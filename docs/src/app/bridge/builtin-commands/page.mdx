@@ -65,10 +65,44 @@ Window commands are available through `window.zero.windows.*` when `js_window_ap
 
 Dialog commands are **always default-deny** and require an explicit `builtin_bridge` policy.
 
+## Shortcut commands
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>Required permission</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>zero-native.shortcut.register</code></td>
+      <td><code>globalShortcut</code></td>
+      <td>Register a global keyboard shortcut and return its native ID</td>
+    </tr>
+    <tr>
+      <td><code>zero-native.shortcut.unregister</code></td>
+      <td><code>globalShortcut</code></td>
+      <td>Unregister a global shortcut by ID or label</td>
+    </tr>
+    <tr>
+      <td><code>zero-native.shortcut.unregisterAll</code></td>
+      <td><code>globalShortcut</code></td>
+      <td>Unregister every global shortcut for the app</td>
+    </tr>
+  </tbody>
+</table>
+
+Shortcut commands are **always default-deny** and require both the `globalShortcut` permission and an explicit `builtin_bridge` policy. See [Shortcuts](/shortcuts) for accelerator syntax and event handling.
+
 ## Enabling builtin commands
 
 ```zig
-const app_permissions = [_][]const u8{zero_native.security.permission_window};
+const app_permissions = [_][]const u8{
+    zero_native.security.permission_window,
+    zero_native.security.permission_global_shortcut,
+};
 
 .security = .{
     .permissions = &app_permissions,
@@ -81,6 +115,9 @@ const app_permissions = [_][]const u8{zero_native.security.permission_window};
         .{ .name = "zero-native.window.create", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
         .{ .name = "zero-native.dialog.openFile", .origins = .{ "zero://app" } },
         .{ .name = "zero-native.dialog.showMessage", .origins = .{ "zero://app" } },
+        .{ .name = "zero-native.shortcut.register", .permissions = .{ "globalShortcut" }, .origins = .{ "zero://app" } },
+        .{ .name = "zero-native.shortcut.unregister", .permissions = .{ "globalShortcut" }, .origins = .{ "zero://app" } },
+        .{ .name = "zero-native.shortcut.unregisterAll", .permissions = .{ "globalShortcut" }, .origins = .{ "zero://app" } },
     },
 },
 ```
@@ -107,6 +144,13 @@ const result = await window.zero.invoke("zero-native.dialog.showMessage", {
   primaryButton: "Yes",
   secondaryButton: "No",
 });
+
+const { id } = await window.zero.invoke("zero-native.shortcut.register", {
+  accelerator: "CommandOrControl+Shift+P",
+  label: "command-palette",
+});
+
+await window.zero.invoke("zero-native.shortcut.unregister", { id });
 ```
 
-See also: [Dialogs](/dialogs) for the full dialog type reference, [Security](/security) for policy details.
+See also: [Dialogs](/dialogs) for the full dialog type reference, [Shortcuts](/shortcuts) for global shortcut events, and [Security](/security) for policy details.

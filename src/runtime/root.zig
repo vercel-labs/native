@@ -2,6 +2,7 @@ const std = @import("std");
 const geometry = @import("geometry");
 const trace = @import("trace");
 const json = @import("json");
+const keycombo = @import("keycombo");
 const automation = @import("../automation/root.zig");
 const bridge = @import("../bridge/root.zig");
 const extensions = @import("../extensions/root.zig");
@@ -33,6 +34,9 @@ pub const FrameDiagnostics = struct {
     resource_upload_count: usize = 0,
     duration_ns: u64 = 0,
 };
+
+const max_shortcuts: usize = 64;
+const max_shortcut_label_bytes: usize = 64;
 
 pub const Event = union(enum) {
     lifecycle: LifecycleEvent,
@@ -101,6 +105,8 @@ pub const Runtime = struct {
     timestamp_ns: i128 = 0,
     frame_index: u64 = 0,
     command_count: usize = 0,
+    shortcuts: [max_shortcuts]RegisteredShortcut = undefined,
+    shortcut_count: usize = 0,
     dirty_regions: [8]geometry.RectF = undefined,
     dirty_region_count: usize = 0,
     last_invalidation_reason: InvalidationReason = .startup,
@@ -254,6 +260,15 @@ pub const Runtime = struct {
             .tray_action => |item_id| {
                 try self.log("tray.action", "tray item selected", &.{trace.uint("item_id", item_id)});
                 try self.dispatchEvent(app, .{ .command = .{ .name = "tray.action" } });
+            },
+            .shortcut_fire => |shortcut_id| {
+                const label = self.shortcutLabel(shortcut_id) orelse "";
+                try self.log("shortcut.fire", "shortcut pressed", &.{
+                    trace.uint("shortcut_id", shortcut_id),
+                    trace.string("label", label),
+                });
+                try self.emitShortcutFire(shortcut_id, label);
+                try self.dispatchEvent(app, .{ .command = .{ .name = "shortcut.fire" } });
             },
             .app_shutdown => {
                 try self.dispatchEvent(app, .{ .lifecycle = .stop });
@@ -511,6 +526,58 @@ pub const Runtime = struct {
         }
     }
 
+    fn recordShortcut(self: *Runtime, id: platform.ShortcutId, label: []const u8) !void {
+        if (self.shortcut_count >= max_shortcuts) return error.ShortcutLimitReached;
+        self.shortcuts[self.shortcut_count] = .{ .id = id, .label = "" };
+        self.shortcuts[self.shortcut_count].label = try copyInto(&self.shortcuts[self.shortcut_count].label_storage, label);
+        self.shortcut_count += 1;
+    }
+
+    fn removeShortcutAt(self: *Runtime, index: usize) void {
+        if (index >= self.shortcut_count) return;
+        var i = index;
+        while (i + 1 < self.shortcut_count) : (i += 1) {
+            self.shortcuts[i] = self.shortcuts[i + 1];
+        }
+        self.shortcut_count -= 1;
+    }
+
+    fn findShortcutIndexById(self: *const Runtime, id: platform.ShortcutId) ?usize {
+        for (self.shortcuts[0..self.shortcut_count], 0..) |shortcut, index| {
+            if (shortcut.id == id) return index;
+        }
+        return null;
+    }
+
+    fn findShortcutIndexByLabel(self: *const Runtime, label: []const u8) ?usize {
+        for (self.shortcuts[0..self.shortcut_count], 0..) |shortcut, index| {
+            if (std.mem.eql(u8, shortcut.label, label)) return index;
+        }
+        return null;
+    }
+
+    fn shortcutLabel(self: *const Runtime, id: platform.ShortcutId) ?[]const u8 {
+        const index = self.findShortcutIndexById(id) orelse return null;
+        return self.shortcuts[index].label;
+    }
+
+    fn emitShortcutFire(self: *Runtime, id: platform.ShortcutId, label: []const u8) !void {
+        var buffer: [256]u8 = undefined;
+        const detail = try shortcutFireJson(id, label, &buffer);
+        if (self.window_count == 0) {
+            self.options.platform.services.emitWindowEvent(1, "shortcut.fire", detail) catch |err| {
+                if (err != error.UnsupportedService) return err;
+            };
+            return;
+        }
+        for (self.windows[0..self.window_count]) |window| {
+            if (!window.info.open) continue;
+            self.options.platform.services.emitWindowEvent(window.info.id, "shortcut.fire", detail) catch |err| {
+                if (err != error.UnsupportedService) return err;
+            };
+        }
+    }
+
     fn findWindowIndexById(self: *const Runtime, id: platform.WindowId) ?usize {
         for (self.windows[0..self.window_count], 0..) |window, index| {
             if (window.info.id == id) return index;
@@ -536,12 +603,13 @@ pub const Runtime = struct {
         const request = bridge.parseRequest(message.bytes) catch return false;
         const is_window = std.mem.startsWith(u8, request.command, "zero-native.window.");
         const is_dialog = std.mem.startsWith(u8, request.command, "zero-native.dialog.");
-        if (!is_window and !is_dialog) return false;
+        const is_shortcut = std.mem.startsWith(u8, request.command, "zero-native.shortcut.");
+        if (!is_window and !is_dialog and !is_shortcut) return false;
 
         var response_buffer: [bridge.max_response_bytes]u8 = undefined;
         var result_buffer: [bridge.max_result_bytes]u8 = undefined;
-        if (!self.allowsBuiltinBridgeCommand(request.command, message.origin, is_window)) {
-            const message_text = if (is_window) "Window API is not permitted" else "Dialog API is not permitted";
+        if (!self.allowsBuiltinBridgeCommand(request.command, message.origin, is_window, is_shortcut)) {
+            const message_text = if (is_window) "Window API is not permitted" else if (is_dialog) "Dialog API is not permitted" else "Shortcut API is not permitted";
             const result = bridge.writeErrorResponse(&response_buffer, request.id, .permission_denied, message_text);
             try self.completeBridgeResponse(message.window_id, result);
             self.invalidateFor(.command, null);
@@ -549,6 +617,8 @@ pub const Runtime = struct {
         }
         const result = if (is_window)
             self.dispatchWindowBridgeCommand(request, &result_buffer, &response_buffer)
+        else if (is_shortcut)
+            self.dispatchShortcutBridgeCommand(request, &result_buffer, &response_buffer)
         else
             self.dispatchDialogBridgeCommand(request, &result_buffer, &response_buffer);
 
@@ -564,10 +634,14 @@ pub const Runtime = struct {
         }
     }
 
-    fn allowsBuiltinBridgeCommand(self: *Runtime, command: []const u8, origin: []const u8, is_window: bool) bool {
+    fn allowsBuiltinBridgeCommand(self: *Runtime, command: []const u8, origin: []const u8, is_window: bool, is_shortcut: bool) bool {
         var policy = self.options.builtin_bridge;
         if (self.options.security.permissions.len > 0) policy.permissions = self.options.security.permissions;
-        if (policy.enabled) return policy.allows(command, origin);
+        if (policy.enabled) {
+            if (!policy.allows(command, origin)) return false;
+            if (is_shortcut and !security.hasPermission(policy.permissions, security.permission_global_shortcut)) return false;
+            return true;
+        }
         if (!is_window or !self.options.js_window_api) return false;
         if (!security.allowsOrigin(self.options.security.navigation.allowed_origins, origin)) return false;
         if (self.options.security.permissions.len == 0) return true;
@@ -598,6 +672,59 @@ pub const Runtime = struct {
         else
             return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown dialog command");
         return bridge.writeSuccessResponse(response_buffer, request.id, result);
+    }
+
+    fn dispatchShortcutBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+        const result = if (std.mem.eql(u8, request.command, "zero-native.shortcut.register"))
+            self.registerShortcutFromJson(request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
+        else if (std.mem.eql(u8, request.command, "zero-native.shortcut.unregister"))
+            self.unregisterShortcutFromJson(request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
+        else if (std.mem.eql(u8, request.command, "zero-native.shortcut.unregisterAll"))
+            self.unregisterAllShortcutsToJson(result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
+        else
+            return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown shortcut command");
+        return bridge.writeSuccessResponse(response_buffer, request.id, result);
+    }
+
+    fn registerShortcutFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
+        var storage = json.StringStorage.init(output);
+        const accelerator = jsonStringField(payload, "accelerator", &storage) orelse return error.InvalidShortcutOptions;
+        const label = jsonStringField(payload, "label", &storage) orelse "";
+        if (label.len > max_shortcut_label_bytes) return error.InvalidShortcutOptions;
+        if (label.len > 0 and self.findShortcutIndexByLabel(label) != null) return error.DuplicateShortcutLabel;
+        if (self.shortcut_count >= max_shortcuts) return error.ShortcutLimitReached;
+
+        const combo = keycombo.parse(accelerator) catch return error.InvalidShortcutOptions;
+        const id = try self.options.platform.services.registerShortcut(combo, label);
+        self.recordShortcut(id, label) catch |err| {
+            self.options.platform.services.unregisterShortcut(id) catch {};
+            return err;
+        };
+
+        var writer = std.Io.Writer.fixed(output);
+        try writer.print("{{\"id\":{d}}}", .{id});
+        return writer.buffered();
+    }
+
+    fn unregisterShortcutFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
+        var storage = json.StringStorage.init(output);
+        const index = if (json.unsignedField(platform.ShortcutId, payload, "id")) |id|
+            self.findShortcutIndexById(id) orelse return error.ShortcutNotFound
+        else if (jsonStringField(payload, "label", &storage)) |label|
+            self.findShortcutIndexByLabel(label) orelse return error.ShortcutNotFound
+        else
+            return error.InvalidShortcutOptions;
+
+        const id = self.shortcuts[index].id;
+        try self.options.platform.services.unregisterShortcut(id);
+        self.removeShortcutAt(index);
+        return emptyObject(output);
+    }
+
+    fn unregisterAllShortcutsToJson(self: *Runtime, output: []u8) ![]const u8 {
+        try self.options.platform.services.unregisterAllShortcuts();
+        self.shortcut_count = 0;
+        return emptyObject(output);
     }
 
     fn openFileDialogFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
@@ -790,6 +917,12 @@ const RuntimeWindow = struct {
     source_storage: [platform.max_window_source_bytes]u8 = undefined,
 };
 
+const RegisteredShortcut = struct {
+    id: platform.ShortcutId,
+    label: []const u8 = "",
+    label_storage: [max_shortcut_label_bytes]u8 = undefined,
+};
+
 fn copyInto(buffer: []u8, value: []const u8) ![]const u8 {
     if (value.len > buffer.len) return error.NoSpaceLeft;
     @memcpy(buffer[0..value.len], value);
@@ -823,6 +956,20 @@ fn writeWindowJsonToWriter(window: platform.WindowInfo, writer: anytype) !void {
     try writer.writeByte('}');
 }
 
+fn emptyObject(output: []u8) ![]const u8 {
+    var writer = std.Io.Writer.fixed(output);
+    try writer.writeAll("{}");
+    return writer.buffered();
+}
+
+fn shortcutFireJson(id: platform.ShortcutId, label: []const u8, output: []u8) ![]const u8 {
+    var writer = std.Io.Writer.fixed(output);
+    try writer.print("{{\"id\":{d},\"label\":", .{id});
+    try json.writeString(&writer, label);
+    try writer.writeByte('}');
+    return writer.buffered();
+}
+
 fn builtinBridgeErrorMessage(err: anyerror) []const u8 {
     return switch (err) {
         error.UnsupportedService => "Native service is not available on this platform",
@@ -833,6 +980,11 @@ fn builtinBridgeErrorMessage(err: anyerror) []const u8 {
         error.WindowSourceTooLarge => "Window source is too large",
         error.InvalidWindowOptions => "Window options are invalid",
         error.DuplicateWindowId => "Window id already exists",
+        error.InvalidShortcutOptions => "Shortcut options are invalid",
+        error.ShortcutLimitReached => "Shortcut limit reached",
+        error.ShortcutNotFound => "Shortcut was not found",
+        error.DuplicateShortcutLabel => "Shortcut label already exists",
+        error.ShortcutRegistrationFailed => "Shortcut registration failed",
         error.NoSpaceLeft => "Native response buffer is too small",
         else => "Native command failed",
     };
@@ -1212,6 +1364,79 @@ test "runtime denies built-in dialog bridge commands by default" {
     } });
 
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"permission_denied\"") != null);
+}
+
+test "runtime handles built-in shortcut bridge commands with explicit permission" {
+    const app_permissions = [_][]const u8{security.permission_global_shortcut};
+    const command_permissions = [_][]const u8{security.permission_global_shortcut};
+    const policies = [_]bridge.CommandPolicy{
+        .{ .name = "zero-native.shortcut.register", .permissions = &command_permissions, .origins = &.{"zero://inline"} },
+        .{ .name = "zero-native.shortcut.unregister", .permissions = &command_permissions, .origins = &.{"zero://inline"} },
+        .{ .name = "zero-native.shortcut.unregisterAll", .permissions = &command_permissions, .origins = &.{"zero://inline"} },
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.runtime.options.security.permissions = &app_permissions;
+    harness.runtime.options.builtin_bridge = .{ .enabled = true, .commands = &policies };
+    const app = App{ .context = &harness, .name = "shortcut-bridge", .source = platform.WebViewSource.html("<p>Shortcuts</p>") };
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
+        .bytes = "{\"id\":\"1\",\"command\":\"zero-native.shortcut.register\",\"payload\":{\"accelerator\":\"CommandOrControl+Shift+P\",\"label\":\"palette\"}}",
+        .origin = "zero://inline",
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"id\":1") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.shortcut_count);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
+        .bytes = "{\"id\":\"2\",\"command\":\"zero-native.shortcut.unregister\",\"payload\":{\"label\":\"palette\"}}",
+        .origin = "zero://inline",
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.shortcut_count);
+}
+
+test "runtime denies shortcut bridge commands without global shortcut permission" {
+    const policies = [_]bridge.CommandPolicy{
+        .{ .name = "zero-native.shortcut.register", .origins = &.{"zero://inline"} },
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.runtime.options.builtin_bridge = .{ .enabled = true, .commands = &policies };
+    const app = App{ .context = &harness, .name = "shortcut-denied", .source = platform.WebViewSource.html("<p>Shortcuts</p>") };
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
+        .bytes = "{\"id\":\"1\",\"command\":\"zero-native.shortcut.register\",\"payload\":{\"accelerator\":\"Cmd+P\"}}",
+        .origin = "zero://inline",
+    } });
+
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"permission_denied\"") != null);
+}
+
+test "runtime propagates shortcut fire events to app event function" {
+    const ShortcutState = struct {
+        fires: u32 = 0,
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (event_value == .command and std.mem.eql(u8, event_value.command.name, "shortcut.fire")) {
+                self.fires += 1;
+            }
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    try harness.runtime.recordShortcut(42, "palette");
+
+    var state: ShortcutState = .{};
+    const app = App{ .context = &state, .name = "shortcut-fire", .source = platform.WebViewSource.html("<p>Shortcuts</p>"), .event_fn = ShortcutState.event };
+    try harness.runtime.dispatchPlatformEvent(app, .{ .shortcut_fire = 42 });
+
+    try std.testing.expectEqual(@as(u32, 1), state.fires);
 }
 
 test "runtime builtin JSON field reader only reads top-level fields" {

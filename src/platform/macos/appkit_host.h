@@ -96,6 +96,7 @@ typedef struct {
 } zero_native_appkit_message_dialog_opts_t;
 
 typedef void (*zero_native_appkit_tray_callback_t)(void *context, uint32_t item_id);
+typedef void (*zero_native_appkit_shortcut_callback_t)(void *context, uint32_t shortcut_id);
 
 zero_native_appkit_open_dialog_result_t zero_native_appkit_show_open_dialog(zero_native_appkit_host_t *host, const zero_native_appkit_open_dialog_opts_t *opts, char *buffer, size_t buffer_len);
 size_t zero_native_appkit_show_save_dialog(zero_native_appkit_host_t *host, const zero_native_appkit_save_dialog_opts_t *opts, char *buffer, size_t buffer_len);
@@ -104,6 +105,10 @@ void zero_native_appkit_create_tray(zero_native_appkit_host_t *host, const char 
 void zero_native_appkit_update_tray_menu(zero_native_appkit_host_t *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, size_t count);
 void zero_native_appkit_remove_tray(zero_native_appkit_host_t *host);
 void zero_native_appkit_set_tray_callback(zero_native_appkit_host_t *host, zero_native_appkit_tray_callback_t callback, void *context);
+int zero_native_appkit_register_shortcut(zero_native_appkit_host_t *host, uint32_t modifiers, uint32_t key_code, uint32_t *out_id);
+int zero_native_appkit_unregister_shortcut(zero_native_appkit_host_t *host, uint32_t id);
+int zero_native_appkit_unregister_all_shortcuts(zero_native_appkit_host_t *host);
+void zero_native_appkit_set_shortcut_callback(zero_native_appkit_host_t *host, zero_native_appkit_shortcut_callback_t callback, void *context);
 
 #ifdef __cplusplus
 }

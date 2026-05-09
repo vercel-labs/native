@@ -1,4 +1,5 @@
 const geometry = @import("geometry");
+const keycombo = @import("keycombo");
 const platform_mod = @import("../root.zig");
 const policy_values = @import("../policy_values.zig");
 const security = @import("../../security/root.zig");
@@ -98,6 +99,7 @@ const AppKitMessageDialogOpts = extern struct {
 };
 
 const AppKitTrayCallback = *const fn (context: ?*anyopaque, item_id: u32) callconv(.c) void;
+const AppKitShortcutCallback = *const fn (context: ?*anyopaque, shortcut_id: u32) callconv(.c) void;
 
 extern fn zero_native_appkit_show_open_dialog(host: *AppKitHost, opts: *const AppKitOpenDialogOpts, buffer: [*]u8, buffer_len: usize) AppKitOpenDialogResult;
 extern fn zero_native_appkit_show_save_dialog(host: *AppKitHost, opts: *const AppKitSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
@@ -106,6 +108,10 @@ extern fn zero_native_appkit_create_tray(host: *AppKitHost, icon_path: [*]const 
 extern fn zero_native_appkit_update_tray_menu(host: *AppKitHost, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, count: usize) void;
 extern fn zero_native_appkit_remove_tray(host: *AppKitHost) void;
 extern fn zero_native_appkit_set_tray_callback(host: *AppKitHost, callback: AppKitTrayCallback, context: ?*anyopaque) void;
+extern fn zero_native_appkit_register_shortcut(host: *AppKitHost, modifiers: u32, key_code: u32, out_id: *u32) c_int;
+extern fn zero_native_appkit_unregister_shortcut(host: *AppKitHost, id: u32) c_int;
+extern fn zero_native_appkit_unregister_all_shortcuts(host: *AppKitHost) c_int;
+extern fn zero_native_appkit_set_shortcut_callback(host: *AppKitHost, callback: AppKitShortcutCallback, context: ?*anyopaque) void;
 
 pub const MacPlatform = struct {
     host: *AppKitHost,
@@ -166,6 +172,9 @@ pub const MacPlatform = struct {
                 .create_tray_fn = createTray,
                 .update_tray_menu_fn = updateTrayMenu,
                 .remove_tray_fn = removeTray,
+                .register_shortcut_fn = registerShortcut,
+                .unregister_shortcut_fn = unregisterShortcut,
+                .unregister_all_shortcuts_fn = unregisterAllShortcuts,
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .emit_window_event_fn = emitWindowEvent,
             },
@@ -182,6 +191,7 @@ pub const MacPlatform = struct {
         };
         zero_native_appkit_set_bridge_callback(self.host, appkitBridgeCallback, &self.state);
         zero_native_appkit_set_tray_callback(self.host, appkitTrayCallback, &self.state);
+        zero_native_appkit_set_shortcut_callback(self.host, appkitShortcutCallback, &self.state);
         zero_native_appkit_run(self.host, appkitCallback, &self.state);
         if (self.state.failed) return error.CallbackFailed;
     }
@@ -443,9 +453,123 @@ fn removeTray(context: ?*anyopaque) anyerror!void {
     zero_native_appkit_remove_tray(self.host);
 }
 
+fn registerShortcut(context: ?*anyopaque, combo: keycombo.KeyCombo, label: []const u8) anyerror!platform_mod.ShortcutId {
+    _ = label;
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    const modifiers = carbonModifiers(combo.modifier);
+    const key_code = try carbonKeyCode(combo.key);
+    var id: u32 = 0;
+    if (zero_native_appkit_register_shortcut(self.host, modifiers, key_code, &id) == 0) return error.ShortcutRegistrationFailed;
+    return id;
+}
+
+fn unregisterShortcut(context: ?*anyopaque, id: platform_mod.ShortcutId) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (zero_native_appkit_unregister_shortcut(self.host, id) == 0) return error.ShortcutNotFound;
+}
+
+fn unregisterAllShortcuts(context: ?*anyopaque) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (zero_native_appkit_unregister_all_shortcuts(self.host) == 0) return error.ShortcutRegistrationFailed;
+}
+
 fn appkitTrayCallback(context: ?*anyopaque, item_id: u32) callconv(.c) void {
     const state: *RunState = @ptrCast(@alignCast(context.?));
     state.emit(.{ .tray_action = item_id });
+}
+
+fn appkitShortcutCallback(context: ?*anyopaque, shortcut_id: u32) callconv(.c) void {
+    const state: *RunState = @ptrCast(@alignCast(context.?));
+    state.emit(.{ .shortcut_fire = shortcut_id });
+}
+
+fn carbonModifiers(modifier: keycombo.Modifier) u32 {
+    const cmdKey: u32 = 1 << 8;
+    const shiftKey: u32 = 1 << 9;
+    const optionKey: u32 = 1 << 11;
+    const controlKey: u32 = 1 << 12;
+
+    var result: u32 = 0;
+    if (modifier.command) result |= cmdKey;
+    if (modifier.shift) result |= shiftKey;
+    if (modifier.alt) result |= optionKey;
+    if (modifier.control) result |= controlKey;
+    return result;
+}
+
+fn carbonKeyCode(key: keycombo.KeyCode) !u32 {
+    return switch (key) {
+        .a => 0,
+        .s => 1,
+        .d => 2,
+        .f => 3,
+        .h => 4,
+        .g => 5,
+        .z => 6,
+        .x => 7,
+        .c => 8,
+        .v => 9,
+        .b => 11,
+        .q => 12,
+        .w => 13,
+        .e => 14,
+        .r => 15,
+        .y => 16,
+        .t => 17,
+        .key_1 => 18,
+        .key_2 => 19,
+        .key_3 => 20,
+        .key_4 => 21,
+        .key_6 => 22,
+        .key_5 => 23,
+        .Plus => 24,
+        .key_9 => 25,
+        .key_7 => 26,
+        .Minus => 27,
+        .key_8 => 28,
+        .key_0 => 29,
+        .o => 31,
+        .u => 32,
+        .i => 34,
+        .p => 35,
+        .Return => 36,
+        .l => 37,
+        .j => 38,
+        .k => 40,
+        .Tab => 48,
+        .Space => 49,
+        .Delete => 51,
+        .Escape => 53,
+        .F17 => 64,
+        .F18 => 79,
+        .F19 => 80,
+        .F5 => 96,
+        .F6 => 97,
+        .F7 => 98,
+        .F3 => 99,
+        .F8 => 100,
+        .F9 => 101,
+        .F11 => 103,
+        .F13 => 105,
+        .F16 => 106,
+        .F14 => 107,
+        .F10 => 109,
+        .F12 => 111,
+        .F15 => 113,
+        .Insert => 114,
+        .Home => 115,
+        .PageUp => 116,
+        .End => 119,
+        .F2 => 120,
+        .PageDown => 121,
+        .F1 => 122,
+        .Left => 123,
+        .Right => 124,
+        .Down => 125,
+        .Up => 126,
+        .m => 46,
+        .n => 45,
+    };
 }
 
 fn flattenFilters(filters: []const platform_mod.FileFilter, buffer: []u8) []const u8 {

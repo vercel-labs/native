@@ -63,6 +63,7 @@ pub const PermissionKind = enum {
     notifications,
     clipboard,
     window,
+    globalShortcut,
     custom,
 };
 
@@ -75,6 +76,7 @@ pub const Permission = union(PermissionKind) {
     notifications: void,
     clipboard: void,
     window: void,
+    globalShortcut: void,
     custom: []const u8,
 
     pub fn kind(self: Permission) PermissionKind {
@@ -586,8 +588,8 @@ test "valid rich manifest" {
         .{ .asset = "icons/app-128", .size = 128, .scale = 1, .purpose = .any },
         .{ .asset = "icons/app-256", .size = 256, .scale = 1, .purpose = .maskable },
     };
-    const permissions = [_]Permission{ .network, .clipboard, .window, .{ .custom = "com.example.custom" } };
-    const bridge_permissions = [_]Permission{.clipboard};
+    const permissions = [_]Permission{ .network, .clipboard, .window, .globalShortcut, .{ .custom = "com.example.custom" } };
+    const bridge_permissions = [_]Permission{ .clipboard, .globalShortcut };
     const bridge_origins = [_][]const u8{ "zero://inline", "https://example.com" };
     const bridge_commands = [_]BridgeCommand{.{ .name = "native.ping", .permissions = &bridge_permissions, .origins = &bridge_origins }};
     const platform_permissions = [_]Permission{.notifications};
@@ -700,8 +702,9 @@ test "icon validation catches zero values and duplicates" {
 }
 
 test "permission validation catches duplicates" {
-    try validatePermissions(&.{ .network, .clipboard, .{ .custom = "com.example.custom" } });
+    try validatePermissions(&.{ .network, .clipboard, .globalShortcut, .{ .custom = "com.example.custom" } });
     try std.testing.expectError(error.DuplicatePermission, validatePermissions(&.{ .network, .network }));
+    try std.testing.expectError(error.DuplicatePermission, validatePermissions(&.{ .globalShortcut, .globalShortcut }));
     try std.testing.expectError(error.DuplicatePermission, validatePermissions(&.{ .{ .custom = "com.example.custom" }, .{ .custom = "com.example.custom" } }));
     try std.testing.expectError(error.InvalidName, validatePermissions(&.{.{ .custom = "bad/name" }}));
 }

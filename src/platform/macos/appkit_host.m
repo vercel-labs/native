@@ -1,6 +1,7 @@
 #import "appkit_host.h"
 
 #import <AppKit/AppKit.h>
+#import <Carbon/Carbon.h>
 #import <WebKit/WebKit.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -17,6 +18,7 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath);
 static NSArray<NSString *> *ZeroNativePolicyListFromBytes(const char *bytes, size_t len, NSArray<NSString *> *fallback);
 static NSString *ZeroNativeOriginForURL(NSURL *url);
 static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url);
+static OSStatus ZeroNativeHotKeyHandler(EventHandlerCallRef nextHandler, EventRef event, void *userData);
 
 @interface ZeroNativeWindowDelegate : NSObject <NSWindowDelegate>
 @property(nonatomic, assign) ZeroNativeAppKitHost *host;
@@ -60,6 +62,11 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, assign) zero_native_appkit_tray_callback_t trayCallback;
 @property(nonatomic, assign) void *trayContext;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSValue *> *shortcutRefs;
+@property(nonatomic, assign) uint32_t nextShortcutId;
+@property(nonatomic, assign) EventHandlerRef shortcutHandlerRef;
+@property(nonatomic, assign) zero_native_appkit_shortcut_callback_t shortcutCallback;
+@property(nonatomic, assign) void *shortcutContext;
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
@@ -91,6 +98,8 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 - (void)completeBridgeWithResponse:(NSString *)response;
 - (void)completeBridgeWithResponse:(NSString *)response windowId:(uint64_t)windowId;
 - (void)emitEventNamed:(NSString *)name detailJSON:(NSString *)detailJSON windowId:(uint64_t)windowId;
+- (BOOL)ensureShortcutHandler;
+- (void)emitShortcut:(uint32_t)shortcutId;
 @end
 
 @implementation ZeroNativeWindowDelegate
@@ -218,6 +227,8 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     self.bridgeScriptHandlers = [[NSMutableDictionary alloc] init];
     self.assetSchemeHandlers = [[NSMutableDictionary alloc] init];
     self.windowLabels = [[NSMutableDictionary alloc] init];
+    self.shortcutRefs = [[NSMutableDictionary alloc] init];
+    self.nextShortcutId = 1;
     self.allowedNavigationOrigins = @[ @"zero://app", @"zero://inline" ];
     self.allowedExternalURLs = @[];
     self.externalLinkAction = 0;
@@ -303,6 +314,15 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 - (void)dealloc {
     for (WKWebView *webView in self.webViews.allValues) {
         [webView.configuration.userContentController removeScriptMessageHandlerForName:@"zeroNativeBridge"];
+    }
+    for (NSValue *value in self.shortcutRefs.allValues) {
+        EventHotKeyRef ref = (EventHotKeyRef)value.pointerValue;
+        if (ref) UnregisterEventHotKey(ref);
+    }
+    [self.shortcutRefs removeAllObjects];
+    if (self.shortcutHandlerRef) {
+        RemoveEventHandler(self.shortcutHandlerRef);
+        self.shortcutHandlerRef = NULL;
     }
 }
 
@@ -775,7 +795,31 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     }
 }
 
+- (BOOL)ensureShortcutHandler {
+    if (self.shortcutHandlerRef) return YES;
+    EventTypeSpec eventSpec = { kEventClassKeyboard, kEventHotKeyPressed };
+    OSStatus status = InstallApplicationEventHandler(&ZeroNativeHotKeyHandler, 1, &eventSpec, (__bridge void *)self, &_shortcutHandlerRef);
+    return status == noErr;
+}
+
+- (void)emitShortcut:(uint32_t)shortcutId {
+    if (self.shortcutCallback) {
+        self.shortcutCallback(self.shortcutContext, shortcutId);
+    }
+}
+
 @end
+
+static OSStatus ZeroNativeHotKeyHandler(EventHandlerCallRef nextHandler, EventRef event, void *userData) {
+    (void)nextHandler;
+    ZeroNativeAppKitHost *host = (__bridge ZeroNativeAppKitHost *)userData;
+    EventHotKeyID hotKeyID;
+    OSStatus status = GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof(hotKeyID), NULL, &hotKeyID);
+    if (status != noErr) return status;
+    [host emitShortcut:hotKeyID.id];
+    [host scheduleFrame];
+    return noErr;
+}
 
 static NSArray<NSString *> *ZeroNativePolicyListFromBytes(const char *bytes, size_t len, NSArray<NSString *> *fallback) {
     if (!bytes || len == 0) return fallback ?: @[];
@@ -1122,4 +1166,54 @@ void zero_native_appkit_set_tray_callback(zero_native_appkit_host_t *host, zero_
     ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
     object.trayCallback = callback;
     object.trayContext = context;
+}
+
+int zero_native_appkit_register_shortcut(zero_native_appkit_host_t *host, uint32_t modifiers, uint32_t key_code, uint32_t *out_id) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    if (!object || !out_id) return 0;
+    @autoreleasepool {
+        if (![object ensureShortcutHandler]) return 0;
+
+        uint32_t id = object.nextShortcutId++;
+        if (id == 0) {
+            id = object.nextShortcutId++;
+        }
+
+        EventHotKeyID hotKeyID = { .signature = 'ZNHS', .id = id };
+        EventHotKeyRef hotKeyRef = NULL;
+        OSStatus status = RegisterEventHotKey(key_code, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef);
+        if (status != noErr || !hotKeyRef) return 0;
+
+        object.shortcutRefs[@(id)] = [NSValue valueWithPointer:hotKeyRef];
+        *out_id = id;
+        return 1;
+    }
+}
+
+int zero_native_appkit_unregister_shortcut(zero_native_appkit_host_t *host, uint32_t id) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    if (!object) return 0;
+    NSValue *value = object.shortcutRefs[@(id)];
+    if (!value) return 0;
+    EventHotKeyRef hotKeyRef = (EventHotKeyRef)value.pointerValue;
+    if (hotKeyRef) UnregisterEventHotKey(hotKeyRef);
+    [object.shortcutRefs removeObjectForKey:@(id)];
+    return 1;
+}
+
+int zero_native_appkit_unregister_all_shortcuts(zero_native_appkit_host_t *host) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    if (!object) return 0;
+    for (NSValue *value in object.shortcutRefs.allValues) {
+        EventHotKeyRef hotKeyRef = (EventHotKeyRef)value.pointerValue;
+        if (hotKeyRef) UnregisterEventHotKey(hotKeyRef);
+    }
+    [object.shortcutRefs removeAllObjects];
+    return 1;
+}
+
+void zero_native_appkit_set_shortcut_callback(zero_native_appkit_host_t *host, zero_native_appkit_shortcut_callback_t callback, void *context) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    object.shortcutCallback = callback;
+    object.shortcutContext = context;
 }
