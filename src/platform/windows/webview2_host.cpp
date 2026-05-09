@@ -2,6 +2,7 @@
 #include <shellapi.h>
 #include <commdlg.h>
 #include <shlobj.h>
+#include <shobjidl.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -9,6 +10,8 @@
 
 #include <map>
 #include <string>
+
+#include "webview2_host_types.h"
 
 namespace {
 
@@ -537,7 +540,7 @@ WindowsOpenDialogResult zero_native_windows_show_open_dialog(Host *host, const W
         return result;
     }
 
-    IShellItem *item_result = nullptr;
+    IShellItemArray *item_result = nullptr;
     hr = pfd->GetResults(&item_result);
     if (FAILED(hr) || !item_result) {
         pfd->Release();
