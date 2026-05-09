@@ -255,6 +255,10 @@ pub const Runtime = struct {
                 try self.log("tray.action", "tray item selected", &.{trace.uint("item_id", item_id)});
                 try self.dispatchEvent(app, .{ .command = .{ .name = "tray.action" } });
             },
+            .theme_changed => |theme| {
+                try self.log("theme.change", "system theme changed", &.{trace.string("theme", @tagName(theme))});
+                try self.dispatchEvent(app, .{ .command = .{ .name = "theme_changed" } });
+            },
             .app_shutdown => {
                 try self.dispatchEvent(app, .{ .lifecycle = .stop });
                 if (self.options.extensions) |registry| try registry.stopAll(self.extensionContext());
@@ -536,21 +540,30 @@ pub const Runtime = struct {
         const request = bridge.parseRequest(message.bytes) catch return false;
         const is_window = std.mem.startsWith(u8, request.command, "zero-native.window.");
         const is_dialog = std.mem.startsWith(u8, request.command, "zero-native.dialog.");
-        if (!is_window and !is_dialog) return false;
+        const is_theme = std.mem.startsWith(u8, request.command, "zero-native.theme.");
+        if (!is_window and !is_dialog and !is_theme) return false;
 
         var response_buffer: [bridge.max_response_bytes]u8 = undefined;
         var result_buffer: [bridge.max_result_bytes]u8 = undefined;
-        if (!self.allowsBuiltinBridgeCommand(request.command, message.origin, is_window)) {
+        if (!is_theme and !self.allowsBuiltinBridgeCommand(request.command, message.origin, is_window)) {
             const message_text = if (is_window) "Window API is not permitted" else "Dialog API is not permitted";
             const result = bridge.writeErrorResponse(&response_buffer, request.id, .permission_denied, message_text);
             try self.completeBridgeResponse(message.window_id, result);
             self.invalidateFor(.command, null);
             return true;
         }
+        if (is_theme and !self.allowsThemeBridgeCommand(request.command, message.origin)) {
+            const result = bridge.writeErrorResponse(&response_buffer, request.id, .permission_denied, "Theme API is not permitted");
+            try self.completeBridgeResponse(message.window_id, result);
+            self.invalidateFor(.command, null);
+            return true;
+        }
         const result = if (is_window)
             self.dispatchWindowBridgeCommand(request, &result_buffer, &response_buffer)
+        else if (is_dialog)
+            self.dispatchDialogBridgeCommand(request, &result_buffer, &response_buffer)
         else
-            self.dispatchDialogBridgeCommand(request, &result_buffer, &response_buffer);
+            self.dispatchThemeBridgeCommand(request, &result_buffer, &response_buffer);
 
         try self.completeBridgeResponse(message.window_id, result);
         self.invalidateFor(.command, null);
@@ -572,6 +585,13 @@ pub const Runtime = struct {
         if (!security.allowsOrigin(self.options.security.navigation.allowed_origins, origin)) return false;
         if (self.options.security.permissions.len == 0) return true;
         return security.hasPermission(self.options.security.permissions, security.permission_window);
+    }
+
+    fn allowsThemeBridgeCommand(self: *Runtime, command: []const u8, origin: []const u8) bool {
+        var policy = self.options.builtin_bridge;
+        if (self.options.security.permissions.len > 0) policy.permissions = self.options.security.permissions;
+        if (policy.enabled) return policy.allows(command, origin);
+        return true;
     }
 
     fn dispatchWindowBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
@@ -598,6 +618,23 @@ pub const Runtime = struct {
         else
             return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown dialog command");
         return bridge.writeSuccessResponse(response_buffer, request.id, result);
+    }
+
+    fn dispatchThemeBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+        const result = if (std.mem.eql(u8, request.command, "zero-native.theme.get"))
+            self.writeThemeJson(result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
+        else
+            return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown theme command");
+        return bridge.writeSuccessResponse(response_buffer, request.id, result);
+    }
+
+    fn writeThemeJson(self: *Runtime, output: []u8) ![]const u8 {
+        const theme = try self.options.platform.services.currentTheme();
+        var writer = std.Io.Writer.fixed(output);
+        try writer.writeAll("{\"theme\":");
+        try json.writeString(&writer, @tagName(theme));
+        try writer.writeByte('}');
+        return writer.buffered();
     }
 
     fn openFileDialogFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
@@ -1212,6 +1249,59 @@ test "runtime denies built-in dialog bridge commands by default" {
     } });
 
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"permission_denied\"") != null);
+}
+
+test "theme.get returns the platform theme" {
+    const ThemeService = struct {
+        fn currentTheme(context: ?*anyopaque) anyerror!platform.Theme {
+            _ = context;
+            return .light;
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.runtime.options.platform.services.theme_fn = ThemeService.currentTheme;
+    const app = App{ .context = &harness, .name = "theme-get", .source = platform.WebViewSource.html("<p>Theme</p>") };
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
+        .bytes = "{\"id\":\"1\",\"command\":\"zero-native.theme.get\",\"payload\":null}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+
+    try std.testing.expectEqualStrings("{\"id\":\"1\",\"ok\":true,\"result\":{\"theme\":\"light\"}}", harness.null_platform.lastBridgeResponse());
+}
+
+test "theme_changed CommandEvent reaches event_fn" {
+    const ThemeApp = struct {
+        event_count: u32 = 0,
+
+        fn onEvent(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (event_value == .command and std.mem.eql(u8, event_value.command.name, "theme_changed")) {
+                self.event_count += 1;
+            }
+        }
+
+        fn app(self: *@This()) App {
+            return .{
+                .context = self,
+                .name = "theme-event",
+                .source = platform.WebViewSource.html("<p>Theme</p>"),
+                .event_fn = onEvent,
+            };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    var app_state: ThemeApp = .{};
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .theme_changed = .dark });
+
+    try std.testing.expectEqual(@as(u32, 1), app_state.event_count);
 }
 
 test "runtime builtin JSON field reader only reads top-level fields" {
