@@ -73,8 +73,8 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
-- (instancetype)initWithAppName:(NSString *)appName windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame;
-- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame makeMain:(BOOL)makeMain;
+- (instancetype)initWithAppName:(NSString *)appName windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame frameless:(BOOL)frameless transparent:(BOOL)transparent alwaysOnTop:(BOOL)alwaysOnTop;
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame frameless:(BOOL)frameless transparent:(BOOL)transparent alwaysOnTop:(BOOL)alwaysOnTop makeMain:(BOOL)makeMain;
 - (void)focusWindowWithId:(uint64_t)windowId;
 - (void)closeWindowWithId:(uint64_t)windowId;
 - (WKWebView *)webViewForWindowId:(uint64_t)windowId;
@@ -263,7 +263,7 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 
 @implementation ZeroNativeAppKitHost
 
-- (instancetype)initWithAppName:(NSString *)appName windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame {
+- (instancetype)initWithAppName:(NSString *)appName windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame frameless:(BOOL)frameless transparent:(BOOL)transparent alwaysOnTop:(BOOL)alwaysOnTop {
     self = [super init];
     if (!self) {
         return nil;
@@ -288,13 +288,13 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     self.externalLinkAction = 0;
     [self configureApplication];
 
-    [self createWindowWithId:1 title:(windowTitle.length > 0 ? windowTitle : self.appName) label:self.windowLabel x:x y:y width:width height:height restoreFrame:restoreFrame makeMain:YES];
+    [self createWindowWithId:1 title:(windowTitle.length > 0 ? windowTitle : self.appName) label:self.windowLabel x:x y:y width:width height:height restoreFrame:restoreFrame frameless:frameless transparent:transparent alwaysOnTop:alwaysOnTop makeMain:YES];
     self.didShutdown = NO;
 
     return self;
 }
 
-- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame makeMain:(BOOL)makeMain {
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame frameless:(BOOL)frameless transparent:(BOOL)transparent alwaysOnTop:(BOOL)alwaysOnTop makeMain:(BOOL)makeMain {
     NSNumber *key = @(windowId);
     if (self.windows[key]) {
         return NO;
@@ -304,14 +304,32 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     if (restoreFrame) {
         rect = constrainFrame(rect);
     }
+    NSWindowStyleMask styleMask = frameless
+        ? NSWindowStyleMaskBorderless
+        : (NSWindowStyleMaskTitled |
+           NSWindowStyleMaskClosable |
+           NSWindowStyleMaskResizable |
+           NSWindowStyleMaskMiniaturizable);
     NSWindow *window = [[NSWindow alloc] initWithContentRect:rect
-                                                   styleMask:(NSWindowStyleMaskTitled |
-                                                              NSWindowStyleMaskClosable |
-                                                              NSWindowStyleMaskResizable |
-                                                              NSWindowStyleMaskMiniaturizable)
+                                                   styleMask:styleMask
                                                      backing:NSBackingStoreBuffered
                                                        defer:NO];
     [window setTitle:(title.length > 0 ? title : self.appName)];
+    if (frameless) {
+        [window setMovableByWindowBackground:YES];
+    }
+    if (transparent) {
+        [window setOpaque:NO];
+        [window setBackgroundColor:[NSColor clearColor]];
+        [window setHasShadow:NO];
+    }
+    if (alwaysOnTop) {
+        [window setLevel:NSFloatingWindowLevel];
+        [window setCollectionBehavior:NSWindowCollectionBehaviorCanJoinAllSpaces |
+                                       NSWindowCollectionBehaviorFullScreenAuxiliary |
+                                       NSWindowCollectionBehaviorIgnoresCycle];
+        [window setHidesOnDeactivate:NO];
+    }
     if (!restoreFrame) {
         [window center];
     }
@@ -343,6 +361,17 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     if ([webView respondsToSelector:NSSelectorFromString(@"setInspectable:")]) {
         [webView setValue:@YES forKey:@"inspectable"];
     }
+    if (transparent) {
+        if ([webView respondsToSelector:NSSelectorFromString(@"setValue:forKey:")]) {
+            @try {
+                [webView setValue:@NO forKey:@"drawsBackground"];
+            } @catch (NSException *exception) {
+                (void)exception;
+            }
+        }
+        webView.layer.backgroundColor = [NSColor clearColor].CGColor;
+        webView.layer.opaque = NO;
+    }
     webView.navigationDelegate = self;
     webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [container addSubview:webView positioned:NSWindowAbove relativeTo:nil];
@@ -366,6 +395,10 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
         self.bridgeScriptHandler = bridgeScriptHandler;
         self.assetSchemeHandler = assetSchemeHandler;
         self.windowLabel = label.length > 0 ? label : @"main";
+        if (frameless) {
+            [window makeKeyAndOrderFront:nil];
+            [NSApp activate];
+        }
     } else {
         [window makeKeyAndOrderFront:nil];
         [NSApp activate];
@@ -1342,14 +1375,14 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     return NO;
 }
 
-zero_native_appkit_host_t *zero_native_appkit_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {
+zero_native_appkit_host_t *zero_native_appkit_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int frameless, int transparent, int always_on_top) {
     @autoreleasepool {
         NSString *appNameString = [[NSString alloc] initWithBytes:app_name length:app_name_len encoding:NSUTF8StringEncoding] ?: @"zero-native";
         NSString *windowTitleString = [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] ?: appNameString;
         NSString *bundleIdString = [[NSString alloc] initWithBytes:bundle_id length:bundle_id_len encoding:NSUTF8StringEncoding] ?: @"dev.zero_native.app";
         NSString *iconPathString = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding] ?: @"";
         NSString *windowLabelString = [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] ?: @"main";
-        ZeroNativeAppKitHost *host = [[ZeroNativeAppKitHost alloc] initWithAppName:appNameString windowTitle:windowTitleString bundleIdentifier:bundleIdString iconPath:iconPathString windowLabel:windowLabelString x:x y:y width:width height:height restoreFrame:(restore_frame != 0)];
+        ZeroNativeAppKitHost *host = [[ZeroNativeAppKitHost alloc] initWithAppName:appNameString windowTitle:windowTitleString bundleIdentifier:bundleIdString iconPath:iconPathString windowLabel:windowLabelString x:x y:y width:width height:height restoreFrame:(restore_frame != 0) frameless:(frameless != 0) transparent:(transparent != 0) alwaysOnTop:(always_on_top != 0)];
         return (__bridge_retained zero_native_appkit_host_t *)host;
     }
 }
@@ -1428,11 +1461,11 @@ void zero_native_appkit_set_security_policy(zero_native_appkit_host_t *host, con
     [object setAllowedNavigationOrigins:origins externalURLs:externalURLs externalAction:external_action];
 }
 
-int zero_native_appkit_create_window(zero_native_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {
+int zero_native_appkit_create_window(zero_native_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int frameless, int transparent, int always_on_top) {
     ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
     NSString *titleString = window_title ? [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] : @"";
     NSString *labelString = window_label ? [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] : @"";
-    return [object createWindowWithId:window_id title:titleString ?: @"" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) makeMain:NO] ? 1 : 0;
+    return [object createWindowWithId:window_id title:titleString ?: @"" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) frameless:(frameless != 0) transparent:(transparent != 0) alwaysOnTop:(always_on_top != 0) makeMain:NO] ? 1 : 0;
 }
 
 int zero_native_appkit_focus_window(zero_native_appkit_host_t *host, uint64_t window_id) {
@@ -1446,6 +1479,35 @@ int zero_native_appkit_close_window(zero_native_appkit_host_t *host, uint64_t wi
     ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
     if (!object.windows[@(window_id)]) return 0;
     [object closeWindowWithId:window_id];
+    return 1;
+}
+
+int zero_native_appkit_move_window(zero_native_appkit_host_t *host, uint64_t window_id, double dx, double dy, int clamp_to_visible_frame, int *out_hit_x, int *out_hit_y) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) {
+        if (out_hit_x) *out_hit_x = 0;
+        if (out_hit_y) *out_hit_y = 0;
+        return 0;
+    }
+    NSRect frame = window.frame;
+    double newX = frame.origin.x + dx;
+    double newY = frame.origin.y - dy;
+    int hitX = 0, hitY = 0;
+    if (clamp_to_visible_frame) {
+        NSRect visible = (window.screen ?: NSScreen.mainScreen).visibleFrame;
+        double minX = visible.origin.x;
+        double maxX = visible.origin.x + visible.size.width - frame.size.width;
+        double minY = visible.origin.y;
+        double maxY = visible.origin.y + visible.size.height - frame.size.height;
+        if (newX < minX) { newX = minX; hitX = 1; }
+        else if (newX > maxX) { newX = maxX; hitX = 1; }
+        if (newY < minY) { newY = minY; hitY = 1; }
+        else if (newY > maxY) { newY = maxY; hitY = 1; }
+    }
+    [window setFrameOrigin:NSMakePoint(newX, newY)];
+    if (out_hit_x) *out_hit_x = hitX;
+    if (out_hit_y) *out_hit_y = hitY;
     return 1;
 }
 

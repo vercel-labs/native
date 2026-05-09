@@ -197,6 +197,9 @@ pub const Window = struct {
     resizable: bool = true,
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
+    frameless: bool = false,
+    transparent: bool = false,
+    always_on_top: bool = false,
 };
 
 pub const PackageMetadata = struct {

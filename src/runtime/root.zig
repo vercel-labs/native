@@ -602,7 +602,7 @@ pub const Runtime = struct {
             return true;
         }
         const result = if (is_window)
-            self.dispatchWindowBridgeCommand(request, &result_buffer, &response_buffer)
+            self.dispatchWindowBridgeCommand(request, message.window_id, &result_buffer, &response_buffer)
         else if (is_webview)
             self.dispatchWebViewBridgeCommand(request, message.window_id, &result_buffer, &response_buffer)
         else
@@ -630,7 +630,7 @@ pub const Runtime = struct {
         return security.hasPermission(self.options.security.permissions, security.permission_window);
     }
 
-    fn dispatchWindowBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+    fn dispatchWindowBridgeCommand(self: *Runtime, request: bridge.Request, source_window_id: platform.WindowId, result_buffer: []u8, response_buffer: []u8) []const u8 {
         const result = if (std.mem.eql(u8, request.command, "zero-native.window.list"))
             self.writeWindowListJson(result_buffer) catch return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, "Failed to list windows")
         else if (std.mem.eql(u8, request.command, "zero-native.window.create"))
@@ -639,6 +639,8 @@ pub const Runtime = struct {
             self.focusWindowFromJson(request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
         else if (std.mem.eql(u8, request.command, "zero-native.window.close"))
             self.closeWindowFromJson(request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
+        else if (std.mem.eql(u8, request.command, "zero-native.window.move"))
+            self.moveWindowFromJson(request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
         else
             return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown window command");
         return bridge.writeSuccessResponse(response_buffer, request.id, result);
@@ -780,9 +782,23 @@ pub const Runtime = struct {
             .title = title,
             .default_frame = geometry.RectF.init(x, y, width, height),
             .restore_state = jsonBoolField(payload, "restoreState") orelse true,
+            .frameless = jsonBoolField(payload, "frameless") orelse false,
+            .transparent = jsonBoolField(payload, "transparent") orelse false,
+            .always_on_top = jsonBoolField(payload, "alwaysOnTop") orelse false,
             .source = source,
         });
         return writeWindowJson(info, output);
+    }
+
+    fn moveWindowFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
+        var storage = json.StringStorage.init(output);
+        const window_id = self.resolveWindowSelector(payload, &storage) catch source_window_id;
+        const dx = jsonNumberField(payload, "dx") orelse 0;
+        const dy = jsonNumberField(payload, "dy") orelse 0;
+        const clamp = jsonBoolField(payload, "clampToVisibleFrame") orelse false;
+        const result = try self.options.platform.services.moveWindow(window_id, dx, dy, clamp);
+        const index = self.findWindowIndexById(window_id) orelse return error.WindowNotFound;
+        return writeMoveResultJson(self.windows[index].info, result, output);
     }
 
     fn createWebViewFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
@@ -1169,6 +1185,18 @@ fn writeWindowJson(window: platform.WindowInfo, output: []u8) ![]const u8 {
     return writer.buffered();
 }
 
+fn writeMoveResultJson(window: platform.WindowInfo, result: platform.MoveResult, output: []u8) ![]const u8 {
+    var writer = std.Io.Writer.fixed(output);
+    try writer.writeByte('{');
+    try writeWindowFields(window, &writer);
+    try writer.writeAll(",\"hitX\":");
+    try writer.writeAll(if (result.hit_x) "true" else "false");
+    try writer.writeAll(",\"hitY\":");
+    try writer.writeAll(if (result.hit_y) "true" else "false");
+    try writer.writeByte('}');
+    return writer.buffered();
+}
+
 fn writeWebViewOkJson(label: []const u8, window_id: platform.WindowId, output: []u8) ![]const u8 {
     var writer = std.Io.Writer.fixed(output);
     try writer.writeAll("{\"label\":");
@@ -1202,7 +1230,13 @@ fn writeWebViewJsonToWriter(webview: RuntimeWebView, writer: anytype) !void {
 }
 
 fn writeWindowJsonToWriter(window: platform.WindowInfo, writer: anytype) !void {
-    try writer.writeAll("{\"id\":");
+    try writer.writeByte('{');
+    try writeWindowFields(window, writer);
+    try writer.writeByte('}');
+}
+
+fn writeWindowFields(window: platform.WindowInfo, writer: anytype) !void {
+    try writer.writeAll("\"id\":");
     try writer.print("{d}", .{window.id});
     try writer.writeAll(",\"label\":");
     try json.writeString(writer, window.label);
@@ -1219,7 +1253,6 @@ fn writeWindowJsonToWriter(window: platform.WindowInfo, writer: anytype) !void {
         window.frame.height,
         window.scale_factor,
     });
-    try writer.writeByte('}');
 }
 
 fn builtinBridgeErrorMessage(err: anyerror) []const u8 {
@@ -1663,11 +1696,82 @@ test "runtime handles built-in JavaScript window bridge commands" {
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"focused\":true") != null);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"4\",\"command\":\"zero-native.window.close\",\"payload\":{\"label\":\"palette\"}}",
+        .bytes = "{\"id\":\"4\",\"command\":\"zero-native.window.move\",\"payload\":{\"label\":\"palette\",\"dx\":12,\"dy\":-7}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"5\",\"command\":\"zero-native.window.close\",\"payload\":{\"label\":\"palette\"}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"open\":false") != null);
+}
+
+test "runtime window.move defaults to source window when payload omits selector" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "window-move-default", .source = platform.WebViewSource.html("<p>Move</p>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.runtime.options.js_window_api = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"1\",\"command\":\"zero-native.window.create\",\"payload\":{\"label\":\"floater\",\"width\":160,\"height\":160}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"2\",\"command\":\"zero-native.window.move\",\"payload\":{\"dx\":10,\"dy\":5}}",
+        .origin = "zero://inline",
+        .window_id = 2,
+    } });
+    const response = harness.null_platform.lastBridgeResponse();
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"id\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"hitX\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"hitY\":false") != null);
+}
+
+test "runtime window.move propagates clamp flag and hit results" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "window-move-clamp", .source = platform.WebViewSource.html("<p>Clamp</p>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.runtime.options.js_window_api = true;
+    harness.null_platform.clamp_x_on_move = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"1\",\"command\":\"zero-native.window.create\",\"payload\":{\"label\":\"floater\",\"width\":160,\"height\":160}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"2\",\"command\":\"zero-native.window.move\",\"payload\":{\"label\":\"floater\",\"dx\":1000,\"dy\":0,\"clampToVisibleFrame\":true}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    const response = harness.null_platform.lastBridgeResponse();
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"hitX\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"hitY\":false") != null);
+    try std.testing.expect(harness.null_platform.last_move_clamp);
 }
 
 test "runtime handles built-in JavaScript webview bridge commands" {

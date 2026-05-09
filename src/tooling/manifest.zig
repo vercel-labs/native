@@ -91,6 +91,9 @@ pub const WindowMetadata = struct {
     x: ?f32 = null,
     y: ?f32 = null,
     restore_state: bool = true,
+    frameless: bool = false,
+    transparent: bool = false,
+    always_on_top: bool = false,
 };
 
 pub const FrontendDevMetadata = struct {
@@ -270,6 +273,9 @@ fn convertRawWindows(allocator: std.mem.Allocator, windows: []const RawWindow) !
             .x = window.x,
             .y = window.y,
             .restore_state = window.restore_state,
+            .frameless = window.frameless,
+            .transparent = window.transparent,
+            .always_on_top = window.always_on_top,
         };
     }
     return converted;
@@ -342,6 +348,9 @@ fn convertWindows(allocator: std.mem.Allocator, windows: []const WindowMetadata)
             .x = window.x,
             .y = window.y,
             .restore_state = window.restore_state,
+            .frameless = window.frameless,
+            .transparent = window.transparent,
+            .always_on_top = window.always_on_top,
         };
     }
     return converted;
@@ -557,4 +566,49 @@ test "manifest metadata parser reads frontend config" {
     try std.testing.expectEqualStrings("http://127.0.0.1:5173/", metadata.frontend.?.dev.?.url);
     try std.testing.expectEqualStrings("npm", metadata.frontend.?.dev.?.command[0]);
     try std.testing.expectEqual(@as(u32, 12000), metadata.frontend.?.dev.?.timeout_ms);
+}
+
+test "manifest parser reads frameless transparent always_on_top window flags" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "0.1.0",
+        \\  .windows = .{
+        \\    .{
+        \\      .label = "overlay",
+        \\      .width = 160,
+        \\      .height = 160,
+        \\      .frameless = true,
+        \\      .transparent = true,
+        \\      .always_on_top = true,
+        \\    },
+        \\  },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), metadata.windows.len);
+    const window = metadata.windows[0];
+    try std.testing.expectEqualStrings("overlay", window.label);
+    try std.testing.expect(window.frameless);
+    try std.testing.expect(window.transparent);
+    try std.testing.expect(window.always_on_top);
+}
+
+test "manifest parser defaults floating window flags to false" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "0.1.0",
+        \\  .windows = .{ .{ .label = "main" } },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+
+    const window = metadata.windows[0];
+    try std.testing.expect(!window.frameless);
+    try std.testing.expect(!window.transparent);
+    try std.testing.expect(!window.always_on_top);
 }

@@ -86,10 +86,18 @@ pub const WindowOptions = struct {
     resizable: bool = true,
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
+    frameless: bool = false,
+    transparent: bool = false,
+    always_on_top: bool = false,
 
     pub fn resolvedTitle(self: WindowOptions, app_name: []const u8) []const u8 {
         return if (self.title.len > 0) self.title else app_name;
     }
+};
+
+pub const MoveResult = struct {
+    hit_x: bool = false,
+    hit_y: bool = false,
 };
 
 pub const WindowState = struct {
@@ -134,6 +142,9 @@ pub const WindowCreateOptions = struct {
     resizable: bool = true,
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
+    frameless: bool = false,
+    transparent: bool = false,
+    always_on_top: bool = false,
     source: ?WebViewSource = null,
 
     pub fn windowOptions(self: WindowCreateOptions, id: WindowId, label: []const u8) WindowOptions {
@@ -145,6 +156,9 @@ pub const WindowCreateOptions = struct {
             .resizable = self.resizable,
             .restore_state = self.restore_state,
             .restore_policy = self.restore_policy,
+            .frameless = self.frameless,
+            .transparent = self.transparent,
+            .always_on_top = self.always_on_top,
         };
     }
 };
@@ -322,6 +336,7 @@ pub const PlatformServices = struct {
     create_window_fn: ?*const fn (context: ?*anyopaque, options: WindowOptions) anyerror!WindowInfo = null,
     focus_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
     close_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    move_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, dx: f64, dy: f64, clamp_to_visible_frame: bool) anyerror!MoveResult = null,
     create_webview_fn: ?*const fn (context: ?*anyopaque, options: WebViewOptions) anyerror!void = null,
     set_webview_frame_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, frame: geometry.RectF) anyerror!void = null,
     navigate_webview_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, url: []const u8) anyerror!void = null,
@@ -390,6 +405,11 @@ pub const PlatformServices = struct {
     pub fn closeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
         const close_fn = self.close_window_fn orelse return error.UnsupportedService;
         return close_fn(self.context, window_id);
+    }
+
+    pub fn moveWindow(self: PlatformServices, window_id: WindowId, dx: f64, dy: f64, clamp_to_visible_frame: bool) anyerror!MoveResult {
+        const move_fn = self.move_window_fn orelse return error.UnsupportedService;
+        return move_fn(self.context, window_id, dx, dy, clamp_to_visible_frame);
     }
 
     pub fn createWebView(self: PlatformServices, options: WebViewOptions) anyerror!void {
@@ -481,7 +501,7 @@ pub const Platform = struct {
 };
 
 pub const Backend = enum {
-    @"null",
+    null,
     macos,
     linux,
     windows,
@@ -503,6 +523,9 @@ pub const NullPlatform = struct {
     bridge_response_len: usize = 0,
     bridge_response_window_id: WindowId = 0,
     bridge_response_webview_label: []const u8 = "main",
+    clamp_x_on_move: bool = false,
+    clamp_y_on_move: bool = false,
+    last_move_clamp: bool = false,
 
     pub fn init(surface_value: Surface) NullPlatform {
         return .{ .surface_value = surface_value };
@@ -532,6 +555,7 @@ pub const NullPlatform = struct {
                 .create_window_fn = createWindow,
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
+                .move_window_fn = moveWindow,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
                 .navigate_webview_fn = navigateWebView,
@@ -658,6 +682,20 @@ pub const NullPlatform = struct {
         self.windows[index].open = false;
         self.windows[index].focused = false;
         self.removeWebViewsForWindow(window_id);
+    }
+
+    fn moveWindow(context: ?*anyopaque, window_id: WindowId, dx: f64, dy: f64, clamp_to_visible_frame: bool) anyerror!MoveResult {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.last_move_clamp = clamp_to_visible_frame;
+        const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        var frame = self.windows[index].frame;
+        frame.x += @floatCast(dx);
+        frame.y += @floatCast(dy);
+        self.windows[index].frame = frame;
+        return .{
+            .hit_x = clamp_to_visible_frame and self.clamp_x_on_move,
+            .hit_y = clamp_to_visible_frame and self.clamp_y_on_move,
+        };
     }
 
     fn createWebView(context: ?*anyopaque, options: WebViewOptions) anyerror!void {
