@@ -1,5 +1,7 @@
 #include <windows.h>
 #include <shellapi.h>
+#include <commdlg.h>
+#include <shlobj.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -36,6 +38,7 @@ struct WindowsEvent {
 
 using EventCallback = void (*)(void *, const WindowsEvent *);
 using BridgeCallback = void (*)(void *, uint64_t, const char *, size_t, const char *, size_t);
+using TrayCallback = void (*)(void *, uint32_t);
 
 struct Window {
     uint64_t id = 1;
@@ -48,6 +51,9 @@ struct Window {
     double height = 480;
 };
 
+// Use a custom message for tray notifications to avoid conflicts
+#define WM_TRAY_CALLBACK (WM_APP + 1)
+
 struct Host {
     HINSTANCE instance = GetModuleHandleW(nullptr);
     std::string app_name;
@@ -58,8 +64,13 @@ struct Host {
     void *callback_context = nullptr;
     BridgeCallback bridge_callback = nullptr;
     void *bridge_context = nullptr;
+    TrayCallback tray_callback = nullptr;
+    void *tray_context = nullptr;
     bool running = false;
     std::map<uint64_t, Window> windows;
+    HWND message_window = nullptr;
+    UINT taskbar_created = 0;
+    UINT_PTR tray_id_counter = 1;
 };
 
 static std::string slice(const char *bytes, size_t len) {
@@ -84,14 +95,17 @@ static void emit(Host *host, const Window &window, EventKind kind) {
     if (!host || !host->callback) return;
     RECT rect = {};
     if (window.hwnd) GetClientRect(window.hwnd, &rect);
+    WINDOWPLACEMENT wp = {};
+    wp.length = sizeof(wp);
+    if (window.hwnd) GetWindowPlacement(window.hwnd, &wp);
     WindowsEvent event = {};
     event.kind = kind;
     event.window_id = window.id;
     event.width = rect.right > rect.left ? (double)(rect.right - rect.left) : window.width;
     event.height = rect.bottom > rect.top ? (double)(rect.bottom - rect.top) : window.height;
     event.scale = 1.0;
-    event.x = window.x;
-    event.y = window.y;
+    event.x = (double)wp.rcNormalPosition.left;
+    event.y = (double)wp.rcNormalPosition.top;
     event.open = window.hwnd != nullptr;
     event.focused = window.hwnd && GetFocus() == window.hwnd;
     event.label = window.label.c_str();
@@ -122,6 +136,12 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             return 0;
         case WM_SETFOCUS:
         case WM_KILLFOCUS:
+            if (host) {
+                for (auto &entry : host->windows) {
+                    if (entry.second.hwnd == hwnd) emit(host, entry.second, kWindowFrame);
+                }
+            }
+            return 0;
         case WM_MOVE:
             if (host) {
                 for (auto &entry : host->windows) {
@@ -137,7 +157,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         case WM_CLOSE:
             DestroyWindow(hwnd);
             return 0;
-        case WM_DESTROY:
+        case WM_DESTROY: {
             if (host) {
                 for (auto &entry : host->windows) {
                     if (entry.second.hwnd == hwnd) {
@@ -150,6 +170,43 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 if (!any_open) PostQuitMessage(0);
             }
             return 0;
+        }
+        case WM_NCDESTROY: {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            return 0;
+        }
+        case WM_TRAY_CALLBACK:
+            if (host && host->tray_callback && lparam == WM_LBUTTONUP) {
+                host->tray_callback(host->tray_context, (uint32_t)wparam);
+            }
+            return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+static LRESULT CALLBACK messageWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_COPYDATA) {
+        Host *host = reinterpret_cast<Host *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (host) {
+            COPYDATASTRUCT *cds = reinterpret_cast<COPYDATASTRUCT *>(lparam);
+            if (cds && cds->dwData == 0) {
+                HWND main_hwnd = nullptr;
+                for (auto &entry : host->windows) {
+                    if (entry.second.hwnd) { main_hwnd = entry.second.hwnd; break; }
+                }
+                if (main_hwnd) return CallWindowProcW(reinterpret_cast<WNDPROC>(GetWindowLongPtrW(main_hwnd, GWLP_WNDPROC)), main_hwnd, message, wparam, lparam);
+            }
+        }
+        return 0;
+    }
+    if (message == WM_TRAY_CALLBACK) {
+        Host *host = reinterpret_cast<Host *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (host && host->tray_callback) {
+            if (lparam == WM_LBUTTONUP || lparam == WM_RBUTTONUP) {
+                host->tray_callback(host->tray_context, (uint32_t)wparam);
+            }
+        }
+        return 0;
     }
     return DefWindowProcW(hwnd, message, wparam, lparam);
 }
@@ -162,6 +219,15 @@ static ATOM registerClass(Host *host) {
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     wc.lpszClassName = L"ZeroNativeWindowsHost";
+    return RegisterClassExW(&wc);
+}
+
+static ATOM registerMessageClass(Host *host) {
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = messageWindowProc;
+    wc.hInstance = host->instance;
+    wc.lpszClassName = L"ZeroNativeWindowsMessage";
     return RegisterClassExW(&wc);
 }
 
@@ -222,6 +288,7 @@ void zero_native_windows_destroy(Host *host) {
 
 void zero_native_windows_run(Host *host, EventCallback callback, void *context) {
     if (!host) return;
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     host->callback = callback;
     host->callback_context = context;
     host->running = true;
@@ -239,6 +306,7 @@ void zero_native_windows_run(Host *host, EventCallback callback, void *context) 
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
+    CoUninitialize();
     WindowsEvent shutdown = {};
     shutdown.kind = kShutdown;
     shutdown.window_id = 1;
@@ -304,6 +372,420 @@ void zero_native_windows_set_security_policy(Host *host, const char *allowed_ori
     (void)external_urls;
     (void)external_urls_len;
     (void)external_action;
+}
+
+int zero_native_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {
+    (void)restore_frame;
+    if (!host || host->windows.find(window_id) != host->windows.end()) return 0;
+    Window window;
+    window.id = window_id;
+    window.title = slice(window_title, window_title_len);
+    window.label = slice(window_label, window_label_len);
+    window.x = x;
+    window.y = y;
+    window.width = width;
+    window.height = height;
+    bool ok = createNativeWindow(host, window);
+    host->windows[window_id] = window;
+    return ok ? 1 : 0;
+}
+
+int zero_native_windows_focus_window(Host *host, uint64_t window_id) {
+    if (!host) return 0;
+    auto found = host->windows.find(window_id);
+    if (found == host->windows.end() || !found->second.hwnd) return 0;
+    SetForegroundWindow(found->second.hwnd);
+    SetFocus(found->second.hwnd);
+    return 1;
+}
+
+int zero_native_windows_close_window(Host *host, uint64_t window_id) {
+    if (!host) return 0;
+    auto found = host->windows.find(window_id);
+    if (found == host->windows.end() || !found->second.hwnd) return 0;
+    DestroyWindow(found->second.hwnd);
+    return 1;
+}
+
+size_t zero_native_windows_clipboard_read(Host *host, char *buffer, size_t buffer_len) {
+    (void)host;
+    if (!buffer || buffer_len == 0 || !OpenClipboard(nullptr)) return 0;
+    HANDLE handle = GetClipboardData(CF_TEXT);
+    if (!handle) {
+        CloseClipboard();
+        return 0;
+    }
+    const char *text = static_cast<const char *>(GlobalLock(handle));
+    if (!text) {
+        CloseClipboard();
+        return 0;
+    }
+    size_t len = boundedLen(text, buffer_len);
+    memcpy(buffer, text, len);
+    GlobalUnlock(handle);
+    CloseClipboard();
+    return len;
+}
+
+void zero_native_windows_clipboard_write(Host *host, const char *text, size_t text_len) {
+    (void)host;
+    if (!OpenClipboard(nullptr)) return;
+    EmptyClipboard();
+    HGLOBAL handle = GlobalAlloc(GMEM_MOVEABLE, text_len + 1);
+    if (handle) {
+        char *dest = static_cast<char *>(GlobalLock(handle));
+        memcpy(dest, text, text_len);
+        dest[text_len] = '\0';
+        GlobalUnlock(handle);
+        SetClipboardData(CF_TEXT, handle);
+    }
+    CloseClipboard();
+}
+
+// Dialog/tray support
+static void flattenFilters(const char *filters, size_t filters_len, char *buffer, size_t buffer_len, size_t *out_len) {
+    *out_len = 0;
+    if (!filters || filters_len == 0) return;
+    const char *p = filters;
+    const char *end = filters + filters_len;
+    int need_semicolon = 0;
+    while (p < end) {
+        // Skip filter name (until first ';')
+        while (p < end && *p != ';') p++;
+        if (p >= end) break;
+        if (need_semicolon && *out_len < buffer_len) {
+            buffer[*out_len] = ';';
+            (*out_len)++;
+        }
+        need_semicolon = 0;
+        p++; // skip ';'
+        // Copy extensions until next filter name (next non-semicolon sequence starting a new filter)
+        const char *ext_start = p;
+        while (p < end && *p != ';') p++;
+        size_t ext_len = (size_t)(p - ext_start);
+        if (ext_len > 0) {
+            size_t copy_len = ext_len;
+            if (copy_len > buffer_len - *out_len) copy_len = buffer_len - *out_len;
+            memcpy(buffer + *out_len, ext_start, copy_len);
+            *out_len += copy_len;
+            need_semicolon = 1;
+        }
+    }
+}
+
+WindowsOpenDialogResult zero_native_windows_show_open_dialog(Host *host, const WindowsOpenDialogOpts *opts, char *buffer, size_t buffer_len) {
+    (void)host;
+    WindowsOpenDialogResult result = { .count = 0, .bytes_written = 0 };
+    IFileDialog *pfd = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd));
+    if (FAILED(hr) || !pfd) return result;
+
+    // Set title
+    if (opts->title && opts->title_len > 0) {
+        wchar_t *wtitle = new wchar_t[opts->title_len + 1];
+        MultiByteToWideChar(CP_UTF8, 0, opts->title, (int)opts->title_len, wtitle, (int)opts->title_len + 1);
+        pfd->SetTitle(wtitle);
+        delete[] wtitle;
+    }
+
+    // Set default folder
+    if (opts->default_path && opts->default_path_len > 0) {
+        wchar_t *wpath = new wchar_t[opts->default_path_len + 1];
+        MultiByteToWideChar(CP_UTF8, 0, opts->default_path, (int)opts->default_path_len, wpath, (int)opts->default_path_len + 1);
+        IShellItem *psi = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(wpath, nullptr, IID_PPV_ARGS(&psi)))) {
+            pfd->SetFolder(psi);
+            psi->Release();
+        }
+        delete[] wpath;
+    }
+
+    // Set file type filter
+    if (opts->extensions && opts->extensions_len > 0) {
+        std::wstring extStr;
+        const char *p = opts->extensions;
+        const char *end = opts->extensions + opts->extensions_len;
+        while (p < end) {
+            if (p > opts->extensions) extStr += L";";
+            size_t len = 0;
+            while (p + len < end && p[len] != ';') len++;
+            int wlen = MultiByteToWideChar(CP_UTF8, 0, p, (int)len, nullptr, 0);
+            if (wlen > 0) {
+                wchar_t *wext = new wchar_t[wlen + 1];
+                MultiByteToWideChar(CP_UTF8, 0, p, (int)len, wext, wlen + 1);
+                wext[wlen] = L'\0';
+                extStr += wext;
+                delete[] wext;
+            }
+            p += len + 1;
+        }
+        if (!extStr.empty()) {
+            COMDLG_FILTERSPEC spec = { extStr.c_str(), extStr.c_str() };
+            pfd->SetFileTypes(1, &spec);
+        }
+    }
+
+    // Set options
+    DWORD options = 0;
+    if (opts->allow_directories) options |= FOS_PICKFOLDERS;
+    if (opts->allow_multiple) options |= FOS_ALLOWMULTISELECT;
+    pfd->SetOptions(options);
+
+    hr = pfd->Show(nullptr);
+    if (FAILED(hr)) {
+        pfd->Release();
+        return result;
+    }
+
+    IShellItem *item_result = nullptr;
+    hr = pfd->GetResults(&item_result);
+    if (FAILED(hr) || !item_result) {
+        pfd->Release();
+        return result;
+    }
+
+    IEnumShellItems *pEnum = nullptr;
+    hr = item_result->EnumItems(&pEnum);
+    if (FAILED(hr) || !pEnum) {
+        item_result->Release();
+        pfd->Release();
+        return result;
+    }
+
+    size_t offset = 0;
+    size_t count = 0;
+    IShellItem *item = nullptr;
+    while (pEnum->Next(1, &item, nullptr) == S_OK) {
+        PWSTR path = nullptr;
+        if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+            // Convert wide string to UTF-8
+            int utf8len = WideCharToMultiByte(CP_UTF8, 0, path, -1, nullptr, 0, nullptr, nullptr);
+            if (utf8len > 0) {
+                size_t needed = (size_t)(utf8len - 1); // exclude null terminator
+                if (offset > 0 && offset < buffer_len) {
+                    buffer[offset] = '\n';
+                    offset++;
+                }
+                if (offset + needed <= buffer_len) {
+                    WideCharToMultiByte(CP_UTF8, 0, path, -1, buffer + offset, (int)(buffer_len - offset), nullptr, nullptr);
+                    offset += needed;
+                    count++;
+                }
+            }
+            CoTaskMemFree(path);
+        }
+        item->Release();
+    }
+
+    pEnum->Release();
+    item_result->Release();
+    pfd->Release();
+    result.count = count;
+    result.bytes_written = offset;
+    return result;
+}
+
+size_t zero_native_windows_show_save_dialog(Host *host, const WindowsSaveDialogOpts *opts, char *buffer, size_t buffer_len) {
+    (void)host;
+    IFileDialog *pfd = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd));
+    if (FAILED(hr) || !pfd) return 0;
+
+    if (opts->title && opts->title_len > 0) {
+        wchar_t *wtitle = new wchar_t[opts->title_len + 1];
+        MultiByteToWideChar(CP_UTF8, 0, opts->title, (int)opts->title_len, wtitle, (int)opts->title_len + 1);
+        pfd->SetTitle(wtitle);
+        delete[] wtitle;
+    }
+
+    if (opts->default_path && opts->default_path_len > 0) {
+        wchar_t *wpath = new wchar_t[opts->default_path_len + 1];
+        MultiByteToWideChar(CP_UTF8, 0, opts->default_path, (int)opts->default_path_len, wpath, (int)opts->default_path_len + 1);
+        IShellItem *psi = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(wpath, nullptr, IID_PPV_ARGS(&psi)))) {
+            pfd->SetFolder(psi);
+            psi->Release();
+        }
+        delete[] wpath;
+    }
+
+    if (opts->default_name && opts->default_name_len > 0) {
+        wchar_t *wname = new wchar_t[opts->default_name_len + 1];
+        MultiByteToWideChar(CP_UTF8, 0, opts->default_name, (int)opts->default_name_len, wname, (int)opts->default_name_len + 1);
+        pfd->SetFileName(wname);
+        delete[] wname;
+    }
+
+    if (opts->extensions && opts->extensions_len > 0) {
+        std::wstring extStr;
+        const char *p = opts->extensions;
+        const char *end = opts->extensions + opts->extensions_len;
+        while (p < end) {
+            if (p > opts->extensions) extStr += L";";
+            size_t len = 0;
+            while (p + len < end && p[len] != ';') len++;
+            int wlen = MultiByteToWideChar(CP_UTF8, 0, p, (int)len, nullptr, 0);
+            if (wlen > 0) {
+                wchar_t *wext = new wchar_t[wlen + 1];
+                MultiByteToWideChar(CP_UTF8, 0, p, (int)len, wext, wlen + 1);
+                wext[wlen] = L'\0';
+                extStr += wext;
+                delete[] wext;
+            }
+            p += len + 1;
+        }
+        if (!extStr.empty()) {
+            COMDLG_FILTERSPEC spec = { extStr.c_str(), extStr.c_str() };
+            pfd->SetFileTypes(1, &spec);
+        }
+    }
+
+    hr = pfd->Show(nullptr);
+    if (FAILED(hr)) {
+        pfd->Release();
+        return 0;
+    }
+
+    IShellItem *result = nullptr;
+    hr = pfd->GetResult(&result);
+    if (FAILED(hr) || !result) {
+        pfd->Release();
+        return 0;
+    }
+
+    PWSTR path = nullptr;
+    size_t written = 0;
+    if (SUCCEEDED(result->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+        int utf8len = WideCharToMultiByte(CP_UTF8, 0, path, -1, nullptr, 0, nullptr, nullptr);
+        if (utf8len > 0) {
+            written = (size_t)(utf8len - 1);
+            if (written > buffer_len) written = buffer_len;
+            WideCharToMultiByte(CP_UTF8, 0, path, -1, buffer, (int)buffer_len, nullptr, nullptr);
+        }
+        CoTaskMemFree(path);
+    }
+
+    result->Release();
+    pfd->Release();
+    return written;
+}
+
+int zero_native_windows_show_message_dialog(Host *host, const WindowsMessageDialogOpts *opts) {
+    (void)host;
+    UINT type = MB_OK;
+    if (opts->style == 1) type = MB_ICONWARNING | MB_OK;
+    else if (opts->style == 2) type = MB_ICONERROR | MB_OK;
+    else type = MB_ICONINFORMATION | MB_OK;
+
+    std::wstring wmsg;
+    if (opts->informative_text && opts->informative_text_len > 0) {
+        int len = MultiByteToWideChar(CP_UTF8, 0, opts->informative_text, (int)opts->informative_text_len, nullptr, 0);
+        if (len > 0) {
+            wchar_t *buf = new wchar_t[len + 1];
+            MultiByteToWideChar(CP_UTF8, 0, opts->informative_text, (int)opts->informative_text_len, buf, len);
+            buf[len] = L'\0';
+            wmsg += buf;
+            delete[] buf;
+        }
+    }
+    if (opts->message && opts->message_len > 0) {
+        if (!wmsg.empty()) wmsg += L"\n\n";
+        int len = MultiByteToWideChar(CP_UTF8, 0, opts->message, (int)opts->message_len, nullptr, 0);
+        if (len > 0) {
+            wchar_t *buf = new wchar_t[len + 1];
+            MultiByteToWideChar(CP_UTF8, 0, opts->message, (int)opts->message_len, buf, len);
+            buf[len] = L'\0';
+            wmsg += buf;
+            delete[] buf;
+        }
+    }
+
+    std::wstring wtitle;
+    if (opts->title && opts->title_len > 0) {
+        int len = MultiByteToWideChar(CP_UTF8, 0, opts->title, (int)opts->title_len, nullptr, 0);
+        if (len > 0) {
+            wchar_t *buf = new wchar_t[len + 1];
+            MultiByteToWideChar(CP_UTF8, 0, opts->title, (int)opts->title_len, buf, len);
+            buf[len] = L'\0';
+            wtitle = buf;
+            delete[] buf;
+        }
+    }
+
+    int result = MessageBoxW(nullptr, wmsg.c_str(), wtitle.c_str(), type);
+    if (result == IDOK) return 0;
+    if (result == IDCANCEL) return 1;
+    return 2;
+}
+
+void zero_native_windows_create_tray(Host *host, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len) {
+    if (!host) return;
+
+    // Create a hidden message window for tray messages
+    if (!host->message_window) {
+        registerMessageClass(host);
+        host->message_window = CreateWindowExW(
+            0, L"ZeroNativeWindowsMessage", L"", 0, 0, 0, 0, 0,
+            HWND_MESSAGE, nullptr, host->instance, host);
+        if (host->message_window) {
+            SetWindowLongPtrW(host->message_window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(host));
+        }
+    }
+
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = host->message_window ? host->message_window : (host->windows.begin()->second.hwnd);
+    nid.uID = 1;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = WM_TRAY_CALLBACK;
+
+    if (icon_path && icon_path_len > 0) {
+        wchar_t *wicon = new wchar_t[icon_path_len + 1];
+        MultiByteToWideChar(CP_UTF8, 0, icon_path, (int)icon_path_len, wicon, (int)icon_path_len + 1);
+        HICON icon = (HICON)LoadImageW(nullptr, wicon, IMAGE_ICON, 0, 0, LR_LOADFROMFILE);
+        if (icon) {
+            nid.hIcon = icon;
+            Shell_NotifyIconW(NIM_ADD, &nid);
+            DestroyIcon(icon);
+        }
+        delete[] wicon;
+    }
+
+    if (tooltip && tooltip_len > 0) {
+        MultiByteToWideChar(CP_UTF8, 0, tooltip, (int)tooltip_len, nid.szTip, (int)std::min(tooltip_len, (size_t)127));
+    }
+}
+
+void zero_native_windows_update_tray_menu(Host *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, size_t count) {
+    (void)host;
+    (void)item_ids;
+    (void)labels;
+    (void)label_lens;
+    (void)separators;
+    (void)enabled_flags;
+    (void)count;
+    // Menu construction would require HMENU; this is a simplified stub.
+    // Full implementation would track the HMENU and rebuild on updates.
+}
+
+void zero_native_windows_remove_tray(Host *host) {
+    if (!host) return;
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = host->message_window ? host->message_window : (host->windows.begin()->second.hwnd);
+    nid.uID = 1;
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+
+    if (host->message_window) {
+        DestroyWindow(host->message_window);
+        host->message_window = nullptr;
+    }
+}
+
+void zero_native_windows_set_tray_callback(Host *host, TrayCallback callback, void *context) {
+    if (!host) return;
+    host->tray_callback = callback;
+    host->tray_context = context;
 }
 
 int zero_native_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {

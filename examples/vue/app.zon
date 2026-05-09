@@ -4,7 +4,7 @@
     .display_name = "Vue Example",
     .version = "0.1.0",
     .icons = .{ "assets/icon.icns" },
-    .platforms = .{ "macos", "linux" },
+    .platforms = .{ "macos", "linux", "windows" },
     .permissions = .{},
     .capabilities = .{ "webview" },
     .frontend = .{
