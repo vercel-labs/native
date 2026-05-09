@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
         });
         const signing_name = try flagValue(args, "--signing") orelse "none";
         const signing = tooling.package.SigningMode.parse(signing_name) orelse fail("invalid signing mode");
-        const output_dir = try flagValue(args, "--output") orelse if (args.len >= 3 and args[2].len > 0 and args[2][0] != '-') args[2] else "zig-out/package/zero-native-local.app";
+        const output_dir = try packageOutputArg(args, target);
         const archive = flagBool(args, "--archive");
         if (web_engine.engine == .chromium and web_engine.cef_auto_install) {
             try tooling.cef.run(allocator, init.io, init.environ_map, &.{ "install", "--dir", web_engine.cef_dir });
@@ -97,16 +97,16 @@ pub fn main(init: std.process.Init) !void {
             .timeout_ms = if (try flagValue(args, "--timeout-ms")) |value| try std.fmt.parseUnsigned(u32, value, 10) else null,
         });
     } else if (std.mem.eql(u8, command, "package-windows")) {
-        try packageShortcut(allocator, init.io, args, .windows, "zig-out/package/windows");
+        try packageShortcut(allocator, init.io, args, .windows);
     } else if (std.mem.eql(u8, command, "package-linux")) {
-        try packageShortcut(allocator, init.io, args, .linux, "zig-out/package/linux");
+        try packageShortcut(allocator, init.io, args, .linux);
     } else if (std.mem.eql(u8, command, "package-ios")) {
         const metadata = try tooling.manifest.readMetadata(allocator, init.io, try flagValue(args, "--manifest") orelse "app.zon");
         const web_engine = try tooling.web_engine.resolve(.{ .web_engine = metadata.web_engine, .cef = metadata.cef }, .{});
         const stats = try tooling.package.createPackage(allocator, init.io, .{
             .metadata = metadata,
             .target = .ios,
-            .output_path = try flagValue(args, "--output") orelse if (args.len >= 3 and args[2].len > 0 and args[2][0] != '-') args[2] else "zig-out/mobile/ios",
+            .output_path = try packageOutputArg(args, .ios),
             .binary_path = try flagValue(args, "--binary"),
             .assets_dir = try flagValue(args, "--assets") orelse if (metadata.frontend) |frontend| frontend.dist else "assets",
             .frontend = metadata.frontend,
@@ -120,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
         const stats = try tooling.package.createPackage(allocator, init.io, .{
             .metadata = metadata,
             .target = .android,
-            .output_path = try flagValue(args, "--output") orelse if (args.len >= 3 and args[2].len > 0 and args[2][0] != '-') args[2] else "zig-out/mobile/android",
+            .output_path = try packageOutputArg(args, .android),
             .binary_path = try flagValue(args, "--binary"),
             .assets_dir = try flagValue(args, "--assets") orelse if (metadata.frontend) |frontend| frontend.dist else "assets",
             .frontend = metadata.frontend,
@@ -244,6 +244,7 @@ fn positionalArg(args: []const []const u8) ?[]const u8 {
                 std.mem.eql(u8, arg, "--output") or
                 std.mem.eql(u8, arg, "--binary") or
                 std.mem.eql(u8, arg, "--assets") or
+                std.mem.eql(u8, arg, "--optimize") or
                 std.mem.eql(u8, arg, "--web-engine") or
                 std.mem.eql(u8, arg, "--cef-dir") or
                 std.mem.eql(u8, arg, "--signing") or
@@ -273,13 +274,13 @@ fn splitCommand(allocator: std.mem.Allocator, value: []const u8) ![]const []cons
     return parts.toOwnedSlice(allocator);
 }
 
-fn packageShortcut(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8, target: tooling.package.PackageTarget, default_output: []const u8) !void {
+fn packageShortcut(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8, target: tooling.package.PackageTarget) !void {
     const metadata = try tooling.manifest.readMetadata(allocator, io, try flagValue(args, "--manifest") orelse "app.zon");
     const web_engine = try tooling.web_engine.resolve(.{ .web_engine = metadata.web_engine, .cef = metadata.cef }, .{});
     const stats = try tooling.package.createPackage(allocator, io, .{
         .metadata = metadata,
         .target = target,
-        .output_path = try flagValue(args, "--output") orelse default_output,
+        .output_path = try packageOutputArg(args, target),
         .binary_path = try flagValue(args, "--binary"),
         .assets_dir = try flagValue(args, "--assets") orelse if (metadata.frontend) |frontend| frontend.dist else "assets",
         .frontend = metadata.frontend,
@@ -287,4 +288,33 @@ fn packageShortcut(allocator: std.mem.Allocator, io: std.Io, args: []const []con
         .cef_dir = web_engine.cef_dir,
     });
     tooling.package.printDiagnostic(stats);
+}
+
+fn packageOutputArg(args: []const []const u8, target: tooling.package.PackageTarget) error{MissingFlagValue}![]const u8 {
+    return try flagValue(args, "--output") orelse positionalArg(args[2..]) orelse defaultPackageOutput(target);
+}
+
+fn defaultPackageOutput(target: tooling.package.PackageTarget) []const u8 {
+    return switch (target) {
+        .macos => "zig-out/package/zero-native-local.app",
+        .windows => "zig-out/package/windows",
+        .linux => "zig-out/package/linux",
+        .ios => "zig-out/mobile/ios",
+        .android => "zig-out/mobile/android",
+    };
+}
+
+test "package output defaults are target-specific" {
+    try std.testing.expectEqualStrings("zig-out/package/zero-native-local.app", defaultPackageOutput(.macos));
+    try std.testing.expectEqualStrings("zig-out/package/windows", defaultPackageOutput(.windows));
+    try std.testing.expectEqualStrings("zig-out/package/linux", defaultPackageOutput(.linux));
+    try std.testing.expectEqualStrings("zig-out/mobile/ios", defaultPackageOutput(.ios));
+    try std.testing.expectEqualStrings("zig-out/mobile/android", defaultPackageOutput(.android));
+}
+
+test "package output arg prefers explicit and positional paths" {
+    try std.testing.expectEqualStrings("custom", try packageOutputArg(&.{ "zero-native", "package", "--target", "linux", "--output", "custom" }, .linux));
+    try std.testing.expectEqualStrings("positional", try packageOutputArg(&.{ "zero-native", "package", "positional", "--target", "linux" }, .linux));
+    try std.testing.expectEqualStrings("zig-out/package/linux", try packageOutputArg(&.{ "zero-native", "package", "--target", "linux", "--optimize", "ReleaseFast" }, .linux));
+    try std.testing.expectEqualStrings("zig-out/package/linux", try packageOutputArg(&.{ "zero-native", "package", "--target", "linux" }, .linux));
 }

@@ -146,6 +146,7 @@ pub fn build(b: *std.Build) void {
     const cli_mod = module(b, target, optimize, "tools/zero-native/main.zig");
     cli_mod.addImport("tooling", tooling_mod);
     cli_mod.addImport("automation_protocol", automation_protocol_mod);
+    const cli_tests = testArtifact(b, cli_mod);
     const cli_exe = b.addExecutable(.{
         .name = "zero-native",
         .root_module = cli_mod,
@@ -171,6 +172,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(json_tests).step);
     test_step.dependOn(&b.addRunArtifact(desktop_tests).step);
     test_step.dependOn(&b.addRunArtifact(tooling_tests).step);
+    test_step.dependOn(&b.addRunArtifact(cli_tests).step);
 
     addTestStep(b, "test-geometry", "Run geometry module tests", geometry_tests);
     addTestStep(b, "test-assets", "Run assets module tests", assets_tests);
@@ -182,6 +184,7 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-json", "Run JSON primitive tests", json_tests);
     addTestStep(b, "test-desktop", "Run zero-native framework tests", desktop_tests);
     addTestStep(b, "test-tooling", "Run zero-native tooling tests", tooling_tests);
+    addTestStep(b, "test-cli", "Run zero-native CLI tests", cli_tests);
 
     const run_hello = b.addSystemCommand(&.{ "zig", "build", "run", b.fmt("-Dplatform={s}", .{platform_arg}), b.fmt("-Dtrace={s}", .{@tagName(trace_option)}) });
     run_hello.setCwd(b.path("examples/hello"));
