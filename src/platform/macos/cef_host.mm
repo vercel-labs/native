@@ -400,7 +400,7 @@ static const char *ZeroNativeCefBridgeScript() {
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
-- (instancetype)initWithAppName:(NSString *)appName title:(NSString *)title width:(double)width height:(double)height;
+- (instancetype)initWithAppName:(NSString *)appName title:(NSString *)title width:(double)width height:(double)height frameless:(BOOL)frameless transparent:(BOOL)transparent alwaysOnTop:(BOOL)alwaysOnTop;
 - (void)configureApplication;
 - (void)buildMenuBar;
 - (NSMenuItem *)menuItem:(NSString *)title action:(SEL)action key:(NSString *)key modifiers:(NSEventModifierFlags)modifiers;
@@ -487,7 +487,7 @@ static const char *ZeroNativeCefBridgeScript() {
 
 @implementation ZeroNativeChromiumHost
 
-- (instancetype)initWithAppName:(NSString *)appName title:(NSString *)title width:(double)width height:(double)height {
+- (instancetype)initWithAppName:(NSString *)appName title:(NSString *)title width:(double)width height:(double)height frameless:(BOOL)frameless transparent:(BOOL)transparent alwaysOnTop:(BOOL)alwaysOnTop {
     self = [super init];
     if (!self) return nil;
 
@@ -517,7 +517,7 @@ static const char *ZeroNativeCefBridgeScript() {
     self.allowedExternalURLs = @[];
     self.externalLinkAction = 0;
 
-    [self createWindowWithId:1 title:(title.length > 0 ? title : self.appName) label:@"main" x:0 y:0 width:width height:height restoreFrame:NO frameless:NO transparent:NO alwaysOnTop:NO makeMain:YES];
+    [self createWindowWithId:1 title:(title.length > 0 ? title : self.appName) label:@"main" x:0 y:0 width:width height:height restoreFrame:NO frameless:frameless transparent:transparent alwaysOnTop:alwaysOnTop makeMain:YES];
     self.didShutdown = NO;
     return self;
 }
@@ -1326,14 +1326,14 @@ bool ZeroNativeCefClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser
 } // namespace
 
 static void ZeroNativeWarnUnsupportedFlags(int frameless, int transparent, int always_on_top) {
-    if (frameless) {
-        NSLog(@"zero-native: window option `frameless` is not yet honored on the Chromium backend; falling back to titled window chrome");
-    }
+    // `frameless` and `always_on_top` are NSWindow attributes that the CEF
+    // backend honors normally — only `transparent` is genuinely unsupported,
+    // because the embedded Chromium browser surface stays opaque even when
+    // the surrounding NSWindow is set to clear color.
+    (void)frameless;
+    (void)always_on_top;
     if (transparent) {
-        NSLog(@"zero-native: window option `transparent` is not yet honored on the Chromium backend; the embedded browser surface remains opaque");
-    }
-    if (always_on_top) {
-        NSLog(@"zero-native: window option `always_on_top` is not yet honored on the Chromium backend; window will use normal level");
+        NSLog(@"zero-native: window option `transparent` is not yet honored on the Chromium backend; the surrounding NSWindow honors it but the embedded browser surface remains opaque");
     }
 }
 
@@ -1348,7 +1348,7 @@ zero_native_appkit_host_t *zero_native_appkit_create(const char *app_name, size_
         ZeroNativeWarnUnsupportedFlags(frameless, transparent, always_on_top);
         NSString *appNameString = [[NSString alloc] initWithBytes:app_name length:app_name_len encoding:NSUTF8StringEncoding] ?: @"zero-native";
         NSString *titleString = [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] ?: appNameString;
-        ZeroNativeChromiumHost *host = [[ZeroNativeChromiumHost alloc] initWithAppName:appNameString title:titleString width:width height:height];
+        ZeroNativeChromiumHost *host = [[ZeroNativeChromiumHost alloc] initWithAppName:appNameString title:titleString width:width height:height frameless:(frameless != 0) transparent:(transparent != 0) alwaysOnTop:(always_on_top != 0)];
         if (restore_frame) {
             [host.window setFrame:ZeroNativeConstrainFrame(NSMakeRect(x, y, width, height)) display:NO];
         }
@@ -1451,7 +1451,6 @@ int zero_native_appkit_close_window(zero_native_appkit_host_t *host, uint64_t wi
 }
 
 int zero_native_appkit_move_window(zero_native_appkit_host_t *host, uint64_t window_id, double dx, double dy, int clamp_to_visible_frame, int *out_hit_x, int *out_hit_y) {
-    (void)clamp_to_visible_frame;
     ZeroNativeChromiumHost *object = (__bridge ZeroNativeChromiumHost *)host;
     NSWindow *window = object.windows[@(window_id)];
     if (!window) {
@@ -1460,9 +1459,25 @@ int zero_native_appkit_move_window(zero_native_appkit_host_t *host, uint64_t win
         return 0;
     }
     NSRect frame = window.frame;
-    [window setFrameOrigin:NSMakePoint(frame.origin.x + dx, frame.origin.y - dy)];
-    if (out_hit_x) *out_hit_x = 0;
-    if (out_hit_y) *out_hit_y = 0;
+    // dx/dy are screen-space pixels with Y growing downward; AppKit window
+    // origin is bottom-up, so dy is subtracted.
+    double newX = frame.origin.x + dx;
+    double newY = frame.origin.y - dy;
+    int hitX = 0, hitY = 0;
+    if (clamp_to_visible_frame) {
+        NSRect visible = (window.screen ?: NSScreen.mainScreen).visibleFrame;
+        double minX = visible.origin.x;
+        double maxX = visible.origin.x + visible.size.width - frame.size.width;
+        double minY = visible.origin.y;
+        double maxY = visible.origin.y + visible.size.height - frame.size.height;
+        if (newX < minX) { newX = minX; hitX = 1; }
+        else if (newX > maxX) { newX = maxX; hitX = 1; }
+        if (newY < minY) { newY = minY; hitY = 1; }
+        else if (newY > maxY) { newY = maxY; hitY = 1; }
+    }
+    [window setFrameOrigin:NSMakePoint(newX, newY)];
+    if (out_hit_x) *out_hit_x = hitX;
+    if (out_hit_y) *out_hit_y = hitY;
     return 1;
 }
 
