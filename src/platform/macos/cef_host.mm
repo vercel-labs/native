@@ -1325,6 +1325,18 @@ bool ZeroNativeCefClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser
 
 } // namespace
 
+static void ZeroNativeWarnUnsupportedFlags(int frameless, int transparent, int always_on_top) {
+    if (frameless) {
+        NSLog(@"zero-native: window option `frameless` is not yet honored on the Chromium backend; falling back to titled window chrome");
+    }
+    if (transparent) {
+        NSLog(@"zero-native: window option `transparent` is not yet honored on the Chromium backend; the embedded browser surface remains opaque");
+    }
+    if (always_on_top) {
+        NSLog(@"zero-native: window option `always_on_top` is not yet honored on the Chromium backend; window will use normal level");
+    }
+}
+
 zero_native_appkit_host_t *zero_native_appkit_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int frameless, int transparent, int always_on_top) {
     @autoreleasepool {
         (void)bundle_id;
@@ -1333,9 +1345,7 @@ zero_native_appkit_host_t *zero_native_appkit_create(const char *app_name, size_
         (void)icon_path_len;
         (void)window_label;
         (void)window_label_len;
-        (void)frameless;
-        (void)transparent;
-        (void)always_on_top;
+        ZeroNativeWarnUnsupportedFlags(frameless, transparent, always_on_top);
         NSString *appNameString = [[NSString alloc] initWithBytes:app_name length:app_name_len encoding:NSUTF8StringEncoding] ?: @"zero-native";
         NSString *titleString = [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] ?: appNameString;
         ZeroNativeChromiumHost *host = [[ZeroNativeChromiumHost alloc] initWithAppName:appNameString title:titleString width:width height:height];
@@ -1422,6 +1432,7 @@ int zero_native_appkit_create_window(zero_native_appkit_host_t *host, uint64_t w
     ZeroNativeChromiumHost *object = (__bridge ZeroNativeChromiumHost *)host;
     NSString *titleString = window_title ? [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] : @"zero-native";
     NSString *labelString = window_label ? [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] : @"";
+    ZeroNativeWarnUnsupportedFlags(frameless, transparent, always_on_top);
     return [object createWindowWithId:window_id title:titleString ?: @"zero-native" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) frameless:(frameless != 0) transparent:(transparent != 0) alwaysOnTop:(always_on_top != 0) makeMain:NO] ? 1 : 0;
 }
 
@@ -1436,6 +1447,22 @@ int zero_native_appkit_close_window(zero_native_appkit_host_t *host, uint64_t wi
     ZeroNativeChromiumHost *object = (__bridge ZeroNativeChromiumHost *)host;
     if (!object.windows[@(window_id)]) return 0;
     [object closeWindowWithId:window_id];
+    return 1;
+}
+
+int zero_native_appkit_move_window(zero_native_appkit_host_t *host, uint64_t window_id, double dx, double dy, int clamp_to_visible_frame, int *out_hit_x, int *out_hit_y) {
+    (void)clamp_to_visible_frame;
+    ZeroNativeChromiumHost *object = (__bridge ZeroNativeChromiumHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) {
+        if (out_hit_x) *out_hit_x = 0;
+        if (out_hit_y) *out_hit_y = 0;
+        return 0;
+    }
+    NSRect frame = window.frame;
+    [window setFrameOrigin:NSMakePoint(frame.origin.x + dx, frame.origin.y - dy)];
+    if (out_hit_x) *out_hit_x = 0;
+    if (out_hit_y) *out_hit_y = 0;
     return 1;
 }
 
