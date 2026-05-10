@@ -7,11 +7,30 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 #include <map>
 #include <string>
 
 #include "webview2_host_types.h"
+
+// Try to include WebView2 SDK if available; gracefully fall back if not
+#ifdef __has_include
+#if __has_include(<WebView2.h>)
+#define HAVE_WEBVIEW2_SDK 1
+#include <wrl.h>
+#include <WebView2.h>
+using Microsoft::WRL::ComPtr;
+#else
+#define HAVE_WEBVIEW2_SDK 0
+#endif
+#else
+// For compilers without __has_include, assume SDK is available
+#define HAVE_WEBVIEW2_SDK 1
+#include <wrl.h>
+#include <WebView2.h>
+using Microsoft::WRL::ComPtr;
+#endif
 
 namespace {
 
@@ -52,6 +71,11 @@ struct Window {
     double y = 0;
     double width = 720;
     double height = 480;
+#if HAVE_WEBVIEW2_SDK
+    // WebView2 controller and core webview pointers (only when SDK is available)
+    Microsoft::WRL::ComPtr<ICoreWebView2Controller> controller;
+    Microsoft::WRL::ComPtr<ICoreWebView2> webview;
+#endif
 };
 
 // Use a custom message for tray notifications to avoid conflicts
@@ -133,7 +157,17 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         case WM_SIZE:
             if (host) {
                 for (auto &entry : host->windows) {
-                    if (entry.second.hwnd == hwnd) emit(host, entry.second, kResize);
+                    if (entry.second.hwnd == hwnd) {
+#if HAVE_WEBVIEW2_SDK
+                        // Resize WebView2 to match window client area
+                        if (entry.second.controller) {
+                            RECT bounds;
+                            GetClientRect(hwnd, &bounds);
+                            entry.second.controller->put_Bounds(bounds);
+                        }
+#endif
+                        emit(host, entry.second, kResize);
+                    }
                 }
             }
             return 0;
@@ -164,6 +198,16 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (host) {
                 for (auto &entry : host->windows) {
                     if (entry.second.hwnd == hwnd) {
+#if HAVE_WEBVIEW2_SDK
+                        // Clean up WebView2 objects
+                        if (entry.second.webview) {
+                            entry.second.webview.Reset();
+                        }
+                        if (entry.second.controller) {
+                            entry.second.controller->Close();
+                            entry.second.controller.Reset();
+                        }
+#endif
                         entry.second.hwnd = nullptr;
                         emit(host, entry.second, kWindowFrame);
                     }
@@ -260,6 +304,251 @@ static bool createNativeWindow(Host *host, Window &window) {
 
 } // namespace
 
+// WebView2 handler structs (C++ structures, defined outside extern "C")
+#if HAVE_WEBVIEW2_SDK
+
+struct NavigationStartingHandler : public ICoreWebView2NavigationStartingEventHandler {
+    ULONG refCount = 1;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
+        (void)riid;
+        if (!ppvObject) return E_POINTER;
+        *ppvObject = static_cast<ICoreWebView2NavigationStartingEventHandler*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refCount; }
+    ULONG STDMETHODCALLTYPE Release() override { ULONG c = --refCount; if (!c) delete this; return c; }
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2 *sender, ICoreWebView2NavigationStartingEventArgs *args) override {
+        (void)sender;
+        (void)args;
+        return S_OK;
+    }
+};
+
+struct NavigationCompletedHandler : public ICoreWebView2NavigationCompletedEventHandler {
+    struct ScriptResultHandler : public ICoreWebView2ExecuteScriptCompletedHandler {
+        ULONG refCount = 1;
+        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
+            (void)riid;
+            if (!ppvObject) return E_POINTER;
+            *ppvObject = static_cast<ICoreWebView2ExecuteScriptCompletedHandler*>(this);
+            AddRef();
+            return S_OK;
+        }
+        ULONG STDMETHODCALLTYPE AddRef() override { return ++refCount; }
+        ULONG STDMETHODCALLTYPE Release() override { ULONG c = --refCount; if (!c) delete this; return c; }
+        HRESULT STDMETHODCALLTYPE Invoke(HRESULT errorCode, LPCWSTR resultObjectAsJson) override {
+            if (FAILED(errorCode)) {
+                fprintf(stderr, "[webview2] execute script failed hr=0x%08lx\n", (unsigned long)errorCode);
+                return S_OK;
+            }
+            fprintf(stderr, "[webview2] root child count json=%ls\n", resultObjectAsJson ? resultObjectAsJson : L"<null>");
+            return S_OK;
+        }
+    };
+
+    ULONG refCount = 1;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
+        (void)riid;
+        if (!ppvObject) return E_POINTER;
+        *ppvObject = static_cast<ICoreWebView2NavigationCompletedEventHandler*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refCount; }
+    ULONG STDMETHODCALLTYPE Release() override { ULONG c = --refCount; if (!c) delete this; return c; }
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2 *sender, ICoreWebView2NavigationCompletedEventArgs *args) override {
+        (void)sender;
+        BOOL success = FALSE;
+        if (args) args->get_IsSuccess(&success);
+        COREWEBVIEW2_WEB_ERROR_STATUS status = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+        if (args) args->get_WebErrorStatus(&status);
+        fprintf(stderr, "[webview2] navigation completed success=%d status=%d\n", success ? 1 : 0, (int)status);
+        if (success && sender) {
+            sender->ExecuteScript(
+                L"(() => { const r = document.getElementById('root'); return r ? r.childElementCount : -1; })()",
+                new ScriptResultHandler()
+            );
+        }
+        return S_OK;
+    }
+};
+
+struct EnvHandler : public ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler {
+    ULONG refCount = 1;
+    Host *host;
+    Window *win;
+    std::wstring wsource;
+    int source_kind;
+    std::string asset_root;
+    std::string asset_entry;
+
+    EnvHandler(Host *h, Window *w, std::wstring ws, int kind, const std::string &ar, const std::string &ae) 
+        : host(h), win(w), wsource(std::move(ws)), source_kind(kind), asset_root(ar), asset_entry(ae) {}
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
+        (void)riid;
+        if (!ppvObject) return E_POINTER;
+        *ppvObject = static_cast<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refCount; }
+    ULONG STDMETHODCALLTYPE Release() override { ULONG c = --refCount; if (!c) delete this; return c; }
+
+    HRESULT STDMETHODCALLTYPE Invoke(HRESULT result, ICoreWebView2Environment *env) override {
+        if (FAILED(result) || !env) return result;
+        env->CreateCoreWebView2Controller(win->hwnd, new ControllerHandler(host, win, wsource, source_kind, asset_root, asset_entry));
+        return S_OK;
+    }
+
+    struct ControllerHandler : public ICoreWebView2CreateCoreWebView2ControllerCompletedHandler {
+        ULONG refCount = 1;
+        Host *host;
+        Window *win;
+        std::wstring wsource;
+        int source_kind;
+        std::string asset_root;
+        std::string asset_entry;
+
+        ControllerHandler(Host *h, Window *w, std::wstring ws, int kind, const std::string &ar, const std::string &ae)
+            : host(h), win(w), wsource(std::move(ws)), source_kind(kind), asset_root(ar), asset_entry(ae) {}
+
+        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
+            (void)riid;
+            if (!ppvObject) return E_POINTER;
+            *ppvObject = static_cast<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler*>(this);
+            AddRef();
+            return S_OK;
+        }
+        ULONG STDMETHODCALLTYPE AddRef() override { return ++refCount; }
+        ULONG STDMETHODCALLTYPE Release() override { ULONG c = --refCount; if (!c) delete this; return c; }
+
+        HRESULT STDMETHODCALLTYPE Invoke(HRESULT result, ICoreWebView2Controller *controller) override {
+            if (FAILED(result) || !controller) return result;
+
+            ComPtr<ICoreWebView2Controller> ctrl(controller);
+            win->controller = ctrl;
+
+            ComPtr<ICoreWebView2> core;
+            ctrl->get_CoreWebView2(&core);
+            win->webview = core;
+
+            ComPtr<ICoreWebView2Settings> settings;
+            if (SUCCEEDED(core->get_Settings(&settings))) {
+                settings->put_IsWebMessageEnabled(TRUE);
+                settings->put_IsScriptEnabled(TRUE);
+            }
+
+            EventRegistrationToken tokenStart{}, tokenComplete{};
+            core->add_NavigationStarting(new NavigationStartingHandler(), &tokenStart);
+            core->add_NavigationCompleted(new NavigationCompletedHandler(), &tokenComplete);
+
+            if (source_kind == 1) {
+                if (!wsource.empty()) core->Navigate(wsource.c_str());
+            } else if (source_kind == 0) {
+                core->NavigateToString(wsource.c_str());
+            } else if (source_kind == 2) {
+                std::wstring wroot = widen(asset_root);
+                std::wstring abs_root = wroot;
+                if (!wroot.empty()) {
+                    DWORD needed = GetFullPathNameW(wroot.c_str(), 0, nullptr, nullptr);
+                    if (needed > 0) {
+                        std::wstring buffer((size_t)needed, L'\0');
+                        DWORD written = GetFullPathNameW(wroot.c_str(), needed, buffer.data(), nullptr);
+                        if (written > 0 && written < needed) {
+                            buffer.resize((size_t)written);
+                            abs_root = std::move(buffer);
+                        }
+                    }
+
+                    // If the CWD-resolved path doesn't exist, try exe-relative package layout:
+                    // <exe_dir>/../resources/<asset_root>
+                    DWORD attrs = GetFileAttributesW(abs_root.c_str());
+                    if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+                        wchar_t exe_path[MAX_PATH];
+                        DWORD exe_len = GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+                        if (exe_len > 0 && exe_len < MAX_PATH) {
+                            std::wstring exe_dir(exe_path, exe_len);
+                            auto sep = exe_dir.find_last_of(L"\\/");
+                            if (sep != std::wstring::npos) {
+                                exe_dir.resize(sep);
+                                std::wstring pkg_candidate = exe_dir + L"\\..\\resources\\" + wroot;
+                                DWORD pkg_needed = GetFullPathNameW(pkg_candidate.c_str(), 0, nullptr, nullptr);
+                                if (pkg_needed > 0) {
+                                    std::wstring pkg_buffer((size_t)pkg_needed, L'\0');
+                                    DWORD pkg_written = GetFullPathNameW(pkg_candidate.c_str(), pkg_needed, pkg_buffer.data(), nullptr);
+                                    if (pkg_written > 0 && pkg_written < pkg_needed) {
+                                        pkg_buffer.resize((size_t)pkg_written);
+                                        DWORD pkg_attrs = GetFileAttributesW(pkg_buffer.c_str());
+                                        if (pkg_attrs != INVALID_FILE_ATTRIBUTES && (pkg_attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+                                            abs_root = std::move(pkg_buffer);
+                                            fprintf(stderr, "[webview2] resolved package assets path=%ls\n", abs_root.c_str());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                std::wstring wpath = abs_root;
+                if (!wpath.empty() && wpath.back() != L'/' && wpath.back() != L'\\') {
+                    wpath += L'\\';
+                }
+                wpath += widen(asset_entry);
+
+                // Prefer mapped https origin over file:// to avoid local file/module restrictions.
+                HRESULT map_hr = E_NOINTERFACE;
+                ICoreWebView2_3 *core3 = nullptr;
+                if (core) {
+                    map_hr = core->QueryInterface(IID_ICoreWebView2_3, reinterpret_cast<void **>(&core3));
+                }
+
+                std::wstring entry_url_path = widen(asset_entry);
+                for (auto &ch : entry_url_path) {
+                    if (ch == L'\\') ch = L'/';
+                }
+
+                bool used_mapped = false;
+                if (SUCCEEDED(map_hr) && core3) {
+                    HRESULT set_map_hr = core3->SetVirtualHostNameToFolderMapping(
+                        L"appassets.local",
+                        abs_root.c_str(),
+                        COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW
+                    );
+                    core3->Release();
+                    if (SUCCEEDED(set_map_hr)) {
+                        std::wstring mapped_url = L"https://appassets.local/";
+                        mapped_url += entry_url_path;
+                        fprintf(stderr, "[webview2] navigate mapped url=%ls\n", mapped_url.c_str());
+                        core->Navigate(mapped_url.c_str());
+                        used_mapped = true;
+                    }
+                }
+
+                if (!used_mapped) {
+                    std::wstring url = L"file:///";
+                    for (auto c : wpath) {
+                        url += (c == L'\\') ? L'/' : c;
+                    }
+                    fprintf(stderr, "[webview2] navigate url=%ls\n", url.c_str());
+                    core->Navigate(url.c_str());
+                }
+            }
+
+            RECT bounds;
+            GetClientRect(win->hwnd, &bounds);
+            ctrl->put_Bounds(bounds);
+
+            emit(host, *win, kWindowFrame);
+            return S_OK;
+        }
+    };
+};
+
+#endif  // HAVE_WEBVIEW2_SDK
+
 extern "C" {
 
 void zero_native_windows_load_window_webview(Host *host, uint64_t window_id, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback);
@@ -326,6 +615,34 @@ void zero_native_windows_load_webview(Host *host, const char *source, size_t sou
     zero_native_windows_load_window_webview(host, 1, source, source_len, source_kind, asset_root, asset_root_len, asset_entry, asset_entry_len, asset_origin, asset_origin_len, spa_fallback);
 }
 
+#if HAVE_WEBVIEW2_SDK
+
+void zero_native_windows_load_window_webview(Host *host, uint64_t window_id, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback) {
+    if (!host) return;
+    auto found = host->windows.find(window_id);
+    if (found == host->windows.end()) return;
+    Window &win = found->second;
+
+    // Convert source (UTF-8) to wide string for navigation when needed.
+    std::wstring wsource;
+    if (source && source_len) {
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, source, (int)source_len, nullptr, 0);
+        if (wlen > 0) {
+            wsource.resize(wlen);
+            MultiByteToWideChar(CP_UTF8, 0, source, (int)source_len, wsource.data(), wlen);
+        }
+    }
+
+    // Convert asset paths for file:// URL construction
+    std::string asset_root_str(asset_root ? asset_root : "", asset_root_len);
+    std::string asset_entry_str(asset_entry ? asset_entry : "", asset_entry_len);
+
+    // Kick off environment creation with the handler defined above.
+    CreateCoreWebView2EnvironmentWithOptions(nullptr, nullptr, nullptr, new EnvHandler(host, &win, wsource, source_kind, asset_root_str, asset_entry_str));
+}
+
+#else  // !HAVE_WEBVIEW2_SDK
+
 void zero_native_windows_load_window_webview(Host *host, uint64_t window_id, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback) {
     (void)source;
     (void)source_len;
@@ -341,6 +658,9 @@ void zero_native_windows_load_window_webview(Host *host, uint64_t window_id, con
     auto found = host->windows.find(window_id);
     if (found != host->windows.end()) emit(host, found->second, kWindowFrame);
 }
+
+#endif  // HAVE_WEBVIEW2_SDK
+
 
 void zero_native_windows_set_bridge_callback(Host *host, BridgeCallback callback, void *context) {
     if (!host) return;
@@ -479,7 +799,7 @@ static void flattenFilters(const char *filters, size_t filters_len, char *buffer
 WindowsOpenDialogResult zero_native_windows_show_open_dialog(Host *host, const WindowsOpenDialogOpts *opts, char *buffer, size_t buffer_len) {
     (void)host;
     WindowsOpenDialogResult result = { .count = 0, .bytes_written = 0 };
-    IFileDialog *pfd = nullptr;
+    IFileOpenDialog *pfd = nullptr;
     HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd));
     if (FAILED(hr) || !pfd) return result;
 
@@ -789,74 +1109,6 @@ void zero_native_windows_set_tray_callback(Host *host, TrayCallback callback, vo
     if (!host) return;
     host->tray_callback = callback;
     host->tray_context = context;
-}
-
-int zero_native_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {
-    (void)restore_frame;
-    if (!host || host->windows.find(window_id) != host->windows.end()) return 0;
-    Window window;
-    window.id = window_id;
-    window.title = slice(window_title, window_title_len);
-    window.label = slice(window_label, window_label_len);
-    window.x = x;
-    window.y = y;
-    window.width = width;
-    window.height = height;
-    bool ok = createNativeWindow(host, window);
-    host->windows[window_id] = window;
-    return ok ? 1 : 0;
-}
-
-int zero_native_windows_focus_window(Host *host, uint64_t window_id) {
-    if (!host) return 0;
-    auto found = host->windows.find(window_id);
-    if (found == host->windows.end() || !found->second.hwnd) return 0;
-    SetForegroundWindow(found->second.hwnd);
-    SetFocus(found->second.hwnd);
-    return 1;
-}
-
-int zero_native_windows_close_window(Host *host, uint64_t window_id) {
-    if (!host) return 0;
-    auto found = host->windows.find(window_id);
-    if (found == host->windows.end() || !found->second.hwnd) return 0;
-    DestroyWindow(found->second.hwnd);
-    return 1;
-}
-
-size_t zero_native_windows_clipboard_read(Host *host, char *buffer, size_t buffer_len) {
-    (void)host;
-    if (!buffer || buffer_len == 0 || !OpenClipboard(nullptr)) return 0;
-    HANDLE handle = GetClipboardData(CF_TEXT);
-    if (!handle) {
-        CloseClipboard();
-        return 0;
-    }
-    const char *text = static_cast<const char *>(GlobalLock(handle));
-    if (!text) {
-        CloseClipboard();
-        return 0;
-    }
-    size_t len = boundedLen(text, buffer_len);
-    memcpy(buffer, text, len);
-    GlobalUnlock(handle);
-    CloseClipboard();
-    return len;
-}
-
-void zero_native_windows_clipboard_write(Host *host, const char *text, size_t text_len) {
-    (void)host;
-    if (!OpenClipboard(nullptr)) return;
-    EmptyClipboard();
-    HGLOBAL handle = GlobalAlloc(GMEM_MOVEABLE, text_len + 1);
-    if (handle) {
-        char *dest = static_cast<char *>(GlobalLock(handle));
-        memcpy(dest, text, text_len);
-        dest[text_len] = '\0';
-        GlobalUnlock(handle);
-        SetClipboardData(CF_TEXT, handle);
-    }
-    CloseClipboard();
 }
 
 }

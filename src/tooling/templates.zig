@@ -179,6 +179,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const web_engine_override = b.option(WebEngineOption, "web-engine", "Override app.zon web engine: system, chromium");
         \\    const cef_dir_override = b.option([]const u8, "cef-dir", "Override CEF root directory for Chromium builds");
         \\    const cef_auto_install_override = b.option(bool, "cef-auto-install", "Override app.zon CEF auto-install setting");
+        \\    const webview2_sdk_dir_override = b.option([]const u8, "webview2-sdk-dir", "Windows: WebView2 SDK root directory (contains build/native/include and build/native/*)");
         \\    const package_target = b.option(PackageTarget, "package-target", "Package target: macos, windows, linux") orelse .macos;
         \\    const zero_native_path = b.option([]const u8, "zero-native-path", "Path to the zero-native framework checkout") orelse default_zero_native_path;
         \\    const optimize_name = @tagName(optimize);
@@ -199,6 +200,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const web_engine = web_engine_override orelse app_web_engine.web_engine;
         \\    const cef_dir = cef_dir_override orelse defaultCefDir(selected_platform, app_web_engine.cef_dir);
         \\    const cef_auto_install = cef_auto_install_override orelse app_web_engine.cef_auto_install;
+        \\    const webview2_sdk_dir = webview2_sdk_dir_override orelse "third_party/webview2-sdk";
         \\    if (web_engine == .chromium and selected_platform == .@"null") {
         \\        @panic("-Dweb-engine=chromium requires -Dplatform=macos, linux, or windows");
         \\    }
@@ -230,7 +232,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        .name = app_exe_name,
         \\        .root_module = app_mod,
         \\    });
-        \\    linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, zero_native_path, cef_dir, cef_auto_install);
+        \\    linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, zero_native_path, webview2_sdk_dir, cef_dir, cef_auto_install);
         \\    b.installArtifact(exe);
         \\
         \\    const frontend_install = b.addSystemCommand(&.{ "npm", "install", "--prefix", "frontend" });
@@ -331,7 +333,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    });
         \\}
         \\
-        \\fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, zero_native_path: []const u8, cef_dir: []const u8, cef_auto_install: bool) void {
+        \\fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, zero_native_path: []const u8, webview2_sdk_dir: []const u8, cef_dir: []const u8, cef_auto_install: bool) void {
         \\    if (platform == .macos) {
         \\        switch (web_engine) {
         \\            .system => {
@@ -386,7 +388,18 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        if (web_engine == .chromium) app_mod.linkSystemLibrary("stdc++", .{});
         \\    } else if (platform == .windows) {
         \\        switch (web_engine) {
-        \\            .system => app_mod.addCSourceFile(.{ .file = zeroNativePath(b, zero_native_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17" } }),
+        \\            .system => {
+        \\                const include_arg = b.fmt("-I{s}/build/native/include", .{webview2_sdk_dir});
+        \\                app_mod.addCSourceFile(.{ .file = zeroNativePath(b, zero_native_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17", include_arg } });
+        \\                const arch_lib_dir = switch (target.result.cpu.arch) {
+        \\                    .x86_64 => b.fmt("{s}/build/native/x64", .{webview2_sdk_dir}),
+        \\                    .x86 => b.fmt("{s}/build/native/x86", .{webview2_sdk_dir}),
+        \\                    .aarch64 => b.fmt("{s}/build/native/arm64", .{webview2_sdk_dir}),
+        \\                    else => @panic("Unsupported Windows CPU architecture for WebView2 SDK"),
+        \\                };
+        \\                app_mod.addLibraryPath(b.path(arch_lib_dir));
+        \\                app_mod.linkSystemLibrary("WebView2Loader", .{});
+        \\            },
         \\            .chromium => {
         \\                const cef_check = addCefCheck(b, target, cef_dir);
         \\                if (cef_auto_install) {
@@ -917,7 +930,7 @@ fn appZon(allocator: std.mem.Allocator, names: TemplateNames, frontend: Frontend
         \\,
         \\    .version = "0.1.0",
         \\    .icons = .{ "assets/icon.icns" },
-        \\    .platforms = .{ "macos", "linux" },
+        \\    .platforms = .{ "macos", "linux", "windows" },
         \\    .permissions = .{},
         \\    .capabilities = .{ "webview" },
         \\    .frontend = .{
@@ -1733,6 +1746,18 @@ fn readme(allocator: std.mem.Allocator, names: TemplateNames, framework_path: []
         \\
         \\Use `-Dcef-dir=/path/to/cef` when you keep CEF outside the platform default under `third_party/cef`.
         \\
+        \\## Windows
+        \\
+        \\On Windows the system engine uses the WebView2 Runtime (included with Windows 11, available on Windows 10 via the evergreen runtime).
+        \\
+        \\The generated build script includes the `-Dwebview2-sdk-dir` option for projects that vendor the WebView2 SDK:
+        \\
+        \\```sh
+        \\zig build run -Dplatform=windows -Dwebview2-sdk-dir=third_party/webview2-sdk
+        \\```
+        \\
+        \\Without this option the compiler looks for `<WebView2.h>` in the system Windows SDK path (requires Visual Studio or the Windows SDK). The C++ host uses `__has_include` to degrade gracefully when the header is unavailable.
+        \\
         \\```sh
         \\zero-native doctor --web-engine chromium
         \\```
@@ -1804,6 +1829,10 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "127.0.0.1:5173") != null);
     try std.testing.expect(std.mem.indexOf(u8, package_json_text, "\"vite\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, main_js_text, "window.zero") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "\"windows\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "webview2-sdk-dir") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "src/platform/windows/webview2_host.cpp") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "Windows") != null);
 }
 
 test "writeDefaultApp emits frontend-specific Next paths" {
@@ -1858,7 +1887,25 @@ fn normalizeModuleName(allocator: std.mem.Allocator, value: []const u8) ![]const
             try out.append(allocator, '_');
         }
     }
+    if (isZigKeyword(out.items)) try out.appendSlice(allocator, "_pkg");
     return out.toOwnedSlice(allocator);
+}
+
+fn isZigKeyword(name: []const u8) bool {
+    const keywords = [_][]const u8{
+        "addrspace", "align", "allowzero", "and", "anyframe", "anytype", "asm",
+        "async", "await", "break", "callconv", "catch", "comptime", "const",
+        "continue", "defer", "else", "enum", "errdefer", "error", "export",
+        "extern", "fn", "for", "if", "inline", "noalias", "noinline",
+        "nosuspend", "not", "null", "or", "orelse", "packed", "pub",
+        "resume", "return", "linksection", "struct", "suspend", "switch",
+        "test", "threadlocal", "true", "try", "union", "unreachable",
+        "use", "var", "volatile", "while",
+    };
+    for (keywords) |kw| {
+        if (std.mem.eql(u8, name, kw)) return true;
+    }
+    return false;
 }
 
 test "normalizeModuleName caps Zig package names" {

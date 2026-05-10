@@ -22,6 +22,7 @@ export const navSections: NavSection[] = [
     title: "Core Concepts",
     items: [
       { name: "Web Engines", href: "/web-engines" },
+      { name: "Windows Build", href: "/windows-build" },
       { name: "Windows", href: "/windows" },
       { name: "Bridge", href: "/bridge" },
       { name: "Builtin Commands", href: "/bridge/builtin-commands" },

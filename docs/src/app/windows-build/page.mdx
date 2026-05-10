@@ -1,0 +1,98 @@
+# Windows Build
+
+zero-native supports Windows via the WebView2 Runtime. The system engine uses WebView2.
+
+## Prerequisites
+
+- Windows 10 or later with the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (included with Windows 11)
+- [Zig](https://ziglang.org/download/) 0.16.0 or later
+
+## Building
+
+```sh
+zig build run -Dplatform=windows
+```
+
+This installs frontend dependencies, builds assets, compiles the binary, and runs the app.
+
+## WebView2 SDK
+
+The generated project looks for the WebView2 SDK at `third_party/webview2-sdk/` by default. You need to vendor the SDK there (one-time setup per project).
+
+### Acquiring the SDK
+
+The WebView2 SDK is distributed as a NuGet package. Download and extract it with PowerShell:
+
+```pwsh
+Invoke-WebRequest -Uri https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.3351.48 -OutFile webview2.zip
+New-Item -ItemType Directory -Path third_party/webview2-sdk -Force
+Expand-Archive -Path webview2.zip -DestinationPath third_party/webview2-sdk
+Remove-Item webview2.zip
+```
+
+`WebView2.h` includes `EventToken.h` (a standard Windows SDK header not shipped in the NuGet). Create it at `third_party/webview2-sdk/build/native/include/EventToken.h`:
+
+```c
+#ifndef _EVENTTOKEN_H_
+#define _EVENTTOKEN_H_
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct EventRegistrationToken {
+    __int64 value;
+} EventRegistrationToken;
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+```
+
+> This file is normally provided by the Windows SDK. The workaround above is only needed when vendoring the NuGet without Visual Studio or the standalone Windows SDK installed.
+
+Once vendored, no extra flags are needed:
+
+```sh
+zig build run -Dplatform=windows
+```
+
+To use a different SDK path instead of the default, pass `-Dwebview2-sdk-dir`:
+
+```sh
+zig build run -Dplatform=windows -Dwebview2-sdk-dir=path/to/sdk
+```
+
+## App Manifest
+
+The generated `app.zon` includes `"windows"` in `.platforms` and a `.windows` window configuration:
+
+```zig
+.platforms = .{ "macos", "linux", "windows" },
+.windows = .{
+    .{ .label = "main", .title = "My App", .width = 720, .height = 480, .restore_state = true },
+},
+```
+
+## Packaging
+
+```sh
+zig build package -Dplatform=windows -Dpackage-target=windows
+```
+
+Creates a self-contained directory with the binary and assets under `zig-out/package/`. The binary resolves assets relative to its own location inside the package, so the package can be moved as a whole.
+
+To override the frontend directory at runtime, set `ZERO_NATIVE_FRONTEND_DIR`:
+
+```sh
+set ZERO_NATIVE_FRONTEND_DIR=C:\path\to\dist
+testing22.exe
+```
+
+## Diagnostics
+
+```sh
+zero-native doctor --manifest app.zon --web-engine system
+```
