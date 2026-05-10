@@ -23,7 +23,7 @@ The generated project looks for the WebView2 SDK at `third_party/webview2-sdk/` 
 
 The WebView2 SDK is distributed as a NuGet package. Download and extract it with PowerShell:
 
-```pwsh
+```bash
 Invoke-WebRequest -Uri https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.3351.48 -OutFile webview2.zip
 New-Item -ItemType Directory -Path third_party/webview2-sdk -Force
 Expand-Archive -Path webview2.zip -DestinationPath third_party/webview2-sdk
