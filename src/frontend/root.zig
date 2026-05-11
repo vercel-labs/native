@@ -13,6 +13,16 @@ pub fn sourceFromEnv(env_map: *std.process.Environ.Map, config: Config) platform
     if (env_map.get(config.dev_url_env)) |url| {
         if (url.len > 0) return platform.WebViewSource.url(url);
     }
+    if (env_map.get("ZERO_NATIVE_FRONTEND_DIR")) |dir| {
+        if (dir.len > 0) {
+            return platform.WebViewSource.assets(.{
+                .root_path = dir,
+                .entry = config.entry,
+                .origin = config.origin,
+                .spa_fallback = config.spa_fallback,
+            });
+        }
+    }
     return productionSource(config);
 }
 

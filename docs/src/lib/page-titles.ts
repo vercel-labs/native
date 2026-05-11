@@ -22,6 +22,7 @@ export const PAGE_TITLES: Record<string, string> = {
   extensions: "Extensions",
   embed: "Embedded App",
   "web-engines": "Web Engines",
+  "windows-build": "Windows Build",
   packages: "Package Distribution",
 };
 

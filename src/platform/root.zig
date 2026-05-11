@@ -399,7 +399,7 @@ pub const Platform = struct {
 };
 
 pub const Backend = enum {
-    @"null",
+    null,
     macos,
     linux,
     windows,
@@ -412,7 +412,7 @@ pub const NullPlatform = struct {
     requested_frames: u32 = 1,
     loaded_source: ?WebViewSource = null,
     security_policy: security.Policy = .{},
-    window_sources: [max_windows]?WebViewSource = [_]?WebViewSource{null} ** max_windows,
+    window_sources: [max_windows]?WebViewSource = @splat(null),
     windows: [max_windows]WindowInfo = undefined,
     window_count: usize = 0,
     bridge_response: [16 * 1024]u8 = undefined,

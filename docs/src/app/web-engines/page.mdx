@@ -25,7 +25,7 @@ zero-native has one app/runtime API and selectable web engine backends. The defa
     </tr>
     <tr>
       <td>Windows</td>
-      <td>In progress</td>
+      <td>WebView2</td>
       <td>In progress</td>
     </tr>
   </tbody>
@@ -40,6 +40,8 @@ The intended parity contract is the same Zig app model, same runtime services, s
 ```
 
 System mode has no bundled browser dependency. It uses the OS web engine, so rendering and web platform support follow the user's installed OS.
+
+On Windows the system engine uses the WebView2 Runtime (included with Windows 11, available on Windows 10 via the evergreen runtime). The build looks for `<WebView2.h>` at `third_party/webview2-sdk/build/native/include` by default; pass `-Dwebview2-sdk-dir` to use a different path.
 
 ## Chromium (CEF)
 
@@ -107,6 +109,10 @@ Core maintainers can build CEF from source with `tools/cef/build-from-source.sh`
     <tr>
       <td><code>-Dcef-auto-install=true</code></td>
       <td>Temporarily opt into running <code>zero-native cef install</code> during Chromium builds when CEF is missing.</td>
+    </tr>
+    <tr>
+      <td><code>-Dwebview2-sdk-dir=path</code></td>
+      <td>Windows only. Path to the WebView2 SDK root directory containing <code>build/native/include</code>. When omitted, defaults to <code>third_party/webview2-sdk</code>.</td>
     </tr>
   </tbody>
 </table>
