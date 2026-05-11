@@ -63,7 +63,7 @@ pub const Hash = struct {
     }
 
     pub fn zero() Hash {
-        return .{ .bytes = [_]u8{0} ** digest_len };
+        return .{ .bytes = [_]u8{0}** digest_len };
     }
 
     pub fn toHex(self: Hash) [hex_len]u8 {

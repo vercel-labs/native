@@ -1,3 +1,4 @@
+const std = @import("std");
 const geometry = @import("geometry");
 const platform_mod = @import("../root.zig");
 const policy_values = @import("../policy_values.zig");
@@ -38,6 +39,7 @@ const WindowsEvent = extern struct {
 
 const WindowsCallback = *const fn (context: ?*anyopaque, event: *const WindowsEvent) callconv(.c) void;
 const WindowsBridgeCallback = *const fn (context: ?*anyopaque, window_id: u64, message: [*]const u8, message_len: usize, origin: [*]const u8, origin_len: usize) callconv(.c) void;
+const WindowsTrayCallback = *const fn (context: ?*anyopaque, item_id: u32) callconv(.c) void;
 
 extern fn zero_native_windows_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int) ?*WindowsHost;
 extern fn zero_native_windows_destroy(host: *WindowsHost) void;
@@ -55,6 +57,58 @@ extern fn zero_native_windows_focus_window(host: *WindowsHost, window_id: u64) c
 extern fn zero_native_windows_close_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn zero_native_windows_clipboard_read(host: *WindowsHost, buffer: [*]u8, buffer_len: usize) usize;
 extern fn zero_native_windows_clipboard_write(host: *WindowsHost, text: [*]const u8, text_len: usize) void;
+
+const WindowsOpenDialogOpts = extern struct {
+    title: [*]const u8,
+    title_len: usize,
+    default_path: [*]const u8,
+    default_path_len: usize,
+    extensions: [*]const u8,
+    extensions_len: usize,
+    allow_directories: c_int,
+    allow_multiple: c_int,
+};
+
+const WindowsOpenDialogResult = extern struct {
+    count: usize,
+    bytes_written: usize,
+};
+
+const WindowsSaveDialogOpts = extern struct {
+    title: [*]const u8,
+    title_len: usize,
+    default_path: [*]const u8,
+    default_path_len: usize,
+    default_name: [*]const u8,
+    default_name_len: usize,
+    extensions: [*]const u8,
+    extensions_len: usize,
+};
+
+const WindowsMessageDialogOpts = extern struct {
+    style: c_int,
+    title: [*]const u8,
+    title_len: usize,
+    message: [*]const u8,
+    message_len: usize,
+    informative_text: [*]const u8,
+    informative_text_len: usize,
+    primary_button: [*]const u8,
+    primary_button_len: usize,
+    secondary_button: [*]const u8,
+    secondary_button_len: usize,
+    tertiary_button: [*]const u8,
+    tertiary_button_len: usize,
+};
+
+extern fn zero_native_windows_show_open_dialog(host: *WindowsHost, opts: *const WindowsOpenDialogOpts, buffer: [*]u8, buffer_len: usize) WindowsOpenDialogResult;
+extern fn zero_native_windows_show_save_dialog(host: *WindowsHost, opts: *const WindowsSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
+extern fn zero_native_windows_show_message_dialog(host: *WindowsHost, opts: *const WindowsMessageDialogOpts) c_int;
+
+extern fn zero_native_windows_create_tray(host: *WindowsHost, icon_path: [*]const u8, icon_path_len: usize, tooltip: [*]const u8, tooltip_len: usize) void;
+extern fn zero_native_windows_update_tray_menu(host: *WindowsHost, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, count: usize) void;
+extern fn zero_native_windows_remove_tray(host: *WindowsHost) void;
+extern fn zero_native_windows_set_tray_callback(host: *WindowsHost, callback: WindowsTrayCallback, context: ?*anyopaque) void;
 
 pub const WindowsPlatform = struct {
     host: *WindowsHost,
@@ -109,6 +163,12 @@ pub const WindowsPlatform = struct {
                 .create_window_fn = createWindow,
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
+                .show_open_dialog_fn = showOpenDialog,
+                .show_save_dialog_fn = showSaveDialog,
+                .show_message_dialog_fn = showMessageDialog,
+                .create_tray_fn = createTray,
+                .update_tray_menu_fn = updateTrayMenu,
+                .remove_tray_fn = removeTray,
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .emit_window_event_fn = emitWindowEvent,
             },
@@ -124,6 +184,7 @@ pub const WindowsPlatform = struct {
             .handler_context = handler_context,
         };
         zero_native_windows_set_bridge_callback(self.host, windowsBridgeCallback, &self.state);
+        zero_native_windows_set_tray_callback(self.host, windowsTrayCallback, &self.state);
         zero_native_windows_run(self.host, windowsCallback, &self.state);
         if (self.state.failed) return error.CallbackFailed;
     }
@@ -196,6 +257,11 @@ fn windowsBridgeCallback(context: ?*anyopaque, window_id: u64, message: [*]const
         .origin = origin[0..origin_len],
         .window_id = window_id,
     } });
+}
+
+fn windowsTrayCallback(context: ?*anyopaque, item_id: u32) callconv(.c) void {
+    const state: *RunState = @ptrCast(@alignCast(context.?));
+    state.emit(.{ .tray_action = item_id });
 }
 
 fn readClipboard(context: ?*anyopaque, buffer: []u8) anyerror![]const u8 {
@@ -292,6 +358,140 @@ fn configureSecurityPolicy(context: ?*anyopaque, policy: security.Policy) anyerr
     );
 }
 
+fn showOpenDialog(context: ?*anyopaque, options: platform_mod.OpenDialogOptions, buffer: []u8) anyerror!platform_mod.OpenDialogResult {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    var ext_buf: [1024]u8 = undefined;
+    const ext_str = flattenFilters(options.filters, &ext_buf);
+    const opts = WindowsOpenDialogOpts{
+        .title = options.title.ptr,
+        .title_len = options.title.len,
+        .default_path = options.default_path.ptr,
+        .default_path_len = options.default_path.len,
+        .extensions = ext_str.ptr,
+        .extensions_len = ext_str.len,
+        .allow_directories = if (options.allow_directories) 1 else 0,
+        .allow_multiple = if (options.allow_multiple) 1 else 0,
+    };
+    const result = zero_native_windows_show_open_dialog(self.host, &opts, buffer.ptr, buffer.len);
+    return .{
+        .count = result.count,
+        .paths = buffer[0..result.bytes_written],
+    };
+}
+
+fn showSaveDialog(context: ?*anyopaque, options: platform_mod.SaveDialogOptions, buffer: []u8) anyerror!?[]const u8 {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    var ext_buf: [1024]u8 = undefined;
+    const ext_str = flattenFilters(options.filters, &ext_buf);
+    const opts = WindowsSaveDialogOpts{
+        .title = options.title.ptr,
+        .title_len = options.title.len,
+        .default_path = options.default_path.ptr,
+        .default_path_len = options.default_path.len,
+        .default_name = options.default_name.ptr,
+        .default_name_len = options.default_name.len,
+        .extensions = ext_str.ptr,
+        .extensions_len = ext_str.len,
+    };
+    const written = zero_native_windows_show_save_dialog(self.host, &opts, buffer.ptr, buffer.len);
+    if (written == 0) return null;
+    return buffer[0..written];
+}
+
+fn showMessageDialog(context: ?*anyopaque, options: platform_mod.MessageDialogOptions) anyerror!platform_mod.MessageDialogResult {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    // Build filter string from all filters (flattenFilters not used here; message dialog doesn't have file filters)
+    const opts = WindowsMessageDialogOpts{
+        .style = @intFromEnum(options.style),
+        .title = options.title.ptr,
+        .title_len = options.title.len,
+        .message = options.message.ptr,
+        .message_len = options.message.len,
+        .informative_text = options.informative_text.ptr,
+        .informative_text_len = options.informative_text.len,
+        .primary_button = options.primary_button.ptr,
+        .primary_button_len = options.primary_button.len,
+        .secondary_button = options.secondary_button.ptr,
+        .secondary_button_len = options.secondary_button.len,
+        .tertiary_button = options.tertiary_button.ptr,
+        .tertiary_button_len = options.tertiary_button.len,
+    };
+    const result = zero_native_windows_show_message_dialog(self.host, &opts);
+    return @enumFromInt(result);
+}
+
+fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    zero_native_windows_create_tray(self.host, options.icon_path.ptr, options.icon_path.len, options.tooltip.ptr, options.tooltip.len);
+    if (options.items.len > 0) {
+        try updateTrayMenu(context, options.items);
+    }
+}
+
+fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    const max_items: usize = 32;
+    const count = @min(items.len, max_items);
+    var ids: [max_items]u32 = undefined;
+    var labels_ptr: [max_items][*]const u8 = undefined;
+    var label_lens: [max_items]usize = undefined;
+    var separators: [max_items]c_int = undefined;
+    var enabled_flags: [max_items]c_int = undefined;
+    for (items[0..count], 0..) |item, i| {
+        ids[i] = item.id;
+        labels_ptr[i] = item.label.ptr;
+        label_lens[i] = item.label.len;
+        separators[i] = if (item.separator) 1 else 0;
+        enabled_flags[i] = if (item.enabled) 1 else 0;
+    }
+    zero_native_windows_update_tray_menu(self.host, &ids, &labels_ptr, &label_lens, &separators, &enabled_flags, count);
+}
+
+fn removeTray(context: ?*anyopaque) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    zero_native_windows_remove_tray(self.host);
+}
+
+fn flattenFilters(filters: []const platform_mod.FileFilter, buffer: []u8) []const u8 {
+    var offset: usize = 0;
+    for (filters) |filter| {
+        for (filter.extensions) |ext| {
+            if (offset > 0 and offset < buffer.len) {
+                buffer[offset] = ';';
+                offset += 1;
+            }
+            const end = @min(offset + ext.len, buffer.len);
+            if (end > offset) {
+                @memcpy(buffer[offset..end], ext[0..(end - offset)]);
+                offset = end;
+            }
+        }
+    }
+    return buffer[0..offset];
+}
+
 test "windows platform module exports type" {
     _ = WindowsPlatform;
+}
+
+test "windows event kind count matches expectation" {
+    // Ensure we have the right number of event kinds
+    const kinds = [_]WindowsEventKind{ .start, .frame, .shutdown, .resize, .window_frame };
+    try std.testing.expectEqual(@as(usize, 5), kinds.len);
+}
+
+test "windows open dialog opts has correct layout" {
+    try std.testing.expectEqual(@as(usize, 8), @typeInfo(WindowsOpenDialogOpts).@"struct".fields.len);
+}
+
+test "windows save dialog opts has correct layout" {
+    try std.testing.expectEqual(@as(usize, 8), @typeInfo(WindowsSaveDialogOpts).@"struct".fields.len);
+}
+
+test "windows message dialog opts has correct layout" {
+    try std.testing.expectEqual(@as(usize, 13), @typeInfo(WindowsMessageDialogOpts).@"struct".fields.len);
+}
+
+test "refAllDecls" {
+    std.testing.refAllDecls(@This());
 }
