@@ -42,6 +42,7 @@ static NSString *ZeroNativeExistingPath(NSString *path);
 static NSString *ZeroNativeCefFrameworkPath(void);
 static NSString *ZeroNativeOriginForURL(NSURL *url);
 static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url);
+static void ZeroNativeApplyTitleBarStyle(NSWindow *window, NSInteger style);
 
 class ZeroNativeCefBridgeV8Handler final : public CefV8Handler {
 public:
@@ -338,11 +339,11 @@ static const char *ZeroNativeCefBridgeScript() {
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
-- (instancetype)initWithAppName:(NSString *)appName title:(NSString *)title width:(double)width height:(double)height;
+- (instancetype)initWithAppName:(NSString *)appName title:(NSString *)title width:(double)width height:(double)height titleBarStyle:(NSInteger)titleBarStyle;
 - (void)configureApplication;
 - (void)buildMenuBar;
 - (NSMenuItem *)menuItem:(NSString *)title action:(SEL)action key:(NSString *)key modifiers:(NSEventModifierFlags)modifiers;
-- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame makeMain:(BOOL)makeMain;
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame titleBarStyle:(NSInteger)titleBarStyle makeMain:(BOOL)makeMain;
 - (void)focusWindowWithId:(uint64_t)windowId;
 - (void)closeWindowWithId:(uint64_t)windowId;
 - (void)runWithCallback:(zero_native_appkit_event_callback_t)callback context:(void *)context;
@@ -410,7 +411,7 @@ static const char *ZeroNativeCefBridgeScript() {
 
 @implementation ZeroNativeChromiumHost
 
-- (instancetype)initWithAppName:(NSString *)appName title:(NSString *)title width:(double)width height:(double)height {
+- (instancetype)initWithAppName:(NSString *)appName title:(NSString *)title width:(double)width height:(double)height titleBarStyle:(NSInteger)titleBarStyle {
     self = [super init];
     if (!self) return nil;
 
@@ -432,7 +433,7 @@ static const char *ZeroNativeCefBridgeScript() {
     self.allowedExternalURLs = @[];
     self.externalLinkAction = 0;
 
-    [self createWindowWithId:1 title:(title.length > 0 ? title : self.appName) label:@"main" x:0 y:0 width:width height:height restoreFrame:NO makeMain:YES];
+    [self createWindowWithId:1 title:(title.length > 0 ? title : self.appName) label:@"main" x:0 y:0 width:width height:height restoreFrame:NO titleBarStyle:titleBarStyle makeMain:YES];
     self.didShutdown = NO;
     return self;
 }
@@ -521,7 +522,7 @@ static const char *ZeroNativeCefBridgeScript() {
     delete self.browsers;
 }
 
-- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame makeMain:(BOOL)makeMain {
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame titleBarStyle:(NSInteger)titleBarStyle makeMain:(BOOL)makeMain {
     NSNumber *key = @(windowId);
     if (self.windows[key]) return NO;
 
@@ -534,6 +535,7 @@ static const char *ZeroNativeCefBridgeScript() {
                                                      backing:NSBackingStoreBuffered
                                                        defer:NO];
     [window setTitle:title.length > 0 ? title : @"zero-native"];
+    ZeroNativeApplyTitleBarStyle(window, titleBarStyle);
     if (!restoreFrame) [window center];
 
     NSView *browserContainer = [[NSView alloc] initWithFrame:rect];
@@ -880,6 +882,13 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     return NO;
 }
 
+static void ZeroNativeApplyTitleBarStyle(NSWindow *window, NSInteger style) {
+    if (style != 1) return;
+    window.titleVisibility = NSWindowTitleHidden;
+    window.titlebarAppearsTransparent = YES;
+    window.styleMask = window.styleMask | NSWindowStyleMaskFullSizeContentView;
+}
+
 void ZeroNativeCefClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     [host_ setBrowser:browser windowId:window_id_];
 }
@@ -925,7 +934,7 @@ bool ZeroNativeCefClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser
 
 } // namespace
 
-zero_native_appkit_host_t *zero_native_appkit_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {
+zero_native_appkit_host_t *zero_native_appkit_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int title_bar_style) {
     @autoreleasepool {
         (void)bundle_id;
         (void)bundle_id_len;
@@ -935,7 +944,7 @@ zero_native_appkit_host_t *zero_native_appkit_create(const char *app_name, size_
         (void)window_label_len;
         NSString *appNameString = [[NSString alloc] initWithBytes:app_name length:app_name_len encoding:NSUTF8StringEncoding] ?: @"zero-native";
         NSString *titleString = [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] ?: appNameString;
-        ZeroNativeChromiumHost *host = [[ZeroNativeChromiumHost alloc] initWithAppName:appNameString title:titleString width:width height:height];
+        ZeroNativeChromiumHost *host = [[ZeroNativeChromiumHost alloc] initWithAppName:appNameString title:titleString width:width height:height titleBarStyle:title_bar_style];
         if (restore_frame) {
             [host.window setFrame:ZeroNativeConstrainFrame(NSMakeRect(x, y, width, height)) display:NO];
         }
@@ -1008,11 +1017,11 @@ void zero_native_appkit_set_security_policy(zero_native_appkit_host_t *host, con
     [object setAllowedNavigationOrigins:origins externalURLs:externalURLs externalAction:external_action];
 }
 
-int zero_native_appkit_create_window(zero_native_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {
+int zero_native_appkit_create_window(zero_native_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int title_bar_style) {
     ZeroNativeChromiumHost *object = (__bridge ZeroNativeChromiumHost *)host;
     NSString *titleString = window_title ? [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] : @"zero-native";
     NSString *labelString = window_label ? [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] : @"";
-    return [object createWindowWithId:window_id title:titleString ?: @"zero-native" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) makeMain:NO] ? 1 : 0;
+    return [object createWindowWithId:window_id title:titleString ?: @"zero-native" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) titleBarStyle:title_bar_style makeMain:NO] ? 1 : 0;
 }
 
 int zero_native_appkit_focus_window(zero_native_appkit_host_t *host, uint64_t window_id) {

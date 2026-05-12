@@ -29,7 +29,7 @@ The `app.zon` manifest declares app metadata, permissions, bridge policies, secu
     .web_engine = "system",
     .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
     .windows = .{
-        .{ .label = "main", .title = "zero-native", .width = 720, .height = 480, .restore_state = true },
+        .{ .label = "main", .title = "zero-native", .title_bar_style = "standard", .width = 720, .height = 480, .restore_state = true },
     },
 }
 ```

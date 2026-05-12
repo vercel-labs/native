@@ -187,6 +187,11 @@ pub const WindowRestorePolicy = enum {
     center_on_primary,
 };
 
+pub const WindowTitleBarStyle = enum {
+    standard,
+    overlay,
+};
+
 pub const Window = struct {
     label: []const u8 = "main",
     title: ?[]const u8 = null,
@@ -195,6 +200,7 @@ pub const Window = struct {
     x: ?f32 = null,
     y: ?f32 = null,
     resizable: bool = true,
+    title_bar_style: WindowTitleBarStyle = .standard,
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
 };

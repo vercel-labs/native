@@ -62,12 +62,18 @@ pub const WindowRestorePolicy = enum {
     center_on_primary,
 };
 
+pub const WindowTitleBarStyle = enum {
+    standard,
+    overlay,
+};
+
 pub const WindowOptions = struct {
     id: WindowId = 1,
     label: []const u8 = "main",
     title: []const u8 = "",
     default_frame: geometry.RectF = geometry.RectF.init(0, 0, 720, 480),
     resizable: bool = true,
+    title_bar_style: WindowTitleBarStyle = .standard,
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
 
@@ -116,6 +122,7 @@ pub const WindowCreateOptions = struct {
     title: []const u8 = "",
     default_frame: geometry.RectF = geometry.RectF.init(0, 0, 720, 480),
     resizable: bool = true,
+    title_bar_style: WindowTitleBarStyle = .standard,
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
     source: ?WebViewSource = null,
@@ -127,6 +134,7 @@ pub const WindowCreateOptions = struct {
             .title = self.title,
             .default_frame = self.default_frame,
             .resizable = self.resizable,
+            .title_bar_style = self.title_bar_style,
             .restore_state = self.restore_state,
             .restore_policy = self.restore_policy,
         };

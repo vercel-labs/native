@@ -72,6 +72,7 @@ pub const Metadata = struct {
         for (self.windows) |window| {
             allocator.free(window.label);
             if (window.title) |title| allocator.free(title);
+            allocator.free(window.title_bar_style);
         }
         if (self.windows.len > 0) allocator.free(self.windows);
     }
@@ -90,6 +91,7 @@ pub const WindowMetadata = struct {
     height: f32 = 480,
     x: ?f32 = null,
     y: ?f32 = null,
+    title_bar_style: []const u8 = "standard",
     restore_state: bool = true,
 };
 
@@ -150,7 +152,7 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     }
     const frontend = if (metadata.frontend) |frontend_value| convertFrontend(frontend_value) else null;
     const security = convertSecurity(metadata.security) catch return .{ .ok = false, .message = "app.zon security policy is invalid" };
-    const windows = try convertWindows(allocator, metadata.windows);
+    const windows = convertWindows(allocator, metadata.windows) catch return .{ .ok = false, .message = "app.zon windows are invalid" };
     defer allocator.free(windows);
     const manifest_web_engine = parseWebEngine(metadata.web_engine) catch return .{ .ok = false, .message = "app.zon web engine is invalid" };
 
@@ -269,6 +271,7 @@ fn convertRawWindows(allocator: std.mem.Allocator, windows: []const RawWindow) !
             .height = window.height,
             .x = window.x,
             .y = window.y,
+            .title_bar_style = try allocator.dupe(u8, window.title_bar_style),
             .restore_state = window.restore_state,
         };
     }
@@ -341,6 +344,7 @@ fn convertWindows(allocator: std.mem.Allocator, windows: []const WindowMetadata)
             .height = window.height,
             .x = window.x,
             .y = window.y,
+            .title_bar_style = parseWindowTitleBarStyle(window.title_bar_style) catch return error.InvalidWindow,
             .restore_state = window.restore_state,
         };
     }
@@ -433,6 +437,12 @@ fn parseExternalLinkAction(value: []const u8) !app_manifest.ExternalLinkAction {
     if (std.mem.eql(u8, value, "deny")) return .deny;
     if (std.mem.eql(u8, value, "open_system_browser")) return .open_system_browser;
     return error.InvalidAction;
+}
+
+fn parseWindowTitleBarStyle(value: []const u8) !app_manifest.WindowTitleBarStyle {
+    if (std.mem.eql(u8, value, "standard")) return .standard;
+    if (std.mem.eql(u8, value, "overlay")) return .overlay;
+    return error.InvalidWindow;
 }
 
 fn parseWebEngine(value: []const u8) !app_manifest.WebEngine {
@@ -557,4 +567,23 @@ test "manifest metadata parser reads frontend config" {
     try std.testing.expectEqualStrings("http://127.0.0.1:5173/", metadata.frontend.?.dev.?.url);
     try std.testing.expectEqualStrings("npm", metadata.frontend.?.dev.?.command[0]);
     try std.testing.expectEqual(@as(u32, 12000), metadata.frontend.?.dev.?.timeout_ms);
+}
+
+test "manifest metadata parser reads window title bar style" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.2.3",
+        \\  .windows = .{
+        \\    .{ .label = "main", .title = "Example", .title_bar_style = "overlay", .width = 800, .height = 600 },
+        \\  },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("overlay", metadata.windows[0].title_bar_style);
+    const windows = try convertWindows(std.testing.allocator, metadata.windows);
+    defer std.testing.allocator.free(windows);
+    try std.testing.expectEqual(app_manifest.WindowTitleBarStyle.overlay, windows[0].title_bar_style);
 }

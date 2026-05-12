@@ -67,5 +67,6 @@ pub const RawWindow = struct {
     height: f32 = 480,
     x: ?f32 = null,
     y: ?f32 = null,
+    title_bar_style: []const u8 = "standard",
     restore_state: bool = true,
 };
