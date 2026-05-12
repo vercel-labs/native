@@ -65,6 +65,29 @@ Window commands are available through `window.zero.windows.*` when `js_window_ap
 
 Dialog commands are **always default-deny** and require an explicit `builtin_bridge` policy.
 
+## Theme commands
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>Required permission</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>zero-native.theme.get</code></td>
+      <td>None</td>
+      <td>Read the current OS color scheme as <code>light</code> or <code>dark</code></td>
+    </tr>
+  </tbody>
+</table>
+
+`zero-native.theme.get` returns a JSON object with a `theme` field set to `"light"` or `"dark"`. It does not require a permission because the same OS preference is already observable from the WebView with `prefers-color-scheme`. If `builtin_bridge.enabled` is `true`, include the command in that policy when you want to restrict allowed origins.
+
+Native apps also receive a `theme_changed` command event when the OS color scheme changes.
+
 ## Enabling builtin commands
 
 ```zig
@@ -107,6 +130,8 @@ const result = await window.zero.invoke("zero-native.dialog.showMessage", {
   primaryButton: "Yes",
   secondaryButton: "No",
 });
+
+const { theme } = await window.zero.invoke("zero-native.theme.get", null);
 ```
 
 See also: [Dialogs](/dialogs) for the full dialog type reference, [Security](/security) for policy details.

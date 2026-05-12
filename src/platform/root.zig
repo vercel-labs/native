@@ -232,6 +232,11 @@ pub const MessageDialogOptions = struct {
 
 pub const TrayItemId = u32;
 
+pub const Theme = enum {
+    light,
+    dark,
+};
+
 pub const TrayOptions = struct {
     icon_path: []const u8 = "",
     tooltip: []const u8 = "",
@@ -254,6 +259,7 @@ pub const Event = union(enum) {
     window_focused: WindowId,
     bridge_message: BridgeMessage,
     tray_action: TrayItemId,
+    theme_changed: Theme,
 
     pub fn name(self: Event) []const u8 {
         return switch (self) {
@@ -265,6 +271,7 @@ pub const Event = union(enum) {
             .window_focused => "window_focused",
             .bridge_message => "bridge_message",
             .tray_action => "tray_action",
+            .theme_changed => "theme_changed",
         };
     }
 };
@@ -288,6 +295,7 @@ pub const PlatformServices = struct {
     create_tray_fn: ?*const fn (context: ?*anyopaque, options: TrayOptions) anyerror!void = null,
     update_tray_menu_fn: ?*const fn (context: ?*anyopaque, items: []const TrayMenuItem) anyerror!void = null,
     remove_tray_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    theme_fn: ?*const fn (context: ?*anyopaque) anyerror!Theme = null,
     configure_security_policy_fn: ?*const fn (context: ?*anyopaque, policy: security.Policy) anyerror!void = null,
     emit_window_event_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void = null,
 
@@ -368,6 +376,11 @@ pub const PlatformServices = struct {
     pub fn removeTray(self: PlatformServices) anyerror!void {
         const remove_fn = self.remove_tray_fn orelse return error.UnsupportedService;
         return remove_fn(self.context);
+    }
+
+    pub fn currentTheme(self: PlatformServices) anyerror!Theme {
+        const theme_fn = self.theme_fn orelse return error.UnsupportedService;
+        return theme_fn(self.context);
     }
 
     pub fn configureSecurityPolicy(self: PlatformServices, policy: security.Policy) anyerror!void {

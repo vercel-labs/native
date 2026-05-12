@@ -11,6 +11,7 @@
 static NSRect constrainFrame(NSRect frame);
 static NSString *ZeroNativeAppKitBridgeScript(void);
 static NSString *ZeroNativeMimeTypeForPath(NSString *path);
+static int ZeroNativeCurrentTheme(void);
 static NSString *ZeroNativeResolvedAssetRoot(NSString *rootPath);
 static NSString *ZeroNativeSafeAssetPath(NSURL *url, NSString *entryPath);
 static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath);
@@ -60,6 +61,9 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, assign) zero_native_appkit_tray_callback_t trayCallback;
 @property(nonatomic, assign) void *trayContext;
+@property(nonatomic, assign) zero_native_appkit_theme_callback_t themeCallback;
+@property(nonatomic, assign) void *themeContext;
+@property(nonatomic, assign) BOOL observesThemeChanges;
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
@@ -91,6 +95,7 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 - (void)completeBridgeWithResponse:(NSString *)response;
 - (void)completeBridgeWithResponse:(NSString *)response windowId:(uint64_t)windowId;
 - (void)emitEventNamed:(NSString *)name detailJSON:(NSString *)detailJSON windowId:(uint64_t)windowId;
+- (void)themeDidChange:(NSNotification *)notification;
 @end
 
 @implementation ZeroNativeWindowDelegate
@@ -304,6 +309,9 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     for (WKWebView *webView in self.webViews.allValues) {
         [webView.configuration.userContentController removeScriptMessageHandlerForName:@"zeroNativeBridge"];
     }
+    if (self.observesThemeChanges) {
+        [[NSDistributedNotificationCenter defaultCenter] removeObserver:self name:@"AppleInterfaceThemeChangedNotification" object:nil];
+    }
 }
 
 - (void)focusWindowWithId:(uint64_t)windowId {
@@ -409,6 +417,13 @@ static NSString *ZeroNativeMimeTypeForPath(NSString *path) {
     if ([ext isEqualToString:@"otf"]) return @"font/otf";
     if ([ext isEqualToString:@"wasm"]) return @"application/wasm";
     return @"application/octet-stream";
+}
+
+static int ZeroNativeCurrentTheme(void) {
+    [NSApplication sharedApplication];
+    NSAppearance *appearance = [NSApp effectiveAppearance] ?: [NSAppearance currentAppearance];
+    NSString *match = [appearance bestMatchFromAppearancesWithNames:@[ NSAppearanceNameAqua, NSAppearanceNameDarkAqua ]];
+    return [match isEqualToString:NSAppearanceNameDarkAqua] ? 1 : 0;
 }
 
 static BOOL ZeroNativeDirectoryExists(NSString *path) {
@@ -747,6 +762,13 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     [webView evaluateJavaScript:script completionHandler:nil];
 }
 
+- (void)themeDidChange:(NSNotification *)notification {
+    (void)notification;
+    if (self.themeCallback) {
+        self.themeCallback(self.themeContext, ZeroNativeCurrentTheme());
+    }
+}
+
 - (void)showPreferences:(id)sender {
     (void)sender;
 }
@@ -868,6 +890,24 @@ void zero_native_appkit_set_bridge_callback(zero_native_appkit_host_t *host, zer
     ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
     object.bridgeCallback = callback;
     object.bridgeContext = context;
+}
+
+void zero_native_appkit_set_theme_callback(zero_native_appkit_host_t *host, zero_native_appkit_theme_callback_t callback, void *context) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    object.themeCallback = callback;
+    object.themeContext = context;
+    if (!object.observesThemeChanges) {
+        [[NSDistributedNotificationCenter defaultCenter] addObserver:object selector:@selector(themeDidChange:) name:@"AppleInterfaceThemeChangedNotification" object:nil];
+        object.observesThemeChanges = YES;
+    }
+}
+
+int zero_native_appkit_current_theme(int *out_theme) {
+    if (!out_theme) {
+        return 0;
+    }
+    *out_theme = ZeroNativeCurrentTheme();
+    return 1;
 }
 
 void zero_native_appkit_bridge_respond(zero_native_appkit_host_t *host, const char *response, size_t response_len) {

@@ -34,6 +34,7 @@ typedef struct {
 
 typedef void (*zero_native_appkit_event_callback_t)(void *context, const zero_native_appkit_event_t *event);
 typedef void (*zero_native_appkit_bridge_callback_t)(void *context, uint64_t window_id, const char *message, size_t message_len, const char *origin, size_t origin_len);
+typedef void (*zero_native_appkit_theme_callback_t)(void *context, int theme);
 
 zero_native_appkit_host_t *zero_native_appkit_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame);
 void zero_native_appkit_destroy(zero_native_appkit_host_t *host);
@@ -42,6 +43,8 @@ void zero_native_appkit_stop(zero_native_appkit_host_t *host);
 void zero_native_appkit_load_webview(zero_native_appkit_host_t *host, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback);
 void zero_native_appkit_load_window_webview(zero_native_appkit_host_t *host, uint64_t window_id, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback);
 void zero_native_appkit_set_bridge_callback(zero_native_appkit_host_t *host, zero_native_appkit_bridge_callback_t callback, void *context);
+void zero_native_appkit_set_theme_callback(zero_native_appkit_host_t *host, zero_native_appkit_theme_callback_t callback, void *context);
+int zero_native_appkit_current_theme(int *out_theme);
 void zero_native_appkit_bridge_respond(zero_native_appkit_host_t *host, const char *response, size_t response_len);
 void zero_native_appkit_bridge_respond_window(zero_native_appkit_host_t *host, uint64_t window_id, const char *response, size_t response_len);
 void zero_native_appkit_emit_window_event(zero_native_appkit_host_t *host, uint64_t window_id, const char *name, size_t name_len, const char *detail_json, size_t detail_json_len);
