@@ -39,6 +39,8 @@ const GtkEvent = extern struct {
 
 const GtkCallback = *const fn (context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void;
 const GtkBridgeCallback = *const fn (context: ?*anyopaque, window_id: u64, message: [*]const u8, message_len: usize, origin: [*]const u8, origin_len: usize) callconv(.c) void;
+const GtkResourceStreamReadCallback = *const fn (context: ?*anyopaque, id: [*]const u8, id_len: usize, origin: [*]const u8, origin_len: usize, window_id: u64, buffer: [*]u8, buffer_len: usize) callconv(.c) isize;
+const GtkResourceStreamCloseCallback = *const fn (context: ?*anyopaque, id: [*]const u8, id_len: usize, reason: platform_mod.ResourceCloseReason) callconv(.c) void;
 
 extern fn zero_native_gtk_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int) ?*GtkHost;
 extern fn zero_native_gtk_destroy(host: *GtkHost) void;
@@ -52,6 +54,7 @@ extern fn zero_native_gtk_bridge_respond_window(host: *GtkHost, window_id: u64, 
 extern fn zero_native_gtk_emit_window_event(host: *GtkHost, window_id: u64, name: [*]const u8, name_len: usize, detail_json: [*]const u8, detail_json_len: usize) void;
 extern fn zero_native_gtk_set_security_policy(host: *GtkHost, allowed_origins: [*]const u8, allowed_origins_len: usize, external_urls: [*]const u8, external_urls_len: usize, external_action: c_int) void;
 extern fn zero_native_gtk_register_resource_bytes(host: *GtkHost, id: [*]const u8, id_len: usize, mime: [*]const u8, mime_len: usize, bytes: [*]const u8, bytes_len: usize, origin: [*]const u8, origin_len: usize, window_id: u64, expires_at_ns: i64, has_expiry: c_int, one_shot: c_int) c_int;
+extern fn zero_native_gtk_register_resource_stream(host: *GtkHost, id: [*]const u8, id_len: usize, mime: [*]const u8, mime_len: usize, origin: [*]const u8, origin_len: usize, window_id: u64, expires_at_ns: i64, has_expiry: c_int, one_shot: c_int, size: u64, has_size: c_int, callback_context: ?*anyopaque, read_callback: GtkResourceStreamReadCallback, close_callback: GtkResourceStreamCloseCallback) c_int;
 extern fn zero_native_gtk_revoke_resource(host: *GtkHost, id: [*]const u8, id_len: usize) void;
 extern fn zero_native_gtk_create_window(host: *GtkHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int) c_int;
 extern fn zero_native_gtk_focus_window(host: *GtkHost, window_id: u64) c_int;
@@ -168,6 +171,7 @@ pub const LinuxPlatform = struct {
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .emit_window_event_fn = emitWindowEvent,
                 .register_resource_bytes_fn = registerResourceBytes,
+                .register_resource_stream_fn = registerResourceStream,
                 .revoke_resource_fn = revokeResource,
             },
             .app_info = self.app_info,
@@ -312,6 +316,28 @@ fn registerResourceBytes(context: ?*anyopaque, id: []const u8, mime: []const u8,
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine == .chromium) return error.UnsupportedService;
     if (zero_native_gtk_register_resource_bytes(self.host, id.ptr, id.len, mime.ptr, mime.len, bytes.ptr, bytes.len, origin.ptr, origin.len, window_id, optionalTimestampForC(expires_at_ns), if (expires_at_ns != null) 1 else 0, if (one_shot) 1 else 0) == 0) return error.ResourceLimitReached;
+}
+
+fn registerResourceStream(context: ?*anyopaque, registration: platform_mod.ResourceStreamRegistration) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (zero_native_gtk_register_resource_stream(
+        self.host,
+        registration.id.ptr,
+        registration.id.len,
+        registration.mime.ptr,
+        registration.mime.len,
+        registration.origin.ptr,
+        registration.origin.len,
+        registration.window_id,
+        optionalTimestampForC(registration.expires_at_ns),
+        if (registration.expires_at_ns != null) 1 else 0,
+        if (registration.one_shot) 1 else 0,
+        @intCast(registration.size orelse 0),
+        if (registration.size != null) 1 else 0,
+        registration.callback_context,
+        registration.read_fn,
+        registration.close_fn,
+    ) == 0) return error.ResourceLimitReached;
 }
 
 fn revokeResource(context: ?*anyopaque, id: []const u8) anyerror!void {

@@ -79,6 +79,7 @@ pub const Policy = struct {
 pub const HandlerFn = *const fn (context: *anyopaque, invocation: Invocation, output: []u8) anyerror![]const u8;
 pub const AsyncRespondFn = *const fn (context: *anyopaque, source: Source, response: []const u8) anyerror!void;
 pub const AsyncResourceBytesFn = *const fn (context: *anyopaque, source: Source, bytes: []const u8, options: resources.Options, output: []u8) anyerror![]const u8;
+pub const AsyncResourceStreamFn = *const fn (context: *anyopaque, source: Source, provider: resources.StreamProvider, options: resources.Options, output: []u8) anyerror![]const u8;
 pub const AsyncHandlerFn = *const fn (context: *anyopaque, invocation: Invocation, responder: AsyncResponder) anyerror!void;
 
 pub const Handler = struct {
@@ -93,6 +94,7 @@ pub const AsyncResponder = struct {
     source: Source,
     respond_fn: AsyncRespondFn,
     resource_bytes_fn: ?AsyncResourceBytesFn = null,
+    resource_stream_fn: ?AsyncResourceStreamFn = null,
 
     pub fn respond(self: AsyncResponder, response: []const u8) anyerror!void {
         return self.respond_fn(self.context, self.source, response);
@@ -112,6 +114,14 @@ pub const AsyncResponder = struct {
         const resource_fn = self.resource_bytes_fn orelse return error.UnsupportedService;
         var descriptor_buffer: [max_result_bytes]u8 = undefined;
         const descriptor = try resource_fn(self.context, self.source, bytes, options, &descriptor_buffer);
+        var response_buffer: [max_response_bytes]u8 = undefined;
+        try self.respond(writeSuccessResponse(&response_buffer, self.request_id, descriptor));
+    }
+
+    pub fn resourceStream(self: AsyncResponder, provider: resources.StreamProvider, options: resources.Options) anyerror!void {
+        const resource_fn = self.resource_stream_fn orelse return error.UnsupportedService;
+        var descriptor_buffer: [max_result_bytes]u8 = undefined;
+        const descriptor = try resource_fn(self.context, self.source, provider, options, &descriptor_buffer);
         var response_buffer: [max_response_bytes]u8 = undefined;
         try self.respond(writeSuccessResponse(&response_buffer, self.request_id, descriptor));
     }
@@ -418,8 +428,7 @@ test "bridge writes success and error responses" {
 
 test "bridge validates and writes JSON result values" {
     var buffer: [256]u8 = undefined;
-    try std.testing.expectEqualStrings("\"hello \\\"user\\\"\"",
-        writeJsonStringValue(&buffer, "hello \"user\""));
+    try std.testing.expectEqualStrings("\"hello \\\"user\\\"\"", writeJsonStringValue(&buffer, "hello \"user\""));
     try std.testing.expect(isValidJsonValue("{\"pong\":true}"));
     try std.testing.expect(isValidJsonValue("{\"escaped\\\"key\":true}"));
     try std.testing.expect(isValidJsonValue("\"hello\""));
@@ -552,4 +561,47 @@ test "async responder can return resource descriptors" {
     try responder.resourceBytes("hello", .{ .mime = "text/plain" });
     try std.testing.expect(std.mem.indexOf(u8, state.response[0..state.response_len], "\"kind\":\"resource\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, state.response[0..state.response_len], "\"text/plain\"") != null);
+}
+
+test "async responder can return stream resource descriptors" {
+    const State = struct {
+        response: [512]u8 = undefined,
+        response_len: usize = 0,
+
+        fn respond(context: *anyopaque, source: Source, response: []const u8) anyerror!void {
+            _ = source;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            @memcpy(self.response[0..response.len], response);
+            self.response_len = response.len;
+        }
+
+        fn stream(context: *anyopaque, source: Source, provider: resources.StreamProvider, options: resources.Options, output: []u8) anyerror![]const u8 {
+            _ = context;
+            _ = source;
+            return resources.writeDescriptorJson(output, .{
+                .id = "stream",
+                .url = "zero://native/resource/stream",
+                .mime = options.mime,
+                .size = provider.size,
+            });
+        }
+
+        fn read(context: *anyopaque, output: []u8) anyerror!usize {
+            _ = context;
+            _ = output;
+            return 0;
+        }
+    };
+
+    var state = State{};
+    const responder: AsyncResponder = .{
+        .context = &state,
+        .request_id = "request-1",
+        .source = .{ .origin = "zero://app", .window_id = 1 },
+        .respond_fn = State.respond,
+        .resource_stream_fn = State.stream,
+    };
+    try responder.resourceStream(.{ .context = &state, .read_fn = State.read, .size = 12 }, .{ .mime = "text/plain" });
+    try std.testing.expect(std.mem.indexOf(u8, state.response[0..state.response_len], "\"kind\":\"resource\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, state.response[0..state.response_len], "\"size\":12") != null);
 }

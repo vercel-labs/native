@@ -12,7 +12,7 @@ export interface ZeroNativeResourceDescriptor {
   url: string;
   mime: string;
   name?: string;
-  size: number;
+  size?: number;
   oneShot?: boolean;
 }
 

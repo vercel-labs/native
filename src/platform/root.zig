@@ -180,6 +180,30 @@ pub const BridgeMessage = struct {
     window_id: WindowId = 1,
 };
 
+pub const ResourceCloseReason = enum(c_int) {
+    complete = 0,
+    cancel = 1,
+    revoke = 2,
+    expired = 3,
+    failure = 4,
+};
+
+pub const ResourceStreamReadFn = *const fn (context: ?*anyopaque, id: [*]const u8, id_len: usize, origin: [*]const u8, origin_len: usize, window_id: WindowId, buffer: [*]u8, buffer_len: usize) callconv(.c) isize;
+pub const ResourceStreamCloseFn = *const fn (context: ?*anyopaque, id: [*]const u8, id_len: usize, reason: ResourceCloseReason) callconv(.c) void;
+
+pub const ResourceStreamRegistration = struct {
+    id: []const u8,
+    mime: []const u8,
+    origin: []const u8 = "",
+    window_id: WindowId = 0,
+    expires_at_ns: ?i128 = null,
+    one_shot: bool = true,
+    size: ?usize = null,
+    callback_context: ?*anyopaque,
+    read_fn: ResourceStreamReadFn,
+    close_fn: ResourceStreamCloseFn,
+};
+
 pub const max_dialog_path_bytes: usize = 4096;
 pub const max_dialog_paths_bytes: usize = 16 * 4096;
 
@@ -291,6 +315,7 @@ pub const PlatformServices = struct {
     configure_security_policy_fn: ?*const fn (context: ?*anyopaque, policy: security.Policy) anyerror!void = null,
     emit_window_event_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void = null,
     register_resource_bytes_fn: ?*const fn (context: ?*anyopaque, id: []const u8, mime: []const u8, bytes: []const u8, origin: []const u8, window_id: WindowId, expires_at_ns: ?i128, one_shot: bool) anyerror!void = null,
+    register_resource_stream_fn: ?*const fn (context: ?*anyopaque, registration: ResourceStreamRegistration) anyerror!void = null,
     revoke_resource_fn: ?*const fn (context: ?*anyopaque, id: []const u8) anyerror!void = null,
 
     pub fn readClipboard(self: PlatformServices, buffer: []u8) anyerror![]const u8 {
@@ -387,6 +412,11 @@ pub const PlatformServices = struct {
         return register_fn(self.context, id, mime, bytes, origin, window_id, expires_at_ns, one_shot);
     }
 
+    pub fn registerResourceStream(self: PlatformServices, registration: ResourceStreamRegistration) anyerror!void {
+        const register_fn = self.register_resource_stream_fn orelse return error.UnsupportedService;
+        return register_fn(self.context, registration);
+    }
+
     pub fn revokeResource(self: PlatformServices, id: []const u8) anyerror!void {
         const revoke_fn = self.revoke_resource_fn orelse return error.UnsupportedService;
         return revoke_fn(self.context, id);
@@ -411,7 +441,7 @@ pub const Platform = struct {
 };
 
 pub const Backend = enum {
-    @"null",
+    null,
     macos,
     linux,
     windows,
@@ -442,6 +472,11 @@ pub const NullPlatform = struct {
     resource_bytes_len: usize = 0,
     resource_one_shot: bool = false,
     resource_registration_fails: bool = false,
+    resource_stream_size: ?usize = null,
+    resource_stream_context: ?*anyopaque = null,
+    resource_stream_read_fn: ?ResourceStreamReadFn = null,
+    resource_stream_close_fn: ?ResourceStreamCloseFn = null,
+    resource_stream_close_reason: ?ResourceCloseReason = null,
 
     pub fn init(surface_value: Surface) NullPlatform {
         return .{ .surface_value = surface_value };
@@ -473,6 +508,7 @@ pub const NullPlatform = struct {
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .emit_window_event_fn = emitWindowEvent,
                 .register_resource_bytes_fn = registerResourceBytes,
+                .register_resource_stream_fn = registerResourceStream,
                 .revoke_resource_fn = revokeResource,
             },
             .app_info = self.app_info,
@@ -608,9 +644,36 @@ pub const NullPlatform = struct {
         self.resource_one_shot = one_shot;
     }
 
+    fn registerResourceStream(context: ?*anyopaque, registration: ResourceStreamRegistration) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (self.resource_registration_fails) return error.ResourceLimitReached;
+        const id_len = @min(registration.id.len, self.resource_id.len);
+        const mime_len = @min(registration.mime.len, self.resource_mime.len);
+        const origin_len = @min(registration.origin.len, self.resource_origin.len);
+        @memcpy(self.resource_id[0..id_len], registration.id[0..id_len]);
+        @memcpy(self.resource_mime[0..mime_len], registration.mime[0..mime_len]);
+        @memcpy(self.resource_origin[0..origin_len], registration.origin[0..origin_len]);
+        self.resource_id_len = id_len;
+        self.resource_mime_len = mime_len;
+        self.resource_origin_len = origin_len;
+        self.resource_window_id = registration.window_id;
+        self.resource_expires_at_ns = registration.expires_at_ns;
+        self.resource_bytes_len = 0;
+        self.resource_one_shot = registration.one_shot;
+        self.resource_stream_size = registration.size;
+        self.resource_stream_context = registration.callback_context;
+        self.resource_stream_read_fn = registration.read_fn;
+        self.resource_stream_close_fn = registration.close_fn;
+        self.resource_stream_close_reason = null;
+    }
+
     fn revokeResource(context: ?*anyopaque, id: []const u8) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         if (std.mem.eql(u8, self.lastResourceId(), id)) {
+            if (self.resource_stream_close_fn) |close_fn| {
+                close_fn(self.resource_stream_context, id.ptr, id.len, .revoke);
+                self.resource_stream_close_reason = .revoke;
+            }
             self.resource_id_len = 0;
             self.resource_mime_len = 0;
             self.resource_origin_len = 0;
@@ -618,6 +681,10 @@ pub const NullPlatform = struct {
             self.resource_expires_at_ns = null;
             self.resource_bytes_len = 0;
             self.resource_one_shot = false;
+            self.resource_stream_size = null;
+            self.resource_stream_context = null;
+            self.resource_stream_read_fn = null;
+            self.resource_stream_close_fn = null;
         }
     }
 
@@ -704,6 +771,49 @@ test "null platform records registered resource bytes" {
     try std.testing.expectEqualStrings("zero://inline", null_platform.lastResourceOrigin());
     try std.testing.expectEqual(@as(WindowId, 7), null_platform.resource_window_id);
     try std.testing.expectEqual(@as(?i128, 123), null_platform.resource_expires_at_ns);
+}
+
+test "null platform records registered resource stream callbacks" {
+    const State = struct {
+        fn read(context: ?*anyopaque, id: [*]const u8, id_len: usize, origin: [*]const u8, origin_len: usize, window_id: WindowId, buffer: [*]u8, buffer_len: usize) callconv(.c) isize {
+            _ = context;
+            _ = id;
+            _ = id_len;
+            _ = origin;
+            _ = origin_len;
+            _ = window_id;
+            const value = "stream";
+            const count = @min(buffer_len, value.len);
+            @memcpy(buffer[0..count], value[0..count]);
+            return @intCast(count);
+        }
+
+        fn close(context: ?*anyopaque, id: [*]const u8, id_len: usize, reason: ResourceCloseReason) callconv(.c) void {
+            _ = context;
+            _ = id;
+            _ = id_len;
+            _ = reason;
+        }
+    };
+
+    var null_platform = NullPlatform.init(.{});
+    try null_platform.platform().services.registerResourceStream(.{
+        .id = "stream-id",
+        .mime = "text/plain",
+        .origin = "zero://inline",
+        .window_id = 7,
+        .expires_at_ns = 123,
+        .one_shot = true,
+        .size = 6,
+        .callback_context = null,
+        .read_fn = State.read,
+        .close_fn = State.close,
+    });
+
+    try std.testing.expectEqualStrings("stream-id", null_platform.lastResourceId());
+    try std.testing.expectEqualStrings("zero://inline", null_platform.lastResourceOrigin());
+    try std.testing.expectEqual(@as(?usize, 6), null_platform.resource_stream_size);
+    try std.testing.expect(null_platform.resource_stream_read_fn != null);
 }
 
 test "webview asset source records production bundle options" {

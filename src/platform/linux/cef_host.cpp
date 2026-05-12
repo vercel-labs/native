@@ -38,6 +38,8 @@ struct OpenDialogResult {
 
 using EventCallback = void (*)(void *, const GtkEvent *);
 using BridgeCallback = void (*)(void *, uint64_t, const char *, size_t, const char *, size_t);
+using ResourceStreamReadCallback = intptr_t (*)(void *, const char *, size_t, const char *, size_t, uint64_t, char *, size_t);
+using ResourceStreamCloseCallback = void (*)(void *, const char *, size_t, int);
 
 struct Window {
     uint64_t id = 1;
@@ -210,6 +212,26 @@ int zero_native_gtk_register_resource_bytes(Host *host, const char *id, size_t i
     (void)expires_at_ns;
     (void)has_expiry;
     (void)one_shot;
+    return 0;
+}
+
+int zero_native_gtk_register_resource_stream(Host *host, const char *id, size_t id_len, const char *mime, size_t mime_len, const char *origin, size_t origin_len, uint64_t window_id, int64_t expires_at_ns, int has_expiry, int one_shot, uint64_t size, int has_size, void *callback_context, ResourceStreamReadCallback read_callback, ResourceStreamCloseCallback close_callback) {
+    (void)host;
+    (void)id;
+    (void)id_len;
+    (void)mime;
+    (void)mime_len;
+    (void)origin;
+    (void)origin_len;
+    (void)window_id;
+    (void)expires_at_ns;
+    (void)has_expiry;
+    (void)one_shot;
+    (void)size;
+    (void)has_size;
+    (void)callback_context;
+    (void)read_callback;
+    (void)close_callback;
     return 0;
 }
 

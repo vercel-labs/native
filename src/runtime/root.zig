@@ -218,6 +218,31 @@ pub const Runtime = struct {
         return descriptor_json;
     }
 
+    pub fn registerBridgeResourceStream(self: *Runtime, source: bridge.Source, provider: bridge.resources.StreamProvider, options: bridge.resources.Options, output: []u8) anyerror![]const u8 {
+        const registry = self.options.bridge_resources orelse return error.UnsupportedService;
+        var resolved_options = options;
+        if (resolved_options.origin.len == 0) resolved_options.origin = source.origin;
+        if (resolved_options.window_id == 0) resolved_options.window_id = source.window_id;
+        const now_ns = nowNanoseconds();
+        const expires_at_ns = if (resolved_options.ttl_ns) |ttl| now_ns + ttl else null;
+        const descriptor = try registry.registerStream(provider, resolved_options, now_ns);
+        errdefer _ = registry.revoke(descriptor.id);
+        const descriptor_json = try bridge.resources.writeDescriptorJson(output, descriptor);
+        try self.options.platform.services.registerResourceStream(.{
+            .id = descriptor.id,
+            .mime = descriptor.mime,
+            .origin = resolved_options.origin,
+            .window_id = resolved_options.window_id,
+            .expires_at_ns = expires_at_ns,
+            .one_shot = descriptor.one_shot,
+            .size = descriptor.size,
+            .callback_context = self,
+            .read_fn = resourceStreamReadCallback,
+            .close_fn = resourceStreamCloseCallback,
+        });
+        return descriptor_json;
+    }
+
     pub fn dispatchPlatformEvent(self: *Runtime, app: App, event_value: platform.Event) anyerror!void {
         if (event_value != .frame_requested or self.invalidated) {
             const event_fields = [_]trace.Field{trace.string("event", event_value.name())};
@@ -434,6 +459,7 @@ pub const Runtime = struct {
             .source = .{ .origin = message.origin, .window_id = message.window_id },
             .respond_fn = asyncBridgeRespond,
             .resource_bytes_fn = asyncBridgeResourceBytes,
+            .resource_stream_fn = asyncBridgeResourceStream,
         }) catch |err| {
             var response_buffer: [bridge.max_response_bytes]u8 = undefined;
             const response = bridge.writeErrorResponse(&response_buffer, request.id, .handler_failed, @errorName(err));
@@ -450,6 +476,35 @@ pub const Runtime = struct {
     fn asyncBridgeResourceBytes(context: *anyopaque, source: bridge.Source, bytes: []const u8, options: bridge.resources.Options, output: []u8) anyerror![]const u8 {
         const self: *Runtime = @ptrCast(@alignCast(context));
         return self.registerBridgeResourceBytes(source, bytes, options, output);
+    }
+
+    fn asyncBridgeResourceStream(context: *anyopaque, source: bridge.Source, provider: bridge.resources.StreamProvider, options: bridge.resources.Options, output: []u8) anyerror![]const u8 {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.registerBridgeResourceStream(source, provider, options, output);
+    }
+
+    fn resourceStreamReadCallback(context: ?*anyopaque, id: [*]const u8, id_len: usize, origin: [*]const u8, origin_len: usize, window_id: platform.WindowId, buffer: [*]u8, buffer_len: usize) callconv(.c) isize {
+        const self: *Runtime = @ptrCast(@alignCast(context.?));
+        const registry = self.options.bridge_resources orelse return -1;
+        const read = registry.readStream(
+            id[0..id_len],
+            .{ .origin = origin[0..origin_len], .window_id = window_id },
+            nowNanoseconds(),
+            buffer[0..buffer_len],
+        ) catch return -1;
+        return @intCast(read);
+    }
+
+    fn resourceStreamCloseCallback(context: ?*anyopaque, id: [*]const u8, id_len: usize, reason: platform.ResourceCloseReason) callconv(.c) void {
+        const self: *Runtime = @ptrCast(@alignCast(context.?));
+        const registry = self.options.bridge_resources orelse return;
+        _ = registry.closeStream(id[0..id_len], switch (reason) {
+            .complete => .complete,
+            .cancel => .cancel,
+            .revoke => .revoke,
+            .expired => .expired,
+            .failure => .failure,
+        });
     }
 
     fn publishAutomation(self: *Runtime) anyerror!void {
@@ -1368,6 +1423,87 @@ test "runtime async bridge can return resource descriptors" {
     try std.testing.expectEqualStrings("large payload", harness.null_platform.lastResourceBytes());
     try std.testing.expect(harness.null_platform.resource_one_shot);
     try std.testing.expect(harness.null_platform.resource_expires_at_ns != null);
+    try std.testing.expectEqual(@as(usize, 0), registry.entries.items.len);
+}
+
+test "runtime async bridge can return streaming resource descriptors" {
+    const State = struct {
+        bytes: []const u8 = "streamed payload",
+        offset: usize = 0,
+        close_reason: ?bridge.resources.CloseReason = null,
+
+        fn exportStream(context: *anyopaque, invocation: bridge.Invocation, responder: bridge.AsyncResponder) anyerror!void {
+            _ = invocation;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try responder.resourceStream(.{
+                .context = self,
+                .read_fn = read,
+                .close_fn = close,
+                .size = self.bytes.len,
+            }, .{ .mime = "text/plain" });
+        }
+
+        fn read(context: *anyopaque, output: []u8) anyerror!usize {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.offset >= self.bytes.len) return 0;
+            const count = @min(output.len, self.bytes.len - self.offset);
+            @memcpy(output[0..count], self.bytes[self.offset..][0..count]);
+            self.offset += count;
+            return count;
+        }
+
+        fn close(context: *anyopaque, reason: bridge.resources.CloseReason) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.close_reason = reason;
+        }
+    };
+
+    var registry = bridge.resources.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+
+    var state = State{};
+    const policies = [_]bridge.CommandPolicy{.{ .name = "native.stream", .origins = &.{"zero://inline"} }};
+    const handlers = [_]bridge.AsyncHandler{.{ .name = "native.stream", .context = &state, .invoke_fn = State.exportStream }};
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.runtime.options.bridge_resources = &registry;
+    harness.runtime.options.bridge = .{
+        .policy = .{ .enabled = true, .commands = &policies },
+        .async_registry = .{ .handlers = &handlers },
+    };
+
+    const app = App{ .context = &harness, .name = "streams", .source = platform.WebViewSource.html("<p>Resources</p>") };
+    try harness.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
+        .bytes = "{\"id\":\"1\",\"command\":\"native.stream\",\"payload\":null}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"kind\":\"resource\"") != null);
+    try std.testing.expectEqual(@as(?usize, state.bytes.len), harness.null_platform.resource_stream_size);
+
+    var output: [32]u8 = undefined;
+    const read_fn = harness.null_platform.resource_stream_read_fn.?;
+    const read = read_fn(
+        harness.null_platform.resource_stream_context,
+        harness.null_platform.lastResourceId().ptr,
+        harness.null_platform.lastResourceId().len,
+        "zero://inline".ptr,
+        "zero://inline".len,
+        1,
+        &output,
+        output.len,
+    );
+    try std.testing.expect(read > 0);
+    try std.testing.expectEqualStrings("streamed payload", output[0..@intCast(read)]);
+    harness.null_platform.resource_stream_close_fn.?(
+        harness.null_platform.resource_stream_context,
+        harness.null_platform.lastResourceId().ptr,
+        harness.null_platform.lastResourceId().len,
+        .complete,
+    );
+    try std.testing.expectEqual(bridge.resources.CloseReason.complete, state.close_reason.?);
     try std.testing.expectEqual(@as(usize, 0), registry.entries.items.len);
 }
 

@@ -14,6 +14,7 @@ pub const Error = error{
     ResourceOriginMismatch,
     ResourceWindowMismatch,
     InvalidResourceMetadata,
+    InvalidResourceProvider,
     NoSpaceLeft,
 };
 
@@ -53,14 +54,43 @@ pub const Descriptor = struct {
     url: []const u8,
     mime: []const u8,
     name: []const u8 = "",
-    size: usize,
+    size: ?usize = null,
     one_shot: bool = false,
+};
+
+pub const CloseReason = enum {
+    complete,
+    cancel,
+    revoke,
+    expired,
+    failure,
+};
+
+pub const StreamProvider = struct {
+    context: *anyopaque,
+    read_fn: *const fn (context: *anyopaque, output: []u8) anyerror!usize,
+    close_fn: ?*const fn (context: *anyopaque, reason: CloseReason) void = null,
+    size: ?usize = null,
+
+    fn read(self: StreamProvider, output: []u8) !usize {
+        return self.read_fn(self.context, output);
+    }
+
+    fn close(self: StreamProvider, reason: CloseReason) void {
+        if (self.close_fn) |close_fn| close_fn(self.context, reason);
+    }
+};
+
+const Payload = union(enum) {
+    bytes: []u8,
+    stream: StreamProvider,
 };
 
 const Entry = struct {
     id: []u8,
     url: []u8,
-    bytes: []u8,
+    payload: Payload,
+    bytes_offset: usize = 0,
     mime: []u8,
     name: []u8,
     origin: []u8,
@@ -74,7 +104,10 @@ const Entry = struct {
             .url = self.url,
             .mime = self.mime,
             .name = self.name,
-            .size = self.bytes.len,
+            .size = switch (self.payload) {
+                .bytes => |bytes| bytes.len,
+                .stream => |provider| provider.size,
+            },
             .one_shot = self.one_shot,
         };
     }
@@ -122,7 +155,40 @@ pub const Registry = struct {
         const entry: Entry = .{
             .id = owned_id,
             .url = url,
-            .bytes = owned_bytes,
+            .payload = .{ .bytes = owned_bytes },
+            .mime = owned_mime,
+            .name = owned_name,
+            .origin = owned_origin,
+            .window_id = options.window_id,
+            .expires_at_ns = if (options.ttl_ns) |ttl| now_ns + ttl else null,
+            .one_shot = options.one_shot,
+        };
+        try self.entries.append(self.allocator, entry);
+        return entry.descriptor();
+    }
+
+    pub fn registerStream(self: *Registry, provider: StreamProvider, options: Options, now_ns: i128) !Descriptor {
+        self.pruneExpired(now_ns);
+        if (self.entries.items.len >= max_resource_count) return error.ResourceLimitReached;
+        try validateMetadata(options);
+
+        var id_buffer: [max_resource_id_bytes]u8 = undefined;
+        const id = try self.generateId(&id_buffer, now_ns);
+        const owned_id = try self.allocator.dupe(u8, id);
+        errdefer self.allocator.free(owned_id);
+        const url = try std.fmt.allocPrint(self.allocator, "zero://native/resource/{s}", .{owned_id});
+        errdefer self.allocator.free(url);
+        const owned_mime = try self.allocator.dupe(u8, options.mime);
+        errdefer self.allocator.free(owned_mime);
+        const owned_name = try self.allocator.dupe(u8, options.name);
+        errdefer self.allocator.free(owned_name);
+        const owned_origin = try self.allocator.dupe(u8, options.origin);
+        errdefer self.allocator.free(owned_origin);
+
+        const entry: Entry = .{
+            .id = owned_id,
+            .url = url,
+            .payload = .{ .stream = provider },
             .mime = owned_mime,
             .name = owned_name,
             .origin = owned_origin,
@@ -145,15 +211,54 @@ pub const Registry = struct {
         }
         if (entry.origin.len > 0 and !std.mem.eql(u8, entry.origin, source.origin)) return error.ResourceOriginMismatch;
         if (entry.window_id != 0 and entry.window_id != source.window_id) return error.ResourceWindowMismatch;
-        if (output.len < entry.bytes.len) return error.NoSpaceLeft;
-        @memcpy(output[0..entry.bytes.len], entry.bytes);
-        const len = entry.bytes.len;
+        const bytes = switch (entry.payload) {
+            .bytes => |bytes| bytes,
+            .stream => return error.InvalidResourceProvider,
+        };
+        if (output.len < bytes.len) return error.NoSpaceLeft;
+        @memcpy(output[0..bytes.len], bytes);
+        const len = bytes.len;
         if (entry.one_shot) self.removeAt(index);
         return output[0..len];
     }
 
+    pub fn readStream(self: *Registry, id: []const u8, source: Source, now_ns: i128, output: []u8) !usize {
+        const index = self.findIndex(id) orelse return error.ResourceNotFound;
+        var entry = &self.entries.items[index];
+        if (entry.expires_at_ns) |expires| {
+            if (now_ns >= expires) {
+                self.closeEntry(entry.*, .expired);
+                self.removeAt(index);
+                return error.ResourceExpired;
+            }
+        }
+        if (entry.origin.len > 0 and !std.mem.eql(u8, entry.origin, source.origin)) return error.ResourceOriginMismatch;
+        if (entry.window_id != 0 and entry.window_id != source.window_id) return error.ResourceWindowMismatch;
+        switch (entry.payload) {
+            .bytes => |bytes| {
+                if (entry.bytes_offset >= bytes.len) return 0;
+                const count = @min(output.len, bytes.len - entry.bytes_offset);
+                @memcpy(output[0..count], bytes[entry.bytes_offset..][0..count]);
+                entry.bytes_offset += count;
+                return count;
+            },
+            .stream => |provider| return provider.read(output),
+        }
+    }
+
+    pub fn closeStream(self: *Registry, id: []const u8, reason: CloseReason) bool {
+        const index = self.findIndex(id) orelse return false;
+        const entry = self.entries.items[index];
+        self.closeEntry(entry, reason);
+        if (entry.one_shot or reason == .revoke or reason == .expired) {
+            self.removeAt(index);
+        }
+        return true;
+    }
+
     pub fn revoke(self: *Registry, id: []const u8) bool {
         const index = self.findIndex(id) orelse return false;
+        self.closeEntry(self.entries.items[index], .revoke);
         self.removeAt(index);
         return true;
     }
@@ -175,6 +280,7 @@ pub const Registry = struct {
         while (index < self.entries.items.len) {
             if (self.entries.items[index].expires_at_ns) |expires| {
                 if (now_ns >= expires) {
+                    self.closeEntry(self.entries.items[index], .expired);
                     self.removeAt(index);
                     continue;
                 }
@@ -183,10 +289,21 @@ pub const Registry = struct {
         }
     }
 
+    fn closeEntry(self: *Registry, entry: Entry, reason: CloseReason) void {
+        _ = self;
+        switch (entry.payload) {
+            .bytes => {},
+            .stream => |provider| provider.close(reason),
+        }
+    }
+
     fn freeEntry(self: *Registry, entry: Entry) void {
         self.allocator.free(entry.id);
         self.allocator.free(entry.url);
-        self.allocator.free(entry.bytes);
+        switch (entry.payload) {
+            .bytes => |bytes| self.allocator.free(bytes),
+            .stream => {},
+        }
         self.allocator.free(entry.mime);
         self.allocator.free(entry.name);
         self.allocator.free(entry.origin);
@@ -216,7 +333,7 @@ pub fn writeDescriptorJson(output: []u8, descriptor: Descriptor) ![]const u8 {
     try json.writeString(&writer, descriptor.url);
     try writer.writeAll(",\"mime\":");
     try json.writeString(&writer, descriptor.mime);
-    try writer.print(",\"size\":{d}", .{descriptor.size});
+    if (descriptor.size) |size| try writer.print(",\"size\":{d}", .{size});
     if (descriptor.name.len > 0) {
         try writer.writeAll(",\"name\":");
         try json.writeString(&writer, descriptor.name);
@@ -292,4 +409,50 @@ test "resource registry one-shot fetch copies bytes and frees entry" {
     try std.testing.expectEqualStrings("consume me", bytes);
     try std.testing.expectEqual(@as(usize, 0), registry.entries.items.len);
     try std.testing.expectError(error.ResourceNotFound, registry.fetchBytes(descriptor.id, .{}, 102, &fetch_buffer));
+}
+
+test "resource registry streams provider chunks and closes" {
+    const State = struct {
+        bytes: []const u8 = "stream me",
+        offset: usize = 0,
+        close_reason: ?CloseReason = null,
+
+        fn read(context: *anyopaque, output: []u8) anyerror!usize {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.offset >= self.bytes.len) return 0;
+            const count = @min(output.len, self.bytes.len - self.offset);
+            @memcpy(output[0..count], self.bytes[self.offset..][0..count]);
+            self.offset += count;
+            return count;
+        }
+
+        fn close(context: *anyopaque, reason: CloseReason) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.close_reason = reason;
+        }
+    };
+
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    var state = State{};
+
+    const descriptor = try registry.registerStream(.{
+        .context = &state,
+        .read_fn = State.read,
+        .close_fn = State.close,
+        .size = state.bytes.len,
+    }, .{ .mime = "text/plain" }, 100);
+
+    try std.testing.expectEqual(@as(?usize, state.bytes.len), descriptor.size);
+    var chunk: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), try registry.readStream(descriptor.id, .{}, 101, &chunk));
+    try std.testing.expectEqualStrings("stre", &chunk);
+    try std.testing.expectEqual(@as(usize, 4), try registry.readStream(descriptor.id, .{}, 101, &chunk));
+    try std.testing.expectEqualStrings("am m", &chunk);
+    try std.testing.expectEqual(@as(usize, 1), try registry.readStream(descriptor.id, .{}, 101, &chunk));
+    try std.testing.expectEqualStrings("e", chunk[0..1]);
+    try std.testing.expectEqual(@as(usize, 0), try registry.readStream(descriptor.id, .{}, 101, &chunk));
+    try std.testing.expect(registry.closeStream(descriptor.id, .complete));
+    try std.testing.expectEqual(CloseReason.complete, state.close_reason.?);
+    try std.testing.expectEqual(@as(usize, 0), registry.entries.items.len);
 }

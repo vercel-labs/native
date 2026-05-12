@@ -66,6 +66,8 @@ The JSON bridge is the control plane. For larger byte payloads, return a resourc
 }
 ```
 
+`size` is omitted when the native source cannot know the length up front.
+
 ```javascript
 const resource = await window.zero.invoke("native.export", {});
 if (!window.zero.resources.isDescriptor(resource)) {
@@ -86,6 +88,32 @@ fn exportBytes(context: *anyopaque, invocation: zero_native.bridge.Invocation, r
     _ = invocation;
     try responder.resourceBytes("large payload", zero_native.BridgeResourceOptions.download("payload.txt", "text/plain"));
 }
+```
+
+For true source streaming, use `AsyncResponder.resourceStream` with a provider. The provider is pulled by the native resource handler in chunks, so the full payload does not need to be copied into the runtime or native host before the browser starts consuming it:
+
+```zig
+const ExportStream = struct {
+    file: std.fs.File,
+
+    fn read(context: *anyopaque, output: []u8) anyerror!usize {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.file.read(output);
+    }
+
+    fn close(context: *anyopaque, reason: zero_native.BridgeResourceCloseReason) void {
+        _ = reason;
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.file.close();
+    }
+};
+
+try responder.resourceStream(.{
+    .context = &export_stream,
+    .read_fn = ExportStream.read,
+    .close_fn = ExportStream.close,
+    .size = known_size_or_null,
+}, zero_native.BridgeResourceOptions.download("export.bin", "application/octet-stream"));
 ```
 
 Resource responses also need a registry attached to the runtime:
@@ -110,9 +138,9 @@ try responder.resourceBytes(
 );
 ```
 
-The fetch path currently works with the system WebView engines on macOS (WKWebView) and Linux (WebKitGTK). Windows and CEF-backed WebViews reject resource registration through the normal bridge error path with `handler_failed` until those hosts add native resource serving.
+The byte resource path currently works with the system WebView engines on macOS (WKWebView) and Linux (WebKitGTK). `resourceStream` registers provider callbacks so those hosts pull chunks from Zig as the native resource handler serves the browser response. Hosts that do not yet have a native resource interceptor reject registration through the normal bridge error path with `handler_failed`.
 
-`zero.resources.stream()` exposes the browser response stream. The native implementation still stores the registered bytes in memory before serving them, so this is not yet true native streaming from Zig.
+`zero.resources.stream()` exposes the browser response stream. For `resourceStream` descriptors, the native host pulls from the Zig provider in chunks; for `resourceBytes` descriptors, the source is still a buffered byte slice.
 
 ### Benchmarking large transfers
 

@@ -980,6 +980,26 @@ int zero_native_appkit_register_resource_bytes(zero_native_appkit_host_t *host, 
     return 0;
 }
 
+int zero_native_appkit_register_resource_stream(zero_native_appkit_host_t *host, const char *id, size_t id_len, const char *mime, size_t mime_len, const char *origin, size_t origin_len, uint64_t window_id, int64_t expires_at_ns, int has_expiry, int one_shot, uint64_t size, int has_size, void *callback_context, zero_native_appkit_resource_stream_read_callback_t read_callback, zero_native_appkit_resource_stream_close_callback_t close_callback) {
+    (void)host;
+    (void)id;
+    (void)id_len;
+    (void)mime;
+    (void)mime_len;
+    (void)origin;
+    (void)origin_len;
+    (void)window_id;
+    (void)expires_at_ns;
+    (void)has_expiry;
+    (void)one_shot;
+    (void)size;
+    (void)has_size;
+    (void)callback_context;
+    (void)read_callback;
+    (void)close_callback;
+    return 0;
+}
+
 void zero_native_appkit_revoke_resource(zero_native_appkit_host_t *host, const char *id, size_t id_len) {
     (void)host;
     (void)id;
