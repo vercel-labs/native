@@ -1,5 +1,6 @@
 const std = @import("std");
 const geometry = @import("geometry");
+const keycombo = @import("keycombo");
 const platform_info = @import("platform_info");
 const security = @import("../security/root.zig");
 
@@ -231,6 +232,7 @@ pub const MessageDialogOptions = struct {
 };
 
 pub const TrayItemId = u32;
+pub const ShortcutId = u32;
 
 pub const TrayOptions = struct {
     icon_path: []const u8 = "",
@@ -254,6 +256,7 @@ pub const Event = union(enum) {
     window_focused: WindowId,
     bridge_message: BridgeMessage,
     tray_action: TrayItemId,
+    shortcut_fire: ShortcutId,
 
     pub fn name(self: Event) []const u8 {
         return switch (self) {
@@ -265,6 +268,7 @@ pub const Event = union(enum) {
             .window_focused => "window_focused",
             .bridge_message => "bridge_message",
             .tray_action => "tray_action",
+            .shortcut_fire => "shortcut_fire",
         };
     }
 };
@@ -288,6 +292,9 @@ pub const PlatformServices = struct {
     create_tray_fn: ?*const fn (context: ?*anyopaque, options: TrayOptions) anyerror!void = null,
     update_tray_menu_fn: ?*const fn (context: ?*anyopaque, items: []const TrayMenuItem) anyerror!void = null,
     remove_tray_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    register_shortcut_fn: ?*const fn (context: ?*anyopaque, combo: keycombo.KeyCombo, label: []const u8) anyerror!ShortcutId = null,
+    unregister_shortcut_fn: ?*const fn (context: ?*anyopaque, id: ShortcutId) anyerror!void = null,
+    unregister_all_shortcuts_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     configure_security_policy_fn: ?*const fn (context: ?*anyopaque, policy: security.Policy) anyerror!void = null,
     emit_window_event_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void = null,
 
@@ -370,6 +377,21 @@ pub const PlatformServices = struct {
         return remove_fn(self.context);
     }
 
+    pub fn registerShortcut(self: PlatformServices, combo: keycombo.KeyCombo, label: []const u8) anyerror!ShortcutId {
+        const register_fn = self.register_shortcut_fn orelse return error.UnsupportedService;
+        return register_fn(self.context, combo, label);
+    }
+
+    pub fn unregisterShortcut(self: PlatformServices, id: ShortcutId) anyerror!void {
+        const unregister_fn = self.unregister_shortcut_fn orelse return error.UnsupportedService;
+        return unregister_fn(self.context, id);
+    }
+
+    pub fn unregisterAllShortcuts(self: PlatformServices) anyerror!void {
+        const unregister_fn = self.unregister_all_shortcuts_fn orelse return error.UnsupportedService;
+        return unregister_fn(self.context);
+    }
+
     pub fn configureSecurityPolicy(self: PlatformServices, policy: security.Policy) anyerror!void {
         const configure_fn = self.configure_security_policy_fn orelse return error.UnsupportedService;
         return configure_fn(self.context, policy);
@@ -418,6 +440,8 @@ pub const NullPlatform = struct {
     bridge_response: [16 * 1024]u8 = undefined,
     bridge_response_len: usize = 0,
     bridge_response_window_id: WindowId = 0,
+    next_shortcut_id: ShortcutId = 1,
+    shortcut_count: usize = 0,
 
     pub fn init(surface_value: Surface) NullPlatform {
         return .{ .surface_value = surface_value };
@@ -446,6 +470,9 @@ pub const NullPlatform = struct {
                 .create_window_fn = createWindow,
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
+                .register_shortcut_fn = registerShortcut,
+                .unregister_shortcut_fn = unregisterShortcut,
+                .unregister_all_shortcuts_fn = unregisterAllShortcuts,
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .emit_window_event_fn = emitWindowEvent,
             },
@@ -548,6 +575,28 @@ pub const NullPlatform = struct {
         const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
         self.windows[index].open = false;
         self.windows[index].focused = false;
+    }
+
+    fn registerShortcut(context: ?*anyopaque, combo: keycombo.KeyCombo, label: []const u8) anyerror!ShortcutId {
+        _ = combo;
+        _ = label;
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const id = self.next_shortcut_id;
+        self.next_shortcut_id += 1;
+        self.shortcut_count += 1;
+        return id;
+    }
+
+    fn unregisterShortcut(context: ?*anyopaque, id: ShortcutId) anyerror!void {
+        _ = id;
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (self.shortcut_count == 0) return error.ShortcutNotFound;
+        self.shortcut_count -= 1;
+    }
+
+    fn unregisterAllShortcuts(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.shortcut_count = 0;
     }
 
     fn configureSecurityPolicy(context: ?*anyopaque, policy: security.Policy) anyerror!void {

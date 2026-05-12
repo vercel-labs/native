@@ -4,6 +4,7 @@ pub const permission_window = "window";
 pub const permission_filesystem = "filesystem";
 pub const permission_clipboard = "clipboard";
 pub const permission_network = "network";
+pub const permission_global_shortcut = "globalShortcut";
 
 pub const ExternalLinkAction = enum(c_int) {
     deny = 0,

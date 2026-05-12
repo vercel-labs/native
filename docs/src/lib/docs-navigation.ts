@@ -27,6 +27,7 @@ export const navSections: NavSection[] = [
       { name: "Builtin Commands", href: "/bridge/builtin-commands" },
       { name: "Dialogs", href: "/dialogs" },
       { name: "System Tray", href: "/tray" },
+      { name: "Shortcuts", href: "/shortcuts" },
       { name: "Security", href: "/security" },
     ],
   },

@@ -8,6 +8,7 @@ export const PAGE_TITLES: Record<string, string> = {
   "bridge/builtin-commands": "Builtin Commands",
   dialogs: "Dialogs",
   tray: "System Tray",
+  shortcuts: "Shortcuts",
   security: "Security",
   cli: "CLI Reference",
   "cli/dev": "Dev Server",

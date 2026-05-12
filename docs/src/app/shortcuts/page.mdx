@@ -1,0 +1,101 @@
+# Shortcuts
+
+zero-native supports app-scoped global keyboard shortcuts through the built-in bridge. Shortcuts are currently implemented on macOS with Carbon `RegisterEventHotKey`; Linux and Windows return `UnsupportedService`.
+
+## Commands
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>Payload</th>
+      <th>Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>zero-native.shortcut.register</code></td>
+      <td><code>&#123;"accelerator":"CommandOrControl+Shift+P","label":"command-palette"&#125;</code></td>
+      <td><code>&#123;"id":1&#125;</code></td>
+    </tr>
+    <tr>
+      <td><code>zero-native.shortcut.unregister</code></td>
+      <td><code>&#123;"id":1&#125;</code> or <code>&#123;"label":"command-palette"&#125;</code></td>
+      <td><code>&#123;&#125;</code></td>
+    </tr>
+    <tr>
+      <td><code>zero-native.shortcut.unregisterAll</code></td>
+      <td><code>&#123;&#125;</code></td>
+      <td><code>&#123;&#125;</code></td>
+    </tr>
+  </tbody>
+</table>
+
+## Accelerator syntax
+
+Accelerators use the same string shape as Tauri and Electron:
+
+- Modifiers: `Command`, `Cmd`, `Control`, `Ctrl`, `CommandOrControl`, `Alt`, `Option`, `Shift`, `Function`, `Fn`
+- Letters and numbers: `A` through `Z`, `0` through `9`
+- Function keys: `F1` through `F19`
+- Named keys: `Space`, `Tab`, `Return`, `Enter`, `Escape`, `Esc`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `Insert`, `Delete`, `Plus`, `Minus`
+
+Examples:
+
+```javascript
+await window.zero.invoke("zero-native.shortcut.register", {
+  accelerator: "CommandOrControl+Shift+P",
+  label: "command-palette",
+});
+
+await window.zero.invoke("zero-native.shortcut.register", {
+  accelerator: "Alt+Space",
+  label: "launcher",
+});
+```
+
+## Events
+
+When a shortcut fires, the runtime dispatches a command event named `shortcut.fire` and emits a browser event with `{ id, label }`.
+
+```javascript
+window.zero.on("shortcut.fire", ({ id, label }) => {
+  if (label === "command-palette") {
+    window.zero.windows.focus("main");
+  }
+});
+```
+
+```zig
+fn event(context: *anyopaque, runtime: *Runtime, ev: Event) anyerror!void {
+    _ = context;
+    _ = runtime;
+    switch (ev) {
+        .command => |cmd| {
+            if (std.mem.eql(u8, cmd.name, "shortcut.fire")) {
+                // Update app state or focus a window.
+            }
+        },
+        else => {},
+    }
+}
+```
+
+## Security
+
+Shortcut commands are default-deny. Enable them with both the app permission and explicit built-in bridge command policies:
+
+```zig
+const app_permissions = [_][]const u8{zero_native.security.permission_global_shortcut};
+const shortcut_permissions = [_][]const u8{zero_native.security.permission_global_shortcut};
+
+.security = .{ .permissions = &app_permissions },
+.builtin_bridge = .{
+    .enabled = true,
+    .commands = &.{
+        .{ .name = "zero-native.shortcut.register", .permissions = &shortcut_permissions, .origins = &.{ "zero://app" } },
+        .{ .name = "zero-native.shortcut.unregister", .permissions = &shortcut_permissions, .origins = &.{ "zero://app" } },
+        .{ .name = "zero-native.shortcut.unregisterAll", .permissions = &shortcut_permissions, .origins = &.{ "zero://app" } },
+    },
+},
+```
