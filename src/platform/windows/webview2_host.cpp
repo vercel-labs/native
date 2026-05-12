@@ -306,6 +306,23 @@ void zero_native_windows_set_security_policy(Host *host, const char *allowed_ori
     (void)external_action;
 }
 
+void zero_native_windows_register_resource_bytes(Host *host, const char *id, size_t id_len, const char *mime, size_t mime_len, const char *bytes, size_t bytes_len, int one_shot) {
+    (void)host;
+    (void)id;
+    (void)id_len;
+    (void)mime;
+    (void)mime_len;
+    (void)bytes;
+    (void)bytes_len;
+    (void)one_shot;
+}
+
+void zero_native_windows_revoke_resource(Host *host, const char *id, size_t id_len) {
+    (void)host;
+    (void)id;
+    (void)id_len;
+}
+
 int zero_native_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {
     (void)restore_frame;
     if (!host || host->windows.find(window_id) != host->windows.end()) return 0;

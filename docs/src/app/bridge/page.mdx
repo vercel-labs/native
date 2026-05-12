@@ -10,7 +10,7 @@ WebView JS                       Zig Runtime
 window.zero.invoke(cmd, payload)
         │                              │
         ├──── JSON message ───────────►│
-        │                         Size check (16 KiB max)
+        │                         Size check (1 MiB max)
         │                         Policy check (origin + permissions)
         │                         Handler lookup + execute
         │◄─── JSON response ──────────┤
@@ -27,7 +27,7 @@ fn ping(context: *anyopaque, invocation: zero_native.bridge.Invocation, output: 
 }
 ```
 
-The handler writes its JSON result into the provided `output` buffer (max 12 KiB) and returns a slice of it. Results must be valid JSON values; invalid raw text is rejected with `handler_failed`. When returning user data as a string, use the bridge helper so quotes and control characters are escaped:
+The handler writes its JSON result into the provided `output` buffer (max 1 MiB) and returns a slice of it. Results must be valid JSON values; invalid raw text is rejected with `handler_failed`. When returning user data as a string, use the bridge helper so quotes and control characters are escaped:
 
 ```zig
 return zero_native.bridge.writeJsonStringValue(output, user_supplied_name);
@@ -52,6 +52,41 @@ const result = await window.zero.invoke("native.ping", { source: "webview" });
 console.log(result); // { message: "pong from Zig", count: 1 }
 ```
 
+## Large data resources
+
+The JSON bridge is the control plane. For larger byte payloads, return a resource descriptor from Zig and let the frontend consume it through browser-native `fetch()` APIs:
+
+```json
+{
+  "kind": "resource",
+  "id": "opaque-id",
+  "url": "zero://native/resource/opaque-id",
+  "mime": "application/octet-stream",
+  "size": 1048576
+}
+```
+
+```javascript
+const resource = await window.zero.invoke("native.export", {});
+const response = await window.zero.resources.fetch(resource);
+const bytes = new Uint8Array(await response.arrayBuffer());
+
+const stream = await window.zero.resources.stream(resource);
+const reader = stream.getReader();
+```
+
+Async Zig handlers can use `AsyncResponder.resourceBytes` to register bytes with the runtime and complete the command with a small descriptor instead of embedding the bytes in the JSON response.
+
+### Benchmarking large transfers
+
+When measuring bridge throughput, compare at least three payload sizes: 1 MiB, 16 MiB, and 128 MiB. The recommended baseline is:
+
+- JSON bridge with plain JSON data for small structured results.
+- JSON bridge with base64 for binary data.
+- Resource descriptor plus `zero.resources.fetch(...).arrayBuffer()` for binary data.
+
+The resource path should avoid the base64 size overhead and keeps large bytes out of `evaluateJavaScript`/`ExecuteJavaScript` response strings.
+
 ## Invocation
 
 When a handler is called, it receives an `Invocation` with:
@@ -74,15 +109,15 @@ When a handler is called, it receives an `Invocation` with:
   <tbody>
     <tr>
       <td><code>max_message_bytes</code></td>
-      <td>16 KiB</td>
+      <td>1 MiB</td>
     </tr>
     <tr>
       <td><code>max_response_bytes</code></td>
-      <td>16 KiB</td>
+      <td>1 MiB</td>
     </tr>
     <tr>
       <td><code>max_result_bytes</code></td>
-      <td>12 KiB</td>
+      <td>1 MiB</td>
     </tr>
     <tr>
       <td><code>max_id_bytes</code></td>
@@ -125,7 +160,7 @@ When a bridge call fails, the JS promise rejects with an error containing a `cod
     </tr>
     <tr>
       <td><code>payload_too_large</code></td>
-      <td>Message exceeds 16 KiB</td>
+      <td>Message exceeds 1 MiB</td>
     </tr>
     <tr>
       <td><code>internal_error</code></td>
@@ -171,6 +206,10 @@ try {
     <tr>
       <td><code>BridgeHandler</code></td>
       <td><code>name</code>, <code>context</code>, <code>invoke_fn</code></td>
+    </tr>
+    <tr>
+      <td><code>BridgeResourceRegistry</code></td>
+      <td>Stores large byte resources and creates <code>zero://native/resource/*</code> descriptors</td>
     </tr>
   </tbody>
 </table>

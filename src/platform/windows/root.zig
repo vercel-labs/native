@@ -50,6 +50,8 @@ extern fn zero_native_windows_bridge_respond(host: *WindowsHost, response: [*]co
 extern fn zero_native_windows_bridge_respond_window(host: *WindowsHost, window_id: u64, response: [*]const u8, response_len: usize) void;
 extern fn zero_native_windows_emit_window_event(host: *WindowsHost, window_id: u64, name: [*]const u8, name_len: usize, detail_json: [*]const u8, detail_json_len: usize) void;
 extern fn zero_native_windows_set_security_policy(host: *WindowsHost, allowed_origins: [*]const u8, allowed_origins_len: usize, external_urls: [*]const u8, external_urls_len: usize, external_action: c_int) void;
+extern fn zero_native_windows_register_resource_bytes(host: *WindowsHost, id: [*]const u8, id_len: usize, mime: [*]const u8, mime_len: usize, bytes: [*]const u8, bytes_len: usize, one_shot: c_int) void;
+extern fn zero_native_windows_revoke_resource(host: *WindowsHost, id: [*]const u8, id_len: usize) void;
 extern fn zero_native_windows_create_window(host: *WindowsHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int) c_int;
 extern fn zero_native_windows_focus_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn zero_native_windows_close_window(host: *WindowsHost, window_id: u64) c_int;
@@ -111,6 +113,8 @@ pub const WindowsPlatform = struct {
                 .close_window_fn = closeWindow,
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .emit_window_event_fn = emitWindowEvent,
+                .register_resource_bytes_fn = registerResourceBytes,
+                .revoke_resource_fn = revokeResource,
             },
             .app_info = self.app_info,
         };
@@ -248,6 +252,21 @@ fn completeWindowBridge(context: ?*anyopaque, window_id: platform_mod.WindowId, 
 fn emitWindowEvent(context: ?*anyopaque, window_id: platform_mod.WindowId, name: []const u8, detail_json: []const u8) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     zero_native_windows_emit_window_event(self.host, window_id, name.ptr, name.len, detail_json.ptr, detail_json.len);
+}
+
+fn registerResourceBytes(context: ?*anyopaque, id: []const u8, mime: []const u8, bytes: []const u8, one_shot: bool) anyerror!void {
+    _ = context;
+    _ = id;
+    _ = mime;
+    _ = bytes;
+    _ = one_shot;
+    return error.UnsupportedService;
+}
+
+fn revokeResource(context: ?*anyopaque, id: []const u8) anyerror!void {
+    _ = context;
+    _ = id;
+    return error.UnsupportedService;
 }
 
 fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyerror!platform_mod.WindowInfo {

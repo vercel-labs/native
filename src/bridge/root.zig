@@ -1,6 +1,7 @@
 const std = @import("std");
 const json = @import("json");
 const security = @import("../security/root.zig");
+pub const resources = @import("resources.zig");
 
 pub const max_message_bytes: usize = 1024 * 1024;
 pub const max_response_bytes: usize = 1024 * 1024;
@@ -77,6 +78,7 @@ pub const Policy = struct {
 
 pub const HandlerFn = *const fn (context: *anyopaque, invocation: Invocation, output: []u8) anyerror![]const u8;
 pub const AsyncRespondFn = *const fn (context: *anyopaque, source: Source, response: []const u8) anyerror!void;
+pub const AsyncResourceBytesFn = *const fn (context: *anyopaque, source: Source, bytes: []const u8, options: resources.Options, output: []u8) anyerror![]const u8;
 pub const AsyncHandlerFn = *const fn (context: *anyopaque, invocation: Invocation, responder: AsyncResponder) anyerror!void;
 
 pub const Handler = struct {
@@ -89,6 +91,7 @@ pub const AsyncResponder = struct {
     context: *anyopaque,
     source: Source,
     respond_fn: AsyncRespondFn,
+    resource_bytes_fn: ?AsyncResourceBytesFn = null,
 
     pub fn respond(self: AsyncResponder, response: []const u8) anyerror!void {
         return self.respond_fn(self.context, self.source, response);
@@ -102,6 +105,14 @@ pub const AsyncResponder = struct {
     pub fn fail(self: AsyncResponder, id: []const u8, code: ErrorCode, message: []const u8) anyerror!void {
         var buffer: [max_response_bytes]u8 = undefined;
         try self.respond(writeErrorResponse(&buffer, id, code, message));
+    }
+
+    pub fn resourceBytes(self: AsyncResponder, id: []const u8, bytes: []const u8, options: resources.Options) anyerror!void {
+        const resource_fn = self.resource_bytes_fn orelse return error.UnsupportedService;
+        var descriptor_buffer: [max_result_bytes]u8 = undefined;
+        const descriptor = try resource_fn(self.context, self.source, bytes, options, &descriptor_buffer);
+        var response_buffer: [max_response_bytes]u8 = undefined;
+        try self.respond(writeSuccessResponse(&response_buffer, id, descriptor));
     }
 };
 
@@ -503,4 +514,40 @@ test "dispatcher reports permission denial before unknown command" {
         \\{"id":"1","command":"native.ping","payload":null}
     , .{}, &buffer);
     try std.testing.expect(std.mem.indexOf(u8, response, "\"permission_denied\"") != null);
+}
+
+test "async responder can return resource descriptors" {
+    const State = struct {
+        response: [512]u8 = undefined,
+        response_len: usize = 0,
+
+        fn respond(context: *anyopaque, source: Source, response: []const u8) anyerror!void {
+            _ = source;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            @memcpy(self.response[0..response.len], response);
+            self.response_len = response.len;
+        }
+
+        fn resource(context: *anyopaque, source: Source, bytes: []const u8, options: resources.Options, output: []u8) anyerror![]const u8 {
+            _ = context;
+            _ = source;
+            return resources.writeDescriptorJson(output, .{
+                .id = "abc",
+                .url = "zero://native/resource/abc",
+                .mime = options.mime,
+                .size = bytes.len,
+            });
+        }
+    };
+
+    var state = State{};
+    const responder: AsyncResponder = .{
+        .context = &state,
+        .source = .{ .origin = "zero://app", .window_id = 1 },
+        .respond_fn = State.respond,
+        .resource_bytes_fn = State.resource,
+    };
+    try responder.resourceBytes("request-1", "hello", .{ .mime = "text/plain" });
+    try std.testing.expect(std.mem.indexOf(u8, state.response[0..state.response_len], "\"kind\":\"resource\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, state.response[0..state.response_len], "\"text/plain\"") != null);
 }

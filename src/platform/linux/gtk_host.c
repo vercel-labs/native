@@ -5,8 +5,18 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include "../bridge_script.h"
 
 #define ZERO_NATIVE_MAX_WINDOWS 16
+#define ZERO_NATIVE_MAX_RESOURCES 128
+
+typedef struct zero_native_dynamic_resource {
+    char *id;
+    char *mime;
+    unsigned char *bytes;
+    size_t len;
+    int one_shot;
+} zero_native_dynamic_resource_t;
 
 typedef struct zero_native_gtk_window {
     uint64_t id;
@@ -51,6 +61,8 @@ struct zero_native_gtk_host {
     int allowed_external_urls_count;
     int external_link_action;
     int scheme_registered;
+    zero_native_dynamic_resource_t resources[ZERO_NATIVE_MAX_RESOURCES];
+    int resource_count;
 };
 
 static char *zero_native_strndup(const char *s, size_t len) {
@@ -65,6 +77,32 @@ static void zero_native_free_string_list(char **list, int count) {
     if (!list) return;
     for (int i = 0; i < count; i++) free(list[i]);
     free(list);
+}
+
+static void zero_native_clear_resource(zero_native_dynamic_resource_t *resource) {
+    if (!resource) return;
+    free(resource->id);
+    free(resource->mime);
+    free(resource->bytes);
+    memset(resource, 0, sizeof(*resource));
+}
+
+static int zero_native_find_resource_index(zero_native_gtk_host_t *host, const char *id) {
+    if (!host || !id) return -1;
+    for (int i = 0; i < host->resource_count; i++) {
+        if (host->resources[i].id && strcmp(host->resources[i].id, id) == 0) return i;
+    }
+    return -1;
+}
+
+static void zero_native_remove_resource_at(zero_native_gtk_host_t *host, int index) {
+    if (!host || index < 0 || index >= host->resource_count) return;
+    zero_native_clear_resource(&host->resources[index]);
+    for (int i = index; i + 1 < host->resource_count; i++) {
+        host->resources[i] = host->resources[i + 1];
+    }
+    memset(&host->resources[host->resource_count - 1], 0, sizeof(host->resources[0]));
+    host->resource_count--;
 }
 
 static char **zero_native_parse_newline_list(const char *bytes, size_t len, int *out_count) {
@@ -175,52 +213,7 @@ static int zero_native_path_is_safe(const char *path) {
 }
 
 static const char *zero_native_bridge_script(void) {
-    return
-        "(function(){"
-        "if(window.zero&&window.zero.invoke){return;}"
-        "var pending=new Map();"
-        "var listeners=new Map();"
-        "var nextId=1;"
-        "function post(message){"
-        "window.webkit.messageHandlers.zeroNativeBridge.postMessage(message);"
-        "}"
-        "function complete(response){"
-        "var id=response&&response.id!=null?String(response.id):'';"
-        "var entry=pending.get(id);"
-        "if(!entry){return;}"
-        "pending.delete(id);"
-        "if(response.ok){entry.resolve(response.result===undefined?null:response.result);return;}"
-        "var errorInfo=response.error||{};"
-        "var error=new Error(errorInfo.message||'Native command failed');"
-        "error.code=errorInfo.code||'internal_error';"
-        "entry.reject(error);"
-        "}"
-        "function invoke(command,payload){"
-        "if(typeof command!=='string'||command.length===0){return Promise.reject(new TypeError('command must be a non-empty string'));}"
-        "var id=String(nextId++);"
-        "var envelope=JSON.stringify({id:id,command:command,payload:payload===undefined?null:payload});"
-        "return new Promise(function(resolve,reject){"
-        "pending.set(id,{resolve:resolve,reject:reject});"
-        "try{post(envelope);}catch(error){pending.delete(id);reject(error);}"
-        "});"
-        "}"
-        "function selector(value){return typeof value==='number'?{id:value}:{label:String(value)};}"
-        "function on(name,callback){if(typeof callback!=='function'){throw new TypeError('callback must be a function');}var set=listeners.get(name);if(!set){set=new Set();listeners.set(name,set);}set.add(callback);return function(){off(name,callback);};}"
-        "function off(name,callback){var set=listeners.get(name);if(set){set.delete(callback);if(set.size===0){listeners.delete(name);}}}"
-        "function emit(name,detail){var set=listeners.get(name);if(set){Array.from(set).forEach(function(callback){callback(detail);});}window.dispatchEvent(new CustomEvent('zero-native:'+name,{detail:detail}));}"
-        "var windows=Object.freeze({"
-        "create:function(options){return invoke('zero-native.window.create',options||{});},"
-        "list:function(){return invoke('zero-native.window.list',{});},"
-        "focus:function(value){return invoke('zero-native.window.focus',selector(value));},"
-        "close:function(value){return invoke('zero-native.window.close',selector(value));}"
-        "});"
-        "var dialogs=Object.freeze({"
-        "openFile:function(options){return invoke('zero-native.dialog.openFile',options||{});},"
-        "saveFile:function(options){return invoke('zero-native.dialog.saveFile',options||{});},"
-        "showMessage:function(options){return invoke('zero-native.dialog.showMessage',options||{});}"
-        "});"
-        "Object.defineProperty(window,'zero',{value:Object.freeze({invoke:invoke,on:on,off:off,windows:windows,dialogs:dialogs,_complete:complete,_emit:emit}),configurable:false});"
-        "})();";
+    return ZERO_NATIVE_BRIDGE_SCRIPT;
 }
 
 static const char *zero_native_mime_for_ext(const char *path) {
@@ -283,6 +276,22 @@ static void zero_native_fail_scheme_request(WebKitURISchemeRequest *request, GQu
 static void zero_native_asset_scheme_request(WebKitURISchemeRequest *request, gpointer data) {
     zero_native_gtk_host_t *host = data;
     const char *uri = webkit_uri_scheme_request_get_uri(request);
+    if (g_str_has_prefix(uri, "zero://native/resource/")) {
+        const char *id = uri + strlen("zero://native/resource/");
+        int resource_index = zero_native_find_resource_index(host, id);
+        if (resource_index < 0) {
+            zero_native_fail_scheme_request(request, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "Resource is not registered");
+            return;
+        }
+        zero_native_dynamic_resource_t *resource = &host->resources[resource_index];
+        GBytes *bytes = g_bytes_new(resource->bytes, resource->len);
+        GInputStream *stream = g_memory_input_stream_new_from_bytes(bytes);
+        webkit_uri_scheme_request_finish(request, stream, (gint64)resource->len, resource->mime && resource->mime[0] ? resource->mime : "application/octet-stream");
+        g_object_unref(stream);
+        g_bytes_unref(bytes);
+        if (resource->one_shot) zero_native_remove_resource_at(host, resource_index);
+        return;
+    }
     zero_native_gtk_window_t *win = zero_native_window_for_asset_uri(host, uri);
     if (!win || !win->asset_root) {
         zero_native_fail_scheme_request(request, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "No asset root is configured");
@@ -636,6 +645,7 @@ void zero_native_gtk_destroy(zero_native_gtk_host_t *host) {
     free(host->window_label);
     zero_native_free_string_list(host->allowed_origins, host->allowed_origins_count);
     zero_native_free_string_list(host->allowed_external_urls, host->allowed_external_urls_count);
+    for (int i = 0; i < host->resource_count; i++) zero_native_clear_resource(&host->resources[i]);
     free(host);
 }
 
@@ -769,6 +779,34 @@ void zero_native_gtk_set_security_policy(zero_native_gtk_host_t *host, const cha
     host->allowed_origins = zero_native_parse_newline_list(allowed_origins, allowed_origins_len, &host->allowed_origins_count);
     host->allowed_external_urls = zero_native_parse_newline_list(external_urls, external_urls_len, &host->allowed_external_urls_count);
     host->external_link_action = external_action;
+}
+
+void zero_native_gtk_register_resource_bytes(zero_native_gtk_host_t *host, const char *id, size_t id_len, const char *mime, size_t mime_len, const char *bytes, size_t bytes_len, int one_shot) {
+    if (!host || !id || id_len == 0) return;
+    char *resource_id = zero_native_strndup(id, id_len);
+    if (!resource_id) return;
+    int existing = zero_native_find_resource_index(host, resource_id);
+    if (existing >= 0) zero_native_remove_resource_at(host, existing);
+    if (host->resource_count >= ZERO_NATIVE_MAX_RESOURCES) {
+        free(resource_id);
+        return;
+    }
+    zero_native_dynamic_resource_t *resource = &host->resources[host->resource_count++];
+    resource->id = resource_id;
+    resource->mime = mime && mime_len > 0 ? zero_native_strndup(mime, mime_len) : zero_native_strndup("application/octet-stream", strlen("application/octet-stream"));
+    resource->bytes = bytes_len > 0 ? malloc(bytes_len) : NULL;
+    if (bytes_len > 0 && resource->bytes) memcpy(resource->bytes, bytes, bytes_len);
+    resource->len = bytes_len;
+    resource->one_shot = one_shot != 0;
+}
+
+void zero_native_gtk_revoke_resource(zero_native_gtk_host_t *host, const char *id, size_t id_len) {
+    if (!host || !id || id_len == 0) return;
+    char *resource_id = zero_native_strndup(id, id_len);
+    if (!resource_id) return;
+    int index = zero_native_find_resource_index(host, resource_id);
+    if (index >= 0) zero_native_remove_resource_at(host, index);
+    free(resource_id);
 }
 
 int zero_native_gtk_create_window(zero_native_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {

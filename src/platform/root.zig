@@ -290,6 +290,8 @@ pub const PlatformServices = struct {
     remove_tray_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     configure_security_policy_fn: ?*const fn (context: ?*anyopaque, policy: security.Policy) anyerror!void = null,
     emit_window_event_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void = null,
+    register_resource_bytes_fn: ?*const fn (context: ?*anyopaque, id: []const u8, mime: []const u8, bytes: []const u8, one_shot: bool) anyerror!void = null,
+    revoke_resource_fn: ?*const fn (context: ?*anyopaque, id: []const u8) anyerror!void = null,
 
     pub fn readClipboard(self: PlatformServices, buffer: []u8) anyerror![]const u8 {
         const read_fn = self.read_clipboard_fn orelse return error.UnsupportedService;
@@ -379,6 +381,16 @@ pub const PlatformServices = struct {
         const emit_fn = self.emit_window_event_fn orelse return error.UnsupportedService;
         return emit_fn(self.context, window_id, name, detail_json);
     }
+
+    pub fn registerResourceBytes(self: PlatformServices, id: []const u8, mime: []const u8, bytes: []const u8, one_shot: bool) anyerror!void {
+        const register_fn = self.register_resource_bytes_fn orelse return error.UnsupportedService;
+        return register_fn(self.context, id, mime, bytes, one_shot);
+    }
+
+    pub fn revokeResource(self: PlatformServices, id: []const u8) anyerror!void {
+        const revoke_fn = self.revoke_resource_fn orelse return error.UnsupportedService;
+        return revoke_fn(self.context, id);
+    }
 };
 
 pub const Platform = struct {
@@ -418,6 +430,13 @@ pub const NullPlatform = struct {
     bridge_response: [16 * 1024]u8 = undefined,
     bridge_response_len: usize = 0,
     bridge_response_window_id: WindowId = 0,
+    resource_id: [64]u8 = undefined,
+    resource_id_len: usize = 0,
+    resource_mime: [128]u8 = undefined,
+    resource_mime_len: usize = 0,
+    resource_bytes: [64 * 1024]u8 = undefined,
+    resource_bytes_len: usize = 0,
+    resource_one_shot: bool = false,
 
     pub fn init(surface_value: Surface) NullPlatform {
         return .{ .surface_value = surface_value };
@@ -448,6 +467,8 @@ pub const NullPlatform = struct {
                 .close_window_fn = closeWindow,
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .emit_window_event_fn = emitWindowEvent,
+                .register_resource_bytes_fn = registerResourceBytes,
+                .revoke_resource_fn = revokeResource,
             },
             .app_info = self.app_info,
         };
@@ -562,6 +583,30 @@ pub const NullPlatform = struct {
         _ = detail_json;
     }
 
+    fn registerResourceBytes(context: ?*anyopaque, id: []const u8, mime: []const u8, bytes: []const u8, one_shot: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const id_len = @min(id.len, self.resource_id.len);
+        const mime_len = @min(mime.len, self.resource_mime.len);
+        const bytes_len = @min(bytes.len, self.resource_bytes.len);
+        @memcpy(self.resource_id[0..id_len], id[0..id_len]);
+        @memcpy(self.resource_mime[0..mime_len], mime[0..mime_len]);
+        @memcpy(self.resource_bytes[0..bytes_len], bytes[0..bytes_len]);
+        self.resource_id_len = id_len;
+        self.resource_mime_len = mime_len;
+        self.resource_bytes_len = bytes_len;
+        self.resource_one_shot = one_shot;
+    }
+
+    fn revokeResource(context: ?*anyopaque, id: []const u8) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (std.mem.eql(u8, self.lastResourceId(), id)) {
+            self.resource_id_len = 0;
+            self.resource_mime_len = 0;
+            self.resource_bytes_len = 0;
+            self.resource_one_shot = false;
+        }
+    }
+
     fn findWindowIndex(self: *const NullPlatform, window_id: WindowId) ?usize {
         for (self.windows[0..self.window_count], 0..) |window, index| {
             if (window.id == window_id) return index;
@@ -575,6 +620,14 @@ pub const NullPlatform = struct {
 
     pub fn lastBridgeResponseWindowId(self: *const NullPlatform) WindowId {
         return self.bridge_response_window_id;
+    }
+
+    pub fn lastResourceId(self: *const NullPlatform) []const u8 {
+        return self.resource_id[0..self.resource_id_len];
+    }
+
+    pub fn lastResourceBytes(self: *const NullPlatform) []const u8 {
+        return self.resource_bytes[0..self.resource_bytes_len];
     }
 };
 
@@ -622,6 +675,14 @@ test "null platform records bridge response window routing" {
 
     try std.testing.expectEqual(@as(WindowId, 7), null_platform.lastBridgeResponseWindowId());
     try std.testing.expectEqualStrings("{\"ok\":true}", null_platform.lastBridgeResponse());
+}
+
+test "null platform records registered resource bytes" {
+    var null_platform = NullPlatform.init(.{});
+    try null_platform.platform().services.registerResourceBytes("abc", "text/plain", "hello", true);
+
+    try std.testing.expectEqualStrings("abc", null_platform.lastResourceId());
+    try std.testing.expectEqualStrings("hello", null_platform.lastResourceBytes());
 }
 
 test "webview asset source records production bundle options" {

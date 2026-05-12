@@ -17,6 +17,7 @@
 #include "include/cef_process_message.h"
 #include "include/cef_v8.h"
 #include "include/wrapper/cef_library_loader.h"
+#include "../bridge_script.h"
 #include <map>
 
 #ifndef ZERO_NATIVE_CEF_DIR
@@ -237,53 +238,7 @@ static NSRect ZeroNativeConstrainFrame(NSRect frame) {
 }
 
 static const char *ZeroNativeCefBridgeScript() {
-    return "(function(){"
-        "if(window.zero&&window.zero.invoke){return;}"
-        "var pending=new Map();"
-        "var listeners=new Map();"
-        "var nextId=1;"
-        "function post(message){"
-        "if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.zeroNativeBridge){window.webkit.messageHandlers.zeroNativeBridge.postMessage(message);return;}"
-        "if(window.zeroNativeCefBridge&&window.zeroNativeCefBridge.postMessage){window.zeroNativeCefBridge.postMessage(message);return;}"
-        "throw new Error('zero-native bridge transport is unavailable');"
-        "}"
-        "function complete(response){"
-        "var id=response&&response.id!=null?String(response.id):'';"
-        "var entry=pending.get(id);"
-        "if(!entry){return;}"
-        "pending.delete(id);"
-        "if(response.ok){entry.resolve(response.result===undefined?null:response.result);return;}"
-        "var errorInfo=response.error||{};"
-        "var error=new Error(errorInfo.message||'Native command failed');"
-        "error.code=errorInfo.code||'internal_error';"
-        "entry.reject(error);"
-        "}"
-        "function invoke(command,payload){"
-        "if(typeof command!=='string'||command.length===0){return Promise.reject(new TypeError('command must be a non-empty string'));}"
-        "var id=String(nextId++);"
-        "var envelope=JSON.stringify({id:id,command:command,payload:payload===undefined?null:payload});"
-        "return new Promise(function(resolve,reject){"
-        "pending.set(id,{resolve:resolve,reject:reject});"
-        "try{post(envelope);}catch(error){pending.delete(id);reject(error);}"
-        "});"
-        "}"
-        "function selector(value){return typeof value==='number'?{id:value}:{label:String(value)};}"
-        "function on(name,callback){if(typeof callback!=='function'){throw new TypeError('callback must be a function');}var set=listeners.get(name);if(!set){set=new Set();listeners.set(name,set);}set.add(callback);return function(){off(name,callback);};}"
-        "function off(name,callback){var set=listeners.get(name);if(set){set.delete(callback);if(set.size===0){listeners.delete(name);}}}"
-        "function emit(name,detail){var set=listeners.get(name);if(set){Array.from(set).forEach(function(callback){callback(detail);});}window.dispatchEvent(new CustomEvent('zero-native:'+name,{detail:detail}));}"
-        "var windows=Object.freeze({"
-        "create:function(options){return invoke('zero-native.window.create',options||{});},"
-        "list:function(){return invoke('zero-native.window.list',{});},"
-        "focus:function(value){return invoke('zero-native.window.focus',selector(value));},"
-        "close:function(value){return invoke('zero-native.window.close',selector(value));}"
-        "});"
-        "var dialogs=Object.freeze({"
-        "openFile:function(options){return invoke('zero-native.dialog.openFile',options||{});},"
-        "saveFile:function(options){return invoke('zero-native.dialog.saveFile',options||{});},"
-        "showMessage:function(options){return invoke('zero-native.dialog.showMessage',options||{});}"
-        "});"
-        "Object.defineProperty(window,'zero',{value:Object.freeze({invoke:invoke,on:on,off:off,windows:windows,dialogs:dialogs,_complete:complete,_emit:emit}),configurable:false});"
-        "})();";
+    return ZERO_NATIVE_BRIDGE_SCRIPT;
 }
 
 } // namespace
@@ -1006,6 +961,23 @@ void zero_native_appkit_set_security_policy(zero_native_appkit_host_t *host, con
     NSArray<NSString *> *origins = ZeroNativePolicyListFromBytes(allowed_origins, allowed_origins_len, @[ @"zero://app", @"zero://inline" ]);
     NSArray<NSString *> *externalURLs = ZeroNativePolicyListFromBytes(external_urls, external_urls_len, @[]);
     [object setAllowedNavigationOrigins:origins externalURLs:externalURLs externalAction:external_action];
+}
+
+void zero_native_appkit_register_resource_bytes(zero_native_appkit_host_t *host, const char *id, size_t id_len, const char *mime, size_t mime_len, const char *bytes, size_t bytes_len, int one_shot) {
+    (void)host;
+    (void)id;
+    (void)id_len;
+    (void)mime;
+    (void)mime_len;
+    (void)bytes;
+    (void)bytes_len;
+    (void)one_shot;
+}
+
+void zero_native_appkit_revoke_resource(zero_native_appkit_host_t *host, const char *id, size_t id_len) {
+    (void)host;
+    (void)id;
+    (void)id_len;
 }
 
 int zero_native_appkit_create_window(zero_native_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {

@@ -5,6 +5,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <string.h>
+#include "../bridge_script.h"
 
 @class ZeroNativeAppKitHost;
 
@@ -29,10 +30,17 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 @end
 
 @interface ZeroNativeAssetSchemeHandler : NSObject <WKURLSchemeHandler>
+@property(nonatomic, assign) ZeroNativeAppKitHost *host;
 @property(nonatomic, strong) NSString *rootPath;
 @property(nonatomic, strong) NSString *entryPath;
 @property(nonatomic, assign) BOOL spaFallback;
 - (void)configureWithRootPath:(NSString *)rootPath entryPath:(NSString *)entryPath spaFallback:(BOOL)spaFallback;
+@end
+
+@interface ZeroNativeDynamicResource : NSObject
+@property(nonatomic, strong) NSData *data;
+@property(nonatomic, strong) NSString *mimeType;
+@property(nonatomic, assign) BOOL oneShot;
 @end
 
 @interface ZeroNativeAppKitHost : NSObject <WKNavigationDelegate>
@@ -46,6 +54,7 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, ZeroNativeWindowDelegate *> *delegates;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, ZeroNativeBridgeScriptHandler *> *bridgeScriptHandlers;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, ZeroNativeAssetSchemeHandler *> *assetSchemeHandlers;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, ZeroNativeDynamicResource *> *dynamicResources;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *windowLabels;
 @property(nonatomic, strong) NSTimer *timer;
 @property(nonatomic, strong) NSString *appName;
@@ -91,6 +100,9 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 - (void)completeBridgeWithResponse:(NSString *)response;
 - (void)completeBridgeWithResponse:(NSString *)response windowId:(uint64_t)windowId;
 - (void)emitEventNamed:(NSString *)name detailJSON:(NSString *)detailJSON windowId:(uint64_t)windowId;
+- (ZeroNativeDynamicResource *)dynamicResourceForId:(NSString *)resourceId consume:(BOOL)consume;
+- (void)registerDynamicResource:(NSString *)resourceId data:(NSData *)data mimeType:(NSString *)mimeType oneShot:(BOOL)oneShot;
+- (void)revokeDynamicResource:(NSString *)resourceId;
 @end
 
 @implementation ZeroNativeWindowDelegate
@@ -141,6 +153,9 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 
 @end
 
+@implementation ZeroNativeDynamicResource
+@end
+
 @implementation ZeroNativeAssetSchemeHandler
 
 - (instancetype)init {
@@ -160,6 +175,21 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 
 - (void)webView:(WKWebView *)webView startURLSchemeTask:(id<WKURLSchemeTask>)urlSchemeTask {
     (void)webView;
+    NSURL *url = urlSchemeTask.request.URL;
+    if ([url.host isEqualToString:@"native"] && [url.path hasPrefix:@"/resource/"]) {
+        NSString *resourceId = [url.lastPathComponent stringByRemovingPercentEncoding] ?: @"";
+        ZeroNativeDynamicResource *resource = [self.host dynamicResourceForId:resourceId consume:YES];
+        if (!resource) {
+            NSError *error = [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorFileDoesNotExist userInfo:nil];
+            [urlSchemeTask didFailWithError:error];
+            return;
+        }
+        NSURLResponse *response = [[NSURLResponse alloc] initWithURL:url MIMEType:resource.mimeType expectedContentLength:(NSInteger)resource.data.length textEncodingName:nil];
+        [urlSchemeTask didReceiveResponse:response];
+        [urlSchemeTask didReceiveData:resource.data];
+        [urlSchemeTask didFinish];
+        return;
+    }
     NSString *relativePath = ZeroNativeSafeAssetPath(urlSchemeTask.request.URL, self.entryPath);
     if (!relativePath) {
         NSError *error = [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorBadURL userInfo:nil];
@@ -217,6 +247,7 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     self.delegates = [[NSMutableDictionary alloc] init];
     self.bridgeScriptHandlers = [[NSMutableDictionary alloc] init];
     self.assetSchemeHandlers = [[NSMutableDictionary alloc] init];
+    self.dynamicResources = [[NSMutableDictionary alloc] init];
     self.windowLabels = [[NSMutableDictionary alloc] init];
     self.allowedNavigationOrigins = @[ @"zero://app", @"zero://inline" ];
     self.allowedExternalURLs = @[];
@@ -253,6 +284,7 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
     ZeroNativeAssetSchemeHandler *assetSchemeHandler = [[ZeroNativeAssetSchemeHandler alloc] init];
+    assetSchemeHandler.host = self;
     [configuration setURLSchemeHandler:assetSchemeHandler forURLScheme:@"zero"];
     WKUserContentController *userContentController = [[WKUserContentController alloc] init];
     ZeroNativeBridgeScriptHandler *bridgeScriptHandler = [[ZeroNativeBridgeScriptHandler alloc] init];
@@ -343,53 +375,7 @@ static NSRect constrainFrame(NSRect frame) {
 }
 
 static NSString *ZeroNativeAppKitBridgeScript(void) {
-    return @"(function(){"
-        "if(window.zero&&window.zero.invoke){return;}"
-        "var pending=new Map();"
-        "var listeners=new Map();"
-        "var nextId=1;"
-        "function post(message){"
-        "if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.zeroNativeBridge){window.webkit.messageHandlers.zeroNativeBridge.postMessage(message);return;}"
-        "if(window.zeroNativeCefBridge&&window.zeroNativeCefBridge.postMessage){window.zeroNativeCefBridge.postMessage(message);return;}"
-        "throw new Error('zero-native bridge transport is unavailable');"
-        "}"
-        "function complete(response){"
-        "var id=response&&response.id!=null?String(response.id):'';"
-        "var entry=pending.get(id);"
-        "if(!entry){return;}"
-        "pending.delete(id);"
-        "if(response.ok){entry.resolve(response.result===undefined?null:response.result);return;}"
-        "var errorInfo=response.error||{};"
-        "var error=new Error(errorInfo.message||'Native command failed');"
-        "error.code=errorInfo.code||'internal_error';"
-        "entry.reject(error);"
-        "}"
-        "function invoke(command,payload){"
-        "if(typeof command!=='string'||command.length===0){return Promise.reject(new TypeError('command must be a non-empty string'));}"
-        "var id=String(nextId++);"
-        "var envelope=JSON.stringify({id:id,command:command,payload:payload===undefined?null:payload});"
-        "return new Promise(function(resolve,reject){"
-        "pending.set(id,{resolve:resolve,reject:reject});"
-        "try{post(envelope);}catch(error){pending.delete(id);reject(error);}"
-        "});"
-        "}"
-        "function selector(value){return typeof value==='number'?{id:value}:{label:String(value)};}"
-        "function on(name,callback){if(typeof callback!=='function'){throw new TypeError('callback must be a function');}var set=listeners.get(name);if(!set){set=new Set();listeners.set(name,set);}set.add(callback);return function(){off(name,callback);};}"
-        "function off(name,callback){var set=listeners.get(name);if(set){set.delete(callback);if(set.size===0){listeners.delete(name);}}}"
-        "function emit(name,detail){var set=listeners.get(name);if(set){Array.from(set).forEach(function(callback){callback(detail);});}window.dispatchEvent(new CustomEvent('zero-native:'+name,{detail:detail}));}"
-        "var windows=Object.freeze({"
-        "create:function(options){return invoke('zero-native.window.create',options||{});},"
-        "list:function(){return invoke('zero-native.window.list',{});},"
-        "focus:function(value){return invoke('zero-native.window.focus',selector(value));},"
-        "close:function(value){return invoke('zero-native.window.close',selector(value));}"
-        "});"
-        "var dialogs=Object.freeze({"
-        "openFile:function(options){return invoke('zero-native.dialog.openFile',options||{});},"
-        "saveFile:function(options){return invoke('zero-native.dialog.saveFile',options||{});},"
-        "showMessage:function(options){return invoke('zero-native.dialog.showMessage',options||{});}"
-        "});"
-        "Object.defineProperty(window,'zero',{value:Object.freeze({invoke:invoke,on:on,off:off,windows:windows,dialogs:dialogs,_complete:complete,_emit:emit}),configurable:false});"
-        "})();";
+    return @ZERO_NATIVE_BRIDGE_SCRIPT;
 }
 
 static NSString *ZeroNativeMimeTypeForPath(NSString *path) {
@@ -747,6 +733,28 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     [webView evaluateJavaScript:script completionHandler:nil];
 }
 
+- (ZeroNativeDynamicResource *)dynamicResourceForId:(NSString *)resourceId consume:(BOOL)consume {
+    if (resourceId.length == 0) return nil;
+    ZeroNativeDynamicResource *resource = self.dynamicResources[resourceId];
+    if (resource && consume && resource.oneShot) {
+        [self.dynamicResources removeObjectForKey:resourceId];
+    }
+    return resource;
+}
+
+- (void)registerDynamicResource:(NSString *)resourceId data:(NSData *)data mimeType:(NSString *)mimeType oneShot:(BOOL)oneShot {
+    if (resourceId.length == 0 || !data) return;
+    ZeroNativeDynamicResource *resource = [[ZeroNativeDynamicResource alloc] init];
+    resource.data = data;
+    resource.mimeType = mimeType.length > 0 ? mimeType : @"application/octet-stream";
+    resource.oneShot = oneShot;
+    self.dynamicResources[resourceId] = resource;
+}
+
+- (void)revokeDynamicResource:(NSString *)resourceId {
+    if (resourceId.length > 0) [self.dynamicResources removeObjectForKey:resourceId];
+}
+
 - (void)showPreferences:(id)sender {
     (void)sender;
 }
@@ -892,6 +900,20 @@ void zero_native_appkit_set_security_policy(zero_native_appkit_host_t *host, con
     NSArray<NSString *> *origins = ZeroNativePolicyListFromBytes(allowed_origins, allowed_origins_len, @[ @"zero://app", @"zero://inline" ]);
     NSArray<NSString *> *externalURLs = ZeroNativePolicyListFromBytes(external_urls, external_urls_len, @[]);
     [object setAllowedNavigationOrigins:origins externalURLs:externalURLs externalAction:external_action];
+}
+
+void zero_native_appkit_register_resource_bytes(zero_native_appkit_host_t *host, const char *id, size_t id_len, const char *mime, size_t mime_len, const char *bytes, size_t bytes_len, int one_shot) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *resourceId = id ? [[NSString alloc] initWithBytes:id length:id_len encoding:NSUTF8StringEncoding] : @"";
+    NSString *mimeType = mime ? [[NSString alloc] initWithBytes:mime length:mime_len encoding:NSUTF8StringEncoding] : @"application/octet-stream";
+    NSData *data = bytes && bytes_len > 0 ? [NSData dataWithBytes:bytes length:bytes_len] : [NSData data];
+    [object registerDynamicResource:resourceId ?: @"" data:data mimeType:mimeType ?: @"application/octet-stream" oneShot:(one_shot != 0)];
+}
+
+void zero_native_appkit_revoke_resource(zero_native_appkit_host_t *host, const char *id, size_t id_len) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *resourceId = id ? [[NSString alloc] initWithBytes:id length:id_len encoding:NSUTF8StringEncoding] : @"";
+    [object revokeDynamicResource:resourceId ?: @""];
 }
 
 int zero_native_appkit_create_window(zero_native_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {

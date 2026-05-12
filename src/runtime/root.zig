@@ -84,6 +84,7 @@ pub const Options = struct {
     log_path: ?[]const u8 = null,
     extensions: ?extensions.ModuleRegistry = null,
     bridge: ?bridge.Dispatcher = null,
+    bridge_resources: ?*bridge.resources.Registry = null,
     builtin_bridge: bridge.Policy = .{},
     security: security.Policy = .{},
     automation: ?automation.Server = null,
@@ -200,6 +201,19 @@ pub const Runtime = struct {
 
     pub fn respondToBridge(self: *Runtime, source: bridge.Source, response: []const u8) anyerror!void {
         try self.completeBridgeResponse(source.window_id, response);
+    }
+
+    pub fn registerBridgeResourceBytes(self: *Runtime, source: bridge.Source, bytes: []const u8, options: bridge.resources.Options, output: []u8) anyerror![]const u8 {
+        const registry = self.options.bridge_resources orelse return error.UnsupportedService;
+        var resolved_options = options;
+        if (resolved_options.origin.len == 0) resolved_options.origin = source.origin;
+        if (resolved_options.window_id == 0) resolved_options.window_id = source.window_id;
+        const descriptor = try registry.registerBytes(bytes, resolved_options, self.timestamp_ns);
+        self.options.platform.services.registerResourceBytes(descriptor.id, descriptor.mime, bytes, descriptor.one_shot) catch |err| {
+            _ = registry.revoke(descriptor.id);
+            return err;
+        };
+        return bridge.resources.writeDescriptorJson(output, descriptor);
     }
 
     pub fn dispatchPlatformEvent(self: *Runtime, app: App, event_value: platform.Event) anyerror!void {
@@ -416,6 +430,7 @@ pub const Runtime = struct {
             .context = self,
             .source = .{ .origin = message.origin, .window_id = message.window_id },
             .respond_fn = asyncBridgeRespond,
+            .resource_bytes_fn = asyncBridgeResourceBytes,
         });
         return true;
     }
@@ -423,6 +438,11 @@ pub const Runtime = struct {
     fn asyncBridgeRespond(context: *anyopaque, source: bridge.Source, response: []const u8) anyerror!void {
         const self: *Runtime = @ptrCast(@alignCast(context));
         try self.respondToBridge(source, response);
+    }
+
+    fn asyncBridgeResourceBytes(context: *anyopaque, source: bridge.Source, bytes: []const u8, options: bridge.resources.Options, output: []u8) anyerror![]const u8 {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.registerBridgeResourceBytes(source, bytes, options, output);
     }
 
     fn publishAutomation(self: *Runtime) anyerror!void {
@@ -1235,6 +1255,45 @@ test "runtime returns bridge permission errors through platform response service
     } });
 
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"permission_denied\"") != null);
+}
+
+test "runtime async bridge can return resource descriptors" {
+    const State = struct {
+        fn exportBytes(context: *anyopaque, invocation: bridge.Invocation, responder: bridge.AsyncResponder) anyerror!void {
+            _ = context;
+            try responder.resourceBytes(invocation.request.id, "large payload", .{
+                .mime = "text/plain",
+                .name = "payload.txt",
+                .one_shot = true,
+            });
+        }
+    };
+
+    var registry = bridge.resources.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+
+    var state: u8 = 0;
+    const policies = [_]bridge.CommandPolicy{.{ .name = "native.export", .origins = &.{"zero://inline"} }};
+    const handlers = [_]bridge.AsyncHandler{.{ .name = "native.export", .context = &state, .invoke_fn = State.exportBytes }};
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.runtime.options.bridge_resources = &registry;
+    harness.runtime.options.bridge = .{
+        .policy = .{ .enabled = true, .commands = &policies },
+        .async_registry = .{ .handlers = &handlers },
+    };
+
+    const app = App{ .context = &harness, .name = "resources", .source = platform.WebViewSource.html("<p>Resources</p>") };
+    try harness.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
+        .bytes = "{\"id\":\"1\",\"command\":\"native.export\",\"payload\":null}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"kind\":\"resource\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "zero://native/resource/") != null);
+    try std.testing.expectEqualStrings("large payload", harness.null_platform.lastResourceBytes());
 }
 
 test {
