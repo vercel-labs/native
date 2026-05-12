@@ -272,25 +272,9 @@ fn registerResourceBytes(context: ?*anyopaque, id: []const u8, mime: []const u8,
 }
 
 fn registerResourceStream(context: ?*anyopaque, registration: platform_mod.ResourceStreamRegistration) anyerror!void {
-    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
-    if (zero_native_windows_register_resource_stream(
-        self.host,
-        registration.id.ptr,
-        registration.id.len,
-        registration.mime.ptr,
-        registration.mime.len,
-        registration.origin.ptr,
-        registration.origin.len,
-        registration.window_id,
-        optionalTimestampForC(registration.expires_at_ns),
-        if (registration.expires_at_ns != null) 1 else 0,
-        if (registration.one_shot) 1 else 0,
-        @intCast(registration.size orelse 0),
-        if (registration.size != null) 1 else 0,
-        registration.callback_context,
-        registration.read_fn,
-        registration.close_fn,
-    ) == 0) return error.ResourceLimitReached;
+    _ = context;
+    _ = registration;
+    return error.UnsupportedService;
 }
 
 fn revokeResource(context: ?*anyopaque, id: []const u8) anyerror!void {

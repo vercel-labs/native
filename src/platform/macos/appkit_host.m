@@ -787,12 +787,12 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     if (resourceId.length == 0) return nil;
     ZeroNativeDynamicResource *resource = self.dynamicResources[resourceId];
     if (resource.hasExpiry && nowNs >= resource.expiresAtNs) {
-        [self.dynamicResources removeObjectForKey:resourceId];
+        [self closeDynamicResource:resourceId reason:3];
         return nil;
     }
     if (resource.origin.length > 0 && ![resource.origin isEqualToString:(origin ?: @"")]) return nil;
     if (resource.windowId != 0 && resource.windowId != windowId) return nil;
-    if (resource && consume && resource.oneShot) {
+    if (resource && consume && resource.oneShot && !resource.streaming) {
         [self.dynamicResources removeObjectForKey:resourceId];
     }
     return resource;
@@ -806,7 +806,9 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
             [expired addObject:key];
         }
     }];
-    if (expired.count > 0) [self.dynamicResources removeObjectsForKeys:expired];
+    for (NSString *resourceId in expired) {
+        [self closeDynamicResource:resourceId reason:3];
+    }
 }
 
 - (BOOL)registerDynamicResource:(NSString *)resourceId data:(NSData *)data mimeType:(NSString *)mimeType origin:(NSString *)origin windowId:(uint64_t)windowId expiresAtNs:(int64_t)expiresAtNs hasExpiry:(BOOL)hasExpiry oneShot:(BOOL)oneShot {

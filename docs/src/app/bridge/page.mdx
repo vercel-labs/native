@@ -77,6 +77,9 @@ const response = await window.zero.resources.fetch(resource);
 const bytes = new Uint8Array(await response.arrayBuffer());
 
 const stream = await window.zero.resources.stream(resource);
+if (!stream) {
+  throw new Error("resource response did not include a readable stream");
+}
 const reader = stream.getReader();
 ```
 

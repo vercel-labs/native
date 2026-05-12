@@ -320,6 +320,7 @@ fn registerResourceBytes(context: ?*anyopaque, id: []const u8, mime: []const u8,
 
 fn registerResourceStream(context: ?*anyopaque, registration: platform_mod.ResourceStreamRegistration) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine == .chromium) return error.UnsupportedService;
     if (zero_native_gtk_register_resource_stream(
         self.host,
         registration.id.ptr,

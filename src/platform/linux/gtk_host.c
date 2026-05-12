@@ -103,6 +103,96 @@ static void zero_native_close_resource(zero_native_dynamic_resource_t *resource,
     resource->stream_close_callback(resource->stream_context, resource->id ? resource->id : "", resource->id ? strlen(resource->id) : 0, reason);
 }
 
+typedef struct _ZeroNativeResourceInputStream {
+    GInputStream parent_instance;
+    char *id;
+    char *origin;
+    uint64_t window_id;
+    void *stream_context;
+    zero_native_gtk_resource_stream_read_callback_t read_callback;
+    zero_native_gtk_resource_stream_close_callback_t close_callback;
+    int closed;
+    int reached_eof;
+    int failed;
+} ZeroNativeResourceInputStream;
+
+typedef struct _ZeroNativeResourceInputStreamClass {
+    GInputStreamClass parent_class;
+} ZeroNativeResourceInputStreamClass;
+
+G_DEFINE_TYPE(ZeroNativeResourceInputStream, zero_native_resource_input_stream, G_TYPE_INPUT_STREAM)
+
+static void zero_native_resource_input_stream_close_once(ZeroNativeResourceInputStream *self) {
+    if (!self || self->closed) return;
+    self->closed = 1;
+    int reason = self->failed ? 4 : (self->reached_eof ? 0 : 1);
+    if (self->close_callback) {
+        self->close_callback(self->stream_context, self->id ? self->id : "", self->id ? strlen(self->id) : 0, reason);
+    }
+}
+
+static gssize zero_native_resource_input_stream_read(GInputStream *stream, void *buffer, gsize count, GCancellable *cancellable, GError **error) {
+    ZeroNativeResourceInputStream *self = (ZeroNativeResourceInputStream *)stream;
+    if (g_cancellable_set_error_if_cancelled(cancellable, error)) return -1;
+    if (self->closed || self->reached_eof) return 0;
+    if (!self->read_callback) {
+        self->failed = 1;
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Resource stream is missing a read callback");
+        return -1;
+    }
+    intptr_t read = self->read_callback(self->stream_context, self->id ? self->id : "", self->id ? strlen(self->id) : 0, self->origin ? self->origin : "", self->origin ? strlen(self->origin) : 0, self->window_id, (char *)buffer, count);
+    if (read < 0 || (guint64)read > count) {
+        self->failed = 1;
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Resource stream failed");
+        return -1;
+    }
+    if (read == 0) self->reached_eof = 1;
+    return (gssize)read;
+}
+
+static gboolean zero_native_resource_input_stream_close(GInputStream *stream, GCancellable *cancellable, GError **error) {
+    (void)cancellable;
+    (void)error;
+    zero_native_resource_input_stream_close_once((ZeroNativeResourceInputStream *)stream);
+    return TRUE;
+}
+
+static void zero_native_resource_input_stream_finalize(GObject *object) {
+    ZeroNativeResourceInputStream *self = (ZeroNativeResourceInputStream *)object;
+    zero_native_resource_input_stream_close_once(self);
+    g_free(self->id);
+    g_free(self->origin);
+    G_OBJECT_CLASS(zero_native_resource_input_stream_parent_class)->finalize(object);
+}
+
+static void zero_native_resource_input_stream_class_init(ZeroNativeResourceInputStreamClass *klass) {
+    GObjectClass *object_class = G_OBJECT_CLASS(klass);
+    object_class->finalize = zero_native_resource_input_stream_finalize;
+    GInputStreamClass *stream_class = G_INPUT_STREAM_CLASS(klass);
+    stream_class->read_fn = zero_native_resource_input_stream_read;
+    stream_class->close_fn = zero_native_resource_input_stream_close;
+}
+
+static void zero_native_resource_input_stream_init(ZeroNativeResourceInputStream *self) {
+    self->window_id = 0;
+}
+
+static GInputStream *zero_native_resource_input_stream_new(zero_native_dynamic_resource_t *resource, const char *origin, uint64_t window_id) {
+    if (!resource || !resource->streaming || !resource->stream_read_callback || !resource->stream_close_callback) return NULL;
+    ZeroNativeResourceInputStream *stream = g_object_new(zero_native_resource_input_stream_get_type(), NULL);
+    stream->id = g_strdup(resource->id ? resource->id : "");
+    stream->origin = g_strdup(origin ? origin : "");
+    if (!stream->id || !stream->origin) {
+        g_object_unref(stream);
+        return NULL;
+    }
+    stream->window_id = window_id;
+    stream->stream_context = resource->stream_context;
+    stream->read_callback = resource->stream_read_callback;
+    stream->close_callback = resource->stream_close_callback;
+    return G_INPUT_STREAM(stream);
+}
+
 static int zero_native_find_resource_index(zero_native_gtk_host_t *host, const char *id) {
     if (!host || !id) return -1;
     for (int i = 0; i < host->resource_count; i++) {
@@ -343,24 +433,12 @@ static void zero_native_asset_scheme_request(WebKitURISchemeRequest *request, gp
         GInputStream *stream = NULL;
         gint64 response_len = (gint64)resource->len;
         if (resource->streaming) {
-            GMemoryInputStream *memory_stream = G_MEMORY_INPUT_STREAM(g_memory_input_stream_new());
-            unsigned char buffer[64 * 1024];
-            while (1) {
-                intptr_t count = resource->stream_read_callback ? resource->stream_read_callback(resource->stream_context, resource->id, strlen(resource->id), request_origin ? request_origin : "", request_origin ? strlen(request_origin) : 0, request_window ? request_window->id : 0, (char *)buffer, sizeof(buffer)) : -1;
-                if (count < 0) {
-                    zero_native_close_resource(resource, 4);
-                    g_object_unref(memory_stream);
-                    g_free(request_origin);
-                    zero_native_fail_scheme_request(request, G_IO_ERROR, G_IO_ERROR_FAILED, "Resource stream failed");
-                    return;
-                }
-                if (count == 0) break;
-                GBytes *chunk = g_bytes_new(buffer, (gsize)count);
-                g_memory_input_stream_add_bytes(memory_stream, chunk);
-                g_bytes_unref(chunk);
+            stream = zero_native_resource_input_stream_new(resource, request_origin ? request_origin : "", request_window ? request_window->id : 0);
+            if (!stream) {
+                g_free(request_origin);
+                zero_native_fail_scheme_request(request, G_IO_ERROR, G_IO_ERROR_FAILED, "Resource stream is not available");
+                return;
             }
-            zero_native_close_resource(resource, 0);
-            stream = G_INPUT_STREAM(memory_stream);
             response_len = resource->has_size ? (gint64)resource->size : -1;
         } else {
             GBytes *bytes = g_bytes_new(resource->bytes, resource->len);
