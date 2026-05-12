@@ -1,6 +1,6 @@
 # Builtin Commands
 
-zero-native provides built-in bridge commands for window management and native dialogs. These are controlled by the `builtin_bridge` policy in `RuntimeOptions`, separate from app-defined commands.
+zero-native provides built-in bridge commands for window management, native dialogs, and clipboard text. These are controlled by the `builtin_bridge` policy in `RuntimeOptions`, separate from app-defined commands.
 
 ## Window commands
 
@@ -65,10 +65,22 @@ Window commands are available through `window.zero.windows.*` when `js_window_ap
 
 Dialog commands are **always default-deny** and require an explicit `builtin_bridge` policy.
 
+## Clipboard commands
+
+| Command | Required permission | Description |
+| --- | --- | --- |
+| `zero-native.clipboard.readText` | `clipboard` | Read text from the system clipboard and return `{"text": string}` |
+| `zero-native.clipboard.writeText` | `clipboard` | Write `{"text": string}` to the system clipboard |
+
+Clipboard commands are **always default-deny**. They require the app-level `clipboard` permission and an explicit `builtin_bridge.commands` policy entry for each command.
+
 ## Enabling builtin commands
 
 ```zig
-const app_permissions = [_][]const u8{zero_native.security.permission_window};
+const app_permissions = [_][]const u8{
+    zero_native.security.permission_window,
+    zero_native.security.permission_clipboard,
+};
 
 .security = .{
     .permissions = &app_permissions,
@@ -81,6 +93,8 @@ const app_permissions = [_][]const u8{zero_native.security.permission_window};
         .{ .name = "zero-native.window.create", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
         .{ .name = "zero-native.dialog.openFile", .origins = .{ "zero://app" } },
         .{ .name = "zero-native.dialog.showMessage", .origins = .{ "zero://app" } },
+        .{ .name = "zero-native.clipboard.readText", .permissions = .{ "clipboard" }, .origins = .{ "zero://app" } },
+        .{ .name = "zero-native.clipboard.writeText", .permissions = .{ "clipboard" }, .origins = .{ "zero://app" } },
     },
 },
 ```
@@ -107,6 +121,9 @@ const result = await window.zero.invoke("zero-native.dialog.showMessage", {
   primaryButton: "Yes",
   secondaryButton: "No",
 });
+
+await window.zero.invoke("zero-native.clipboard.writeText", { text: "Hello" });
+const { text } = await window.zero.invoke("zero-native.clipboard.readText", null);
 ```
 
 See also: [Dialogs](/dialogs) for the full dialog type reference, [Security](/security) for policy details.
