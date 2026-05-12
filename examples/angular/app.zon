@@ -1,0 +1,32 @@
+.{
+    .id = "dev.zero_native.angular-example",
+    .name = "angular-example",
+    .display_name = "Angular Example",
+    .version = "0.1.0",
+    .icons = .{ "assets/icon.icns" },
+    .platforms = .{ "macos", "linux" },
+    .permissions = .{},
+    .capabilities = .{ "webview" },
+    .frontend = .{
+        .dist = "frontend/dist",
+        .entry = "index.html",
+        .spa_fallback = true,
+        .dev = .{
+            .url = "http://127.0.0.1:4200/",
+            .command = .{ "npm", "--prefix", "frontend", "run", "dev", "--", "--host", "127.0.0.1" },
+            .ready_path = "/",
+            .timeout_ms = 30000,
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline", "http://127.0.0.1:4200" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+    .windows = .{
+        .{ .label = "main", .title = "Angular Example", .width = 720, .height = 480, .restore_state = true },
+    },
+}

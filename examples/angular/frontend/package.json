@@ -1,0 +1,25 @@
+{
+  "name": "angular-example",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "ng serve",
+    "build": "ng build"
+  },
+  "dependencies": {
+    "@angular/common": "^20.3.0",
+    "@angular/compiler": "^20.3.0",
+    "@angular/core": "^20.3.0",
+    "@angular/forms": "^20.3.0",
+    "@angular/platform-browser": "^20.3.0",
+    "@angular/router": "^20.3.0",
+    "rxjs": "~7.8.0",
+    "tslib": "^2.3.0"
+  },
+  "devDependencies": {
+    "@angular/build": "^20.3.26",
+    "@angular/cli": "^20.3.26",
+    "@angular/compiler-cli": "^20.3.0",
+    "typescript": "~5.9.2"
+  }
+}
