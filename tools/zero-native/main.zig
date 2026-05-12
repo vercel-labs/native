@@ -17,8 +17,8 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("zero-native {s}\n", .{version});
     } else if (std.mem.eql(u8, command, "init")) {
         const destination = positionalArg(args[2..]) orelse ".";
-        const frontend_str = flagValue(args, "--frontend") catch fail("--frontend requires a value: next, vite, react, svelte, vue") orelse fail("--frontend is required: next, vite, react, svelte, vue");
-        const frontend = tooling.templates.Frontend.parse(frontend_str) orelse fail("invalid --frontend value: use next, vite, react, svelte, or vue");
+        const frontend_str = flagValue(args, "--frontend") catch fail("--frontend requires a value: next, vite, react, svelte, vue, angular") orelse fail("--frontend is required: next, vite, react, svelte, vue, angular");
+        const frontend = tooling.templates.Frontend.parse(frontend_str) orelse fail("invalid --frontend value: use next, vite, react, svelte, vue, or angular");
         const app_name, const free_app_name = try initAppName(allocator, init.io, destination);
         defer if (free_app_name) allocator.free(app_name);
         const framework_path, const free_framework_path = try initFrameworkPath(allocator, init.io);
@@ -146,7 +146,7 @@ fn usage() void {
         \\usage: zero-native <command>
         \\
         \\commands:
-        \\  init [path] --frontend <next|vite|react|svelte|vue>
+        \\  init [path] --frontend <next|vite|react|svelte|vue|angular>
         \\  cef install|path|doctor [--dir path] [--version version] [--source prepared|official] [--force]
         \\  doctor [--strict] [--manifest app.zon] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install]
         \\  validate [app.zon]
