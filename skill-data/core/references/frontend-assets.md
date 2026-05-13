@@ -120,5 +120,6 @@ For builtin windows/WebViews helpers, enable `js_window_api` and policy in the r
 - `examples/react`: React with Vite.
 - `examples/svelte`: Svelte with Vite.
 - `examples/vue`: Vue with Vite.
+- `examples/angular`: Angular 20 SPA with `ng serve`/`ng build` and flat assets under `frontend/dist`.
 
 When unsure about frontend build commands or output directories, inspect the matching example before editing.
