@@ -215,7 +215,8 @@ const RunState = struct {
     fn emit(self: *RunState, event: platform_mod.Event) void {
         const handler = self.handler orelse return;
         const context = self.handler_context orelse return;
-        handler(context, event) catch {
+        handler(context, event) catch |err| {
+            std.debug.print("zero-native linux emit error: {s} on event {s}\n", .{ @errorName(err), event.name() });
             self.failed = true;
             if (self.self) |linux| zero_native_gtk_stop(linux.host);
         };

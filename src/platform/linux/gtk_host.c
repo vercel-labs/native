@@ -766,7 +766,7 @@ zero_native_gtk_host_t *zero_native_gtk_create(
     host->allowed_external_urls = NULL;
     host->allowed_external_urls_count = 0;
 
-    host->app = gtk_application_new(host->bundle_id, G_APPLICATION_DEFAULT_FLAGS);
+    host->app = gtk_application_new(host->bundle_id, G_APPLICATION_NON_UNIQUE);
 
     return host;
 }
