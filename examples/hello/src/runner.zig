@@ -25,6 +25,7 @@ pub const RunOptions = struct {
     bridge: ?zero_native.BridgeDispatcher = null,
     builtin_bridge: zero_native.BridgePolicy = .{},
     security: zero_native.SecurityPolicy = .{},
+    main_window: zero_native.WindowOptions = .{},
 
     fn appInfo(self: RunOptions) zero_native.AppInfo {
         return .{
@@ -32,6 +33,7 @@ pub const RunOptions = struct {
             .window_title = self.window_title,
             .bundle_id = self.bundle_id,
             .icon_path = self.icon_path,
+            .main_window = self.main_window,
         };
     }
 };

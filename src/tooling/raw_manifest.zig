@@ -68,4 +68,7 @@ pub const RawWindow = struct {
     x: ?f32 = null,
     y: ?f32 = null,
     restore_state: bool = true,
+    frameless: bool = false,
+    transparent: bool = false,
+    always_on_top: bool = false,
 };
