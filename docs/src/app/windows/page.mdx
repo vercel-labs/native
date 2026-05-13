@@ -8,6 +8,7 @@ zero-native supports multiple windows. The main window is created automatically;
 const info = try runtime.createWindow(.{
     .label = "tools",
     .title = "Tools",
+    .title_bar_style = .overlay,
     .default_frame = zero_native.geometry.RectF.init(80, 80, 420, 320),
 });
 try runtime.focusWindow(info.id);
@@ -33,6 +34,7 @@ Then JavaScript can call the helper from an allowed origin:
 const win = await window.zero.windows.create({
   label: "tools",
   title: "Tools",
+  titleBarStyle: "overlay",
   width: 420,
   height: 320,
 });
@@ -58,7 +60,7 @@ await window.zero.windows.close(win.id);
     </tr>
     <tr>
       <td><code>WindowCreateOptions</code></td>
-      <td>Options for <code>runtime.createWindow()</code>: label, title, frame</td>
+      <td>Options for <code>runtime.createWindow()</code>: label, title, frame, title bar style</td>
     </tr>
     <tr>
       <td><code>WindowInfo</code></td>
@@ -74,6 +76,10 @@ await window.zero.windows.close(win.id);
     </tr>
   </tbody>
 </table>
+
+## macOS title bar style
+
+Use `title_bar_style = .overlay` from Zig, `title_bar_style = "overlay"` in `app.zon`, or `titleBarStyle: "overlay"` from JavaScript to extend the WebView into the native macOS title bar while keeping native window controls. The default `standard` style keeps the normal macOS title bar. Other platforms currently ignore this option.
 
 ## Platform limits
 
@@ -145,6 +151,6 @@ When `saveWindow` is called, the store merges by matching on `label` or `id`, so
 
 ```zig
 .windows = .{
-    .{ .label = "main", .title = "zero-native", .width = 720, .height = 480, .restore_state = true },
+    .{ .label = "main", .title = "zero-native", .title_bar_style = "overlay", .width = 720, .height = 480, .restore_state = true },
 },
 ```

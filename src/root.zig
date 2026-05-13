@@ -40,6 +40,7 @@ pub const WindowCreateOptions = platform.WindowCreateOptions;
 pub const WindowInfo = platform.WindowInfo;
 pub const WindowState = platform.WindowState;
 pub const WindowRestorePolicy = platform.WindowRestorePolicy;
+pub const WindowTitleBarStyle = platform.WindowTitleBarStyle;
 pub const FileFilter = platform.FileFilter;
 pub const OpenDialogOptions = platform.OpenDialogOptions;
 pub const OpenDialogResult = platform.OpenDialogResult;

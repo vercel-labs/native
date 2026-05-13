@@ -775,10 +775,12 @@ pub const Runtime = struct {
         const x = jsonNumberField(payload, "x") orelse 0;
         const y = jsonNumberField(payload, "y") orelse 0;
         const source = if (jsonStringField(payload, "url", &storage)) |url| platform.WebViewSource.url(url) else null;
+        const title_bar_style = try parseWindowTitleBarStyle(jsonStringField(payload, "titleBarStyle", &storage) orelse "standard");
         const info = try self.createWindow(.{
             .label = label,
             .title = title,
             .default_frame = geometry.RectF.init(x, y, width, height),
+            .title_bar_style = title_bar_style,
             .restore_state = jsonBoolField(payload, "restoreState") orelse true,
             .source = source,
         });
@@ -1353,6 +1355,12 @@ fn jsonIntegerField(payload: []const u8, field: []const u8) ?platform.WindowId {
 
 fn jsonBoolField(payload: []const u8, field: []const u8) ?bool {
     return json.boolField(payload, field);
+}
+
+fn parseWindowTitleBarStyle(value: []const u8) !platform.WindowTitleBarStyle {
+    if (std.mem.eql(u8, value, "standard")) return .standard;
+    if (std.mem.eql(u8, value, "overlay")) return .overlay;
+    return error.InvalidWindowOptions;
 }
 
 pub fn TestHarness() type {
@@ -2193,6 +2201,12 @@ test "runtime builtin JSON field reader only reads top-level fields" {
     try std.testing.expectEqualStrings("palette \"one\"", jsonStringField(payload, "label", &storage).?);
     try std.testing.expectEqual(@as(f32, 320), jsonNumberField(payload, "width").?);
     try std.testing.expectEqual(false, jsonBoolField(payload, "restoreState").?);
+}
+
+test "runtime parses window title bar style values" {
+    try std.testing.expectEqual(platform.WindowTitleBarStyle.standard, try parseWindowTitleBarStyle("standard"));
+    try std.testing.expectEqual(platform.WindowTitleBarStyle.overlay, try parseWindowTitleBarStyle("overlay"));
+    try std.testing.expectError(error.InvalidWindowOptions, parseWindowTitleBarStyle("hidden"));
 }
 
 test "runtime returns bridge permission errors through platform response service" {

@@ -39,6 +39,7 @@ export interface ZeroNativeCreateWindowOptions {
   height?: number;
   x?: number;
   y?: number;
+  titleBarStyle?: "standard" | "overlay";
   restoreState?: boolean;
   url?: string;
 }
