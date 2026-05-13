@@ -107,7 +107,7 @@ jobs:
       - name: Scaffold and test frontend templates
         run: |
           set -euo pipefail
-          for frontend in next vite react svelte vue; do
+          for frontend in next vite react svelte vue angular; do
             app=".zig-cache/scaffold-${frontend}"
             rm -rf "$app"
             ./zig-out/bin/zero-native init "$app" --frontend "$frontend"

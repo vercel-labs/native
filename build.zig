@@ -215,6 +215,7 @@ pub fn build(b: *std.Build) void {
     addExampleTestStep(b, frontend_examples_step, "test-example-react", "Run React example tests", "examples/react");
     addExampleTestStep(b, frontend_examples_step, "test-example-svelte", "Run Svelte example tests", "examples/svelte");
     addExampleTestStep(b, frontend_examples_step, "test-example-vue", "Run Vue example tests", "examples/vue");
+    addExampleTestStep(b, frontend_examples_step, "test-example-angular", "Run Angular example tests", "examples/angular");
 
     const mobile_examples_step = b.step("test-examples-mobile", "Verify mobile example project layouts");
     addLayoutCheckStep(b, mobile_examples_step, "test-example-ios-layout", "Verify iOS example layout", &.{

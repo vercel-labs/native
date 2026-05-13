@@ -11,6 +11,7 @@ out/
 dist/
 next-env.d.ts
 package-lock.json
+.angular/
 
 # Local iOS build products.
 Libraries/

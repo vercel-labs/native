@@ -22,7 +22,7 @@ The first run installs the generated frontend dependencies automatically.
 
 | Command | Description |
 |---------|-------------|
-| `zero-native init [name] --frontend <next\|vite\|react\|svelte\|vue>` | Scaffold a new zero-native project |
+| `zero-native init [name] --frontend <next\|vite\|react\|svelte\|vue\|angular>` | Scaffold a new zero-native project |
 | `zero-native dev --binary <path>` | Start the app with a managed frontend dev server |
 | `zero-native doctor` | Check host environment, WebView, manifest, and CEF |
 | `zero-native validate` | Validate `app.zon` against the manifest schema |

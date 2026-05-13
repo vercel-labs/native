@@ -107,6 +107,7 @@ Framework-specific starter examples live in `examples/`:
 - `examples/react`
 - `examples/svelte`
 - `examples/vue`
+- `examples/angular`
 
 Each example is a complete zero-native app with `app.zon`, a Zig shell, and a minimal frontend project. Run one with `zig build run` from its directory.
 

@@ -8,6 +8,7 @@ pub const Frontend = enum {
     react,
     svelte,
     vue,
+    angular,
 
     pub fn parse(value: []const u8) ?Frontend {
         if (std.mem.eql(u8, value, "next")) return .next;
@@ -15,13 +16,14 @@ pub const Frontend = enum {
         if (std.mem.eql(u8, value, "react")) return .react;
         if (std.mem.eql(u8, value, "svelte")) return .svelte;
         if (std.mem.eql(u8, value, "vue")) return .vue;
+        if (std.mem.eql(u8, value, "angular")) return .angular;
         return null;
     }
 
     pub fn distDir(self: Frontend) []const u8 {
         return switch (self) {
             .next => "frontend/out",
-            .vite, .react, .svelte, .vue => "frontend/dist",
+            .vite, .react, .svelte, .vue, .angular => "frontend/dist",
         };
     }
 
@@ -29,6 +31,7 @@ pub const Frontend = enum {
         return switch (self) {
             .next => "3000",
             .vite, .react, .svelte, .vue => "5173",
+            .angular => "4200",
         };
     }
 
@@ -36,6 +39,7 @@ pub const Frontend = enum {
         return switch (self) {
             .next => "http://127.0.0.1:3000/",
             .vite, .react, .svelte, .vue => "http://127.0.0.1:5173/",
+            .angular => "http://127.0.0.1:4200/",
         };
     }
 };
@@ -740,7 +744,7 @@ fn runnerZig() []const u8 {
     \\    bridge: ?zero_native.BridgeDispatcher = null,
     \\    builtin_bridge: zero_native.BridgePolicy = .{},
     \\    security: zero_native.SecurityPolicy = .{},
-        \\    js_window_api: bool = false,
+    \\    js_window_api: bool = false,
     \\
     \\    fn appInfo(self: RunOptions) zero_native.AppInfo {
     \\        return .{
@@ -793,7 +797,7 @@ fn runnerZig() []const u8 {
     \\        .bridge = options.bridge,
     \\        .builtin_bridge = options.builtin_bridge,
     \\        .security = options.security,
-        \\        .js_window_api = options.js_window_api,
+    \\        .js_window_api = options.js_window_api,
     \\        .automation = if (build_options.automation) zero_native.automation.Server.init(init.io, ".zig-cache/zero-native-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
     \\    });
@@ -828,7 +832,7 @@ fn runnerZig() []const u8 {
     \\        .bridge = options.bridge,
     \\        .builtin_bridge = options.builtin_bridge,
     \\        .security = options.security,
-        \\        .js_window_api = options.js_window_api,
+    \\        .js_window_api = options.js_window_api,
     \\        .automation = if (build_options.automation) zero_native.automation.Server.init(init.io, ".zig-cache/zero-native-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
     \\    });
@@ -863,7 +867,7 @@ fn runnerZig() []const u8 {
     \\        .bridge = options.bridge,
     \\        .builtin_bridge = options.builtin_bridge,
     \\        .security = options.security,
-        \\        .js_window_api = options.js_window_api,
+    \\        .js_window_api = options.js_window_api,
     \\        .automation = if (build_options.automation) zero_native.automation.Server.init(init.io, ".zig-cache/zero-native-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
     \\    });
@@ -898,7 +902,7 @@ fn runnerZig() []const u8 {
     \\        .bridge = options.bridge,
     \\        .builtin_bridge = options.builtin_bridge,
     \\        .security = options.security,
-        \\        .js_window_api = options.js_window_api,
+    \\        .js_window_api = options.js_window_api,
     \\        .automation = if (build_options.automation) zero_native.automation.Server.init(init.io, ".zig-cache/zero-native-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
     \\    });
@@ -1026,7 +1030,317 @@ fn writeFrontendFiles(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.
         .react => try writeReactFrontend(allocator, io, app_dir, names),
         .svelte => try writeSvelteFrontend(allocator, io, app_dir, names),
         .vue => try writeVueFrontend(allocator, io, app_dir, names),
+        .angular => try writeAngularFrontend(allocator, io, app_dir, names),
     }
+}
+
+fn angularProjectKey(allocator: std.mem.Allocator, package_name: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    if (package_name.len > 0 and !isAsciiAlpha(package_name[0])) {
+        try out.appendSlice(allocator, "app_");
+    }
+    for (package_name) |ch| {
+        const normalized = if (isAsciiAlpha(ch) or isAsciiDigit(ch)) ch else '_';
+        if (normalized == '_' and (out.items.len == 0 or out.items[out.items.len - 1] == '_')) continue;
+        try out.append(allocator, normalized);
+    }
+    while (out.items.len > 0 and out.items[out.items.len - 1] == '_') _ = out.pop();
+    if (out.items.len == 0) try out.appendSlice(allocator, "app");
+    return out.toOwnedSlice(allocator);
+}
+
+fn writeAngularFrontend(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames) !void {
+    try app_dir.createDirPath(io, "frontend/src/app/home");
+    const project_key = try angularProjectKey(allocator, names.package_name);
+    defer allocator.free(project_key);
+
+    const angular_json = try angularAngularJson(allocator, project_key);
+    defer allocator.free(angular_json);
+
+    const package_json = try angularPackageJson(allocator, names);
+    defer allocator.free(package_json);
+
+    const index_html = try angularIndexHtml(allocator, names.display_name);
+    defer allocator.free(index_html);
+
+    const home_html = try angularHomeHtml(allocator, names.display_name);
+    defer allocator.free(home_html);
+
+    try writeFile(app_dir, io, "frontend/angular.json", angular_json);
+    try writeFile(app_dir, io, "frontend/package.json", package_json);
+    try writeFile(app_dir, io, "frontend/tsconfig.json", angularTsConfigJson());
+    try writeFile(app_dir, io, "frontend/tsconfig.app.json", angularTsConfigAppJson());
+    try writeFile(app_dir, io, "frontend/src/main.ts", angularMainTs());
+    try writeFile(app_dir, io, "frontend/src/index.html", index_html);
+    try writeFile(app_dir, io, "frontend/src/styles.css", frontendStylesCss());
+    try writeFile(app_dir, io, "frontend/src/app/app.config.ts", angularAppConfigTs());
+    try writeFile(app_dir, io, "frontend/src/app/app.routes.ts", angularAppRoutesTs());
+    try writeFile(app_dir, io, "frontend/src/app/app.ts", angularAppTs());
+    try writeFile(app_dir, io, "frontend/src/app/home/home.ts", angularHomeTs());
+    try writeFile(app_dir, io, "frontend/src/app/home/home.html", home_html);
+    try writeFile(app_dir, io, "frontend/src/app/home/home.css", "");
+}
+
+fn angularAngularJson(allocator: std.mem.Allocator, project_key: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator,
+        \\{{
+        \\  "$schema": "./node_modules/@angular/cli/lib/config/schema.json",
+        \\  "version": 1,
+        \\  "newProjectRoot": "projects",
+        \\  "projects": {{
+        \\    "{s}": {{
+        \\      "projectType": "application",
+        \\      "root": "",
+        \\      "sourceRoot": "src",
+        \\      "prefix": "app",
+        \\      "architect": {{
+        \\        "build": {{
+        \\          "builder": "@angular/build:application",
+        \\          "options": {{
+        \\            "outputPath": {{ "base": "dist", "browser": "" }},
+        \\            "browser": "src/main.ts",
+        \\            "tsConfig": "tsconfig.app.json",
+        \\            "styles": ["src/styles.css"]
+        \\          }},
+        \\          "configurations": {{
+        \\            "production": {{
+        \\              "budgets": [
+        \\                {{ "type": "initial", "maximumWarning": "500kB", "maximumError": "1MB" }},
+        \\                {{ "type": "anyComponentStyle", "maximumWarning": "4kB", "maximumError": "8kB" }}
+        \\              ],
+        \\              "outputHashing": "all"
+        \\            }},
+        \\            "development": {{
+        \\              "optimization": false,
+        \\              "extractLicenses": false,
+        \\              "sourceMap": true
+        \\            }}
+        \\          }},
+        \\          "defaultConfiguration": "production"
+        \\        }},
+        \\        "serve": {{
+        \\          "builder": "@angular/build:dev-server",
+        \\          "options": {{ "host": "127.0.0.1" }},
+        \\          "configurations": {{
+        \\            "production": {{ "buildTarget": "{s}:build:production" }},
+        \\            "development": {{ "buildTarget": "{s}:build:development" }}
+        \\          }},
+        \\          "defaultConfiguration": "development"
+        \\        }}
+        \\      }}
+        \\    }}
+        \\  }}
+        \\}}
+        \\
+    , .{ project_key, project_key, project_key });
+}
+
+fn angularPackageJson(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "{\n  \"name\": ");
+    try appendJsonString(&out, allocator, names.package_name);
+    try out.appendSlice(allocator,
+        \\,
+        \\  "version": "0.1.0",
+        \\  "private": true,
+        \\  "scripts": {
+        \\    "dev": "ng serve",
+        \\    "build": "ng build"
+        \\  },
+        \\  "dependencies": {
+        \\    "@angular/common": "^20.3.0",
+        \\    "@angular/compiler": "^20.3.0",
+        \\    "@angular/core": "^20.3.0",
+        \\    "@angular/forms": "^20.3.0",
+        \\    "@angular/platform-browser": "^20.3.0",
+        \\    "@angular/router": "^20.3.0",
+        \\    "rxjs": "~7.8.0",
+        \\    "tslib": "^2.3.0"
+        \\  },
+        \\  "devDependencies": {
+        \\    "@angular/build": "^20.3.26",
+        \\    "@angular/cli": "^20.3.26",
+        \\    "@angular/compiler-cli": "^20.3.0",
+        \\    "typescript": "~5.9.2"
+        \\  }
+        \\}
+        \\
+    );
+    return out.toOwnedSlice(allocator);
+}
+
+fn angularTsConfigJson() []const u8 {
+    return
+    \\{
+    \\  "compileOnSave": false,
+    \\  "compilerOptions": {
+    \\    "strict": true,
+    \\    "noImplicitOverride": true,
+    \\    "noPropertyAccessFromIndexSignature": true,
+    \\    "noImplicitReturns": true,
+    \\    "noFallthroughCasesInSwitch": true,
+    \\    "skipLibCheck": true,
+    \\    "isolatedModules": true,
+    \\    "experimentalDecorators": true,
+    \\    "importHelpers": true,
+    \\    "target": "ES2022",
+    \\    "module": "preserve"
+    \\  },
+    \\  "angularCompilerOptions": {
+    \\    "enableI18nLegacyMessageIdFormat": false,
+    \\    "strictInjectionParameters": true,
+    \\    "strictInputAccessModifiers": true,
+    \\    "typeCheckHostBindings": true,
+    \\    "strictTemplates": true
+    \\  },
+    \\  "files": [],
+    \\  "references": [{ "path": "./tsconfig.app.json" }]
+    \\}
+    \\
+    ;
+}
+
+fn angularTsConfigAppJson() []const u8 {
+    return
+    \\{
+    \\  "extends": "./tsconfig.json",
+    \\  "compilerOptions": {
+    \\    "outDir": "./out-tsc/app",
+    \\    "types": []
+    \\  },
+    \\  "include": ["src/**/*.ts"],
+    \\  "exclude": ["src/**/*.spec.ts"]
+    \\}
+    \\
+    ;
+}
+
+fn angularMainTs() []const u8 {
+    return
+    \\import { bootstrapApplication } from '@angular/platform-browser';
+    \\import { appConfig } from './app/app.config';
+    \\import { App } from './app/app';
+    \\
+    \\bootstrapApplication(App, appConfig).catch((err) => console.error(err));
+    \\
+    ;
+}
+
+fn angularAppConfigTs() []const u8 {
+    return
+    \\import {
+    \\  ApplicationConfig,
+    \\  provideBrowserGlobalErrorListeners,
+    \\  provideZonelessChangeDetection,
+    \\} from '@angular/core';
+    \\import { provideRouter } from '@angular/router';
+    \\
+    \\import { routes } from './app.routes';
+    \\
+    \\export const appConfig: ApplicationConfig = {
+    \\  providers: [
+    \\    provideBrowserGlobalErrorListeners(),
+    \\    provideZonelessChangeDetection(),
+    \\    provideRouter(routes),
+    \\  ],
+    \\};
+    \\
+    ;
+}
+
+fn angularAppRoutesTs() []const u8 {
+    return
+    \\import { Routes } from '@angular/router';
+    \\
+    \\import { Home } from './home/home';
+    \\
+    \\export const routes: Routes = [
+    \\  { path: '', pathMatch: 'full', component: Home },
+    \\];
+    \\
+    ;
+}
+
+fn angularAppTs() []const u8 {
+    return
+    \\import { ChangeDetectionStrategy, Component } from '@angular/core';
+    \\import { RouterOutlet } from '@angular/router';
+    \\
+    \\@Component({
+    \\  selector: 'app-root',
+    \\  changeDetection: ChangeDetectionStrategy.OnPush,
+    \\  imports: [RouterOutlet],
+    \\  template: '<router-outlet />',
+    \\})
+    \\export class App {}
+    \\
+    ;
+}
+
+fn angularHomeTs() []const u8 {
+    return
+    \\import { ChangeDetectionStrategy, Component, signal } from '@angular/core';
+    \\
+    \\@Component({
+    \\  selector: 'app-home',
+    \\  changeDetection: ChangeDetectionStrategy.OnPush,
+    \\  templateUrl: './home.html',
+    \\  styleUrl: './home.css',
+    \\})
+    \\export class Home {
+    \\  protected readonly bridge = signal('zero' in globalThis ? 'available' : 'not enabled');
+    \\}
+    \\
+    ;
+}
+
+fn angularIndexHtml(allocator: std.mem.Allocator, display_name: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator,
+        \\<!doctype html>
+        \\<html lang="en">
+        \\<head>
+        \\  <meta charset="utf-8">
+        \\  <title>
+    );
+    try appendXmlText(&out, allocator, display_name);
+    try out.appendSlice(allocator,
+        \\</title>
+        \\  <base href="/">
+        \\  <meta name="viewport" content="width=device-width, initial-scale=1">
+        \\</head>
+        \\<body>
+        \\  <app-root></app-root>
+        \\</body>
+        \\</html>
+        \\
+    );
+    return out.toOwnedSlice(allocator);
+}
+
+fn angularHomeHtml(allocator: std.mem.Allocator, display_name: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator,
+        \\<main>
+        \\  <p class="eyebrow">zero-native + Angular</p>
+        \\  <h1>
+    );
+    try appendXmlText(&out, allocator, display_name);
+    try out.appendSlice(allocator,
+        \\</h1>
+        \\  <p class="lede">An Angular frontend running inside the system WebView.</p>
+        \\  <div class="card">
+        \\    <span>Native bridge</span>
+        \\    <strong role="status" aria-live="polite">{{ bridge() }}</strong>
+        \\  </div>
+        \\</main>
+        \\
+    );
+    return out.toOwnedSlice(allocator);
 }
 
 fn writeNextFrontend(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames) !void {
@@ -1873,6 +2187,45 @@ test "writeDefaultApp emits frontend-specific Next paths" {
     try std.testing.expect(std.mem.indexOf(u8, tsconfig_text, "\"@/*\": [\"./app/*\"]") != null);
 }
 
+test "writeDefaultApp emits frontend-specific Angular paths" {
+    const destination = ".zig-cache/test-angular-init-template";
+    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "Angular App", .framework_path = ".", .frontend = .angular });
+
+    const app_zon_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.zon");
+    defer std.testing.allocator.free(app_zon_text);
+    const angular_json_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "frontend/angular.json");
+    defer std.testing.allocator.free(angular_json_text);
+    const main_zig_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "src/main.zig");
+    defer std.testing.allocator.free(main_zig_text);
+    const package_json_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "frontend/package.json");
+    defer std.testing.allocator.free(package_json_text);
+    const app_ts_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "frontend/src/app/app.ts");
+    defer std.testing.allocator.free(app_ts_text);
+    const home_html_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "frontend/src/app/home/home.html");
+    defer std.testing.allocator.free(home_html_text);
+
+    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "frontend/dist") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "127.0.0.1:4200") != null);
+    try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "frontend/dist") != null);
+    try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "127.0.0.1:4200") != null);
+    try std.testing.expect(std.mem.indexOf(u8, angular_json_text, "\"base\": \"dist\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, angular_json_text, "\"browser\": \"\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, angular_json_text, "\"host\": \"127.0.0.1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, angular_json_text, "zone.js") == null);
+    try std.testing.expect(std.mem.indexOf(u8, app_ts_text, "ChangeDetectionStrategy.OnPush") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_ts_text, "standalone: true") == null);
+    try std.testing.expect(std.mem.indexOf(u8, home_html_text, "role=\"status\" aria-live=\"polite\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, package_json_text, "\"@angular/core\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, package_json_text, "\"zone.js\"") == null);
+}
+
+test "angularProjectKey emits Angular-safe target names" {
+    const key = try angularProjectKey(std.testing.allocator, "123 bad.name/@scope");
+    defer std.testing.allocator.free(key);
+
+    try std.testing.expectEqualStrings("app_123_bad_name_scope", key);
+}
+
 fn normalizePackageName(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -1980,6 +2333,19 @@ fn appendZigString(out: *std.ArrayList(u8), allocator: std.mem.Allocator, value:
 
 fn appendJsonString(out: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
     try appendEscapedString(out, allocator, value);
+}
+
+fn appendXmlText(out: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
+    for (value) |ch| {
+        switch (ch) {
+            '&' => try out.appendSlice(allocator, "&amp;"),
+            '<' => try out.appendSlice(allocator, "&lt;"),
+            '>' => try out.appendSlice(allocator, "&gt;"),
+            '"' => try out.appendSlice(allocator, "&quot;"),
+            '\'' => try out.appendSlice(allocator, "&#39;"),
+            else => try out.append(allocator, ch),
+        }
+    }
 }
 
 fn appendEscapedString(out: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {

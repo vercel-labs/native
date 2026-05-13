@@ -25,7 +25,7 @@ These references are included by `zero-native skills get core --full`. Use them 
 
 - Project creation, generated files, build steps: `references/project-anatomy.md`
 - `App`, `Runtime`, callbacks, embedding, tests: `references/app-model-runtime.md`
-- React/Vue/Svelte/Next/Vite, dev server, bundled assets: `references/frontend-assets.md`
+- React/Vue/Svelte/Angular/Next/Vite, dev server, bundled assets: `references/frontend-assets.md`
 - App-defined bridge commands, builtin commands, permissions, windows, WebViews, dialogs: `references/bridge-security-native-capabilities.md`
 - Web engine choice, CEF, packaging, signing, doctor, logs, debugging: `references/web-engines-packaging-debugging.md`
 - Running-app inspection and smoke tests: `zero-native skills get automation`
@@ -41,7 +41,7 @@ cd my_app
 zig build run
 ```
 
-Frontend choices are `next`, `vite`, `react`, `svelte`, and `vue`. The first `zig build run` installs frontend dependencies, builds the native shell, and opens a desktop window.
+Frontend choices are `next`, `vite`, `react`, `svelte`, `vue`, and `angular`. The first `zig build run` installs frontend dependencies, builds the native shell, and opens a desktop window.
 
 ## Workflow for existing apps
 
@@ -141,7 +141,7 @@ Use exact local origins for dev servers. Add `zero://inline` only for inline HTM
 
 ### Add a new framework app
 
-Use `zero-native init <path> --frontend <next|vite|react|svelte|vue>`. Then inspect the generated `app.zon`, `src/main.zig`, and `build.zig` before customizing. For framework behavior, keep frontend work in `frontend/` and use `sourceFromEnv` so development and packaged builds share one app shell.
+Use `zero-native init <path> --frontend <next|vite|react|svelte|vue|angular>`. Then inspect the generated `app.zon`, `src/main.zig`, and `build.zig` before customizing. For framework behavior, keep frontend work in `frontend/` and use `sourceFromEnv` so development and packaged builds share one app shell.
 
 ### Add a native bridge command
 
@@ -186,7 +186,7 @@ Or run the CLI directly after building the binary:
 zero-native dev --manifest app.zon --binary zig-out/bin/MyApp
 ```
 
-Vite usually uses `http://127.0.0.1:5173/`; Next.js usually uses `http://127.0.0.1:3000/`. The app WebView loads the dev URL directly, so framework HMR remains owned by Vite, Next.js, or the selected dev server.
+Vite usually uses `http://127.0.0.1:5173/`; Angular usually uses `http://127.0.0.1:4200/`; Next.js usually uses `http://127.0.0.1:3000/`. The app WebView loads the dev URL directly, so framework HMR remains owned by Vite, Next.js, Angular, or the selected dev server.
 
 ## Security defaults
 
@@ -232,6 +232,7 @@ When changing app behavior, add focused Zig tests when the code can run headless
 - `examples/browser`: layered WebView/browser-style example.
 - `examples/next`: Next.js with production assets.
 - `examples/react`, `examples/svelte`, `examples/vue`: Vite frontend apps.
+- `examples/angular`: Angular 20 SPA.
 - `examples/ios`, `examples/android`: mobile host embedding examples.
 
 ## When answering users

@@ -10,7 +10,7 @@ Use this when creating, orienting in, or restructuring a zero-native app.
 - `src/main.zig`: app state, `app()` method, source resolver, optional bridge dispatcher, lifecycle callbacks.
 - `src/runner.zig`: platform and runtime setup: native backend, trace sinks, panic capture, log paths, state store, security policy, builtin bridge policy, automation.
 - `assets/`: icons and other package resources.
-- `frontend/`: framework app when using Next, Vite, React, Svelte, or Vue.
+- `frontend/`: framework app when using Next, Vite, React, Svelte, Vue, or Angular.
 
 ## app.zon responsibilities
 
