@@ -720,14 +720,13 @@ static const char *ZeroNativeCefBridgeScript() {
 }
 
 - (void)emitResizeForWindowId:(uint64_t)windowId {
-    NSView *container = self.browserContainers[@(windowId)] ?: self.browserContainer;
     NSWindow *window = self.windows[@(windowId)] ?: self.window;
     CefRefPtr<CefBrowser> browser;
     if (self.browsers) {
         auto it = self.browsers->find(windowId);
         if (it != self.browsers->end()) browser = it->second;
     }
-    NSRect bounds = container.bounds;
+    NSRect bounds = window.contentView.bounds;
     if (browser) browser->GetHost()->WasResized();
     [self emitEvent:(zero_native_appkit_event_t){
         .kind = ZERO_NATIVE_APPKIT_EVENT_RESIZE,

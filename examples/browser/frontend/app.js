@@ -1,7 +1,9 @@
 var PAGE_WEBVIEW_LABEL = "page";
+var PAGE_WEBVIEW_LAYER = 0;
+var CHROME_WEBVIEW_LAYER = 10;
 
 var form = document.querySelector("#browser-form");
-var addressInput = document.querySelector("#address");
+var addressInput = document.querySelector("#url-input");
 var addressBar = document.querySelector("#address-bar");
 var addressIcon = document.querySelector("#address-icon");
 var suggestions = document.querySelector("#suggestions");
@@ -23,6 +25,7 @@ var navHistory = [];
 var historyIndex = -1;
 var visitedUrls = [];
 var resizeHandle = 0;
+var viewportPollHandle = 0;
 var isLoading = false;
 var statusTimer = null;
 var zoomLevel = 1.0;
@@ -31,6 +34,13 @@ var ZOOM_MIN = 0.25;
 var ZOOM_MAX = 5.0;
 var suggestActive = -1;
 var suggestFiltered = [];
+// The main WebView is later resized to chrome height, so keep the original
+// full-window viewport for positioning the child page WebView.
+var browserViewport = {
+  width: Math.max(1, Math.floor(window.innerWidth)),
+  height: Math.max(1, Math.floor(window.innerHeight)),
+};
+var nativeViewportInset = null;
 
 function setStatus(message, autohide) {
   clearTimeout(statusTimer);
@@ -73,31 +83,83 @@ function normalizeUrl(value) {
   return "https://" + trimmed;
 }
 
-function pageFrame() {
-  var rect = toolbar.getBoundingClientRect();
-  var top = Math.ceil(rect.height);
-  top = Math.min(top, Math.max(0, window.innerHeight - 1));
-  return {
-    x: 0,
-    y: top,
-    width: Math.max(1, Math.floor(window.innerWidth)),
-    height: Math.max(1, Math.floor(window.innerHeight - top)),
-  };
+function toolbarHeight() {
+  var toolbarRect = toolbar.getBoundingClientRect();
+  return Math.ceil(toolbarRect.height);
 }
 
-function chromeFrame() {
-  var toolbarRect = toolbar.getBoundingClientRect();
-  var height = Math.ceil(toolbarRect.height);
+function chromeHeight() {
+  var height = toolbarHeight();
   if (!suggestions.hidden) {
     var suggestionsRect = suggestions.getBoundingClientRect();
     height = Math.max(height, Math.ceil(suggestionsRect.bottom + 8));
   }
+  return height;
+}
+
+function pageFrame() {
+  var top = toolbarHeight();
+  top = Math.min(top, Math.max(0, browserViewport.height - 1));
+  return {
+    x: 0,
+    y: top,
+    width: browserViewport.width,
+    height: Math.max(1, Math.floor(browserViewport.height - top)),
+  };
+}
+
+function chromeFrame() {
+  var height = chromeHeight();
   return {
     x: 0,
     y: 0,
-    width: Math.max(1, Math.floor(window.innerWidth)),
-    height: Math.max(1, Math.min(height, window.innerHeight)),
+    width: browserViewport.width,
+    height: Math.max(1, Math.min(height, browserViewport.height)),
   };
+}
+
+function updateBrowserViewport(width, height) {
+  var nextWidth = Math.max(1, Math.floor(width));
+  var nextHeight = Math.max(1, Math.floor(height));
+  if (browserViewport.width === nextWidth && browserViewport.height === nextHeight) return false;
+  browserViewport = { width: nextWidth, height: nextHeight };
+  return true;
+}
+
+function mainWindowInfo(windows) {
+  if (!Array.isArray(windows)) return null;
+  for (var i = 0; i < windows.length; i++) {
+    if (windows[i] && (windows[i].id === 1 || windows[i].label === "main")) return windows[i];
+  }
+  return windows[0] || null;
+}
+
+async function syncBrowserViewport() {
+  try {
+    var info = mainWindowInfo(await window.zero.windows.list());
+    if (!info) return false;
+    var nativeWidth = Math.max(1, Math.floor(info.width));
+    var nativeHeight = Math.max(1, Math.floor(info.height));
+    if (!nativeViewportInset) {
+      nativeViewportInset = {
+        width: nativeWidth - browserViewport.width,
+        height: nativeHeight - browserViewport.height,
+      };
+    }
+    return updateBrowserViewport(
+      nativeWidth - nativeViewportInset.width,
+      nativeHeight - nativeViewportInset.height
+    );
+  } catch (error) {
+    console.error("Failed to sync browser viewport", error);
+    return false;
+  }
+}
+
+async function updateChromeOverlay() {
+  var frame = chromeFrame();
+  await window.zero.webviews.setFrame({ label: "main", frame: frame });
+  await window.zero.webviews.setLayer({ label: "main", layer: CHROME_WEBVIEW_LAYER });
 }
 
 function updateHistoryButtons() {
@@ -244,17 +306,20 @@ async function closePageWebView() {
 // ── Navigation ──
 
 async function ensurePageWebView(url) {
+  await syncBrowserViewport();
   var frame = pageFrame();
   if (!pageWebView) {
-    await window.zero.webviews.setFrame({ label: "main", frame: chromeFrame() });
+    await updateChromeOverlay();
     pageWebView = await window.zero.webviews.create({
       label: PAGE_WEBVIEW_LABEL,
       url: url,
       frame: frame,
-      layer: 0,
+      layer: PAGE_WEBVIEW_LAYER,
       transparent: false,
       bridge: false,
     });
+    await updateChromeOverlay();
+    startViewportPolling();
     emptyState.hidden = true;
   } else {
     await pageWebView.setFrame(frame);
@@ -286,25 +351,42 @@ async function navigateTo(url, options) {
   }
 }
 
-function scheduleResize() {
+function scheduleResize(syncNative) {
   if (resizeHandle) cancelAnimationFrame(resizeHandle);
   resizeHandle = requestAnimationFrame(async function () {
     resizeHandle = 0;
     if (!pageWebView) return;
     try {
-      await window.zero.webviews.setFrame({ label: "main", frame: chromeFrame() });
-      await pageWebView.setFrame(pageFrame());
+      if (syncNative !== false) await syncBrowserViewport();
+      await updateChromeOverlay();
+      var frame = pageFrame();
+      await pageWebView.setFrame(frame);
     } catch (error) {
       setStatus(error.message || "Failed to resize page WebView");
     }
   });
 }
 
+function startViewportPolling() {
+  if (viewportPollHandle) return;
+  viewportPollHandle = setInterval(async function () {
+    if (!pageWebView) return;
+    if (await syncBrowserViewport()) scheduleResize();
+  }, 250);
+}
+
+window.zero.on("resize", function (detail) {
+  if (!detail) return;
+  var changed = updateBrowserViewport(detail.width, detail.height);
+  if (changed) scheduleResize(false);
+});
+
 // ── Event listeners ──
 
 form.addEventListener("submit", function (event) {
   event.preventDefault();
   hideSuggestions();
+  addressInput.blur();
   navigateTo(addressInput.value);
 });
 

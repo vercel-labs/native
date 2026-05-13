@@ -227,6 +227,14 @@ pub const Runtime = struct {
                     self.windows[index].info.frame.height = surface_value.size.height;
                     self.windows[index].info.scale_factor = surface_value.scale_factor;
                 }
+                var detail_buffer: [160]u8 = undefined;
+                var detail_writer = std.Io.Writer.fixed(&detail_buffer);
+                try detail_writer.print("{{\"width\":{d},\"height\":{d},\"scale\":{d}}}", .{
+                    surface_value.size.width,
+                    surface_value.size.height,
+                    surface_value.scale_factor,
+                });
+                self.emitWindowEvent(surface_value.id, "resize", detail_writer.buffered()) catch |err| try self.log("window.resize.emit_failed", @errorName(err), &.{});
                 self.invalidateFor(.surface_resize, geometry.RectF.fromSize(surface_value.size));
                 const fields = [_]trace.Field{
                     trace.float("width", surface_value.size.width),

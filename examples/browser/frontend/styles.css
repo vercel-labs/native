@@ -57,7 +57,7 @@ body {
   font-size: 13px;
   line-height: 1;
   color: var(--text-primary);
-  background: var(--stage-bg);
+  background: transparent;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -166,7 +166,7 @@ button { cursor: pointer; border: 0; background: none; }
 .address-bar.secure .address-icon .icon-globe { display: none; }
 .address-bar.secure .address-icon .icon-lock { display: block; }
 
-#address {
+#url-input {
   flex: 1;
   min-width: 0;
   height: 100%;
@@ -181,11 +181,11 @@ button { cursor: pointer; border: 0; background: none; }
   text-overflow: ellipsis;
 }
 
-#address::placeholder {
+#url-input::placeholder {
   color: var(--text-tertiary);
 }
 
-#address::selection {
+#url-input::selection {
   background: rgba(59, 130, 246, 0.25);
 }
 
@@ -338,7 +338,7 @@ button { cursor: pointer; border: 0; background: none; }
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--stage-bg);
+  background: transparent;
 }
 
 .empty-state {

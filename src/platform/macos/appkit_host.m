@@ -286,6 +286,9 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     NSView *container = [[NSView alloc] initWithFrame:rect];
     container.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     WKWebView *webView = [[WKWebView alloc] initWithFrame:container.bounds configuration:configuration];
+    webView.wantsLayer = YES;
+    webView.layer.backgroundColor = NSColor.clearColor.CGColor;
+    [webView setValue:@NO forKey:@"drawsBackground"];
     if ([webView respondsToSelector:NSSelectorFromString(@"setInspectable:")]) {
         [webView setValue:@YES forKey:@"inspectable"];
     }
@@ -754,9 +757,8 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
 }
 
 - (void)emitResizeForWindowId:(uint64_t)windowId {
-    WKWebView *webView = [self webViewForWindowId:windowId];
     NSWindow *window = self.windows[@(windowId)] ?: self.window;
-    NSRect bounds = webView.bounds;
+    NSRect bounds = window.contentView.bounds;
     [self emitEvent:(zero_native_appkit_event_t){
         .kind = ZERO_NATIVE_APPKIT_EVENT_RESIZE,
         .window_id = windowId,
