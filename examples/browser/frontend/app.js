@@ -10,7 +10,6 @@ var suggestions = document.querySelector("#suggestions");
 var backButton = document.querySelector("#back");
 var forwardButton = document.querySelector("#forward");
 var reloadButton = document.querySelector("#reload");
-var statusBar = document.querySelector("#status");
 var statusText = document.querySelector("#status-text");
 var emptyState = document.querySelector("#empty-state");
 var errorState = document.querySelector("#error-state");
@@ -45,10 +44,9 @@ var nativeViewportInset = null;
 function setStatus(message, autohide) {
   clearTimeout(statusTimer);
   statusText.textContent = message;
-  statusBar.classList.remove("hidden");
   if (autohide) {
     statusTimer = setTimeout(function () {
-      statusBar.classList.add("hidden");
+      statusText.textContent = "";
     }, autohide);
   }
 }
