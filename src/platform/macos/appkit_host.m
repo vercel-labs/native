@@ -8,6 +8,20 @@
 
 @class ZeroNativeAppKitHost;
 
+// Private WebKit SPI used to lift WKWebView's 60fps requestAnimationFrame cap on
+// macOS 13–15 (no-op on macOS 26+, where the cap was removed). Same mechanism
+// Safari uses internally; safe behind respondsToSelector checks.
+@interface WKPreferences (ZeroNativeHighRefresh)
++ (NSArray *)_features;
++ (NSArray *)_experimentalFeatures;
++ (NSArray *)_internalDebugFeatures;
+- (void)_setEnabled:(BOOL)enabled forFeature:(id)feature;
+- (void)_setEnabled:(BOOL)enabled forExperimentalFeature:(id)feature;
+- (void)_setEnabled:(BOOL)enabled forInternalDebugFeature:(id)feature;
+@end
+
+static void ZeroNativeUnlockHighRefresh(WKPreferences *preferences);
+
 static NSRect constrainFrame(NSRect frame);
 static NSString *ZeroNativeAppKitBridgeScript(void);
 static NSString *ZeroNativeMimeTypeForPath(NSString *path);
@@ -267,6 +281,7 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     if ([configuration.preferences respondsToSelector:NSSelectorFromString(@"setDeveloperExtrasEnabled:")]) {
         [configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
     }
+    ZeroNativeUnlockHighRefresh(configuration.preferences);
     WKWebView *webView = [[WKWebView alloc] initWithFrame:rect configuration:configuration];
     if ([webView respondsToSelector:NSSelectorFromString(@"setInspectable:")]) {
         [webView setValue:@YES forKey:@"inspectable"];
@@ -327,6 +342,61 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 
 - (ZeroNativeAssetSchemeHandler *)assetHandlerForWindowId:(uint64_t)windowId {
     return self.assetSchemeHandlers[@(windowId)] ?: self.assetSchemeHandler;
+}
+
+// High-refresh support is opt-in (it relies on private WebKit SPI, which is not
+// App-Store-safe). Consumers enable it by compiling appkit_host.m with
+// -DZERO_NATIVE_MACOS_HIGH_REFRESH=1. When the macro is undefined the helper
+// below compiles to a no-op and the SPI is never touched.
+#if defined(ZERO_NATIVE_MACOS_HIGH_REFRESH) && ZERO_NATIVE_MACOS_HIGH_REFRESH
+
+// Disable the named WebKit feature in `features` (if present) via `setter`.
+static void ZeroNativeDisableFeature(NSArray *features, NSString *name,
+                                     WKPreferences *prefs, SEL setter) {
+    if (!features || ![prefs respondsToSelector:setter]) return;
+    for (id feature in features) {
+        NSString *key = nil;
+        @try { key = [feature valueForKey:@"key"]; }
+        @catch (__unused NSException *e) { continue; }
+        if (![key isEqualToString:name]) continue;
+        NSMethodSignature *sig = [prefs methodSignatureForSelector:setter];
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+        inv.target = prefs;
+        inv.selector = setter;
+        BOOL enabled = NO;
+        [inv setArgument:&enabled atIndex:2];
+        [inv setArgument:&feature atIndex:3];
+        [inv invoke];
+        return;
+    }
+}
+
+#endif
+
+// WKWebView caps requestAnimationFrame at 60fps on macOS via the internal
+// "PreferPageRenderingUpdatesNear60FPSEnabled" WebKit feature, regardless of the
+// display's refresh rate. When opted in, disable it so rAF runs at the native
+// rate (e.g. 120Hz ProMotion), using WebKit's private feature-flags SPI (class
+// methods on WKPreferences). Fully guarded, so it no-ops if the SPI changes.
+static void ZeroNativeUnlockHighRefresh(WKPreferences *preferences) {
+#if defined(ZERO_NATIVE_MACOS_HIGH_REFRESH) && ZERO_NATIVE_MACOS_HIGH_REFRESH
+    if (!preferences) return;
+    static NSString *const kFeature = @"PreferPageRenderingUpdatesNear60FPSEnabled";
+    if ([WKPreferences respondsToSelector:@selector(_features)]) {
+        ZeroNativeDisableFeature([WKPreferences _features], kFeature, preferences,
+                                 @selector(_setEnabled:forFeature:));
+    }
+    if ([WKPreferences respondsToSelector:@selector(_experimentalFeatures)]) {
+        ZeroNativeDisableFeature([WKPreferences _experimentalFeatures], kFeature, preferences,
+                                 @selector(_setEnabled:forExperimentalFeature:));
+    }
+    if ([WKPreferences respondsToSelector:@selector(_internalDebugFeatures)]) {
+        ZeroNativeDisableFeature([WKPreferences _internalDebugFeatures], kFeature, preferences,
+                                 @selector(_setEnabled:forInternalDebugFeature:));
+    }
+#else
+    (void)preferences;
+#endif
 }
 
 static NSRect constrainFrame(NSRect frame) {
