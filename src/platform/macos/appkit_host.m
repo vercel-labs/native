@@ -49,7 +49,7 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 - (void)configureWithRootPath:(NSString *)rootPath entryPath:(NSString *)entryPath spaFallback:(BOOL)spaFallback;
 @end
 
-@interface ZeroNativeAppKitHost : NSObject <WKNavigationDelegate>
+@interface ZeroNativeAppKitHost : NSObject <WKNavigationDelegate, WKUIDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) WKWebView *webView;
 @property(nonatomic, strong) ZeroNativeWindowDelegate *delegate;
@@ -287,6 +287,7 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
         [webView setValue:@YES forKey:@"inspectable"];
     }
     webView.navigationDelegate = self;
+    webView.UIDelegate = self;
     webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     window.contentView = webView;
 
@@ -757,6 +758,28 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
         return;
     }
     decisionHandler(WKNavigationActionPolicyAllow);
+}
+
+// WKUIDelegate: back HTML <input type="file"> with a native NSOpenPanel.
+// Without this, file inputs silently do nothing inside a WKWebView.
+- (void)webView:(WKWebView *)webView
+    runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
+              initiatedByFrame:(WKFrameInfo *)frame
+             completionHandler:(void (^)(NSArray<NSURL *> *URLs))completionHandler {
+    (void)frame;
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = parameters.allowsMultipleSelection;
+    void (^complete)(NSModalResponse) = ^(NSModalResponse result) {
+        completionHandler(result == NSModalResponseOK ? panel.URLs : nil);
+    };
+    NSWindow *host = webView.window;
+    if (host) {
+        [panel beginSheetModalForWindow:host completionHandler:complete];
+    } else {
+        complete([panel runModal]);
+    }
 }
 
 - (NSString *)bridgeOriginForMessage:(WKScriptMessage *)message {
