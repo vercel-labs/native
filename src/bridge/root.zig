@@ -3,10 +3,27 @@ const json = @import("json");
 const security = @import("../security/root.zig");
 
 pub const max_message_bytes: usize = 1024 * 1024;
-pub const max_response_bytes: usize = 1024 * 1024;
-pub const max_result_bytes: usize = 1024 * 1024;
+// Responses/results may carry base64-encoded HTTP bodies (e.g. images) from the
+// native net.fetch bridge, so these are sized generously (48 MB). Buffers of this
+// size must never live on the stack — see the shared static buffers below.
+pub const max_response_bytes: usize = 48 * 1024 * 1024;
+pub const max_result_bytes: usize = 48 * 1024 * 1024;
 pub const max_id_bytes: usize = 64;
 pub const max_command_bytes: usize = 128;
+
+// Bridge dispatch runs on the single main event-loop thread, so these large
+// buffers are shared statics rather than per-call stack arrays (a 48 MB stack
+// allocation would overflow the thread stack).
+var shared_response_buffer: [max_response_bytes]u8 = undefined;
+var shared_result_buffer: [max_result_bytes]u8 = undefined;
+
+pub fn sharedResponseBuffer() []u8 {
+    return &shared_response_buffer;
+}
+
+pub fn sharedResultBuffer() []u8 {
+    return &shared_result_buffer;
+}
 
 const null_json = "null";
 
@@ -95,13 +112,11 @@ pub const AsyncResponder = struct {
     }
 
     pub fn success(self: AsyncResponder, id: []const u8, result: []const u8) anyerror!void {
-        var buffer: [max_response_bytes]u8 = undefined;
-        try self.respond(writeSuccessResponse(&buffer, id, result));
+        try self.respond(writeSuccessResponse(sharedResponseBuffer(), id, result));
     }
 
     pub fn fail(self: AsyncResponder, id: []const u8, code: ErrorCode, message: []const u8) anyerror!void {
-        var buffer: [max_response_bytes]u8 = undefined;
-        try self.respond(writeErrorResponse(&buffer, id, code, message));
+        try self.respond(writeErrorResponse(sharedResponseBuffer(), id, code, message));
     }
 };
 
@@ -155,8 +170,7 @@ pub const Dispatcher = struct {
             return writeErrorResponse(output, request.id, .unknown_command, "Bridge command is not registered");
         };
 
-        var result_buffer: [max_result_bytes]u8 = undefined;
-        const result = handler.invoke_fn(handler.context, .{ .request = request, .source = source }, &result_buffer) catch |err| {
+        const result = handler.invoke_fn(handler.context, .{ .request = request, .source = source }, sharedResultBuffer()) catch |err| {
             return writeErrorResponse(output, request.id, .handler_failed, @errorName(err));
         };
         return writeSuccessResponse(output, request.id, if (result.len == 0) null_json else result);

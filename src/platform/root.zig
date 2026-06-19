@@ -285,6 +285,7 @@ pub const PlatformServices = struct {
     show_open_dialog_fn: ?*const fn (context: ?*anyopaque, options: OpenDialogOptions, buffer: []u8) anyerror!OpenDialogResult = null,
     show_save_dialog_fn: ?*const fn (context: ?*anyopaque, options: SaveDialogOptions, buffer: []u8) anyerror!?[]const u8 = null,
     show_message_dialog_fn: ?*const fn (context: ?*anyopaque, options: MessageDialogOptions) anyerror!MessageDialogResult = null,
+    http_fetch_fn: ?*const fn (context: ?*anyopaque, url: []const u8, buffer: []u8) anyerror![]const u8 = null,
     create_tray_fn: ?*const fn (context: ?*anyopaque, options: TrayOptions) anyerror!void = null,
     update_tray_menu_fn: ?*const fn (context: ?*anyopaque, items: []const TrayMenuItem) anyerror!void = null,
     remove_tray_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
@@ -353,6 +354,11 @@ pub const PlatformServices = struct {
     pub fn showMessageDialog(self: PlatformServices, options: MessageDialogOptions) anyerror!MessageDialogResult {
         const msg_fn = self.show_message_dialog_fn orelse return error.UnsupportedService;
         return msg_fn(self.context, options);
+    }
+
+    pub fn httpFetch(self: PlatformServices, url: []const u8, buffer: []u8) anyerror![]const u8 {
+        const fetch_fn = self.http_fetch_fn orelse return error.UnsupportedService;
+        return fetch_fn(self.context, url, buffer);
     }
 
     pub fn createTray(self: PlatformServices, options: TrayOptions) anyerror!void {

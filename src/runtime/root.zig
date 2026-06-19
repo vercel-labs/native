@@ -386,12 +386,12 @@ pub const Runtime = struct {
         if (try self.handleBuiltinBridgeMessage(message)) return;
         var dispatcher = self.options.bridge orelse bridge.Dispatcher{};
         if (self.options.security.permissions.len > 0) dispatcher.policy.permissions = self.options.security.permissions;
-        var response_buffer: [bridge.max_response_bytes]u8 = undefined;
+        const response_buffer = bridge.sharedResponseBuffer();
         if (try self.handleAsyncBridgeMessage(dispatcher, message)) {
             self.invalidateFor(.command, null);
             return;
         }
-        const response = dispatcher.dispatch(message.bytes, .{ .origin = message.origin, .window_id = message.window_id }, &response_buffer);
+        const response = dispatcher.dispatch(message.bytes, .{ .origin = message.origin, .window_id = message.window_id }, response_buffer);
         try self.completeBridgeResponse(message.window_id, response);
         self.invalidateFor(.command, null);
         try self.log("bridge.dispatch", "bridge request handled", &.{
@@ -404,8 +404,8 @@ pub const Runtime = struct {
         const request = bridge.parseRequest(message.bytes) catch return false;
         const handler = dispatcher.async_registry.find(request.command) orelse return false;
         if (!dispatcher.policy.allows(request.command, message.origin)) {
-            var response_buffer: [bridge.max_response_bytes]u8 = undefined;
-            const response = bridge.writeErrorResponse(&response_buffer, request.id, .permission_denied, "Bridge command is not permitted");
+            const response_buffer = bridge.sharedResponseBuffer();
+            const response = bridge.writeErrorResponse(response_buffer, request.id, .permission_denied, "Bridge command is not permitted");
             try self.completeBridgeResponse(message.window_id, response);
             return true;
         }
@@ -536,21 +536,24 @@ pub const Runtime = struct {
         const request = bridge.parseRequest(message.bytes) catch return false;
         const is_window = std.mem.startsWith(u8, request.command, "zero-native.window.");
         const is_dialog = std.mem.startsWith(u8, request.command, "zero-native.dialog.");
-        if (!is_window and !is_dialog) return false;
+        const is_net = std.mem.startsWith(u8, request.command, "zero-native.net.");
+        if (!is_window and !is_dialog and !is_net) return false;
 
-        var response_buffer: [bridge.max_response_bytes]u8 = undefined;
-        var result_buffer: [bridge.max_result_bytes]u8 = undefined;
+        const response_buffer = bridge.sharedResponseBuffer();
+        const result_buffer = bridge.sharedResultBuffer();
         if (!self.allowsBuiltinBridgeCommand(request.command, message.origin, is_window)) {
-            const message_text = if (is_window) "Window API is not permitted" else "Dialog API is not permitted";
-            const result = bridge.writeErrorResponse(&response_buffer, request.id, .permission_denied, message_text);
+            const message_text = if (is_window) "Window API is not permitted" else if (is_net) "Net API is not permitted" else "Dialog API is not permitted";
+            const result = bridge.writeErrorResponse(response_buffer, request.id, .permission_denied, message_text);
             try self.completeBridgeResponse(message.window_id, result);
             self.invalidateFor(.command, null);
             return true;
         }
         const result = if (is_window)
-            self.dispatchWindowBridgeCommand(request, &result_buffer, &response_buffer)
+            self.dispatchWindowBridgeCommand(request, result_buffer, response_buffer)
+        else if (is_net)
+            self.dispatchNetBridgeCommand(request, result_buffer, response_buffer)
         else
-            self.dispatchDialogBridgeCommand(request, &result_buffer, &response_buffer);
+            self.dispatchDialogBridgeCommand(request, result_buffer, response_buffer);
 
         try self.completeBridgeResponse(message.window_id, result);
         self.invalidateFor(.command, null);
@@ -598,6 +601,24 @@ pub const Runtime = struct {
         else
             return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown dialog command");
         return bridge.writeSuccessResponse(response_buffer, request.id, result);
+    }
+
+    fn dispatchNetBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+        const result = if (std.mem.eql(u8, request.command, "zero-native.net.fetch"))
+            self.netFetchFromJson(request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
+        else
+            return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown net command");
+        return bridge.writeSuccessResponse(response_buffer, request.id, result);
+    }
+
+    fn netFetchFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
+        var storage_buffer: [platform.max_dialog_path_bytes]u8 = undefined;
+        var storage = json.StringStorage.init(&storage_buffer);
+        const url = jsonStringField(payload, "url", &storage) orelse "";
+        if (url.len == 0) return error.InvalidArgument;
+        // The native fetch writes a complete JSON object describing the response
+        // (status/contentType/finalUrl/base64) straight into `output`.
+        return try self.options.platform.services.httpFetch(url, output);
     }
 
     fn openFileDialogFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
@@ -834,6 +855,7 @@ fn builtinBridgeErrorMessage(err: anyerror) []const u8 {
         error.InvalidWindowOptions => "Window options are invalid",
         error.DuplicateWindowId => "Window id already exists",
         error.NoSpaceLeft => "Native response buffer is too small",
+        error.InvalidArgument => "A required argument is missing or invalid",
         else => "Native command failed",
     };
 }

@@ -459,7 +459,10 @@ static NSString *ZeroNativeAppKitBridgeScript(void) {
         "saveFile:function(options){return invoke('zero-native.dialog.saveFile',options||{});},"
         "showMessage:function(options){return invoke('zero-native.dialog.showMessage',options||{});}"
         "});"
-        "Object.defineProperty(window,'zero',{value:Object.freeze({invoke:invoke,on:on,off:off,windows:windows,dialogs:dialogs,_complete:complete,_emit:emit}),configurable:false});"
+        "var net=Object.freeze({"
+        "fetch:function(options){return invoke('zero-native.net.fetch',options||{});}"
+        "});"
+        "Object.defineProperty(window,'zero',{value:Object.freeze({invoke:invoke,on:on,off:off,windows:windows,dialogs:dialogs,net:net,_complete:complete,_emit:emit}),configurable:false});"
         "})();";
 }
 
@@ -1023,6 +1026,104 @@ void zero_native_appkit_clipboard_write(zero_native_appkit_host_t *host, const c
     NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
     [pasteboard clearContents];
     [pasteboard setString:value forType:NSPasteboardTypeString];
+}
+
+static NSString *ZeroNativeJsonEscape(NSString *value) {
+    if (!value) return @"";
+    NSMutableString *escaped = [NSMutableString stringWithCapacity:value.length + 2];
+    NSUInteger length = value.length;
+    for (NSUInteger i = 0; i < length; i++) {
+        unichar c = [value characterAtIndex:i];
+        switch (c) {
+            case '"': [escaped appendString:@"\\\""]; break;
+            case '\\': [escaped appendString:@"\\\\"]; break;
+            case '\n': [escaped appendString:@"\\n"]; break;
+            case '\r': [escaped appendString:@"\\r"]; break;
+            case '\t': [escaped appendString:@"\\t"]; break;
+            default:
+                if (c < 0x20) {
+                    [escaped appendFormat:@"\\u%04x", c];
+                } else {
+                    [escaped appendFormat:@"%C", c];
+                }
+                break;
+        }
+    }
+    return escaped;
+}
+
+zero_native_appkit_http_fetch_result_t zero_native_appkit_http_fetch(zero_native_appkit_host_t *host, const char *url, size_t url_len, char *buffer, size_t buffer_len) {
+    (void)host;
+    zero_native_appkit_http_fetch_result_t result = { .status = 0, .bytes_written = 0 };
+    @autoreleasepool {
+        NSString *requested = (url && url_len > 0)
+            ? [[NSString alloc] initWithBytes:url length:url_len encoding:NSUTF8StringEncoding]
+            : @"";
+        NSURL *target = requested.length > 0 ? [NSURL URLWithString:requested] : nil;
+
+        __block NSInteger httpStatus = 0;
+        __block NSString *contentType = @"";
+        __block NSString *finalUrl = requested ?: @"";
+        __block NSString *base64Body = @"";
+
+        if (target) {
+            NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:target];
+            request.HTTPMethod = @"GET";
+            request.timeoutInterval = 12.0;
+            request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+            [request setValue:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
+          forHTTPHeaderField:@"User-Agent"];
+
+            dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+            NSURLSession *session = [NSURLSession sharedSession];
+            // NSURLSession dispatches its completion handler on a background
+            // delegate queue, so blocking the caller with a semaphore here will
+            // not deadlock even when invoked from the main thread.
+            NSURLSessionDataTask *task = [session dataTaskWithRequest:request
+                                               completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+                if (error == nil && response) {
+                    if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                        httpStatus = ((NSHTTPURLResponse *)response).statusCode;
+                    }
+                    if (response.MIMEType) contentType = response.MIMEType;
+                    if (response.URL && response.URL.absoluteString) finalUrl = response.URL.absoluteString;
+                    if (data) base64Body = [data base64EncodedStringWithOptions:0];
+                }
+                dispatch_semaphore_signal(sema);
+            }];
+            [task resume];
+            dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+        }
+
+        NSString *json = [NSString stringWithFormat:
+            @"{\"status\":%ld,\"contentType\":\"%@\",\"finalUrl\":\"%@\",\"base64\":\"%@\"}",
+            (long)httpStatus,
+            ZeroNativeJsonEscape(contentType),
+            ZeroNativeJsonEscape(finalUrl),
+            base64Body];
+        NSData *jsonData = [json dataUsingEncoding:NSUTF8StringEncoding];
+
+        if (jsonData && jsonData.length <= buffer_len) {
+            memcpy(buffer, jsonData.bytes, jsonData.length);
+            result.status = (int)httpStatus;
+            result.bytes_written = jsonData.length;
+        } else {
+            // The body is too large for the response buffer; return a small,
+            // valid JSON with an empty base64 so the JS side degrades gracefully.
+            NSString *fallback = [NSString stringWithFormat:
+                @"{\"status\":%ld,\"contentType\":\"%@\",\"finalUrl\":\"%@\",\"base64\":\"\"}",
+                (long)httpStatus,
+                ZeroNativeJsonEscape(contentType),
+                ZeroNativeJsonEscape(finalUrl)];
+            NSData *fallbackData = [fallback dataUsingEncoding:NSUTF8StringEncoding];
+            if (fallbackData && fallbackData.length <= buffer_len) {
+                memcpy(buffer, fallbackData.bytes, fallbackData.length);
+                result.status = (int)httpStatus;
+                result.bytes_written = fallbackData.length;
+            }
+        }
+    }
+    return result;
 }
 
 static NSArray<NSString *> *ZeroNativeParseExtensions(const char *extensions, size_t len) {
