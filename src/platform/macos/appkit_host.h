@@ -95,12 +95,9 @@ typedef struct {
     size_t tertiary_button_len;
 } zero_native_appkit_message_dialog_opts_t;
 
-typedef struct {
-    int status;
-    size_t bytes_written;
-} zero_native_appkit_http_fetch_result_t;
+typedef void (*zero_native_appkit_http_fetch_callback_t)(void *ctx, int status, const char *json_utf8, size_t json_len);
 
-zero_native_appkit_http_fetch_result_t zero_native_appkit_http_fetch(zero_native_appkit_host_t *host, const char *url, size_t url_len, char *buffer, size_t buffer_len);
+void zero_native_appkit_http_fetch_async(zero_native_appkit_host_t *host, const char *url, size_t url_len, zero_native_appkit_http_fetch_callback_t callback, void *ctx);
 
 typedef void (*zero_native_appkit_tray_callback_t)(void *context, uint32_t item_id);
 

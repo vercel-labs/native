@@ -1052,78 +1052,77 @@ static NSString *ZeroNativeJsonEscape(NSString *value) {
     return escaped;
 }
 
-zero_native_appkit_http_fetch_result_t zero_native_appkit_http_fetch(zero_native_appkit_host_t *host, const char *url, size_t url_len, char *buffer, size_t buffer_len) {
+// Builds the response JSON string consumed by the bridge:
+//   {"status":...,"contentType":"...","finalUrl":"...","base64":"..."}
+// contentType/finalUrl are JSON-escaped; base64 is always a safe charset.
+static NSString *ZeroNativeHttpFetchJson(NSInteger httpStatus, NSString *contentType, NSString *finalUrl, NSString *base64Body) {
+    return [NSString stringWithFormat:
+        @"{\"status\":%ld,\"contentType\":\"%@\",\"finalUrl\":\"%@\",\"base64\":\"%@\"}",
+        (long)httpStatus,
+        ZeroNativeJsonEscape(contentType),
+        ZeroNativeJsonEscape(finalUrl),
+        base64Body];
+}
+
+void zero_native_appkit_http_fetch_async(zero_native_appkit_host_t *host, const char *url, size_t url_len, zero_native_appkit_http_fetch_callback_t callback, void *ctx) {
     (void)host;
-    zero_native_appkit_http_fetch_result_t result = { .status = 0, .bytes_written = 0 };
-    @autoreleasepool {
-        NSString *requested = (url && url_len > 0)
-            ? [[NSString alloc] initWithBytes:url length:url_len encoding:NSUTF8StringEncoding]
-            : @"";
-        NSURL *target = requested.length > 0 ? [NSURL URLWithString:requested] : nil;
+    if (!callback) return;
 
-        __block NSInteger httpStatus = 0;
-        __block NSString *contentType = @"";
-        __block NSString *finalUrl = requested ?: @"";
-        __block NSString *base64Body = @"";
+    NSString *requested = (url && url_len > 0)
+        ? [[NSString alloc] initWithBytes:url length:url_len encoding:NSUTF8StringEncoding]
+        : @"";
+    NSURL *target = requested.length > 0 ? [NSURL URLWithString:requested] : nil;
 
-        if (target) {
-            NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:target];
-            request.HTTPMethod = @"GET";
-            request.timeoutInterval = 12.0;
-            request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-            [request setValue:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
-          forHTTPHeaderField:@"User-Agent"];
-
-            dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-            NSURLSession *session = [NSURLSession sharedSession];
-            // NSURLSession dispatches its completion handler on a background
-            // delegate queue, so blocking the caller with a semaphore here will
-            // not deadlock even when invoked from the main thread.
-            NSURLSessionDataTask *task = [session dataTaskWithRequest:request
-                                               completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-                if (error == nil && response) {
-                    if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-                        httpStatus = ((NSHTTPURLResponse *)response).statusCode;
-                    }
-                    if (response.MIMEType) contentType = response.MIMEType;
-                    if (response.URL && response.URL.absoluteString) finalUrl = response.URL.absoluteString;
-                    if (data) base64Body = [data base64EncodedStringWithOptions:0];
+    // Invoke the callback on the main thread with a JSON string. The callback
+    // must copy/serialize synchronously; the string is only valid during the call.
+    void (^deliver)(NSInteger, NSString *, NSString *, NSString *) =
+        ^(NSInteger status, NSString *contentType, NSString *finalUrl, NSString *base64Body) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @autoreleasepool {
+                NSString *json = ZeroNativeHttpFetchJson(status, contentType, finalUrl, base64Body);
+                NSData *jsonData = [json dataUsingEncoding:NSUTF8StringEncoding];
+                if (jsonData) {
+                    callback(ctx, (int)status, (const char *)jsonData.bytes, jsonData.length);
+                } else {
+                    callback(ctx, 0, "", 0);
                 }
-                dispatch_semaphore_signal(sema);
-            }];
-            [task resume];
-            dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
-        }
-
-        NSString *json = [NSString stringWithFormat:
-            @"{\"status\":%ld,\"contentType\":\"%@\",\"finalUrl\":\"%@\",\"base64\":\"%@\"}",
-            (long)httpStatus,
-            ZeroNativeJsonEscape(contentType),
-            ZeroNativeJsonEscape(finalUrl),
-            base64Body];
-        NSData *jsonData = [json dataUsingEncoding:NSUTF8StringEncoding];
-
-        if (jsonData && jsonData.length <= buffer_len) {
-            memcpy(buffer, jsonData.bytes, jsonData.length);
-            result.status = (int)httpStatus;
-            result.bytes_written = jsonData.length;
-        } else {
-            // The body is too large for the response buffer; return a small,
-            // valid JSON with an empty base64 so the JS side degrades gracefully.
-            NSString *fallback = [NSString stringWithFormat:
-                @"{\"status\":%ld,\"contentType\":\"%@\",\"finalUrl\":\"%@\",\"base64\":\"\"}",
-                (long)httpStatus,
-                ZeroNativeJsonEscape(contentType),
-                ZeroNativeJsonEscape(finalUrl)];
-            NSData *fallbackData = [fallback dataUsingEncoding:NSUTF8StringEncoding];
-            if (fallbackData && fallbackData.length <= buffer_len) {
-                memcpy(buffer, fallbackData.bytes, fallbackData.length);
-                result.status = (int)httpStatus;
-                result.bytes_written = fallbackData.length;
             }
-        }
+        });
+    };
+
+    if (!target) {
+        // Bad/empty URL: deliver an error result (status 0, empty body) without a request.
+        deliver(0, @"", requested ?: @"", @"");
+        return;
     }
-    return result;
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:target];
+    request.HTTPMethod = @"GET";
+    request.timeoutInterval = 12.0;
+    request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    [request setValue:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
+   forHTTPHeaderField:@"User-Agent"];
+
+    NSString *requestedUrl = requested;
+    NSURLSession *session = [NSURLSession sharedSession];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:request
+                                           completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSInteger httpStatus = 0;
+        NSString *contentType = @"";
+        NSString *finalUrl = requestedUrl ?: @"";
+        NSString *base64Body = @"";
+        if (error == nil && response) {
+            if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                httpStatus = ((NSHTTPURLResponse *)response).statusCode;
+            }
+            if (response.MIMEType) contentType = response.MIMEType;
+            if (response.URL && response.URL.absoluteString) finalUrl = response.URL.absoluteString;
+            if (data) base64Body = [data base64EncodedStringWithOptions:0];
+        }
+        deliver(httpStatus, contentType, finalUrl, base64Body);
+    }];
+    // Start the request and return immediately; never block the caller.
+    [task resume];
 }
 
 static NSArray<NSString *> *ZeroNativeParseExtensions(const char *extensions, size_t len) {

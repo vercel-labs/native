@@ -79,6 +79,7 @@ pub const App = struct {
 };
 
 pub const Options = struct {
+    allocator: std.mem.Allocator = std.heap.c_allocator,
     platform: platform.Platform,
     trace_sink: ?trace.Sink = null,
     log_path: ?[]const u8 = null,
@@ -548,10 +549,16 @@ pub const Runtime = struct {
             self.invalidateFor(.command, null);
             return true;
         }
+        if (is_net) {
+            // net.fetch runs asynchronously: it dispatches a non-blocking HTTP
+            // request and responds later from the native completion callback.
+            try self.dispatchNetBridgeCommandAsync(request, message);
+            self.invalidateFor(.command, null);
+            return true;
+        }
+
         const result = if (is_window)
             self.dispatchWindowBridgeCommand(request, result_buffer, response_buffer)
-        else if (is_net)
-            self.dispatchNetBridgeCommand(request, result_buffer, response_buffer)
         else
             self.dispatchDialogBridgeCommand(request, result_buffer, response_buffer);
 
@@ -603,22 +610,60 @@ pub const Runtime = struct {
         return bridge.writeSuccessResponse(response_buffer, request.id, result);
     }
 
-    fn dispatchNetBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
-        const result = if (std.mem.eql(u8, request.command, "zero-native.net.fetch"))
-            self.netFetchFromJson(request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
-        else
-            return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown net command");
-        return bridge.writeSuccessResponse(response_buffer, request.id, result);
+    fn dispatchNetBridgeCommandAsync(self: *Runtime, request: bridge.Request, message: platform.BridgeMessage) anyerror!void {
+        if (!std.mem.eql(u8, request.command, "zero-native.net.fetch")) {
+            const response_buffer = bridge.sharedResponseBuffer();
+            const response = bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown net command");
+            try self.completeBridgeResponse(message.window_id, response);
+            return;
+        }
+        self.netFetchAsyncFromJson(request, message) catch |err| {
+            const response_buffer = bridge.sharedResponseBuffer();
+            const response = bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err));
+            try self.completeBridgeResponse(message.window_id, response);
+        };
     }
 
-    fn netFetchFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
+    fn netFetchAsyncFromJson(self: *Runtime, request: bridge.Request, message: platform.BridgeMessage) !void {
         var storage_buffer: [platform.max_dialog_path_bytes]u8 = undefined;
         var storage = json.StringStorage.init(&storage_buffer);
-        const url = jsonStringField(payload, "url", &storage) orelse "";
+        const url = jsonStringField(request.payload, "url", &storage) orelse "";
         if (url.len == 0) return error.InvalidArgument;
-        // The native fetch writes a complete JSON object describing the response
-        // (status/contentType/finalUrl/base64) straight into `output`.
-        return try self.options.platform.services.httpFetch(url, output);
+
+        const allocator = self.netFetchAllocator();
+        // The context owns copies of everything the deferred trampoline needs:
+        // the request id, the origin (the incoming message buffer is transient),
+        // the window id, the responder, and a NUL-free copy of the URL.
+        const ctx = try allocator.create(NetFetchContext);
+        errdefer allocator.destroy(ctx);
+        ctx.* = .{
+            .runtime = self,
+            .allocator = allocator,
+            .window_id = message.window_id,
+            .id = undefined,
+            .origin = undefined,
+            .url = undefined,
+            .responder = .{
+                .context = self,
+                .source = .{ .origin = "", .window_id = message.window_id },
+                .respond_fn = asyncBridgeRespond,
+            },
+        };
+        ctx.id = try allocator.dupe(u8, request.id);
+        errdefer allocator.free(ctx.id);
+        ctx.origin = try allocator.dupe(u8, message.origin);
+        errdefer allocator.free(ctx.origin);
+        ctx.responder.source.origin = ctx.origin;
+        ctx.url = try allocator.dupe(u8, url);
+        errdefer allocator.free(ctx.url);
+
+        // After this call, ownership of `ctx` transfers to the trampoline, which
+        // frees it exactly once when the native fetch completes on the main thread.
+        try self.options.platform.services.httpFetchAsync(ctx.url, netFetchTrampoline, ctx);
+    }
+
+    fn netFetchAllocator(self: *Runtime) std.mem.Allocator {
+        return self.options.allocator;
     }
 
     fn openFileDialogFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
@@ -784,6 +829,38 @@ pub const Runtime = struct {
         return trace.Timestamp.fromNanoseconds(self.timestamp_ns);
     }
 };
+
+// Heap-allocated state that outlives the synchronous dispatch of a net.fetch
+// request and is consumed once by `netFetchTrampoline` on the main thread.
+const NetFetchContext = struct {
+    runtime: *Runtime,
+    allocator: std.mem.Allocator,
+    window_id: platform.WindowId,
+    id: []u8,
+    origin: []u8,
+    url: []u8,
+    responder: bridge.AsyncResponder,
+};
+
+// Runs on the main thread when the native HTTP fetch completes. `json_utf8`/
+// `json_len` is the native-built response object and is only valid for the
+// duration of this call, so it is serialized synchronously here. Frees the
+// owning context exactly once before returning.
+fn netFetchTrampoline(ctx_ptr: ?*anyopaque, status: c_int, json_utf8: [*]const u8, json_len: usize) callconv(.c) void {
+    _ = status;
+    const ctx: *NetFetchContext = @ptrCast(@alignCast(ctx_ptr.?));
+    const allocator = ctx.allocator;
+    defer {
+        allocator.free(ctx.url);
+        allocator.free(ctx.origin);
+        allocator.free(ctx.id);
+        allocator.destroy(ctx);
+    }
+
+    const result_json = json_utf8[0..json_len];
+    const response = bridge.writeSuccessResponse(bridge.sharedResponseBuffer(), ctx.id, result_json);
+    ctx.responder.respond_fn(ctx.responder.context, ctx.responder.source, response) catch {};
+}
 
 fn nowNanoseconds() i128 {
     switch (@import("builtin").os.tag) {

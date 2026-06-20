@@ -97,12 +97,7 @@ const AppKitMessageDialogOpts = extern struct {
     tertiary_button_len: usize,
 };
 
-const AppKitHttpFetchResult = extern struct {
-    status: c_int,
-    bytes_written: usize,
-};
-
-extern fn zero_native_appkit_http_fetch(host: *AppKitHost, url: [*]const u8, url_len: usize, buffer: [*]u8, buffer_len: usize) AppKitHttpFetchResult;
+extern fn zero_native_appkit_http_fetch_async(host: *AppKitHost, url: [*]const u8, url_len: usize, callback: platform_mod.HttpFetchCallback, ctx: ?*anyopaque) void;
 
 const AppKitTrayCallback = *const fn (context: ?*anyopaque, item_id: u32) callconv(.c) void;
 
@@ -170,7 +165,7 @@ pub const MacPlatform = struct {
                 .show_open_dialog_fn = showOpenDialog,
                 .show_save_dialog_fn = showSaveDialog,
                 .show_message_dialog_fn = showMessageDialog,
-                .http_fetch_fn = httpFetch,
+                .http_fetch_async_fn = httpFetchAsync,
                 .create_tray_fn = createTray,
                 .update_tray_menu_fn = updateTrayMenu,
                 .remove_tray_fn = removeTray,
@@ -418,11 +413,9 @@ fn showMessageDialog(context: ?*anyopaque, options: platform_mod.MessageDialogOp
     return @enumFromInt(result);
 }
 
-fn httpFetch(context: ?*anyopaque, url: []const u8, buffer: []u8) anyerror![]const u8 {
+fn httpFetchAsync(context: ?*anyopaque, url: []const u8, callback: platform_mod.HttpFetchCallback, ctx: ?*anyopaque) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    const result = zero_native_appkit_http_fetch(self.host, url.ptr, url.len, buffer.ptr, buffer.len);
-    if (result.bytes_written == 0 or result.bytes_written > buffer.len) return error.NoSpaceLeft;
-    return buffer[0..result.bytes_written];
+    zero_native_appkit_http_fetch_async(self.host, url.ptr, url.len, callback, ctx);
 }
 
 const max_tray_items: usize = 32;

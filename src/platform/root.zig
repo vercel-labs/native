@@ -271,6 +271,12 @@ pub const Event = union(enum) {
 
 pub const EventHandler = *const fn (context: *anyopaque, event: Event) anyerror!void;
 
+// C callback fired (on the main thread) when an async HTTP fetch completes. The
+// `json_utf8`/`json_len` slice describes the full response object and is only
+// valid for the duration of the call — the receiver must copy/serialize it
+// synchronously.
+pub const HttpFetchCallback = *const fn (ctx: ?*anyopaque, status: c_int, json_utf8: [*]const u8, json_len: usize) callconv(.c) void;
+
 pub const PlatformServices = struct {
     context: ?*anyopaque = null,
     read_clipboard_fn: ?*const fn (context: ?*anyopaque, buffer: []u8) anyerror![]const u8 = null,
@@ -285,7 +291,7 @@ pub const PlatformServices = struct {
     show_open_dialog_fn: ?*const fn (context: ?*anyopaque, options: OpenDialogOptions, buffer: []u8) anyerror!OpenDialogResult = null,
     show_save_dialog_fn: ?*const fn (context: ?*anyopaque, options: SaveDialogOptions, buffer: []u8) anyerror!?[]const u8 = null,
     show_message_dialog_fn: ?*const fn (context: ?*anyopaque, options: MessageDialogOptions) anyerror!MessageDialogResult = null,
-    http_fetch_fn: ?*const fn (context: ?*anyopaque, url: []const u8, buffer: []u8) anyerror![]const u8 = null,
+    http_fetch_async_fn: ?*const fn (context: ?*anyopaque, url: []const u8, callback: HttpFetchCallback, ctx: ?*anyopaque) anyerror!void = null,
     create_tray_fn: ?*const fn (context: ?*anyopaque, options: TrayOptions) anyerror!void = null,
     update_tray_menu_fn: ?*const fn (context: ?*anyopaque, items: []const TrayMenuItem) anyerror!void = null,
     remove_tray_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
@@ -356,9 +362,9 @@ pub const PlatformServices = struct {
         return msg_fn(self.context, options);
     }
 
-    pub fn httpFetch(self: PlatformServices, url: []const u8, buffer: []u8) anyerror![]const u8 {
-        const fetch_fn = self.http_fetch_fn orelse return error.UnsupportedService;
-        return fetch_fn(self.context, url, buffer);
+    pub fn httpFetchAsync(self: PlatformServices, url: []const u8, callback: HttpFetchCallback, ctx: ?*anyopaque) anyerror!void {
+        const fetch_fn = self.http_fetch_async_fn orelse return error.UnsupportedService;
+        return fetch_fn(self.context, url, callback, ctx);
     }
 
     pub fn createTray(self: PlatformServices, options: TrayOptions) anyerror!void {
