@@ -102,6 +102,38 @@ pub const ShortcutEvent = struct {
     window_id: WindowId = 1,
 };
 
+pub fn validateShortcut(shortcut: Shortcut) Error!void {
+    if (shortcut.id.len == 0 or shortcut.id.len > max_shortcut_id_bytes) return error.InvalidShortcut;
+    if (!isValidShortcutKey(shortcut.key)) return error.InvalidShortcut;
+}
+
+pub fn isValidShortcutKey(key: []const u8) bool {
+    if (key.len == 0 or key.len > max_shortcut_key_bytes) return false;
+    if (key.len == 1) {
+        const ch = key[0];
+        if (std.ascii.isAlphabetic(ch) or std.ascii.isDigit(ch)) return true;
+        return switch (ch) {
+            '=', '-', ',', '.', '/', ';', '\'', '[', ']', '\\', '`' => true,
+            else => false,
+        };
+    }
+    const specials = [_][]const u8{
+        "escape",
+        "enter",
+        "tab",
+        "space",
+        "backspace",
+        "arrowleft",
+        "arrowright",
+        "arrowup",
+        "arrowdown",
+    };
+    for (&specials) |special| {
+        if (std.ascii.eqlIgnoreCase(key, special)) return true;
+    }
+    return false;
+}
+
 pub const WindowRestorePolicy = enum {
     clamp_to_visible_screen,
     center_on_primary,
@@ -788,8 +820,7 @@ pub const NullPlatform = struct {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         if (shortcuts.len > self.shortcuts.len) return error.InvalidShortcut;
         for (shortcuts, 0..) |shortcut, index| {
-            if (shortcut.id.len == 0 or shortcut.id.len > max_shortcut_id_bytes) return error.InvalidShortcut;
-            if (shortcut.key.len == 0 or shortcut.key.len > max_shortcut_key_bytes) return error.InvalidShortcut;
+            try validateShortcut(shortcut);
             self.shortcuts[index] = shortcut;
         }
         self.shortcut_count = shortcuts.len;
@@ -945,6 +976,9 @@ test "null platform records configured shortcuts" {
     const long_key = [_]u8{'x'} ** (max_shortcut_key_bytes + 1);
     const invalid = [_]Shortcut{.{ .id = "invalid", .key = long_key[0..] }};
     try std.testing.expectError(error.InvalidShortcut, null_platform.platform().services.configureShortcuts(&invalid));
+
+    const invalid_key = [_]Shortcut{.{ .id = "invalid", .key = "@" }};
+    try std.testing.expectError(error.InvalidShortcut, null_platform.platform().services.configureShortcuts(&invalid_key));
 }
 
 test "webview bridge fallback only routes main responses" {

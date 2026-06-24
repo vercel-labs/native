@@ -429,8 +429,7 @@ fn configureShortcuts(context: ?*anyopaque, shortcuts: []const platform_mod.Shor
     var key_lens: [platform_mod.max_shortcuts]usize = undefined;
     var modifiers: [platform_mod.max_shortcuts]u32 = undefined;
     for (shortcuts, 0..) |shortcut, index| {
-        if (shortcut.id.len == 0 or shortcut.id.len > platform_mod.max_shortcut_id_bytes) return error.InvalidShortcut;
-        if (shortcut.key.len == 0 or shortcut.key.len > platform_mod.max_shortcut_key_bytes) return error.InvalidShortcut;
+        try platform_mod.validateShortcut(shortcut);
         ids[index] = shortcut.id.ptr;
         id_lens[index] = shortcut.id.len;
         keys[index] = shortcut.key.ptr;

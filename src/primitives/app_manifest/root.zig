@@ -493,9 +493,8 @@ fn validateReadyPath(path: []const u8) ValidationError!void {
 fn validateShortcutKey(key: []const u8) ValidationError!void {
     if (key.len == 0 or key.len > 32) return error.InvalidShortcut;
     if (key.len == 1) {
-        const ch = key[0];
-        if (ch <= ' ' or ch == 0x7f) return error.InvalidShortcut;
-        return;
+        if (isPortableShortcutKey(key[0])) return;
+        return error.InvalidShortcut;
     }
     const specials = [_][]const u8{
         "escape",
@@ -512,6 +511,14 @@ fn validateShortcutKey(key: []const u8) ValidationError!void {
         if (std.ascii.eqlIgnoreCase(key, special)) return;
     }
     return error.InvalidShortcut;
+}
+
+fn isPortableShortcutKey(ch: u8) bool {
+    if (std.ascii.isAlphabetic(ch) or std.ascii.isDigit(ch)) return true;
+    return switch (ch) {
+        '=', '-', ',', '.', '/', ';', '\'', '[', ']', '\\', '`' => true,
+        else => false,
+    };
 }
 
 pub fn validatePlatforms(platforms: []const PlatformSettings) ValidationError!void {
@@ -639,6 +646,15 @@ test "manifest validates keyboard shortcuts" {
         },
     };
     try std.testing.expectError(error.DuplicateShortcut, validateManifest(duplicate));
+
+    const invalid_key: Manifest = .{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .shortcuts = &.{
+            .{ .id = "invalid", .key = "@", .modifiers = .{ .primary = true } },
+        },
+    };
+    try std.testing.expectError(error.InvalidShortcut, validateManifest(invalid_key));
 }
 
 test "frontend validation accepts managed dev server config" {
