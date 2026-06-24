@@ -184,13 +184,17 @@ pub fn createAndroidSkeleton(io: std.Io, output_path: []const u8) !PackageStats 
     try cwd.createDirPath(io, output_path);
     var dir = try cwd.openDir(io, output_path, .{});
     defer dir.close(io);
-    try dir.createDirPath(io, "app/src/main/java/dev/zero_native");
+    try dir.createDirPath(io, "app/src/main/java/dev/zero_native/examples/android");
     try dir.createDirPath(io, "app/src/main/cpp");
+    try dir.createDirPath(io, "app/src/main/res/values");
     try writeFile(dir, io, "README.md", androidReadme());
-    try writeFile(dir, io, "settings.gradle", "pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\ndependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }\nrootProject.name = 'zero-nativeHost'\ninclude ':app'\n");
-    try writeFile(dir, io, "app/build.gradle", "plugins { id 'com.android.application' version '8.5.0' }\n\nandroid { namespace 'dev.zero_native'; compileSdk 35\n    defaultConfig { applicationId 'dev.zero_native'; minSdk 26; targetSdk 35; versionCode 1; versionName '0.1.0' }\n}\n");
+    try writeFile(dir, io, "settings.gradle", androidSettingsGradle());
+    try writeFile(dir, io, "build.gradle", androidRootBuildGradle());
+    try writeFile(dir, io, "app/build.gradle", androidAppBuildGradle());
     try writeFile(dir, io, "app/src/main/AndroidManifest.xml", androidManifest());
-    try writeFile(dir, io, "app/src/main/java/dev/zero_native/MainActivity.kt", androidActivity());
+    try writeFile(dir, io, "app/src/main/res/values/styles.xml", androidStyles());
+    try writeFile(dir, io, "app/src/main/java/dev/zero_native/examples/android/MainActivity.kt", androidActivity());
+    try writeFile(dir, io, "app/src/main/cpp/CMakeLists.txt", androidCMakeLists());
     try writeFile(dir, io, "app/src/main/cpp/zero_native_jni.c", androidJni());
     try writeFile(dir, io, "app/src/main/cpp/zero_native.h", embedHeader());
     return .{ .path = output_path, .target = .android };
@@ -367,42 +371,182 @@ fn iosViewController() []const u8 {
 }
 
 fn androidReadme() []const u8 {
-    return "Android zero-native host skeleton. Copy libzero-native.a into the NDK build and wire the JNI bridge in app/src/main/cpp.\n";
+    return
+    \\# Android Host Skeleton
+    \\
+    \\A minimal Android host app that embeds a zero-native static library through JNI.
+    \\
+    \\Copy `libzero-native.a` into `app/src/main/cpp/lib/libzero-native.a`, then build with Android Studio or Gradle.
+    \\
+    ;
+}
+
+fn androidSettingsGradle() []const u8 {
+    return
+    \\pluginManagement {
+    \\    repositories {
+    \\        google()
+    \\        mavenCentral()
+    \\        gradlePluginPortal()
+    \\    }
+    \\}
+    \\
+    \\dependencyResolutionManagement {
+    \\    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    \\    repositories {
+    \\        google()
+    \\        mavenCentral()
+    \\    }
+    \\}
+    \\
+    \\rootProject.name = "ZeroNativeAndroidHost"
+    \\include ":app"
+    \\
+    ;
+}
+
+fn androidRootBuildGradle() []const u8 {
+    return
+    \\plugins {
+    \\    id "com.android.application" version "8.5.0" apply false
+    \\    id "org.jetbrains.kotlin.android" version "2.0.20" apply false
+    \\}
+    \\
+    ;
+}
+
+fn androidAppBuildGradle() []const u8 {
+    return
+    \\plugins {
+    \\    id "com.android.application"
+    \\    id "org.jetbrains.kotlin.android"
+    \\}
+    \\
+    \\android {
+    \\    namespace "dev.zero_native.examples.android"
+    \\    compileSdk 35
+    \\
+    \\    defaultConfig {
+    \\        applicationId "dev.zero_native.examples.android"
+    \\        minSdk 26
+    \\        targetSdk 35
+    \\        versionCode 1
+    \\        versionName "0.1.0"
+    \\
+    \\        externalNativeBuild {
+    \\            cmake {
+    \\                arguments "-DANDROID_STL=c++_shared"
+    \\            }
+    \\        }
+    \\    }
+    \\
+    \\    externalNativeBuild {
+    \\        cmake {
+    \\            path "src/main/cpp/CMakeLists.txt"
+    \\        }
+    \\    }
+    \\}
+    \\
+    ;
 }
 
 fn androidManifest() []const u8 {
-    return "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"><application android:theme=\"@style/AppTheme\"><activity android:name=\".MainActivity\" android:exported=\"true\"><intent-filter><action android:name=\"android.intent.action.MAIN\"/><category android:name=\"android.intent.category.LAUNCHER\"/></intent-filter></activity></application></manifest>\n";
+    return
+    \\<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    \\    <application
+    \\        android:label="zero-native Host"
+    \\        android:theme="@style/AppTheme">
+    \\        <activity
+    \\            android:name=".MainActivity"
+    \\            android:exported="true">
+    \\            <intent-filter>
+    \\                <action android:name="android.intent.action.MAIN" />
+    \\                <category android:name="android.intent.category.LAUNCHER" />
+    \\            </intent-filter>
+    \\        </activity>
+    \\    </application>
+    \\</manifest>
+    \\
+    ;
+}
+
+fn androidStyles() []const u8 {
+    return
+    \\<resources>
+    \\    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+    \\        <item name="android:windowLightStatusBar">true</item>
+    \\        <item name="android:colorAccent">#2563EB</item>
+    \\    </style>
+    \\</resources>
+    \\
+    ;
 }
 
 fn androidActivity() []const u8 {
     return
-    \\package dev.zero_native
+    \\package dev.zero_native.examples.android
     \\
     \\import android.app.Activity
     \\import android.os.Bundle
     \\import android.view.MotionEvent
     \\import android.view.SurfaceHolder
     \\import android.view.SurfaceView
+    \\import android.widget.FrameLayout
+    \\import android.widget.TextView
     \\
     \\class MainActivity : Activity(), SurfaceHolder.Callback {
-    \\    private var app: Long = 0
+    \\    private var nativeApp: Long = 0
+    \\
     \\    override fun onCreate(savedInstanceState: Bundle?) {
     \\        super.onCreate(savedInstanceState)
+    \\        System.loadLibrary("zero_native_example")
+    \\
     \\        val surface = SurfaceView(this)
     \\        surface.holder.addCallback(this)
-    \\        setContentView(surface)
-    \\        app = nativeCreate()
-    \\        nativeStart(app)
+    \\
+    \\        val label = TextView(this).apply {
+    \\            text = "zero-native Android Host"
+    \\            textSize = 22f
+    \\            setPadding(32, 32, 32, 32)
+    \\        }
+    \\
+    \\        val root = FrameLayout(this)
+    \\        root.addView(surface)
+    \\        root.addView(label)
+    \\        setContentView(root)
+    \\
+    \\        nativeApp = nativeCreate()
+    \\        nativeStart(nativeApp)
     \\    }
-    \\    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) { nativeResize(app, width.toFloat(), height.toFloat(), 1f, holder.surface) }
-    \\    override fun surfaceCreated(holder: SurfaceHolder) {}
-    \\    override fun surfaceDestroyed(holder: SurfaceHolder) { nativeStop(app) }
+    \\
+    \\    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+    \\        nativeResize(nativeApp, width.toFloat(), height.toFloat(), resources.displayMetrics.density, holder.surface)
+    \\        nativeFrame(nativeApp)
+    \\    }
+    \\
+    \\    override fun surfaceCreated(holder: SurfaceHolder) = Unit
+    \\
+    \\    override fun surfaceDestroyed(holder: SurfaceHolder) {
+    \\        nativeStop(nativeApp)
+    \\    }
+    \\
     \\    override fun onTouchEvent(event: MotionEvent): Boolean {
-    \\        nativeTouch(app, event.getPointerId(0).toLong(), event.actionMasked, event.x, event.y, event.pressure)
-    \\        nativeFrame(app)
+    \\        nativeTouch(nativeApp, event.getPointerId(0).toLong(), event.actionMasked, event.x, event.y, event.pressure)
+    \\        nativeFrame(nativeApp)
     \\        return true
     \\    }
+    \\
+    \\    override fun onDestroy() {
+    \\        if (nativeApp != 0L) {
+    \\            nativeStop(nativeApp)
+    \\            nativeDestroy(nativeApp)
+    \\            nativeApp = 0
+    \\        }
+    \\        super.onDestroy()
+    \\    }
+    \\
     \\    external fun nativeCreate(): Long
+    \\    external fun nativeDestroy(app: Long)
     \\    external fun nativeStart(app: Long)
     \\    external fun nativeStop(app: Long)
     \\    external fun nativeResize(app: Long, width: Float, height: Float, scale: Float, surface: Any)
@@ -413,16 +557,72 @@ fn androidActivity() []const u8 {
     ;
 }
 
+fn androidCMakeLists() []const u8 {
+    return
+    \\cmake_minimum_required(VERSION 3.22.1)
+    \\
+    \\project(zero_native_android_host C)
+    \\
+    \\add_library(zero-native STATIC IMPORTED)
+    \\set_target_properties(zero-native PROPERTIES
+    \\    IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/lib/libzero-native.a"
+    \\)
+    \\
+    \\add_library(zero_native_example SHARED zero_native_jni.c)
+    \\target_include_directories(zero_native_example PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    \\target_link_libraries(zero_native_example zero-native android log)
+    \\
+    ;
+}
+
 fn androidJni() []const u8 {
     return
     \\#include <jni.h>
+    \\#include <stdint.h>
+    \\
     \\#include "zero_native.h"
-    \\JNIEXPORT jlong JNICALL Java_dev_zero_1native_MainActivity_nativeCreate(JNIEnv *env, jobject self) { (void)env; (void)self; return (jlong)zero_native_app_create(); }
-    \\JNIEXPORT void JNICALL Java_dev_zero_1native_MainActivity_nativeStart(JNIEnv *env, jobject self, jlong app) { (void)env; (void)self; zero_native_app_start((void*)app); }
-    \\JNIEXPORT void JNICALL Java_dev_zero_1native_MainActivity_nativeStop(JNIEnv *env, jobject self, jlong app) { (void)env; (void)self; zero_native_app_stop((void*)app); zero_native_app_destroy((void*)app); }
-    \\JNIEXPORT void JNICALL Java_dev_zero_1native_MainActivity_nativeResize(JNIEnv *env, jobject self, jlong app, jfloat w, jfloat h, jfloat scale, jobject surface) { (void)env; (void)self; zero_native_app_resize((void*)app, w, h, scale, surface); }
-    \\JNIEXPORT void JNICALL Java_dev_zero_1native_MainActivity_nativeTouch(JNIEnv *env, jobject self, jlong app, jlong id, jint phase, jfloat x, jfloat y, jfloat pressure) { (void)env; (void)self; zero_native_app_touch((void*)app, (uint64_t)id, phase, x, y, pressure); }
-    \\JNIEXPORT void JNICALL Java_dev_zero_1native_MainActivity_nativeFrame(JNIEnv *env, jobject self, jlong app) { (void)env; (void)self; zero_native_app_frame((void*)app); }
+    \\
+    \\JNIEXPORT jlong JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativeCreate(JNIEnv *env, jobject self) {
+    \\    (void)env;
+    \\    (void)self;
+    \\    return (jlong)zero_native_app_create();
+    \\}
+    \\
+    \\JNIEXPORT void JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativeDestroy(JNIEnv *env, jobject self, jlong app) {
+    \\    (void)env;
+    \\    (void)self;
+    \\    zero_native_app_destroy((void *)app);
+    \\}
+    \\
+    \\JNIEXPORT void JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativeStart(JNIEnv *env, jobject self, jlong app) {
+    \\    (void)env;
+    \\    (void)self;
+    \\    zero_native_app_start((void *)app);
+    \\}
+    \\
+    \\JNIEXPORT void JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativeStop(JNIEnv *env, jobject self, jlong app) {
+    \\    (void)env;
+    \\    (void)self;
+    \\    zero_native_app_stop((void *)app);
+    \\}
+    \\
+    \\JNIEXPORT void JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativeResize(JNIEnv *env, jobject self, jlong app, jfloat width, jfloat height, jfloat scale, jobject surface) {
+    \\    (void)env;
+    \\    (void)self;
+    \\    zero_native_app_resize((void *)app, width, height, scale, surface);
+    \\}
+    \\
+    \\JNIEXPORT void JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativeTouch(JNIEnv *env, jobject self, jlong app, jlong id, jint phase, jfloat x, jfloat y, jfloat pressure) {
+    \\    (void)env;
+    \\    (void)self;
+    \\    zero_native_app_touch((void *)app, (uint64_t)id, phase, x, y, pressure);
+    \\}
+    \\
+    \\JNIEXPORT void JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativeFrame(JNIEnv *env, jobject self, jlong app) {
+    \\    (void)env;
+    \\    (void)self;
+    \\    zero_native_app_frame((void *)app);
+    \\}
     \\
     ;
 }
@@ -917,6 +1117,23 @@ test "chromium desktop packages require a matching CEF layout" {
     }));
 }
 
+test "android skeleton includes Gradle CMake Kotlin and JNI wiring" {
+    const root = ".zig-cache/test-android-skeleton";
+    var cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(std.testing.io, root) catch {};
+    _ = try createAndroidSkeleton(std.testing.io, root);
+
+    try expectFileContains(root ++ "/settings.gradle", "include \":app\"");
+    try expectFileContains(root ++ "/build.gradle", "org.jetbrains.kotlin.android");
+    try expectFileContains(root ++ "/app/build.gradle", "externalNativeBuild");
+    try expectFileContains(root ++ "/app/src/main/cpp/CMakeLists.txt", "lib/libzero-native.a");
+    try expectFileContains(root ++ "/app/src/main/res/values/styles.xml", "AppTheme");
+    try expectFileContains(root ++ "/app/src/main/java/dev/zero_native/examples/android/MainActivity.kt", "package dev.zero_native.examples.android");
+    try expectFileContains(root ++ "/app/src/main/java/dev/zero_native/examples/android/MainActivity.kt", "System.loadLibrary(\"zero_native_example\")");
+    try expectFileContains(root ++ "/app/src/main/cpp/zero_native_jni.c", "Java_dev_zero_1native_examples_android_MainActivity_nativeCreate");
+    try expectFileContains(root ++ "/app/src/main/cpp/zero_native_jni.c", "zero_native_app_destroy");
+}
+
 test "package report records target signing and assets" {
     const metadata: manifest_tool.Metadata = .{ .id = "dev.example.app", .name = "demo", .version = "1.2.3" };
     var cwd = std.Io.Dir.cwd();
@@ -935,4 +1152,10 @@ test "package report records target signing and assets" {
     const len = try file.readPositionalAll(std.testing.io, &buffer, 0);
     try std.testing.expect(std.mem.indexOf(u8, buffer[0..len], ".target = \"linux\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer[0..len], ".asset_count = 2") != null);
+}
+
+fn expectFileContains(path: []const u8, needle: []const u8) !void {
+    const bytes = try readPath(std.testing.allocator, std.testing.io, path);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, needle) != null);
 }
