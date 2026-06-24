@@ -196,10 +196,21 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
         return;
     }
 
-    NSURLResponse *response = [[NSURLResponse alloc] initWithURL:urlSchemeTask.request.URL
-                                                        MIMEType:ZeroNativeMimeTypeForPath(filePath)
-                                           expectedContentLength:(NSInteger)data.length
-                                                textEncodingName:nil];
+    // Respond with a real HTTP response (status 200 + headers), not a bare
+    // NSURLResponse. Resource loads (<script>/<link>/<img>) work with either,
+    // but fetch()/XHR -- and therefore WebAssembly.instantiate(Streaming) --
+    // need an NSHTTPURLResponse with a status and Content-Type, or they fail
+    // ("both async and sync fetching of the wasm failed").
+    NSDictionary<NSString *, NSString *> *headers = @{
+        @"Content-Type" : ZeroNativeMimeTypeForPath(filePath),
+        @"Content-Length" : [NSString stringWithFormat:@"%lu", (unsigned long)data.length],
+        @"Access-Control-Allow-Origin" : @"*",
+        @"Cache-Control" : @"no-cache",
+    };
+    NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc] initWithURL:urlSchemeTask.request.URL
+                                                             statusCode:200
+                                                            HTTPVersion:@"HTTP/1.1"
+                                                           headerFields:headers];
     [urlSchemeTask didReceiveResponse:response];
     [urlSchemeTask didReceiveData:data];
     [urlSchemeTask didFinish];
