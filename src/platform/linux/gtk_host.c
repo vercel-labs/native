@@ -508,6 +508,16 @@ static const char *zero_native_shortcut_key_for_keyval(guint keyval, char *buffe
     if (!buffer || buffer_len < 2) return "";
     guint lower = gdk_keyval_to_lower(keyval);
     switch (lower) {
+        case '!': lower = '1'; break;
+        case '@': lower = '2'; break;
+        case '#': lower = '3'; break;
+        case '$': lower = '4'; break;
+        case '%': lower = '5'; break;
+        case '^': lower = '6'; break;
+        case '&': lower = '7'; break;
+        case '*': lower = '8'; break;
+        case '(': lower = '9'; break;
+        case ')': lower = '0'; break;
         case '+': lower = '='; break;
         case '_': lower = '-'; break;
         case '<': lower = ','; break;
@@ -553,13 +563,7 @@ static int zero_native_shortcut_modifiers_match(uint32_t shortcut_modifiers, Gdk
     int has_control = (event_modifiers & GDK_CONTROL_MASK) != 0;
     int has_option = (event_modifiers & GDK_ALT_MASK) != 0;
     int has_shift = (event_modifiers & GDK_SHIFT_MASK) != 0;
-    int has_command = 0;
-#ifdef GDK_META_MASK
-    has_command = has_command || ((event_modifiers & GDK_META_MASK) != 0);
-#endif
-#ifdef GDK_SUPER_MASK
-    has_command = has_command || ((event_modifiers & GDK_SUPER_MASK) != 0);
-#endif
+    int has_command = ((event_modifiers & GDK_META_MASK) != 0) || ((event_modifiers & GDK_SUPER_MASK) != 0);
     return has_control == needs_control &&
         has_option == needs_option &&
         has_shift == needs_shift &&

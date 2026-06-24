@@ -453,7 +453,9 @@ static bool createChildWebView(Host *host, const std::string &key) {
                     controller->put_ZoomFactor(found->second.zoom);
                     controller->put_IsVisible(TRUE);
                     if (found->second.webview) {
-                        found->second.webview->AddScriptToExecuteOnDocumentCreated(zeroNativeEventBridgeScript(), nullptr);
+                        if (found->second.bridge_enabled) {
+                            found->second.webview->AddScriptToExecuteOnDocumentCreated(zeroNativeEventBridgeScript(), nullptr);
+                        }
                         EventRegistrationToken token = {};
                         found->second.webview->add_NavigationStarting(Callback<ICoreWebView2NavigationStartingEventHandler>(
                             [host, lifetime](ICoreWebView2 *, ICoreWebView2NavigationStartingEventArgs *args) -> HRESULT {
@@ -724,7 +726,7 @@ void zero_native_windows_emit_window_event(Host *host, uint64_t window_id, const
     std::wstring script_wide = widen(script);
     for (auto &entry : host->webviews) {
         ChildWebView &webview = entry.second;
-        if (webview.window_id != window_id || !webview.webview) continue;
+        if (webview.window_id != window_id || !webview.bridge_enabled || !webview.webview) continue;
         webview.webview->ExecuteScript(script_wide.c_str(), nullptr);
     }
 #else
