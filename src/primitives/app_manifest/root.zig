@@ -298,6 +298,7 @@ pub fn validateShortcuts(shortcuts: []const Shortcut) ValidationError!void {
         if (shortcut.id.len > max_shortcut_id_bytes) return error.InvalidShortcut;
         try validateName(shortcut.id);
         try validateShortcutKey(shortcut.key);
+        if (!shortcutModifiersHasAny(shortcut.modifiers) and shortcutRequiresModifier(shortcut.key)) return error.InvalidShortcut;
         for (shortcuts[0..i]) |previous| {
             if (std.mem.eql(u8, previous.id, shortcut.id)) return error.DuplicateShortcut;
             if (std.ascii.eqlIgnoreCase(previous.key, shortcut.key) and shortcutModifiersEql(previous.modifiers, shortcut.modifiers)) return error.DuplicateShortcut;
@@ -527,6 +528,14 @@ fn isPortableShortcutKey(ch: u8) bool {
     };
 }
 
+fn shortcutRequiresModifier(key: []const u8) bool {
+    if (key.len == 1) return true;
+    return std.ascii.eqlIgnoreCase(key, "space") or
+        std.ascii.eqlIgnoreCase(key, "enter") or
+        std.ascii.eqlIgnoreCase(key, "tab") or
+        std.ascii.eqlIgnoreCase(key, "backspace");
+}
+
 pub fn validatePlatforms(platforms: []const PlatformSettings) ValidationError!void {
     for (platforms, 0..) |settings, i| {
         if (settings.platform == .unknown) return error.MissingRequiredField;
@@ -606,6 +615,10 @@ fn shortcutModifiersEql(a: ShortcutModifiers, b: ShortcutModifiers) bool {
         a.shift == b.shift;
 }
 
+fn shortcutModifiersHasAny(modifiers: ShortcutModifiers) bool {
+    return modifiers.primary or modifiers.command or modifiers.control or modifiers.option or modifiers.shift;
+}
+
 fn isLowerAlpha(ch: u8) bool {
     return ch >= 'a' and ch <= 'z';
 }
@@ -661,6 +674,15 @@ test "manifest validates keyboard shortcuts" {
         },
     };
     try std.testing.expectError(error.InvalidShortcut, validateManifest(invalid_key));
+
+    const unmodified_text_key: Manifest = .{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .shortcuts = &.{
+            .{ .id = "text-entry", .key = "p" },
+        },
+    };
+    try std.testing.expectError(error.InvalidShortcut, validateManifest(unmodified_text_key));
 
     const too_many = [_]Shortcut{.{ .id = "duplicate-ok-for-limit-check", .key = "p" }} ** (max_shortcuts + 1);
     const too_many_manifest: Manifest = .{

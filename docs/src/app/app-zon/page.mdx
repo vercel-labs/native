@@ -123,6 +123,8 @@ The optional `shortcuts` list defines app-level keyboard shortcuts. Generated ru
 
 `id` is the event identifier. `key` accepts letters, digits, the unshifted punctuation keys `=`, `-`, `,`, `.`, `/`, `;`, `'`, `[`, `]`, `\`, and `` ` ``, or a named key. `modifiers` accepts `primary`, `command`, `control`, `option`, `alt`, and `shift`.
 
+Single-character keys and text-entry keys (`enter`, `tab`, `space`, and `backspace`) require at least one modifier.
+
 An app can define up to 64 shortcuts. Shortcut ids can be up to 64 bytes and keys can be up to 32 bytes.
 
 Linux Chromium builds currently reject non-empty `shortcuts`; use the Linux system WebView backend when an app needs native shortcut events.

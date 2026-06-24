@@ -295,18 +295,26 @@ static bool shortcutModifiersMatch(uint32_t shortcut_modifiers) {
         has_shift == needs_shift;
 }
 
-static bool emitShortcutForKey(Host *host, HWND hwnd, WPARAM wparam) {
+static const Window *windowForId(Host *host, uint64_t window_id) {
+    if (!host) return nullptr;
+    auto found = host->windows.find(window_id);
+    if (found == host->windows.end()) return nullptr;
+    return &found->second;
+}
+
+static const Window *windowForHwnd(Host *host, HWND hwnd) {
+    if (!host) return nullptr;
+    for (auto &entry : host->windows) {
+        if (entry.second.hwnd == hwnd) return &entry.second;
+    }
+    return nullptr;
+}
+
+static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wparam) {
     if (!host || host->shortcuts.empty()) return false;
+    if (!window) return false;
     std::string key = shortcutKeyFromWParam(wparam);
     if (key.empty()) return false;
-    const Window *window = nullptr;
-    for (auto &entry : host->windows) {
-        if (entry.second.hwnd == hwnd) {
-            window = &entry.second;
-            break;
-        }
-    }
-    if (!window) return false;
     for (const Shortcut &shortcut : host->shortcuts) {
         if (shortcut.key != key) continue;
         if (!shortcutModifiersMatch(shortcut.modifiers)) continue;
@@ -323,6 +331,14 @@ static bool emitShortcutForKey(Host *host, HWND hwnd, WPARAM wparam) {
         return true;
     }
     return false;
+}
+
+static bool emitShortcutForHwnd(Host *host, HWND hwnd, WPARAM wparam) {
+    return emitShortcutForWindow(host, windowForHwnd(host, hwnd), wparam);
+}
+
+static bool emitShortcutForWindowId(Host *host, uint64_t window_id, WPARAM wparam) {
+    return emitShortcutForWindow(host, windowForId(host, window_id), wparam);
 }
 
 static std::string webViewKey(uint64_t window_id, const std::string &label) {
@@ -456,6 +472,25 @@ static bool createChildWebView(Host *host, const std::string &key) {
                         if (found->second.bridge_enabled) {
                             found->second.webview->AddScriptToExecuteOnDocumentCreated(zeroNativeEventBridgeScript(), nullptr);
                         }
+                        EventRegistrationToken accelerator_token = {};
+                        uint64_t accelerator_window_id = found->second.window_id;
+                        found->second.controller->add_AcceleratorKeyPressed(Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
+                            [host, accelerator_window_id, lifetime](ICoreWebView2Controller *, ICoreWebView2AcceleratorKeyPressedEventArgs *args) -> HRESULT {
+                                auto token = lifetime.lock();
+                                if (!token) return S_OK;
+                                std::lock_guard<std::recursive_mutex> guard(token->mutex);
+                                if (!token->alive || !args) return S_OK;
+                                COREWEBVIEW2_KEY_EVENT_KIND kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
+                                if (FAILED(args->get_KeyEventKind(&kind))) return S_OK;
+                                if (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN) return S_OK;
+                                UINT virtual_key = 0;
+                                if (FAILED(args->get_VirtualKey(&virtual_key))) return S_OK;
+                                if (emitShortcutForWindowId(host, accelerator_window_id, virtual_key)) {
+                                    args->put_Handled(TRUE);
+                                }
+                                return S_OK;
+                            }).Get(), &accelerator_token);
+
                         EventRegistrationToken token = {};
                         found->second.webview->add_NavigationStarting(Callback<ICoreWebView2NavigationStartingEventHandler>(
                             [host, lifetime](ICoreWebView2 *, ICoreWebView2NavigationStartingEventArgs *args) -> HRESULT {
@@ -525,7 +560,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
     switch (message) {
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN:
-            if (host && emitShortcutForKey(host, hwnd, wparam)) return 0;
+            if (host && emitShortcutForHwnd(host, hwnd, wparam)) return 0;
             break;
         case WM_SIZE:
             if (host) {
@@ -816,7 +851,7 @@ int zero_native_windows_create_webview(Host *host, uint64_t window_id, const cha
     (void)bridge_enabled;
     return 0;
 #else
-    if (!host || label_len == 0 || url_len == 0 || !validChildWebViewFrame(x, y, width, height) || bridge_enabled) return 0;
+    if (!host || label_len == 0 || url_len == 0 || !validChildWebViewFrame(x, y, width, height)) return 0;
     auto window = host->windows.find(window_id);
     if (window == host->windows.end() || !window->second.hwnd) return 0;
     std::string label_string = slice(label, label_len);

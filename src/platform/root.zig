@@ -105,6 +105,7 @@ pub const ShortcutEvent = struct {
 pub fn validateShortcut(shortcut: Shortcut) Error!void {
     if (shortcut.id.len == 0 or shortcut.id.len > max_shortcut_id_bytes) return error.InvalidShortcut;
     if (!isValidShortcutKey(shortcut.key)) return error.InvalidShortcut;
+    if (!shortcut.modifiers.hasAny() and shortcutRequiresModifier(shortcut.key)) return error.InvalidShortcut;
 }
 
 pub fn isValidShortcutKey(key: []const u8) bool {
@@ -132,6 +133,14 @@ pub fn isValidShortcutKey(key: []const u8) bool {
         if (std.ascii.eqlIgnoreCase(key, special)) return true;
     }
     return false;
+}
+
+fn shortcutRequiresModifier(key: []const u8) bool {
+    if (key.len == 1) return true;
+    return std.ascii.eqlIgnoreCase(key, "space") or
+        std.ascii.eqlIgnoreCase(key, "enter") or
+        std.ascii.eqlIgnoreCase(key, "tab") or
+        std.ascii.eqlIgnoreCase(key, "backspace");
 }
 
 pub const WindowRestorePolicy = enum {
@@ -979,6 +988,9 @@ test "null platform records configured shortcuts" {
 
     const invalid_key = [_]Shortcut{.{ .id = "invalid", .key = "@" }};
     try std.testing.expectError(error.InvalidShortcut, null_platform.platform().services.configureShortcuts(&invalid_key));
+
+    const unmodified_text_key = [_]Shortcut{.{ .id = "text", .key = "p" }};
+    try std.testing.expectError(error.InvalidShortcut, null_platform.platform().services.configureShortcuts(&unmodified_text_key));
 }
 
 test "webview bridge fallback only routes main responses" {
