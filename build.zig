@@ -37,6 +37,7 @@ const SigningMode = enum {
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+    const host_target = b.graph.host;
     const optimize = b.standardOptimizeOption(.{});
     const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
     const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
@@ -157,6 +158,32 @@ pub fn build(b: *std.Build) void {
         .root_module = cli_mod,
     });
     b.installArtifact(cli_exe);
+
+    const host_assets_mod = module(b, host_target, optimize, "src/primitives/assets/root.zig");
+    const host_app_dirs_mod = module(b, host_target, optimize, "src/primitives/app_dirs/root.zig");
+    const host_app_manifest_mod = module(b, host_target, optimize, "src/primitives/app_manifest/root.zig");
+    const host_diagnostics_mod = module(b, host_target, optimize, "src/primitives/diagnostics/root.zig");
+    const host_platform_info_mod = module(b, host_target, optimize, "src/primitives/platform_info/root.zig");
+    const host_trace_mod = module(b, host_target, optimize, "src/primitives/trace/root.zig");
+    const host_debug_mod = module(b, host_target, optimize, "src/debug/root.zig");
+    host_debug_mod.addImport("app_dirs", host_app_dirs_mod);
+    host_debug_mod.addImport("trace", host_trace_mod);
+    const host_automation_protocol_mod = module(b, host_target, optimize, "src/automation/protocol.zig");
+    const host_tooling_mod = module(b, host_target, optimize, "src/tooling/root.zig");
+    host_tooling_mod.addImport("assets", host_assets_mod);
+    host_tooling_mod.addImport("app_dirs", host_app_dirs_mod);
+    host_tooling_mod.addImport("app_manifest", host_app_manifest_mod);
+    host_tooling_mod.addImport("diagnostics", host_diagnostics_mod);
+    host_tooling_mod.addImport("debug", host_debug_mod);
+    host_tooling_mod.addImport("platform_info", host_platform_info_mod);
+    host_tooling_mod.addImport("trace", host_trace_mod);
+    const host_cli_mod = module(b, host_target, optimize, "tools/zero-native/main.zig");
+    host_cli_mod.addImport("tooling", host_tooling_mod);
+    host_cli_mod.addImport("automation_protocol", host_automation_protocol_mod);
+    const host_cli_exe = b.addExecutable(.{
+        .name = "zero-native",
+        .root_module = host_cli_mod,
+    });
 
     const platform_arg = switch (selected_platform) {
         .auto => unreachable,
@@ -614,22 +641,22 @@ pub fn build(b: *std.Build) void {
     const lib_step = b.step("lib", "Build zero-native embeddable static library");
     lib_step.dependOn(&b.addInstallArtifact(embed_lib, .{}).step);
 
-    const doctor_run = b.addRunArtifact(cli_exe);
+    const doctor_run = b.addRunArtifact(host_cli_exe);
     doctor_run.addArg("doctor");
     const doctor_step = b.step("doctor", "Print zero-native platform diagnostics");
     doctor_step.dependOn(&doctor_run.step);
 
-    const validate_run = b.addRunArtifact(cli_exe);
+    const validate_run = b.addRunArtifact(host_cli_exe);
     validate_run.addArgs(&.{ "validate", "app.zon" });
     const validate_step = b.step("validate", "Validate app.zon");
     validate_step.dependOn(&validate_run.step);
 
-    const bundle_run = b.addRunArtifact(cli_exe);
+    const bundle_run = b.addRunArtifact(host_cli_exe);
     bundle_run.addArgs(&.{ "bundle-assets", "app.zon", "assets", "zig-out/assets" });
     const bundle_step = b.step("bundle-assets", "Bundle app assets");
     bundle_step.dependOn(&bundle_run.step);
 
-    const package_run = b.addRunArtifact(cli_exe);
+    const package_run = b.addRunArtifact(host_cli_exe);
     package_run.addArgs(&.{
         "package",
         "--target",
@@ -646,7 +673,7 @@ pub fn build(b: *std.Build) void {
     const package_step = b.step("package", "Create local package artifact");
     package_step.dependOn(&package_run.step);
 
-    const package_cef_run = b.addRunArtifact(cli_exe);
+    const package_cef_run = b.addRunArtifact(host_cli_exe);
     package_cef_run.addArgs(&.{
         "package",
         "--target",
@@ -677,27 +704,23 @@ pub fn build(b: *std.Build) void {
     const package_cef_smoke_step = b.step("test-package-cef-layout", "Verify macOS Chromium package layout");
     package_cef_smoke_step.dependOn(&package_cef_check.step);
 
-    const package_windows_run = b.addRunArtifact(cli_exe);
+    const package_windows_run = b.addRunArtifact(host_cli_exe);
     package_windows_run.addArgs(&.{ "package-windows", "--output", b.fmt("zig-out/package/zero-native-{s}-windows-Debug", .{package_version}), "--manifest", "app.zon", "--assets", "assets" });
     const package_windows_step = b.step("package-windows", "Create local Windows artifact directory");
     package_windows_step.dependOn(&package_windows_run.step);
 
-    const package_linux_run = b.addRunArtifact(cli_exe);
+    const package_linux_run = b.addRunArtifact(host_cli_exe);
     package_linux_run.addArgs(&.{ "package-linux", "--output", b.fmt("zig-out/package/zero-native-{s}-linux-Debug", .{package_version}), "--manifest", "app.zon", "--assets", "assets" });
     const package_linux_step = b.step("package-linux", "Create local Linux artifact directory");
     package_linux_step.dependOn(&package_linux_run.step);
 
-    const package_ios_run = b.addRunArtifact(cli_exe);
-    package_ios_run.addArgs(&.{ "package-ios", "--output", b.fmt("zig-out/mobile/zero-native-{s}-ios-Debug", .{package_version}), "--manifest", "app.zon", "--assets", "assets", "--binary" });
-    package_ios_run.addFileArg(embed_lib.getEmittedBin());
-    package_ios_run.step.dependOn(&embed_lib.step);
+    const package_ios_run = b.addRunArtifact(host_cli_exe);
+    package_ios_run.addArgs(&.{ "package-ios", "--output", b.fmt("zig-out/mobile/zero-native-{s}-ios-Debug", .{package_version}), "--manifest", "app.zon", "--assets", "assets" });
     const package_ios_step = b.step("package-ios", "Create local iOS host skeleton");
     package_ios_step.dependOn(&package_ios_run.step);
 
-    const package_android_run = b.addRunArtifact(cli_exe);
-    package_android_run.addArgs(&.{ "package-android", "--output", b.fmt("zig-out/mobile/zero-native-{s}-android-Debug", .{package_version}), "--manifest", "app.zon", "--assets", "assets", "--binary" });
-    package_android_run.addFileArg(embed_lib.getEmittedBin());
-    package_android_run.step.dependOn(&embed_lib.step);
+    const package_android_run = b.addRunArtifact(host_cli_exe);
+    package_android_run.addArgs(&.{ "package-android", "--output", b.fmt("zig-out/mobile/zero-native-{s}-android-Debug", .{package_version}), "--manifest", "app.zon", "--assets", "assets" });
     const package_android_step = b.step("package-android", "Create local Android host skeleton");
     package_android_step.dependOn(&package_android_run.step);
 
@@ -720,7 +743,7 @@ pub fn build(b: *std.Build) void {
     });
     generate_icon_step.dependOn(&iconset_script.step);
 
-    const notarize_run = b.addRunArtifact(cli_exe);
+    const notarize_run = b.addRunArtifact(host_cli_exe);
     notarize_run.addArgs(&.{
         "package",
         "--target",
@@ -769,7 +792,7 @@ pub fn build(b: *std.Build) void {
     });
     const cef_bundle_step = b.step("cef-bundle", "Copy CEF framework and resources into zig-out/bin/ for local dev runs");
     if (cef_auto_install) {
-        const cef_bundle_auto = b.addRunArtifact(cli_exe);
+        const cef_bundle_auto = b.addRunArtifact(host_cli_exe);
         cef_bundle_auto.addArgs(&.{ "cef", "install", "--dir", cef_dir });
         cef_bundle_script.step.dependOn(&cef_bundle_auto.step);
     }

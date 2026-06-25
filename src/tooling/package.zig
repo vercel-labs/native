@@ -437,6 +437,8 @@ const MobileShellModel = struct {
     primary_command: []const u8,
     secondary_button_title: []const u8,
     secondary_command: []const u8,
+    asset_root_subdirectory: []const u8,
+    asset_entry_path: []const u8,
 };
 
 fn defaultMobileShellModel() MobileShellModel {
@@ -447,12 +449,18 @@ fn defaultMobileShellModel() MobileShellModel {
         .primary_command = "mobile.back",
         .secondary_button_title = "Refresh",
         .secondary_command = "mobile.refresh",
+        .asset_root_subdirectory = "",
+        .asset_entry_path = "index.html",
     };
 }
 
 fn mobileShellModel(metadata: manifest_tool.Metadata) MobileShellModel {
     var model = defaultMobileShellModel();
     model.title = metadata.displayName();
+    if (metadata.frontend) |frontend| {
+        model.asset_root_subdirectory = frontend.dist;
+        model.asset_entry_path = frontend.entry;
+    }
     if (metadata.shell.windows.len == 0) return model;
 
     for (metadata.shell.windows[0].views) |view| {
@@ -504,6 +512,8 @@ fn iosDefaultShellConfig() []const u8 {
     \\    static let primaryCommand = "mobile.back"
     \\    static let secondaryButtonTitle = "Refresh"
     \\    static let secondaryCommand = "mobile.refresh"
+    \\    static let assetRootSubdirectory = ""
+    \\    static let assetEntryPath = "index.html"
     \\}
     \\
     ;
@@ -522,6 +532,10 @@ fn iosShellConfigAlloc(allocator: std.mem.Allocator, model: MobileShellModel) ![
     defer allocator.free(secondary_title);
     const secondary_command = try sourceStringLiteralAlloc(allocator, model.secondary_command);
     defer allocator.free(secondary_command);
+    const asset_root = try sourceStringLiteralAlloc(allocator, model.asset_root_subdirectory);
+    defer allocator.free(asset_root);
+    const asset_entry = try sourceStringLiteralAlloc(allocator, model.asset_entry_path);
+    defer allocator.free(asset_entry);
 
     return std.fmt.allocPrint(allocator,
         \\enum ZeroNativeShellConfig {{
@@ -531,9 +545,11 @@ fn iosShellConfigAlloc(allocator: std.mem.Allocator, model: MobileShellModel) ![
         \\    static let primaryCommand = {s}
         \\    static let secondaryButtonTitle = {s}
         \\    static let secondaryCommand = {s}
+        \\    static let assetRootSubdirectory = {s}
+        \\    static let assetEntryPath = {s}
         \\}}
         \\
-    , .{ title, status, primary_title, primary_command, secondary_title, secondary_command });
+    , .{ title, status, primary_title, primary_command, secondary_title, secondary_command, asset_root, asset_entry });
 }
 
 fn iosViewController() []const u8 {
@@ -577,12 +593,46 @@ fn iosViewController() []const u8 {
     \\
     \\        nativeApp = zero_native_app_create()
     \\        if let nativeApp {
-    \\            if let resourcePath = Bundle.main.resourcePath {
-    \\                resourcePath.withCString { pointer in
-    \\                    zero_native_app_set_asset_root(nativeApp, pointer, UInt(resourcePath.utf8.count))
-    \\                }
-    \\            }
+    \\            configureNativeAssetRoot(nativeApp)
     \\            zero_native_app_start(nativeApp)
+    \\        }
+    \\        loadWorkspace()
+    \\    }
+    \\
+    \\    private func packagedAssetRootURL() -> URL? {
+    \\        guard let resourceURL = Bundle.main.resourceURL else { return nil }
+    \\        let resourcesURL = resourceURL.appendingPathComponent("Resources", isDirectory: true)
+    \\        let roots: [URL]
+    \\        if ZeroNativeShellConfig.assetRootSubdirectory.isEmpty {
+    \\            roots = [resourceURL, resourcesURL]
+    \\        } else {
+    \\            roots = [
+    \\                resourceURL.appendingPathComponent(ZeroNativeShellConfig.assetRootSubdirectory, isDirectory: true),
+    \\                resourcesURL.appendingPathComponent(ZeroNativeShellConfig.assetRootSubdirectory, isDirectory: true),
+    \\            ]
+    \\        }
+    \\        for rootURL in roots {
+    \\            let entryURL = rootURL.appendingPathComponent(ZeroNativeShellConfig.assetEntryPath, isDirectory: false)
+    \\            if FileManager.default.fileExists(atPath: entryURL.path) { return rootURL }
+    \\        }
+    \\        return roots.first
+    \\    }
+    \\
+    \\    private func configureNativeAssetRoot(_ nativeApp: UnsafeMutableRawPointer) {
+    \\        guard let rootURL = packagedAssetRootURL() else { return }
+    \\        let path = rootURL.path
+    \\        path.withCString { pointer in
+    \\            zero_native_app_set_asset_root(nativeApp, pointer, UInt(path.utf8.count))
+    \\        }
+    \\    }
+    \\
+    \\    private func loadWorkspace() {
+    \\        if let rootURL = packagedAssetRootURL() {
+    \\            let entryURL = rootURL.appendingPathComponent(ZeroNativeShellConfig.assetEntryPath, isDirectory: false)
+    \\            if FileManager.default.fileExists(atPath: entryURL.path) {
+    \\                webView.loadFileURL(entryURL, allowingReadAccessTo: rootURL)
+    \\                return
+    \\            }
     \\        }
     \\        webView.loadHTMLString(Self.html, baseURL: nil)
     \\    }
@@ -839,6 +889,8 @@ fn androidDefaultShellConfig() []const u8 {
     \\    const val primaryCommand = "mobile.back"
     \\    const val secondaryButtonTitle = "Refresh"
     \\    const val secondaryCommand = "mobile.refresh"
+    \\    const val assetRootSubdirectory = ""
+    \\    const val assetEntryPath = "index.html"
     \\}
     \\
     ;
@@ -857,6 +909,10 @@ fn androidShellConfigAlloc(allocator: std.mem.Allocator, model: MobileShellModel
     defer allocator.free(secondary_title);
     const secondary_command = try sourceStringLiteralAlloc(allocator, model.secondary_command);
     defer allocator.free(secondary_command);
+    const asset_root = try sourceStringLiteralAlloc(allocator, model.asset_root_subdirectory);
+    defer allocator.free(asset_root);
+    const asset_entry = try sourceStringLiteralAlloc(allocator, model.asset_entry_path);
+    defer allocator.free(asset_entry);
 
     return std.fmt.allocPrint(allocator,
         \\package dev.zero_native
@@ -868,9 +924,11 @@ fn androidShellConfigAlloc(allocator: std.mem.Allocator, model: MobileShellModel
         \\    const val primaryCommand = {s}
         \\    const val secondaryButtonTitle = {s}
         \\    const val secondaryCommand = {s}
+        \\    const val assetRootSubdirectory = {s}
+        \\    const val assetEntryPath = {s}
         \\}}
         \\
-    , .{ title, status, primary_title, primary_command, secondary_title, secondary_command });
+    , .{ title, status, primary_title, primary_command, secondary_title, secondary_command, asset_root, asset_entry });
 }
 
 fn androidActivity() []const u8 {
@@ -880,6 +938,7 @@ fn androidActivity() []const u8 {
     \\import android.app.Activity
     \\import android.content.res.Configuration
     \\import android.graphics.Color
+    \\import android.net.Uri
     \\import android.os.Bundle
     \\import android.view.MotionEvent
     \\import android.view.SurfaceHolder
@@ -937,7 +996,7 @@ fn androidActivity() []const u8 {
     \\
     \\        val webView = WebView(this).apply {
     \\            settings.javaScriptEnabled = false
-    \\            loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+    \\            loadWorkspace(this)
     \\        }
     \\        val content = FrameLayout(this)
     \\        content.addView(surface, FrameLayout.LayoutParams(
@@ -964,8 +1023,35 @@ fn androidActivity() []const u8 {
     \\        setContentView(root)
     \\
     \\        nativeApp = nativeCreate()
-    \\        nativeSetAssetRoot(nativeApp, "android_asset/zero-native")
+    \\        nativeSetAssetRoot(nativeApp, packagedAssetRoot())
     \\        nativeStart(nativeApp)
+    \\    }
+    \\
+    \\    private fun packagedAssetRoot(): String {
+    \\        return if (ZeroNativeShellConfig.assetRootSubdirectory.isEmpty()) {
+    \\            "android_asset/zero-native"
+    \\        } else {
+    \\            "android_asset/zero-native/${ZeroNativeShellConfig.assetRootSubdirectory}"
+    \\        }
+    \\    }
+    \\
+    \\    private fun packagedAssetEntry(): String {
+    \\        return if (ZeroNativeShellConfig.assetRootSubdirectory.isEmpty()) {
+    \\            "zero-native/${ZeroNativeShellConfig.assetEntryPath}"
+    \\        } else {
+    \\            "zero-native/${ZeroNativeShellConfig.assetRootSubdirectory}/${ZeroNativeShellConfig.assetEntryPath}"
+    \\        }
+    \\    }
+    \\
+    \\    private fun loadWorkspace(webView: WebView) {
+    \\        val assetPath = packagedAssetEntry()
+    \\        try {
+    \\            assets.open(assetPath).close()
+    \\            val url = Uri.Builder().scheme("file").path("/android_asset/$assetPath").build().toString()
+    \\            webView.loadUrl(url)
+    \\        } catch (_: Exception) {
+    \\            webView.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+    \\        }
     \\    }
     \\
     \\    private fun dispatchNativeCommand(command: String) {
@@ -1847,6 +1933,9 @@ test "mobile package templates include native command shells" {
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "ZeroNativeShellConfig.primaryCommand") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "zero_native_app_command") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "zero_native_app_set_asset_root") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ios_controller, "ZeroNativeShellConfig.assetEntryPath") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ios_controller, "webView.loadFileURL") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ios_controller, "appendingPathComponent(\"Resources\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "keyboardWillChangeFrameNotification") != null);
     try std.testing.expect(std.mem.indexOf(u8, iosDefaultShellConfig(), "primaryCommand = \"mobile.back\"") != null);
 
@@ -1856,7 +1945,9 @@ test "mobile package templates include native command shells" {
 
     const android_activity = androidActivity();
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "System.loadLibrary(\"zero_native_host\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, android_activity, "nativeSetAssetRoot(nativeApp, \"android_asset/zero-native\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, android_activity, "nativeSetAssetRoot(nativeApp, packagedAssetRoot())") != null);
+    try std.testing.expect(std.mem.indexOf(u8, android_activity, "ZeroNativeShellConfig.assetEntryPath") != null);
+    try std.testing.expect(std.mem.indexOf(u8, android_activity, "webView.loadUrl(url)") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "dispatchNativeCommand(ZeroNativeShellConfig.secondaryCommand)") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "WebView(this)") != null);
     try std.testing.expect(std.mem.indexOf(u8, androidDefaultShellConfig(), "const val secondaryCommand = \"mobile.refresh\"") != null);
@@ -1900,7 +1991,7 @@ test "mobile package artifacts use manifest identity metadata" {
     try cwd.deleteTree(std.testing.io, ".zig-cache/test-package-mobile-identity");
     defer cwd.deleteTree(std.testing.io, ".zig-cache/test-package-mobile-identity") catch {};
     try cwd.createDirPath(std.testing.io, ".zig-cache/test-package-mobile-identity/assets");
-    try cwd.writeFile(std.testing.io, .{ .sub_path = ".zig-cache/test-package-mobile-identity/assets/index.html", .data = "<h1>Mobile</h1>" });
+    try cwd.writeFile(std.testing.io, .{ .sub_path = ".zig-cache/test-package-mobile-identity/assets/main.html", .data = "<h1>Mobile</h1>" });
 
     const shell_views = [_]manifest_tool.ShellViewMetadata{
         .{ .label = "mobile-header", .kind = "toolbar", .edge = "top", .height = 104 },
@@ -1920,6 +2011,7 @@ test "mobile package artifacts use manifest identity metadata" {
         .name = "mobile-demo",
         .display_name = "Mobile Demo",
         .version = "2.3.4",
+        .frontend = .{ .dist = "dist", .entry = "main.html" },
         .shell = .{ .windows = &shell_windows },
     };
 
@@ -1927,11 +2019,13 @@ test "mobile package artifacts use manifest identity metadata" {
         .metadata = metadata,
         .output_path = ".zig-cache/test-package-mobile-identity/ios",
         .assets_dir = ".zig-cache/test-package-mobile-identity/assets",
+        .frontend = metadata.frontend,
     });
     const android_stats = try createAndroidArtifact(std.testing.allocator, std.testing.io, .{
         .metadata = metadata,
         .output_path = ".zig-cache/test-package-mobile-identity/android",
         .assets_dir = ".zig-cache/test-package-mobile-identity/assets",
+        .frontend = metadata.frontend,
     });
     try std.testing.expectEqual(@as(usize, 1), ios_stats.asset_count);
     try std.testing.expectEqual(@as(usize, 1), android_stats.asset_count);
@@ -1959,6 +2053,8 @@ test "mobile package artifacts use manifest identity metadata" {
     try std.testing.expect(std.mem.indexOf(u8, ios_shell_config, "static let status = \"Shell ready\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_shell_config, "static let primaryCommand = \"mobile.go_back\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_shell_config, "static let secondaryButtonTitle = \"Sync Now\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ios_shell_config, "static let assetRootSubdirectory = \"dist\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ios_shell_config, "static let assetEntryPath = \"main.html\"") != null);
 
     const android_shell_config = try readPath(std.testing.allocator, std.testing.io, ".zig-cache/test-package-mobile-identity/android/app/src/main/java/dev/zero_native/ZeroNativeShellConfig.kt");
     defer std.testing.allocator.free(android_shell_config);
@@ -1966,12 +2062,14 @@ test "mobile package artifacts use manifest identity metadata" {
     try std.testing.expect(std.mem.indexOf(u8, android_shell_config, "const val status = \"Shell ready\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_shell_config, "const val primaryButtonTitle = \"Go Back\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_shell_config, "const val secondaryCommand = \"mobile.sync\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, android_shell_config, "const val assetRootSubdirectory = \"dist\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, android_shell_config, "const val assetEntryPath = \"main.html\"") != null);
 
-    const ios_asset = try readPath(std.testing.allocator, std.testing.io, ".zig-cache/test-package-mobile-identity/ios/Resources/index.html");
+    const ios_asset = try readPath(std.testing.allocator, std.testing.io, ".zig-cache/test-package-mobile-identity/ios/Resources/dist/main.html");
     defer std.testing.allocator.free(ios_asset);
     try std.testing.expectEqualStrings("<h1>Mobile</h1>", ios_asset);
 
-    const android_asset = try readPath(std.testing.allocator, std.testing.io, ".zig-cache/test-package-mobile-identity/android/app/src/main/assets/zero-native/index.html");
+    const android_asset = try readPath(std.testing.allocator, std.testing.io, ".zig-cache/test-package-mobile-identity/android/app/src/main/assets/zero-native/dist/main.html");
     defer std.testing.allocator.free(android_asset);
     try std.testing.expectEqualStrings("<h1>Mobile</h1>", android_asset);
 }
