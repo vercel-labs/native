@@ -244,6 +244,10 @@ pub fn build(b: *std.Build) void {
         "examples/android/app/src/main/cpp/zero_native_jni.c",
         "examples/android/app/src/main/cpp/zero_native.h",
     });
+    addLayoutCheckStep(b, mobile_examples_step, "test-example-mobile-shell-layout", "Verify shared mobile-shell metadata", &.{
+        "examples/mobile-shell/README.md",
+        "examples/mobile-shell/app.zon",
+    });
 
     const build_webview_cef = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=chromium", b.fmt("-Dcef-dir={s}", .{cef_dir}) });
     build_webview_cef.setCwd(b.path("examples/webview"));
