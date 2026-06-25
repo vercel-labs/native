@@ -384,7 +384,9 @@ fn appkitBridgeCallback(context: ?*anyopaque, window_id: u64, webview_label: [*]
 
 fn readClipboard(context: ?*anyopaque, buffer: []u8) anyerror![]const u8 {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    return buffer[0..zero_native_appkit_clipboard_read(self.host, buffer.ptr, buffer.len)];
+    const len = zero_native_appkit_clipboard_read(self.host, buffer.ptr, buffer.len);
+    if (len > buffer.len) return error.NoSpaceLeft;
+    return buffer[0..len];
 }
 
 fn writeClipboard(context: ?*anyopaque, text: []const u8) anyerror!void {

@@ -533,8 +533,7 @@ fn validateShellViews(views: []const ShellView) ValidationError!void {
         }
         if (view.text) |text| try validateFreeText(text);
         if (view.command) |command| {
-            if (command.len > max_command_id_bytes) return error.InvalidCommand;
-            try validateName(command);
+            try validateCommandId(command);
         }
         if (view.url) |url| try validateViewUrl(url);
         if (view.kind == .webview and view.url == null) return error.MissingRequiredField;
@@ -596,6 +595,9 @@ pub fn validateCommands(commands: []const Command) ValidationError!void {
 fn validateCommandId(id: []const u8) ValidationError!void {
     if (id.len == 0 or id.len > max_command_id_bytes) return error.InvalidCommand;
     try validateName(id);
+    for (id) |ch| {
+        if (ch == '\n' or ch == '\r' or ch == '\t') return error.InvalidCommand;
+    }
 }
 
 pub fn validateMenus(menus: []const Menu) ValidationError!void {
@@ -1166,6 +1168,14 @@ test "manifest validates shell windows and views" {
         .shell = .{ .windows = &orphan_window },
     }));
 
+    const invalid_command_views = [_]ShellView{.{ .label = "save", .kind = .button, .command = "app\tsave" }};
+    const invalid_command_window = [_]ShellWindow{.{ .views = &invalid_command_views }};
+    try std.testing.expectError(error.InvalidCommand, validateManifest(.{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .shell = .{ .windows = &invalid_command_window },
+    }));
+
     const cyclic_views = [_]ShellView{
         .{ .label = "first", .kind = .stack, .parent = "second" },
         .{ .label = "second", .kind = .stack, .parent = "first" },
@@ -1316,6 +1326,13 @@ test "manifest validates command metadata" {
         .commands = &invalid_id_commands,
     }));
 
+    const invalid_control_commands = [_]Command{.{ .id = "app\nrefresh" }};
+    try std.testing.expectError(error.InvalidCommand, validateManifest(.{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .commands = &invalid_control_commands,
+    }));
+
     const long_title = [_]u8{'x'} ** (max_command_title_bytes + 1);
     const long_title_commands = [_]Command{.{ .id = "app.long-title", .title = long_title[0..] }};
     try std.testing.expectError(error.InvalidName, validateManifest(.{
@@ -1345,6 +1362,14 @@ test "manifest validates native menus" {
         .identity = .{ .id = "com.example.app", .name = "example" },
         .version = .{ .major = 1, .minor = 0, .patch = 0 },
         .menus = &missing_command_menus,
+    }));
+
+    const invalid_command_items = [_]MenuItem{.{ .label = "Refresh", .command = "app\rrefresh" }};
+    const invalid_command_menus = [_]Menu{.{ .title = "View", .items = &invalid_command_items }};
+    try std.testing.expectError(error.InvalidCommand, validateManifest(.{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .menus = &invalid_command_menus,
     }));
 
     const invalid_key_items = [_]MenuItem{.{ .label = "Refresh", .command = "app.refresh", .key = "r" }};

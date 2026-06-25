@@ -384,7 +384,9 @@ fn windowsBridgeCallback(context: ?*anyopaque, window_id: u64, webview_label: [*
 
 fn readClipboard(context: ?*anyopaque, buffer: []u8) anyerror![]const u8 {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
-    return buffer[0..zero_native_windows_clipboard_read(self.host, buffer.ptr, buffer.len)];
+    const len = zero_native_windows_clipboard_read(self.host, buffer.ptr, buffer.len);
+    if (len > buffer.len) return error.NoSpaceLeft;
+    return buffer[0..len];
 }
 
 fn writeClipboard(context: ?*anyopaque, text: []const u8) anyerror!void {
@@ -395,6 +397,7 @@ fn writeClipboard(context: ?*anyopaque, text: []const u8) anyerror!void {
 fn readClipboardData(context: ?*anyopaque, mime_type: []const u8, buffer: []u8) anyerror![]const u8 {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     const len = zero_native_windows_clipboard_read_data(self.host, mime_type.ptr, mime_type.len, buffer.ptr, buffer.len);
+    if (len > buffer.len) return error.NoSpaceLeft;
     return buffer[0..len];
 }
 

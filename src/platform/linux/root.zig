@@ -261,13 +261,18 @@ pub const LinuxPlatform = struct {
             .reveal_path,
             .notifications,
             .recent_documents,
-            .credentials,
             .file_drops,
             .app_activation_events,
             => self.web_engine == .system,
+            .credentials => self.web_engine == .system and credentialsAvailable(self.host),
             .gpu_surfaces => false,
             .tray => false,
         };
+    }
+
+    fn credentialsAvailable(host: *GtkHost) bool {
+        if (@import("builtin").target.os.tag != .linux) return false;
+        return zero_native_gtk_credentials_available(host) != 0;
     }
 
     fn run(context: *anyopaque, handler: platform_mod.EventHandler, handler_context: *anyopaque) anyerror!void {
@@ -380,7 +385,9 @@ fn gtkBridgeCallback(context: ?*anyopaque, window_id: u64, webview_label: [*]con
 
 fn readClipboard(context: ?*anyopaque, buffer: []u8) anyerror![]const u8 {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
-    return buffer[0..zero_native_gtk_clipboard_read(self.host, buffer.ptr, buffer.len)];
+    const len = zero_native_gtk_clipboard_read(self.host, buffer.ptr, buffer.len);
+    if (len > buffer.len) return error.NoSpaceLeft;
+    return buffer[0..len];
 }
 
 fn writeClipboard(context: ?*anyopaque, text: []const u8) anyerror!void {
@@ -391,6 +398,7 @@ fn writeClipboard(context: ?*anyopaque, text: []const u8) anyerror!void {
 fn readClipboardData(context: ?*anyopaque, mime_type: []const u8, buffer: []u8) anyerror![]const u8 {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     const len = zero_native_gtk_clipboard_read_data(self.host, mime_type.ptr, mime_type.len, buffer.ptr, buffer.len);
+    if (len > buffer.len) return error.NoSpaceLeft;
     return buffer[0..len];
 }
 

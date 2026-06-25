@@ -732,7 +732,7 @@ static size_t copyBytesToBuffer(char *buffer, size_t buffer_len, const std::stri
     if (!buffer || buffer_len == 0) return 0;
     size_t len = std::min(buffer_len, bytes.size());
     if (len > 0) memcpy(buffer, bytes.data(), len);
-    return len;
+    return bytes.size();
 }
 
 static std::string lowerAscii(std::string value) {

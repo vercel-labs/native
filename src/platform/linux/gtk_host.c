@@ -2543,7 +2543,7 @@ static size_t zero_native_copy_bytes(char *buffer, size_t buffer_len, const void
     if (!buffer || buffer_len == 0 || !bytes) return 0;
     size_t count = bytes_len < buffer_len ? bytes_len : buffer_len;
     if (count > 0) memcpy(buffer, bytes, count);
-    return count;
+    return bytes_len;
 }
 
 static void zero_native_clipboard_read_done(GObject *source, GAsyncResult *result, gpointer data) {
