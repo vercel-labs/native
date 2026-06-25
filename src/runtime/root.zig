@@ -144,6 +144,7 @@ pub const Runtime = struct {
     shell_layouts: [platform.max_windows]RuntimeShellLayout = undefined,
     shell_layout_count: usize = 0,
     next_window_id: platform.WindowId = 2,
+    next_view_id: platform.ViewId = 1,
     invalidated: bool = true,
     timestamp_ns: i128 = 0,
     frame_index: u64 = 0,
@@ -1039,6 +1040,7 @@ pub const Runtime = struct {
             .open = true,
             .focused = self.window_count == 0,
         };
+        self.windows[index].main_view_id = self.allocateViewId();
         self.windows[index].source = if (source) |source_value| try self.copySource(index, source_value) else null;
         self.windows[index].main_frame = geometry.RectF.init(0, 0, self.windows[index].info.frame.width, self.windows[index].info.frame.height);
         self.windows[index].main_frame_set = false;
@@ -1160,6 +1162,12 @@ pub const Runtime = struct {
         while (self.findWindowIndexById(self.next_window_id) != null) self.next_window_id += 1;
         const id = self.next_window_id;
         self.next_window_id += 1;
+        return id;
+    }
+
+    fn allocateViewId(self: *Runtime) platform.ViewId {
+        const id = self.next_view_id;
+        self.next_view_id += 1;
         return id;
     }
 
@@ -1845,7 +1853,7 @@ pub const Runtime = struct {
             }
             self.options.platform.services.closeWebView(window_id, label) catch {};
         }
-        try self.reserveWebView(window_id, label, url, webview_frame, layer, transparent, bridge_enabled);
+        try self.reserveWebView(self.allocateViewId(), window_id, label, url, webview_frame, layer, transparent, bridge_enabled);
         reserved = true;
         return writeWebViewJson(self.webviews[self.webview_count - 1], output);
     }
@@ -1986,9 +1994,10 @@ pub const Runtime = struct {
         return writer.buffered();
     }
 
-    fn reserveWebView(self: *Runtime, window_id: platform.WindowId, label: []const u8, url: []const u8, webview_frame: geometry.RectF, layer: i32, transparent: bool, bridge_enabled: bool) !void {
+    fn reserveWebView(self: *Runtime, id: platform.ViewId, window_id: platform.WindowId, label: []const u8, url: []const u8, webview_frame: geometry.RectF, layer: i32, transparent: bool, bridge_enabled: bool) !void {
         const index = self.webview_count;
         self.webviews[index] = .{
+            .id = id,
             .window_id = window_id,
             .frame = webview_frame,
             .layer = layer,
@@ -2014,6 +2023,7 @@ pub const Runtime = struct {
         while (cursor + 1 < self.webview_count) : (cursor += 1) {
             const next = self.webviews[cursor + 1];
             self.webviews[cursor] = .{
+                .id = next.id,
                 .window_id = next.window_id,
                 .frame = next.frame,
                 .layer = next.layer,
@@ -2044,6 +2054,7 @@ pub const Runtime = struct {
         const window = self.windows[window_index];
         const fallback_frame = geometry.RectF.init(0, 0, window.info.frame.width, window.info.frame.height);
         return .{
+            .id = window.main_view_id,
             .window_id = window.info.id,
             .label = "main",
             .url = sourceWebViewUrl(window.source),
@@ -2070,7 +2081,7 @@ pub const Runtime = struct {
             }
             self.options.platform.services.closeView(options.window_id, options.label) catch {};
         }
-        try self.reserveWebView(options.window_id, options.label, options.url, options.frame, options.layer, options.transparent, options.bridge_enabled);
+        try self.reserveWebView(self.allocateViewId(), options.window_id, options.label, options.url, options.frame, options.layer, options.transparent, options.bridge_enabled);
         reserved = true;
         self.invalidateFor(.command, options.frame);
         return viewInfoFromWebView(self.webviews[self.webview_count - 1]);
@@ -2126,6 +2137,7 @@ pub const Runtime = struct {
     fn reserveView(self: *Runtime, options: platform.ViewOptions) !void {
         const index = self.view_count;
         self.views[index] = .{
+            .id = self.allocateViewId(),
             .window_id = options.window_id,
             .kind = options.kind,
             .frame = options.frame,
@@ -2230,6 +2242,7 @@ pub const Runtime = struct {
         while (cursor + 1 < self.view_count) : (cursor += 1) {
             const next = self.views[cursor + 1];
             self.views[cursor] = .{
+                .id = next.id,
                 .window_id = next.window_id,
                 .kind = next.kind,
                 .frame = next.frame,
@@ -2338,6 +2351,7 @@ const RunContext = struct {
 
 const RuntimeWindow = struct {
     info: platform.WindowInfo = .{},
+    main_view_id: platform.ViewId = 0,
     source: ?platform.WebViewSource = null,
     main_frame: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
     main_frame_set: bool = false,
@@ -2350,6 +2364,7 @@ const RuntimeWindow = struct {
 };
 
 const RuntimeWebView = struct {
+    id: platform.ViewId = 0,
     window_id: platform.WindowId = 1,
     label: []const u8 = "",
     url: []const u8 = "",
@@ -2386,6 +2401,7 @@ const FocusTraversalDirection = enum {
 };
 
 const RuntimeView = struct {
+    id: platform.ViewId = 0,
     window_id: platform.WindowId = 1,
     label: []const u8 = "",
     kind: platform.ViewKind = .toolbar,
@@ -2411,6 +2427,7 @@ const RuntimeView = struct {
 
     fn info(self: RuntimeView) platform.ViewInfo {
         return .{
+            .id = self.id,
             .window_id = self.window_id,
             .label = self.label,
             .kind = self.kind,
@@ -2868,7 +2885,7 @@ fn writeCommandJsonToWriter(command: Command, writer: anytype) !void {
 }
 
 fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
-    try writer.writeAll("{\"label\":");
+    try writer.print("{{\"id\":{d},\"label\":", .{view.id});
     try json.writeString(writer, view.label);
     try writer.print(",\"windowId\":{d},\"kind\":", .{view.window_id});
     try json.writeString(writer, @tagName(view.kind));
@@ -2905,6 +2922,7 @@ fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
 
 fn viewInfoFromWebView(webview: RuntimeWebView) platform.ViewInfo {
     return .{
+        .id = webview.id,
         .window_id = webview.window_id,
         .label = webview.label,
         .kind = .webview,
@@ -3608,6 +3626,7 @@ test "runtime exposes startup WebView and native views through generic view API"
         .command = "app.toolbar",
     });
     try std.testing.expectEqual(platform.ViewKind.toolbar, toolbar.kind);
+    try std.testing.expect(toolbar.id > 0);
     try std.testing.expectEqualStrings("toolbar", toolbar.label);
     try std.testing.expectEqualStrings("Main toolbar", toolbar.accessibility_label);
     try std.testing.expectEqualStrings("Tools", toolbar.text);
@@ -3617,9 +3636,11 @@ test "runtime exposes startup WebView and native views through generic view API"
     const views = harness.runtime.listViews(1, &views_buffer);
     try std.testing.expectEqual(@as(usize, 2), views.len);
     try std.testing.expectEqual(platform.ViewKind.webview, views[0].kind);
+    try std.testing.expect(views[0].id > 0);
     try std.testing.expectEqualStrings("main", views[0].label);
     try std.testing.expect(views[0].focused);
     try std.testing.expectEqual(platform.ViewKind.toolbar, views[1].kind);
+    try std.testing.expectEqual(toolbar.id, views[1].id);
     try std.testing.expectEqualStrings("toolbar", views[1].label);
     try std.testing.expect(!views[1].focused);
 
@@ -3642,6 +3663,7 @@ test "runtime exposes startup WebView and native views through generic view API"
         .command = "app.toolbar.updated",
     });
     try std.testing.expectEqual(@as(f32, 52), updated.frame.height);
+    try std.testing.expectEqual(toolbar.id, updated.id);
     try std.testing.expect(!updated.visible);
     try std.testing.expect(updated.focused);
     try std.testing.expectEqualStrings("Primary actions toolbar", updated.accessibility_label);
@@ -3676,6 +3698,7 @@ test "runtime createView routes webview kind through WebView backend" {
         .bridge_enabled = true,
     });
     try std.testing.expectEqual(platform.ViewKind.webview, preview.kind);
+    try std.testing.expect(preview.id > 0);
     try std.testing.expectEqualStrings("zero://app/preview.html", preview.url);
     try std.testing.expect(preview.bridge_enabled);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.webview_count);
@@ -3685,6 +3708,7 @@ test "runtime createView routes webview kind through WebView backend" {
         .layer = 8,
     });
     try std.testing.expectEqualStrings("zero://app/updated.html", updated.url);
+    try std.testing.expectEqual(preview.id, updated.id);
     try std.testing.expectEqual(@as(i32, 8), updated.layer);
 
     var views_buffer: [4]platform.ViewInfo = undefined;
@@ -3692,6 +3716,7 @@ test "runtime createView routes webview kind through WebView backend" {
     try std.testing.expectEqual(@as(usize, 2), views.len);
     try std.testing.expectEqualStrings("main", views[0].label);
     try std.testing.expectEqualStrings("preview", views[1].label);
+    try std.testing.expectEqual(preview.id, views[1].id);
 
     try harness.runtime.closeView(1, "preview");
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.webview_count);
@@ -5263,6 +5288,7 @@ test "runtime handles built-in JavaScript view bridge commands" {
         .window_id = 1,
     } });
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"id\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"kind\":\"toolbar\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"accessibilityLabel\":\"Main tools\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"text\":\"Tools\"") != null);

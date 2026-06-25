@@ -159,6 +159,8 @@ export type ZeroNativeViewKind =
   | "progressIndicator";
 
 export interface ZeroNativeViewInfo {
+  /** Stable runtime view id for this window/view lifetime. */
+  id: number;
   label: string;
   windowId: number;
   kind: ZeroNativeViewKind;

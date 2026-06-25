@@ -178,6 +178,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "ZeroNativeCommandInfo" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "list(): Promise<ZeroNativeCommandInfo[]>" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "ZeroNativeCreateWebViewViewOptions" },
+        .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "Stable runtime view id" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "kind: \"webview\"" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "url: string" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "ZeroNativePlatformFeatureSelector" },
@@ -196,6 +197,9 @@ pub fn build(b: *std.Build) void {
     addFileContainsCheckStep(b, test_step, "test-docs-command-contracts", "Verify command docs match native view update contracts", &.{
         .{ .path = "docs/src/app/commands/page.mdx", .pattern = ".text = \"Refreshed\"" },
         .{ .path = "docs/src/app/commands/page.mdx", .pattern = "const commands = await window.zero.commands.list();" },
+    });
+    addFileContainsCheckStep(b, test_step, "test-docs-native-view-contracts", "Verify native surface docs describe view identity", &.{
+        .{ .path = "docs/src/app/native-surfaces/page.mdx", .pattern = "ViewInfo.id" },
     });
     addFileContainsCheckStep(b, test_step, "test-docs-builtin-bridge-policy", "Verify bridge policy docs include guarded dialog commands", &.{
         .{ .path = "docs/src/app/security/page.mdx", .pattern = ".{ .name = \"zero-native.dialog.saveFile\"" },

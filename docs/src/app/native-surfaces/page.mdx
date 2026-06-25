@@ -67,7 +67,7 @@ await window.zero.commands.invoke("app.refresh");
 
 Surfaces should share command IDs instead of each UI entry point owning separate behavior. A native menu item, shortcut, toolbar button, tray item, native button, and WebView bridge call can all dispatch `app.refresh` into the same `Event.command` handler.
 
-`CommandEvent.source` records whether the action came from `.menu`, `.shortcut`, `.toolbar`, `.tray`, `.native_view`, `.bridge`, or `.runtime`.
+`CommandEvent.source` records whether the action came from `.menu`, `.shortcut`, `.toolbar`, `.tray`, `.native_view`, `.bridge`, or `.runtime`. `ViewInfo.id` is a stable runtime handle for the view lifetime, while `label` remains the selector used by runtime and bridge APIs.
 
 ## Compatibility
 

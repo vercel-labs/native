@@ -119,6 +119,7 @@ pub const WebViewSource = struct {
 };
 
 pub const WindowId = u64;
+pub const ViewId = u64;
 pub const max_windows: usize = 16;
 pub const max_window_label_bytes: usize = 64;
 pub const max_window_title_bytes: usize = 128;
@@ -433,6 +434,7 @@ pub const ViewPatch = struct {
 };
 
 pub const ViewInfo = struct {
+    id: ViewId = 0,
     window_id: WindowId = 1,
     label: []const u8 = "",
     kind: ViewKind = .webview,
