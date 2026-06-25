@@ -7,6 +7,7 @@ This example shows one `app.sync` command handled from each user-facing entry po
 - Native tray item.
 - App shortcut.
 - WebView bridge call.
+- Manifest command catalog listing from the WebView.
 
 Run with the system backend:
 

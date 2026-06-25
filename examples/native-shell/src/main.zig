@@ -97,9 +97,9 @@ const html =
     \\        <button id="refresh" type="button">Refresh</button>
     \\      </div>
     \\      <div class="row">
-    \\        <div class="label">View list</div>
-    \\        <div class="meta">Reads the runtime view tree, including native views and the main WebView.</div>
-    \\        <button id="views" type="button">List Views</button>
+    \\        <div class="label">Runtime lists</div>
+    \\        <div class="meta">Reads native views and manifest commands.</div>
+    \\        <div><button id="views" type="button">Views</button> <button id="commands" type="button">Commands</button></div>
     \\      </div>
     \\    </section>
     \\    <pre id="output">Ready.</pre>
@@ -120,6 +120,9 @@ const html =
     \\    document.querySelector("#views").addEventListener("click", async () => {
     \\      try { show(await window.zero.views.list()); } catch (error) { fail(error); }
     \\    });
+    \\    document.querySelector("#commands").addEventListener("click", async () => {
+    \\      try { show(await window.zero.commands.list()); } catch (error) { fail(error); }
+    \\    });
     \\  </script>
     \\</body>
     \\</html>
@@ -131,6 +134,7 @@ const command_permission = [_][]const u8{zero_native.security.permission_command
 const view_permission = [_][]const u8{zero_native.security.permission_view};
 const builtin_policies = [_]zero_native.BridgeCommandPolicy{
     .{ .name = "zero-native.command.invoke", .permissions = &command_permission, .origins = &bridge_origins },
+    .{ .name = "zero-native.command.list", .permissions = &command_permission, .origins = &bridge_origins },
     .{ .name = "zero-native.view.list", .permissions = &view_permission, .origins = &bridge_origins },
 };
 const shell_views = [_]zero_native.ShellView{

@@ -84,6 +84,7 @@ const html =
     \\    <div class="panel">
     \\      <p>Dispatch from the WebView through the built-in command bridge.</p>
     \\      <button id="sync" type="button">Sync</button>
+    \\      <button id="commands" type="button">List Commands</button>
     \\    </div>
     \\    <pre id="output">Ready.</pre>
     \\  </main>
@@ -97,8 +98,17 @@ const html =
     \\      }
     \\      return window.zero.invoke("zero-native.command.invoke", { name });
     \\    };
+    \\    const listCommands = () => {
+    \\      if (window.zero && window.zero.commands && window.zero.commands.list) {
+    \\        return window.zero.commands.list();
+    \\      }
+    \\      return window.zero.invoke("zero-native.command.list", {});
+    \\    };
     \\    document.querySelector("#sync").addEventListener("click", async () => {
     \\      try { show(await invokeCommand("app.sync")); } catch (error) { fail(error); }
+    \\    });
+    \\    document.querySelector("#commands").addEventListener("click", async () => {
+    \\      try { show(await listCommands()); } catch (error) { fail(error); }
     \\    });
     \\  </script>
     \\</body>
@@ -108,8 +118,10 @@ const html =
 const app_permissions = [_][]const u8{zero_native.security.permission_command};
 const bridge_origins = [_][]const u8{ "zero://inline", "zero://app" };
 const command_permission = [_][]const u8{zero_native.security.permission_command};
+const command_catalog = [_]zero_native.Command{.{ .id = command_id, .title = "Sync" }};
 const builtin_policies = [_]zero_native.BridgeCommandPolicy{
     .{ .name = "zero-native.command.invoke", .permissions = &command_permission, .origins = &bridge_origins },
+    .{ .name = "zero-native.command.list", .permissions = &command_permission, .origins = &bridge_origins },
 };
 const tray_items = [_]zero_native.TrayMenuItem{
     .{ .id = 1, .label = "Sync", .command = command_id },
@@ -212,6 +224,7 @@ test "command app routes toolbar menu tray shortcut and bridge commands" {
     harness.init(.{ .size = zero_native.geometry.SizeF.init(window_width, window_height) });
     harness.runtime.options.builtin_bridge = .{ .enabled = true, .commands = &builtin_policies };
     harness.runtime.options.js_window_api = true;
+    harness.runtime.options.commands = &command_catalog;
     harness.runtime.options.security = .{
         .permissions = &app_permissions,
         .navigation = .{ .allowed_origins = &bridge_origins },
@@ -243,6 +256,12 @@ test "command app routes toolbar menu tray shortcut and bridge commands" {
         .window_id = 1,
         .webview_label = "main",
     } });
+    try harness.runtime.dispatchPlatformEvent(app.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"2\",\"command\":\"zero-native.command.list\",\"payload\":{}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+        .webview_label = "main",
+    } });
 
     try std.testing.expectEqual(@as(u32, 5), app.command_count);
     try std.testing.expectEqualStrings(command_id, app.last_command_name);
@@ -252,4 +271,5 @@ test "command app routes toolbar menu tray shortcut and bridge commands" {
     try std.testing.expectEqual(zero_native.CommandSource.shortcut, app.sources[3]);
     try std.testing.expectEqual(zero_native.CommandSource.bridge, app.sources[4]);
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"id\":\"app.sync\"") != null);
 }

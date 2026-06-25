@@ -1255,6 +1255,8 @@ pub const Runtime = struct {
     fn dispatchCommandBridgeCommand(self: *Runtime, app: App, request: bridge.Request, source_window_id: platform.WindowId, source_view_label: []const u8, result_buffer: []u8, response_buffer: []u8) []const u8 {
         const result = if (std.mem.eql(u8, request.command, "zero-native.command.invoke"))
             self.invokeCommandFromJson(app, request.payload, source_window_id, source_view_label, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
+        else if (std.mem.eql(u8, request.command, "zero-native.command.list"))
+            self.writeCommandListJson(result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
         else
             return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown command command");
         return bridge.writeSuccessResponse(response_buffer, request.id, result);
@@ -1295,6 +1297,17 @@ pub const Runtime = struct {
         };
         try self.dispatchCommand(app, event);
         return writeCommandEventJson(event, output);
+    }
+
+    fn writeCommandListJson(self: *Runtime, output: []u8) ![]const u8 {
+        var writer = std.Io.Writer.fixed(output);
+        try writer.writeByte('[');
+        for (self.options.commands, 0..) |command, index| {
+            if (index > 0) try writer.writeByte(',');
+            try writeCommandJsonToWriter(command, &writer);
+        }
+        try writer.writeByte(']');
+        return writer.buffered();
     }
 
     fn dispatchViewBridgeCommand(self: *Runtime, request: bridge.Request, source_window_id: platform.WindowId, result_buffer: []u8, response_buffer: []u8) []const u8 {
@@ -2735,6 +2748,14 @@ fn writeCommandEventJson(event_value: CommandEvent, output: []u8) ![]const u8 {
     try writer.print(",\"trayItemId\":{d}", .{event_value.tray_item_id});
     try writer.writeByte('}');
     return writer.buffered();
+}
+
+fn writeCommandJsonToWriter(command: Command, writer: anytype) !void {
+    try writer.writeAll("{\"id\":");
+    try json.writeString(writer, command.id);
+    try writer.writeAll(",\"title\":");
+    try json.writeString(writer, command.title);
+    try writer.print(",\"enabled\":{},\"checked\":{}}}", .{ command.enabled, command.checked });
 }
 
 fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
@@ -4397,6 +4418,43 @@ test "runtime handles built-in JavaScript command bridge commands" {
     try std.testing.expectEqualStrings("toolbar", app_state.last_view_label);
 }
 
+test "runtime lists command catalog through built-in JavaScript command API" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "command-list", .source = platform.WebViewSource.html("<p>Commands</p>") };
+        }
+    };
+
+    const commands = [_]Command{
+        .{ .id = "app.save", .title = "Save" },
+        .{ .id = "app.sidebar.toggle", .title = "Sidebar", .enabled = false, .checked = true },
+    };
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.runtime.options.js_window_api = true;
+    harness.runtime.options.commands = &commands;
+    const command_origins = [_][]const u8{"zero://inline"};
+    harness.runtime.options.security.navigation.allowed_origins = &command_origins;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"1\",\"command\":\"zero-native.command.list\",\"payload\":{}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+        .webview_label = "main",
+    } });
+
+    const response = harness.null_platform.lastBridgeResponse();
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"result\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"id\":\"app.save\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"title\":\"Save\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"id\":\"app.sidebar.toggle\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"enabled\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"checked\":true") != null);
+}
+
 test "runtime gates JavaScript command API with command permission" {
     const TestApp = struct {
         command_count: u32 = 0,
@@ -4430,6 +4488,15 @@ test "runtime gates JavaScript command API with command permission" {
     try std.testing.expectEqual(@as(u32, 1), app_state.command_count);
     try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
 
+    const commands = [_]Command{.{ .id = "app.save", .title = "Save" }};
+    allowed.runtime.options.commands = &commands;
+    try allowed.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"list\",\"command\":\"zero-native.command.list\",\"payload\":{}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "\"id\":\"app.save\"") != null);
+
     const filesystem_only = [_][]const u8{security.permission_filesystem};
     var denied: TestHarness() = undefined;
     denied.init(.{});
@@ -4438,6 +4505,13 @@ test "runtime gates JavaScript command API with command permission" {
     try denied.start(app_state.app());
     try denied.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
         .bytes = "{\"id\":\"denied\",\"command\":\"zero-native.command.invoke\",\"payload\":{\"name\":\"app.open\"}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, denied.null_platform.lastBridgeResponse(), "\"permission_denied\"") != null);
+
+    try denied.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"denied-list\",\"command\":\"zero-native.command.list\",\"payload\":{}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });

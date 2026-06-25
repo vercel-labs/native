@@ -210,7 +210,7 @@ The optional `commands` list declares shared command metadata. The runtime still
 
 An app can define up to 256 commands. Command ids can be up to 128 bytes and titles can be up to 128 bytes.
 
-Generated runners load manifest commands into `RuntimeOptions.commands`. Native code can read the active catalog with `runtime.listCommands(...)` and keep menus, shortcuts, toolbar controls, tray items, and bridge callers aligned with the same command ids.
+Generated runners load manifest commands into `RuntimeOptions.commands`. Native code can read the active catalog with `runtime.listCommands(...)`, and trusted WebView code can read it with `window.zero.commands.list()` when the built-in command bridge allows it. Use the catalog to keep menus, shortcuts, toolbar controls, tray items, and bridge callers aligned with the same command ids.
 
 ## `shortcuts`
 

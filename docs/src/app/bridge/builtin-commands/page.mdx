@@ -18,10 +18,15 @@ zero-native provides built-in bridge commands for app command routing, window ma
       <td><code>command</code></td>
       <td>Dispatch an <code>Event.command</code> into the app runtime from the calling WebView</td>
     </tr>
+    <tr>
+      <td><code>zero-native.command.list</code></td>
+      <td><code>command</code></td>
+      <td>List the manifest command catalog loaded into the runtime</td>
+    </tr>
   </tbody>
 </table>
 
-Command routing is available through `window.zero.commands.invoke(...)` when `js_window_api` is `true`. When runtime permissions are configured, the command helper requires the `command` permission; the legacy `window` permission is still accepted for compatibility. The runtime emits a `CommandEvent` with `source = .bridge`, the calling `window_id`, and the calling view label when the request comes from a named child WebView.
+Command routing is available through `window.zero.commands.invoke(...)` when `js_window_api` is `true`. The manifest command catalog is available through `window.zero.commands.list()`. When runtime permissions are configured, command helpers require the `command` permission; the legacy `window` permission is still accepted for compatibility. The runtime emits a `CommandEvent` with `source = .bridge`, the calling `window_id`, and the calling view label when the request comes from a named child WebView.
 
 Native controls can also bind a `command` when created with `runtime.createView(...)` or `window.zero.views.create(...)`. On macOS, Linux, and Windows system WebView builds, native button-style controls dispatch the command with the native `window_id` and the originating view label. Controls inside a toolbar report `source = .toolbar`; other native controls report `source = .native_view`.
 
@@ -355,6 +360,7 @@ const app_permissions = [_][]const u8{
     .commands = &.{
         .{ .name = "zero-native.window.list", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
         .{ .name = "zero-native.command.invoke", .permissions = .{ "command" }, .origins = .{ "zero://app" } },
+        .{ .name = "zero-native.command.list", .permissions = .{ "command" }, .origins = .{ "zero://app" } },
         .{ .name = "zero-native.platform.supports", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
         .{ .name = "zero-native.window.create", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
         .{ .name = "zero-native.view.create", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
@@ -430,6 +436,7 @@ await window.zero.views.create({
 await toolbar.setVisible(false);
 
 await window.zero.commands.invoke("app.save");
+const commands = await window.zero.commands.list();
 
 const hasNativeViews = await window.zero.platform.supports("native_views");
 

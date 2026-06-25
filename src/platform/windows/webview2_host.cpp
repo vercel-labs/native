@@ -1201,7 +1201,8 @@ static const wchar_t *zeroNativeBridgeScript() {
 	function off(name,callback){var set=listeners.get(name);if(set){set.delete(callback);if(set.size===0){listeners.delete(name);}}}
 	function emit(name,detail){var set=listeners.get(name);if(set){Array.from(set).forEach(function(callback){callback(detail);});}window.dispatchEvent(new CustomEvent('zero-native:'+name,{detail:detail}));}
 	var commands=Object.freeze({
-	invoke:function(value){return invoke('zero-native.command.invoke',commandPayload(value));}
+	invoke:function(value){return invoke('zero-native.command.invoke',commandPayload(value));},
+	list:function(){return invoke('zero-native.command.list',{});}
 	});
 	var windows=Object.freeze({
 	create:function(options){return invoke('zero-native.window.create',options||{});},

@@ -82,3 +82,9 @@ await window.zero.commands.invoke("app.refresh");
 ```
 
 The resulting event has `source = .bridge`, the calling native `window_id`, and the calling view label when the call came from a named child WebView.
+
+WebView content can also read the manifest command catalog:
+
+```js
+const commands = await window.zero.commands.list();
+```
