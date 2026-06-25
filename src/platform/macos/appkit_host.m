@@ -30,6 +30,7 @@ static NSString *ZeroNativeShortcutKeyForEvent(NSEvent *event);
 static BOOL ZeroNativeShortcutUsesImplicitShift(NSString *key, NSEvent *event);
 static BOOL ZeroNativeShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventModifierFlags eventModifiers, BOOL allowImplicitShift);
 static NSEventModifierFlags ZeroNativeMenuModifierFlags(uint32_t modifiers);
+static NSAccessibilityRole ZeroNativeAccessibilityRoleForNativeViewKind(NSInteger kind);
 
 static NSString *ZeroNativeStringFromBytes(const char *bytes, size_t len) {
     if (!bytes || len == 0) return nil;
@@ -42,6 +43,38 @@ static NSString *ZeroNativePasteboardTypeForMime(const char *mime_type, size_t m
     if ([mime isEqualToString:@"text/html"]) return NSPasteboardTypeHTML;
     if ([mime isEqualToString:@"text/rtf"] || [mime isEqualToString:@"application/rtf"]) return NSPasteboardTypeRTF;
     return nil;
+}
+
+static NSAccessibilityRole ZeroNativeAccessibilityRoleForNativeViewKind(NSInteger kind) {
+    switch (kind) {
+        case ZERO_NATIVE_APPKIT_VIEW_TOOLBAR:
+        case ZERO_NATIVE_APPKIT_VIEW_TITLEBAR_ACCESSORY:
+            return NSAccessibilityToolbarRole;
+        case ZERO_NATIVE_APPKIT_VIEW_SPLIT:
+            return NSAccessibilitySplitterRole;
+        case ZERO_NATIVE_APPKIT_VIEW_BUTTON:
+        case ZERO_NATIVE_APPKIT_VIEW_ICON_BUTTON:
+        case ZERO_NATIVE_APPKIT_VIEW_TOGGLE:
+            return NSAccessibilityButtonRole;
+        case ZERO_NATIVE_APPKIT_VIEW_CHECKBOX:
+            return NSAccessibilityCheckBoxRole;
+        case ZERO_NATIVE_APPKIT_VIEW_SEGMENTED_CONTROL:
+            return NSAccessibilityRadioGroupRole;
+        case ZERO_NATIVE_APPKIT_VIEW_TEXT_FIELD:
+        case ZERO_NATIVE_APPKIT_VIEW_SEARCH_FIELD:
+            return NSAccessibilityTextFieldRole;
+        case ZERO_NATIVE_APPKIT_VIEW_LABEL:
+            return NSAccessibilityStaticTextRole;
+        case ZERO_NATIVE_APPKIT_VIEW_PROGRESS_INDICATOR:
+            return NSAccessibilityProgressIndicatorRole;
+        case ZERO_NATIVE_APPKIT_VIEW_STATUSBAR:
+        case ZERO_NATIVE_APPKIT_VIEW_SIDEBAR:
+        case ZERO_NATIVE_APPKIT_VIEW_STACK:
+        case ZERO_NATIVE_APPKIT_VIEW_SPACER:
+            return NSAccessibilityGroupRole;
+        default:
+            return NSAccessibilityUnknownRole;
+    }
 }
 
 static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSString *account) {
@@ -631,6 +664,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
     }
     view.identifier = label;
     view.wantsLayer = YES;
+    view.accessibilityRole = ZeroNativeAccessibilityRoleForNativeViewKind(kind);
     return view;
 }
 
