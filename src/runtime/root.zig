@@ -289,7 +289,7 @@ pub const Runtime = struct {
         });
         errdefer self.closeWindow(info.id) catch {};
 
-        try self.createShellViews(info.id, shell_window.views, window_frame);
+        try self.createShellViews(info.id, shell_window.views, self.shellBoundsForWindow(info.id));
         return info;
     }
 
@@ -3961,6 +3961,96 @@ test "runtime materializes manifest shell windows into laid out views" {
     try std.testing.expectEqual(@as(f32, 960), resized_content.frame.width);
     try std.testing.expectEqual(@as(f32, 720), resized_content.frame.height);
     try std.testing.expectEqual(@as(f32, 772), resized_statusbar.frame.y);
+}
+
+test "runtime lays out created shell windows with native returned bounds" {
+    const ShellCreatePlatform = struct {
+        create_count: usize = 0,
+        load_count: usize = 0,
+        views: [4]platform.ViewOptions = undefined,
+        view_count: usize = 0,
+
+        fn platformValue(self: *@This()) platform.Platform {
+            return .{
+                .context = self,
+                .name = "shell-create",
+                .surface_value = .{ .id = 1, .size = geometry.SizeF.init(640, 480), .scale_factor = 1 },
+                .run_fn = run,
+                .services = .{
+                    .context = self,
+                    .create_window_fn = createWindow,
+                    .load_window_webview_fn = loadWindowWebView,
+                    .create_view_fn = createView,
+                },
+            };
+        }
+
+        fn run(context: *anyopaque, handler: platform.EventHandler, handler_context: *anyopaque) anyerror!void {
+            _ = context;
+            _ = handler;
+            _ = handler_context;
+        }
+
+        fn createWindow(context: ?*anyopaque, options: platform.WindowOptions) anyerror!platform.WindowInfo {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.create_count += 1;
+            return .{
+                .id = options.id,
+                .label = options.label,
+                .title = options.resolvedTitle("shell-create"),
+                .frame = geometry.RectF.init(20, 30, 1200, 800),
+                .scale_factor = 2,
+                .open = true,
+                .focused = false,
+            };
+        }
+
+        fn loadWindowWebView(context: ?*anyopaque, window_id: platform.WindowId, source: platform.WebViewSource) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            _ = window_id;
+            _ = source;
+            self.load_count += 1;
+        }
+
+        fn createView(context: ?*anyopaque, options: platform.ViewOptions) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.views[self.view_count] = options;
+            self.view_count += 1;
+        }
+    };
+
+    const shell_views = [_]app_manifest.ShellView{
+        .{ .label = "toolbar", .kind = .toolbar, .edge = .top, .height = 50 },
+        .{ .label = "content", .kind = .webview, .url = "zero://app/content.html", .fill = true },
+        .{ .label = "statusbar", .kind = .statusbar, .edge = .bottom, .height = 40 },
+    };
+    const shell_window: app_manifest.ShellWindow = .{
+        .label = "restored",
+        .title = "Restored",
+        .width = 900,
+        .height = 600,
+        .views = &shell_views,
+    };
+
+    var host: ShellCreatePlatform = .{};
+    var runtime = Runtime.init(.{ .platform = host.platformValue() });
+    const window = try runtime.createShellWindow(shell_window, platform.WebViewSource.html("<h1>Restored</h1>"));
+
+    try std.testing.expectEqual(@as(usize, 1), host.create_count);
+    try std.testing.expectEqual(@as(usize, 1), host.load_count);
+    try std.testing.expectEqual(@as(f32, 1200), window.frame.width);
+    try std.testing.expectEqual(@as(f32, 800), window.frame.height);
+    try std.testing.expectEqual(@as(usize, 3), host.view_count);
+    try std.testing.expectEqualStrings("toolbar", host.views[0].label);
+    try std.testing.expectEqual(@as(f32, 1200), host.views[0].frame.width);
+    try std.testing.expectEqualStrings("content", host.views[1].label);
+    try std.testing.expectEqual(platform.ViewKind.webview, host.views[1].kind);
+    try std.testing.expectEqual(@as(f32, 50), host.views[1].frame.y);
+    try std.testing.expectEqual(@as(f32, 1200), host.views[1].frame.width);
+    try std.testing.expectEqual(@as(f32, 710), host.views[1].frame.height);
+    try std.testing.expectEqualStrings("statusbar", host.views[2].label);
+    try std.testing.expectEqual(@as(f32, 760), host.views[2].frame.y);
+    try std.testing.expectEqual(@as(f32, 1200), host.views[2].frame.width);
 }
 
 test "runtime relayouts shell views attached to startup window" {
