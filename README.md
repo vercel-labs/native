@@ -79,8 +79,8 @@ Most project-level behavior lives in `app.zon`:
     .display_name = "My App",
     .version = "0.1.0",
     .web_engine = "system",
-    .permissions = .{ "window" },
-    .capabilities = .{ "webview", "js_bridge" },
+    .permissions = .{},
+    .capabilities = .{ "webview" },
     .security = .{
         .navigation = .{
             .allowed_origins = .{ "zero://app", "http://127.0.0.1:5173" },
