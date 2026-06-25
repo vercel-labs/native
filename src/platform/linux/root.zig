@@ -20,6 +20,7 @@ const GtkEventKind = enum(c_int) {
     resize = 3,
     window_frame = 4,
     shortcut = 5,
+    native_command = 6,
 };
 
 const GtkEvent = extern struct {
@@ -41,6 +42,10 @@ const GtkEvent = extern struct {
     shortcut_key: [*]const u8,
     shortcut_key_len: usize,
     shortcut_modifiers: u32,
+    command_name: [*]const u8,
+    command_name_len: usize,
+    view_label: [*]const u8,
+    view_label_len: usize,
 };
 
 const GtkCallback = *const fn (context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void;
@@ -68,6 +73,12 @@ extern fn zero_native_gtk_set_shortcuts(host: *GtkHost, ids: [*]const [*]const u
 extern fn zero_native_gtk_create_window(host: *GtkHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int) c_int;
 extern fn zero_native_gtk_focus_window(host: *GtkHost, window_id: u64) c_int;
 extern fn zero_native_gtk_close_window(host: *GtkHost, window_id: u64) c_int;
+extern fn zero_native_gtk_create_view(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
+extern fn zero_native_gtk_update_view(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, has_frame: c_int, x: f64, y: f64, width: f64, height: f64, has_layer: c_int, layer: c_int, has_visible: c_int, visible: c_int, has_enabled: c_int, enabled: c_int, has_role: c_int, role: [*]const u8, role_len: usize, has_text: c_int, text: [*]const u8, text_len: usize, has_command: c_int, command: [*]const u8, command_len: usize) c_int;
+extern fn zero_native_gtk_set_view_frame(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
+extern fn zero_native_gtk_set_view_visible(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, visible: c_int) c_int;
+extern fn zero_native_gtk_focus_view(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
+extern fn zero_native_gtk_close_view(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn zero_native_gtk_create_webview(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, transparent: c_int, bridge_enabled: c_int) c_int;
 extern fn zero_native_gtk_set_webview_frame(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn zero_native_gtk_navigate_webview(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize) c_int;
@@ -179,6 +190,11 @@ pub const LinuxPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .create_view_fn = createView,
+                .update_view_fn = updateView,
+                .set_view_frame_fn = setViewFrame,
+                .set_view_visible_fn = setViewVisible,
+                .focus_view_fn = focusView,
+                .close_view_fn = closeView,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
                 .navigate_webview_fn = navigateWebView,
@@ -274,6 +290,11 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
             .key = event.shortcut_key[0..event.shortcut_key_len],
             .modifiers = shortcutModifiersFromFlags(event.shortcut_modifiers),
             .window_id = event.window_id,
+        } }),
+        .native_command => state.emit(.{ .native_command = .{
+            .name = event.command_name[0..event.command_name_len],
+            .window_id = event.window_id,
+            .view_label = event.view_label[0..event.view_label_len],
         } }),
     }
 }
@@ -373,7 +394,93 @@ fn closeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!
 
 fn createView(context: ?*anyopaque, options: platform_mod.ViewOptions) anyerror!void {
     if (options.kind == .webview) return createWebView(context, options.webViewOptions());
-    return error.UnsupportedViewKind;
+    if (!isSupportedNativeViewKind(options.kind)) return error.UnsupportedViewKind;
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedViewKind;
+    const frame = options.frame;
+    const parent = options.parent orelse "";
+    if (zero_native_gtk_create_view(
+        self.host,
+        options.window_id,
+        options.label.ptr,
+        options.label.len,
+        viewKindInt(options.kind),
+        parent.ptr,
+        parent.len,
+        frame.x,
+        frame.y,
+        frame.width,
+        frame.height,
+        options.layer,
+        if (options.visible) 1 else 0,
+        if (options.enabled) 1 else 0,
+        options.role.ptr,
+        options.role.len,
+        options.text.ptr,
+        options.text.len,
+        options.command.ptr,
+        options.command.len,
+    ) == 0) return error.CreateFailed;
+}
+
+fn updateView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, patch: platform_mod.ViewPatch) anyerror!void {
+    if (patch.url != null) return error.InvalidViewOptions;
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedViewKind;
+    const frame = patch.frame orelse geometry.RectF.init(0, 0, 0, 0);
+    const role = patch.role orelse "";
+    const text = patch.text orelse "";
+    const command = patch.command orelse "";
+    if (zero_native_gtk_update_view(
+        self.host,
+        window_id,
+        label.ptr,
+        label.len,
+        if (patch.frame != null) 1 else 0,
+        frame.x,
+        frame.y,
+        frame.width,
+        frame.height,
+        if (patch.layer != null) 1 else 0,
+        patch.layer orelse 0,
+        if (patch.visible != null) 1 else 0,
+        if (patch.visible orelse false) 1 else 0,
+        if (patch.enabled != null) 1 else 0,
+        if (patch.enabled orelse false) 1 else 0,
+        if (patch.role != null) 1 else 0,
+        role.ptr,
+        role.len,
+        if (patch.text != null) 1 else 0,
+        text.ptr,
+        text.len,
+        if (patch.command != null) 1 else 0,
+        command.ptr,
+        command.len,
+    ) == 0) return error.ViewNotFound;
+}
+
+fn setViewFrame(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, frame: geometry.RectF) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedViewKind;
+    if (zero_native_gtk_set_view_frame(self.host, window_id, label.ptr, label.len, frame.x, frame.y, frame.width, frame.height) == 0) return error.ViewNotFound;
+}
+
+fn setViewVisible(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, visible: bool) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedViewKind;
+    if (zero_native_gtk_set_view_visible(self.host, window_id, label.ptr, label.len, if (visible) 1 else 0) == 0) return error.ViewNotFound;
+}
+
+fn focusView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedViewFocus;
+    if (zero_native_gtk_focus_view(self.host, window_id, label.ptr, label.len) == 0) return error.UnsupportedViewFocus;
+}
+
+fn closeView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedViewKind;
+    if (zero_native_gtk_close_view(self.host, window_id, label.ptr, label.len) == 0) return error.ViewNotFound;
 }
 
 fn createWebView(context: ?*anyopaque, options: platform_mod.WebViewOptions) anyerror!void {
@@ -571,6 +678,50 @@ fn shortcutModifiersFromFlags(flags: u32) platform_mod.ShortcutModifiers {
         .control = (flags & shortcut_modifier_control) != 0,
         .option = (flags & shortcut_modifier_option) != 0,
         .shift = (flags & shortcut_modifier_shift) != 0,
+    };
+}
+
+fn isSupportedNativeViewKind(kind: platform_mod.ViewKind) bool {
+    return switch (kind) {
+        .toolbar,
+        .titlebar_accessory,
+        .sidebar,
+        .statusbar,
+        .button,
+        .checkbox,
+        .toggle,
+        .text_field,
+        .search_field,
+        .label,
+        .spacer,
+        .progress_indicator,
+        => true,
+        .webview,
+        .split,
+        .stack,
+        .gpu_surface,
+        => false,
+    };
+}
+
+fn viewKindInt(kind: platform_mod.ViewKind) c_int {
+    return switch (kind) {
+        .webview => 0,
+        .toolbar => 1,
+        .titlebar_accessory => 2,
+        .sidebar => 3,
+        .statusbar => 4,
+        .split => 5,
+        .stack => 6,
+        .button => 7,
+        .text_field => 8,
+        .search_field => 9,
+        .label => 10,
+        .spacer => 11,
+        .gpu_surface => 12,
+        .checkbox => 13,
+        .toggle => 14,
+        .progress_indicator => 15,
     };
 }
 

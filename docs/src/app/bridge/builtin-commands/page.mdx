@@ -23,7 +23,7 @@ zero-native provides built-in bridge commands for app command routing, window ma
 
 Command routing is available through `window.zero.commands.invoke(...)` when `js_window_api` is `true`. The runtime emits a `CommandEvent` with `source = .bridge`, the calling `window_id`, and the calling view label when the request comes from a named child WebView.
 
-Native controls can also bind a `command` when created with `runtime.createView(...)` or `window.zero.views.create(...)`. On macOS system WebView builds, native button views dispatch the command with the native `window_id` and the originating view label. Controls inside a toolbar report `source = .toolbar`; other native controls report `source = .native_view`.
+Native controls can also bind a `command` when created with `runtime.createView(...)` or `window.zero.views.create(...)`. On macOS and Linux system WebView builds, native button-style controls dispatch the command with the native `window_id` and the originating view label. Controls inside a toolbar report `source = .toolbar`; other native controls report `source = .native_view`.
 
 ## Window commands
 
@@ -110,7 +110,7 @@ Window commands are available through `window.zero.windows.*` when `js_window_ap
   </tbody>
 </table>
 
-View commands are available through `window.zero.views.*` when `js_window_api` is `true`. They use the same origin and `window` permission checks as window and WebView commands, and `windowId` must match the calling window when provided. `kind: "webview"` routes through the WebView backend. The macOS system-WebView backend supports native `toolbar`, `titlebar_accessory`, `sidebar`, `statusbar`, `button`, `checkbox`, `toggle`, `text_field`, `search_field`, `label`, `spacer`, and `progress_indicator` views; other platform hosts and native kinds return explicit unsupported-backend errors until implemented.
+View commands are available through `window.zero.views.*` when `js_window_api` is `true`. They use the same origin and `window` permission checks as window and WebView commands, and `windowId` must match the calling window when provided. `kind: "webview"` routes through the WebView backend. The macOS and Linux system-WebView backends support native `toolbar`, `titlebar_accessory`, `sidebar`, `statusbar`, `button`, `checkbox`, `toggle`, `text_field`, `search_field`, `label`, `spacer`, and `progress_indicator` views; other platform hosts and native kinds return explicit unsupported-backend errors until implemented.
 
 ## WebView Commands
 

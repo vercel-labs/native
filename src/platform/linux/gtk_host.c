@@ -8,6 +8,7 @@
 
 #define ZERO_NATIVE_MAX_WINDOWS 16
 #define ZERO_NATIVE_MAX_WEBVIEWS 16
+#define ZERO_NATIVE_MAX_NATIVE_VIEWS 32
 #define ZERO_NATIVE_MAX_SHORTCUTS 64
 
 #define ZERO_NATIVE_SHORTCUT_MODIFIER_PRIMARY (1u << 0)
@@ -15,6 +16,23 @@
 #define ZERO_NATIVE_SHORTCUT_MODIFIER_CONTROL (1u << 2)
 #define ZERO_NATIVE_SHORTCUT_MODIFIER_OPTION  (1u << 3)
 #define ZERO_NATIVE_SHORTCUT_MODIFIER_SHIFT   (1u << 4)
+
+#define ZERO_NATIVE_GTK_VIEW_WEBVIEW 0
+#define ZERO_NATIVE_GTK_VIEW_TOOLBAR 1
+#define ZERO_NATIVE_GTK_VIEW_TITLEBAR_ACCESSORY 2
+#define ZERO_NATIVE_GTK_VIEW_SIDEBAR 3
+#define ZERO_NATIVE_GTK_VIEW_STATUSBAR 4
+#define ZERO_NATIVE_GTK_VIEW_SPLIT 5
+#define ZERO_NATIVE_GTK_VIEW_STACK 6
+#define ZERO_NATIVE_GTK_VIEW_BUTTON 7
+#define ZERO_NATIVE_GTK_VIEW_TEXT_FIELD 8
+#define ZERO_NATIVE_GTK_VIEW_SEARCH_FIELD 9
+#define ZERO_NATIVE_GTK_VIEW_LABEL 10
+#define ZERO_NATIVE_GTK_VIEW_SPACER 11
+#define ZERO_NATIVE_GTK_VIEW_GPU_SURFACE 12
+#define ZERO_NATIVE_GTK_VIEW_CHECKBOX 13
+#define ZERO_NATIVE_GTK_VIEW_TOGGLE 14
+#define ZERO_NATIVE_GTK_VIEW_PROGRESS_INDICATOR 15
 
 typedef struct zero_native_gtk_shortcut {
     char *id;
@@ -35,6 +53,26 @@ typedef struct zero_native_gtk_webview {
     WebKitUserContentManager *content_manager;
 } zero_native_gtk_webview_t;
 
+typedef struct zero_native_gtk_native_view {
+    char *label;
+    char *parent;
+    char *role;
+    char *text;
+    char *command;
+    GtkWidget *widget;
+    struct zero_native_gtk_window *window;
+    double x;
+    double y;
+    double width;
+    double height;
+    int kind;
+    int layer;
+    int visible;
+    int enabled;
+    int explicit_text;
+    gulong action_handler;
+} zero_native_gtk_native_view_t;
+
 typedef struct zero_native_gtk_window {
     uint64_t id;
     GtkWindow *gtk_window;
@@ -53,6 +91,8 @@ typedef struct zero_native_gtk_window {
     double y;
     zero_native_gtk_webview_t webviews[ZERO_NATIVE_MAX_WEBVIEWS];
     int webview_count;
+    zero_native_gtk_native_view_t native_views[ZERO_NATIVE_MAX_NATIVE_VIEWS];
+    int native_view_count;
 } zero_native_gtk_window_t;
 
 struct zero_native_gtk_host {
@@ -84,6 +124,8 @@ struct zero_native_gtk_host {
     zero_native_gtk_shortcut_t shortcuts[ZERO_NATIVE_MAX_SHORTCUTS];
     int shortcut_count;
 };
+
+static void zero_native_emit(zero_native_gtk_host_t *host, zero_native_gtk_event_t event);
 
 static char *zero_native_strndup(const char *s, size_t len) {
     char *out = malloc(len + 1);
@@ -178,22 +220,255 @@ static void zero_native_apply_webview_frame(zero_native_gtk_webview_t *webview) 
     gtk_widget_set_size_request(widget, zero_native_webview_extent(webview->width), zero_native_webview_extent(webview->height));
 }
 
-static void zero_native_reorder_webviews(zero_native_gtk_window_t *win) {
+static int zero_native_valid_native_view_frame(double x, double y, double width, double height) {
+    return x >= 0 && y >= 0 && width >= 0 && height >= 0;
+}
+
+static int zero_native_native_extent(double value) {
+    return value > 0 ? (int)(value + 0.5) : 0;
+}
+
+static int zero_native_native_coord(double value) {
+    return value > 0 ? (int)(value + 0.5) : 0;
+}
+
+static int zero_native_is_native_container_kind(int kind) {
+    return kind == ZERO_NATIVE_GTK_VIEW_TOOLBAR ||
+        kind == ZERO_NATIVE_GTK_VIEW_TITLEBAR_ACCESSORY ||
+        kind == ZERO_NATIVE_GTK_VIEW_SIDEBAR ||
+        kind == ZERO_NATIVE_GTK_VIEW_STATUSBAR ||
+        kind == ZERO_NATIVE_GTK_VIEW_SPACER;
+}
+
+static int zero_native_is_supported_native_view_kind(int kind) {
+    return zero_native_is_native_container_kind(kind) ||
+        kind == ZERO_NATIVE_GTK_VIEW_BUTTON ||
+        kind == ZERO_NATIVE_GTK_VIEW_CHECKBOX ||
+        kind == ZERO_NATIVE_GTK_VIEW_TOGGLE ||
+        kind == ZERO_NATIVE_GTK_VIEW_TEXT_FIELD ||
+        kind == ZERO_NATIVE_GTK_VIEW_SEARCH_FIELD ||
+        kind == ZERO_NATIVE_GTK_VIEW_LABEL ||
+        kind == ZERO_NATIVE_GTK_VIEW_PROGRESS_INDICATOR;
+}
+
+static const char *zero_native_native_display_text(zero_native_gtk_native_view_t *view) {
+    if (!view) return "";
+    if (view->text && view->text[0]) return view->text;
+    if (view->role && view->role[0]) return view->role;
+    return view->label ? view->label : "";
+}
+
+static zero_native_gtk_native_view_t *zero_native_find_native_view(zero_native_gtk_window_t *win, const char *label) {
+    if (!win || !label) return NULL;
+    for (int i = 0; i < ZERO_NATIVE_MAX_NATIVE_VIEWS; i++) {
+        if (win->native_views[i].label && strcmp(win->native_views[i].label, label) == 0) return &win->native_views[i];
+    }
+    return NULL;
+}
+
+static GtkWidget *zero_native_make_native_widget(int kind, const char *label, const char *text) {
+    const char *display_text = text && text[0] ? text : (label ? label : "");
+    switch (kind) {
+        case ZERO_NATIVE_GTK_VIEW_TOOLBAR:
+        case ZERO_NATIVE_GTK_VIEW_TITLEBAR_ACCESSORY:
+        case ZERO_NATIVE_GTK_VIEW_SIDEBAR:
+        case ZERO_NATIVE_GTK_VIEW_STATUSBAR:
+        case ZERO_NATIVE_GTK_VIEW_SPACER:
+            return gtk_fixed_new();
+        case ZERO_NATIVE_GTK_VIEW_BUTTON:
+            return gtk_button_new_with_label(display_text[0] ? display_text : "Button");
+        case ZERO_NATIVE_GTK_VIEW_CHECKBOX:
+            return gtk_check_button_new_with_label(display_text[0] ? display_text : "Checkbox");
+        case ZERO_NATIVE_GTK_VIEW_TOGGLE:
+            return gtk_toggle_button_new_with_label(display_text[0] ? display_text : "Toggle");
+        case ZERO_NATIVE_GTK_VIEW_TEXT_FIELD: {
+            GtkWidget *entry = gtk_entry_new();
+            gtk_entry_set_placeholder_text(GTK_ENTRY(entry), display_text);
+            return entry;
+        }
+        case ZERO_NATIVE_GTK_VIEW_SEARCH_FIELD: {
+            GtkWidget *entry = gtk_entry_new();
+            gtk_entry_set_placeholder_text(GTK_ENTRY(entry), display_text[0] ? display_text : "Search");
+            return entry;
+        }
+        case ZERO_NATIVE_GTK_VIEW_LABEL: {
+            GtkWidget *view = gtk_label_new(display_text);
+            gtk_label_set_ellipsize(GTK_LABEL(view), PANGO_ELLIPSIZE_END);
+            gtk_label_set_xalign(GTK_LABEL(view), 0.0f);
+            return view;
+        }
+        case ZERO_NATIVE_GTK_VIEW_PROGRESS_INDICATOR: {
+            GtkWidget *spinner = gtk_spinner_new();
+            gtk_spinner_start(GTK_SPINNER(spinner));
+            return spinner;
+        }
+        default:
+            return NULL;
+    }
+}
+
+static void zero_native_apply_native_view_frame(zero_native_gtk_native_view_t *view) {
+    if (!view || !view->widget) return;
+    GtkWidget *widget = view->widget;
+    gtk_widget_set_halign(widget, GTK_ALIGN_START);
+    gtk_widget_set_valign(widget, GTK_ALIGN_START);
+    gtk_widget_set_size_request(widget, zero_native_native_extent(view->width), zero_native_native_extent(view->height));
+    if (view->parent && view->parent[0]) {
+        zero_native_gtk_native_view_t *parent = zero_native_find_native_view(view->window, view->parent);
+        if (parent && parent->widget && GTK_IS_FIXED(parent->widget)) {
+            gtk_fixed_move(GTK_FIXED(parent->widget), widget, view->x, view->y);
+        }
+        return;
+    }
+    gtk_widget_set_margin_start(widget, zero_native_native_coord(view->x));
+    gtk_widget_set_margin_top(widget, zero_native_native_coord(view->y));
+}
+
+static void zero_native_apply_native_view_text(zero_native_gtk_native_view_t *view, const char *text) {
+    if (!view || !view->widget || !text) return;
+    GtkWidget *widget = view->widget;
+    if (GTK_IS_CHECK_BUTTON(widget)) {
+        gtk_check_button_set_label(GTK_CHECK_BUTTON(widget), text);
+    } else if (GTK_IS_BUTTON(widget)) {
+        gtk_button_set_label(GTK_BUTTON(widget), text);
+    } else if (GTK_IS_LABEL(widget)) {
+        gtk_label_set_text(GTK_LABEL(widget), text);
+    } else if (GTK_IS_ENTRY(widget)) {
+        gtk_entry_set_placeholder_text(GTK_ENTRY(widget), text);
+    }
+}
+
+static void zero_native_apply_native_view_state(zero_native_gtk_native_view_t *view, int update_text, const char *text) {
+    if (!view || !view->widget) return;
+    gtk_widget_set_visible(view->widget, view->visible != 0);
+    gtk_widget_set_sensitive(view->widget, view->enabled != 0);
+    if (update_text) zero_native_apply_native_view_text(view, text);
+}
+
+static void zero_native_emit_native_action(GtkWidget *widget, gpointer data) {
+    (void)widget;
+    zero_native_gtk_native_view_t *view = data;
+    if (!view || !view->window || !view->command || !view->command[0]) return;
+    zero_native_emit(view->window->host, (zero_native_gtk_event_t){
+        .kind = ZERO_NATIVE_GTK_EVENT_NATIVE_COMMAND,
+        .window_id = view->window->id,
+        .command_name = view->command,
+        .command_name_len = strlen(view->command),
+        .view_label = view->label ? view->label : "",
+        .view_label_len = view->label ? strlen(view->label) : 0,
+    });
+}
+
+static void zero_native_configure_native_view_action(zero_native_gtk_native_view_t *view) {
+    if (!view || !view->widget) return;
+    if (view->action_handler != 0) {
+        g_signal_handler_disconnect(view->widget, view->action_handler);
+        view->action_handler = 0;
+    }
+    if (!view->command || !view->command[0]) return;
+    if (GTK_IS_CHECK_BUTTON(view->widget)) {
+        view->action_handler = g_signal_connect(view->widget, "toggled", G_CALLBACK(zero_native_emit_native_action), view);
+    } else if (GTK_IS_BUTTON(view->widget)) {
+        view->action_handler = g_signal_connect(view->widget, "clicked", G_CALLBACK(zero_native_emit_native_action), view);
+    }
+}
+
+static void zero_native_reorder_overlays(zero_native_gtk_window_t *win) {
     if (!win || !win->stack_root) return;
     int placed[ZERO_NATIVE_MAX_WEBVIEWS] = {0};
+    int native_placed[ZERO_NATIVE_MAX_NATIVE_VIEWS] = {0};
     GtkWidget *previous = NULL;
-    for (int pass = 0; pass < win->webview_count; pass++) {
-        int best = -1;
+    int total = win->webview_count + win->native_view_count;
+    for (int pass = 0; pass < total; pass++) {
+        int best_webview = -1;
+        int best_native = -1;
         for (int i = 0; i < win->webview_count; i++) {
             if (!win->webviews[i].web_view) continue;
             if (placed[i]) continue;
-            if (best < 0 || win->webviews[i].layer < win->webviews[best].layer) best = i;
+            if (best_webview < 0 || win->webviews[i].layer < win->webviews[best_webview].layer) best_webview = i;
         }
-        if (best < 0) break;
-        gtk_widget_insert_after(GTK_WIDGET(win->webviews[best].web_view), GTK_WIDGET(win->stack_root), previous);
-        placed[best] = 1;
-        previous = GTK_WIDGET(win->webviews[best].web_view);
+        for (int i = 0; i < ZERO_NATIVE_MAX_NATIVE_VIEWS; i++) {
+            zero_native_gtk_native_view_t *view = &win->native_views[i];
+            if (!view->widget || (view->parent && view->parent[0])) continue;
+            if (native_placed[i]) continue;
+            if (best_native < 0 || view->layer < win->native_views[best_native].layer) best_native = i;
+        }
+
+        GtkWidget *next = NULL;
+        if (best_webview >= 0 && best_native >= 0) {
+            if (win->webviews[best_webview].layer <= win->native_views[best_native].layer) {
+                next = GTK_WIDGET(win->webviews[best_webview].web_view);
+                placed[best_webview] = 1;
+            } else {
+                next = win->native_views[best_native].widget;
+                native_placed[best_native] = 1;
+            }
+        } else if (best_webview >= 0) {
+            next = GTK_WIDGET(win->webviews[best_webview].web_view);
+            placed[best_webview] = 1;
+        } else if (best_native >= 0) {
+            next = win->native_views[best_native].widget;
+            native_placed[best_native] = 1;
+        } else {
+            break;
+        }
+
+        gtk_widget_insert_after(next, GTK_WIDGET(win->stack_root), previous);
+        previous = next;
     }
+}
+
+static void zero_native_clear_native_view(zero_native_gtk_window_t *win, zero_native_gtk_native_view_t *view);
+
+static void zero_native_remove_native_children(zero_native_gtk_window_t *win, const char *parent_label) {
+    if (!win || !parent_label) return;
+    for (int i = 0; i < ZERO_NATIVE_MAX_NATIVE_VIEWS; i++) {
+        zero_native_gtk_native_view_t *child = &win->native_views[i];
+        if (!child->label || !child->parent || strcmp(child->parent, parent_label) != 0) continue;
+        zero_native_clear_native_view(win, child);
+    }
+}
+
+static void zero_native_clear_native_view(zero_native_gtk_window_t *win, zero_native_gtk_native_view_t *view) {
+    if (!view || !view->label) return;
+    char *label = zero_native_strndup(view->label, strlen(view->label));
+    if (label) {
+        zero_native_remove_native_children(win, label);
+        free(label);
+    }
+    if (view->widget) {
+        if (view->action_handler != 0) {
+            g_signal_handler_disconnect(view->widget, view->action_handler);
+            view->action_handler = 0;
+        }
+        if (view->parent && view->parent[0]) {
+            zero_native_gtk_native_view_t *parent = zero_native_find_native_view(win, view->parent);
+            if (parent && parent->widget && GTK_IS_FIXED(parent->widget)) {
+                gtk_fixed_remove(GTK_FIXED(parent->widget), view->widget);
+            } else {
+                gtk_widget_unparent(view->widget);
+            }
+        } else if (win && win->stack_root) {
+            gtk_overlay_remove_overlay(GTK_OVERLAY(win->stack_root), view->widget);
+        } else {
+            gtk_widget_unparent(view->widget);
+        }
+    }
+    free(view->label);
+    free(view->parent);
+    free(view->role);
+    free(view->text);
+    free(view->command);
+    memset(view, 0, sizeof(*view));
+    if (win && win->native_view_count > 0) win->native_view_count--;
+}
+
+static void zero_native_clear_native_views(zero_native_gtk_window_t *win) {
+    if (!win) return;
+    for (int i = 0; i < ZERO_NATIVE_MAX_NATIVE_VIEWS; i++) {
+        if (win->native_views[i].label) zero_native_clear_native_view(win, &win->native_views[i]);
+    }
+    win->native_view_count = 0;
 }
 
 static void zero_native_clear_webview(zero_native_gtk_window_t *win, zero_native_gtk_webview_t *webview) {
@@ -224,6 +499,7 @@ static void zero_native_clear_webviews(zero_native_gtk_window_t *win) {
 
 static void zero_native_clear_window(zero_native_gtk_window_t *win) {
     if (!win) return;
+    zero_native_clear_native_views(win);
     zero_native_clear_webviews(win);
     zero_native_clear_window_source(win);
     free(win->label);
@@ -1159,6 +1435,172 @@ int zero_native_gtk_close_window(zero_native_gtk_host_t *host, uint64_t window_i
     return 1;
 }
 
+int zero_native_gtk_create_view(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, int kind, const char *parent, size_t parent_len, double x, double y, double width, double height, int layer, int visible, int enabled, const char *role, size_t role_len, const char *text, size_t text_len, const char *command, size_t command_len) {
+    zero_native_gtk_window_t *win = zero_native_find_window(host, window_id);
+    if (!win || !win->stack_root || label_len == 0 || !zero_native_valid_native_view_frame(x, y, width, height)) return 0;
+    if (!zero_native_is_supported_native_view_kind(kind)) return 0;
+    if (win->native_view_count >= ZERO_NATIVE_MAX_NATIVE_VIEWS) return 0;
+
+    char *label_copy = zero_native_strndup(label, label_len);
+    char *parent_copy = parent_len > 0 ? zero_native_strndup(parent, parent_len) : NULL;
+    char *role_copy = role_len > 0 ? zero_native_strndup(role, role_len) : NULL;
+    char *text_copy = text_len > 0 ? zero_native_strndup(text, text_len) : NULL;
+    char *command_copy = command_len > 0 ? zero_native_strndup(command, command_len) : NULL;
+    if (!label_copy || (parent_len > 0 && !parent_copy) || (role_len > 0 && !role_copy) || (text_len > 0 && !text_copy) || (command_len > 0 && !command_copy)) {
+        free(label_copy);
+        free(parent_copy);
+        free(role_copy);
+        free(text_copy);
+        free(command_copy);
+        return 0;
+    }
+    if (zero_native_find_native_view(win, label_copy)) {
+        free(label_copy);
+        free(parent_copy);
+        free(role_copy);
+        free(text_copy);
+        free(command_copy);
+        return 0;
+    }
+
+    GtkWidget *parent_widget = win->stack_root;
+    if (parent_copy && parent_copy[0]) {
+        zero_native_gtk_native_view_t *parent_view = zero_native_find_native_view(win, parent_copy);
+        if (!parent_view || !parent_view->widget || !GTK_IS_FIXED(parent_view->widget)) {
+            free(label_copy);
+            free(parent_copy);
+            free(role_copy);
+            free(text_copy);
+            free(command_copy);
+            return 0;
+        }
+        parent_widget = parent_view->widget;
+    }
+
+    const char *display_text = text_copy && text_copy[0] ? text_copy : (role_copy && role_copy[0] ? role_copy : label_copy);
+    GtkWidget *widget = zero_native_make_native_widget(kind, label_copy, display_text);
+    if (!widget) {
+        free(label_copy);
+        free(parent_copy);
+        free(role_copy);
+        free(text_copy);
+        free(command_copy);
+        return 0;
+    }
+
+    int slot = -1;
+    for (int i = 0; i < ZERO_NATIVE_MAX_NATIVE_VIEWS; i++) {
+        if (!win->native_views[i].label) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        g_object_ref_sink(widget);
+        g_object_unref(widget);
+        free(label_copy);
+        free(parent_copy);
+        free(role_copy);
+        free(text_copy);
+        free(command_copy);
+        return 0;
+    }
+
+    zero_native_gtk_native_view_t *view = &win->native_views[slot];
+    memset(view, 0, sizeof(*view));
+    view->label = label_copy;
+    view->parent = parent_copy;
+    view->role = role_copy;
+    view->text = text_copy;
+    view->command = command_copy;
+    view->widget = widget;
+    view->window = win;
+    view->x = x;
+    view->y = y;
+    view->width = width;
+    view->height = height;
+    view->kind = kind;
+    view->layer = layer;
+    view->visible = visible != 0;
+    view->enabled = enabled != 0;
+    view->explicit_text = text_len > 0;
+
+    if (view->parent && view->parent[0]) {
+        gtk_fixed_put(GTK_FIXED(parent_widget), widget, x, y);
+    } else {
+        gtk_overlay_add_overlay(GTK_OVERLAY(parent_widget), widget);
+    }
+    zero_native_apply_native_view_frame(view);
+    zero_native_apply_native_view_state(view, 1, display_text);
+    zero_native_configure_native_view_action(view);
+    win->native_view_count++;
+    zero_native_reorder_overlays(win);
+    return 1;
+}
+
+int zero_native_gtk_update_view(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, int has_frame, double x, double y, double width, double height, int has_layer, int layer, int has_visible, int visible, int has_enabled, int enabled, int has_role, const char *role, size_t role_len, int has_text, const char *text, size_t text_len, int has_command, const char *command, size_t command_len) {
+    zero_native_gtk_window_t *win = zero_native_find_window(host, window_id);
+    char *label_copy = label_len > 0 ? zero_native_strndup(label, label_len) : NULL;
+    zero_native_gtk_native_view_t *view = zero_native_find_native_view(win, label_copy);
+    free(label_copy);
+    if (!view || !view->widget) return 0;
+
+    if (has_frame) {
+        if (!zero_native_valid_native_view_frame(x, y, width, height)) return 0;
+        view->x = x;
+        view->y = y;
+        view->width = width;
+        view->height = height;
+        zero_native_apply_native_view_frame(view);
+    }
+    if (has_layer) view->layer = layer;
+    if (has_visible) view->visible = visible != 0;
+    if (has_enabled) view->enabled = enabled != 0;
+    if (has_role) zero_native_replace_string(&view->role, role, role_len);
+    if (has_text) {
+        zero_native_replace_string(&view->text, text, text_len);
+        view->explicit_text = text_len > 0;
+    }
+    if (has_command) {
+        zero_native_replace_string(&view->command, command, command_len);
+        zero_native_configure_native_view_action(view);
+    }
+
+    int update_text = has_text || (has_role && !view->explicit_text);
+    const char *display_text = has_text ? (view->text ? view->text : "") : zero_native_native_display_text(view);
+    if (has_visible || has_enabled || update_text) zero_native_apply_native_view_state(view, update_text, display_text);
+    if (has_layer) zero_native_reorder_overlays(win);
+    return 1;
+}
+
+int zero_native_gtk_set_view_frame(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height) {
+    return zero_native_gtk_update_view(host, window_id, label, label_len, 1, x, y, width, height, 0, 0, 0, 1, 0, 1, 0, "", 0, 0, "", 0, 0, "", 0);
+}
+
+int zero_native_gtk_set_view_visible(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, int visible) {
+    return zero_native_gtk_update_view(host, window_id, label, label_len, 0, 0, 0, 0, 0, 0, 0, 1, visible, 0, 1, 0, "", 0, 0, "", 0, 0, "", 0);
+}
+
+int zero_native_gtk_focus_view(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len) {
+    zero_native_gtk_window_t *win = zero_native_find_window(host, window_id);
+    char *label_copy = label_len > 0 ? zero_native_strndup(label, label_len) : NULL;
+    zero_native_gtk_native_view_t *view = zero_native_find_native_view(win, label_copy);
+    free(label_copy);
+    if (!view || !view->widget || !gtk_widget_get_visible(view->widget) || !gtk_widget_get_sensitive(view->widget)) return 0;
+    return gtk_widget_grab_focus(view->widget) ? 1 : 0;
+}
+
+int zero_native_gtk_close_view(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len) {
+    zero_native_gtk_window_t *win = zero_native_find_window(host, window_id);
+    char *label_copy = label_len > 0 ? zero_native_strndup(label, label_len) : NULL;
+    zero_native_gtk_native_view_t *view = zero_native_find_native_view(win, label_copy);
+    free(label_copy);
+    if (!view || !view->widget) return 0;
+    zero_native_clear_native_view(win, view);
+    zero_native_reorder_overlays(win);
+    return 1;
+}
+
 int zero_native_gtk_create_webview(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled) {
     zero_native_gtk_window_t *win = zero_native_find_window(host, window_id);
     if (!win || !win->stack_root || label_len == 0 || url_len == 0 || !zero_native_valid_webview_frame(x, y, width, height)) return 0;
@@ -1218,7 +1660,7 @@ int zero_native_gtk_create_webview(zero_native_gtk_host_t *host, uint64_t window
         GdkRGBA transparent_color = {0, 0, 0, 0};
         webkit_web_view_set_background_color(web_view, &transparent_color);
     }
-    zero_native_reorder_webviews(win);
+    zero_native_reorder_overlays(win);
     g_signal_connect(web_view, "decide-policy", G_CALLBACK(on_webview_decide_policy), win);
     webkit_web_view_load_uri(web_view, url_copy);
     free(url_copy);
@@ -1291,7 +1733,7 @@ int zero_native_gtk_set_webview_layer(zero_native_gtk_host_t *host, uint64_t win
     free(label_copy);
     if (!webview || !webview->web_view) return 0;
     webview->layer = layer;
-    zero_native_reorder_webviews(win);
+    zero_native_reorder_overlays(win);
     return 1;
 }
 

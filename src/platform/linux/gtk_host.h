@@ -17,6 +17,7 @@ typedef enum {
     ZERO_NATIVE_GTK_EVENT_RESIZE = 3,
     ZERO_NATIVE_GTK_EVENT_WINDOW_FRAME = 4,
     ZERO_NATIVE_GTK_EVENT_SHORTCUT = 5,
+    ZERO_NATIVE_GTK_EVENT_NATIVE_COMMAND = 6,
 } zero_native_gtk_event_kind_t;
 
 typedef struct {
@@ -38,6 +39,10 @@ typedef struct {
     const char *shortcut_key;
     size_t shortcut_key_len;
     uint32_t shortcut_modifiers;
+    const char *command_name;
+    size_t command_name_len;
+    const char *view_label;
+    size_t view_label_len;
 } zero_native_gtk_event_t;
 
 typedef void (*zero_native_gtk_event_callback_t)(void *context, const zero_native_gtk_event_t *event);
@@ -102,6 +107,12 @@ void zero_native_gtk_set_shortcuts(zero_native_gtk_host_t *host, const char *con
 int zero_native_gtk_create_window(zero_native_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame);
 int zero_native_gtk_focus_window(zero_native_gtk_host_t *host, uint64_t window_id);
 int zero_native_gtk_close_window(zero_native_gtk_host_t *host, uint64_t window_id);
+int zero_native_gtk_create_view(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, int kind, const char *parent, size_t parent_len, double x, double y, double width, double height, int layer, int visible, int enabled, const char *role, size_t role_len, const char *text, size_t text_len, const char *command, size_t command_len);
+int zero_native_gtk_update_view(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, int has_frame, double x, double y, double width, double height, int has_layer, int layer, int has_visible, int visible, int has_enabled, int enabled, int has_role, const char *role, size_t role_len, int has_text, const char *text, size_t text_len, int has_command, const char *command, size_t command_len);
+int zero_native_gtk_set_view_frame(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height);
+int zero_native_gtk_set_view_visible(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, int visible);
+int zero_native_gtk_focus_view(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len);
+int zero_native_gtk_close_view(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len);
 int zero_native_gtk_create_webview(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled);
 int zero_native_gtk_set_webview_frame(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height);
 int zero_native_gtk_navigate_webview(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len);
