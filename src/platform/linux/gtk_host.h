@@ -21,6 +21,7 @@ typedef enum {
     ZERO_NATIVE_GTK_EVENT_APP_ACTIVATED = 7,
     ZERO_NATIVE_GTK_EVENT_APP_DEACTIVATED = 8,
     ZERO_NATIVE_GTK_EVENT_MENU_COMMAND = 9,
+    ZERO_NATIVE_GTK_EVENT_FILES_DROPPED = 10,
 } zero_native_gtk_event_kind_t;
 
 typedef struct {
@@ -46,6 +47,8 @@ typedef struct {
     size_t command_name_len;
     const char *view_label;
     size_t view_label_len;
+    const char *drop_paths;
+    size_t drop_paths_len;
 } zero_native_gtk_event_t;
 
 typedef void (*zero_native_gtk_event_callback_t)(void *context, const zero_native_gtk_event_t *event);

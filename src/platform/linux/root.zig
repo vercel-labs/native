@@ -24,6 +24,7 @@ const GtkEventKind = enum(c_int) {
     app_activated = 7,
     app_deactivated = 8,
     menu_command = 9,
+    files_dropped = 10,
 };
 
 const GtkEvent = extern struct {
@@ -49,6 +50,8 @@ const GtkEvent = extern struct {
     command_name_len: usize,
     view_label: [*]const u8,
     view_label_len: usize,
+    drop_paths: [*]const u8,
+    drop_paths_len: usize,
 };
 
 const GtkCallback = *const fn (context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void;
@@ -316,6 +319,10 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
         .menu_command => state.emit(.{ .menu_command = .{
             .name = event.command_name[0..event.command_name_len],
             .window_id = event.window_id,
+        } }),
+        .files_dropped => state.emit(.{ .files_dropped = .{
+            .window_id = event.window_id,
+            .paths = event.drop_paths[0..event.drop_paths_len],
         } }),
     }
 }

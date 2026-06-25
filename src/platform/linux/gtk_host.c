@@ -139,6 +139,7 @@ struct zero_native_gtk_host {
 };
 
 static void zero_native_emit(zero_native_gtk_host_t *host, zero_native_gtk_event_t event);
+static gboolean zero_native_on_file_drop(GtkDropTarget *target, const GValue *value, double x, double y, gpointer data);
 
 static char *zero_native_strndup(const char *s, size_t len) {
     char *out = malloc(len + 1);
@@ -818,6 +819,71 @@ static void zero_native_emit(zero_native_gtk_host_t *host, zero_native_gtk_event
     if (host->callback) host->callback(host->callback_context, &event);
 }
 
+static void zero_native_append_file_path(GString *paths, GFile *file) {
+    if (!paths || !file) return;
+    char *path = g_file_get_path(file);
+    if (!path || path[0] == '\0') {
+        g_free(path);
+        return;
+    }
+    if (paths->len > 0) g_string_append_c(paths, '\n');
+    g_string_append(paths, path);
+    g_free(path);
+}
+
+static gboolean zero_native_emit_file_drop(zero_native_gtk_window_t *win, const char *paths, size_t paths_len) {
+    if (!win || !win->host || !paths || paths_len == 0) return FALSE;
+    zero_native_emit(win->host, (zero_native_gtk_event_t){
+        .kind = ZERO_NATIVE_GTK_EVENT_FILES_DROPPED,
+        .window_id = win->id,
+        .drop_paths = paths,
+        .drop_paths_len = paths_len,
+    });
+    return TRUE;
+}
+
+static gboolean zero_native_on_file_drop(GtkDropTarget *target, const GValue *value, double x, double y, gpointer data) {
+    (void)target;
+    (void)x;
+    (void)y;
+    zero_native_gtk_window_t *win = data;
+    if (!win || !value) return FALSE;
+
+    GString *paths = g_string_new(NULL);
+    if (!paths) return FALSE;
+    if (G_VALUE_HOLDS(value, G_TYPE_FILE)) {
+        zero_native_append_file_path(paths, G_FILE(g_value_get_object(value)));
+    }
+#ifdef GDK_TYPE_FILE_LIST
+    else if (G_VALUE_HOLDS(value, GDK_TYPE_FILE_LIST)) {
+        GdkFileList *file_list = g_value_get_boxed(value);
+        if (file_list) {
+            GSList *files = gdk_file_list_get_files(file_list);
+            for (GSList *item = files; item; item = item->next) {
+                zero_native_append_file_path(paths, G_FILE(item->data));
+            }
+            g_slist_free(files);
+        }
+    }
+#endif
+
+    gboolean handled = zero_native_emit_file_drop(win, paths->str, paths->len);
+    g_string_free(paths, TRUE);
+    return handled;
+}
+
+static void zero_native_install_file_drop_target(zero_native_gtk_window_t *win) {
+    if (!win || !win->root_box) return;
+    GtkDropTarget *target = gtk_drop_target_new(G_TYPE_FILE, GDK_ACTION_COPY);
+    if (!target) return;
+#ifdef GDK_TYPE_FILE_LIST
+    GType drop_types[] = { G_TYPE_FILE, GDK_TYPE_FILE_LIST };
+    gtk_drop_target_set_gtypes(target, drop_types, G_N_ELEMENTS(drop_types));
+#endif
+    g_signal_connect(target, "drop", G_CALLBACK(zero_native_on_file_drop), win);
+    gtk_widget_add_controller(win->root_box, GTK_EVENT_CONTROLLER(target));
+}
+
 static uint64_t zero_native_active_window_id(zero_native_gtk_host_t *host) {
     if (!host) return 1;
     GtkWindow *active = host->app ? gtk_application_get_active_window(host->app) : NULL;
@@ -1277,6 +1343,7 @@ static zero_native_gtk_window_t *zero_native_create_window_internal(zero_native_
     gtk_overlay_set_child(GTK_OVERLAY(win->stack_root), GTK_WIDGET(wv));
     gtk_box_append(GTK_BOX(win->root_box), win->stack_root);
     gtk_window_set_child(win->gtk_window, win->root_box);
+    zero_native_install_file_drop_target(win);
 
     g_signal_connect(win->gtk_window, "notify::default-width", G_CALLBACK(on_resize), win);
     g_signal_connect(win->gtk_window, "notify::default-height", G_CALLBACK(on_resize), win);
