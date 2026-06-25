@@ -2,6 +2,8 @@
 
 A minimal Android mobile shell that embeds a zero-native static library through JNI. The example keeps a native Android header above a WebView workspace.
 
+Android views own the mobile shell layout: native header sizing, density-aware resize events, touch forwarding, and the `WebView` workspace. The zero-native runtime is driven through JNI calls into the C ABI.
+
 ## Build the native library
 
 Build or package an Android static library from the repository root, then copy it into this example:
@@ -34,3 +36,12 @@ Install on an emulator or device:
 - `app/src/main/cpp/zero_native_jni.c` forwards JNI calls to the zero-native C ABI.
 - `app/src/main/cpp/CMakeLists.txt` imports `libzero-native.a` and builds the JNI shared library.
 - `app.zon` records the mobile example metadata for zero-native tooling.
+
+## Host lifecycle
+
+- `onCreate` loads the JNI library, creates the native shell, then starts the zero-native app.
+- `surfaceChanged` forwards size, display density, and the Android `Surface`, then requests a frame.
+- `onTouchEvent` forwards pointer id, phase, position, and pressure.
+- `surfaceDestroyed` and `onDestroy` stop and destroy the app.
+
+The generic desktop `ShellView` runtime is not mapped to Android `ViewGroup` yet; native mobile chrome is implemented directly in Kotlin in this example.

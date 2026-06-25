@@ -65,6 +65,44 @@ The repository includes full mobile host examples:
 
 Both examples expect a local `libzero-native.a` built from the repository and copied into the path documented in each example README.
 
+## Mobile host contract
+
+Mobile embedding uses the same runtime lifecycle through a thin native host:
+
+<table>
+  <thead>
+    <tr>
+      <th>Host event</th>
+      <th>zero-native call</th>
+      <th>Current examples</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>View/controller creation</td>
+      <td><code>zero_native_app_create</code>, then <code>zero_native_app_start</code></td>
+      <td>Swift <code>viewDidLoad</code>; Android <code>onCreate</code></td>
+    </tr>
+    <tr>
+      <td>Content size or surface changes</td>
+      <td><code>zero_native_app_resize</code>, then <code>zero_native_app_frame</code></td>
+      <td>Swift <code>viewDidLayoutSubviews</code>; Android <code>surfaceChanged</code></td>
+    </tr>
+    <tr>
+      <td>Touch input</td>
+      <td><code>zero_native_app_touch</code>, then <code>zero_native_app_frame</code></td>
+      <td>Android forwards <code>MotionEvent</code> data; iOS keeps touch handling in UIKit/WebKit for now</td>
+    </tr>
+    <tr>
+      <td>Shutdown</td>
+      <td><code>zero_native_app_stop</code>, then <code>zero_native_app_destroy</code></td>
+      <td>Swift controller deinit; Android <code>onDestroy</code></td>
+    </tr>
+  </tbody>
+</table>
+
+The mobile examples keep navigation/header UI in UIKit or Android views and keep rich content in `WKWebView` or Android `WebView`. Safe areas, orientation, keyboard avoidance, back gestures, and platform lifecycle ownership stay in the native host. The generic desktop `ShellView` tree is not mapped to UIKit or Android `ViewGroup` yet, so mobile app metadata is currently descriptive and packaging-oriented rather than a runtime materialized view tree.
+
 ## Testing with EmbeddedApp
 
 ```zig

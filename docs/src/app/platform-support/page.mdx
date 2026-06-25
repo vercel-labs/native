@@ -52,7 +52,11 @@ The macOS, Linux, and Windows system-WebView hosts support `toolbar`, `titlebar_
 
 ## Mobile And GPU
 
-iOS, Android, and `gpu_surface` are not part of the current supported desktop host matrix. The public API already reserves the native view vocabulary needed for those surfaces, but the shipped support today is desktop-first.
+iOS and Android are supported today through embedded host examples rather than the desktop platform host matrix. The mobile examples own native header/navigation layout in UIKit or Android views, embed a `WKWebView` or Android `WebView` as the workspace, and drive zero-native through the C/JNI lifecycle calls documented in [Embedded App](/embed).
+
+The desktop `ShellView` tree is not yet mapped to UIKit or Android `ViewGroup`, so generic native view commands should be treated as desktop APIs for now. Mobile hosts own safe areas, orientation, keyboard avoidance, back gestures, and platform lifecycle integration.
+
+`gpu_surface` is reserved for future custom drawing regions. Current hosts report unsupported operations for that view kind.
 
 ## Related Docs
 
