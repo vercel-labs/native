@@ -2,7 +2,11 @@ const std = @import("std");
 const json = @import("json");
 const security = @import("../security/root.zig");
 
-pub const max_message_bytes: usize = 1024 * 1024;
+// Requests may carry base64-encoded image/video bytes (annex.media.write), so
+// the request cap matches the response caps. At 1 MB, any write of a file whose
+// base64 exceeded ~750 KB was rejected as "too large" — and that rejection
+// carries an empty id, so the JS promise never resolves and the call hangs.
+pub const max_message_bytes: usize = 48 * 1024 * 1024;
 // Responses/results may carry base64-encoded HTTP bodies (e.g. images) from the
 // native net.fetch bridge, so these are sized generously (48 MB). Buffers of this
 // size must never live on the stack — see the shared static buffers below.

@@ -27,6 +27,9 @@ static NSString *ZeroNativeAppKitBridgeScript(void);
 static NSString *ZeroNativeMimeTypeForPath(NSString *path);
 static NSString *ZeroNativeResolvedAssetRoot(NSString *rootPath);
 static NSString *ZeroNativeSafeAssetPath(NSURL *url, NSString *entryPath);
+// Serve an arbitrary local file (image/video) at zero://media/<base64url-abspath>
+// with HTTP range support, so <video> can stream + seek. See startURLSchemeTask.
+static void ZeroNativeServeMediaTask(id<WKURLSchemeTask> urlSchemeTask);
 static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath);
 static NSArray<NSString *> *ZeroNativePolicyListFromBytes(const char *bytes, size_t len, NSArray<NSString *> *fallback);
 static NSString *ZeroNativeOriginForURL(NSURL *url);
@@ -174,6 +177,12 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 
 - (void)webView:(WKWebView *)webView startURLSchemeTask:(id<WKURLSchemeTask>)urlSchemeTask {
     (void)webView;
+    // zero://media/<base64url-abspath> serves a local file with range support
+    // (for <video> streaming/seeking), separate from the bundled asset root.
+    if ([urlSchemeTask.request.URL.host.lowercaseString isEqualToString:@"media"]) {
+        ZeroNativeServeMediaTask(urlSchemeTask);
+        return;
+    }
     NSString *relativePath = ZeroNativeSafeAssetPath(urlSchemeTask.request.URL, self.entryPath);
     if (!relativePath) {
         NSError *error = [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorBadURL userInfo:nil];
@@ -488,6 +497,9 @@ static NSString *ZeroNativeMimeTypeForPath(NSString *path) {
     if ([ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) return @"image/jpeg";
     if ([ext isEqualToString:@"gif"]) return @"image/gif";
     if ([ext isEqualToString:@"webp"]) return @"image/webp";
+    if ([ext isEqualToString:@"avif"]) return @"image/avif";
+    if ([ext isEqualToString:@"mp4"] || [ext isEqualToString:@"m4v"]) return @"video/mp4";
+    if ([ext isEqualToString:@"mov"] || [ext isEqualToString:@"qt"]) return @"video/quicktime";
     if ([ext isEqualToString:@"woff"]) return @"font/woff";
     if ([ext isEqualToString:@"woff2"]) return @"font/woff2";
     if ([ext isEqualToString:@"ttf"]) return @"font/ttf";
@@ -536,6 +548,116 @@ static NSString *ZeroNativeSafeAssetPath(NSURL *url, NSString *entryPath) {
     if (path.length == 0) return entryPath.length > 0 ? entryPath : @"index.html";
     if (ZeroNativePathHasUnsafeSegment(path)) return nil;
     return path;
+}
+
+// Decode a URL-safe base64 string (no padding) back to its bytes as a string.
+static NSString *ZeroNativeDecodeBase64URL(NSString *s) {
+    if (s.length == 0) return nil;
+    NSMutableString *b64 = [[s stringByReplacingOccurrencesOfString:@"-" withString:@"+"] mutableCopy];
+    [b64 replaceOccurrencesOfString:@"_" withString:@"/" options:0 range:NSMakeRange(0, b64.length)];
+    while (b64.length % 4 != 0) [b64 appendString:@"="];
+    NSData *data = [[NSData alloc] initWithBase64EncodedString:b64 options:0];
+    if (!data) return nil;
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+}
+
+static void ZeroNativeServeMediaTask(id<WKURLSchemeTask> urlSchemeTask) {
+    NSURL *reqURL = urlSchemeTask.request.URL;
+    // The absolute file path rides in the URL path as URL-safe base64.
+    NSString *encoded = reqURL.path;
+    while ([encoded hasPrefix:@"/"]) encoded = [encoded substringFromIndex:1];
+    NSString *path = ZeroNativeDecodeBase64URL(encoded);
+
+    BOOL isDir = NO;
+    BOOL exists = path.length > 0 && [path hasPrefix:@"/"] &&
+        !ZeroNativePathHasUnsafeSegment(path) &&
+        [[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDir] && !isDir;
+    if (!exists) {
+        [urlSchemeTask didFailWithError:[NSError errorWithDomain:NSURLErrorDomain
+                                                            code:NSURLErrorFileDoesNotExist
+                                                        userInfo:nil]];
+        return;
+    }
+
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    unsigned long long fileSize = attrs ? attrs.fileSize : 0;
+
+    // Parse an optional `Range: bytes=START-END` (END or START may be empty).
+    unsigned long long start = 0, end = fileSize > 0 ? fileSize - 1 : 0;
+    BOOL isRange = NO;
+    NSString *rangeHeader = urlSchemeTask.request.allHTTPHeaderFields[@"Range"];
+    if (fileSize > 0 && [rangeHeader hasPrefix:@"bytes="]) {
+        NSArray<NSString *> *parts = [[rangeHeader substringFromIndex:6] componentsSeparatedByString:@"-"];
+        if (parts.count == 2) {
+            NSString *s = parts[0], *e = parts[1];
+            if (s.length == 0 && e.length > 0) { // suffix range: last N bytes
+                unsigned long long n = strtoull(e.UTF8String, NULL, 10);
+                start = n >= fileSize ? 0 : fileSize - n;
+                end = fileSize - 1;
+            } else {
+                if (s.length > 0) start = strtoull(s.UTF8String, NULL, 10);
+                if (e.length > 0) end = strtoull(e.UTF8String, NULL, 10);
+            }
+            isRange = YES;
+        }
+    }
+    if (end >= fileSize) end = fileSize > 0 ? fileSize - 1 : 0;
+    if (fileSize == 0 || start > end) { start = 0; end = 0; isRange = NO; }
+    unsigned long long length = fileSize == 0 ? 0 : end - start + 1;
+
+    NSData *data = nil;
+    if (fileSize > 0) {
+        NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
+        if (!fh) {
+            [urlSchemeTask didFailWithError:[NSError errorWithDomain:NSURLErrorDomain
+                                                                code:NSURLErrorCannotOpenFile
+                                                            userInfo:nil]];
+            return;
+        }
+        @try {
+            [fh seekToFileOffset:start];
+            data = [fh readDataOfLength:(NSUInteger)length];
+        } @catch (__unused NSException *ex) {
+            data = nil;
+        } @finally {
+            [fh closeFile];
+        }
+        if (!data) {
+            [urlSchemeTask didFailWithError:[NSError errorWithDomain:NSURLErrorDomain
+                                                                code:NSURLErrorCannotOpenFile
+                                                            userInfo:nil]];
+            return;
+        }
+    } else {
+        data = [NSData data];
+    }
+
+    NSMutableDictionary<NSString *, NSString *> *headers = [@{
+        @"Content-Type" : ZeroNativeMimeTypeForPath(path),
+        @"Content-Length" : [NSString stringWithFormat:@"%llu", length],
+        @"Accept-Ranges" : @"bytes",
+        @"Access-Control-Allow-Origin" : @"*",
+        @"Cache-Control" : @"no-cache",
+    } mutableCopy];
+    NSInteger status = 200;
+    if (isRange) {
+        status = 206;
+        headers[@"Content-Range"] =
+            [NSString stringWithFormat:@"bytes %llu-%llu/%llu", start, end, fileSize];
+    }
+    NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc] initWithURL:reqURL
+                                                             statusCode:status
+                                                            HTTPVersion:@"HTTP/1.1"
+                                                           headerFields:headers];
+    // The player cancels in-flight tasks on every seek; calling back into a
+    // stopped task throws, so guard the delivery.
+    @try {
+        [urlSchemeTask didReceiveResponse:response];
+        [urlSchemeTask didReceiveData:data];
+        [urlSchemeTask didFinish];
+    } @catch (__unused NSException *ex) {
+        // task already stopped — nothing to do
+    }
 }
 
 static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
