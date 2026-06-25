@@ -180,6 +180,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "ZeroNativeCreateWebViewViewOptions" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "Stable runtime view id" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "update(label: string" },
+        .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "focus(options: string | ZeroNativeViewSelector)" },
+        .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "close(options: string | ZeroNativeViewSelector)" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "kind: \"webview\"" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "url: string" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "ZeroNativePlatformFeatureSelector" },
@@ -194,6 +196,20 @@ pub fn build(b: *std.Build) void {
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "\"appActivationEvents\"" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "\"gpu_surfaces\"" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "\"gpuSurfaces\"" },
+    });
+    addFileContainsCheckStep(b, test_step, "test-bridge-view-selector-helpers", "Verify injected view helpers accept string selectors", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "viewSelectorPayload(options)" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "viewSelectorPayload(options)" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "viewSelectorPayload(options)" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "viewSelectorPayload(options)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "focus:function(options){return invoke('zero-native.view.focus',viewSelectorPayload(options))" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "focus:function(options){return invoke('zero-native.view.focus',viewSelectorPayload(options))" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "focus:function(options){return invoke('zero-native.view.focus',viewSelectorPayload(options))" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "focus:function(options){return invoke('zero-native.view.focus',viewSelectorPayload(options))" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "close:function(options){return invoke('zero-native.view.close',viewSelectorPayload(options))" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "close:function(options){return invoke('zero-native.view.close',viewSelectorPayload(options))" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "close:function(options){return invoke('zero-native.view.close',viewSelectorPayload(options))" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "close:function(options){return invoke('zero-native.view.close',viewSelectorPayload(options))" },
     });
     addFileContainsCheckStep(b, test_step, "test-docs-command-contracts", "Verify command docs match native view update contracts", &.{
         .{ .path = "docs/src/app/commands/page.mdx", .pattern = ".text = \"Refreshed\"" },

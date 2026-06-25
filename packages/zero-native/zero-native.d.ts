@@ -459,10 +459,10 @@ export interface ZeroNativeApi {
     update(options: ZeroNativeUpdateViewOptions): Promise<ZeroNativeViewHandle>;
     setFrame(options: ZeroNativeSetViewFrameOptions): Promise<ZeroNativeViewHandle>;
     setVisible(options: ZeroNativeSetViewVisibleOptions): Promise<ZeroNativeViewHandle>;
-    focus(options: ZeroNativeViewSelector): Promise<ZeroNativeViewHandle>;
+    focus(options: string | ZeroNativeViewSelector): Promise<ZeroNativeViewHandle>;
     focusNext(options?: ZeroNativeViewTraversalOptions): Promise<ZeroNativeViewHandle>;
     focusPrevious(options?: ZeroNativeViewTraversalOptions): Promise<ZeroNativeViewHandle>;
-    close(options: ZeroNativeViewSelector): Promise<ZeroNativeViewInfo>;
+    close(options: string | ZeroNativeViewSelector): Promise<ZeroNativeViewInfo>;
   };
   dialogs: {
     openFile(options?: ZeroNativeOpenFileOptions): Promise<string[] | null>;
