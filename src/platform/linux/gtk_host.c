@@ -113,6 +113,7 @@ struct zero_native_gtk_host {
     zero_native_gtk_window_t windows[ZERO_NATIVE_MAX_WINDOWS];
     int window_count;
     int did_shutdown;
+    int app_active;
     guint frame_timer;
 
     char **allowed_origins;
@@ -787,6 +788,25 @@ static void zero_native_emit(zero_native_gtk_host_t *host, zero_native_gtk_event
     if (host->callback) host->callback(host->callback_context, &event);
 }
 
+static int zero_native_any_window_active(zero_native_gtk_host_t *host) {
+    if (!host) return 0;
+    for (int i = 0; i < host->window_count; i++) {
+        zero_native_gtk_window_t *win = &host->windows[i];
+        if (win->gtk_window && gtk_window_is_active(win->gtk_window)) return 1;
+    }
+    return 0;
+}
+
+static void zero_native_emit_app_active_if_changed(zero_native_gtk_host_t *host) {
+    if (!host) return;
+    int active = zero_native_any_window_active(host);
+    if (host->app_active == active) return;
+    host->app_active = active;
+    zero_native_emit(host, (zero_native_gtk_event_t){
+        .kind = active ? ZERO_NATIVE_GTK_EVENT_APP_ACTIVATED : ZERO_NATIVE_GTK_EVENT_APP_DEACTIVATED,
+    });
+}
+
 static void zero_native_emit_window_frame(zero_native_gtk_host_t *host, zero_native_gtk_window_t *win, int open) {
     if (!win || !win->gtk_window) return;
     int w = gtk_widget_get_width(GTK_WIDGET(win->gtk_window));
@@ -942,6 +962,7 @@ static void on_focus(GtkWindow *window, GParamSpec *pspec, gpointer data) {
     (void)window;
     zero_native_gtk_window_t *win = data;
     zero_native_emit_window_frame(win->host, win, 1);
+    zero_native_emit_app_active_if_changed(win->host);
 }
 
 static gboolean on_close_request(GtkWindow *window, gpointer data) {
@@ -1178,6 +1199,7 @@ static void on_activate(GtkApplication *app, gpointer data) {
     if (!win) return;
 
     gtk_window_present(win->gtk_window);
+    zero_native_emit_app_active_if_changed(host);
 
     zero_native_emit(host, (zero_native_gtk_event_t){ .kind = ZERO_NATIVE_GTK_EVENT_START });
     zero_native_emit_resize(host, win);

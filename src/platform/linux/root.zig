@@ -21,6 +21,8 @@ const GtkEventKind = enum(c_int) {
     window_frame = 4,
     shortcut = 5,
     native_command = 6,
+    app_activated = 7,
+    app_deactivated = 8,
 };
 
 const GtkEvent = extern struct {
@@ -265,6 +267,8 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
         .start => state.emit(.app_start),
         .frame => state.emit(.frame_requested),
         .shutdown => state.emit(.app_shutdown),
+        .app_activated => state.emit(.app_activated),
+        .app_deactivated => state.emit(.app_deactivated),
         .resize => {
             const surface: platform_mod.Surface = .{
                 .id = event.window_id,
