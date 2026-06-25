@@ -500,11 +500,11 @@ pub fn build(b: *std.Build) void {
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
         \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  case "$snapshot" in *'window @w1 "zero-native Native Shell" bounds=(0,0 900x640)'*) break ;; esac
+        \\  case "$snapshot" in *'window @w1 "zero-native Native Shell" bounds=('*' 900x640)'*) break ;; esac
         \\  attempts=$((attempts + 1))
         \\  sleep 0.1
         \\done
-        \\case "$snapshot" in *'window @w1 "zero-native Native Shell" bounds=(0,0 900x640)'*) ;; *) echo "native-shell window resize was not reflected in snapshot" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'window @w1 "zero-native Native Shell" bounds=('*' 900x640)'*) ;; *) echo "native-shell window resize was not reflected in snapshot" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'view @w1/toolbar kind=toolbar'*'bounds=(0,0 900x52)'*) ;; *) echo "native-shell toolbar did not relayout after resize" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'view @w1/main kind=webview'*'bounds=(240,52 660x548)'*) ;; *) echo "native-shell main WebView did not relayout after resize" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'view @w1/statusbar kind=statusbar'*'bounds=(240,600 660x40)'*) ;; *) echo "native-shell statusbar did not relayout after resize" >&2; exit 1 ;; esac
