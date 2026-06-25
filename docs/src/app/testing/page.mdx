@@ -22,12 +22,13 @@ The default test suite does not require a window server:
 ```bash
 zig build test
 zig build test-desktop
+zig build test-automation-protocol
 zig build test-platform-info
 zig build test-examples-native
 zig build test-examples-mobile
 ```
 
-Bridge and IPC coverage lives in the headless desktop tests: they inject platform bridge events, exercise command policy and handlers, and assert the platform response without launching a WebView.
+Bridge and IPC coverage lives in the headless desktop tests: they inject platform bridge events, exercise command policy and handlers, and assert the platform response without launching a WebView. Automation command parsing is covered by `test-automation-protocol`.
 
 `test-examples-native` runs the headless tests for `examples/command-app`, `examples/native-shell`, `examples/native-panels`, and `examples/capabilities` with `-Dplatform=null`. This keeps command routing, native view composition, and guarded OS capability examples covered from the repository root.
 
@@ -54,7 +55,7 @@ This step:
 
 The CEF smoke step additionally requires a local CEF layout or `-Dcef-auto-install=true`; it exercises `native.ping` and child WebView create/resize/navigate/close through the automation bridge. These steps are intentionally opt-in because they need a GUI-capable macOS session.
 
-The native-shell smoke step launches `examples/native-shell`, verifies toolbar/sidebar/statusbar/WebView rows in the automation snapshot, drives a main-window resize and checks relayout bounds, dispatches `app.refresh` through bridge, menu, toolbar, and shortcut command paths, creates and closes a child preview WebView, and checks that the native status label reflects each command source.
+The native-shell smoke step launches `examples/native-shell`, verifies toolbar/sidebar/statusbar/WebView rows in the automation snapshot, drives native focus traversal, drives a main-window resize and checks relayout bounds, dispatches `app.refresh` through bridge, menu, toolbar, and shortcut command paths, creates and closes a child preview WebView, and checks that the native status label reflects each command source.
 
 ## NullPlatform
 

@@ -101,6 +101,14 @@ The runtime polls `command.txt` and processes these actions:
       <td><code>shortcut &lt;id&gt;</code></td>
       <td>Dispatch a shortcut command event for the main window</td>
     </tr>
+    <tr>
+      <td><code>focus &lt;view-label&gt;</code></td>
+      <td>Focus a native or WebView-backed view in the main window</td>
+    </tr>
+    <tr>
+      <td><code>focus-next</code> / <code>focus-previous</code></td>
+      <td>Move focus through visible, enabled views in runtime order</td>
+    </tr>
   </tbody>
 </table>
 
@@ -134,6 +142,11 @@ zero-native automate menu-command app.refresh
 zero-native automate native-command app.refresh refresh-button
 zero-native automate shortcut app.refresh
 
+# Drive focus between native controls and WebViews
+zero-native automate focus refresh-button
+zero-native automate focus-next
+zero-native automate focus-previous
+
 # Send a bridge command and get the response
 zero-native automate bridge '{"id":"1","command":"native.ping","payload":{"source":"automation"}}'
 ```
@@ -145,8 +158,8 @@ The WebView and native-shell smoke build steps demonstrate full automation test 
 1. Build and start the app with `-Dautomation=true`
 2. Run `zero-native automate wait` to block until the app is ready
 3. Run `zero-native automate snapshot` to verify window, source, and native/WebView metadata
-4. Run `zero-native automate resize ...`, `zero-native automate bridge '...'`, or command-source actions such as `zero-native automate native-command ...`
-5. Verify bridge responses, relayout bounds, and updated snapshots
+4. Run `zero-native automate resize ...`, `zero-native automate bridge '...'`, focus traversal, or command-source actions such as `zero-native automate native-command ...`
+5. Verify bridge responses, relayout bounds, focus state, and updated snapshots
 
 ```bash
 zig build test-webview-smoke -Dplatform=macos
