@@ -263,6 +263,9 @@ fn createIosArtifact(allocator: std.mem.Allocator, io: std.Io, options: PackageO
     var dir = try std.Io.Dir.cwd().openDir(io, options.output_path, .{});
     defer dir.close(io);
     try dir.createDirPath(io, "Libraries");
+    const info_plist = try iosInfoPlistForMetadata(allocator, options.metadata);
+    defer allocator.free(info_plist);
+    try writeFile(dir, io, "Info.plist", info_plist);
     if (options.binary_path) |binary_path| try copyFileToDir(allocator, io, dir, binary_path, "Libraries/libzero-native.a");
     try writeReport(allocator, dir, io, "package-manifest.zon", options, "libzero-native.a", 0);
     return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = .ios, .web_engine = options.web_engine };
@@ -273,6 +276,12 @@ fn createAndroidArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
     var dir = try std.Io.Dir.cwd().openDir(io, options.output_path, .{});
     defer dir.close(io);
     try dir.createDirPath(io, "app/src/main/cpp/lib");
+    const build_gradle = try androidBuildGradleForMetadata(allocator, options.metadata);
+    defer allocator.free(build_gradle);
+    try writeFile(dir, io, "app/build.gradle", build_gradle);
+    const manifest = try androidManifestForMetadata(allocator, options.metadata);
+    defer allocator.free(manifest);
+    try writeFile(dir, io, "app/src/main/AndroidManifest.xml", manifest);
     if (options.binary_path) |binary_path| try copyFileToDir(allocator, io, dir, binary_path, "app/src/main/cpp/lib/libzero-native.a");
     try writeReport(allocator, dir, io, "package-manifest.zon", options, "libzero-native.a", 0);
     return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = .android, .web_engine = options.web_engine };
@@ -371,6 +380,36 @@ fn iosInfoPlist() []const u8 {
     \\<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>dev.zero_native.ios</string><key>CFBundleName</key><string>zero-nativeHost</string></dict></plist>
     \\
     ;
+}
+
+fn iosInfoPlistForMetadata(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata) ![]const u8 {
+    const bundle_id = try xmlEscapeAlloc(allocator, metadata.id);
+    defer allocator.free(bundle_id);
+    const name = try xmlEscapeAlloc(allocator, metadata.name);
+    defer allocator.free(name);
+    const display_name = try xmlEscapeAlloc(allocator, metadata.displayName());
+    defer allocator.free(display_name);
+    const version = try xmlEscapeAlloc(allocator, metadata.version);
+    defer allocator.free(version);
+    return std.fmt.allocPrint(allocator,
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        \\<plist version="1.0">
+        \\<dict>
+        \\  <key>CFBundleIdentifier</key>
+        \\  <string>{s}</string>
+        \\  <key>CFBundleName</key>
+        \\  <string>{s}</string>
+        \\  <key>CFBundleDisplayName</key>
+        \\  <string>{s}</string>
+        \\  <key>CFBundleShortVersionString</key>
+        \\  <string>{s}</string>
+        \\  <key>CFBundleVersion</key>
+        \\  <string>{s}</string>
+        \\</dict>
+        \\</plist>
+        \\
+    , .{ bundle_id, name, display_name, version, version });
 }
 
 fn iosViewController() []const u8 {
@@ -548,6 +587,43 @@ fn androidBuildGradle() []const u8 {
     ;
 }
 
+fn androidBuildGradleForMetadata(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata) ![]const u8 {
+    const application_id = try androidApplicationIdAlloc(allocator, metadata.id);
+    defer allocator.free(application_id);
+    return std.fmt.allocPrint(allocator,
+        \\plugins {{
+        \\    id "com.android.application" version "8.5.0"
+        \\    id "org.jetbrains.kotlin.android" version "2.0.20"
+        \\}}
+        \\
+        \\android {{
+        \\    namespace "{s}"
+        \\    compileSdk 35
+        \\
+        \\    defaultConfig {{
+        \\        applicationId "{s}"
+        \\        minSdk 26
+        \\        targetSdk 35
+        \\        versionCode 1
+        \\        versionName "{s}"
+        \\
+        \\        externalNativeBuild {{
+        \\            cmake {{
+        \\                arguments "-DANDROID_STL=c++_shared"
+        \\            }}
+        \\        }}
+        \\    }}
+        \\
+        \\    externalNativeBuild {{
+        \\        cmake {{
+        \\            path "src/main/cpp/CMakeLists.txt"
+        \\        }}
+        \\    }}
+        \\}}
+        \\
+    , .{ application_id, application_id, metadata.version });
+}
+
 fn androidCMakeLists() []const u8 {
     return
     \\cmake_minimum_required(VERSION 3.22.1)
@@ -568,6 +644,47 @@ fn androidCMakeLists() []const u8 {
 
 fn androidManifest() []const u8 {
     return "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"><application android:theme=\"@style/AppTheme\"><activity android:name=\".MainActivity\" android:configChanges=\"keyboard|keyboardHidden|orientation|screenSize\" android:exported=\"true\" android:windowSoftInputMode=\"adjustResize\"><intent-filter><action android:name=\"android.intent.action.MAIN\"/><category android:name=\"android.intent.category.LAUNCHER\"/></intent-filter></activity></application></manifest>\n";
+}
+
+fn androidManifestForMetadata(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata) ![]const u8 {
+    const label = try xmlEscapeAlloc(allocator, metadata.displayName());
+    defer allocator.free(label);
+    return std.fmt.allocPrint(allocator,
+        \\<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+        \\  <application android:label="{s}" android:theme="@style/AppTheme">
+        \\    <activity android:name=".MainActivity" android:configChanges="keyboard|keyboardHidden|orientation|screenSize" android:exported="true" android:windowSoftInputMode="adjustResize">
+        \\      <intent-filter>
+        \\        <action android:name="android.intent.action.MAIN" />
+        \\        <category android:name="android.intent.category.LAUNCHER" />
+        \\      </intent-filter>
+        \\    </activity>
+        \\  </application>
+        \\</manifest>
+        \\
+    , .{label});
+}
+
+fn androidApplicationIdAlloc(allocator: std.mem.Allocator, id: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var segment_start = true;
+    for (id) |ch| {
+        if (ch == '.') {
+            try out.append(allocator, '.');
+            segment_start = true;
+            continue;
+        }
+        if (segment_start and !std.ascii.isAlphabetic(ch)) {
+            try out.append(allocator, 'a');
+        }
+        segment_start = false;
+        if (std.ascii.isAlphanumeric(ch) or ch == '_') {
+            try out.append(allocator, ch);
+        } else {
+            try out.append(allocator, '_');
+        }
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 fn androidActivity() []const u8 {
@@ -1574,6 +1691,44 @@ test "mobile skeletons create native library drop-in directories" {
 
     var cmake = try cwd.openFile(std.testing.io, ".zig-cache/test-package-mobile-skeletons/android/app/src/main/cpp/CMakeLists.txt", .{});
     cmake.close(std.testing.io);
+}
+
+test "mobile package artifacts use manifest identity metadata" {
+    var cwd = std.Io.Dir.cwd();
+    try cwd.deleteTree(std.testing.io, ".zig-cache/test-package-mobile-identity");
+    defer cwd.deleteTree(std.testing.io, ".zig-cache/test-package-mobile-identity") catch {};
+
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.zero-native.mobile-app",
+        .name = "mobile-demo",
+        .display_name = "Mobile Demo",
+        .version = "2.3.4",
+    };
+
+    _ = try createIosArtifact(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = ".zig-cache/test-package-mobile-identity/ios",
+    });
+    _ = try createAndroidArtifact(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = ".zig-cache/test-package-mobile-identity/android",
+    });
+
+    const plist = try readPath(std.testing.allocator, std.testing.io, ".zig-cache/test-package-mobile-identity/ios/Info.plist");
+    defer std.testing.allocator.free(plist);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "dev.zero-native.mobile-app") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "Mobile Demo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "2.3.4") != null);
+
+    const gradle = try readPath(std.testing.allocator, std.testing.io, ".zig-cache/test-package-mobile-identity/android/app/build.gradle");
+    defer std.testing.allocator.free(gradle);
+    try std.testing.expect(std.mem.indexOf(u8, gradle, "applicationId \"dev.zero_native.mobile_app\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, gradle, "namespace \"dev.zero_native.mobile_app\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, gradle, "versionName \"2.3.4\"") != null);
+
+    const manifest = try readPath(std.testing.allocator, std.testing.io, ".zig-cache/test-package-mobile-identity/android/app/src/main/AndroidManifest.xml");
+    defer std.testing.allocator.free(manifest);
+    try std.testing.expect(std.mem.indexOf(u8, manifest, "android:label=\"Mobile Demo\"") != null);
 }
 
 test "linux desktop entry contains app name" {
