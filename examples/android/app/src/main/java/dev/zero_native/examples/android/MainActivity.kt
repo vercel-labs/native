@@ -14,6 +14,7 @@ import android.widget.TextView
 
 class MainActivity : Activity(), SurfaceHolder.Callback {
     private var nativeApp: Long = 0
+    private lateinit var statusLabel: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,26 +39,34 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             setTextColor(Color.rgb(95, 102, 114))
             setPadding(0, 6, 0, 0)
         }
-        val status = TextView(this).apply {
+        statusLabel = TextView(this).apply {
             text = "Native commands ready"
             textSize = 13f
             setTextColor(Color.rgb(95, 102, 114))
             setPadding(0, 12, 0, 0)
         }
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 12, 0, 0)
+        }
+        val back = Button(this).apply {
+            text = "Back"
+            setOnClickListener {
+                dispatchNativeCommand("mobile.back")
+            }
+        }
         val refresh = Button(this).apply {
             text = "Refresh"
             setOnClickListener {
-                if (nativeApp != 0L) {
-                    val count = nativeCommand(nativeApp, "mobile.refresh")
-                    status.text = "Command $count: mobile.refresh"
-                    nativeFrame(nativeApp)
-                }
+                dispatchNativeCommand("mobile.refresh")
             }
         }
+        actions.addView(back, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        actions.addView(refresh, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         header.addView(title)
         header.addView(subtitle)
-        header.addView(status)
-        header.addView(refresh)
+        header.addView(statusLabel)
+        header.addView(actions)
 
         val webView = WebView(this).apply {
             settings.javaScriptEnabled = false
@@ -93,6 +102,15 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         nativeStart(nativeApp)
     }
 
+    private fun dispatchNativeCommand(command: String) {
+        if (nativeApp == 0L) return
+        val count = nativeCommand(nativeApp, command)
+        if (::statusLabel.isInitialized) {
+            statusLabel.text = "Command $count: $command"
+        }
+        nativeFrame(nativeApp)
+    }
+
     override fun onResume() {
         super.onResume()
         if (nativeApp != 0L) {
@@ -122,6 +140,14 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         nativeTouch(nativeApp, event.getPointerId(0).toLong(), event.actionMasked, event.x, event.y, event.pressure)
         nativeFrame(nativeApp)
         return true
+    }
+
+    override fun onBackPressed() {
+        if (nativeApp != 0L) {
+            dispatchNativeCommand("mobile.back")
+            return
+        }
+        super.onBackPressed()
     }
 
     override fun onDestroy() {

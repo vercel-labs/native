@@ -417,6 +417,11 @@ fn androidActivity() []const u8 {
     \\        app = nativeCreate()
     \\        nativeStart(app)
     \\    }
+    \\    private fun dispatchNativeCommand(command: String) {
+    \\        if (app == 0L) return
+    \\        nativeCommand(app, command)
+    \\        nativeFrame(app)
+    \\    }
     \\    override fun onResume() {
     \\        super.onResume()
     \\        if (app != 0L) nativeActivate(app)
@@ -432,6 +437,13 @@ fn androidActivity() []const u8 {
     \\        nativeTouch(app, event.getPointerId(0).toLong(), event.actionMasked, event.x, event.y, event.pressure)
     \\        nativeFrame(app)
     \\        return true
+    \\    }
+    \\    override fun onBackPressed() {
+    \\        if (app != 0L) {
+    \\            dispatchNativeCommand("mobile.back")
+    \\            return
+    \\        }
+    \\        super.onBackPressed()
     \\    }
     \\    override fun onDestroy() {
     \\        if (app != 0L) {

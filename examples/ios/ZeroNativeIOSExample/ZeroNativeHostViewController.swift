@@ -6,6 +6,7 @@ final class ZeroNativeHostViewController: UIViewController {
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
     private let statusLabel = UILabel()
+    private let backButton = UIButton(type: .system)
     private let refreshButton = UIButton(type: .system)
     private let webView = WKWebView(frame: .zero)
     private var nativeApp: UnsafeMutableRawPointer?
@@ -69,11 +70,15 @@ final class ZeroNativeHostViewController: UIViewController {
         statusLabel.layer.masksToBounds = true
         statusLabel.textAlignment = .center
 
+        backButton.setTitle("Back", for: .normal)
+        backButton.titleLabel?.font = .preferredFont(forTextStyle: .headline)
+        backButton.addTarget(self, action: #selector(sendBackCommand), for: .touchUpInside)
+
         refreshButton.setTitle("Refresh", for: .normal)
         refreshButton.titleLabel?.font = .preferredFont(forTextStyle: .headline)
         refreshButton.addTarget(self, action: #selector(sendRefreshCommand), for: .touchUpInside)
 
-        [titleLabel, subtitleLabel, statusLabel, refreshButton].forEach {
+        [titleLabel, subtitleLabel, statusLabel, backButton, refreshButton].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             headerView.addSubview($0)
         }
@@ -87,15 +92,24 @@ final class ZeroNativeHostViewController: UIViewController {
             statusLabel.heightAnchor.constraint(equalToConstant: 24),
             refreshButton.trailingAnchor.constraint(equalTo: statusLabel.trailingAnchor),
             refreshButton.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 8),
+            backButton.trailingAnchor.constraint(equalTo: refreshButton.leadingAnchor, constant: -12),
+            backButton.centerYAnchor.constraint(equalTo: refreshButton.centerYAnchor),
             subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: refreshButton.leadingAnchor, constant: -16),
+            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: backButton.leadingAnchor, constant: -16),
             subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
         ])
     }
 
+    @objc private func sendBackCommand() {
+        dispatchNativeCommand("mobile.back")
+    }
+
     @objc private func sendRefreshCommand() {
+        dispatchNativeCommand("mobile.refresh")
+    }
+
+    private func dispatchNativeCommand(_ command: String) {
         guard let nativeApp else { return }
-        let command = "mobile.refresh"
         command.withCString { pointer in
             zero_native_app_command(nativeApp, pointer, UInt(command.utf8.count))
         }

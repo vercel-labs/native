@@ -2,8 +2,8 @@
 
 The mobile shell shape is implemented by the concrete platform hosts in `examples/ios` and `examples/android`.
 
-- `examples/ios` uses a native UIKit header with a WKWebView workspace and a native command button.
-- `examples/android` uses a native Android header with a WebView workspace, JNI bridge, and a native command button.
+- `examples/ios` uses a native UIKit header with a WKWebView workspace and native command buttons.
+- `examples/android` uses a native Android header with a WebView workspace, JNI bridge, native command buttons, and system Back dispatch.
 
 Use those platform folders when building or running the example.
 

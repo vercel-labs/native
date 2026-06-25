@@ -113,7 +113,7 @@ Mobile embedding uses the same runtime lifecycle through a thin native host:
     <tr>
       <td>Native commands</td>
       <td><code>zero_native_app_command</code></td>
-      <td>Mobile chrome can dispatch stable command IDs such as <code>mobile.refresh</code> through the embedded runtime</td>
+      <td>Mobile chrome can dispatch stable command IDs such as <code>mobile.back</code> and <code>mobile.refresh</code> through the embedded runtime</td>
     </tr>
     <tr>
       <td>Shutdown</td>
@@ -123,7 +123,7 @@ Mobile embedding uses the same runtime lifecycle through a thin native host:
   </tbody>
 </table>
 
-The mobile examples keep navigation/header UI in UIKit or Android views and keep rich content in `WKWebView` or Android `WebView`. Native header buttons dispatch command IDs through `zero_native_app_command`, so mobile chrome can use the same command/event model as desktop menus, shortcuts, and native controls. App activation, safe areas, orientation, keyboard avoidance, back gestures, and platform lifecycle ownership stay in the native host. The generic desktop `ShellView` tree is not mapped to UIKit or Android `ViewGroup` yet, so mobile app metadata is currently descriptive and packaging-oriented rather than a runtime materialized view tree.
+The mobile examples keep navigation/header UI in UIKit or Android views and keep rich content in `WKWebView` or Android `WebView`. Native header buttons and the Android system Back action dispatch command IDs through `zero_native_app_command`, so mobile chrome can use the same command/event model as desktop menus, shortcuts, and native controls. App activation, safe areas, orientation, keyboard avoidance, back gestures, and platform lifecycle ownership stay in the native host. The generic desktop `ShellView` tree is not mapped to UIKit or Android `ViewGroup` yet, so mobile app metadata is currently descriptive and packaging-oriented rather than a runtime materialized view tree.
 
 ## Testing with EmbeddedApp
 
