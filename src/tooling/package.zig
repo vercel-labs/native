@@ -96,7 +96,11 @@ pub fn createPackage(allocator: std.mem.Allocator, io: std.Io, options: PackageO
 }
 
 fn validateWebEngineTarget(target: PackageTarget, web_engine: WebEngine) !void {
-    if (web_engine == .chromium and target != .macos) return error.UnsupportedWebEngine;
+    if (web_engine != .chromium) return;
+    switch (target) {
+        .macos, .ios, .android => {},
+        .windows, .linux => return error.UnsupportedWebEngine,
+    }
 }
 
 pub fn printDiagnostic(stats: PackageStats) void {
@@ -1914,33 +1918,53 @@ fn toLowerAscii(ch: u8) u8 {
 
 fn createArchive(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions) !?[]const u8 {
     const archive_path = try archivePath(allocator, options);
-    const cmd = switch (options.target) {
-        .macos => try std.fmt.allocPrint(allocator, "hdiutil create -volname \"{s}\" -srcfolder \"{s}\" -ov -format UDZO \"{s}\"", .{ options.metadata.displayName(), options.output_path, archive_path }),
-        .windows => try std.fmt.allocPrint(allocator, "cd \"{s}\" && zip -r \"{s}\" .", .{ options.output_path, archive_path }),
-        .linux => try std.fmt.allocPrint(allocator, "tar czf \"{s}\" -C \"{s}\" .", .{ archive_path, options.output_path }),
+    errdefer allocator.free(archive_path);
+    switch (options.target) {
         .ios, .android => {
             allocator.free(archive_path);
             return null;
         },
+        .macos, .windows, .linux => {},
+    }
+    const archive_command_path = try absolutePathAlloc(allocator, io, archive_path);
+    defer allocator.free(archive_command_path);
+
+    const ok = switch (options.target) {
+        .macos => runArchiveCommand(io, &.{ "hdiutil", "create", "-volname", options.metadata.displayName(), "-srcfolder", options.output_path, "-ov", "-format", "UDZO", archive_command_path }, null),
+        .windows => runArchiveCommand(io, &.{ "zip", "-r", archive_command_path, "." }, options.output_path),
+        .linux => runArchiveCommand(io, &.{ "tar", "czf", archive_command_path, "-C", options.output_path, "." }, null),
+        .ios, .android => unreachable,
     };
-    defer allocator.free(cmd);
-    const argv = [_][]const u8{ "sh", "-c", cmd };
+
+    if (!ok) {
+        std.debug.print("warning: archive creation failed for {s}\n", .{archive_path});
+        allocator.free(archive_path);
+        return null;
+    }
+    return archive_path;
+}
+
+fn absolutePathAlloc(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+    if (std.fs.path.isAbsolute(path)) return allocator.dupe(u8, path);
+    const cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd);
+    return std.fs.path.join(allocator, &.{ cwd, path });
+}
+
+fn runArchiveCommand(io: std.Io, argv: []const []const u8, cwd: ?[]const u8) bool {
+    const child_cwd: std.process.Child.Cwd = if (cwd) |path| .{ .path = path } else .inherit;
     var child = std.process.spawn(io, .{
-        .argv = &argv,
+        .argv = argv,
+        .cwd = child_cwd,
         .stdin = .ignore,
         .stdout = .inherit,
         .stderr = .inherit,
-    }) catch {
-        std.debug.print("warning: archive creation failed for {s}\n", .{archive_path});
-        allocator.free(archive_path);
-        return null;
+    }) catch return false;
+    const term = child.wait(io) catch return false;
+    return switch (term) {
+        .exited => |code| code == 0,
+        else => false,
     };
-    _ = child.wait(io) catch {
-        std.debug.print("warning: archive creation failed for {s}\n", .{archive_path});
-        allocator.free(archive_path);
-        return null;
-    };
-    return archive_path;
 }
 
 pub fn archivePath(allocator: std.mem.Allocator, options: PackageOptions) ![]const u8 {
@@ -1975,6 +1999,11 @@ test "archive path includes correct suffix per platform" {
     const win_path = try archivePath(std.testing.allocator, .{ .metadata = metadata, .target = .windows, .output_path = "zig-out/package/demo" });
     defer std.testing.allocator.free(win_path);
     try std.testing.expect(std.mem.endsWith(u8, win_path, ".zip"));
+}
+
+test "archive command reports nonzero exit" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    try std.testing.expect(!runArchiveCommand(std.testing.io, &.{ "sh", "-c", "exit 7" }, null));
 }
 
 test "mobile package templates include native command shells" {
@@ -2147,6 +2176,44 @@ test "mobile package artifacts use manifest identity metadata" {
     const android_asset = try readPath(std.testing.allocator, std.testing.io, ".zig-cache/test-package-mobile-identity/android/app/src/main/assets/zero-native/dist/main.html");
     defer std.testing.allocator.free(android_asset);
     try std.testing.expectEqualStrings("<h1>Mobile</h1>", android_asset);
+}
+
+test "mobile packages allow chromium desktop engine metadata" {
+    var cwd = std.Io.Dir.cwd();
+    try cwd.deleteTree(std.testing.io, ".zig-cache/test-package-mobile-chromium");
+    defer cwd.deleteTree(std.testing.io, ".zig-cache/test-package-mobile-chromium") catch {};
+    try cwd.createDirPath(std.testing.io, ".zig-cache/test-package-mobile-chromium/assets");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = ".zig-cache/test-package-mobile-chromium/assets/index.html", .data = "<h1>Mobile</h1>" });
+
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.zero-native.mobile-chromium",
+        .name = "mobile-chromium",
+        .display_name = "Mobile Chromium",
+        .version = "1.0.0",
+        .frontend = .{ .dist = "dist", .entry = "index.html" },
+    };
+
+    const ios_stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .ios,
+        .output_path = ".zig-cache/test-package-mobile-chromium/ios",
+        .assets_dir = ".zig-cache/test-package-mobile-chromium/assets",
+        .frontend = metadata.frontend,
+        .web_engine = .chromium,
+    });
+    const android_stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .android,
+        .output_path = ".zig-cache/test-package-mobile-chromium/android",
+        .assets_dir = ".zig-cache/test-package-mobile-chromium/assets",
+        .frontend = metadata.frontend,
+        .web_engine = .chromium,
+    });
+
+    try std.testing.expectEqual(PackageTarget.ios, ios_stats.target);
+    try std.testing.expectEqual(PackageTarget.android, android_stats.target);
+    try std.testing.expectEqual(@as(usize, 1), ios_stats.asset_count);
+    try std.testing.expectEqual(@as(usize, 1), android_stats.asset_count);
 }
 
 test "linux desktop entry contains app name" {
@@ -2355,7 +2422,7 @@ test "macOS app executable is marked executable" {
     try std.testing.expect((permissions.toMode() & 0o111) != 0);
 }
 
-test "non-macos chromium packages are rejected before CEF layout checks" {
+test "desktop chromium packages are rejected before CEF layout checks" {
     const metadata: manifest_tool.Metadata = .{
         .id = "dev.demo",
         .name = "demo",
@@ -2368,6 +2435,13 @@ test "non-macos chromium packages are rejected before CEF layout checks" {
         .output_path = ".zig-cache/test-package-linux-chromium",
         .web_engine = .chromium,
         .cef_dir = ".zig-cache/missing-linux-cef",
+    }));
+    try std.testing.expectError(error.UnsupportedWebEngine, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = ".zig-cache/test-package-windows-chromium",
+        .web_engine = .chromium,
+        .cef_dir = ".zig-cache/missing-windows-cef",
     }));
 }
 
