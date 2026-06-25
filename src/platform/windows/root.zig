@@ -23,6 +23,7 @@ const WindowsEventKind = enum(c_int) {
     native_command = 6,
     app_activated = 7,
     app_deactivated = 8,
+    files_dropped = 9,
 };
 
 const WindowsEvent = extern struct {
@@ -48,6 +49,8 @@ const WindowsEvent = extern struct {
     command_name_len: usize,
     view_label: [*]const u8,
     view_label_len: usize,
+    drop_paths: [*]const u8,
+    drop_paths_len: usize,
 };
 
 const WindowsCallback = *const fn (context: ?*anyopaque, event: *const WindowsEvent) callconv(.c) void;
@@ -224,6 +227,10 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
         .shutdown => state.emit(.app_shutdown),
         .app_activated => state.emit(.app_activated),
         .app_deactivated => state.emit(.app_deactivated),
+        .files_dropped => state.emit(.{ .files_dropped = .{
+            .window_id = event.window_id,
+            .paths = event.drop_paths[0..event.drop_paths_len],
+        } }),
         .resize => {
             const surface: platform_mod.Surface = .{
                 .id = event.window_id,

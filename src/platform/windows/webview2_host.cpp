@@ -39,6 +39,7 @@ enum EventKind {
     kNativeCommand = 6,
     kAppActivated = 7,
     kAppDeactivated = 8,
+    kFilesDropped = 9,
 };
 
 constexpr uint32_t kShortcutModifierPrimary = 1u << 0;
@@ -88,6 +89,8 @@ struct WindowsEvent {
     size_t command_name_len;
     const char *view_label;
     size_t view_label_len;
+    const char *drop_paths;
+    size_t drop_paths_len;
 };
 
 using EventCallback = void (*)(void *, const WindowsEvent *);
@@ -301,6 +304,33 @@ static void emit(Host *host, const Window &window, EventKind kind) {
     event.title = window.title.c_str();
     event.title_len = window.title.size();
     host->callback(host->callback_context, &event);
+}
+
+static void emitFileDrop(Host *host, const Window &window, const std::string &paths) {
+    if (!host || !host->callback || paths.empty()) return;
+    WindowsEvent event = {};
+    event.kind = kFilesDropped;
+    event.window_id = window.id;
+    event.drop_paths = paths.c_str();
+    event.drop_paths_len = paths.size();
+    host->callback(host->callback_context, &event);
+}
+
+static std::string droppedFilePaths(HDROP drop) {
+    std::string paths;
+    UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+    for (UINT index = 0; index < count; ++index) {
+        UINT len = DragQueryFileW(drop, index, nullptr, 0);
+        if (len == 0) continue;
+        std::wstring path((size_t)len + 1, L'\0');
+        DragQueryFileW(drop, index, path.data(), len + 1);
+        path.resize(len);
+        std::string utf8_path = narrow(path);
+        if (utf8_path.empty()) continue;
+        if (!paths.empty()) paths.push_back('\n');
+        paths += utf8_path;
+    }
+    return paths;
 }
 
 static std::string shortcutKeyFromWParam(WPARAM wparam) {
@@ -938,6 +968,21 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 }
             }
             break;
+        case WM_DROPFILES:
+            if (host) {
+                HDROP drop = reinterpret_cast<HDROP>(wparam);
+                std::string paths = droppedFilePaths(drop);
+                DragFinish(drop);
+                if (!paths.empty()) {
+                    for (auto &entry : host->windows) {
+                        if (entry.second.hwnd == hwnd) {
+                            emitFileDrop(host, entry.second, paths);
+                            break;
+                        }
+                    }
+                }
+            }
+            return 0;
         case WM_SIZE:
             if (host) {
                 for (auto &entry : host->windows) {
@@ -1009,6 +1054,7 @@ static bool createNativeWindow(Host *host, Window &window) {
         host->instance,
         host);
     if (!hwnd) return false;
+    DragAcceptFiles(hwnd, TRUE);
     window.hwnd = hwnd;
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
