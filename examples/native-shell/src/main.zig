@@ -193,7 +193,7 @@ const NativeShellApp = struct {
         self.last_command_source = source;
         var status_buffer: [128]u8 = undefined;
         const status = try std.fmt.bufPrint(&status_buffer, "Refreshed from {s}. Count {d}.", .{ @tagName(source), self.refresh_count });
-        _ = try runtime.updateView(1, "status-label", .{ .role = status });
+        _ = try runtime.updateView(1, "status-label", .{ .text = status });
     }
 };
 

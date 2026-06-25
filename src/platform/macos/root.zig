@@ -77,8 +77,8 @@ extern fn zero_native_appkit_set_shortcuts(host: *AppKitHost, ids: [*]const [*]c
 extern fn zero_native_appkit_create_window(host: *AppKitHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int) c_int;
 extern fn zero_native_appkit_focus_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn zero_native_appkit_close_window(host: *AppKitHost, window_id: u64) c_int;
-extern fn zero_native_appkit_create_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, command: [*]const u8, command_len: usize) c_int;
-extern fn zero_native_appkit_update_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, has_frame: c_int, x: f64, y: f64, width: f64, height: f64, has_layer: c_int, layer: c_int, has_visible: c_int, visible: c_int, has_enabled: c_int, enabled: c_int, role: [*]const u8, role_len: usize, has_command: c_int, command: [*]const u8, command_len: usize) c_int;
+extern fn zero_native_appkit_create_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
+extern fn zero_native_appkit_update_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, has_frame: c_int, x: f64, y: f64, width: f64, height: f64, has_layer: c_int, layer: c_int, has_visible: c_int, visible: c_int, has_enabled: c_int, enabled: c_int, has_role: c_int, role: [*]const u8, role_len: usize, has_text: c_int, text: [*]const u8, text_len: usize, has_command: c_int, command: [*]const u8, command_len: usize) c_int;
 extern fn zero_native_appkit_set_view_frame(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn zero_native_appkit_set_view_visible(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, visible: c_int) c_int;
 extern fn zero_native_appkit_focus_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
@@ -469,6 +469,8 @@ fn createView(context: ?*anyopaque, options: platform_mod.ViewOptions) anyerror!
         if (options.enabled) 1 else 0,
         options.role.ptr,
         options.role.len,
+        options.text.ptr,
+        options.text.len,
         options.command.ptr,
         options.command.len,
     ) == 0) return error.CreateFailed;
@@ -480,6 +482,7 @@ fn updateView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []c
     if (self.web_engine != .system) return error.UnsupportedViewKind;
     const frame = patch.frame orelse geometry.RectF.init(0, 0, 0, 0);
     const role = patch.role orelse "";
+    const text = patch.text orelse "";
     const command = patch.command orelse "";
     if (zero_native_appkit_update_view(
         self.host,
@@ -497,8 +500,12 @@ fn updateView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []c
         if (patch.visible orelse false) 1 else 0,
         if (patch.enabled != null) 1 else 0,
         if (patch.enabled orelse false) 1 else 0,
+        if (patch.role != null) 1 else 0,
         role.ptr,
         role.len,
+        if (patch.text != null) 1 else 0,
+        text.ptr,
+        text.len,
         if (patch.command != null) 1 else 0,
         command.ptr,
         command.len,

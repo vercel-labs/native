@@ -362,6 +362,9 @@ pub const Runtime = struct {
         if (patch.role) |role| {
             if (role.len > platform.max_view_role_bytes) return error.ViewRoleTooLarge;
         }
+        if (patch.text) |text| {
+            if (text.len > platform.max_view_text_bytes) return error.ViewTextTooLarge;
+        }
         if (patch.command) |command| {
             if (command.len > 0) try validateCommandName(command);
         }
@@ -378,6 +381,7 @@ pub const Runtime = struct {
         if (patch.visible) |visible| self.views[index].visible = visible;
         if (patch.enabled) |enabled| self.views[index].enabled = enabled;
         if (patch.role) |role| self.views[index].role = try copyInto(&self.views[index].role_storage, role);
+        if (patch.text) |text| self.views[index].text = try copyInto(&self.views[index].text_storage, text);
         if (patch.command) |command| self.views[index].command = try copyInto(&self.views[index].command_storage, command);
         self.invalidateFor(.command, patch.frame);
         return self.views[index].info();
@@ -1466,13 +1470,14 @@ pub const Runtime = struct {
     }
 
     fn createViewFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
-        var scratch: [platform.max_view_label_bytes * 2 + platform.max_view_role_bytes + platform.max_view_command_bytes + platform.max_webview_url_bytes]u8 = undefined;
+        var scratch: [platform.max_view_label_bytes * 2 + platform.max_view_role_bytes + platform.max_view_text_bytes + platform.max_view_command_bytes + platform.max_webview_url_bytes]u8 = undefined;
         var storage = json.StringStorage.init(&scratch);
         const label = jsonStringField(payload, "label", &storage) orelse return error.InvalidViewOptions;
         const kind_str = jsonStringField(payload, "kind", &storage) orelse return error.InvalidViewOptions;
         const kind = viewKindFromString(kind_str) orelse return error.UnsupportedViewKind;
         const window_id = try viewWindowIdFromJson(payload, source_window_id);
         const role = jsonStringField(payload, "role", &storage) orelse "";
+        const text = jsonStringField(payload, "text", &storage) orelse "";
         const command = jsonStringField(payload, "command", &storage) orelse "";
         const parent = jsonStringField(payload, "parent", &storage);
         const url = jsonStringField(payload, "url", &storage) orelse "";
@@ -1486,6 +1491,7 @@ pub const Runtime = struct {
             .visible = jsonBoolField(payload, "visible") orelse true,
             .enabled = jsonBoolField(payload, "enabled") orelse true,
             .role = role,
+            .text = text,
             .command = command,
             .url = url,
             .transparent = jsonBoolField(payload, "transparent") orelse false,
@@ -1495,7 +1501,7 @@ pub const Runtime = struct {
     }
 
     fn updateViewFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
-        var scratch: [platform.max_view_label_bytes + platform.max_view_role_bytes + platform.max_view_command_bytes + platform.max_webview_url_bytes]u8 = undefined;
+        var scratch: [platform.max_view_label_bytes + platform.max_view_role_bytes + platform.max_view_text_bytes + platform.max_view_command_bytes + platform.max_webview_url_bytes]u8 = undefined;
         var storage = json.StringStorage.init(&scratch);
         const label = jsonStringField(payload, "label", &storage) orelse return error.InvalidViewOptions;
         const window_id = try viewWindowIdFromJson(payload, source_window_id);
@@ -1505,6 +1511,7 @@ pub const Runtime = struct {
             .visible = jsonBoolField(payload, "visible"),
             .enabled = jsonBoolField(payload, "enabled"),
             .role = jsonStringField(payload, "role", &storage),
+            .text = jsonStringField(payload, "text", &storage),
             .command = jsonStringField(payload, "command", &storage),
             .url = jsonStringField(payload, "url", &storage),
         };
@@ -1837,7 +1844,7 @@ pub const Runtime = struct {
     }
 
     fn updateWebViewView(self: *Runtime, window_id: platform.WindowId, label: []const u8, patch: platform.ViewPatch) !platform.ViewInfo {
-        if (patch.visible != null or patch.enabled != null or patch.role != null or patch.command != null) return error.InvalidViewOptions;
+        if (patch.visible != null or patch.enabled != null or patch.role != null or patch.text != null or patch.command != null) return error.InvalidViewOptions;
         if (isMainWebViewLabel(label)) {
             const window_index = self.findWindowIndexById(window_id) orelse return error.WindowNotFound;
             if (patch.url != null) return error.InvalidViewOptions;
@@ -1899,6 +1906,7 @@ pub const Runtime = struct {
         self.views[index].label = try copyInto(&self.views[index].label_storage, options.label);
         self.views[index].parent = if (options.parent) |parent| try copyInto(&self.views[index].parent_storage, parent) else null;
         self.views[index].role = try copyInto(&self.views[index].role_storage, options.role);
+        self.views[index].text = try copyInto(&self.views[index].text_storage, options.text);
         self.views[index].command = try copyInto(&self.views[index].command_storage, options.command);
         self.view_count += 1;
     }
@@ -1944,6 +1952,7 @@ pub const Runtime = struct {
             self.views[cursor].label = copyInto(&self.views[cursor].label_storage, next.label) catch unreachable;
             self.views[cursor].parent = if (next.parent) |parent| copyInto(&self.views[cursor].parent_storage, parent) catch unreachable else null;
             self.views[cursor].role = copyInto(&self.views[cursor].role_storage, next.role) catch unreachable;
+            self.views[cursor].text = copyInto(&self.views[cursor].text_storage, next.text) catch unreachable;
             self.views[cursor].command = copyInto(&self.views[cursor].command_storage, next.command) catch unreachable;
         }
         self.view_count -= 1;
@@ -2079,6 +2088,7 @@ const RuntimeView = struct {
     visible: bool = true,
     enabled: bool = true,
     role: []const u8 = "",
+    text: []const u8 = "",
     command: []const u8 = "",
     transparent: bool = false,
     bridge_enabled: bool = false,
@@ -2086,6 +2096,7 @@ const RuntimeView = struct {
     label_storage: [platform.max_view_label_bytes]u8 = undefined,
     parent_storage: [platform.max_view_label_bytes]u8 = undefined,
     role_storage: [platform.max_view_role_bytes]u8 = undefined,
+    text_storage: [platform.max_view_text_bytes]u8 = undefined,
     command_storage: [platform.max_view_command_bytes]u8 = undefined,
 
     fn info(self: RuntimeView) platform.ViewInfo {
@@ -2099,6 +2110,7 @@ const RuntimeView = struct {
             .visible = self.visible,
             .enabled = self.enabled,
             .role = self.role,
+            .text = self.text,
             .command = self.command,
             .url = "",
             .transparent = self.transparent,
@@ -2222,7 +2234,8 @@ fn shellViewOptions(window_id: platform.WindowId, view: app_manifest.ShellView, 
         .layer = view.layer,
         .visible = view.visible,
         .enabled = view.enabled,
-        .role = view.role orelse view.text orelse "",
+        .role = view.role orelse "",
+        .text = view.text orelse view.role orelse "",
         .command = view.command orelse "",
         .url = view.url orelse "",
         .bridge_enabled = view.kind == .webview,
@@ -2448,6 +2461,8 @@ fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
     }
     try writer.writeAll(",\"role\":");
     try json.writeString(writer, view.role);
+    try writer.writeAll(",\"text\":");
+    try json.writeString(writer, view.text);
     try writer.writeAll(",\"command\":");
     try json.writeString(writer, view.command);
     try writer.writeAll(",\"url\":");
@@ -2572,6 +2587,7 @@ fn builtinBridgeErrorMessage(err: anyerror) []const u8 {
         error.DuplicateViewLabel => "View label already exists",
         error.ViewLabelTooLarge => "View label is too large",
         error.ViewRoleTooLarge => "View role is too large",
+        error.ViewTextTooLarge => "View text is too large",
         error.UnsupportedViewKind => "This backend does not support this native view kind yet",
         error.UnsupportedViewFocus => "This backend does not support focusing this native view yet",
         error.NoSpaceLeft => "Native response buffer is too small",
@@ -2607,6 +2623,7 @@ fn builtinBridgeErrorCode(err: anyerror) bridge.ErrorCode {
         error.DuplicateViewLabel,
         error.ViewLabelTooLarge,
         error.ViewRoleTooLarge,
+        error.ViewTextTooLarge,
         error.UnsupportedViewKind,
         error.UnsupportedViewFocus,
         error.InvalidExternalUrl,
@@ -2804,6 +2821,7 @@ fn validateViewOptions(options: platform.ViewOptions) !void {
         if (parent.len == 0 or parent.len > platform.max_view_label_bytes) return error.InvalidViewOptions;
     }
     if (options.role.len > platform.max_view_role_bytes) return error.ViewRoleTooLarge;
+    if (options.text.len > platform.max_view_text_bytes) return error.ViewTextTooLarge;
     if (options.command.len > 0) try validateCommandName(options.command);
     if (options.kind != .webview and options.url.len > 0) return error.InvalidViewOptions;
 }
@@ -2968,10 +2986,12 @@ test "runtime exposes startup WebView and native views through generic view API"
         .kind = .toolbar,
         .frame = geometry.RectF.init(0, 0, 640, 44),
         .role = "toolbar",
+        .text = "Tools",
         .command = "app.toolbar",
     });
     try std.testing.expectEqual(platform.ViewKind.toolbar, toolbar.kind);
     try std.testing.expectEqualStrings("toolbar", toolbar.label);
+    try std.testing.expectEqualStrings("Tools", toolbar.text);
     try std.testing.expectEqualStrings("app.toolbar", toolbar.command);
 
     var views_buffer: [4]platform.ViewInfo = undefined;
@@ -2987,10 +3007,12 @@ test "runtime exposes startup WebView and native views through generic view API"
     const updated = try harness.runtime.updateView(1, "toolbar", .{
         .frame = geometry.RectF.init(0, 0, 640, 52),
         .visible = false,
+        .text = "Actions",
         .command = "app.toolbar.updated",
     });
     try std.testing.expectEqual(@as(f32, 52), updated.frame.height);
     try std.testing.expect(!updated.visible);
+    try std.testing.expectEqualStrings("Actions", updated.text);
     try std.testing.expectEqualStrings("app.toolbar.updated", updated.command);
 
     try harness.runtime.closeView(1, "toolbar");
@@ -3096,7 +3118,7 @@ test "runtime materializes manifest shell windows into laid out views" {
 
     try std.testing.expectEqual(platform.ViewKind.button, refresh.kind);
     try std.testing.expectEqualStrings("toolbar", refresh.parent.?);
-    try std.testing.expectEqualStrings("Refresh", refresh.role);
+    try std.testing.expectEqualStrings("Refresh", refresh.text);
     try std.testing.expectEqualStrings("app.refresh", refresh.command);
     try std.testing.expectEqual(@as(f32, 8), refresh.frame.x);
     try std.testing.expectEqual(@as(f32, 10), refresh.frame.y);
@@ -3105,7 +3127,7 @@ test "runtime materializes manifest shell windows into laid out views" {
 
     try std.testing.expectEqual(platform.ViewKind.search_field, search.kind);
     try std.testing.expectEqualStrings("toolbar", search.parent.?);
-    try std.testing.expectEqualStrings("Search", search.role);
+    try std.testing.expectEqualStrings("Search", search.text);
     try std.testing.expectEqual(@as(f32, 112), search.frame.x);
     try std.testing.expectEqual(@as(f32, 12), search.frame.y);
     try std.testing.expectEqual(@as(f32, 220), search.frame.width);
@@ -3118,21 +3140,21 @@ test "runtime materializes manifest shell windows into laid out views" {
     try std.testing.expectEqual(@as(f32, 648), sidebar.frame.height);
 
     try std.testing.expectEqual(platform.ViewKind.checkbox, checkbox.kind);
-    try std.testing.expectEqualStrings("Live", checkbox.role);
+    try std.testing.expectEqualStrings("Live", checkbox.text);
     try std.testing.expectEqual(@as(f32, 18), checkbox.frame.x);
     try std.testing.expectEqual(@as(f32, 92), checkbox.frame.y);
     try std.testing.expectEqual(@as(f32, 96), checkbox.frame.width);
     try std.testing.expectEqual(@as(f32, 32), checkbox.frame.height);
 
     try std.testing.expectEqual(platform.ViewKind.toggle, toggle.kind);
-    try std.testing.expectEqualStrings("Mode", toggle.role);
+    try std.testing.expectEqualStrings("Mode", toggle.text);
     try std.testing.expectEqual(@as(f32, 18), toggle.frame.x);
     try std.testing.expectEqual(@as(f32, 128), toggle.frame.y);
     try std.testing.expectEqual(@as(f32, 96), toggle.frame.width);
     try std.testing.expectEqual(@as(f32, 32), toggle.frame.height);
 
     try std.testing.expectEqual(platform.ViewKind.statusbar, statusbar.kind);
-    try std.testing.expectEqualStrings("Ready", statusbar.role);
+    try std.testing.expectEqualStrings("Ready", statusbar.text);
     try std.testing.expectEqual(@as(f32, 240), statusbar.frame.x);
     try std.testing.expectEqual(@as(f32, 672), statusbar.frame.y);
     try std.testing.expectEqual(@as(f32, 760), statusbar.frame.width);
@@ -3993,12 +4015,13 @@ test "runtime handles built-in JavaScript view bridge commands" {
     try harness.start(app_state.app());
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"1\",\"command\":\"zero-native.view.create\",\"payload\":{\"label\":\"toolbar\",\"kind\":\"toolbar\",\"frame\":{\"x\":0,\"y\":0,\"width\":640,\"height\":44},\"role\":\"toolbar\",\"layer\":3}}",
+        .bytes = "{\"id\":\"1\",\"command\":\"zero-native.view.create\",\"payload\":{\"label\":\"toolbar\",\"kind\":\"toolbar\",\"frame\":{\"x\":0,\"y\":0,\"width\":640,\"height\":44},\"role\":\"toolbar\",\"text\":\"Tools\",\"layer\":3}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"kind\":\"toolbar\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"text\":\"Tools\"") != null);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.view_count);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
@@ -4031,12 +4054,13 @@ test "runtime handles built-in JavaScript view bridge commands" {
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"visible\":false") != null);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"6\",\"command\":\"zero-native.view.update\",\"payload\":{\"label\":\"toolbar\",\"visible\":true,\"enabled\":false,\"role\":\"banner\"}}",
+        .bytes = "{\"id\":\"6\",\"command\":\"zero-native.view.update\",\"payload\":{\"label\":\"toolbar\",\"visible\":true,\"enabled\":false,\"role\":\"banner\",\"text\":\"Actions\"}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"enabled\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"role\":\"banner\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"text\":\"Actions\"") != null);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
         .bytes = "{\"id\":\"7\",\"command\":\"zero-native.view.close\",\"payload\":{\"label\":\"toolbar\"}}",

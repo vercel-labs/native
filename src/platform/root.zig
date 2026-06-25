@@ -24,6 +24,7 @@ pub const Error = error{
     DuplicateViewLabel,
     ViewLabelTooLarge,
     ViewRoleTooLarge,
+    ViewTextTooLarge,
     UnsupportedViewKind,
     UnsupportedViewFocus,
     MissingWebViewUrl,
@@ -115,6 +116,7 @@ pub const max_window_event_detail_bytes: usize = 8192;
 pub const max_views: usize = 32;
 pub const max_view_label_bytes: usize = 64;
 pub const max_view_role_bytes: usize = 64;
+pub const max_view_text_bytes: usize = 1024;
 pub const max_view_command_bytes: usize = 128;
 pub const max_menus: usize = 16;
 pub const max_menu_items: usize = 128;
@@ -361,6 +363,7 @@ pub const ViewOptions = struct {
     visible: bool = true,
     enabled: bool = true,
     role: []const u8 = "",
+    text: []const u8 = "",
     command: []const u8 = "",
     url: []const u8 = "",
     transparent: bool = false,
@@ -385,6 +388,7 @@ pub const ViewPatch = struct {
     visible: ?bool = null,
     enabled: ?bool = null,
     role: ?[]const u8 = null,
+    text: ?[]const u8 = null,
     command: ?[]const u8 = null,
     url: ?[]const u8 = null,
 };
@@ -399,6 +403,7 @@ pub const ViewInfo = struct {
     visible: bool = true,
     enabled: bool = true,
     role: []const u8 = "",
+    text: []const u8 = "",
     command: []const u8 = "",
     url: []const u8 = "",
     transparent: bool = false,
@@ -1168,7 +1173,7 @@ pub const NullPlatform = struct {
             .enabled = options.enabled,
             .open = true,
         };
-        try self.copyViewStrings(index, options.label, options.parent, options.role, options.command);
+        try self.copyViewStrings(index, options.label, options.parent, options.role, options.text, options.command);
     }
 
     fn updateView(context: ?*anyopaque, window_id: WindowId, label: []const u8, patch: ViewPatch) anyerror!void {
@@ -1184,6 +1189,10 @@ pub const NullPlatform = struct {
         if (patch.role) |role| {
             if (role.len > max_view_role_bytes) return error.ViewRoleTooLarge;
             self.views[index].role = try copyInto(&self.views[index].role_storage, role);
+        }
+        if (patch.text) |text| {
+            if (text.len > max_view_text_bytes) return error.ViewTextTooLarge;
+            self.views[index].text = try copyInto(&self.views[index].text_storage, text);
         }
         if (patch.command) |command| {
             if (command.len > max_view_command_bytes) return error.InvalidCommand;
@@ -1435,6 +1444,7 @@ pub const NullPlatform = struct {
         if (options.label.len == 0) return error.InvalidViewOptions;
         if (options.label.len > max_view_label_bytes) return error.ViewLabelTooLarge;
         if (options.role.len > max_view_role_bytes) return error.ViewRoleTooLarge;
+        if (options.text.len > max_view_text_bytes) return error.ViewTextTooLarge;
         if (options.command.len > max_view_command_bytes) return error.InvalidCommand;
         if (!isValidViewFrame(options.frame)) return error.InvalidViewOptions;
         if (options.url.len > 0) return error.InvalidViewOptions;
@@ -1442,10 +1452,11 @@ pub const NullPlatform = struct {
         if (self.findWebViewIndex(options.window_id, options.label) != null) return error.DuplicateViewLabel;
     }
 
-    fn copyViewStrings(self: *NullPlatform, index: usize, label: []const u8, parent: ?[]const u8, role: []const u8, command: []const u8) !void {
+    fn copyViewStrings(self: *NullPlatform, index: usize, label: []const u8, parent: ?[]const u8, role: []const u8, text: []const u8, command: []const u8) !void {
         self.views[index].label = try copyInto(&self.views[index].label_storage, label);
         self.views[index].parent = if (parent) |value| try copyInto(&self.views[index].parent_storage, value) else null;
         self.views[index].role = try copyInto(&self.views[index].role_storage, role);
+        self.views[index].text = try copyInto(&self.views[index].text_storage, text);
         self.views[index].command = try copyInto(&self.views[index].command_storage, command);
     }
 
@@ -1464,7 +1475,7 @@ pub const NullPlatform = struct {
                 .command = next.command,
                 .open = next.open,
             };
-            self.copyViewStrings(cursor, next.label, next.parent, next.role, next.command) catch unreachable;
+            self.copyViewStrings(cursor, next.label, next.parent, next.role, next.text, next.command) catch unreachable;
         }
         self.view_count -= 1;
     }
@@ -1638,11 +1649,13 @@ const NullView = struct {
     visible: bool = true,
     enabled: bool = true,
     role: []const u8 = "",
+    text: []const u8 = "",
     command: []const u8 = "",
     open: bool = false,
     label_storage: [max_view_label_bytes]u8 = undefined,
     parent_storage: [max_view_label_bytes]u8 = undefined,
     role_storage: [max_view_role_bytes]u8 = undefined,
+    text_storage: [max_view_text_bytes]u8 = undefined,
     command_storage: [max_view_command_bytes]u8 = undefined,
 };
 

@@ -85,7 +85,7 @@ Window commands are available through `window.zero.windows.*` when `js_window_ap
     <tr>
       <td><code>zero-native.view.update</code></td>
       <td><code>window</code></td>
-      <td>Patch frame, layer, visibility, enabled state, role, or WebView URL</td>
+      <td>Patch frame, layer, visibility, enabled state, role, text, command, or WebView URL</td>
     </tr>
     <tr>
       <td><code>zero-native.view.setFrame</code></td>
@@ -394,7 +394,7 @@ await window.zero.views.create({
   kind: "button",
   parent: "toolbar",
   frame: { x: 12, y: 8, width: 96, height: 28 },
-  role: "Refresh",
+  text: "Refresh",
   command: "app.refresh",
 });
 

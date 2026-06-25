@@ -157,6 +157,7 @@ export interface ZeroNativeViewInfo {
   kind: ZeroNativeViewKind;
   parent: string | null;
   role: string;
+  text: string;
   url: string;
   x: number;
   y: number;
@@ -180,7 +181,10 @@ export interface ZeroNativeCreateViewOptions {
   layer?: number;
   visible?: boolean;
   enabled?: boolean;
+  /** Accessibility or semantic role/label. Use text for visible titles and placeholders. */
   role?: string;
+  /** Visible native control label, button title, or text/search placeholder. */
+  text?: string;
   command?: string;
   /** Required when kind is "webview". Ignored for native view kinds. */
   url?: string;
@@ -195,7 +199,10 @@ export interface ZeroNativeUpdateViewOptions {
   layer?: number;
   visible?: boolean;
   enabled?: boolean;
+  /** Accessibility or semantic role/label. Use text for visible titles and placeholders. */
   role?: string;
+  /** Visible native control label, button title, or text/search placeholder. */
+  text?: string;
   command?: string;
   /** Only valid for WebView-backed views. */
   url?: string;
