@@ -197,6 +197,10 @@ pub fn build(b: *std.Build) void {
         .{ .path = "docs/src/app/commands/page.mdx", .pattern = ".text = \"Refreshed\"" },
         .{ .path = "docs/src/app/commands/page.mdx", .pattern = "const commands = await window.zero.commands.list();" },
     });
+    addFileContainsCheckStep(b, test_step, "test-docs-builtin-bridge-policy", "Verify bridge policy docs include guarded dialog commands", &.{
+        .{ .path = "docs/src/app/security/page.mdx", .pattern = ".{ .name = \"zero-native.dialog.saveFile\"" },
+        .{ .path = "docs/src/app/bridge/builtin-commands/page.mdx", .pattern = ".{ .name = \"zero-native.dialog.saveFile\"" },
+    });
 
     addTestStep(b, "test-geometry", "Run geometry module tests", geometry_tests);
     addTestStep(b, "test-assets", "Run assets module tests", assets_tests);
