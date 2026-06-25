@@ -131,7 +131,7 @@ Window commands are available through `window.zero.windows.*` when `js_window_ap
   </tbody>
 </table>
 
-View commands are available through `window.zero.views.*` when `js_window_api` is `true`. They use the same origin and `window` permission checks as window and WebView commands, and `windowId` must match the calling window when provided. View responses include frame, layer, visibility, enabled, focus, role, text, command, and open state. `kind: "webview"` routes through the WebView backend. The macOS, Linux, and Windows system-WebView backends support native `toolbar`, `titlebar_accessory`, `sidebar`, `statusbar`, `button`, `icon_button`, `checkbox`, `toggle`, `segmented_control`, `text_field`, `search_field`, `label`, `spacer`, and `progress_indicator` views; Chromium hosts and unsupported native kinds return explicit unsupported-backend errors until implemented.
+View commands are available through `window.zero.views.*` when `js_window_api` is `true`. They use the same origin and `window` permission checks as window and WebView commands, and `windowId` must match the calling window when provided. View responses include frame, layer, visibility, enabled, focus, role, text, command, and open state. `kind: "webview"` routes through the WebView backend. The macOS, Linux, and Windows system-WebView backends support native `toolbar`, `titlebar_accessory`, `sidebar`, `statusbar`, `split`, `stack`, `button`, `icon_button`, `checkbox`, `toggle`, `segmented_control`, `text_field`, `search_field`, `label`, `spacer`, and `progress_indicator` views; Chromium hosts and unsupported native kinds return explicit unsupported-backend errors until implemented.
 
 ## WebView Commands
 
