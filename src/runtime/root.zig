@@ -257,9 +257,7 @@ pub const Runtime = struct {
         try self.options.platform.services.closeWindow(window_id);
         self.windows[index].info.open = false;
         self.windows[index].info.focused = false;
-        self.removeShellLayoutForWindow(window_id);
-        self.removeViewsForWindow(window_id);
-        self.removeWebViewsForWindow(window_id);
+        self.removeWindowRuntimeViews(window_id);
         self.invalidated = true;
     }
 
@@ -328,6 +326,7 @@ pub const Runtime = struct {
         switch (mode) {
             .create => {
                 if (options.kind == .webview and isMainWebViewLabel(options.label)) {
+                    try self.setMainWebViewParent(options.window_id, options.parent);
                     _ = try self.updateView(options.window_id, options.label, .{
                         .frame = options.frame,
                         .layer = options.layer,
@@ -337,6 +336,9 @@ pub const Runtime = struct {
                 _ = try self.createView(options);
             },
             .update => {
+                if (options.kind == .webview and isMainWebViewLabel(options.label)) {
+                    try self.setMainWebViewParent(options.window_id, options.parent);
+                }
                 _ = self.updateView(options.window_id, options.label, .{
                     .frame = options.frame,
                     .layer = options.layer,
@@ -424,10 +426,13 @@ pub const Runtime = struct {
             return;
         }
 
-        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
-        const was_focused = self.views[index].focused;
+        _ = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        const was_focused = self.viewTreeHasFocused(window_id, label);
+        try self.closeDescendantWebViewBackends(window_id, label);
         try self.options.platform.services.closeView(window_id, label);
-        self.removeViewAt(index);
+        self.removeDescendantViewsForParent(window_id, label);
+        self.removeDescendantWebViewsForParent(window_id, label);
+        if (self.findViewIndex(window_id, label)) |current_index| self.removeViewAt(current_index);
         if (was_focused) self.ensureFocusableViewFocused(window_id);
         self.invalidateFor(.command, null);
     }
@@ -1102,8 +1107,15 @@ pub const Runtime = struct {
         if (!self.windows[index].main_frame_set) {
             self.windows[index].main_frame = geometry.RectF.init(0, 0, state.frame.width, state.frame.height);
         }
-        if (!state.open) self.removeWebViewsForWindow(state.id);
+        if (!state.open) self.removeWindowRuntimeViews(state.id);
         if (state.focused) self.setFocusedIndex(index);
+    }
+
+    fn removeWindowRuntimeViews(self: *Runtime, window_id: platform.WindowId) void {
+        if (self.findWindowIndexById(window_id)) |index| self.windows[index].main_parent = null;
+        self.removeShellLayoutForWindow(window_id);
+        self.removeViewsForWindow(window_id);
+        self.removeWebViewsForWindow(window_id);
     }
 
     fn shellBoundsForWindow(self: *const Runtime, window_id: platform.WindowId) geometry.RectF {
@@ -1872,7 +1884,7 @@ pub const Runtime = struct {
             }
             self.options.platform.services.closeWebView(window_id, label) catch {};
         }
-        try self.reserveWebView(self.allocateViewId(), window_id, label, url, webview_frame, layer, transparent, bridge_enabled);
+        try self.reserveWebView(self.allocateViewId(), window_id, label, null, url, webview_frame, layer, transparent, bridge_enabled);
         reserved = true;
         return writeWebViewJson(self.webviews[self.webview_count - 1], output);
     }
@@ -2016,7 +2028,7 @@ pub const Runtime = struct {
         return writer.buffered();
     }
 
-    fn reserveWebView(self: *Runtime, id: platform.ViewId, window_id: platform.WindowId, label: []const u8, url: []const u8, webview_frame: geometry.RectF, layer: i32, transparent: bool, bridge_enabled: bool) !void {
+    fn reserveWebView(self: *Runtime, id: platform.ViewId, window_id: platform.WindowId, label: []const u8, parent: ?[]const u8, url: []const u8, webview_frame: geometry.RectF, layer: i32, transparent: bool, bridge_enabled: bool) !void {
         const index = self.webview_count;
         self.webviews[index] = .{
             .id = id,
@@ -2028,6 +2040,7 @@ pub const Runtime = struct {
             .open = true,
         };
         self.webviews[index].label = try copyInto(&self.webviews[index].label_storage, label);
+        self.webviews[index].parent = if (parent) |value| try copyInto(&self.webviews[index].parent_storage, value) else null;
         self.webviews[index].url = try copyInto(&self.webviews[index].url_storage, url);
         self.webview_count += 1;
     }
@@ -2056,6 +2069,7 @@ pub const Runtime = struct {
                 .open = next.open,
             };
             self.webviews[cursor].label = copyInto(&self.webviews[cursor].label_storage, next.label) catch unreachable;
+            self.webviews[cursor].parent = if (next.parent) |parent| copyInto(&self.webviews[cursor].parent_storage, parent) catch unreachable else null;
             self.webviews[cursor].url = copyInto(&self.webviews[cursor].url_storage, next.url) catch unreachable;
         }
         self.webview_count -= 1;
@@ -2079,6 +2093,7 @@ pub const Runtime = struct {
             .id = window.main_view_id,
             .window_id = window.info.id,
             .label = "main",
+            .parent = window.main_parent,
             .url = sourceWebViewUrl(window.source),
             .frame = if (window.main_frame_set) window.main_frame else fallback_frame,
             .layer = window.main_layer,
@@ -2103,10 +2118,15 @@ pub const Runtime = struct {
             }
             self.options.platform.services.closeView(options.window_id, options.label) catch {};
         }
-        try self.reserveWebView(self.allocateViewId(), options.window_id, options.label, options.url, options.frame, options.layer, options.transparent, options.bridge_enabled);
+        try self.reserveWebView(self.allocateViewId(), options.window_id, options.label, options.parent, options.url, options.frame, options.layer, options.transparent, options.bridge_enabled);
         reserved = true;
         self.invalidateFor(.command, options.frame);
         return viewInfoFromWebView(self.webviews[self.webview_count - 1]);
+    }
+
+    fn setMainWebViewParent(self: *Runtime, window_id: platform.WindowId, parent: ?[]const u8) !void {
+        const index = self.findWindowIndexById(window_id) orelse return error.WindowNotFound;
+        self.windows[index].main_parent = if (parent) |value| try copyInto(&self.windows[index].main_parent_storage, value) else null;
     }
 
     fn updateWebViewView(self: *Runtime, window_id: platform.WindowId, label: []const u8, patch: platform.ViewPatch) !platform.ViewInfo {
@@ -2331,6 +2351,96 @@ pub const Runtime = struct {
         }
     }
 
+    fn removeDescendantViewsForParent(self: *Runtime, window_id: platform.WindowId, parent_label: []const u8) void {
+        var index: usize = 0;
+        while (index < self.view_count) {
+            const parent = self.views[index].parent orelse {
+                index += 1;
+                continue;
+            };
+            if (self.views[index].window_id != window_id or !std.mem.eql(u8, parent, parent_label)) {
+                index += 1;
+                continue;
+            }
+
+            var child_label_storage: [platform.max_view_label_bytes]u8 = undefined;
+            const child_label = copyInto(&child_label_storage, self.views[index].label) catch unreachable;
+            self.removeDescendantViewsForParent(window_id, child_label);
+            self.removeDescendantWebViewsForParent(window_id, child_label);
+            if (self.findViewIndex(window_id, child_label)) |child_index| self.removeViewAt(child_index);
+            index = 0;
+        }
+    }
+
+    fn removeDescendantWebViewsForParent(self: *Runtime, window_id: platform.WindowId, parent_label: []const u8) void {
+        var index: usize = 0;
+        while (index < self.webview_count) {
+            const parent = self.webviews[index].parent orelse {
+                index += 1;
+                continue;
+            };
+            if (self.webviews[index].window_id != window_id or !std.mem.eql(u8, parent, parent_label)) {
+                index += 1;
+                continue;
+            }
+
+            var child_label_storage: [@max(platform.max_view_label_bytes, platform.max_webview_label_bytes)]u8 = undefined;
+            const child_label = copyInto(&child_label_storage, self.webviews[index].label) catch unreachable;
+            self.removeDescendantViewsForParent(window_id, child_label);
+            self.removeDescendantWebViewsForParent(window_id, child_label);
+            if (self.findWebViewIndex(window_id, child_label)) |child_index| self.removeWebViewAt(child_index);
+            index = 0;
+        }
+    }
+
+    fn closeDescendantWebViewBackends(self: *Runtime, window_id: platform.WindowId, parent_label: []const u8) !void {
+        try self.closeDescendantWebViewBackendsDepth(window_id, parent_label, 0);
+    }
+
+    fn closeDescendantWebViewBackendsDepth(self: *Runtime, window_id: platform.WindowId, parent_label: []const u8, depth: usize) !void {
+        if (depth >= platform.max_views + platform.max_webviews) return;
+        for (self.views[0..self.view_count]) |view| {
+            if (view.window_id != window_id) continue;
+            const parent = view.parent orelse continue;
+            if (std.mem.eql(u8, parent, parent_label)) {
+                try self.closeDescendantWebViewBackendsDepth(window_id, view.label, depth + 1);
+            }
+        }
+        for (self.webviews[0..self.webview_count]) |webview| {
+            if (webview.window_id != window_id) continue;
+            const parent = webview.parent orelse continue;
+            if (std.mem.eql(u8, parent, parent_label)) {
+                try self.closeDescendantWebViewBackendsDepth(window_id, webview.label, depth + 1);
+                try self.options.platform.services.closeWebView(window_id, webview.label);
+            }
+        }
+    }
+
+    fn viewTreeHasFocused(self: *const Runtime, window_id: platform.WindowId, label: []const u8) bool {
+        return self.viewTreeHasFocusedDepth(window_id, label, 0);
+    }
+
+    fn viewTreeHasFocusedDepth(self: *const Runtime, window_id: platform.WindowId, label: []const u8, depth: usize) bool {
+        if (depth >= platform.max_views + platform.max_webviews) return false;
+        if (self.findViewIndex(window_id, label)) |index| {
+            if (self.views[index].focused) return true;
+        }
+        if (self.findWebViewIndex(window_id, label)) |index| {
+            if (self.webviews[index].focused) return true;
+        }
+        for (self.views[0..self.view_count]) |view| {
+            if (view.window_id != window_id) continue;
+            const parent = view.parent orelse continue;
+            if (std.mem.eql(u8, parent, label) and self.viewTreeHasFocusedDepth(window_id, view.label, depth + 1)) return true;
+        }
+        for (self.webviews[0..self.webview_count]) |webview| {
+            if (webview.window_id != window_id) continue;
+            const parent = webview.parent orelse continue;
+            if (std.mem.eql(u8, parent, label) and self.viewTreeHasFocusedDepth(window_id, webview.label, depth + 1)) return true;
+        }
+        return false;
+    }
+
     fn focusWindowFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
         var storage = json.StringStorage.init(output);
         const window_id = try self.resolveWindowSelector(payload, &storage);
@@ -2411,10 +2521,12 @@ const RuntimeWindow = struct {
     main_frame: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
     main_frame_set: bool = false,
     main_layer: i32 = 0,
+    main_parent: ?[]const u8 = null,
     main_zoom: f64 = 1.0,
     main_focused: bool = false,
     label_storage: [platform.max_window_label_bytes]u8 = undefined,
     title_storage: [platform.max_window_title_bytes]u8 = undefined,
+    main_parent_storage: [platform.max_view_label_bytes]u8 = undefined,
     source_storage: [platform.max_window_source_bytes]u8 = undefined,
 };
 
@@ -2422,6 +2534,7 @@ const RuntimeWebView = struct {
     id: platform.ViewId = 0,
     window_id: platform.WindowId = 1,
     label: []const u8 = "",
+    parent: ?[]const u8 = null,
     url: []const u8 = "",
     frame: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
     layer: i32 = 0,
@@ -2431,6 +2544,7 @@ const RuntimeWebView = struct {
     focused: bool = false,
     open: bool = false,
     label_storage: [platform.max_webview_label_bytes]u8 = undefined,
+    parent_storage: [platform.max_view_label_bytes]u8 = undefined,
     url_storage: [platform.max_webview_url_bytes]u8 = undefined,
 };
 
@@ -2981,7 +3095,7 @@ fn viewInfoFromWebView(webview: RuntimeWebView) platform.ViewInfo {
         .window_id = webview.window_id,
         .label = webview.label,
         .kind = .webview,
-        .parent = null,
+        .parent = webview.parent,
         .frame = webview.frame,
         .layer = webview.layer,
         .visible = webview.open,
@@ -3775,10 +3889,18 @@ test "runtime createView routes webview kind through WebView backend" {
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
 
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "preview-host",
+        .kind = .stack,
+        .frame = geometry.RectF.init(0, 0, 360, 280),
+    });
+
     const preview = try harness.runtime.createView(.{
         .window_id = 1,
         .label = "preview",
         .kind = .webview,
+        .parent = "preview-host",
         .url = "zero://app/preview.html",
         .frame = geometry.RectF.init(10, 10, 320, 240),
         .layer = 5,
@@ -3786,6 +3908,7 @@ test "runtime createView routes webview kind through WebView backend" {
     });
     try std.testing.expectEqual(platform.ViewKind.webview, preview.kind);
     try std.testing.expect(preview.id > 0);
+    try std.testing.expectEqualStrings("preview-host", preview.parent.?);
     try std.testing.expectEqualStrings("zero://app/preview.html", preview.url);
     try std.testing.expect(preview.bridge_enabled);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.webview_count);
@@ -3800,18 +3923,77 @@ test "runtime createView routes webview kind through WebView backend" {
 
     var views_buffer: [4]platform.ViewInfo = undefined;
     const views = harness.runtime.listViews(1, &views_buffer);
-    try std.testing.expectEqual(@as(usize, 2), views.len);
+    try std.testing.expectEqual(@as(usize, 3), views.len);
     try std.testing.expectEqualStrings("main", views[0].label);
-    try std.testing.expectEqualStrings("preview", views[1].label);
-    try std.testing.expectEqual(preview.id, views[1].id);
+    const listed_preview = testViewByLabel(views, "preview").?;
+    try std.testing.expectEqual(preview.id, listed_preview.id);
+    try std.testing.expectEqualStrings("preview-host", listed_preview.parent.?);
 
     try harness.runtime.focusView(1, "preview");
     try harness.runtime.closeView(1, "preview");
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.webview_count);
     const remaining = harness.runtime.listViews(1, &views_buffer);
-    try std.testing.expectEqual(@as(usize, 1), remaining.len);
+    try std.testing.expectEqual(@as(usize, 2), remaining.len);
     try std.testing.expectEqualStrings("main", remaining[0].label);
     try std.testing.expect(remaining[0].focused);
+}
+
+test "runtime closes native view descendants and logical WebView children with parent" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "parent-close", .source = platform.WebViewSource.html("<h1>Close</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "pane",
+        .kind = .stack,
+        .frame = geometry.RectF.init(0, 0, 640, 360),
+    });
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "controls",
+        .kind = .stack,
+        .parent = "pane",
+        .frame = geometry.RectF.init(8, 8, 220, 96),
+    });
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "action",
+        .kind = .button,
+        .parent = "controls",
+        .frame = geometry.RectF.init(8, 8, 96, 32),
+    });
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "preview",
+        .kind = .webview,
+        .parent = "pane",
+        .url = "zero://app/preview.html",
+        .frame = geometry.RectF.init(240, 8, 320, 240),
+    });
+    try std.testing.expectEqual(@as(usize, 3), harness.runtime.view_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.webview_count);
+
+    try harness.runtime.focusView(1, "action");
+    try harness.runtime.closeView(1, "pane");
+
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.view_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.webview_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.view_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.webview_count);
+
+    var views_buffer: [4]platform.ViewInfo = undefined;
+    const views = harness.runtime.listViews(1, &views_buffer);
+    try std.testing.expectEqual(@as(usize, 1), views.len);
+    try std.testing.expectEqualStrings("main", views[0].label);
+    try std.testing.expect(views[0].focused);
 }
 
 test "runtime traverses focus across WebViews and native controls" {
@@ -4369,10 +4551,53 @@ test "runtime lays out split panes and parented webview frames" {
     try std.testing.expectEqual(@as(f32, 0), navigator.frame.y);
     try std.testing.expectEqual(@as(f32, 220), navigator.frame.width);
     try std.testing.expectEqual(@as(f32, 556), navigator.frame.height);
+    try std.testing.expectEqualStrings("body", main.parent.?);
     try std.testing.expectEqual(@as(f32, 220), main.frame.x);
     try std.testing.expectEqual(@as(f32, 44), main.frame.y);
     try std.testing.expectEqual(@as(f32, 580), main.frame.width);
     try std.testing.expectEqual(@as(f32, 556), main.frame.height);
+}
+
+test "runtime platform window close clears shell views and child WebViews" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "platform-close", .source = platform.WebViewSource.html("<h1>Close</h1>") };
+        }
+    };
+
+    const shell_views = [_]app_manifest.ShellView{
+        .{ .label = "toolbar", .kind = .toolbar, .edge = .top, .height = 44 },
+        .{ .label = "content", .kind = .webview, .url = "zero://inline", .fill = true },
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{ .id = 1, .size = geometry.SizeF.init(800, 600) });
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.createShellViews(1, &shell_views, geometry.RectF.init(0, 0, 800, 600));
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.shell_layout_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.view_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.webview_count);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = .{
+        .id = 1,
+        .label = "main",
+        .title = "Main",
+        .frame = geometry.RectF.init(0, 0, 800, 600),
+        .scale_factor = 1,
+        .open = false,
+        .focused = false,
+    } });
+
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.shell_layout_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.view_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.webview_count);
+    try std.testing.expect(harness.runtime.windows[0].main_parent == null);
+
+    var views_buffer: [4]platform.ViewInfo = undefined;
+    const views = harness.runtime.listViews(1, &views_buffer);
+    try std.testing.expectEqual(@as(usize, 0), views.len);
 }
 
 test "runtime loads scene hook as native shell startup" {

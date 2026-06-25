@@ -172,6 +172,8 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (BOOL)setNativeViewFrameInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height;
 - (BOOL)setNativeViewVisibleInWindow:(uint64_t)windowId label:(NSString *)label visible:(BOOL)visible;
 - (BOOL)focusNativeViewInWindow:(uint64_t)windowId label:(NSString *)label;
+- (BOOL)nativeView:(NSView *)candidate isInSubtreeRootedAt:(NSView *)root;
+- (NSArray<NSString *> *)nativeViewKeysInSubtreeForWindow:(uint64_t)windowId rootKey:(NSString *)rootKey;
 - (BOOL)closeNativeViewInWindow:(uint64_t)windowId label:(NSString *)label;
 - (void)closeNativeViewsInWindow:(uint64_t)windowId;
 - (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled;
@@ -855,14 +857,39 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
     return [window makeFirstResponder:view];
 }
 
+- (BOOL)nativeView:(NSView *)candidate isInSubtreeRootedAt:(NSView *)root {
+    for (NSView *view = candidate; view; view = view.superview) {
+        if (view == root) return YES;
+    }
+    return NO;
+}
+
+- (NSArray<NSString *> *)nativeViewKeysInSubtreeForWindow:(uint64_t)windowId rootKey:(NSString *)rootKey {
+    NSView *root = self.nativeViews[rootKey];
+    if (!root) return @[];
+    NSString *prefix = [NSString stringWithFormat:@"%llu:", windowId];
+    NSMutableArray<NSString *> *keys = [[NSMutableArray alloc] init];
+    for (NSString *key in self.nativeViews) {
+        if (![key hasPrefix:prefix]) continue;
+        NSView *view = self.nativeViews[key];
+        if (view && [self nativeView:view isInSubtreeRootedAt:root]) {
+            [keys addObject:key];
+        }
+    }
+    return keys;
+}
+
 - (BOOL)closeNativeViewInWindow:(uint64_t)windowId label:(NSString *)label {
     NSString *key = [self nativeViewKeyForWindow:windowId label:label];
-    NSView *view = self.nativeViews[key];
-    if (!view) return NO;
-    [view removeFromSuperview];
-    [self.nativeViews removeObjectForKey:key];
-    [self.nativeViewCommands removeObjectForKey:key];
-    [self.nativeViewExplicitTextKeys removeObject:key];
+    NSArray<NSString *> *keys = [self nativeViewKeysInSubtreeForWindow:windowId rootKey:key];
+    if (keys.count == 0) return NO;
+    for (NSString *viewKey in keys) {
+        NSView *view = self.nativeViews[viewKey];
+        [view removeFromSuperview];
+        [self.nativeViews removeObjectForKey:viewKey];
+        [self.nativeViewCommands removeObjectForKey:viewKey];
+        [self.nativeViewExplicitTextKeys removeObject:viewKey];
+    }
     [self reorderWebViewsInWindow:windowId];
     [self scheduleFrame];
     return YES;

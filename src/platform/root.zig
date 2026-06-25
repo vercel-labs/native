@@ -1360,7 +1360,10 @@ pub const NullPlatform = struct {
     fn closeView(context: ?*anyopaque, window_id: WindowId, label: []const u8) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
-        self.removeViewAt(index);
+        var label_storage: [max_view_label_bytes]u8 = undefined;
+        const view_label = copyInto(&label_storage, self.views[index].label) catch unreachable;
+        self.removeChildViewsForParent(window_id, view_label);
+        if (self.findViewIndex(window_id, view_label)) |current_index| self.removeViewAt(current_index);
     }
 
     fn createWebView(context: ?*anyopaque, options: WebViewOptions) anyerror!void {
@@ -1676,6 +1679,26 @@ pub const NullPlatform = struct {
             } else {
                 index += 1;
             }
+        }
+    }
+
+    fn removeChildViewsForParent(self: *NullPlatform, window_id: WindowId, parent_label: []const u8) void {
+        var index: usize = 0;
+        while (index < self.view_count) {
+            const parent = self.views[index].parent orelse {
+                index += 1;
+                continue;
+            };
+            if (self.views[index].window_id != window_id or !std.mem.eql(u8, parent, parent_label)) {
+                index += 1;
+                continue;
+            }
+
+            var child_label_storage: [max_view_label_bytes]u8 = undefined;
+            const child_label = copyInto(&child_label_storage, self.views[index].label) catch unreachable;
+            self.removeChildViewsForParent(window_id, child_label);
+            if (self.findViewIndex(window_id, child_label)) |child_index| self.removeViewAt(child_index);
+            index = 0;
         }
     }
 
