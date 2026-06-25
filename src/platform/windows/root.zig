@@ -25,6 +25,7 @@ const WindowsEventKind = enum(c_int) {
     app_deactivated = 8,
     files_dropped = 9,
     menu_command = 10,
+    tray_action = 11,
 };
 
 const WindowsEvent = extern struct {
@@ -52,6 +53,7 @@ const WindowsEvent = extern struct {
     view_label_len: usize,
     drop_paths: [*]const u8,
     drop_paths_len: usize,
+    tray_item_id: u32,
 };
 
 const WindowsCallback = *const fn (context: ?*anyopaque, event: *const WindowsEvent) callconv(.c) void;
@@ -98,6 +100,9 @@ extern fn zero_native_windows_show_open_dialog(host: *WindowsHost, opts: *const 
 extern fn zero_native_windows_show_save_dialog(host: *WindowsHost, opts: *const WindowsSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
 extern fn zero_native_windows_show_message_dialog(host: *WindowsHost, opts: *const WindowsMessageDialogOpts) c_int;
 extern fn zero_native_windows_show_notification(host: *WindowsHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize) c_int;
+extern fn zero_native_windows_create_tray(host: *WindowsHost, icon_path: [*]const u8, icon_path_len: usize, tooltip: [*]const u8, tooltip_len: usize) c_int;
+extern fn zero_native_windows_update_tray_menu(host: *WindowsHost, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, count: usize) c_int;
+extern fn zero_native_windows_remove_tray(host: *WindowsHost) void;
 extern fn zero_native_windows_add_recent_document(host: *WindowsHost, path: [*]const u8, path_len: usize) c_int;
 extern fn zero_native_windows_clear_recent_documents(host: *WindowsHost) c_int;
 extern fn zero_native_windows_set_credential(host: *WindowsHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize, secret: [*]const u8, secret_len: usize) c_int;
@@ -219,6 +224,9 @@ pub const WindowsPlatform = struct {
                 .show_save_dialog_fn = showSaveDialog,
                 .show_message_dialog_fn = showMessageDialog,
                 .show_notification_fn = showNotification,
+                .create_tray_fn = createTray,
+                .update_tray_menu_fn = updateTrayMenu,
+                .remove_tray_fn = removeTray,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
                 .add_recent_document_fn = addRecentDocument,
@@ -326,6 +334,7 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .name = event.command_name[0..event.command_name_len],
             .window_id = event.window_id,
         } }),
+        .tray_action => state.emit(.{ .tray_action = event.tray_item_id }),
     }
 }
 
@@ -622,6 +631,42 @@ fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOpti
         options.body.ptr,
         options.body.len,
     ) == 0) return error.UnsupportedService;
+}
+
+const max_tray_items: usize = 32;
+
+fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    if (zero_native_windows_create_tray(self.host, options.icon_path.ptr, options.icon_path.len, options.tooltip.ptr, options.tooltip.len) == 0) return error.UnsupportedService;
+    if (options.items.len > 0) {
+        try updateTrayMenu(context, options.items);
+    }
+}
+
+fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    const count = @min(items.len, max_tray_items);
+    var ids: [max_tray_items]u32 = undefined;
+    var labels: [max_tray_items][*]const u8 = undefined;
+    var label_lens: [max_tray_items]usize = undefined;
+    var separators: [max_tray_items]c_int = undefined;
+    var enabled_flags: [max_tray_items]c_int = undefined;
+    for (items[0..count], 0..) |item, index| {
+        ids[index] = item.id;
+        labels[index] = item.label.ptr;
+        label_lens[index] = item.label.len;
+        separators[index] = if (item.separator) 1 else 0;
+        enabled_flags[index] = if (item.enabled) 1 else 0;
+    }
+    if (zero_native_windows_update_tray_menu(self.host, &ids, &labels, &label_lens, &separators, &enabled_flags, count) == 0) return error.UnsupportedService;
+}
+
+fn removeTray(context: ?*anyopaque) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    zero_native_windows_remove_tray(self.host);
 }
 
 fn openExternalUrl(context: ?*anyopaque, url: []const u8) anyerror!void {

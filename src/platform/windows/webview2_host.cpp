@@ -43,6 +43,7 @@ enum EventKind {
     kAppDeactivated = 8,
     kFilesDropped = 9,
     kMenuCommand = 10,
+    kTrayAction = 11,
 };
 
 constexpr uint32_t kShortcutModifierPrimary = 1u << 0;
@@ -52,6 +53,8 @@ constexpr uint32_t kShortcutModifierOption = 1u << 3;
 constexpr uint32_t kShortcutModifierShift = 1u << 4;
 constexpr size_t kMaxShortcuts = 64;
 constexpr uint32_t kMenuCommandBase = 0x4000;
+constexpr uint32_t kTrayCommandBase = 0x5000;
+constexpr UINT kNotificationCallbackMessage = WM_APP + 42;
 
 constexpr int kViewWebView = 0;
 constexpr int kViewToolbar = 1;
@@ -95,6 +98,7 @@ struct WindowsEvent {
     size_t view_label_len;
     const char *drop_paths;
     size_t drop_paths_len;
+    uint32_t tray_item_id;
 };
 
 struct WindowsOpenDialogOpts {
@@ -216,6 +220,14 @@ struct Menu {
     std::vector<MenuItem> items;
 };
 
+struct TrayItem {
+    uint32_t id = 0;
+    std::string label;
+    uint32_t command_id = 0;
+    bool separator = false;
+    bool enabled = true;
+};
+
 struct HostLifetime {
     std::recursive_mutex mutex;
     bool alive = true;
@@ -241,9 +253,11 @@ struct Host {
     std::vector<Shortcut> shortcuts;
     std::vector<Menu> menus;
     std::map<uint32_t, std::string> menu_commands;
+    std::vector<TrayItem> tray_items;
     int external_link_action = 0;
     bool app_active = false;
     bool notification_icon_added = false;
+    bool tray_active = false;
     std::shared_ptr<HostLifetime> lifetime = std::make_shared<HostLifetime>();
 };
 
@@ -325,21 +339,44 @@ static NOTIFYICONDATAW notificationIconData(Host *host) {
     return data;
 }
 
-static bool ensureNotificationIcon(Host *host) {
+static HICON loadNotificationIcon(Host *host, const std::string &icon_path, bool *destroy_icon) {
+    *destroy_icon = false;
+    std::string path = !icon_path.empty() ? icon_path : (host ? host->icon_path : std::string());
+    if (!path.empty()) {
+        std::wstring wide_path = widen(path);
+        HICON icon = reinterpret_cast<HICON>(LoadImageW(nullptr, wide_path.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE));
+        if (icon) {
+            *destroy_icon = true;
+            return icon;
+        }
+    }
+    return LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
+}
+
+static bool setNotificationIcon(Host *host, const std::string &icon_path, const std::string &tooltip, bool update_existing) {
     if (!host) return false;
-    if (host->notification_icon_added) return true;
+    if (host->notification_icon_added && !update_existing) return true;
     NOTIFYICONDATAW data = notificationIconData(host);
     if (!data.hWnd) return false;
     data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-    data.uCallbackMessage = WM_APP + 42;
-    data.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
-    std::wstring tip = widen(host->app_name.empty() ? std::string("zero-native") : host->app_name);
+    data.uCallbackMessage = kNotificationCallbackMessage;
+    bool destroy_icon = false;
+    data.hIcon = loadNotificationIcon(host, icon_path, &destroy_icon);
+    std::wstring tip = widen(!tooltip.empty() ? tooltip : (host->app_name.empty() ? std::string("zero-native") : host->app_name));
     copyWideField(data.szTip, ARRAYSIZE(data.szTip), tip);
-    if (!Shell_NotifyIconW(NIM_ADD, &data)) return false;
-    data.uVersion = NOTIFYICON_VERSION_4;
-    Shell_NotifyIconW(NIM_SETVERSION, &data);
+    BOOL ok = Shell_NotifyIconW(host->notification_icon_added ? NIM_MODIFY : NIM_ADD, &data);
+    if (destroy_icon && data.hIcon) DestroyIcon(data.hIcon);
+    if (!ok) return false;
+    if (!host->notification_icon_added) {
+        data.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &data);
+    }
     host->notification_icon_added = true;
     return true;
+}
+
+static bool ensureNotificationIcon(Host *host) {
+    return setNotificationIcon(host, std::string(), std::string(), false);
 }
 
 static void removeNotificationIcon(Host *host) {
@@ -684,6 +721,42 @@ static bool emitMenuCommandForId(Host *host, HWND hwnd, uint32_t command_id) {
     event.command_name_len = found->second.size();
     host->callback(host->callback_context, &event);
     return true;
+}
+
+static bool emitTrayActionForCommandId(Host *host, uint32_t command_id) {
+    if (!host || !host->callback) return false;
+    for (const TrayItem &item : host->tray_items) {
+        if (item.separator || item.command_id != command_id) continue;
+        WindowsEvent event = {};
+        event.kind = kTrayAction;
+        event.tray_item_id = item.id;
+        host->callback(host->callback_context, &event);
+        return true;
+    }
+    return false;
+}
+
+static void showTrayMenu(Host *host, HWND hwnd) {
+    if (!host || !host->tray_active || host->tray_items.empty() || !hwnd) return;
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    for (const TrayItem &item : host->tray_items) {
+        if (item.separator) {
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            continue;
+        }
+        UINT flags = MF_STRING;
+        if (!item.enabled) flags |= MF_GRAYED;
+        std::wstring label = widen(item.label);
+        AppendMenuW(menu, flags, item.command_id, label.c_str());
+    }
+    POINT cursor = {};
+    GetCursorPos(&cursor);
+    SetForegroundWindow(hwnd);
+    UINT command_id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, hwnd, nullptr);
+    DestroyMenu(menu);
+    if (command_id != 0) emitTrayActionForCommandId(host, command_id);
+    PostMessageW(hwnd, WM_NULL, 0, 0);
 }
 
 static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wparam) {
@@ -1227,6 +1300,15 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
     }
     Host *host = hostFromWindow(hwnd);
     switch (message) {
+        case kNotificationCallbackMessage:
+            if (host && host->tray_active) {
+                UINT tray_event = LOWORD(lparam);
+                if (tray_event == WM_CONTEXTMENU || tray_event == WM_RBUTTONUP || tray_event == WM_LBUTTONUP) {
+                    showTrayMenu(host, hwnd);
+                    return 0;
+                }
+            }
+            break;
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN:
             if (host && emitShortcutForHwnd(host, hwnd, wparam)) return 0;
@@ -1914,6 +1996,39 @@ int zero_native_windows_show_notification(Host *host, const char *title, size_t 
     copyWideField(data.szInfoTitle, ARRAYSIZE(data.szInfoTitle), title_wide);
     copyWideField(data.szInfo, ARRAYSIZE(data.szInfo), body_wide);
     return Shell_NotifyIconW(NIM_MODIFY, &data) ? 1 : 0;
+}
+
+int zero_native_windows_create_tray(Host *host, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len) {
+    if (!host) return 0;
+    std::string icon = slice(icon_path, icon_path_len);
+    std::string tip = slice(tooltip, tooltip_len);
+    if (!setNotificationIcon(host, icon, tip, true)) return 0;
+    host->tray_active = true;
+    return 1;
+}
+
+int zero_native_windows_update_tray_menu(Host *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, size_t count) {
+    if (!host || !host->tray_active) return 0;
+    host->tray_items.clear();
+    if (count > 0 && (!item_ids || !labels || !label_lens || !separators || !enabled_flags)) return 0;
+    host->tray_items.reserve(count);
+    for (size_t index = 0; index < count; ++index) {
+        TrayItem item;
+        item.id = item_ids[index];
+        item.label = slice(labels[index], label_lens[index]);
+        item.separator = separators[index] != 0;
+        item.enabled = enabled_flags[index] != 0;
+        if (!item.separator) item.command_id = kTrayCommandBase + static_cast<uint32_t>(index);
+        host->tray_items.push_back(item);
+    }
+    return 1;
+}
+
+void zero_native_windows_remove_tray(Host *host) {
+    if (!host) return;
+    host->tray_active = false;
+    host->tray_items.clear();
+    removeNotificationIcon(host);
 }
 
 int zero_native_windows_open_external_url(Host *host, const char *url, size_t url_len) {
