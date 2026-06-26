@@ -820,18 +820,17 @@ static const char *zero_native_mime_for_ext(const char *path) {
 
 static zero_native_gtk_window_t *zero_native_window_for_asset_uri(zero_native_gtk_host_t *host, const char *uri) {
     char *origin = zero_native_origin_for_uri(uri);
-    zero_native_gtk_window_t *fallback = NULL;
+    if (!origin) return NULL;
     for (int i = 0; i < host->window_count; i++) {
         zero_native_gtk_window_t *win = &host->windows[i];
-        if (!win->asset_root) continue;
-        if (!fallback) fallback = win;
-        if (win->asset_origin && strcmp(win->asset_origin, origin) == 0) {
+        if (!win->asset_root || !win->asset_origin) continue;
+        if (strcmp(win->asset_origin, origin) == 0) {
             g_free(origin);
             return win;
         }
     }
     g_free(origin);
-    return fallback;
+    return NULL;
 }
 
 static char *zero_native_asset_relative_path(const char *uri, const char *entry) {
