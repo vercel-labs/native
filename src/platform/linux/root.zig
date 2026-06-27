@@ -271,6 +271,7 @@ pub const LinuxPlatform = struct {
     }
 
     fn credentialsAvailable(host: *GtkHost) bool {
+        if (comptime @import("builtin").is_test) return false;
         if (@import("builtin").target.os.tag != .linux) return false;
         return zero_native_gtk_credentials_available(host) != 0;
     }
