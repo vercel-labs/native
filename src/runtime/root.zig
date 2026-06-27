@@ -482,6 +482,7 @@ pub const Runtime = struct {
         if (patch.accessibility_label) |accessibility_label| self.views[index].accessibility_label = try copyInto(&self.views[index].accessibility_label_storage, accessibility_label);
         if (patch.text) |text| self.views[index].text = try copyInto(&self.views[index].text_storage, text);
         if (patch.command) |command| self.views[index].command = try copyInto(&self.views[index].command_storage, command);
+        if (patch.frame != null) try self.relayoutDescendantWebViewBackends(window_id, label);
         self.invalidateFor(.command, patch.frame);
         if (self.views[index].focused and !isFocusableViewInfo(self.views[index].info())) {
             self.ensureFocusableViewFocused(window_id);
@@ -1987,7 +1988,7 @@ pub const Runtime = struct {
             }
             self.options.platform.services.closeWebView(window_id, label) catch {};
         }
-        try self.reserveWebView(self.allocateViewId(), window_id, label, null, url, webview_frame, layer, transparent, bridge_enabled);
+        try self.reserveWebView(self.allocateViewId(), window_id, label, null, url, webview_frame, webview_frame, layer, transparent, bridge_enabled);
         reserved = true;
         return writeWebViewJson(self.webviews[self.webview_count - 1], output);
     }
@@ -2005,11 +2006,14 @@ pub const Runtime = struct {
             try self.options.platform.services.setWebViewFrame(window_id, label, webview_frame);
             self.windows[window_index].main_frame = webview_frame;
             self.windows[window_index].main_frame_set = true;
+            try self.relayoutDescendantWebViewBackends(window_id, label);
             return writeWebViewJson(self.mainWebViewInfo(window_index), output);
         }
         const webview_index = self.findWebViewIndex(window_id, label) orelse return error.WebViewNotFound;
         try self.options.platform.services.setWebViewFrame(window_id, label, webview_frame);
+        self.webviews[webview_index].local_frame = try self.localFrameForView(window_id, self.webviews[webview_index].parent, webview_frame);
         self.webviews[webview_index].frame = webview_frame;
+        try self.relayoutDescendantWebViewBackends(window_id, label);
         return writeWebViewJson(self.webviews[webview_index], output);
     }
 
@@ -2131,12 +2135,13 @@ pub const Runtime = struct {
         return writer.buffered();
     }
 
-    fn reserveWebView(self: *Runtime, id: platform.ViewId, window_id: platform.WindowId, label: []const u8, parent: ?[]const u8, url: []const u8, webview_frame: geometry.RectF, layer: i32, transparent: bool, bridge_enabled: bool) !void {
+    fn reserveWebView(self: *Runtime, id: platform.ViewId, window_id: platform.WindowId, label: []const u8, parent: ?[]const u8, url: []const u8, local_frame: geometry.RectF, platform_frame: geometry.RectF, layer: i32, transparent: bool, bridge_enabled: bool) !void {
         const index = self.webview_count;
         self.webviews[index] = .{
             .id = id,
             .window_id = window_id,
-            .frame = webview_frame,
+            .frame = platform_frame,
+            .local_frame = local_frame,
             .layer = layer,
             .transparent = transparent,
             .bridge_enabled = bridge_enabled,
@@ -2164,6 +2169,7 @@ pub const Runtime = struct {
                 .id = next.id,
                 .window_id = next.window_id,
                 .frame = next.frame,
+                .local_frame = next.local_frame,
                 .layer = next.layer,
                 .zoom = next.zoom,
                 .transparent = next.transparent,
@@ -2213,7 +2219,9 @@ pub const Runtime = struct {
         try self.validateWebViewUrl(options.url);
         if (!isValidWebViewFrame(options.frame)) return error.InvalidWebViewOptions;
         if (self.webview_count >= platform.max_webviews) return error.WebViewLimitReached;
-        try self.options.platform.services.createView(options);
+        var platform_options = options;
+        platform_options.frame = try self.platformFrameForView(options.window_id, options.parent, options.frame);
+        try self.options.platform.services.createView(platform_options);
         var reserved = false;
         errdefer {
             if (reserved) {
@@ -2221,9 +2229,9 @@ pub const Runtime = struct {
             }
             self.options.platform.services.closeView(options.window_id, options.label) catch {};
         }
-        try self.reserveWebView(self.allocateViewId(), options.window_id, options.label, options.parent, options.url, options.frame, options.layer, options.transparent, options.bridge_enabled);
+        try self.reserveWebView(self.allocateViewId(), options.window_id, options.label, options.parent, options.url, options.frame, platform_options.frame, options.layer, options.transparent, options.bridge_enabled);
         reserved = true;
-        self.invalidateFor(.command, options.frame);
+        self.invalidateFor(.command, platform_options.frame);
         return viewInfoFromWebView(self.webviews[self.webview_count - 1]);
     }
 
@@ -2244,6 +2252,7 @@ pub const Runtime = struct {
                 }
                 self.windows[window_index].main_frame = view_frame;
                 self.windows[window_index].main_frame_set = true;
+                try self.relayoutDescendantWebViewBackends(window_id, label);
             }
             if (patch.layer) |layer| {
                 if (self.windows[window_index].source != null) {
@@ -2258,8 +2267,11 @@ pub const Runtime = struct {
         const webview_index = self.findWebViewIndex(window_id, label) orelse return error.WebViewNotFound;
         if (patch.frame) |view_frame| {
             if (!isValidWebViewFrame(view_frame)) return error.InvalidWebViewOptions;
-            try self.options.platform.services.setWebViewFrame(window_id, label, view_frame);
-            self.webviews[webview_index].frame = view_frame;
+            const platform_frame = try self.platformFrameForView(window_id, self.webviews[webview_index].parent, view_frame);
+            try self.options.platform.services.setWebViewFrame(window_id, label, platform_frame);
+            self.webviews[webview_index].local_frame = view_frame;
+            self.webviews[webview_index].frame = platform_frame;
+            try self.relayoutDescendantWebViewBackends(window_id, label);
         }
         if (patch.layer) |layer| {
             try self.options.platform.services.setWebViewLayer(window_id, label, layer);
@@ -2277,6 +2289,72 @@ pub const Runtime = struct {
     fn validateViewParent(self: *const Runtime, window_id: platform.WindowId) !void {
         const index = self.findWindowIndexById(window_id) orelse return error.WindowNotFound;
         if (!self.windows[index].info.open) return error.WindowNotFound;
+    }
+
+    fn platformFrameForView(self: *const Runtime, window_id: platform.WindowId, parent: ?[]const u8, base_frame: geometry.RectF) !geometry.RectF {
+        var platform_frame = base_frame;
+        if (parent) |parent_label| {
+            const parent_frame = try self.absoluteViewFrame(window_id, parent_label, 0);
+            platform_frame.x += parent_frame.x;
+            platform_frame.y += parent_frame.y;
+        }
+        return platform_frame;
+    }
+
+    fn localFrameForView(self: *const Runtime, window_id: platform.WindowId, parent: ?[]const u8, base_frame: geometry.RectF) !geometry.RectF {
+        var local_frame = base_frame;
+        if (parent) |parent_label| {
+            const parent_frame = try self.absoluteViewFrame(window_id, parent_label, 0);
+            local_frame.x -= parent_frame.x;
+            local_frame.y -= parent_frame.y;
+        }
+        return local_frame;
+    }
+
+    fn absoluteViewFrame(self: *const Runtime, window_id: platform.WindowId, label: []const u8, depth: usize) !geometry.RectF {
+        if (depth >= platform.max_views + platform.max_webviews + 1) return error.InvalidViewOptions;
+        if (isMainWebViewLabel(label)) {
+            const window_index = self.findWindowIndexById(window_id) orelse return error.WindowNotFound;
+            return self.mainWebViewInfo(window_index).frame;
+        }
+        if (self.findViewIndex(window_id, label)) |index| {
+            var absolute_frame = self.views[index].frame;
+            if (self.views[index].parent) |parent| {
+                const parent_frame = try self.absoluteViewFrame(window_id, parent, depth + 1);
+                absolute_frame.x += parent_frame.x;
+                absolute_frame.y += parent_frame.y;
+            }
+            return absolute_frame;
+        }
+        if (self.findWebViewIndex(window_id, label)) |index| {
+            return self.webviews[index].frame;
+        }
+        return error.ViewNotFound;
+    }
+
+    fn relayoutDescendantWebViewBackends(self: *Runtime, window_id: platform.WindowId, parent_label: []const u8) !void {
+        try self.relayoutDescendantWebViewBackendsDepth(window_id, parent_label, 0);
+    }
+
+    fn relayoutDescendantWebViewBackendsDepth(self: *Runtime, window_id: platform.WindowId, parent_label: []const u8, depth: usize) !void {
+        if (depth >= platform.max_views + platform.max_webviews) return;
+        for (self.views[0..self.view_count]) |view| {
+            if (view.window_id != window_id) continue;
+            const parent = view.parent orelse continue;
+            if (std.mem.eql(u8, parent, parent_label)) {
+                try self.relayoutDescendantWebViewBackendsDepth(window_id, view.label, depth + 1);
+            }
+        }
+        for (self.webviews[0..self.webview_count], 0..) |webview, index| {
+            if (webview.window_id != window_id) continue;
+            const parent = webview.parent orelse continue;
+            if (std.mem.eql(u8, parent, parent_label)) {
+                const platform_frame = try self.platformFrameForView(window_id, webview.parent, webview.local_frame);
+                try self.options.platform.services.setWebViewFrame(window_id, webview.label, platform_frame);
+                self.webviews[index].frame = platform_frame;
+                try self.relayoutDescendantWebViewBackendsDepth(window_id, webview.label, depth + 1);
+            }
+        }
     }
 
     fn reserveView(self: *Runtime, options: platform.ViewOptions) !void {
@@ -2676,6 +2754,7 @@ const RuntimeWebView = struct {
     parent: ?[]const u8 = null,
     url: []const u8 = "",
     frame: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
+    local_frame: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
     layer: i32 = 0,
     zoom: f64 = 1.0,
     transparent: bool = false,
@@ -2952,7 +3031,7 @@ fn shellRestorePolicy(policy: app_manifest.WindowRestorePolicy) platform.WindowR
 fn shellViewOptions(window_id: platform.WindowId, view: app_manifest.ShellView, layout: *ShellLayout) !platform.ViewOptions {
     const frame = try layout.frameFor(view);
     const resolved = layout.findView(view.label) orelse return error.InvalidViewOptions;
-    const platform_frame = if (view.kind == .webview and view.parent != null) resolved.absolute_frame else frame;
+    const platform_frame = if (view.kind == .webview and view.parent != null and isMainWebViewLabel(view.label)) resolved.absolute_frame else frame;
     return .{
         .window_id = window_id,
         .label = view.label,
@@ -4066,7 +4145,7 @@ test "runtime createView routes webview kind through WebView backend" {
         .window_id = 1,
         .label = "preview-host",
         .kind = .stack,
-        .frame = geometry.RectF.init(0, 0, 360, 280),
+        .frame = geometry.RectF.init(40, 50, 360, 280),
     });
 
     const preview = try harness.runtime.createView(.{
@@ -4085,6 +4164,10 @@ test "runtime createView routes webview kind through WebView backend" {
     try std.testing.expectEqualStrings("zero://app/preview.html", preview.url);
     try std.testing.expect(preview.bridge_enabled);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.webview_count);
+    try std.testing.expectEqual(@as(f32, 50), preview.frame.x);
+    try std.testing.expectEqual(@as(f32, 60), preview.frame.y);
+    try std.testing.expectEqual(@as(f32, 50), harness.null_platform.webviews[0].frame.x);
+    try std.testing.expectEqual(@as(f32, 60), harness.null_platform.webviews[0].frame.y);
 
     const updated = try harness.runtime.updateView(1, "preview", .{
         .url = "zero://app/updated.html",
@@ -4093,6 +4176,24 @@ test "runtime createView routes webview kind through WebView backend" {
     try std.testing.expectEqualStrings("zero://app/updated.html", updated.url);
     try std.testing.expectEqual(preview.id, updated.id);
     try std.testing.expectEqual(@as(i32, 8), updated.layer);
+
+    const moved_host = try harness.runtime.updateView(1, "preview-host", .{
+        .frame = geometry.RectF.init(80, 90, 360, 280),
+    });
+    try std.testing.expectEqual(@as(f32, 80), moved_host.frame.x);
+    try std.testing.expectEqual(@as(f32, 90), moved_host.frame.y);
+    try std.testing.expectEqual(@as(f32, 90), harness.runtime.webviews[0].frame.x);
+    try std.testing.expectEqual(@as(f32, 100), harness.runtime.webviews[0].frame.y);
+    try std.testing.expectEqual(@as(f32, 90), harness.null_platform.webviews[0].frame.x);
+    try std.testing.expectEqual(@as(f32, 100), harness.null_platform.webviews[0].frame.y);
+
+    const moved_preview = try harness.runtime.updateView(1, "preview", .{
+        .frame = geometry.RectF.init(20, 24, 320, 240),
+    });
+    try std.testing.expectEqual(@as(f32, 100), moved_preview.frame.x);
+    try std.testing.expectEqual(@as(f32, 114), moved_preview.frame.y);
+    try std.testing.expectEqual(@as(f32, 100), harness.null_platform.webviews[0].frame.x);
+    try std.testing.expectEqual(@as(f32, 114), harness.null_platform.webviews[0].frame.y);
 
     var views_buffer: [4]platform.ViewInfo = undefined;
     const views = harness.runtime.listViews(1, &views_buffer);
