@@ -776,6 +776,22 @@ pub const Runtime = struct {
         }
     }
 
+    fn updateCanvasWidgetControlFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
+        const index = self.findViewIndex(pointer_event.window_id, pointer_event.view_label) orelse return;
+        if (self.views[index].kind != .gpu_surface) return;
+
+        const dirty = try self.views[index].applyCanvasWidgetControlPointer(
+            pointer_event.pointer,
+            pointer_event.target,
+            self.views[index].canvas_widget_pressed_id,
+        ) orelse return;
+        if (canvasDirtyRegionForView(self.views[index].frame, dirty)) |dirty_region| {
+            self.invalidateFor(.state, dirty_region);
+        } else {
+            self.invalidateFor(.state, self.views[index].frame);
+        }
+    }
+
     fn updateCanvasWidgetFocusFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent) void {
         if (input_event.kind != .key_down or !std.ascii.eqlIgnoreCase(input_event.key, "tab")) return;
         const index = self.findViewIndex(input_event.window_id, input_event.label) orelse return;
@@ -1101,6 +1117,7 @@ pub const Runtime = struct {
                     else => return err,
                 };
                 if (widget_pointer_event) |pointer_event| {
+                    try self.updateCanvasWidgetControlFromPointer(pointer_event);
                     self.updateCanvasWidgetInteractionFromPointer(pointer_event);
                     try self.updateCanvasWidgetScrollFromPointer(pointer_event);
                     self.updateCanvasWidgetFocusFromPointer(pointer_event);
@@ -3296,6 +3313,10 @@ fn optionalCanvasTextRangesEqual(a: ?canvas.TextRange, b: ?canvas.TextRange) boo
     return b == null;
 }
 
+fn canvasWidgetBooleanSelected(widget: canvas.Widget) bool {
+    return widget.state.selected or widget.value >= 0.5;
+}
+
 const RuntimeView = struct {
     id: platform.ViewId = 0,
     window_id: platform.WindowId = 1,
@@ -3571,6 +3592,52 @@ const RuntimeView = struct {
         }
         self.widget_layout_nodes[edited_index].widget.text_selection = next_state.selection;
         self.widget_layout_nodes[edited_index].widget.text_composition = next_state.composition;
+    }
+
+    fn applyCanvasWidgetControlPointer(self: *RuntimeView, pointer: canvas.WidgetPointerEvent, target: ?canvas.WidgetHit, pressed_id: canvas.ObjectId) anyerror!?geometry.RectF {
+        return switch (pointer.phase) {
+            .down => if (target) |hit| try self.applyCanvasWidgetSliderValue(hit.id, pointer.point) else null,
+            .move => if (pressed_id != 0) try self.applyCanvasWidgetSliderValue(pressed_id, pointer.point) else null,
+            .up => blk: {
+                if (pressed_id == 0) break :blk null;
+                if (try self.applyCanvasWidgetSliderValue(pressed_id, pointer.point)) |dirty| break :blk dirty;
+                const hit = target orelse break :blk null;
+                if (hit.id != pressed_id) break :blk null;
+                break :blk try self.toggleCanvasWidgetBooleanControl(pressed_id);
+            },
+            .hover, .cancel, .wheel => null,
+        };
+    }
+
+    fn applyCanvasWidgetSliderValue(self: *RuntimeView, id: canvas.ObjectId, point: geometry.PointF) anyerror!?geometry.RectF {
+        const index = self.canvasWidgetNodeIndexById(id) orelse return null;
+        const widget = self.widget_layout_nodes[index].widget;
+        if (widget.kind != .slider or widget.state.disabled or widget.frame.width <= 0) return null;
+
+        const next_value = std.math.clamp((point.x - widget.frame.x) / widget.frame.width, 0, 1);
+        if (next_value == widget.value) return null;
+        self.widget_layout_nodes[index].widget.value = next_value;
+        try self.refreshCanvasWidgetSemantics();
+        self.widget_revision += 1;
+        return widget.frame;
+    }
+
+    fn toggleCanvasWidgetBooleanControl(self: *RuntimeView, id: canvas.ObjectId) anyerror!?geometry.RectF {
+        const index = self.canvasWidgetNodeIndexById(id) orelse return null;
+        const widget = self.widget_layout_nodes[index].widget;
+        if ((widget.kind != .checkbox and widget.kind != .toggle) or widget.state.disabled) return null;
+
+        const selected = canvasWidgetBooleanSelected(widget);
+        self.widget_layout_nodes[index].widget.state.selected = !selected;
+        self.widget_layout_nodes[index].widget.value = if (!selected) 1 else 0;
+        try self.refreshCanvasWidgetSemantics();
+        self.widget_revision += 1;
+        return widget.frame;
+    }
+
+    fn refreshCanvasWidgetSemantics(self: *RuntimeView) anyerror!void {
+        const semantics = try self.widgetLayoutTree().collectSemantics(&self.widget_semantics_nodes);
+        self.widget_semantics_node_count = semantics.len;
     }
 
     fn copyWidgetLayoutNode(self: *RuntimeView, node: canvas.WidgetLayoutNode) anyerror!canvas.WidgetLayoutNode {
@@ -6212,6 +6279,143 @@ test "runtime applies text input to focused canvas text fields" {
     snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expectEqualStrings("Search", snapshot.widgets[0].name);
     try std.testing.expectEqualDeep(canvas.TextRange.init(5, 5), harness.runtime.views[0].widgetSemantics()[0].text_selection.?);
+}
+
+test "runtime applies pointer values to canvas controls" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-control-values", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 140),
+    });
+
+    const controls = [_]canvas.Widget{
+        .{
+            .id = 2,
+            .kind = .checkbox,
+            .frame = geometry.RectF.init(10, 10, 120, 28),
+            .text = "Live",
+        },
+        .{
+            .id = 3,
+            .kind = .toggle,
+            .frame = geometry.RectF.init(10, 48, 120, 28),
+            .text = "Alerts",
+            .state = .{ .selected = true },
+        },
+        .{
+            .id = 4,
+            .kind = .slider,
+            .frame = geometry.RectF.init(10, 88, 100, 32),
+            .value = 0.25,
+        },
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &controls }, geometry.RectF.init(0, 0, 240, 140), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 18,
+        .y = 20,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_up,
+        .x = 18,
+        .y = 20,
+    } });
+    try std.testing.expectEqual(@as(u64, 2), harness.runtime.views[0].widget_revision);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 18,
+        .y = 60,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_up,
+        .x = 18,
+        .y = 60,
+    } });
+    try std.testing.expectEqual(@as(u64, 3), harness.runtime.views[0].widget_revision);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 75,
+        .y = 104,
+    } });
+    try std.testing.expectEqual(@as(u64, 4), harness.runtime.views[0].widget_revision);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_drag,
+        .x = 110,
+        .y = 104,
+    } });
+    try std.testing.expectEqual(@as(u64, 5), harness.runtime.views[0].widget_revision);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_up,
+        .x = 10,
+        .y = 104,
+    } });
+    try std.testing.expectEqual(@as(u64, 6), harness.runtime.views[0].widget_revision);
+
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.nodes[1].widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 1), retained.nodes[1].widget.value);
+    try std.testing.expect(!retained.nodes[2].widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 0), retained.nodes[2].widget.value);
+    try std.testing.expectEqual(@as(f32, 0), retained.nodes[3].widget.value);
+
+    const semantics = harness.runtime.views[0].widgetSemantics();
+    try std.testing.expectEqual(@as(?f32, 1), semantics[0].value);
+    try std.testing.expectEqual(@as(?f32, 0), semantics[1].value);
+    try std.testing.expectEqual(@as(?f32, 0), semantics[2].value);
+
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+    const display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    var saw_checkbox_check = false;
+    var saw_empty_slider_active = false;
+    for (display_list.commands) |command| {
+        switch (command) {
+            .draw_line => |line| {
+                if (line.id == testCanvasWidgetPartId(2, 4)) saw_checkbox_check = true;
+            },
+            .fill_rounded_rect => |fill| {
+                if (fill.id == testCanvasWidgetPartId(4, 2)) {
+                    try std.testing.expectEqual(@as(f32, 0), fill.rect.width);
+                    saw_empty_slider_active = true;
+                }
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_checkbox_check);
+    try std.testing.expect(saw_empty_slider_active);
 }
 
 test "runtime automation snapshot exposes canvas list roles" {
