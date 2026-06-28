@@ -840,25 +840,26 @@ pub const ReferenceRenderSurface = struct {
     fn renderCommand(self: ReferenceRenderSurface, command: RenderCommand, scissor: ?geometry.RectF) Error!void {
         const draw_bounds = referenceCommandBounds(command, scissor) orelse return;
         switch (command.command) {
-            .fill_rect => |value| try self.fillRect(draw_bounds, try referenceFillColor(value.fill), command.opacity),
-            .fill_rounded_rect => |value| try self.fillRoundedRect(command, value, draw_bounds, try referenceFillColor(value.fill)),
-            .stroke_rect => |value| try self.strokeRect(command, value, draw_bounds, try referenceFillColor(value.stroke.fill)),
+            .fill_rect => |value| try self.fillRect(command, value, draw_bounds),
+            .fill_rounded_rect => |value| try self.fillRoundedRect(command, value, draw_bounds),
+            .stroke_rect => |value| try self.strokeRect(command, value, draw_bounds),
             else => return error.ReferenceRenderUnsupportedCommand,
         }
     }
 
-    fn fillRect(self: ReferenceRenderSurface, rect: geometry.RectF, color: Color, opacity: f32) Error!void {
-        const pixel_rect = referencePixelRect(rect, self.width, self.height) orelse return;
+    fn fillRect(self: ReferenceRenderSurface, command: RenderCommand, value: FillRect, draw_bounds: geometry.RectF) Error!void {
+        const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return;
         var y = pixel_rect.y;
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
-                self.blendPixel(@intCast(x), @intCast(y), color, opacity);
+                const point = referencePixelCenter(x, y);
+                self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.fill, command.transform, point), command.opacity);
             }
         }
     }
 
-    fn fillRoundedRect(self: ReferenceRenderSurface, command: RenderCommand, value: FillRoundedRect, draw_bounds: geometry.RectF, color: Color) Error!void {
+    fn fillRoundedRect(self: ReferenceRenderSurface, command: RenderCommand, value: FillRoundedRect, draw_bounds: geometry.RectF) Error!void {
         const rect = command.transform.transformRect(value.rect).normalized();
         const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return;
         const radius = referenceScaleRadius(value.radius, command.transform);
@@ -866,13 +867,13 @@ pub const ReferenceRenderSurface = struct {
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
-                const point = geometry.PointF.init(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5);
-                if (referencePointInRoundedRect(point, rect, radius)) self.blendPixel(@intCast(x), @intCast(y), color, command.opacity);
+                const point = referencePixelCenter(x, y);
+                if (referencePointInRoundedRect(point, rect, radius)) self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.fill, command.transform, point), command.opacity);
             }
         }
     }
 
-    fn strokeRect(self: ReferenceRenderSurface, command: RenderCommand, value: StrokeRect, draw_bounds: geometry.RectF, color: Color) Error!void {
+    fn strokeRect(self: ReferenceRenderSurface, command: RenderCommand, value: StrokeRect, draw_bounds: geometry.RectF) Error!void {
         const stroke_width = nonNegative(value.stroke.width) * referenceTransformScale(command.transform);
         if (stroke_width <= 0) return;
         const half_width = stroke_width * 0.5;
@@ -887,9 +888,9 @@ pub const ReferenceRenderSurface = struct {
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
-                const point = geometry.PointF.init(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5);
+                const point = referencePixelCenter(x, y);
                 if (referencePointInRoundedRect(point, outer, outer_radius) and !referencePointInRoundedRect(point, inner, inner_radius)) {
-                    self.blendPixel(@intCast(x), @intCast(y), color, command.opacity);
+                    self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.stroke.fill, command.transform, point), command.opacity);
                 }
             }
         }
@@ -3746,19 +3747,57 @@ const ReferencePixelRect = struct {
     height: usize = 0,
 };
 
-fn referenceFillColor(fill: Fill) Error!Color {
-    return switch (fill) {
-        .color => |color| color,
-        .linear_gradient => error.ReferenceRenderUnsupportedCommand,
-    };
-}
-
 fn referenceCommandBounds(command: RenderCommand, scissor: ?geometry.RectF) ?geometry.RectF {
     var bounds = command.bounds.normalized();
     if (scissor) |rect| {
         bounds = geometry.RectF.intersection(bounds, rect.normalized());
     }
     return if (bounds.isEmpty()) null else bounds;
+}
+
+fn referencePixelCenter(x: usize, y: usize) geometry.PointF {
+    return geometry.PointF.init(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5);
+}
+
+fn referenceSampleFill(fill: Fill, transform: Affine, point: geometry.PointF) Color {
+    return switch (fill) {
+        .color => |color| color,
+        .linear_gradient => |gradient| referenceSampleLinearGradient(gradient, transform, point),
+    };
+}
+
+fn referenceSampleLinearGradient(gradient: LinearGradient, transform: Affine, point: geometry.PointF) Color {
+    if (gradient.stops.len == 0) return Color.rgba8(0, 0, 0, 0);
+    if (gradient.stops.len == 1) return gradient.stops[0].color;
+
+    const start = transform.transformPoint(gradient.start);
+    const end = transform.transformPoint(gradient.end);
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const length_sq = dx * dx + dy * dy;
+    const t = if (length_sq <= 0.000001) 0 else ((point.x - start.x) * dx + (point.y - start.y) * dy) / length_sq;
+
+    var previous = gradient.stops[0];
+    if (t <= previous.offset) return previous.color;
+    for (gradient.stops[1..]) |stop| {
+        if (t <= stop.offset) {
+            const span = stop.offset - previous.offset;
+            const local_t = if (@abs(span) <= 0.000001) 1 else std.math.clamp((t - previous.offset) / span, 0, 1);
+            return referenceMixColor(previous.color, stop.color, local_t);
+        }
+        previous = stop;
+    }
+    return previous.color;
+}
+
+fn referenceMixColor(a: Color, b: Color, t: f32) Color {
+    const value = std.math.clamp(t, 0, 1);
+    return .{
+        .r = a.r + (b.r - a.r) * value,
+        .g = a.g + (b.g - a.g) * value,
+        .b = a.b + (b.b - a.b) * value,
+        .a = a.a + (b.a - a.a) * value,
+    };
 }
 
 fn referencePixelRect(rect: geometry.RectF, width: usize, height: usize) ?ReferencePixelRect {
@@ -7328,19 +7367,60 @@ test "reference renderer applies clip transform and opacity" {
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 3, 3);
 }
 
-test "reference renderer rejects unsupported gradients" {
+test "reference renderer samples transformed clipped linear gradients" {
     const stops = [_]GradientStop{
-        .{ .offset = 0, .color = Color.rgb8(255, 255, 255) },
-        .{ .offset = 1, .color = Color.rgb8(0, 0, 0) },
+        .{ .offset = 0, .color = Color.rgb8(255, 0, 0) },
+        .{ .offset = 1, .color = Color.rgb8(0, 0, 255) },
     };
-    const commands = [_]CanvasCommand{.{ .fill_rect = .{
-        .id = 1,
-        .rect = geometry.RectF.init(0, 0, 2, 2),
-        .fill = .{ .linear_gradient = .{
-            .start = geometry.PointF.init(0, 0),
-            .end = geometry.PointF.init(2, 2),
-            .stops = &stops,
+    const commands = [_]CanvasCommand{
+        .{ .push_clip = .{ .rect = geometry.RectF.init(2, 0, 1, 1) } },
+        .{ .transform = Affine.translate(1, 0) },
+        .{ .fill_rect = .{
+            .id = 1,
+            .rect = geometry.RectF.init(0, 0, 2, 1),
+            .fill = .{ .linear_gradient = .{
+                .start = geometry.PointF.init(0, 0),
+                .end = geometry.PointF.init(2, 0),
+                .stops = &stops,
+            } },
         } },
+        .pop_clip,
+    };
+
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [1]RenderResource = undefined;
+    var resource_cache_entries: [1]RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [1]RenderResourceCacheAction = undefined;
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(4, 1),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    var pixels: [4 * 1 * 4]u8 = undefined;
+    const surface = try ReferenceRenderSurface.init(4, 1, &pixels);
+    try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
+
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 0, 0);
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 1, 0);
+    try expectPixelRgba8(.{ 64, 0, 191, 255 }, surface, 2, 0);
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 3, 0);
+}
+
+test "reference renderer rejects unsupported images" {
+    const commands = [_]CanvasCommand{.{ .draw_image = .{
+        .id = 1,
+        .image_id = 42,
+        .dst = geometry.RectF.init(0, 0, 2, 2),
     } }};
 
     var render_commands: [1]RenderCommand = undefined;
