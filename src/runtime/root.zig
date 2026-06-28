@@ -911,6 +911,29 @@ pub const Runtime = struct {
         }
     }
 
+    fn updateCanvasWidgetTextFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
+        const index = self.findViewIndex(pointer_event.window_id, pointer_event.view_label) orelse return;
+        if (self.views[index].kind != .gpu_surface) return;
+
+        const target_id: canvas.ObjectId = switch (pointer_event.pointer.phase) {
+            .down => if (pointer_event.target) |target| target.id else 0,
+            .move => self.views[index].canvas_widget_pressed_id,
+            else => return,
+        };
+        if (target_id == 0) return;
+
+        const dirty = try self.views[index].applyCanvasWidgetTextPointer(
+            target_id,
+            pointer_event.pointer.point,
+            pointer_event.pointer.phase == .move,
+        ) orelse return;
+        if (canvasDirtyRegionForView(self.views[index].frame, dirty)) |dirty_region| {
+            self.invalidateFor(.state, dirty_region);
+        } else {
+            self.invalidateFor(.state, self.views[index].frame);
+        }
+    }
+
     fn updateCanvasWidgetControlFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
         const index = self.findViewIndex(pointer_event.window_id, pointer_event.view_label) orelse return;
         if (self.views[index].kind != .gpu_surface) return;
@@ -1338,6 +1361,7 @@ pub const Runtime = struct {
                     try self.updateCanvasWidgetControlFromPointer(pointer_event);
                     try self.dispatchCanvasWidgetCommandFromPointer(app, pointer_event);
                     self.updateCanvasWidgetInteractionFromPointer(pointer_event);
+                    try self.updateCanvasWidgetTextFromPointer(pointer_event);
                     try self.updateCanvasWidgetScrollFromPointer(pointer_event);
                     self.updateCanvasWidgetFocusFromPointer(pointer_event);
                     try self.dispatchEvent(app, .{ .canvas_widget_pointer = pointer_event });
@@ -4060,6 +4084,23 @@ const RuntimeView = struct {
         self.widget_semantics_node_count = semantics.len;
         self.widget_revision += 1;
         return self.widget_layout_nodes[index].frame;
+    }
+
+    fn applyCanvasWidgetTextPointer(self: *RuntimeView, target_id: canvas.ObjectId, point: geometry.PointF, extend: bool) anyerror!?geometry.RectF {
+        const index = self.canvasWidgetNodeIndexById(target_id) orelse return null;
+        const widget = self.widget_layout_nodes[index].widget;
+        if ((widget.kind != .text_field and widget.kind != .search_field) or widget.state.disabled) return null;
+
+        const current_selection = widget.text_selection orelse canvas.TextSelection.collapsed(widget.text.len);
+        const anchor: ?usize = if (extend) current_selection.anchor else null;
+        const next_selection = canvas.textSelectionForWidgetPoint(widget, point, anchor, .{}) orelse return null;
+        if (canvasTextSelectionsEqual(current_selection, next_selection) and widget.text_composition == null) return null;
+
+        self.widget_layout_nodes[index].widget.text_selection = next_selection;
+        self.widget_layout_nodes[index].widget.text_composition = null;
+        try self.refreshCanvasWidgetSemantics();
+        self.widget_revision += 1;
+        return widget.frame;
     }
 
     fn canvasWidgetNodeIndexById(self: *const RuntimeView, id: canvas.ObjectId) ?usize {
@@ -7329,7 +7370,7 @@ test "runtime applies text input to focused canvas text fields" {
         .window_id = 1,
         .label = "canvas",
         .kind = .pointer_down,
-        .x = 20,
+        .x = 168,
         .y = 24,
     } });
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
@@ -7418,6 +7459,88 @@ test "runtime applies text input to focused canvas text fields" {
     try std.testing.expect(snapshot.widgets[0].text_composition == null);
 }
 
+test "runtime applies pointer selection to canvas text fields" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-text-pointer-selection", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+
+    const text_field = canvas.Widget{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(12, 16, 160, 36),
+        .text = "Query",
+        .semantics = .{ .label = "Search" },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{text_field} }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 20,
+        .y = 24,
+    } });
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), retained.nodes[1].widget.text_selection.?);
+    try std.testing.expectEqualDeep(canvas.TextRange.init(0, 0), harness.runtime.views[0].widgetSemantics()[0].text_selection.?);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_drag,
+        .x = 46,
+        .y = 24,
+    } });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 0, .focus = 3 }, retained.nodes[1].widget.text_selection.?);
+    var snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 0, .end = 3 }, snapshot.widgets[0].text_selection.?);
+
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+    const selected_display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    var saw_selection_fill = false;
+    for (selected_display_list.commands) |command| {
+        switch (command) {
+            .fill_rounded_rect => |fill| {
+                if (fill.id == testCanvasWidgetPartId(2, 3)) saw_selection_fill = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_selection_fill);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "X",
+        .text = "X",
+    } });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("Xry", retained.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(1), retained.nodes[1].widget.text_selection.?);
+    snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 1, .end = 1 }, snapshot.widgets[0].text_selection.?);
+}
+
 test "runtime applies text input to focused canvas search fields" {
     const TestApp = struct {
         fn app(self: *@This()) App {
@@ -7454,7 +7577,7 @@ test "runtime applies text input to focused canvas search fields" {
         .window_id = 1,
         .label = "canvas",
         .kind = .pointer_down,
-        .x = 20,
+        .x = 188,
         .y = 24,
     } });
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);

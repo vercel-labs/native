@@ -2950,8 +2950,8 @@ fn emitIconButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
 
 fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const radius = Radius.all(tokens.radius.md);
-    const text_size = tokens.typography.body_size;
-    const origin = textOrigin(widget.frame, text_size, tokens.spacing.md);
+    const text_size = widgetTextInputSize(tokens);
+    const origin = textOrigin(widget.frame, text_size, widgetTextInputInset(widget, tokens));
     const selection_range = widgetTextSelectionRange(widget);
     const composition_range = widgetTextCompositionRange(widget);
     const has_text_affordances = selection_range != null or composition_range != null;
@@ -2975,7 +2975,7 @@ fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
         if (!range.isCollapsed(widget.text.len)) {
             try builder.fillRoundedRect(.{
                 .id = widgetPartId(widget.id, 3),
-                .rect = textRangeInlineRect(widget.text, widget.frame, range, text_size, tokens.spacing.md),
+                .rect = textRangeInlineRect(widget.text, widget.frame, range, text_size, widgetTextInputInset(widget, tokens)),
                 .radius = Radius.all(tokens.radius.sm),
                 .fill = .{ .color = textSelectionFillColor(tokens) },
             });
@@ -2993,7 +2993,7 @@ fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
     }
     if (composition_range) |range| {
         if (!range.isCollapsed(widget.text.len)) {
-            const rect = textRangeInlineRect(widget.text, widget.frame, range, text_size, tokens.spacing.md);
+            const rect = textRangeInlineRect(widget.text, widget.frame, range, text_size, widgetTextInputInset(widget, tokens));
             const y = rect.y + rect.height - 1;
             try builder.drawLine(.{
                 .id = widgetPartId(widget.id, 5),
@@ -3020,9 +3020,9 @@ fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
 
 fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const radius = Radius.all(tokens.radius.md);
-    const text_size = tokens.typography.body_size;
+    const text_size = widgetTextInputSize(tokens);
     const icon_size = @max(8, text_size - 2);
-    const text_inset = tokens.spacing.md + icon_size + tokens.spacing.sm;
+    const text_inset = widgetTextInputInset(widget, tokens);
     const origin = textOrigin(widget.frame, text_size, text_inset);
     const selection_range = widgetTextSelectionRange(widget);
     const composition_range = widgetTextCompositionRange(widget);
@@ -3447,6 +3447,33 @@ fn widgetTextCompositionRange(widget: Widget) ?TextRange {
     return null;
 }
 
+pub fn textSelectionForWidgetPoint(widget: Widget, point: geometry.PointF, anchor: ?usize, tokens: DesignTokens) ?TextSelection {
+    const offset = textOffsetForWidgetPoint(widget, point, tokens) orelse return null;
+    const selection = if (anchor) |anchor_offset|
+        TextSelection{ .anchor = anchor_offset, .focus = offset }
+    else
+        TextSelection.collapsed(offset);
+    return snapTextSelection(widget.text, selection);
+}
+
+pub fn textOffsetForWidgetPoint(widget: Widget, point: geometry.PointF, tokens: DesignTokens) ?usize {
+    if (widget.kind != .text_field and widget.kind != .search_field) return null;
+    if (widget.state.disabled) return null;
+    return textOffsetForInlineX(widget.text, widget.frame, point.x, widgetTextInputSize(tokens), widgetTextInputInset(widget, tokens));
+}
+
+fn widgetTextInputSize(tokens: DesignTokens) f32 {
+    return tokens.typography.body_size;
+}
+
+fn widgetTextInputInset(widget: Widget, tokens: DesignTokens) f32 {
+    const text_size = widgetTextInputSize(tokens);
+    return switch (widget.kind) {
+        .search_field => tokens.spacing.md + @max(8, text_size - 2) + tokens.spacing.sm,
+        else => tokens.spacing.md,
+    };
+}
+
 fn textRangeInlineRect(text: []const u8, frame: geometry.RectF, range: TextRange, size: f32, inset: f32) geometry.RectF {
     const normalized = snapTextRange(text, range);
     const origin = textOrigin(frame, size, inset);
@@ -3469,6 +3496,22 @@ fn estimateTextOffsetX(text: []const u8, offset: usize, size: f32) f32 {
         cursor = nextTextOffset(text, cursor);
     }
     return width;
+}
+
+fn textOffsetForInlineX(text: []const u8, frame: geometry.RectF, x: f32, size: f32, inset: f32) usize {
+    const origin = textOrigin(frame, size, inset);
+    const relative_x = x - origin.x;
+    if (relative_x <= 0) return 0;
+
+    const advance = @max(1, size * 0.5);
+    var cursor: usize = 0;
+    var caret_x: f32 = 0;
+    while (cursor < text.len) {
+        if (relative_x < caret_x + advance * 0.5) return cursor;
+        caret_x += advance;
+        cursor = nextTextOffset(text, cursor);
+    }
+    return text.len;
 }
 
 fn textSelectionFillColor(tokens: DesignTokens) Color {
@@ -6877,6 +6920,32 @@ test "widget text fields render selection caret and composition ranges" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "widget text fields map pointer positions to caret selections" {
+    const tokens = DesignTokens{};
+    const field = Widget{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(10, 12, 160, 32),
+        .text = "AéB",
+    };
+    try std.testing.expectEqual(@as(usize, 0), textOffsetForWidgetPoint(field, geometry.PointF.init(18, 24), tokens).?);
+    try std.testing.expectEqual(@as(usize, 1), textOffsetForWidgetPoint(field, geometry.PointF.init(26, 24), tokens).?);
+    try std.testing.expectEqual(@as(usize, 3), textOffsetForWidgetPoint(field, geometry.PointF.init(34, 24), tokens).?);
+    try std.testing.expectEqual(@as(usize, 4), textOffsetForWidgetPoint(field, geometry.PointF.init(80, 24), tokens).?);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(3), textSelectionForWidgetPoint(field, geometry.PointF.init(34, 24), null, tokens).?);
+    try std.testing.expectEqualDeep(TextSelection{ .anchor = 1, .focus = 4 }, textSelectionForWidgetPoint(field, geometry.PointF.init(80, 24), 1, tokens).?);
+
+    const search = Widget{
+        .id = 3,
+        .kind = .search_field,
+        .frame = geometry.RectF.init(10, 52, 180, 32),
+        .text = "Find",
+    };
+    try std.testing.expectEqual(@as(usize, 0), textOffsetForWidgetPoint(search, geometry.PointF.init(24, 64), tokens).?);
+    try std.testing.expectEqual(@as(usize, 1), textOffsetForWidgetPoint(search, geometry.PointF.init(48, 64), tokens).?);
+    try std.testing.expect(textOffsetForWidgetPoint(.{ .kind = .text_field, .state = .{ .disabled = true } }, geometry.PointF.init(0, 0), tokens) == null);
 }
 
 test "widget tooltip emits overlay chrome and tooltip semantics" {
