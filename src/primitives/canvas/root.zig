@@ -8,6 +8,7 @@ pub const Error = error{
     DuplicateObjectId,
     DuplicateWidgetId,
     RenderListFull,
+    RenderResourceListFull,
     RenderStackOverflow,
     RenderStackUnderflow,
     WidgetDepthExceeded,
@@ -332,6 +333,34 @@ pub const RenderPlan = struct {
 
     pub fn commandCount(self: RenderPlan) usize {
         return self.commands.len;
+    }
+};
+
+pub const RenderResourceKind = enum {
+    linear_gradient,
+    image,
+    glyph_run,
+    shadow,
+    blur,
+};
+
+pub const RenderResource = struct {
+    kind: RenderResourceKind,
+    command_index: usize,
+    id: ?ObjectId = null,
+    bounds: ?geometry.RectF = null,
+    image_id: ImageId = 0,
+    font_id: FontId = 0,
+    gradient_stop_count: usize = 0,
+    glyph_count: usize = 0,
+    text_len: usize = 0,
+};
+
+pub const RenderResourcePlan = struct {
+    resources: []const RenderResource = &.{},
+
+    pub fn resourceCount(self: RenderResourcePlan) usize {
+        return self.resources.len;
     }
 };
 
@@ -674,6 +703,11 @@ pub const DisplayList = struct {
         var planner = RenderPlanner.init(output);
         return planner.build(self);
     }
+
+    pub fn resourcePlan(self: DisplayList, output: []RenderResource) Error!RenderResourcePlan {
+        var planner = RenderResourcePlanner.init(output);
+        return planner.build(self);
+    }
 };
 
 pub const Builder = struct {
@@ -877,6 +911,87 @@ pub const RenderPlanner = struct {
         };
         self.len += 1;
         self.bounds_value = unionOptionalBounds(self.bounds_value, clipped_bounds);
+    }
+};
+
+pub const RenderResourcePlanner = struct {
+    resources: []RenderResource,
+    len: usize = 0,
+
+    pub fn init(resources: []RenderResource) RenderResourcePlanner {
+        return .{ .resources = resources };
+    }
+
+    pub fn reset(self: *RenderResourcePlanner) void {
+        self.len = 0;
+    }
+
+    pub fn build(self: *RenderResourcePlanner, display_list: DisplayList) Error!RenderResourcePlan {
+        self.reset();
+        for (display_list.commands, 0..) |command, index| {
+            try self.consume(command, index);
+        }
+        return .{ .resources = self.resources[0..self.len] };
+    }
+
+    fn consume(self: *RenderResourcePlanner, command: CanvasCommand, index: usize) Error!void {
+        switch (command) {
+            .push_clip, .pop_clip, .push_opacity, .pop_opacity, .transform, .draw_line, .fill_path, .stroke_path => {},
+            .fill_rect => |value| try self.consumeFill(value.fill, index, value.id, command.bounds()),
+            .stroke_rect => |value| try self.consumeStroke(value.stroke, index, value.id, command.bounds()),
+            .fill_rounded_rect => |value| try self.consumeFill(value.fill, index, value.id, command.bounds()),
+            .draw_image => |value| try self.append(.{
+                .kind = .image,
+                .command_index = index,
+                .id = nonZeroObjectId(value.id),
+                .bounds = value.dst.normalized(),
+                .image_id = value.image_id,
+            }),
+            .draw_text => |value| try self.append(.{
+                .kind = .glyph_run,
+                .command_index = index,
+                .id = nonZeroObjectId(value.id),
+                .bounds = textBounds(value),
+                .font_id = value.font_id,
+                .glyph_count = value.glyphs.len,
+                .text_len = value.text.len,
+            }),
+            .shadow => |value| try self.append(.{
+                .kind = .shadow,
+                .command_index = index,
+                .id = nonZeroObjectId(value.id),
+                .bounds = shadowBounds(value),
+            }),
+            .blur => |value| try self.append(.{
+                .kind = .blur,
+                .command_index = index,
+                .id = nonZeroObjectId(value.id),
+                .bounds = value.rect.normalized().inflate(geometry.InsetsF.all(nonNegative(value.radius))),
+            }),
+        }
+    }
+
+    fn consumeStroke(self: *RenderResourcePlanner, stroke: Stroke, index: usize, id: ObjectId, bounds: ?geometry.RectF) Error!void {
+        try self.consumeFill(stroke.fill, index, id, bounds);
+    }
+
+    fn consumeFill(self: *RenderResourcePlanner, fill: Fill, index: usize, id: ObjectId, bounds: ?geometry.RectF) Error!void {
+        switch (fill) {
+            .color => {},
+            .linear_gradient => |gradient| try self.append(.{
+                .kind = .linear_gradient,
+                .command_index = index,
+                .id = nonZeroObjectId(id),
+                .bounds = bounds,
+                .gradient_stop_count = gradient.stops.len,
+            }),
+        }
+    }
+
+    fn append(self: *RenderResourcePlanner, resource: RenderResource) Error!void {
+        if (self.len >= self.resources.len) return error.RenderResourceListFull;
+        self.resources[self.len] = resource;
+        self.len += 1;
     }
 };
 
@@ -1694,6 +1809,10 @@ fn estimatedGlyphAdvance(glyph: Glyph, size: f32) f32 {
 
 fn nonNegative(value: f32) f32 {
     return @max(0, value);
+}
+
+fn nonZeroObjectId(id: ObjectId) ?ObjectId {
+    return if (id == 0) null else id;
 }
 
 fn commandsEqual(a: CanvasCommand, b: CanvasCommand) bool {
@@ -2795,6 +2914,76 @@ test "render plan reports output and stack errors" {
 
     const bad_opacity_commands = [_]CanvasCommand{.pop_opacity};
     try std.testing.expectError(error.RenderStackUnderflow, (DisplayList{ .commands = &bad_opacity_commands }).renderPlan(&render_commands));
+}
+
+test "resource plan collects renderer cache inputs" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(255, 255, 255) },
+        .{ .offset = 1, .color = Color.rgb8(59, 130, 246) },
+    };
+    const glyphs = [_]Glyph{.{ .id = 7, .x = 0, .y = 0, .advance = 9 }};
+    const commands = [_]CanvasCommand{
+        .{ .fill_rounded_rect = .{
+            .id = 1,
+            .rect = geometry.RectF.init(0, 0, 100, 40),
+            .radius = Radius.all(8),
+            .fill = .{ .linear_gradient = .{
+                .start = geometry.PointF.init(0, 0),
+                .end = geometry.PointF.init(100, 40),
+                .stops = &stops,
+            } },
+        } },
+        .{ .draw_image = .{ .id = 2, .image_id = 99, .dst = geometry.RectF.init(8, 8, 32, 32) } },
+        .{ .draw_text = .{
+            .id = 3,
+            .font_id = 5,
+            .size = 14,
+            .origin = geometry.PointF.init(48, 24),
+            .color = Color.rgb8(15, 23, 42),
+            .text = "Hi",
+            .glyphs = &glyphs,
+        } },
+        .{ .shadow = .{
+            .id = 4,
+            .rect = geometry.RectF.init(0, 0, 100, 40),
+            .offset = geometry.OffsetF.init(0, 8),
+            .blur = 16,
+            .spread = -4,
+            .color = Color.rgba8(0, 0, 0, 64),
+        } },
+        .{ .blur = .{ .id = 5, .rect = geometry.RectF.init(0, 0, 20, 20), .radius = 6 } },
+    };
+
+    var resources: [5]RenderResource = undefined;
+    const plan = try (DisplayList{ .commands = &commands }).resourcePlan(&resources);
+    try std.testing.expectEqual(@as(usize, 5), plan.resourceCount());
+    try std.testing.expectEqual(RenderResourceKind.linear_gradient, plan.resources[0].kind);
+    try std.testing.expectEqual(@as(?ObjectId, 1), plan.resources[0].id);
+    try std.testing.expectEqual(@as(usize, 2), plan.resources[0].gradient_stop_count);
+    try expectRect(geometry.RectF.init(0, 0, 100, 40), plan.resources[0].bounds);
+
+    try std.testing.expectEqual(RenderResourceKind.image, plan.resources[1].kind);
+    try std.testing.expectEqual(@as(ImageId, 99), plan.resources[1].image_id);
+    try expectRect(geometry.RectF.init(8, 8, 32, 32), plan.resources[1].bounds);
+
+    try std.testing.expectEqual(RenderResourceKind.glyph_run, plan.resources[2].kind);
+    try std.testing.expectEqual(@as(FontId, 5), plan.resources[2].font_id);
+    try std.testing.expectEqual(@as(usize, 1), plan.resources[2].glyph_count);
+    try std.testing.expectEqual(@as(usize, 2), plan.resources[2].text_len);
+
+    try std.testing.expectEqual(RenderResourceKind.shadow, plan.resources[3].kind);
+    try expectRect(geometry.RectF.init(-20, -12, 140, 80), plan.resources[3].bounds);
+
+    try std.testing.expectEqual(RenderResourceKind.blur, plan.resources[4].kind);
+    try expectRect(geometry.RectF.init(-6, -6, 32, 32), plan.resources[4].bounds);
+}
+
+test "resource plan reports output overflow" {
+    const commands = [_]CanvasCommand{
+        .{ .draw_image = .{ .id = 1, .image_id = 1, .dst = geometry.RectF.init(0, 0, 10, 10) } },
+    };
+    var resources: [0]RenderResource = .{};
+    try std.testing.expectError(error.RenderResourceListFull, (DisplayList{ .commands = &commands }).resourcePlan(&resources));
 }
 
 test "display list serializes deterministically" {
