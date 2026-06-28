@@ -1516,6 +1516,7 @@ pub const Runtime = struct {
                     .role = widgetRoleName(node.role),
                     .name = node.label,
                     .value = node.value,
+                    .text_value = node.text_value,
                     .bounds = node.bounds.translate(geometry.OffsetF.init(view.frame.x, view.frame.y)),
                     .focused = node.state.focused or (view.focused and node.id == view.canvas_widget_focused_id),
                     .enabled = !node.state.disabled,
@@ -7002,6 +7003,7 @@ test "runtime automation snapshot exposes canvas widget text ranges" {
     try std.testing.expectEqual(@as(usize, 1), snapshot.widgets.len);
     try std.testing.expectEqualStrings("textbox", snapshot.widgets[0].role);
     try std.testing.expectEqualStrings("Release name", snapshot.widgets[0].name);
+    try std.testing.expectEqualStrings("Deploy", snapshot.widgets[0].text_value);
     try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 1, .end = 4 }, snapshot.widgets[0].text_selection.?);
     try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 2, .end = 5 }, snapshot.widgets[0].text_composition.?);
 
@@ -7009,6 +7011,7 @@ test "runtime automation snapshot exposes canvas widget text ranges" {
     var a11y_writer = std.Io.Writer.fixed(&a11y_buffer);
     try automation.snapshot.writeA11yText(snapshot, &a11y_writer);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#2 role=textbox name=\"Release name\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "text=\"Deploy\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "selection=1..4") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "composition=2..5") != null);
 }
@@ -7394,6 +7397,7 @@ test "runtime applies text input to focused canvas text fields" {
     var snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expectEqual(@as(usize, 1), snapshot.widgets.len);
     try std.testing.expectEqualStrings("Search", snapshot.widgets[0].name);
+    try std.testing.expectEqualStrings("Querya", snapshot.widgets[0].text_value);
     try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 6, .end = 6 }, snapshot.widgets[0].text_selection.?);
     try std.testing.expect(snapshot.widgets[0].text_composition == null);
 
@@ -7454,6 +7458,7 @@ test "runtime applies text input to focused canvas text fields" {
 
     snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expectEqualStrings("Search", snapshot.widgets[0].name);
+    try std.testing.expectEqualStrings("Query", snapshot.widgets[0].text_value);
     try std.testing.expectEqualDeep(canvas.TextRange.init(5, 5), harness.runtime.views[0].widgetSemantics()[0].text_selection.?);
     try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 5, .end = 5 }, snapshot.widgets[0].text_selection.?);
     try std.testing.expect(snapshot.widgets[0].text_composition == null);
@@ -7512,6 +7517,7 @@ test "runtime applies pointer selection to canvas text fields" {
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 0, .focus = 3 }, retained.nodes[1].widget.text_selection.?);
     var snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expectEqualStrings("Query", snapshot.widgets[0].text_value);
     try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 0, .end = 3 }, snapshot.widgets[0].text_selection.?);
 
     _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
@@ -7538,6 +7544,7 @@ test "runtime applies pointer selection to canvas text fields" {
     try std.testing.expectEqualStrings("Xry", retained.nodes[1].widget.text);
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(1), retained.nodes[1].widget.text_selection.?);
     snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expectEqualStrings("Xry", snapshot.widgets[0].text_value);
     try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 1, .end = 1 }, snapshot.widgets[0].text_selection.?);
 }
 
@@ -7595,6 +7602,8 @@ test "runtime applies text input to focused canvas search fields" {
     try std.testing.expectEqualStrings("Queryx", retained.nodes[1].widget.text);
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(6), retained.nodes[1].widget.text_selection.?);
     try std.testing.expectEqualDeep(canvas.TextRange.init(6, 6), harness.runtime.views[0].widgetSemantics()[0].text_selection.?);
+    const snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expectEqualStrings("Queryx", snapshot.widgets[0].text_value);
 
     _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
     const display_list = try harness.runtime.canvasDisplayList(1, "canvas");

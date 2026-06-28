@@ -50,6 +50,7 @@ pub const Widget = struct {
     role: []const u8 = "",
     name: []const u8 = "",
     value: ?f32 = null,
+    text_value: []const u8 = "",
     bounds: geometry.RectF = .{},
     focused: bool = false,
     enabled: bool = true,
@@ -161,6 +162,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
             },
         );
         if (widget.value) |value| try writer.print(" value={d}", .{value});
+        try writeWidgetTextValue(widget, writer);
         try writeWidgetState(widget, writer);
         try writeWidgetActions(widget.actions, writer);
         try writeWidgetTextRanges(widget, writer);
@@ -210,11 +212,17 @@ pub fn writeA11yText(input: Input, writer: anytype) !void {
             widget.bounds.height,
         });
         if (widget.value) |value| try writer.print(" value={d}", .{value});
+        try writeWidgetTextValue(widget, writer);
         try writeWidgetState(widget, writer);
         try writeWidgetActions(widget.actions, writer);
         try writeWidgetTextRanges(widget, writer);
         try writer.writeByte('\n');
     }
+}
+
+fn writeWidgetTextValue(widget: Widget, writer: anytype) !void {
+    if (widget.text_value.len == 0) return;
+    try writer.print(" text=\"{s}\"", .{widget.text_value});
 }
 
 fn writeWidgetState(widget: Widget, writer: anytype) !void {
@@ -345,6 +353,7 @@ test "snapshot emits widget semantics" {
         .id = 42,
         .role = "button",
         .name = "Run query",
+        .text_value = "deploy",
         .bounds = geometry.RectF.init(10, 12, 80, 32),
         .focused = true,
         .hovered = true,
@@ -360,6 +369,7 @@ test "snapshot emits widget semantics" {
         .widgets = &widgets,
     }, &writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "widget @w1/canvas#42 role=button name=\"Run query\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "text=\"deploy\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "state=[hovered,pressed,selected]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "actions=[focus,press]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "selection=4..4") != null);
@@ -374,6 +384,7 @@ test "snapshot emits widget semantics" {
     }, &a11y_writer);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "a11y root=@w1 nodes=3") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#42 role=button name=\"Run query\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "text=\"deploy\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "state=[hovered,pressed,selected]") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "actions=[focus,press]") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "selection=4..4") != null);

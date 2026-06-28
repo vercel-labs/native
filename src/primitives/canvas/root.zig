@@ -1633,6 +1633,7 @@ pub const WidgetSemanticsNode = struct {
     role: WidgetRole,
     label: []const u8,
     value: ?f32 = null,
+    text_value: []const u8 = "",
     bounds: geometry.RectF,
     state: WidgetState,
     focusable: bool = false,
@@ -4057,6 +4058,7 @@ fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNod
             .role = role,
             .label = semanticLabel(node.widget),
             .value = semanticValue(node.widget),
+            .text_value = semanticTextValue(node.widget),
             .bounds = node.frame,
             .state = node.widget.state,
             .focusable = node.widget.semantics.focusable or node.widget.semantics.actions.focus or defaultFocusable(node.widget),
@@ -4119,6 +4121,13 @@ fn semanticValue(widget: Widget) ?f32 {
         .checkbox, .toggle => if (booleanControlSelected(widget)) 1 else 0,
         .slider, .progress => std.math.clamp(widget.value, 0, 1),
         else => null,
+    };
+}
+
+fn semanticTextValue(widget: Widget) []const u8 {
+    return switch (widget.kind) {
+        .text_field, .search_field => widget.text,
+        else => "",
     };
 }
 
@@ -6785,6 +6794,7 @@ test "widget text fields expose textbox semantics and render focused chrome" {
     try std.testing.expectEqual(@as(usize, 1), semantics.len);
     try std.testing.expectEqual(WidgetRole.textbox, semantics[0].role);
     try std.testing.expectEqualStrings("Search", semantics[0].label);
+    try std.testing.expectEqualStrings("search terms", semantics[0].text_value);
     try std.testing.expect(semantics[0].focusable);
 
     const tokens = DesignTokens{
@@ -6830,6 +6840,7 @@ test "widget search fields expose textbox semantics and render search chrome" {
     try std.testing.expectEqual(@as(usize, 1), semantics.len);
     try std.testing.expectEqual(WidgetRole.textbox, semantics[0].role);
     try std.testing.expectEqualStrings("Search customers", semantics[0].label);
+    try std.testing.expectEqualStrings("customers", semantics[0].text_value);
     try std.testing.expect(semantics[0].focusable);
     try std.testing.expectEqualDeep(TextRange.init(9, 9), semantics[0].text_selection.?);
 
