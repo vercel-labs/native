@@ -269,8 +269,8 @@ pub const MacPlatform = struct {
             .native_control_commands,
             .menus,
             .file_drops,
+            .gpu_surfaces,
             => self.web_engine == .system,
-            .gpu_surfaces => false,
         };
     }
 
@@ -812,9 +812,9 @@ fn isSupportedNativeViewKind(kind: platform_mod.ViewKind) bool {
         .label,
         .spacer,
         .progress_indicator,
+        .gpu_surface,
         => true,
         .webview,
-        .gpu_surface,
         => false,
     };
 }
@@ -824,7 +824,7 @@ test "macos supports native container and control kinds" {
     try std.testing.expect(isSupportedNativeViewKind(.stack));
     try std.testing.expect(isSupportedNativeViewKind(.icon_button));
     try std.testing.expect(isSupportedNativeViewKind(.list_item));
-    try std.testing.expect(!isSupportedNativeViewKind(.gpu_surface));
+    try std.testing.expect(isSupportedNativeViewKind(.gpu_surface));
 }
 
 test "macos chromium reports unsupported native surfaces" {
@@ -832,6 +832,7 @@ test "macos chromium reports unsupported native surfaces" {
     try std.testing.expect(MacPlatform.supportsFeature(&system, .native_views));
     try std.testing.expect(MacPlatform.supportsFeature(&system, .native_control_commands));
     try std.testing.expect(MacPlatform.supportsFeature(&system, .menus));
+    try std.testing.expect(MacPlatform.supportsFeature(&system, .gpu_surfaces));
 
     var chromium = testPlatformWithEngine(.chromium);
     try std.testing.expect(MacPlatform.supportsFeature(&chromium, .main_webview));
@@ -842,6 +843,7 @@ test "macos chromium reports unsupported native surfaces" {
     try std.testing.expect(!MacPlatform.supportsFeature(&chromium, .native_control_commands));
     try std.testing.expect(!MacPlatform.supportsFeature(&chromium, .menus));
     try std.testing.expect(!MacPlatform.supportsFeature(&chromium, .file_drops));
+    try std.testing.expect(!MacPlatform.supportsFeature(&chromium, .gpu_surfaces));
 }
 
 fn testPlatformWithEngine(web_engine: platform_mod.WebEngine) MacPlatform {

@@ -21,7 +21,7 @@ const WebEngineOption = enum {
 };
 
 const default_zero_native_path = "../../";
-const app_exe_name = "hello";
+const app_exe_name = "gpu-surface";
 
 pub fn build(b: *std.Build) void {
     const target = zeroNativeTarget(b);

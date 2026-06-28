@@ -13,7 +13,7 @@ The `app.zon` manifest declares app metadata, permissions, bridge policies, secu
     .icons = .{ "assets/icon.icns", "assets/icon.ico" },
     .platforms = .{ "macos" },
     .permissions = .{ "command", "view", "dialog", "window", "clipboard", "credentials" },
-    .capabilities = .{ "webview", "js_bridge", "native_views", "menus", "shortcuts", "dialog", "clipboard", "credentials" },
+    .capabilities = .{ "webview", "js_bridge", "native_views", "gpu_surfaces", "menus", "shortcuts", "dialog", "clipboard", "credentials" },
     .bridge = .{
         .commands = .{
             .{ .name = "native.ping", .origins = .{ "zero://app" } },

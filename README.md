@@ -126,6 +126,7 @@ Native-first examples are available too:
 - `examples/command-app` - shared command routing across native controls, menus, shortcuts, tray, and bridge calls
 - `examples/native-shell` - native toolbar/sidebar/statusbar chrome around WebView content
 - `examples/native-panels` - split/stack native panel composition with WebView content
+- `examples/gpu-surface` - Metal-backed GPU surface composed beside native controls and WebView content
 - `examples/capabilities` - guarded OS services such as notifications, clipboard, dialogs, credentials, file drops, and recent documents
 - `examples/mobile-shell` - shared metadata for the iOS and Android native shell hosts
 

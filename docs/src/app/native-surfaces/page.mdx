@@ -36,7 +36,7 @@ Native surfaces are the app-owned regions that zero-native composes inside a pla
     <tr>
       <td>GPU surface</td>
       <td>Future custom drawing regions for editors, timelines, games, or canvas-like workflows</td>
-      <td>Reserved as <code>ViewKind.gpu_surface</code>; current hosts report it unsupported</td>
+      <td>Metal-backed on macOS system WebView; other hosts report it unsupported</td>
     </tr>
   </tbody>
 </table>
@@ -110,13 +110,16 @@ Existing `App.source`, `runtime.createWebView(...)`, and `window.zero.webviews.*
 
 ## Platform Support
 
-macOS, Linux, and Windows system-WebView hosts support native views and controls today. Chromium hosts and mobile hosts expose the same public vocabulary where useful, but unsupported operations reject explicitly instead of silently falling back to WebView-only behavior.
+macOS, Linux, and Windows system-WebView hosts support native views and controls today. The macOS system-WebView host also supports `gpu_surface` with a Metal-backed child view; see `examples/gpu-surface` for a minimal native controls plus WebView plus GPU surface composition. Chromium hosts and mobile hosts expose the same public vocabulary where useful, but unsupported operations reject explicitly instead of silently falling back to WebView-only behavior.
 
 Use support checks before showing optional native affordances:
 
 ```zig
 if (runtime.supports(.native_views)) {
     try runtime.createView(.{ .label = "toolbar", .kind = .toolbar });
+}
+if (runtime.supports(.gpu_surfaces)) {
+    try runtime.createView(.{ .label = "canvas", .kind = .gpu_surface, .frame = zero_native.geometry.RectF.init(0, 0, 480, 320) });
 }
 ```
 

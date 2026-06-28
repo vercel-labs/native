@@ -170,7 +170,7 @@ Feature names match the Zig `PlatformFeature` enum and the TypeScript `ZeroNativ
 
 ## Native Surfaces
 
-The macOS, Linux, and Windows system-WebView hosts support `toolbar`, `titlebar_accessory`, `sidebar`, `statusbar`, `split`, `stack`, `button`, `icon_button`, `list_item`, `checkbox`, `toggle`, `segmented_control`, `text_field`, `search_field`, `label`, `spacer`, and `progress_indicator` native view kinds.
+The macOS, Linux, and Windows system-WebView hosts support `toolbar`, `titlebar_accessory`, `sidebar`, `statusbar`, `split`, `stack`, `button`, `icon_button`, `list_item`, `checkbox`, `toggle`, `segmented_control`, `text_field`, `search_field`, `label`, `spacer`, and `progress_indicator` native view kinds. The macOS system-WebView host also supports `gpu_surface` as a Metal-backed child view.
 
 `ViewKind.webview` is the compatibility path for WebView-backed views. Existing `runtime.createWebView(...)` and `window.zero.webviews.*` APIs remain available.
 
@@ -234,7 +234,7 @@ iOS and Android are supported today through embedded host examples rather than t
 
 Mobile hosts own safe areas, orientation, keyboard avoidance, back gestures, and platform lifecycle integration. The current mobile mapping is package-time shell metadata for native header/workspace structure; dynamic generic native view bridge commands should still be treated as desktop APIs until UIKit and Android runtime view mutation is added.
 
-`gpu_surface` is reserved for future custom drawing regions. Current hosts report unsupported operations for that view kind and `runtime.supports(.gpu_surfaces)` / `window.zero.platform.supports("gpuSurfaces")` return `false`.
+`gpu_surface` is implemented for the macOS system-WebView host as a Metal-backed child surface. Other current hosts report unsupported operations for that view kind and `runtime.supports(.gpu_surfaces)` / `window.zero.platform.supports("gpuSurfaces")` return `false`.
 
 ## Related Docs
 

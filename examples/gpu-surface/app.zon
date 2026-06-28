@@ -1,0 +1,40 @@
+.{
+    .id = "dev.zero_native.gpu_surface",
+    .name = "gpu-surface",
+    .display_name = "GPU Surface",
+    .version = "0.1.0",
+    .icons = .{ "assets/icon.icns" },
+    .platforms = .{ "macos" },
+    .permissions = .{ "view", "command" },
+    .capabilities = .{ "webview", "js_bridge", "native_views", "gpu_surfaces" },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "zero-native GPU Surface",
+                .width = 1120,
+                .height = 720,
+                .restore_policy = "center_on_primary",
+                .views = .{
+                    .{ .label = "toolbar", .kind = "toolbar", .edge = "top", .height = 52, .role = "Toolbar" },
+                    .{ .label = "toolbar-title", .kind = "label", .parent = "toolbar", .x = 18, .y = 16, .width = 220, .height = 20, .text = "GPU Surface" },
+                    .{ .label = "frame-mode", .kind = "segmented_control", .parent = "toolbar", .x = 252, .y = 11, .width = 178, .height = 30, .text = "Canvas|Hybrid", .command = "gpu.mode" },
+                    .{ .label = "refresh", .kind = "button", .parent = "toolbar", .x = 448, .y = 11, .width = 86, .height = 30, .text = "Refresh", .command = "gpu.refresh" },
+                    .{ .label = "body", .kind = "split", .fill = true, .axis = "row" },
+                    .{ .label = "canvas", .kind = "gpu_surface", .parent = "body", .width = 680, .min_width = 480, .role = "Animated Metal surface", .accessibility_label = "Animated GPU surface" },
+                    .{ .label = "inspector", .kind = "webview", .parent = "body", .url = "zero://inline", .fill = true },
+                    .{ .label = "statusbar", .kind = "statusbar", .edge = "bottom", .height = 34, .role = "Status" },
+                    .{ .label = "status-label", .kind = "label", .parent = "statusbar", .x = 14, .y = 8, .width = 720, .height = 18, .text = "Metal surface ready." },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+}

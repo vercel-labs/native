@@ -1,10 +1,13 @@
 #import "appkit_host.h"
 
 #import <AppKit/AppKit.h>
+#import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
 #import <WebKit/WebKit.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <Security/Security.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -73,6 +76,7 @@ static NSAccessibilityRole ZeroNativeAccessibilityRoleForNativeViewKind(NSIntege
             return NSAccessibilityStaticTextRole;
         case ZERO_NATIVE_APPKIT_VIEW_PROGRESS_INDICATOR:
             return NSAccessibilityProgressIndicatorRole;
+        case ZERO_NATIVE_APPKIT_VIEW_GPU_SURFACE:
         case ZERO_NATIVE_APPKIT_VIEW_STATUSBAR:
         case ZERO_NATIVE_APPKIT_VIEW_SIDEBAR:
         case ZERO_NATIVE_APPKIT_VIEW_STACK:
@@ -106,6 +110,18 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 @property(nonatomic, assign) ZeroNativeAppKitHost *host;
 @property(nonatomic, assign) uint64_t windowId;
 @property(nonatomic, strong) NSString *webViewLabel;
+@end
+
+@interface ZeroNativeMetalSurfaceView : NSView
+@property(nonatomic, strong) id<MTLDevice> device;
+@property(nonatomic, strong) id<MTLCommandQueue> commandQueue;
+@property(nonatomic, strong) CAMetalLayer *metalLayer;
+@property(nonatomic, strong) NSTimer *displayTimer;
+@property(nonatomic, assign) NSUInteger frameIndex;
+@property(nonatomic, assign) BOOL renderedFrame;
+- (BOOL)isAvailable;
+- (void)updateDrawableSize;
+- (void)renderFrame;
 @end
 
 @interface ZeroNativeAssetSchemeHandler : NSObject <WKURLSchemeHandler>
@@ -327,6 +343,107 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
     (void)userContentController;
     [self.host receiveBridgeMessage:message windowId:self.windowId webViewLabel:self.webViewLabel ?: @"main"];
+}
+
+@end
+
+@implementation ZeroNativeMetalSurfaceView
+
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (!self) return nil;
+
+    _device = MTLCreateSystemDefaultDevice();
+    if (!_device) return self;
+
+    _commandQueue = [_device newCommandQueue];
+    _metalLayer = [CAMetalLayer layer];
+    _metalLayer.device = _device;
+    _metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    _metalLayer.framebufferOnly = YES;
+    _metalLayer.opaque = YES;
+    _metalLayer.contentsGravity = kCAGravityResize;
+
+    self.wantsLayer = YES;
+    self.layer = _metalLayer;
+    self.layerContentsRedrawPolicy = NSViewLayerContentsRedrawDuringViewResize;
+    self.accessibilityRole = NSAccessibilityGroupRole;
+
+    [self updateDrawableSize];
+    _displayTimer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 60.0) target:self selector:@selector(renderFrame) userInfo:nil repeats:YES];
+    _displayTimer.tolerance = 1.0 / 240.0;
+    [self renderFrame];
+    return self;
+}
+
+- (void)dealloc {
+    [_displayTimer invalidate];
+}
+
+- (BOOL)isAvailable {
+    return self.device != nil && self.commandQueue != nil && self.metalLayer != nil;
+}
+
+- (BOOL)isOpaque {
+    return YES;
+}
+
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    [self updateDrawableSize];
+}
+
+- (void)viewDidChangeBackingProperties {
+    [super viewDidChangeBackingProperties];
+    [self updateDrawableSize];
+}
+
+- (void)setFrame:(NSRect)frame {
+    [super setFrame:frame];
+    [self updateDrawableSize];
+}
+
+- (void)setBounds:(NSRect)bounds {
+    [super setBounds:bounds];
+    [self updateDrawableSize];
+}
+
+- (void)updateDrawableSize {
+    if (!self.metalLayer) return;
+    CGFloat scale = self.window.backingScaleFactor;
+    if (scale <= 0) scale = NSScreen.mainScreen.backingScaleFactor;
+    if (scale <= 0) scale = 1;
+    NSSize size = self.bounds.size;
+    self.metalLayer.contentsScale = scale;
+    self.metalLayer.drawableSize = CGSizeMake(MAX(1.0, size.width * scale), MAX(1.0, size.height * scale));
+}
+
+- (void)renderFrame {
+    if (![self isAvailable] || self.hidden || self.bounds.size.width <= 0 || self.bounds.size.height <= 0) return;
+    [self updateDrawableSize];
+
+    id<CAMetalDrawable> drawable = [self.metalLayer nextDrawable];
+    if (!drawable) return;
+
+    const double phase = (double)(self.frameIndex % 360) / 360.0;
+    const double red = 0.10 + 0.08 * sin(phase * 6.283185307179586);
+    const double green = 0.18 + 0.10 * sin((phase + 0.33) * 6.283185307179586);
+    const double blue = 0.34 + 0.16 * sin((phase + 0.66) * 6.283185307179586);
+
+    MTLRenderPassDescriptor *descriptor = [MTLRenderPassDescriptor renderPassDescriptor];
+    descriptor.colorAttachments[0].texture = drawable.texture;
+    descriptor.colorAttachments[0].loadAction = MTLLoadActionClear;
+    descriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
+    descriptor.colorAttachments[0].clearColor = MTLClearColorMake(red, green, blue, 1.0);
+
+    id<MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
+    id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:descriptor];
+    [encoder endEncoding];
+    [commandBuffer presentDrawable:drawable];
+    [commandBuffer commit];
+
+    self.renderedFrame = YES;
+    self.frameIndex += 1;
 }
 
 @end
@@ -650,6 +767,12 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
             indicator.indeterminate = YES;
             [indicator startAnimation:nil];
             view = indicator;
+            break;
+        }
+        case ZERO_NATIVE_APPKIT_VIEW_GPU_SURFACE: {
+            ZeroNativeMetalSurfaceView *surface = [[ZeroNativeMetalSurfaceView alloc] initWithFrame:NSZeroRect];
+            if (![surface isAvailable]) return nil;
+            view = surface;
             break;
         }
         case ZERO_NATIVE_APPKIT_VIEW_TEXT_FIELD: {
