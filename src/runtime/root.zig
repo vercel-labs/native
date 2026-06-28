@@ -59,6 +59,14 @@ pub const GpuSurfaceFrameEvent = platform.GpuSurfaceFrameEvent;
 pub const GpuSurfaceResizeEvent = platform.GpuSurfaceResizeEvent;
 pub const GpuSurfaceInputEvent = platform.GpuSurfaceInputEvent;
 
+pub const CanvasWidgetPointerEvent = struct {
+    window_id: platform.WindowId = 1,
+    view_label: []const u8,
+    pointer: canvas.WidgetPointerEvent,
+    target: ?canvas.WidgetHit = null,
+    route: []const canvas.WidgetEventRouteEntry = &.{},
+};
+
 pub const InvalidationReason = enum {
     startup,
     surface_resize,
@@ -82,6 +90,7 @@ pub const Event = union(enum) {
     gpu_surface_frame: GpuSurfaceFrameEvent,
     gpu_surface_resized: GpuSurfaceResizeEvent,
     gpu_surface_input: GpuSurfaceInputEvent,
+    canvas_widget_pointer: CanvasWidgetPointerEvent,
 
     pub fn name(self: Event) []const u8 {
         return switch (self) {
@@ -92,6 +101,7 @@ pub const Event = union(enum) {
             .gpu_surface_frame => "gpu_surface_frame",
             .gpu_surface_resized => "gpu_surface_resized",
             .gpu_surface_input => "gpu_surface_input",
+            .canvas_widget_pointer => "canvas_widget_pointer",
         };
     }
 };
@@ -180,6 +190,7 @@ pub const Runtime = struct {
     automation_windows: [automation.snapshot.max_windows]automation.snapshot.Window = undefined,
     automation_views: [automation.snapshot.max_views]platform.ViewInfo = undefined,
     automation_widgets: [automation.snapshot.max_widgets]automation.snapshot.Widget = undefined,
+    widget_event_route_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined,
 
     pub fn init(options: Options) Runtime {
         var runtime = Runtime{
@@ -600,6 +611,23 @@ pub const Runtime = struct {
         return self.views[index].widgetLayoutTree();
     }
 
+    pub fn routeCanvasWidgetPointerInput(self: *const Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetPointerEvent {
+        try self.validateViewParent(input_event.window_id);
+        try validateViewLabel(input_event.label);
+        const pointer = canvasWidgetPointerEventFromGpuInput(input_event) orelse return null;
+        const index = self.findViewIndex(input_event.window_id, input_event.label) orelse return error.ViewNotFound;
+        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+
+        const route = try self.views[index].widgetLayoutTree().routePointerEvent(pointer, output);
+        return .{
+            .window_id = input_event.window_id,
+            .view_label = self.views[index].label,
+            .pointer = pointer,
+            .target = route.target,
+            .route = route.entries,
+        };
+    }
+
     fn invalidateForCanvasChanges(self: *Runtime, view_frame: geometry.RectF, changes: []const canvas.DiffChange) void {
         var emitted_dirty_region = false;
         for (changes) |change| {
@@ -904,6 +932,16 @@ pub const Runtime = struct {
                     },
                     else => {},
                 }
+                const widget_pointer_event = self.routeCanvasWidgetPointerInput(input_event, &self.widget_event_route_entries) catch |err| switch (err) {
+                    error.WindowNotFound,
+                    error.ViewNotFound,
+                    error.InvalidViewOptions,
+                    => null,
+                    else => return err,
+                };
+                if (widget_pointer_event) |pointer_event| {
+                    try self.dispatchEvent(app, .{ .canvas_widget_pointer = pointer_event });
+                }
                 try self.dispatchEvent(app, .{ .gpu_surface_input = input_event });
             },
             .menu_command => |command| {
@@ -946,6 +984,7 @@ pub const Runtime = struct {
             .gpu_surface_frame => {},
             .gpu_surface_resized => {},
             .gpu_surface_input => {},
+            .canvas_widget_pointer => {},
             .lifecycle => {},
         }
     }
@@ -3686,6 +3725,24 @@ fn sourceWebViewUrl(source: ?platform.WebViewSource) []const u8 {
     return switch (value.kind) {
         .html => "zero://inline",
         .url, .assets => value.bytes,
+    };
+}
+
+fn canvasWidgetPointerEventFromGpuInput(input_event: GpuSurfaceInputEvent) ?canvas.WidgetPointerEvent {
+    const phase: canvas.WidgetPointerPhase = switch (input_event.kind) {
+        .pointer_down => .down,
+        .pointer_up => .up,
+        .pointer_move => .hover,
+        .pointer_drag => .move,
+        .scroll => .wheel,
+        .key_down,
+        .key_up,
+        => return null,
+    };
+    return .{
+        .phase = phase,
+        .point = geometry.PointF.init(input_event.x, input_event.y),
+        .delta = geometry.OffsetF.init(input_event.delta_x, input_event.delta_y),
     };
 }
 
@@ -6693,6 +6750,103 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(@as(u32, 1), app_state.input_count);
     try std.testing.expectEqual(platform.GpuSurfaceInputKind.pointer_down, app_state.last_input_kind);
     try std.testing.expect(harness.runtime.invalidated);
+}
+
+test "runtime dispatches routed canvas widget pointer events" {
+    const TestApp = struct {
+        raw_input_count: u32 = 0,
+        widget_pointer_count: u32 = 0,
+        last_view_label: []const u8 = "",
+        last_phase: canvas.WidgetPointerPhase = .hover,
+        last_target_id: canvas.ObjectId = 0,
+        last_target_kind: canvas.WidgetKind = .stack,
+        last_route_len: usize = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-input", .source = platform.WebViewSource.html("<h1>GPU</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .gpu_surface_input => {
+                    self.raw_input_count += 1;
+                },
+                .canvas_widget_pointer => |pointer_event| {
+                    self.widget_pointer_count += 1;
+                    self.last_view_label = pointer_event.view_label;
+                    self.last_phase = pointer_event.pointer.phase;
+                    self.last_route_len = pointer_event.route.len;
+                    if (pointer_event.target) |target| {
+                        self.last_target_id = target.id;
+                        self.last_target_kind = target.kind;
+                    } else {
+                        self.last_target_id = 0;
+                        self.last_target_kind = .stack;
+                    }
+                },
+                else => {},
+            }
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 160),
+    });
+
+    const children = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(10, 12, 96, 32),
+        .text = "Run",
+    }};
+    const root = canvas.Widget{
+        .id = 1,
+        .kind = .panel,
+        .children = &children,
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 240, 160), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    harness.runtime.invalidated = false;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 20,
+        .y = 24,
+        .button = 0,
+    } });
+
+    try std.testing.expectEqual(@as(u32, 1), app_state.widget_pointer_count);
+    try std.testing.expectEqual(@as(u32, 1), app_state.raw_input_count);
+    try std.testing.expectEqualStrings("canvas", app_state.last_view_label);
+    try std.testing.expectEqual(canvas.WidgetPointerPhase.down, app_state.last_phase);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_target_id);
+    try std.testing.expectEqual(canvas.WidgetKind.button, app_state.last_target_kind);
+    try std.testing.expectEqual(@as(usize, 3), app_state.last_route_len);
+    try std.testing.expect(harness.runtime.views[0].focused);
+    try std.testing.expect(harness.runtime.invalidated);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.widget_pointer_count);
+    try std.testing.expectEqual(@as(u32, 2), app_state.raw_input_count);
 }
 
 test "runtime dispatches shortcut command events" {

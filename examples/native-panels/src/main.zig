@@ -172,7 +172,7 @@ const NativePanelsApp = struct {
                     try self.apply(runtime, command);
                 }
             },
-            .shortcut, .files_dropped, .gpu_surface_frame, .gpu_surface_resized, .gpu_surface_input, .lifecycle => {},
+            .shortcut, .files_dropped, .gpu_surface_frame, .gpu_surface_resized, .gpu_surface_input, .canvas_widget_pointer, .lifecycle => {},
         }
     }
 
