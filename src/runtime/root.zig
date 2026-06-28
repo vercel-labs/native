@@ -747,6 +747,26 @@ pub const Runtime = struct {
         return self.views[index].widgetLayoutTree();
     }
 
+    pub fn setCanvasWidgetDesignTokens(self: *Runtime, window_id: platform.WindowId, label: []const u8, tokens: canvas.DesignTokens) anyerror!platform.ViewInfo {
+        try self.validateViewParent(window_id);
+        try validateViewLabel(label);
+        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+        if (std.meta.eql(self.views[index].widget_tokens, tokens)) return self.views[index].info();
+        self.views[index].widget_tokens = tokens;
+        self.views[index].widget_revision += 1;
+        self.invalidateFor(.state, self.views[index].frame);
+        return self.views[index].info();
+    }
+
+    pub fn canvasWidgetDesignTokens(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror!canvas.DesignTokens {
+        try self.validateViewParent(window_id);
+        try validateViewLabel(label);
+        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+        return self.views[index].widget_tokens;
+    }
+
     pub fn editCanvasWidgetText(self: *Runtime, window_id: platform.WindowId, label: []const u8, id: canvas.ObjectId, edit: canvas.TextInputEvent) anyerror!platform.ViewInfo {
         try self.validateViewParent(window_id);
         try validateViewLabel(label);
@@ -761,6 +781,11 @@ pub const Runtime = struct {
     }
 
     pub fn emitCanvasWidgetDisplayList(self: *Runtime, window_id: platform.WindowId, label: []const u8, tokens: canvas.DesignTokens) anyerror!platform.ViewInfo {
+        _ = try self.setCanvasWidgetDesignTokens(window_id, label, tokens);
+        return self.emitCanvasWidgetDisplayListWithStoredTokens(window_id, label);
+    }
+
+    pub fn emitCanvasWidgetDisplayListWithStoredTokens(self: *Runtime, window_id: platform.WindowId, label: []const u8) anyerror!platform.ViewInfo {
         try self.validateViewParent(window_id);
         try validateViewLabel(label);
         const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
@@ -768,7 +793,7 @@ pub const Runtime = struct {
 
         var commands: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
         var builder = canvas.Builder.init(&commands);
-        try self.views[index].widgetLayoutTree().emitDisplayListWithState(&builder, tokens, .{
+        try self.views[index].widgetLayoutTree().emitDisplayListWithState(&builder, self.views[index].widget_tokens, .{
             .focused_id = self.views[index].canvas_widget_focused_id,
             .hovered_id = self.views[index].canvas_widget_hovered_id,
             .pressed_id = self.views[index].canvas_widget_pressed_id,
@@ -3799,6 +3824,7 @@ const RuntimeView = struct {
     widget_semantics_nodes: [max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
     widget_semantics_node_count: usize = 0,
     widget_revision: u64 = 0,
+    widget_tokens: canvas.DesignTokens = .{},
     canvas_widget_focused_id: canvas.ObjectId = 0,
     canvas_widget_hovered_id: canvas.ObjectId = 0,
     canvas_widget_pressed_id: canvas.ObjectId = 0,
@@ -7243,6 +7269,109 @@ test "runtime emits canvas display list from focused widget layout" {
             .draw_text => |text| {
                 if (text.id == testCanvasWidgetPartId(2, 4)) {
                     try std.testing.expectEqualStrings("Run", text.text);
+                    return;
+                }
+            },
+            else => {},
+        }
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "runtime retains canvas widget design tokens" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-design-tokens", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+
+    const button = canvas.Widget{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(10, 12, 96, 32),
+        .text = "Run",
+        .state = .{ .selected = true },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{button} }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    const tokens = canvas.DesignTokens{
+        .colors = .{
+            .accent = canvas.Color.rgb8(100, 20, 200),
+            .accent_text = canvas.Color.rgb8(255, 250, 240),
+        },
+        .radius = .{ .md = 7 },
+    };
+    const themed = try harness.runtime.setCanvasWidgetDesignTokens(1, "canvas", tokens);
+    try std.testing.expectEqual(@as(u64, 2), themed.widget_revision);
+    try std.testing.expectEqualDeep(tokens, try harness.runtime.canvasWidgetDesignTokens(1, "canvas"));
+
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    const unchanged = try harness.runtime.setCanvasWidgetDesignTokens(1, "canvas", tokens);
+    try std.testing.expectEqual(@as(u64, 2), unchanged.widget_revision);
+    try std.testing.expect(!harness.runtime.invalidated);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDirtyRegions().len);
+
+    _ = try harness.runtime.emitCanvasWidgetDisplayListWithStoredTokens(1, "canvas");
+    const display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    var saw_accent_fill = false;
+    var saw_accent_text = false;
+    for (display_list.commands) |command| {
+        switch (command) {
+            .fill_rounded_rect => |fill| {
+                if (fill.id == testCanvasWidgetPartId(2, 1)) {
+                    switch (fill.fill) {
+                        .color => |color| try std.testing.expectEqualDeep(tokens.colors.accent, color),
+                        else => return error.TestUnexpectedResult,
+                    }
+                    saw_accent_fill = true;
+                }
+            },
+            .draw_text => |text| {
+                if (text.id == testCanvasWidgetPartId(2, 4)) {
+                    try std.testing.expectEqualDeep(tokens.colors.accent_text, text.color);
+                    saw_accent_text = true;
+                }
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_accent_fill);
+    try std.testing.expect(saw_accent_text);
+
+    const next_tokens = canvas.DesignTokens{
+        .colors = .{
+            .accent = canvas.Color.rgb8(20, 120, 80),
+            .accent_text = canvas.Color.rgb8(240, 255, 250),
+        },
+    };
+    const changed = try harness.runtime.setCanvasWidgetDesignTokens(1, "canvas", next_tokens);
+    try std.testing.expectEqual(@as(u64, 3), changed.widget_revision);
+    _ = try harness.runtime.emitCanvasWidgetDisplayListWithStoredTokens(1, "canvas");
+    const changed_display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    for (changed_display_list.commands) |command| {
+        switch (command) {
+            .fill_rounded_rect => |fill| {
+                if (fill.id == testCanvasWidgetPartId(2, 1)) {
+                    switch (fill.fill) {
+                        .color => |color| try std.testing.expectEqualDeep(next_tokens.colors.accent, color),
+                        else => return error.TestUnexpectedResult,
+                    }
                     return;
                 }
             },
