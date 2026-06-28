@@ -4,6 +4,8 @@ const json = @import("json");
 
 pub const Error = error{
     DisplayListFull,
+    DiffListFull,
+    DuplicateObjectId,
 };
 
 pub const ObjectId = u64;
@@ -214,6 +216,61 @@ pub const CanvasCommand = union(enum) {
     draw_text: DrawText,
     shadow: Shadow,
     blur: Blur,
+
+    pub fn objectId(self: CanvasCommand) ?ObjectId {
+        const id = switch (self) {
+            .push_clip => |value| value.id,
+            .fill_rect => |value| value.id,
+            .stroke_rect => |value| value.id,
+            .fill_rounded_rect => |value| value.id,
+            .draw_line => |value| value.id,
+            .fill_path => |value| value.id,
+            .stroke_path => |value| value.id,
+            .draw_image => |value| value.id,
+            .draw_text => |value| value.id,
+            .shadow => |value| value.id,
+            .blur => |value| value.id,
+            .pop_clip, .push_opacity, .pop_opacity, .transform => 0,
+        };
+        return if (id == 0) null else id;
+    }
+
+    pub fn bounds(self: CanvasCommand) ?geometry.RectF {
+        return switch (self) {
+            .push_clip => |value| value.rect.normalized(),
+            .pop_clip, .push_opacity, .pop_opacity, .transform => null,
+            .fill_rect => |value| value.rect.normalized(),
+            .stroke_rect => |value| strokeBounds(value.rect, value.stroke.width),
+            .fill_rounded_rect => |value| value.rect.normalized(),
+            .draw_line => |value| strokeBounds(geometry.RectF.fromPoints(value.from, value.to), value.stroke.width),
+            .fill_path => |value| pathBounds(value.elements),
+            .stroke_path => |value| if (pathBounds(value.elements)) |rect| strokeBounds(rect, value.stroke.width) else null,
+            .draw_image => |value| value.dst.normalized(),
+            .draw_text => |value| textBounds(value),
+            .shadow => |value| shadowBounds(value),
+            .blur => |value| value.rect.normalized().inflate(geometry.InsetsF.all(nonNegative(value.radius))),
+        };
+    }
+};
+
+pub const CommandRef = struct {
+    index: usize,
+    command: CanvasCommand,
+};
+
+pub const DiffKind = enum {
+    added,
+    removed,
+    changed,
+    scene_changed,
+};
+
+pub const DiffChange = struct {
+    kind: DiffKind,
+    id: ?ObjectId = null,
+    previous_index: ?usize = null,
+    next_index: ?usize = null,
+    dirty_bounds: ?geometry.RectF = null,
 };
 
 pub const DisplayList = struct {
@@ -230,6 +287,30 @@ pub const DisplayList = struct {
 
     pub fn commandCount(self: DisplayList) usize {
         return self.commands.len;
+    }
+
+    pub fn findCommandById(self: DisplayList, id: ObjectId) ?CommandRef {
+        if (id == 0) return null;
+        for (self.commands, 0..) |command, index| {
+            if (command.objectId()) |command_id| {
+                if (command_id == id) return .{ .index = index, .command = command };
+            }
+        }
+        return null;
+    }
+
+    pub fn bounds(self: DisplayList) ?geometry.RectF {
+        var result: ?geometry.RectF = null;
+        for (self.commands) |command| {
+            if (command.bounds()) |command_bounds| {
+                result = unionOptionalBounds(result, command_bounds);
+            }
+        }
+        return result;
+    }
+
+    pub fn diff(previous: DisplayList, next: DisplayList, output: []DiffChange) Error![]const DiffChange {
+        return diffDisplayLists(previous, next, output);
     }
 };
 
@@ -315,6 +396,398 @@ pub const Builder = struct {
         try self.append(.{ .blur = value });
     }
 };
+
+fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChange) Error![]const DiffChange {
+    try validateUniqueObjectIds(previous);
+    try validateUniqueObjectIds(next);
+
+    var len: usize = 0;
+    if (!unkeyedCommandsEqual(previous, next)) {
+        try appendDiffChange(output, &len, .{
+            .kind = .scene_changed,
+            .dirty_bounds = unionOptionalBounds(previous.bounds(), next.bounds()),
+        });
+    }
+
+    for (previous.commands, 0..) |previous_command, previous_index| {
+        const id = previous_command.objectId() orelse continue;
+        const next_ref = next.findCommandById(id) orelse {
+            try appendDiffChange(output, &len, .{
+                .kind = .removed,
+                .id = id,
+                .previous_index = previous_index,
+                .dirty_bounds = previous_command.bounds(),
+            });
+            continue;
+        };
+
+        if (previous_index != next_ref.index or !commandsEqual(previous_command, next_ref.command)) {
+            try appendDiffChange(output, &len, .{
+                .kind = .changed,
+                .id = id,
+                .previous_index = previous_index,
+                .next_index = next_ref.index,
+                .dirty_bounds = unionOptionalBounds(previous_command.bounds(), next_ref.command.bounds()),
+            });
+        }
+    }
+
+    for (next.commands, 0..) |next_command, next_index| {
+        const id = next_command.objectId() orelse continue;
+        if (previous.findCommandById(id) == null) {
+            try appendDiffChange(output, &len, .{
+                .kind = .added,
+                .id = id,
+                .next_index = next_index,
+                .dirty_bounds = next_command.bounds(),
+            });
+        }
+    }
+
+    return output[0..len];
+}
+
+fn appendDiffChange(output: []DiffChange, len: *usize, change: DiffChange) Error!void {
+    if (len.* >= output.len) return error.DiffListFull;
+    output[len.*] = change;
+    len.* += 1;
+}
+
+fn validateUniqueObjectIds(display_list: DisplayList) Error!void {
+    for (display_list.commands, 0..) |command, index| {
+        const id = command.objectId() orelse continue;
+        var cursor = index + 1;
+        while (cursor < display_list.commands.len) : (cursor += 1) {
+            if (display_list.commands[cursor].objectId()) |other_id| {
+                if (other_id == id) return error.DuplicateObjectId;
+            }
+        }
+    }
+}
+
+fn unkeyedCommandsEqual(previous: DisplayList, next: DisplayList) bool {
+    var previous_index: usize = 0;
+    var next_index: usize = 0;
+    while (true) {
+        const previous_command = nextUnkeyedCommand(previous, &previous_index);
+        const next_command = nextUnkeyedCommand(next, &next_index);
+        if (previous_command == null and next_command == null) return true;
+        if (previous_command == null or next_command == null) return false;
+        if (!commandsEqual(previous_command.?, next_command.?)) return false;
+    }
+}
+
+fn nextUnkeyedCommand(display_list: DisplayList, index: *usize) ?CanvasCommand {
+    while (index.* < display_list.commands.len) : (index.* += 1) {
+        const command = display_list.commands[index.*];
+        if (command.objectId() == null) {
+            index.* += 1;
+            return command;
+        }
+    }
+    return null;
+}
+
+fn unionOptionalBounds(a: ?geometry.RectF, b: ?geometry.RectF) ?geometry.RectF {
+    if (a) |rect_a| {
+        if (b) |rect_b| return geometry.RectF.unionWith(rect_a.normalized(), rect_b.normalized());
+        return rect_a.normalized();
+    }
+    if (b) |rect_b| return rect_b.normalized();
+    return null;
+}
+
+fn strokeBounds(rect: geometry.RectF, width: f32) geometry.RectF {
+    return rect.normalized().inflate(geometry.InsetsF.all(nonNegative(width) * 0.5));
+}
+
+fn shadowBounds(value: Shadow) geometry.RectF {
+    const spread = nonNegative(@abs(value.spread));
+    const blur_radius = nonNegative(value.blur);
+    return value.rect
+        .normalized()
+        .translate(value.offset)
+        .inflate(geometry.InsetsF.all(spread + blur_radius));
+}
+
+fn pathBounds(elements: []const PathElement) ?geometry.RectF {
+    var has_point = false;
+    var min_x: f32 = 0;
+    var min_y: f32 = 0;
+    var max_x: f32 = 0;
+    var max_y: f32 = 0;
+    for (elements) |element| {
+        const point_count: usize = switch (element.verb) {
+            .move_to, .line_to => 1,
+            .quad_to => 2,
+            .cubic_to => 3,
+            .close => 0,
+        };
+        for (element.points[0..point_count]) |point| {
+            if (!has_point) {
+                has_point = true;
+                min_x = point.x;
+                min_y = point.y;
+                max_x = point.x;
+                max_y = point.y;
+            } else {
+                min_x = @min(min_x, point.x);
+                min_y = @min(min_y, point.y);
+                max_x = @max(max_x, point.x);
+                max_y = @max(max_y, point.y);
+            }
+        }
+    }
+    if (!has_point) return null;
+    return geometry.RectF.init(min_x, min_y, max_x - min_x, max_y - min_y);
+}
+
+fn textBounds(value: DrawText) ?geometry.RectF {
+    if (value.glyphs.len == 0 and value.text.len == 0) return null;
+
+    var min_x = value.origin.x;
+    var max_x = value.origin.x;
+    if (value.glyphs.len > 0) {
+        min_x = value.origin.x + value.glyphs[0].x;
+        max_x = min_x + estimatedGlyphAdvance(value.glyphs[0], value.size);
+        for (value.glyphs[1..]) |glyph| {
+            const glyph_x = value.origin.x + glyph.x;
+            min_x = @min(min_x, glyph_x);
+            max_x = @max(max_x, glyph_x + estimatedGlyphAdvance(glyph, value.size));
+        }
+    } else {
+        max_x = value.origin.x + @as(f32, @floatFromInt(value.text.len)) * value.size * 0.5;
+    }
+
+    return geometry.RectF.init(
+        min_x,
+        value.origin.y - value.size,
+        @max(value.size * 0.25, max_x - min_x),
+        value.size * 1.25,
+    );
+}
+
+fn estimatedGlyphAdvance(glyph: Glyph, size: f32) f32 {
+    return @max(size * 0.25, glyph.advance);
+}
+
+fn nonNegative(value: f32) f32 {
+    return @max(0, value);
+}
+
+fn commandsEqual(a: CanvasCommand, b: CanvasCommand) bool {
+    return switch (a) {
+        .push_clip => |value| switch (b) {
+            .push_clip => |other| clipsEqual(value, other),
+            else => false,
+        },
+        .pop_clip => switch (b) {
+            .pop_clip => true,
+            else => false,
+        },
+        .push_opacity => |value| switch (b) {
+            .push_opacity => |other| value == other,
+            else => false,
+        },
+        .pop_opacity => switch (b) {
+            .pop_opacity => true,
+            else => false,
+        },
+        .transform => |value| switch (b) {
+            .transform => |other| affinesEqual(value, other),
+            else => false,
+        },
+        .fill_rect => |value| switch (b) {
+            .fill_rect => |other| fillRectsEqual(value, other),
+            else => false,
+        },
+        .stroke_rect => |value| switch (b) {
+            .stroke_rect => |other| strokeRectsEqual(value, other),
+            else => false,
+        },
+        .fill_rounded_rect => |value| switch (b) {
+            .fill_rounded_rect => |other| fillRoundedRectsEqual(value, other),
+            else => false,
+        },
+        .draw_line => |value| switch (b) {
+            .draw_line => |other| linesEqual(value, other),
+            else => false,
+        },
+        .fill_path => |value| switch (b) {
+            .fill_path => |other| fillPathsEqual(value, other),
+            else => false,
+        },
+        .stroke_path => |value| switch (b) {
+            .stroke_path => |other| strokePathsEqual(value, other),
+            else => false,
+        },
+        .draw_image => |value| switch (b) {
+            .draw_image => |other| drawImagesEqual(value, other),
+            else => false,
+        },
+        .draw_text => |value| switch (b) {
+            .draw_text => |other| drawTextsEqual(value, other),
+            else => false,
+        },
+        .shadow => |value| switch (b) {
+            .shadow => |other| shadowsEqual(value, other),
+            else => false,
+        },
+        .blur => |value| switch (b) {
+            .blur => |other| blursEqual(value, other),
+            else => false,
+        },
+    };
+}
+
+fn clipsEqual(a: Clip, b: Clip) bool {
+    return a.id == b.id and rectsEqual(a.rect, b.rect) and radiiEqual(a.radius, b.radius);
+}
+
+fn fillRectsEqual(a: FillRect, b: FillRect) bool {
+    return a.id == b.id and rectsEqual(a.rect, b.rect) and fillsEqual(a.fill, b.fill);
+}
+
+fn strokeRectsEqual(a: StrokeRect, b: StrokeRect) bool {
+    return a.id == b.id and rectsEqual(a.rect, b.rect) and radiiEqual(a.radius, b.radius) and strokesEqual(a.stroke, b.stroke);
+}
+
+fn fillRoundedRectsEqual(a: FillRoundedRect, b: FillRoundedRect) bool {
+    return a.id == b.id and rectsEqual(a.rect, b.rect) and radiiEqual(a.radius, b.radius) and fillsEqual(a.fill, b.fill);
+}
+
+fn linesEqual(a: Line, b: Line) bool {
+    return a.id == b.id and pointsEqual(a.from, b.from) and pointsEqual(a.to, b.to) and strokesEqual(a.stroke, b.stroke);
+}
+
+fn fillPathsEqual(a: FillPath, b: FillPath) bool {
+    return a.id == b.id and pathElementsEqual(a.elements, b.elements) and fillsEqual(a.fill, b.fill);
+}
+
+fn strokePathsEqual(a: StrokePath, b: StrokePath) bool {
+    return a.id == b.id and pathElementsEqual(a.elements, b.elements) and strokesEqual(a.stroke, b.stroke);
+}
+
+fn drawImagesEqual(a: DrawImage, b: DrawImage) bool {
+    return a.id == b.id and
+        a.image_id == b.image_id and
+        optionalRectsEqual(a.src, b.src) and
+        rectsEqual(a.dst, b.dst) and
+        a.opacity == b.opacity and
+        a.fit == b.fit;
+}
+
+fn drawTextsEqual(a: DrawText, b: DrawText) bool {
+    return a.id == b.id and
+        a.font_id == b.font_id and
+        a.size == b.size and
+        pointsEqual(a.origin, b.origin) and
+        colorsEqual(a.color, b.color) and
+        std.mem.eql(u8, a.text, b.text) and
+        glyphsEqual(a.glyphs, b.glyphs);
+}
+
+fn shadowsEqual(a: Shadow, b: Shadow) bool {
+    return a.id == b.id and
+        rectsEqual(a.rect, b.rect) and
+        radiiEqual(a.radius, b.radius) and
+        offsetsEqual(a.offset, b.offset) and
+        a.blur == b.blur and
+        a.spread == b.spread and
+        colorsEqual(a.color, b.color);
+}
+
+fn blursEqual(a: Blur, b: Blur) bool {
+    return a.id == b.id and rectsEqual(a.rect, b.rect) and a.radius == b.radius;
+}
+
+fn fillsEqual(a: Fill, b: Fill) bool {
+    return switch (a) {
+        .color => |value| switch (b) {
+            .color => |other| colorsEqual(value, other),
+            else => false,
+        },
+        .linear_gradient => |value| switch (b) {
+            .linear_gradient => |other| linearGradientsEqual(value, other),
+            else => false,
+        },
+    };
+}
+
+fn strokesEqual(a: Stroke, b: Stroke) bool {
+    return a.width == b.width and fillsEqual(a.fill, b.fill);
+}
+
+fn linearGradientsEqual(a: LinearGradient, b: LinearGradient) bool {
+    return pointsEqual(a.start, b.start) and pointsEqual(a.end, b.end) and gradientStopsEqual(a.stops, b.stops);
+}
+
+fn gradientStopsEqual(a: []const GradientStop, b: []const GradientStop) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (left.offset != right.offset or !colorsEqual(left.color, right.color)) return false;
+    }
+    return true;
+}
+
+fn pathElementsEqual(a: []const PathElement, b: []const PathElement) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (left.verb != right.verb) return false;
+        if (!pointsEqual(left.points[0], right.points[0])) return false;
+        if (!pointsEqual(left.points[1], right.points[1])) return false;
+        if (!pointsEqual(left.points[2], right.points[2])) return false;
+    }
+    return true;
+}
+
+fn glyphsEqual(a: []const Glyph, b: []const Glyph) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (left.id != right.id or left.x != right.x or left.y != right.y or left.advance != right.advance) return false;
+    }
+    return true;
+}
+
+fn rectsEqual(a: geometry.RectF, b: geometry.RectF) bool {
+    return a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height;
+}
+
+fn optionalRectsEqual(a: ?geometry.RectF, b: ?geometry.RectF) bool {
+    if (a) |left| {
+        if (b) |right| return rectsEqual(left, right);
+        return false;
+    }
+    return b == null;
+}
+
+fn pointsEqual(a: geometry.PointF, b: geometry.PointF) bool {
+    return a.x == b.x and a.y == b.y;
+}
+
+fn offsetsEqual(a: geometry.OffsetF, b: geometry.OffsetF) bool {
+    return a.dx == b.dx and a.dy == b.dy;
+}
+
+fn colorsEqual(a: Color, b: Color) bool {
+    return a.r == b.r and a.g == b.g and a.b == b.b and a.a == b.a;
+}
+
+fn radiiEqual(a: Radius, b: Radius) bool {
+    return a.top_left == b.top_left and
+        a.top_right == b.top_right and
+        a.bottom_right == b.bottom_right and
+        a.bottom_left == b.bottom_left;
+}
+
+fn affinesEqual(a: Affine, b: Affine) bool {
+    return a.a == b.a and
+        a.b == b.b and
+        a.c == b.c and
+        a.d == b.d and
+        a.tx == b.tx and
+        a.ty == b.ty;
+}
 
 fn writeCommandJson(command: CanvasCommand, writer: anytype) !void {
     try writer.writeAll("{\"op\":");
@@ -525,6 +998,104 @@ test "builder reports fixed buffer overflow" {
     try std.testing.expectError(error.DisplayListFull, builder.popOpacity());
 }
 
+test "display list finds commands and computes conservative bounds" {
+    const path = [_]PathElement{
+        .{ .verb = .move_to, .points = .{ geometry.PointF.init(5, 5), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .cubic_to, .points = .{ geometry.PointF.init(15, 30), geometry.PointF.init(20, 0), geometry.PointF.init(35, 35) } },
+        .{ .verb = .close },
+    };
+
+    var commands: [3]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try builder.strokeRect(.{
+        .id = 1,
+        .rect = geometry.RectF.init(10, 10, 100, 40),
+        .stroke = .{ .fill = .{ .color = Color.rgb8(0, 0, 0) }, .width = 4 },
+    });
+    try builder.fillPath(.{
+        .id = 2,
+        .elements = &path,
+        .fill = .{ .color = Color.rgb8(255, 255, 255) },
+    });
+    try builder.shadow(.{
+        .id = 3,
+        .rect = geometry.RectF.init(20, 20, 40, 20),
+        .offset = .{ .dx = 0, .dy = 8 },
+        .blur = 12,
+        .spread = -4,
+        .color = Color.rgba8(0, 0, 0, 64),
+    });
+
+    const display_list = builder.displayList();
+    const path_ref = display_list.findCommandById(2).?;
+    try std.testing.expectEqual(@as(usize, 1), path_ref.index);
+    try std.testing.expectEqual(@as(?ObjectId, 2), path_ref.command.objectId());
+    try std.testing.expect(display_list.findCommandById(99) == null);
+
+    try expectRect(geometry.RectF.init(8, 8, 104, 44), display_list.commands[0].bounds());
+    try expectRect(geometry.RectF.init(5, 0, 30, 35), display_list.commands[1].bounds());
+    try expectRect(geometry.RectF.init(4, 12, 72, 52), display_list.commands[2].bounds());
+    try expectRect(geometry.RectF.init(4, 0, 108, 64), display_list.bounds());
+}
+
+test "display list diffs changed added removed and unkeyed scene commands" {
+    const previous_commands = [_]CanvasCommand{
+        .{ .push_opacity = 1 },
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 100, 100), .fill = .{ .color = Color.rgb8(255, 255, 255) } } },
+        .{ .fill_rect = .{ .id = 2, .rect = geometry.RectF.init(120, 0, 40, 40), .fill = .{ .color = Color.rgb8(17, 24, 39) } } },
+        .{ .draw_image = .{ .id = 3, .image_id = 8, .dst = geometry.RectF.init(180, 0, 32, 32) } },
+    };
+    const next_commands = [_]CanvasCommand{
+        .{ .push_opacity = 0.5 },
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(10, 0, 100, 100), .fill = .{ .color = Color.rgb8(255, 255, 255) } } },
+        .{ .fill_rect = .{ .id = 2, .rect = geometry.RectF.init(120, 0, 40, 40), .fill = .{ .color = Color.rgb8(17, 24, 39) } } },
+        .{ .blur = .{ .id = 4, .rect = geometry.RectF.init(220, 0, 24, 24), .radius = 6 } },
+    };
+
+    var changes: [8]DiffChange = undefined;
+    const diff = try DisplayList.diff(.{ .commands = &previous_commands }, .{ .commands = &next_commands }, &changes);
+    try std.testing.expectEqual(@as(usize, 4), diff.len);
+    try std.testing.expectEqual(DiffKind.scene_changed, diff[0].kind);
+    try std.testing.expectEqual(@as(?ObjectId, null), diff[0].id);
+    try std.testing.expect(diff[0].dirty_bounds != null);
+    try std.testing.expectEqual(DiffKind.changed, diff[1].kind);
+    try std.testing.expectEqual(@as(?ObjectId, 1), diff[1].id);
+    try std.testing.expectEqual(@as(?usize, 1), diff[1].previous_index);
+    try std.testing.expectEqual(@as(?usize, 1), diff[1].next_index);
+    try expectRect(geometry.RectF.init(0, 0, 110, 100), diff[1].dirty_bounds);
+    try std.testing.expectEqual(DiffKind.removed, diff[2].kind);
+    try std.testing.expectEqual(@as(?ObjectId, 3), diff[2].id);
+    try expectRect(geometry.RectF.init(180, 0, 32, 32), diff[2].dirty_bounds);
+    try std.testing.expectEqual(DiffKind.added, diff[3].kind);
+    try std.testing.expectEqual(@as(?ObjectId, 4), diff[3].id);
+    try expectRect(geometry.RectF.init(214, -6, 36, 36), diff[3].dirty_bounds);
+}
+
+test "display list diff ignores unchanged keyed commands" {
+    const commands = [_]CanvasCommand{
+        .{ .fill_rounded_rect = .{
+            .id = 1,
+            .rect = geometry.RectF.init(8, 8, 120, 40),
+            .radius = Radius.all(10),
+            .fill = .{ .color = Color.rgb8(15, 23, 42) },
+        } },
+    };
+
+    var changes: [1]DiffChange = undefined;
+    const diff = try DisplayList.diff(.{ .commands = &commands }, .{ .commands = &commands }, &changes);
+    try std.testing.expectEqual(@as(usize, 0), diff.len);
+}
+
+test "display list diff rejects duplicate object ids" {
+    const commands = [_]CanvasCommand{
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 10, 10), .fill = .{ .color = Color.rgb8(255, 255, 255) } } },
+        .{ .blur = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 10, 10), .radius = 4 } },
+    };
+
+    var changes: [2]DiffChange = undefined;
+    try std.testing.expectError(error.DuplicateObjectId, DisplayList.diff(.{ .commands = &commands }, .{}, &changes));
+}
+
 test "display list serializes deterministically" {
     const stops = [_]GradientStop{
         .{ .offset = 0, .color = Color.rgb8(255, 255, 255) },
@@ -572,4 +1143,9 @@ test "display list serializes deterministically" {
     const expected =
         "{\"commands\":[{\"op\":\"fill_rect\",\"id\":10,\"rect\":[0,0,360,180],\"fill\":{\"kind\":\"linear_gradient\",\"start\":[0,0],\"end\":[360,180],\"stops\":[{\"offset\":0,\"color\":[1,1,1,1]},{\"offset\":1,\"color\":[0.23137255,0.50980395,0.9647059,1]}]}},{\"op\":\"shadow\",\"id\":11,\"rect\":[24,24,220,96],\"radius\":[16,16,16,16],\"offset\":[0,18],\"blur\":42,\"spread\":-8,\"color\":[0.05882353,0.09019608,0.16470589,0.1882353]},{\"op\":\"draw_text\",\"id\":12,\"font\":7,\"size\":17,\"origin\":[32,52],\"color\":[0.05882353,0.09019608,0.16470589,1],\"text\":\"Hi\",\"glyphs\":[{\"id\":42,\"x\":12,\"y\":28,\"advance\":9},{\"id\":43,\"x\":21,\"y\":28,\"advance\":8}]}]}";
     try std.testing.expectEqualStrings(expected, writer.buffered());
+}
+
+fn expectRect(expected: geometry.RectF, actual: ?geometry.RectF) !void {
+    try std.testing.expect(actual != null);
+    try std.testing.expectEqualDeep(expected, actual.?);
 }
