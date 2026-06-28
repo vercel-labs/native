@@ -843,6 +843,7 @@ pub const ReferenceRenderSurface = struct {
             .fill_rect => |value| try self.fillRect(command, value, draw_bounds),
             .fill_rounded_rect => |value| try self.fillRoundedRect(command, value, draw_bounds),
             .stroke_rect => |value| try self.strokeRect(command, value, draw_bounds),
+            .draw_line => |value| try self.drawLine(command, value, draw_bounds),
             else => return error.ReferenceRenderUnsupportedCommand,
         }
     }
@@ -890,6 +891,25 @@ pub const ReferenceRenderSurface = struct {
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
                 const point = referencePixelCenter(x, y);
                 if (referencePointInRoundedRect(point, outer, outer_radius) and !referencePointInRoundedRect(point, inner, inner_radius)) {
+                    self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.stroke.fill, command.transform, point), command.opacity);
+                }
+            }
+        }
+    }
+
+    fn drawLine(self: ReferenceRenderSurface, command: RenderCommand, value: Line, draw_bounds: geometry.RectF) Error!void {
+        const stroke_width = nonNegative(value.stroke.width) * referenceTransformScale(command.transform);
+        if (stroke_width <= 0) return;
+        const half_width = stroke_width * 0.5;
+        const from = command.transform.transformPoint(value.from);
+        const to = command.transform.transformPoint(value.to);
+        const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return;
+        var y = pixel_rect.y;
+        while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
+            var x = pixel_rect.x;
+            while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
+                const point = referencePixelCenter(x, y);
+                if (referenceDistanceToSegment(point, from, to) <= half_width) {
                     self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.stroke.fill, command.transform, point), command.opacity);
                 }
             }
@@ -3798,6 +3818,23 @@ fn referenceMixColor(a: Color, b: Color, t: f32) Color {
         .b = a.b + (b.b - a.b) * value,
         .a = a.a + (b.a - a.a) * value,
     };
+}
+
+fn referenceDistanceToSegment(point: geometry.PointF, from: geometry.PointF, to: geometry.PointF) f32 {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const length_sq = dx * dx + dy * dy;
+    if (length_sq <= 0.000001) {
+        const px = point.x - from.x;
+        const py = point.y - from.y;
+        return @sqrt(px * px + py * py);
+    }
+
+    const t = std.math.clamp(((point.x - from.x) * dx + (point.y - from.y) * dy) / length_sq, 0, 1);
+    const closest = geometry.PointF.init(from.x + dx * t, from.y + dy * t);
+    const px = point.x - closest.x;
+    const py = point.y - closest.y;
+    return @sqrt(px * px + py * py);
 }
 
 fn referencePixelRect(rect: geometry.RectF, width: usize, height: usize) ?ReferencePixelRect {
@@ -7414,6 +7451,45 @@ test "reference renderer samples transformed clipped linear gradients" {
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 1, 0);
     try expectPixelRgba8(.{ 64, 0, 191, 255 }, surface, 2, 0);
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 3, 0);
+}
+
+test "reference renderer draws stroked lines" {
+    const commands = [_]CanvasCommand{.{ .draw_line = .{
+        .id = 1,
+        .from = geometry.PointF.init(0.5, 1.5),
+        .to = geometry.PointF.init(2.5, 1.5),
+        .stroke = .{ .fill = .{ .color = Color.rgb8(255, 0, 0) }, .width = 1 },
+    } }};
+
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [0]RenderResource = .{};
+    var resource_cache_entries: [0]RenderResourceCacheEntry = .{};
+    var resource_cache_actions: [0]RenderResourceCacheAction = .{};
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(4, 3),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    var pixels: [4 * 3 * 4]u8 = undefined;
+    const surface = try ReferenceRenderSurface.init(4, 3, &pixels);
+    try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
+
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 1, 0);
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 0, 1);
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 1, 1);
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 2, 1);
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 3, 1);
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 1, 2);
 }
 
 test "reference renderer rejects unsupported images" {
