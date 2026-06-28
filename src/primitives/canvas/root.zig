@@ -790,11 +790,19 @@ pub const CanvasFrame = struct {
     }
 };
 
+pub const ReferenceImage = struct {
+    id: ImageId,
+    width: usize,
+    height: usize,
+    pixels: []const u8,
+};
+
 pub const ReferenceRenderSurface = struct {
     width: usize,
     height: usize,
     pixels: []u8,
     scratch: ?[]u8 = null,
+    images: []const ReferenceImage = &.{},
 
     pub fn init(width: usize, height: usize, pixels: []u8) Error!ReferenceRenderSurface {
         const len = std.math.mul(usize, std.math.mul(usize, width, height) catch return error.ReferenceRenderSurfaceTooSmall, 4) catch return error.ReferenceRenderSurfaceTooSmall;
@@ -811,6 +819,12 @@ pub const ReferenceRenderSurface = struct {
         if (scratch.len < surface.pixels.len) return error.ReferenceRenderSurfaceTooSmall;
         surface.scratch = scratch[0..surface.pixels.len];
         return surface;
+    }
+
+    pub fn withImages(self: ReferenceRenderSurface, images: []const ReferenceImage) ReferenceRenderSurface {
+        var next = self;
+        next.images = images;
+        return next;
     }
 
     pub fn clear(self: ReferenceRenderSurface, color: Color) void {
@@ -854,6 +868,7 @@ pub const ReferenceRenderSurface = struct {
             .draw_line => |value| try self.drawLine(command, value, draw_bounds),
             .fill_path => |value| try self.fillPath(command, value, draw_bounds),
             .stroke_path => |value| try self.strokePath(command, value, draw_bounds),
+            .draw_image => |value| try self.drawImage(command, value, draw_bounds),
             .shadow => |value| try self.drawShadow(command, value, draw_bounds),
             .blur => |value| try self.drawBlur(command, value, draw_bounds),
             .draw_text => |value| try self.drawText(command, value, draw_bounds),
@@ -956,6 +971,43 @@ pub const ReferenceRenderSurface = struct {
                 if (referenceDistanceToPath(point, value.elements, command.transform)) |distance| {
                     if (distance <= half_width) self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.stroke.fill, command.transform, point), command.opacity);
                 }
+            }
+        }
+    }
+
+    fn drawImage(self: ReferenceRenderSurface, command: RenderCommand, value: DrawImage, draw_bounds: geometry.RectF) Error!void {
+        const image = self.findImage(value.image_id) orelse return error.ReferenceRenderUnsupportedCommand;
+        if (referenceImagePixelLen(image.width, image.height)) |image_len| {
+            if (image.pixels.len < image_len) return error.ReferenceRenderUnsupportedCommand;
+        } else return error.ReferenceRenderUnsupportedCommand;
+
+        const src_rect = referenceImageSourceRect(image, value.src) orelse return;
+        const local_dst = referenceImageDestinationRect(value.dst, src_rect, value.fit) orelse return;
+        const dst_rect = command.transform.transformRect(local_dst).normalized();
+        const clipped = geometry.RectF.intersection(dst_rect, draw_bounds.normalized());
+        const pixel_rect = referencePixelRect(clipped, self.width, self.height) orelse return;
+        const image_opacity = std.math.clamp(value.opacity, 0, 1);
+        var y = pixel_rect.y;
+        while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
+            var x = pixel_rect.x;
+            while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
+                const point = referencePixelCenter(x, y);
+                if (!dst_rect.containsPoint(point)) continue;
+                const u = std.math.clamp((point.x - dst_rect.x) / dst_rect.width, 0, 1);
+                const v = std.math.clamp((point.y - dst_rect.y) / dst_rect.height, 0, 1);
+                const sample = referenceSampleImage(image, src_rect, u, v);
+                const index = (y * self.width + x) * 4;
+                const dst = [4]u8{
+                    self.pixels[index + 0],
+                    self.pixels[index + 1],
+                    self.pixels[index + 2],
+                    self.pixels[index + 3],
+                };
+                const out = blendRgba8(dst, rgba8ToColor(sample), command.opacity * image_opacity);
+                self.pixels[index + 0] = out[0];
+                self.pixels[index + 1] = out[1];
+                self.pixels[index + 2] = out[2];
+                self.pixels[index + 3] = out[3];
             }
         }
     }
@@ -1091,6 +1143,13 @@ pub const ReferenceRenderSurface = struct {
         self.pixels[index + 1] = out[1];
         self.pixels[index + 2] = out[2];
         self.pixels[index + 3] = out[3];
+    }
+
+    fn findImage(self: ReferenceRenderSurface, id: ImageId) ?ReferenceImage {
+        for (self.images) |image| {
+            if (image.id == id) return image;
+        }
+        return null;
     }
 };
 
@@ -4229,6 +4288,71 @@ fn referencePixelRect(rect: geometry.RectF, width: usize, height: usize) ?Refere
         .y = @intCast(y0),
         .width = @intCast(x1 - x0),
         .height = @intCast(y1 - y0),
+    };
+}
+
+fn referenceImagePixelLen(width: usize, height: usize) ?usize {
+    const pixel_count = std.math.mul(usize, width, height) catch return null;
+    return std.math.mul(usize, pixel_count, 4) catch return null;
+}
+
+fn referenceImageSourceRect(image: ReferenceImage, src: ?geometry.RectF) ?geometry.RectF {
+    const full = geometry.RectF.init(0, 0, @floatFromInt(image.width), @floatFromInt(image.height));
+    const requested = if (src) |rect| rect.normalized() else full;
+    const clipped = geometry.RectF.intersection(requested, full);
+    return if (clipped.isEmpty()) null else clipped;
+}
+
+fn referenceImageDestinationRect(dst: geometry.RectF, src: geometry.RectF, fit: ImageFit) ?geometry.RectF {
+    const normalized = dst.normalized();
+    if (normalized.isEmpty() or src.width <= 0 or src.height <= 0) return null;
+    if (fit == .stretch) return normalized;
+
+    const src_aspect = src.width / src.height;
+    const dst_aspect = normalized.width / normalized.height;
+    var width = normalized.width;
+    var height = normalized.height;
+    switch (fit) {
+        .stretch => unreachable,
+        .contain => {
+            if (dst_aspect > src_aspect) {
+                height = normalized.height;
+                width = height * src_aspect;
+            } else {
+                width = normalized.width;
+                height = width / src_aspect;
+            }
+        },
+        .cover => {
+            if (dst_aspect > src_aspect) {
+                width = normalized.width;
+                height = width / src_aspect;
+            } else {
+                height = normalized.height;
+                width = height * src_aspect;
+            }
+        },
+    }
+
+    return geometry.RectF.init(
+        normalized.x + (normalized.width - width) * 0.5,
+        normalized.y + (normalized.height - height) * 0.5,
+        width,
+        height,
+    );
+}
+
+fn referenceSampleImage(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32) [4]u8 {
+    const sample_x_f = src.x + std.math.clamp(u, 0, 1) * src.width;
+    const sample_y_f = src.y + std.math.clamp(v, 0, 1) * src.height;
+    const sample_x = clampI32(referenceFloor(sample_x_f), 0, @intCast(image.width - 1));
+    const sample_y = clampI32(referenceFloor(sample_y_f), 0, @intCast(image.height - 1));
+    const index = (@as(usize, @intCast(sample_y)) * image.width + @as(usize, @intCast(sample_x))) * 4;
+    return .{
+        image.pixels[index + 0],
+        image.pixels[index + 1],
+        image.pixels[index + 2],
+        image.pixels[index + 3],
     };
 }
 
@@ -8153,6 +8277,54 @@ test "reference renderer draws proxy text runs" {
     try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 3, 1);
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 4, 1);
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 1, 3);
+}
+
+test "reference renderer draws image resources" {
+    const commands = [_]CanvasCommand{.{ .draw_image = .{
+        .id = 1,
+        .image_id = 42,
+        .dst = geometry.RectF.init(0, 0, 4, 4),
+        .fit = .contain,
+    } }};
+    const image_pixels = [_]u8{
+        255, 0, 0,   255,
+        0,   0, 255, 255,
+    };
+    const images = [_]ReferenceImage{.{
+        .id = 42,
+        .width = 2,
+        .height = 1,
+        .pixels = &image_pixels,
+    }};
+
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [1]RenderResource = undefined;
+    var resource_cache_entries: [1]RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [1]RenderResourceCacheAction = undefined;
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(4, 4),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    var pixels: [4 * 4 * 4]u8 = undefined;
+    const surface = (try ReferenceRenderSurface.init(4, 4, &pixels)).withImages(&images);
+    try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
+
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 0, 0);
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 0, 1);
+    try expectPixelRgba8(.{ 0, 0, 255, 255 }, surface, 2, 1);
+    try expectPixelRgba8(.{ 0, 0, 255, 255 }, surface, 3, 2);
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 0, 3);
 }
 
 test "reference renderer rejects unsupported images" {
