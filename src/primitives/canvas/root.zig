@@ -647,6 +647,7 @@ pub const WidgetKind = enum {
     stack,
     row,
     column,
+    grid,
     panel,
     text,
     button,
@@ -671,6 +672,7 @@ pub const WidgetLayoutStyle = struct {
     padding: geometry.InsetsF = .{},
     gap: f32 = 0,
     grow: f32 = 0,
+    columns: usize = 0,
     min_size: geometry.SizeF = .{},
 };
 
@@ -1053,7 +1055,7 @@ pub fn emitWidgetLayout(builder: *Builder, layout: WidgetLayoutTree, tokens: Des
     for (layout.nodes) |node| {
         const widget = widgetWithFrame(node.widget, node.frame);
         switch (widget.kind) {
-            .stack, .row, .column => {},
+            .stack, .row, .column, .grid => {},
             .panel => try emitPanelWidgetChrome(builder, widget, tokens),
             .text => try emitTextWidget(builder, widget, tokens),
             .button => try emitButtonWidget(builder, widget, tokens),
@@ -1624,7 +1626,7 @@ fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, dept
     if (depth >= max_widget_depth) return error.WidgetDepthExceeded;
 
     switch (widget.kind) {
-        .stack, .row, .column => try emitWidgetChildren(builder, widget.children, tokens, depth),
+        .stack, .row, .column, .grid => try emitWidgetChildren(builder, widget.children, tokens, depth),
         .panel => try emitPanelWidget(builder, widget, tokens, depth),
         .text => try emitTextWidget(builder, widget, tokens),
         .button => try emitButtonWidget(builder, widget, tokens),
@@ -2051,6 +2053,7 @@ fn layoutWidgetDepth(
     switch (widget.kind) {
         .row => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout.gap),
         .column => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout.gap),
+        .grid => try layoutGridChildren(widget.children, content, index, depth, output, len, widget.layout.gap, widget.layout.columns),
         .stack, .panel => {
             for (widget.children) |child| {
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len);
@@ -2119,6 +2122,43 @@ fn layoutAxisChildren(
         };
         _ = try layoutWidgetDepth(child, child_frame, parent_index, depth + 1, output, len);
         cursor += main_extent + clamped_gap;
+    }
+}
+
+fn layoutGridChildren(
+    children: []const Widget,
+    content: geometry.RectF,
+    parent_index: usize,
+    depth: usize,
+    output: []WidgetLayoutNode,
+    len: *usize,
+    gap: f32,
+    requested_columns: usize,
+) Error!void {
+    if (children.len == 0) return;
+
+    const columns = if (requested_columns > 0) @min(requested_columns, children.len) else children.len;
+    const rows = (children.len + columns - 1) / columns;
+    const clamped_gap = nonNegative(gap);
+    const total_column_gap = clamped_gap * @as(f32, @floatFromInt(columns - 1));
+    const total_row_gap = clamped_gap * @as(f32, @floatFromInt(rows - 1));
+    const cell_width = if (columns > 0) @max(0, content.width - total_column_gap) / @as(f32, @floatFromInt(columns)) else 0;
+    const fallback_cell_height = if (rows > 0) @max(0, content.height - total_row_gap) / @as(f32, @floatFromInt(rows)) else 0;
+
+    for (children, 0..) |child, child_index| {
+        const column = child_index % columns;
+        const row = child_index / columns;
+        const x = content.x + @as(f32, @floatFromInt(column)) * (cell_width + clamped_gap);
+        const y = content.y + @as(f32, @floatFromInt(row)) * (fallback_cell_height + clamped_gap);
+        const width = @max(child.layout.min_size.width, if (child.frame.width > 0) child.frame.width else cell_width);
+        const height = @max(child.layout.min_size.height, if (child.frame.height > 0) child.frame.height else fallback_cell_height);
+        const child_frame = geometry.RectF.init(
+            x + child.frame.x,
+            y + child.frame.y,
+            width,
+            height,
+        );
+        _ = try layoutWidgetDepth(child, child_frame, parent_index, depth + 1, output, len);
     }
 }
 
@@ -2327,7 +2367,7 @@ fn nearestSemanticParent(stack: []const ?usize) ?usize {
 fn semanticRole(widget: Widget) WidgetRole {
     if (widget.semantics.role != .none) return widget.semantics.role;
     return switch (widget.kind) {
-        .stack, .row, .column, .panel => .group,
+        .stack, .row, .column, .grid, .panel => .group,
         .text => .text,
         .button => .button,
         .text_field => .textbox,
@@ -2370,7 +2410,7 @@ fn isFocusable(widget: Widget) bool {
 fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     return switch (widget.kind) {
-        .row, .column, .stack => false,
+        .row, .column, .grid, .stack => false,
         .panel, .text, .button, .text_field, .list_item, .segmented_control, .checkbox, .toggle, .slider, .progress => true,
     };
 }
@@ -2500,6 +2540,7 @@ fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {
     return insetsEqual(a.padding, b.padding) and
         a.gap == b.gap and
         a.grow == b.grow and
+        a.columns == b.columns and
         sizesEqual(a.min_size, b.min_size);
 }
 
@@ -3346,6 +3387,34 @@ test "widget layout hit testing prefers deepest topmost enabled target" {
     try std.testing.expect(layout.hitTest(geometry.PointF.init(200, 10)) == null);
 }
 
+test "widget grid layout places children in deterministic cells" {
+    const children = [_]Widget{
+        .{ .id = 2, .kind = .text, .text = "One" },
+        .{ .id = 3, .kind = .text, .text = "Two" },
+        .{ .id = 4, .kind = .button, .text = "Three" },
+        .{ .id = 5, .kind = .button, .text = "Four" },
+    };
+    const grid = Widget{
+        .id = 1,
+        .kind = .grid,
+        .layout = .{ .gap = 8, .columns = 2 },
+        .children = &children,
+    };
+
+    var nodes: [6]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(grid, geometry.RectF.init(0, 0, 208, 88), &nodes);
+    try std.testing.expectEqual(@as(usize, 5), layout.nodeCount());
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(0, 0, 100, 40));
+    try expectLayoutFrame(layout, 3, geometry.RectF.init(108, 0, 100, 40));
+    try expectLayoutFrame(layout, 4, geometry.RectF.init(0, 48, 100, 40));
+    try expectLayoutFrame(layout, 5, geometry.RectF.init(108, 48, 100, 40));
+
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    try std.testing.expectEqual(@as(usize, 8), builder.displayList().commandCount());
+}
+
 test "widget pointer route includes capture target and bubble phases" {
     const row_children = [_]Widget{.{
         .id = 2,
@@ -3740,6 +3809,28 @@ test "widget layout diff separates paint and semantics dirtiness" {
     try std.testing.expect(!semantic_invalidations[0].paint_dirty);
     try std.testing.expect(semantic_invalidations[0].semantics_dirty);
     try std.testing.expect(semantic_invalidations[0].dirty_bounds == null);
+}
+
+test "widget layout diff marks grid column changes as layout dirty" {
+    const children = [_]Widget{
+        .{ .id = 2, .kind = .text, .text = "One" },
+        .{ .id = 3, .kind = .text, .text = "Two" },
+    };
+    const previous_grid = Widget{ .id = 1, .kind = .grid, .layout = .{ .columns = 2, .gap = 8 }, .children = &children };
+    const next_grid = Widget{ .id = 1, .kind = .grid, .layout = .{ .columns = 1, .gap = 8 }, .children = &children };
+
+    var previous_nodes: [3]WidgetLayoutNode = undefined;
+    var next_nodes: [3]WidgetLayoutNode = undefined;
+    const previous = try layoutWidgetTree(previous_grid, geometry.RectF.init(0, 0, 208, 88), &previous_nodes);
+    const next = try layoutWidgetTree(next_grid, geometry.RectF.init(0, 0, 208, 88), &next_nodes);
+
+    var invalidations_buffer: [3]WidgetInvalidation = undefined;
+    const invalidations = try WidgetLayoutTree.diff(previous, next, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 3), invalidations.len);
+    try std.testing.expectEqual(@as(ObjectId, 1), invalidations[0].id);
+    try std.testing.expect(invalidations[0].layout_dirty);
+    try std.testing.expect(invalidations[0].paint_dirty);
+    try std.testing.expect(invalidations[0].semantics_dirty);
 }
 
 test "widget layout diff reports duplicate ids and output overflow" {
