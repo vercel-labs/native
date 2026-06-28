@@ -1634,6 +1634,10 @@ pub const WidgetSemanticsNode = struct {
     label: []const u8,
     value: ?f32 = null,
     text_value: []const u8 = "",
+    grid_row_index: ?usize = null,
+    grid_column_index: ?usize = null,
+    grid_row_count: ?usize = null,
+    grid_column_count: ?usize = null,
     bounds: geometry.RectF,
     state: WidgetState,
     focusable: bool = false,
@@ -4041,7 +4045,7 @@ fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNod
     var len: usize = 0;
     var semantic_stack: [max_widget_depth]?usize = [_]?usize{null} ** max_widget_depth;
 
-    for (layout.nodes) |node| {
+    for (layout.nodes, 0..) |node, node_index| {
         if (node.depth >= max_widget_depth) return error.WidgetDepthExceeded;
         var cursor = node.depth + 1;
         while (cursor < semantic_stack.len) : (cursor += 1) {
@@ -4053,12 +4057,17 @@ fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNod
         if (len >= output.len) return error.WidgetSemanticsListFull;
 
         const parent_index = nearestSemanticParent(semantic_stack[0..node.depth]);
+        const grid = widgetGridSemantics(layout, node_index);
         output[len] = .{
             .id = node.widget.id,
             .role = role,
             .label = semanticLabel(node.widget),
             .value = semanticValue(node.widget),
             .text_value = semanticTextValue(node.widget),
+            .grid_row_index = grid.row_index,
+            .grid_column_index = grid.column_index,
+            .grid_row_count = grid.row_count,
+            .grid_column_count = grid.column_count,
             .bounds = node.frame,
             .state = node.widget.state,
             .focusable = node.widget.semantics.focusable or node.widget.semantics.actions.focus or defaultFocusable(node.widget),
@@ -4129,6 +4138,77 @@ fn semanticTextValue(widget: Widget) []const u8 {
         .text_field, .search_field => widget.text,
         else => "",
     };
+}
+
+const WidgetGridSemantics = struct {
+    row_index: ?usize = null,
+    column_index: ?usize = null,
+    row_count: ?usize = null,
+    column_count: ?usize = null,
+};
+
+fn widgetGridSemantics(layout: WidgetLayoutTree, node_index: usize) WidgetGridSemantics {
+    if (node_index >= layout.nodes.len) return .{};
+    const node = layout.nodes[node_index];
+    return switch (node.widget.kind) {
+        .data_grid => .{
+            .row_count = directChildCountByKind(layout, node_index, .data_row),
+            .column_count = maxDataGridColumnCount(layout, node_index),
+        },
+        .data_row => widgetDataRowGridSemantics(layout, node_index),
+        .data_cell => widgetDataCellGridSemantics(layout, node_index),
+        else => .{},
+    };
+}
+
+fn widgetDataRowGridSemantics(layout: WidgetLayoutTree, row_index: usize) WidgetGridSemantics {
+    const grid_index = layout.nodes[row_index].parent_index orelse return .{};
+    if (grid_index >= layout.nodes.len or layout.nodes[grid_index].widget.kind != .data_grid) return .{};
+    return .{
+        .row_index = directChildOrdinalByKind(layout, grid_index, row_index, .data_row),
+        .row_count = directChildCountByKind(layout, grid_index, .data_row),
+        .column_count = directChildCountByKind(layout, row_index, .data_cell),
+    };
+}
+
+fn widgetDataCellGridSemantics(layout: WidgetLayoutTree, cell_index: usize) WidgetGridSemantics {
+    const row_index = layout.nodes[cell_index].parent_index orelse return .{};
+    if (row_index >= layout.nodes.len or layout.nodes[row_index].widget.kind != .data_row) return .{};
+    const grid_index = layout.nodes[row_index].parent_index orelse return .{};
+    if (grid_index >= layout.nodes.len or layout.nodes[grid_index].widget.kind != .data_grid) return .{};
+    return .{
+        .row_index = directChildOrdinalByKind(layout, grid_index, row_index, .data_row),
+        .column_index = directChildOrdinalByKind(layout, row_index, cell_index, .data_cell),
+        .row_count = directChildCountByKind(layout, grid_index, .data_row),
+        .column_count = directChildCountByKind(layout, row_index, .data_cell),
+    };
+}
+
+fn directChildCountByKind(layout: WidgetLayoutTree, parent_index: usize, kind: WidgetKind) usize {
+    var count: usize = 0;
+    for (layout.nodes) |node| {
+        if (node.parent_index == parent_index and node.widget.kind == kind) count += 1;
+    }
+    return count;
+}
+
+fn directChildOrdinalByKind(layout: WidgetLayoutTree, parent_index: usize, child_index: usize, kind: WidgetKind) ?usize {
+    var ordinal: usize = 0;
+    for (layout.nodes, 0..) |node, index| {
+        if (node.parent_index != parent_index or node.widget.kind != kind) continue;
+        if (index == child_index) return ordinal;
+        ordinal += 1;
+    }
+    return null;
+}
+
+fn maxDataGridColumnCount(layout: WidgetLayoutTree, grid_index: usize) usize {
+    var max_columns: usize = 0;
+    for (layout.nodes, 0..) |node, index| {
+        if (node.parent_index != grid_index or node.widget.kind != .data_row) continue;
+        max_columns = @max(max_columns, directChildCountByKind(layout, index, .data_cell));
+    }
+    return max_columns;
 }
 
 fn semanticActions(widget: Widget) WidgetActions {
@@ -7170,6 +7250,60 @@ test "widget list item and segmented controls expose selectable semantics" {
     try std.testing.expectEqual(WidgetRole.tab, semantics[1].role);
     try std.testing.expectEqualStrings("Open", semantics[1].label);
     try std.testing.expectEqual(@as(?f32, 1), semantics[1].value);
+}
+
+test "widget data grids expose row and column semantics" {
+    const header_cells = [_]Widget{
+        .{ .id = 3, .kind = .data_cell, .text = "Project", .layout = .{ .grow = 1 } },
+        .{ .id = 4, .kind = .data_cell, .text = "Status", .layout = .{ .grow = 1 } },
+    };
+    const row_cells = [_]Widget{
+        .{ .id = 6, .kind = .data_cell, .text = "Edge API", .layout = .{ .grow = 1 } },
+        .{ .id = 7, .kind = .data_cell, .text = "Live", .layout = .{ .grow = 1 } },
+    };
+    const rows = [_]Widget{
+        .{ .id = 2, .kind = .data_row, .children = &header_cells },
+        .{ .id = 5, .kind = .data_row, .children = &row_cells },
+    };
+    const grid = Widget{
+        .id = 1,
+        .kind = .data_grid,
+        .text = "Deployments",
+        .layout = .{ .gap = 2 },
+        .children = &rows,
+    };
+
+    var nodes: [8]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(grid, geometry.RectF.init(0, 0, 320, 180), &nodes);
+    var semantics_buffer: [8]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+
+    try std.testing.expectEqual(@as(usize, 7), semantics.len);
+    try std.testing.expectEqual(WidgetRole.grid, semantics[0].role);
+    try std.testing.expect(semantics[0].grid_row_index == null);
+    try std.testing.expect(semantics[0].grid_column_index == null);
+    try std.testing.expectEqual(@as(?usize, 2), semantics[0].grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), semantics[0].grid_column_count);
+
+    try std.testing.expectEqual(WidgetRole.row, semantics[1].role);
+    try std.testing.expectEqual(@as(?usize, 0), semantics[1].grid_row_index);
+    try std.testing.expect(semantics[1].grid_column_index == null);
+    try std.testing.expectEqual(@as(?usize, 2), semantics[1].grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), semantics[1].grid_column_count);
+
+    try std.testing.expectEqual(WidgetRole.gridcell, semantics[2].role);
+    try std.testing.expectEqualStrings("Project", semantics[2].label);
+    try std.testing.expectEqual(@as(?usize, 0), semantics[2].grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 0), semantics[2].grid_column_index);
+    try std.testing.expectEqual(@as(?usize, 2), semantics[2].grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), semantics[2].grid_column_count);
+
+    try std.testing.expectEqual(WidgetRole.gridcell, semantics[5].role);
+    try std.testing.expectEqualStrings("Edge API", semantics[5].label);
+    try std.testing.expectEqual(@as(?usize, 1), semantics[5].grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 0), semantics[5].grid_column_index);
+    try std.testing.expectEqual(@as(?usize, 2), semantics[5].grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), semantics[5].grid_column_count);
 }
 
 test "widget list layout groups list items semantically" {

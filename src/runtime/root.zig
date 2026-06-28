@@ -1532,6 +1532,10 @@ pub const Runtime = struct {
                     .parent_id = canvasWidgetSemanticParentId(semantics, node.parent_index),
                     .value = node.value,
                     .text_value = node.text_value,
+                    .grid_row_index = node.grid_row_index,
+                    .grid_column_index = node.grid_column_index,
+                    .grid_row_count = node.grid_row_count,
+                    .grid_column_count = node.grid_column_count,
                     .bounds = node.bounds.translate(geometry.OffsetF.init(view.frame.x, view.frame.y)),
                     .focused = node.state.focused or (view.focused and node.id == view.canvas_widget_focused_id),
                     .enabled = !node.state.disabled,
@@ -8254,12 +8258,24 @@ test "runtime automation snapshot exposes canvas data grid roles" {
     try std.testing.expectEqualStrings("Deployments", snapshot.widgets[0].name);
     try std.testing.expect(snapshot.widgets[0].parent_id == null);
     try std.testing.expectEqualDeep(geometry.RectF.init(20, 30, 320, 180), snapshot.widgets[0].bounds);
+    try std.testing.expect(snapshot.widgets[0].grid_row_index == null);
+    try std.testing.expect(snapshot.widgets[0].grid_column_index == null);
+    try std.testing.expectEqual(@as(?usize, 2), snapshot.widgets[0].grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), snapshot.widgets[0].grid_column_count);
     try std.testing.expectEqualStrings("row", snapshot.widgets[1].role);
     try std.testing.expectEqual(@as(?u64, 1), snapshot.widgets[1].parent_id);
+    try std.testing.expectEqual(@as(?usize, 0), snapshot.widgets[1].grid_row_index);
+    try std.testing.expect(snapshot.widgets[1].grid_column_index == null);
+    try std.testing.expectEqual(@as(?usize, 2), snapshot.widgets[1].grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), snapshot.widgets[1].grid_column_count);
     try std.testing.expectEqualStrings("gridcell", snapshot.widgets[2].role);
     try std.testing.expectEqualStrings("Project", snapshot.widgets[2].name);
     try std.testing.expectEqual(@as(?u64, 2), snapshot.widgets[2].parent_id);
     try std.testing.expectEqualDeep(geometry.RectF.init(20, 30, 160, 28), snapshot.widgets[2].bounds);
+    try std.testing.expectEqual(@as(?usize, 0), snapshot.widgets[2].grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 0), snapshot.widgets[2].grid_column_index);
+    try std.testing.expectEqual(@as(?usize, 2), snapshot.widgets[2].grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), snapshot.widgets[2].grid_column_count);
     try std.testing.expect(snapshot.widgets[2].actions.focus);
     try std.testing.expect(snapshot.widgets[2].actions.select);
     try std.testing.expect(!snapshot.widgets[2].actions.press);
@@ -8267,13 +8283,18 @@ test "runtime automation snapshot exposes canvas data grid roles" {
     try std.testing.expectEqualStrings("Edge API", snapshot.widgets[5].name);
     try std.testing.expectEqual(@as(?u64, 5), snapshot.widgets[5].parent_id);
     try std.testing.expectEqualDeep(geometry.RectF.init(20, 60, 160, 28), snapshot.widgets[5].bounds);
+    try std.testing.expectEqual(@as(?usize, 1), snapshot.widgets[5].grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 0), snapshot.widgets[5].grid_column_index);
+    try std.testing.expectEqual(@as(?usize, 2), snapshot.widgets[5].grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), snapshot.widgets[5].grid_column_count);
     try std.testing.expect(snapshot.widgets[5].actions.select);
 
-    var a11y_buffer: [1024]u8 = undefined;
+    var a11y_buffer: [2048]u8 = undefined;
     var a11y_writer = std.Io.Writer.fixed(&a11y_buffer);
     try automation.snapshot.writeA11yText(snapshot, &a11y_writer);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#1 role=grid name=\"Deployments\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#6 role=gridcell name=\"Edge API\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "grid=[row_index=1,column_index=0,row_count=2,column_count=2]") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "actions=[focus,select]") != null);
 }
 

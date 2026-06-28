@@ -52,6 +52,10 @@ pub const Widget = struct {
     parent_id: ?u64 = null,
     value: ?f32 = null,
     text_value: []const u8 = "",
+    grid_row_index: ?usize = null,
+    grid_column_index: ?usize = null,
+    grid_row_count: ?usize = null,
+    grid_column_count: ?usize = null,
     bounds: geometry.RectF = .{},
     focused: bool = false,
     enabled: bool = true,
@@ -165,6 +169,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
         try writeWidgetParent(widget, writer);
         if (widget.value) |value| try writer.print(" value={d}", .{value});
         try writeWidgetTextValue(widget, writer);
+        try writeWidgetGrid(widget, writer);
         try writeWidgetState(widget, writer);
         try writeWidgetActions(widget.actions, writer);
         try writeWidgetTextRanges(widget, writer);
@@ -216,6 +221,7 @@ pub fn writeA11yText(input: Input, writer: anytype) !void {
         try writeWidgetParent(widget, writer);
         if (widget.value) |value| try writer.print(" value={d}", .{value});
         try writeWidgetTextValue(widget, writer);
+        try writeWidgetGrid(widget, writer);
         try writeWidgetState(widget, writer);
         try writeWidgetActions(widget.actions, writer);
         try writeWidgetTextRanges(widget, writer);
@@ -230,6 +236,28 @@ fn writeWidgetParent(widget: Widget, writer: anytype) !void {
 fn writeWidgetTextValue(widget: Widget, writer: anytype) !void {
     if (widget.text_value.len == 0) return;
     try writer.print(" text=\"{s}\"", .{widget.text_value});
+}
+
+fn writeWidgetGrid(widget: Widget, writer: anytype) !void {
+    if (widget.grid_row_index == null and
+        widget.grid_column_index == null and
+        widget.grid_row_count == null and
+        widget.grid_column_count == null) return;
+
+    try writer.writeAll(" grid=[");
+    var wrote = false;
+    try writeWidgetGridValue("row_index", widget.grid_row_index, &wrote, writer);
+    try writeWidgetGridValue("column_index", widget.grid_column_index, &wrote, writer);
+    try writeWidgetGridValue("row_count", widget.grid_row_count, &wrote, writer);
+    try writeWidgetGridValue("column_count", widget.grid_column_count, &wrote, writer);
+    try writer.writeByte(']');
+}
+
+fn writeWidgetGridValue(name: []const u8, value: ?usize, wrote: *bool, writer: anytype) !void {
+    const unwrapped = value orelse return;
+    if (wrote.*) try writer.writeByte(',');
+    try writer.print("{s}={d}", .{ name, unwrapped });
+    wrote.* = true;
 }
 
 fn writeWidgetState(widget: Widget, writer: anytype) !void {
@@ -362,6 +390,10 @@ test "snapshot emits widget semantics" {
         .name = "Run query",
         .parent_id = 7,
         .text_value = "deploy",
+        .grid_row_index = 1,
+        .grid_column_index = 2,
+        .grid_row_count = 4,
+        .grid_column_count = 5,
         .bounds = geometry.RectF.init(10, 12, 80, 32),
         .focused = true,
         .hovered = true,
@@ -379,6 +411,7 @@ test "snapshot emits widget semantics" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "widget @w1/canvas#42 role=button name=\"Run query\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "parent=#7") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "text=\"deploy\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "grid=[row_index=1,column_index=2,row_count=4,column_count=5]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "state=[hovered,pressed,selected]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "actions=[focus,press]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "selection=4..4") != null);
@@ -395,6 +428,7 @@ test "snapshot emits widget semantics" {
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#42 role=button name=\"Run query\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "parent=#7") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "text=\"deploy\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "grid=[row_index=1,column_index=2,row_count=4,column_count=5]") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "state=[hovered,pressed,selected]") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "actions=[focus,press]") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "selection=4..4") != null);
