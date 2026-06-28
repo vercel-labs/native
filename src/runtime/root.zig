@@ -848,30 +848,39 @@ pub const Runtime = struct {
         const target_id: canvas.ObjectId = if (pointer_event.target) |target| target.id else 0;
         var next_hovered_id = self.views[index].canvas_widget_hovered_id;
         var next_pressed_id = self.views[index].canvas_widget_pressed_id;
+        var next_cursor = self.views[index].canvas_widget_cursor;
 
         switch (pointer_event.pointer.phase) {
-            .hover, .move => next_hovered_id = target_id,
+            .hover, .move => {
+                next_hovered_id = target_id;
+                next_cursor = platformCursorFromCanvas(self.views[index].widgetLayoutTree().cursorForHit(pointer_event.target));
+            },
             .down => {
                 next_hovered_id = target_id;
                 next_pressed_id = target_id;
+                next_cursor = platformCursorFromCanvas(self.views[index].widgetLayoutTree().cursorForHit(pointer_event.target));
             },
             .up => {
                 next_hovered_id = target_id;
                 next_pressed_id = 0;
+                next_cursor = platformCursorFromCanvas(self.views[index].widgetLayoutTree().cursorForHit(pointer_event.target));
             },
             .cancel => {
                 next_hovered_id = 0;
                 next_pressed_id = 0;
+                next_cursor = .arrow;
             },
             .wheel => {},
         }
 
-        if (self.views[index].canvas_widget_hovered_id == next_hovered_id and
-            self.views[index].canvas_widget_pressed_id == next_pressed_id) return;
+        const interaction_changed = self.views[index].canvas_widget_hovered_id != next_hovered_id or
+            self.views[index].canvas_widget_pressed_id != next_pressed_id;
+        if (!interaction_changed and self.views[index].canvas_widget_cursor == next_cursor) return;
 
         self.views[index].canvas_widget_hovered_id = next_hovered_id;
         self.views[index].canvas_widget_pressed_id = next_pressed_id;
-        self.invalidateFor(.state, self.views[index].frame);
+        self.views[index].canvas_widget_cursor = next_cursor;
+        if (interaction_changed) self.invalidateFor(.state, self.views[index].frame);
     }
 
     fn updateCanvasWidgetScrollFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
@@ -3713,6 +3722,7 @@ const RuntimeView = struct {
     canvas_widget_focused_id: canvas.ObjectId = 0,
     canvas_widget_hovered_id: canvas.ObjectId = 0,
     canvas_widget_pressed_id: canvas.ObjectId = 0,
+    canvas_widget_cursor: platform.Cursor = .arrow,
     widget_text_bytes: [max_canvas_widget_text_bytes_per_view]u8 = undefined,
     widget_text_len: usize = 0,
     focused: bool = false,
@@ -3763,6 +3773,7 @@ const RuntimeView = struct {
             .widget_revision = self.widget_revision,
             .widget_node_count = self.widget_layout_node_count,
             .widget_semantics_count = self.widget_semantics_node_count,
+            .cursor = self.canvas_widget_cursor,
             .focused = self.focused,
             .open = self.open,
         };
@@ -3958,7 +3969,14 @@ const RuntimeView = struct {
         if (self.canvas_widget_pressed_id != 0 and self.widgetLayoutTree().findById(self.canvas_widget_pressed_id) == null) {
             self.canvas_widget_pressed_id = 0;
         }
+        self.canvas_widget_cursor = self.canvasWidgetCursorForId(self.canvas_widget_hovered_id);
         self.widget_revision += 1;
+    }
+
+    fn canvasWidgetCursorForId(self: *const RuntimeView, id: canvas.ObjectId) platform.Cursor {
+        const index = self.canvasWidgetNodeIndexById(id) orelse return .arrow;
+        const node = self.widget_layout_nodes[index];
+        return platformCursorFromCanvas(canvas.cursorForWidgetTarget(node.widget.kind, node.widget.state));
     }
 
     fn nearestCanvasWidgetScrollIndex(self: *const RuntimeView, route: []const canvas.WidgetEventRouteEntry) ?usize {
@@ -4873,6 +4891,15 @@ fn canvasWidgetSelectedState(node: canvas.WidgetSemanticsNode) bool {
     };
 }
 
+fn platformCursorFromCanvas(cursor: canvas.WidgetCursor) platform.Cursor {
+    return switch (cursor) {
+        .arrow => .arrow,
+        .pointing_hand => .pointing_hand,
+        .text => .text,
+        .resize_horizontal => .resize_horizontal,
+    };
+}
+
 fn canvasTextRange(range: ?canvas.TextRange) ?automation.snapshot.TextRange {
     if (range) |value| return .{ .start = value.start, .end = value.end };
     return null;
@@ -4986,10 +5013,13 @@ fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
         view.canvas_frame_change_count,
     });
     try writeOptionalRectJson(view.canvas_frame_dirty_bounds, writer);
-    try writer.print(",\"widgetRevision\":{d},\"widgetNodeCount\":{d},\"widgetSemanticsCount\":{d},\"focused\":{},\"open\":{}}}", .{
+    try writer.print(",\"widgetRevision\":{d},\"widgetNodeCount\":{d},\"widgetSemanticsCount\":{d},\"cursor\":", .{
         view.widget_revision,
         view.widget_node_count,
         view.widget_semantics_count,
+    });
+    try json.writeString(writer, @tagName(view.cursor));
+    try writer.print(",\"focused\":{},\"open\":{}}}", .{
         view.focused,
         view.open,
     });
@@ -9495,6 +9525,7 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"canvasFrameGlyphAtlasEntryCount\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"canvasFrameChangeCount\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"canvasFrameDirtyBounds\":{\"x\":0,\"y\":0,\"width\":640,\"height\":360}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, view_json, "\"cursor\":\"arrow\"") != null);
 
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
         .window_id = 1,
@@ -9543,6 +9574,71 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(@as(u32, 1), app_state.input_count);
     try std.testing.expectEqual(platform.GpuSurfaceInputKind.pointer_down, app_state.last_input_kind);
     try std.testing.expect(harness.runtime.invalidated);
+}
+
+test "runtime tracks retained canvas widget cursor intent" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-cursor", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 160),
+    });
+
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(10, 12, 96, 32), .text = "Run" },
+        .{ .id = 3, .kind = .text_field, .frame = geometry.RectF.init(10, 52, 140, 32), .text = "Query" },
+        .{ .id = 4, .kind = .slider, .frame = geometry.RectF.init(10, 96, 140, 32), .value = 0.5 },
+    };
+    var nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &children }, geometry.RectF.init(0, 0, 240, 160), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    var snapshot = harness.runtime.automationSnapshot("Cursor");
+    try std.testing.expectEqual(platform.Cursor.arrow, testViewByLabel(snapshot.views, "canvas").?.cursor);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_move, .x = 20, .y = 24 } });
+    snapshot = harness.runtime.automationSnapshot("Cursor");
+    try std.testing.expectEqual(platform.Cursor.pointing_hand, testViewByLabel(snapshot.views, "canvas").?.cursor);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_move, .x = 20, .y = 64 } });
+    snapshot = harness.runtime.automationSnapshot("Cursor");
+    try std.testing.expectEqual(platform.Cursor.text, testViewByLabel(snapshot.views, "canvas").?.cursor);
+
+    const disabled_children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(10, 12, 96, 32), .text = "Run" },
+        .{ .id = 3, .kind = .text_field, .frame = geometry.RectF.init(10, 52, 140, 32), .text = "Query", .state = .{ .disabled = true } },
+        .{ .id = 4, .kind = .slider, .frame = geometry.RectF.init(10, 96, 140, 32), .value = 0.5 },
+    };
+    var disabled_nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const disabled_layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &disabled_children }, geometry.RectF.init(0, 0, 240, 160), &disabled_nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", disabled_layout);
+    snapshot = harness.runtime.automationSnapshot("Cursor");
+    try std.testing.expectEqual(platform.Cursor.arrow, testViewByLabel(snapshot.views, "canvas").?.cursor);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_move, .x = 20, .y = 108 } });
+    snapshot = harness.runtime.automationSnapshot("Cursor");
+    const canvas_view = testViewByLabel(snapshot.views, "canvas").?;
+    try std.testing.expectEqual(platform.Cursor.resize_horizontal, canvas_view.cursor);
+
+    var view_json_buffer: [2048]u8 = undefined;
+    const view_json = try writeViewJson(canvas_view, &view_json_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, view_json, "\"cursor\":\"resize_horizontal\"") != null);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_move, .x = 220, .y = 148 } });
+    snapshot = harness.runtime.automationSnapshot("Cursor");
+    try std.testing.expectEqual(platform.Cursor.arrow, testViewByLabel(snapshot.views, "canvas").?.cursor);
 }
 
 test "runtime dispatches routed canvas widget pointer events" {

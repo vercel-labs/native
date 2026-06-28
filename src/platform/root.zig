@@ -439,6 +439,13 @@ pub const ViewPatch = struct {
     url: ?[]const u8 = null,
 };
 
+pub const Cursor = enum {
+    arrow,
+    pointing_hand,
+    text,
+    resize_horizontal,
+};
+
 pub const ViewInfo = struct {
     id: ViewId = 0,
     window_id: WindowId = 1,
@@ -477,6 +484,7 @@ pub const ViewInfo = struct {
     widget_revision: u64 = 0,
     widget_node_count: usize = 0,
     widget_semantics_count: usize = 0,
+    cursor: Cursor = .arrow,
     focused: bool = false,
     open: bool = true,
 

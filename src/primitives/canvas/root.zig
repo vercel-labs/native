@@ -1422,6 +1422,13 @@ pub const WidgetKind = enum {
     progress,
 };
 
+pub const WidgetCursor = enum {
+    arrow,
+    pointing_hand,
+    text,
+    resize_horizontal,
+};
+
 pub const WidgetState = struct {
     hovered: bool = false,
     pressed: bool = false,
@@ -1669,6 +1676,11 @@ pub const WidgetLayoutTree = struct {
 
     pub fn hitTest(self: WidgetLayoutTree, point: geometry.PointF) ?WidgetHit {
         return hitTestWidgetLayout(self, point);
+    }
+
+    pub fn cursorForHit(self: WidgetLayoutTree, hit: ?WidgetHit) WidgetCursor {
+        _ = self;
+        return cursorForWidgetHit(hit);
     }
 
     pub fn routePointerEvent(self: WidgetLayoutTree, event: WidgetPointerEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
@@ -3748,6 +3760,29 @@ fn hitTestWidgetLayout(layout: WidgetLayoutTree, point: geometry.PointF) ?Widget
         };
     }
     return null;
+}
+
+pub fn cursorForWidgetHit(hit: ?WidgetHit) WidgetCursor {
+    const target = hit orelse return .arrow;
+    return cursorForWidgetTarget(target.kind, target.state);
+}
+
+pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor {
+    if (state.disabled) return .arrow;
+    return switch (kind) {
+        .text_field, .search_field => .text,
+        .button,
+        .icon_button,
+        .menu_item,
+        .list_item,
+        .data_cell,
+        .segmented_control,
+        .checkbox,
+        .toggle,
+        => .pointing_hand,
+        .slider => .resize_horizontal,
+        else => .arrow,
+    };
 }
 
 fn isPointVisibleInWidgetAncestors(layout: WidgetLayoutTree, node_index: usize, point: geometry.PointF) bool {
@@ -5953,6 +5988,27 @@ test "widget layout hit testing prefers deepest topmost enabled target" {
     const panel_hit = layout.hitTest(geometry.PointF.init(10, 10)).?;
     try std.testing.expectEqual(@as(ObjectId, 1), panel_hit.id);
     try std.testing.expect(layout.hitTest(geometry.PointF.init(200, 10)) == null);
+}
+
+test "widget layout resolves cursor intent from hit targets" {
+    const children = [_]Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(8, 8, 90, 32), .text = "Run" },
+        .{ .id = 3, .kind = .text_field, .frame = geometry.RectF.init(8, 48, 120, 32), .text = "Query" },
+        .{ .id = 4, .kind = .slider, .frame = geometry.RectF.init(8, 88, 120, 32), .value = 0.5 },
+    };
+    const root = Widget{
+        .id = 1,
+        .kind = .panel,
+        .children = &children,
+    };
+
+    var nodes: [5]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 160, 140), &nodes);
+    try std.testing.expectEqual(WidgetCursor.pointing_hand, layout.cursorForHit(layout.hitTest(geometry.PointF.init(16, 16))));
+    try std.testing.expectEqual(WidgetCursor.text, layout.cursorForHit(layout.hitTest(geometry.PointF.init(16, 56))));
+    try std.testing.expectEqual(WidgetCursor.resize_horizontal, layout.cursorForHit(layout.hitTest(geometry.PointF.init(16, 96))));
+    try std.testing.expectEqual(WidgetCursor.arrow, layout.cursorForHit(layout.hitTest(geometry.PointF.init(150, 130))));
+    try std.testing.expectEqual(WidgetCursor.arrow, cursorForWidgetTarget(.button, .{ .disabled = true }));
 }
 
 test "widget grid layout places children in deterministic cells" {
