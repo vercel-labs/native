@@ -505,6 +505,8 @@ fn gpuFrameEvent(frame: zero_native.platform.GpuFrame) zero_native.GpuSurfaceFra
         .canvas_frame_resource_evict_count = frame.canvas_frame_resource_evict_count,
         .canvas_frame_glyph_atlas_entry_count = frame.canvas_frame_glyph_atlas_entry_count,
         .canvas_frame_change_count = frame.canvas_frame_change_count,
+        .canvas_frame_budget_exceeded_count = frame.canvas_frame_budget_exceeded_count,
+        .canvas_frame_budget_ok = frame.canvas_frame_budget_ok,
         .canvas_frame_dirty_bounds = frame.canvas_frame_dirty_bounds,
         .widget_revision = frame.widget_revision,
         .widget_node_count = frame.widget_node_count,

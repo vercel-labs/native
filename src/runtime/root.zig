@@ -658,6 +658,9 @@ pub const Runtime = struct {
         if (frame_options.surface_size.isEmpty()) {
             frame_options.surface_size = if (self.views[index].gpu_size.isEmpty()) self.views[index].frame.size() else self.views[index].gpu_size;
         }
+        if (canvasFrameBudgetIsUnset(frame_options.budget)) {
+            frame_options.budget = self.views[index].canvas_frame_budget;
+        }
         frame_options.previous_resource_cache = self.views[index].canvasFrameResourceCache();
 
         const display_list = self.views[index].canvasDisplayList();
@@ -701,6 +704,7 @@ pub const Runtime = struct {
             .glyph_atlas_plan = glyph_atlas_plan,
             .changes = changes,
             .dirty_bounds = dirty_bounds,
+            .budget = frame_options.budget,
         };
         try self.views[index].copyCanvasFrameResourceCache(canvas_frame.resource_cache_plan.entries);
         try self.views[index].copyPresentedCanvasSummary(display_list);
@@ -725,6 +729,16 @@ pub const Runtime = struct {
         try validateViewLabel(label);
         const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
         return self.views[index].info().gpuFrame() orelse error.InvalidViewOptions;
+    }
+
+    pub fn setCanvasFrameBudget(self: *Runtime, window_id: platform.WindowId, label: []const u8, budget: canvas.CanvasFrameBudget) anyerror!platform.ViewInfo {
+        try self.validateViewParent(window_id);
+        try validateViewLabel(label);
+        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+        self.views[index].canvas_frame_budget = budget;
+        self.views[index].refreshCanvasFrameBudgetStatus();
+        return self.views[index].info();
     }
 
     pub fn setCanvasWidgetLayout(self: *Runtime, window_id: platform.WindowId, label: []const u8, layout: canvas.WidgetLayoutTree) anyerror!platform.ViewInfo {
@@ -1367,6 +1381,8 @@ pub const Runtime = struct {
                     enriched_frame_event.canvas_frame_resource_evict_count = self.views[index].canvas_frame_resource_evict_count;
                     enriched_frame_event.canvas_frame_glyph_atlas_entry_count = self.views[index].canvas_frame_glyph_atlas_entry_count;
                     enriched_frame_event.canvas_frame_change_count = self.views[index].canvas_frame_change_count;
+                    enriched_frame_event.canvas_frame_budget_exceeded_count = self.views[index].canvas_frame_budget_status.exceededCount();
+                    enriched_frame_event.canvas_frame_budget_ok = self.views[index].canvas_frame_budget_status.ok();
                     enriched_frame_event.canvas_frame_dirty_bounds = self.views[index].canvas_frame_dirty_bounds;
                     enriched_frame_event.widget_revision = self.views[index].widget_revision;
                     enriched_frame_event.widget_node_count = self.views[index].widget_layout_node_count;
@@ -3834,6 +3850,8 @@ const RuntimeView = struct {
     canvas_frame_resource_evict_count: usize = 0,
     canvas_frame_glyph_atlas_entry_count: usize = 0,
     canvas_frame_change_count: usize = 0,
+    canvas_frame_budget: canvas.CanvasFrameBudget = .{},
+    canvas_frame_budget_status: canvas.CanvasFrameBudgetStatus = .{},
     canvas_frame_dirty_bounds: ?geometry.RectF = null,
     widget_layout_nodes: [max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
     widget_layout_node_count: usize = 0,
@@ -3893,6 +3911,8 @@ const RuntimeView = struct {
             .canvas_frame_resource_evict_count = self.canvas_frame_resource_evict_count,
             .canvas_frame_glyph_atlas_entry_count = self.canvas_frame_glyph_atlas_entry_count,
             .canvas_frame_change_count = self.canvas_frame_change_count,
+            .canvas_frame_budget_exceeded_count = self.canvas_frame_budget_status.exceededCount(),
+            .canvas_frame_budget_ok = self.canvas_frame_budget_status.ok(),
             .canvas_frame_dirty_bounds = self.canvas_frame_dirty_bounds,
             .widget_revision = self.widget_revision,
             .widget_node_count = self.widget_layout_node_count,
@@ -3972,7 +3992,25 @@ const RuntimeView = struct {
         self.canvas_frame_resource_evict_count = frame.resource_cache_plan.evictCount();
         self.canvas_frame_glyph_atlas_entry_count = frame.glyph_atlas_plan.entryCount();
         self.canvas_frame_change_count = frame.changes.len;
+        self.canvas_frame_budget = frame.budget;
+        self.canvas_frame_budget_status = frame.budgetStatus();
         self.canvas_frame_dirty_bounds = frame.dirty_bounds;
+    }
+
+    fn refreshCanvasFrameBudgetStatus(self: *RuntimeView) void {
+        self.canvas_frame_budget_status = self.canvas_frame_budget.status(.{
+            .command_count = self.canvas_command_count,
+            .batch_count = self.canvas_frame_batch_count,
+            .resource_count = self.canvas_frame_resource_count,
+            .resource_upload_count = self.canvas_frame_resource_upload_count,
+            .resource_retain_count = self.canvas_frame_resource_retain_count,
+            .resource_evict_count = self.canvas_frame_resource_evict_count,
+            .glyph_atlas_entry_count = self.canvas_frame_glyph_atlas_entry_count,
+            .change_count = self.canvas_frame_change_count,
+            .full_repaint = self.canvas_frame_full_repaint,
+            .requires_render = self.canvas_frame_requires_render,
+            .dirty_bounds = self.canvas_frame_dirty_bounds,
+        });
     }
 
     fn copyPresentedCanvasSummary(self: *RuntimeView, display_list: canvas.DisplayList) anyerror!void {
@@ -4555,6 +4593,15 @@ fn canvasDirtyBoundsFromChanges(changes: []const canvas.DiffChange) ?geometry.Re
         result = unionRects(result, change.dirty_bounds);
     }
     return result;
+}
+
+fn canvasFrameBudgetIsUnset(budget: canvas.CanvasFrameBudget) bool {
+    return budget.max_commands == 0 and
+        budget.max_batches == 0 and
+        budget.max_resources == 0 and
+        budget.max_resource_uploads == 0 and
+        budget.max_glyph_atlas_entries == 0 and
+        budget.max_changes == 0;
 }
 
 fn canvasFullRepaintBounds(surface_size: geometry.SizeF, render_bounds: ?geometry.RectF) ?geometry.RectF {
@@ -5207,7 +5254,7 @@ fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
     try json.writeString(writer, view.command);
     try writer.writeAll(",\"url\":");
     try json.writeString(writer, view.url);
-    try writer.print(",\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"layer\":{d},\"visible\":{},\"enabled\":{},\"transparent\":{},\"bridge\":{},\"gpuWidth\":{d},\"gpuHeight\":{d},\"gpuScale\":{d},\"gpuFrame\":{d},\"gpuTimestampNs\":{d},\"gpuNonblank\":{},\"gpuSampleColor\":{d},\"canvasRevision\":{d},\"canvasCommandCount\":{d},\"canvasFrameRequiresRender\":{},\"canvasFrameFullRepaint\":{},\"canvasFrameBatchCount\":{d},\"canvasFrameResourceCount\":{d},\"canvasFrameResourceUploadCount\":{d},\"canvasFrameResourceRetainCount\":{d},\"canvasFrameResourceEvictCount\":{d},\"canvasFrameGlyphAtlasEntryCount\":{d},\"canvasFrameChangeCount\":{d},\"canvasFrameDirtyBounds\":", .{
+    try writer.print(",\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"layer\":{d},\"visible\":{},\"enabled\":{},\"transparent\":{},\"bridge\":{},\"gpuWidth\":{d},\"gpuHeight\":{d},\"gpuScale\":{d},\"gpuFrame\":{d},\"gpuTimestampNs\":{d},\"gpuNonblank\":{},\"gpuSampleColor\":{d},\"canvasRevision\":{d},\"canvasCommandCount\":{d},\"canvasFrameRequiresRender\":{},\"canvasFrameFullRepaint\":{},\"canvasFrameBatchCount\":{d},\"canvasFrameResourceCount\":{d},\"canvasFrameResourceUploadCount\":{d},\"canvasFrameResourceRetainCount\":{d},\"canvasFrameResourceEvictCount\":{d},\"canvasFrameGlyphAtlasEntryCount\":{d},\"canvasFrameChangeCount\":{d},\"canvasFrameBudgetExceededCount\":{d},\"canvasFrameBudgetOk\":{},\"canvasFrameDirtyBounds\":", .{
         view.frame.x,
         view.frame.y,
         view.frame.width,
@@ -5235,6 +5282,8 @@ fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
         view.canvas_frame_resource_evict_count,
         view.canvas_frame_glyph_atlas_entry_count,
         view.canvas_frame_change_count,
+        view.canvas_frame_budget_exceeded_count,
+        view.canvas_frame_budget_ok,
     });
     try writeOptionalRectJson(view.canvas_frame_dirty_bounds, writer);
     try writer.print(",\"widgetRevision\":{d},\"widgetNodeCount\":{d},\"widgetSemanticsCount\":{d},\"cursor\":", .{
@@ -10042,6 +10091,8 @@ test "runtime dispatches GPU surface events" {
         last_canvas_frame_resource_evict_count: usize = 0,
         last_canvas_frame_glyph_atlas_entry_count: usize = 0,
         last_canvas_frame_change_count: usize = 0,
+        last_canvas_frame_budget_exceeded_count: usize = 0,
+        last_canvas_frame_budget_ok: bool = true,
         last_canvas_frame_dirty_bounds: ?geometry.RectF = null,
         last_widget_revision: u64 = 0,
         last_widget_node_count: usize = 0,
@@ -10069,6 +10120,8 @@ test "runtime dispatches GPU surface events" {
                     self.last_canvas_frame_resource_evict_count = frame_event.canvas_frame_resource_evict_count;
                     self.last_canvas_frame_glyph_atlas_entry_count = frame_event.canvas_frame_glyph_atlas_entry_count;
                     self.last_canvas_frame_change_count = frame_event.canvas_frame_change_count;
+                    self.last_canvas_frame_budget_exceeded_count = frame_event.canvas_frame_budget_exceeded_count;
+                    self.last_canvas_frame_budget_ok = frame_event.canvas_frame_budget_ok;
                     self.last_canvas_frame_dirty_bounds = frame_event.canvas_frame_dirty_bounds;
                     self.last_widget_revision = frame_event.widget_revision;
                     self.last_widget_node_count = frame_event.widget_node_count;
@@ -10110,13 +10163,21 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(@as(usize, 0), initial_frame.canvas_command_count);
     try std.testing.expectEqual(@as(u64, 0), initial_frame.widget_revision);
     try std.testing.expectEqual(@as(usize, 0), initial_frame.widget_node_count);
+    const budgeted = try harness.runtime.setCanvasFrameBudget(1, "canvas", .{ .max_commands = 1 });
+    try std.testing.expectEqual(@as(usize, 0), budgeted.canvas_frame_budget_exceeded_count);
+    try std.testing.expect(budgeted.canvas_frame_budget_ok);
 
-    var commands: [1]canvas.CanvasCommand = undefined;
+    var commands: [2]canvas.CanvasCommand = undefined;
     var builder = canvas.Builder.init(&commands);
     try builder.fillRect(.{
         .id = 10,
         .rect = geometry.RectF.init(0, 0, 320, 180),
         .fill = .{ .color = canvas.Color.rgb8(255, 255, 255) },
+    });
+    try builder.fillRect(.{
+        .id = 11,
+        .rect = geometry.RectF.init(320, 0, 320, 180),
+        .fill = .{ .color = canvas.Color.rgb8(245, 248, 255) },
     });
     _ = try harness.runtime.setCanvasDisplayList(1, "canvas", builder.displayList());
 
@@ -10145,7 +10206,7 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(@as(u32, 1), app_state.frame_count);
     try std.testing.expectEqualStrings("canvas", app_state.last_label);
     try std.testing.expectEqual(@as(u64, 1), app_state.last_canvas_revision);
-    try std.testing.expectEqual(@as(usize, 1), app_state.last_canvas_command_count);
+    try std.testing.expectEqual(@as(usize, 2), app_state.last_canvas_command_count);
     try std.testing.expect(app_state.last_canvas_frame_requires_render);
     try std.testing.expect(app_state.last_canvas_frame_full_repaint);
     try std.testing.expectEqual(@as(usize, 1), app_state.last_canvas_frame_batch_count);
@@ -10155,6 +10216,8 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(@as(usize, 0), app_state.last_canvas_frame_resource_evict_count);
     try std.testing.expectEqual(@as(usize, 0), app_state.last_canvas_frame_glyph_atlas_entry_count);
     try std.testing.expectEqual(@as(usize, 0), app_state.last_canvas_frame_change_count);
+    try std.testing.expectEqual(@as(usize, 1), app_state.last_canvas_frame_budget_exceeded_count);
+    try std.testing.expect(!app_state.last_canvas_frame_budget_ok);
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 640, 360), app_state.last_canvas_frame_dirty_bounds.?);
     try std.testing.expectEqual(@as(u64, 1), app_state.last_widget_revision);
     try std.testing.expectEqual(@as(usize, 2), app_state.last_widget_node_count);
@@ -10172,7 +10235,7 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expect(frame.nonblank);
     try std.testing.expectEqual(@as(u32, 0xff336699), frame.sample_color);
     try std.testing.expectEqual(@as(u64, 1), frame.canvas_revision);
-    try std.testing.expectEqual(@as(usize, 1), frame.canvas_command_count);
+    try std.testing.expectEqual(@as(usize, 2), frame.canvas_command_count);
     try std.testing.expect(frame.canvas_frame_requires_render);
     try std.testing.expect(frame.canvas_frame_full_repaint);
     try std.testing.expectEqual(@as(usize, 1), frame.canvas_frame_batch_count);
@@ -10182,6 +10245,8 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(@as(usize, 0), frame.canvas_frame_resource_evict_count);
     try std.testing.expectEqual(@as(usize, 0), frame.canvas_frame_glyph_atlas_entry_count);
     try std.testing.expectEqual(@as(usize, 0), frame.canvas_frame_change_count);
+    try std.testing.expectEqual(@as(usize, 1), frame.canvas_frame_budget_exceeded_count);
+    try std.testing.expect(!frame.canvas_frame_budget_ok);
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 640, 360), frame.canvas_frame_dirty_bounds.?);
     try std.testing.expectEqual(@as(u64, 1), frame.widget_revision);
     try std.testing.expectEqual(@as(usize, 2), frame.widget_node_count);
@@ -10204,6 +10269,8 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"canvasFrameResourceEvictCount\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"canvasFrameGlyphAtlasEntryCount\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"canvasFrameChangeCount\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, view_json, "\"canvasFrameBudgetExceededCount\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, view_json, "\"canvasFrameBudgetOk\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"canvasFrameDirtyBounds\":{\"x\":0,\"y\":0,\"width\":640,\"height\":360}") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"cursor\":\"arrow\"") != null);
 
@@ -10222,11 +10289,15 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expect(!app_state.last_canvas_frame_full_repaint);
     try std.testing.expectEqual(@as(usize, 1), app_state.last_canvas_frame_batch_count);
     try std.testing.expectEqual(@as(usize, 0), app_state.last_canvas_frame_change_count);
+    try std.testing.expectEqual(@as(usize, 1), app_state.last_canvas_frame_budget_exceeded_count);
+    try std.testing.expect(!app_state.last_canvas_frame_budget_ok);
     try std.testing.expect(app_state.last_canvas_frame_dirty_bounds == null);
     const clean_frame = try harness.runtime.gpuSurfaceFrame(1, "canvas");
     try std.testing.expectEqual(@as(u64, 8), clean_frame.frame_index);
     try std.testing.expect(!clean_frame.canvas_frame_requires_render);
     try std.testing.expect(!clean_frame.canvas_frame_full_repaint);
+    try std.testing.expectEqual(@as(usize, 1), clean_frame.canvas_frame_budget_exceeded_count);
+    try std.testing.expect(!clean_frame.canvas_frame_budget_ok);
     try std.testing.expect(clean_frame.canvas_frame_dirty_bounds == null);
 
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_resized = .{
