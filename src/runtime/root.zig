@@ -964,16 +964,32 @@ pub const Runtime = struct {
     }
 
     fn updateCanvasWidgetFocusFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent) void {
-        if (input_event.kind != .key_down or !std.ascii.eqlIgnoreCase(input_event.key, "tab")) return;
+        if (input_event.kind != .key_down) return;
         const index = self.findViewIndex(input_event.window_id, input_event.label) orelse return;
         if (self.views[index].kind != .gpu_surface) return;
 
         const current_id: ?canvas.ObjectId = if (self.views[index].canvas_widget_focused_id == 0) null else self.views[index].canvas_widget_focused_id;
-        const direction: canvas.WidgetFocusDirection = if (input_event.modifiers.shift) .backward else .forward;
-        const target = self.views[index].widgetLayoutTree().focusTarget(current_id, direction) orelse return;
-        if (self.views[index].canvas_widget_focused_id == target.id) return;
-        self.views[index].canvas_widget_focused_id = target.id;
-        self.invalidateFor(.state, self.views[index].frame);
+        if (std.ascii.eqlIgnoreCase(input_event.key, "tab")) {
+            const direction: canvas.WidgetFocusDirection = if (input_event.modifiers.shift) .backward else .forward;
+            const target = self.views[index].widgetLayoutTree().focusTarget(current_id, direction) orelse return;
+            self.setCanvasWidgetFocusFromKeyboard(index, target.id);
+            return;
+        }
+
+        const direction = canvasWidgetGridNavigationDirection(input_event) orelse return;
+        const focused_id = current_id orelse return;
+        const layout = self.views[index].widgetLayoutTree();
+        const focused = layout.focusTargetById(focused_id) orelse return;
+        if (focused.kind != .data_cell) return;
+        const target = layout.focusTarget(focused_id, direction) orelse return;
+        if (target.kind != .data_cell) return;
+        self.setCanvasWidgetFocusFromKeyboard(index, target.id);
+    }
+
+    fn setCanvasWidgetFocusFromKeyboard(self: *Runtime, view_index: usize, target_id: canvas.ObjectId) void {
+        if (self.views[view_index].canvas_widget_focused_id == target_id) return;
+        self.views[view_index].canvas_widget_focused_id = target_id;
+        self.invalidateFor(.state, self.views[view_index].frame);
     }
 
     fn invalidateForCanvasChanges(self: *Runtime, view_frame: geometry.RectF, changes: []const canvas.DiffChange) void {
@@ -3534,6 +3550,16 @@ fn canvasWidgetSliderKeyboardValue(current: f32, keyboard: canvas.WidgetKeyboard
     }
     if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return 0;
     if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return 1;
+    return null;
+}
+
+fn canvasWidgetGridNavigationDirection(input_event: GpuSurfaceInputEvent) ?canvas.WidgetFocusDirection {
+    if (input_event.kind != .key_down) return null;
+    if (input_event.modifiers.control or input_event.modifiers.option or input_event.modifiers.command or input_event.modifiers.primary) return null;
+    if (std.ascii.eqlIgnoreCase(input_event.key, "arrowleft")) return .left;
+    if (std.ascii.eqlIgnoreCase(input_event.key, "arrowright")) return .right;
+    if (std.ascii.eqlIgnoreCase(input_event.key, "arrowup")) return .up;
+    if (std.ascii.eqlIgnoreCase(input_event.key, "arrowdown")) return .down;
     return null;
 }
 
@@ -7634,6 +7660,128 @@ test "runtime automation snapshot exposes canvas data grid roles" {
     try automation.snapshot.writeA11yText(snapshot, &a11y_writer);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#1 role=grid name=\"Deployments\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#6 role=gridcell name=\"Edge API\"") != null);
+}
+
+test "runtime moves focused canvas data grid cells with arrow keys" {
+    const TestApp = struct {
+        widget_keyboard_count: u32 = 0,
+        last_target_id: canvas.ObjectId = 0,
+        last_target_kind: canvas.WidgetKind = .stack,
+        last_key: []const u8 = "",
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-data-grid-navigation", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .canvas_widget_keyboard => |keyboard_event| {
+                    self.widget_keyboard_count += 1;
+                    self.last_key = keyboard_event.keyboard.key;
+                    if (keyboard_event.target) |target| {
+                        self.last_target_id = target.id;
+                        self.last_target_kind = target.kind;
+                    }
+                },
+                else => {},
+            }
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(20, 30, 320, 180),
+    });
+
+    const header_cells = [_]canvas.Widget{
+        .{ .id = 3, .kind = .data_cell, .text = "Project", .layout = .{ .grow = 1 } },
+        .{ .id = 4, .kind = .data_cell, .text = "Status", .layout = .{ .grow = 1 } },
+    };
+    const row_cells = [_]canvas.Widget{
+        .{ .id = 6, .kind = .data_cell, .text = "Edge API", .layout = .{ .grow = 1 } },
+        .{ .id = 7, .kind = .data_cell, .text = "Live", .layout = .{ .grow = 1 } },
+    };
+    const rows = [_]canvas.Widget{
+        .{ .id = 2, .kind = .data_row, .frame = geometry.RectF.init(0, 0, 0, 28), .children = &header_cells },
+        .{ .id = 5, .kind = .data_row, .frame = geometry.RectF.init(0, 0, 0, 28), .children = &row_cells },
+    };
+    const grid = canvas.Widget{
+        .id = 1,
+        .kind = .data_grid,
+        .text = "Deployments",
+        .layout = .{ .gap = 2 },
+        .children = &rows,
+    };
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(grid, geometry.RectF.init(0, 0, 320, 180), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    harness.runtime.views[0].canvas_widget_focused_id = 3;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "arrowright",
+    } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 4), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(u32, 1), app_state.widget_keyboard_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 4), app_state.last_target_id);
+    try std.testing.expectEqual(canvas.WidgetKind.data_cell, app_state.last_target_kind);
+    try std.testing.expectEqualStrings("arrowright", app_state.last_key);
+
+    const right_snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expect(!right_snapshot.widgets[2].focused);
+    try std.testing.expect(right_snapshot.widgets[3].focused);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "arrowdown",
+    } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 7), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 7), app_state.last_target_id);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "arrowleft",
+    } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 6), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 6), app_state.last_target_id);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "arrowup",
+    } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_target_id);
+    try std.testing.expectEqual(@as(u32, 4), app_state.widget_keyboard_count);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "arrowright",
+        .modifiers = .{ .option = true },
+    } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_target_id);
+    try std.testing.expectEqual(@as(u32, 5), app_state.widget_keyboard_count);
 }
 
 test "runtime automation snapshot exposes canvas icon roles" {
