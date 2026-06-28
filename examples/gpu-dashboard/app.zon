@@ -1,0 +1,46 @@
+.{
+    .id = "dev.zero_native.gpu_dashboard",
+    .name = "gpu-dashboard",
+    .display_name = "GPU Dashboard",
+    .version = "0.1.0",
+    .icons = .{ "assets/icon.icns" },
+    .platforms = .{ "macos" },
+    .permissions = .{ "view", "command" },
+    .capabilities = .{ "webview", "js_bridge", "native_views", "gpu_surfaces" },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "zero-native GPU Dashboard",
+                .width = 1240,
+                .height = 780,
+                .restore_policy = "center_on_primary",
+                .views = .{
+                    .{ .label = "toolbar", .kind = "toolbar", .edge = "top", .height = 54, .role = "Toolbar" },
+                    .{ .label = "toolbar-title", .kind = "label", .parent = "toolbar", .x = 18, .y = 17, .width = 220, .height = 20, .text = "GPU Dashboard" },
+                    .{ .label = "view-mode", .kind = "segmented_control", .parent = "toolbar", .x = 252, .y = 12, .width = 214, .height = 30, .text = "Overview|Revenue|Latency", .command = "dashboard.mode" },
+                    .{ .label = "refresh", .kind = "button", .parent = "toolbar", .x = 484, .y = 12, .width = 86, .height = 30, .text = "Refresh", .command = "dashboard.refresh" },
+                    .{ .label = "body", .kind = "split", .fill = true, .axis = "row" },
+                    .{ .label = "sidebar", .kind = "sidebar", .parent = "body", .width = 196, .min_width = 180, .max_width = 240, .role = "Navigation" },
+                    .{ .label = "sidebar-title", .kind = "label", .parent = "sidebar", .x = 18, .y = 22, .width = 150, .height = 20, .text = "Northstar" },
+                    .{ .label = "nav-overview", .kind = "list_item", .parent = "sidebar", .x = 14, .y = 64, .width = 166, .height = 32, .text = "Overview" },
+                    .{ .label = "nav-customers", .kind = "list_item", .parent = "sidebar", .x = 14, .y = 102, .width = 166, .height = 32, .text = "Customers" },
+                    .{ .label = "nav-latency", .kind = "list_item", .parent = "sidebar", .x = 14, .y = 140, .width = 166, .height = 32, .text = "Latency" },
+                    .{ .label = "sidebar-status", .kind = "label", .parent = "sidebar", .x = 18, .y = 690, .width = 150, .height = 20, .text = "Native shell" },
+                    .{ .label = "dashboard-canvas", .kind = "gpu_surface", .parent = "body", .width = 720, .min_width = 560, .role = "Native-rendered dashboard canvas", .accessibility_label = "Native-rendered product dashboard canvas" },
+                    .{ .label = "inspector", .kind = "webview", .parent = "body", .url = "zero://inline", .fill = true },
+                    .{ .label = "statusbar", .kind = "statusbar", .edge = "bottom", .height = 34, .role = "Status" },
+                    .{ .label = "status-label", .kind = "label", .parent = "statusbar", .x = 14, .y = 8, .width = 840, .height = 18, .text = "Canvas scene waiting for the first GPU frame." },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+}
