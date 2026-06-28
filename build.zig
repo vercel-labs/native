@@ -597,6 +597,58 @@ pub fn build(b: *std.Build) void {
     native_shell_smoke_run.step.dependOn(&cli_exe.step);
     native_shell_smoke_step.dependOn(&native_shell_smoke_run.step);
 
+    const gpu_surface_smoke_step = b.step("test-gpu-surface-smoke", "Run macOS GPU surface automation smoke test");
+    const gpu_surface_smoke_build = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true" });
+    gpu_surface_smoke_build.setCwd(b.path("examples/gpu-surface"));
+    const gpu_surface_smoke_run = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\set -eu
+        \\cd examples/gpu-surface
+        \\app="zig-out/bin/gpu-surface"
+        \\cli="$1"
+        \\case "$cli" in /*) ;; *) cli="../../$cli" ;; esac
+        \\automation_dir=".zig-cache/zero-native-automation"
+        \\mkdir -p "$automation_dir"
+        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir/command.txt"
+        \\"$app" > .zig-cache/zero-native-gpu-surface-smoke.log 2>&1 &
+        \\pid=$!
+        \\trap 'kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true' EXIT
+        \\ready="$("$cli" automate wait 2>&1)"
+        \\case "$ready" in *"ready=true"*) ;; *) echo "gpu-surface automation snapshot was not ready" >&2; exit 1 ;; esac
+        \\snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\case "$snapshot" in *'window @w1 "zero-native GPU Surface"'*) ;; *) echo "gpu-surface window was missing from snapshot" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/canvas kind=gpu_surface'*'accessibility_label="Animated GPU surface"'*) ;; *) echo "gpu_surface view was missing from snapshot" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/inspector kind=webview'*) ;; *) echo "inspector WebView was missing from snapshot" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/toolbar kind=toolbar'*) ;; *) echo "toolbar view was missing from snapshot" >&2; exit 1 ;; esac
+        \\"$cli" automate native-command gpu.refresh refresh >/dev/null 2>&1
+        \\attempts=0
+        \\while [ "$attempts" -lt 50 ]; do
+        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\  case "$snapshot" in *'GPU surface refreshed from toolbar. Count 1.'*) break ;; esac
+        \\  attempts=$((attempts + 1))
+        \\  sleep 0.1
+        \\done
+        \\case "$snapshot" in *'view @w1/status-label kind=label'*'GPU surface refreshed from toolbar. Count 1.'*) ;; *) echo "gpu-surface refresh command did not update status" >&2; exit 1 ;; esac
+        \\"$cli" automate resize 960 620 >/dev/null 2>&1
+        \\attempts=0
+        \\while [ "$attempts" -lt 50 ]; do
+        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\  case "$snapshot" in *'window @w1 "zero-native GPU Surface" bounds=('*' 960x620)'*) break ;; esac
+        \\  attempts=$((attempts + 1))
+        \\  sleep 0.1
+        \\done
+        \\case "$snapshot" in *'window @w1 "zero-native GPU Surface" bounds=('*' 960x620)'*) ;; *) echo "gpu-surface window resize was not reflected in snapshot" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/canvas kind=gpu_surface'*'bounds=(0,0 680x534)'*) ;; *) echo "gpu_surface view did not relayout after resize" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/inspector kind=webview'*'bounds=(680,52 280x534)'*) ;; *) echo "inspector WebView did not relayout after resize" >&2; exit 1 ;; esac
+        \\echo "gpu-surface smoke ok"
+        ,
+        "sh",
+    });
+    gpu_surface_smoke_run.addFileArg(cli_exe.getEmittedBin());
+    gpu_surface_smoke_run.step.dependOn(&gpu_surface_smoke_build.step);
+    gpu_surface_smoke_run.step.dependOn(&cli_exe.step);
+    gpu_surface_smoke_step.dependOn(&gpu_surface_smoke_run.step);
+
     const webview_cef_smoke_step = b.step("test-webview-cef-smoke", "Run macOS Chromium WebView automation smoke test");
     const webview_cef_smoke_build = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=chromium", b.fmt("-Dcef-dir={s}", .{cef_dir}), "-Dautomation=true", "-Djs-bridge=true" });
     webview_cef_smoke_build.setCwd(b.path("examples/webview"));
