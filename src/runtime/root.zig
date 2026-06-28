@@ -20,6 +20,7 @@ pub const max_canvas_path_elements_per_view: usize = 128;
 pub const max_canvas_glyphs_per_view: usize = 256;
 pub const max_canvas_text_bytes_per_view: usize = 2048;
 const max_canvas_diff_changes_per_view: usize = max_canvas_commands_per_view * 2 + 1;
+const max_canvas_resources_per_view: usize = max_canvas_commands_per_view;
 pub const max_canvas_widget_nodes_per_view: usize = 16;
 pub const max_canvas_widget_semantics_per_view: usize = 16;
 pub const max_canvas_widget_text_bytes_per_view: usize = 512;
@@ -592,6 +593,63 @@ pub const Runtime = struct {
         var frame_options = options;
         if (frame_options.surface_size.isEmpty()) frame_options.surface_size = self.views[index].frame.size();
         return self.views[index].canvasDisplayList().framePlan(previous, frame_options, storage);
+    }
+
+    pub fn nextCanvasFrame(self: *Runtime, window_id: platform.WindowId, label: []const u8, options: canvas.CanvasFrameOptions, storage: canvas.CanvasFrameStorage) anyerror!canvas.CanvasFrame {
+        try self.validateViewParent(window_id);
+        try validateViewLabel(label);
+        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+
+        var frame_options = options;
+        if (frame_options.surface_size.isEmpty()) {
+            frame_options.surface_size = if (self.views[index].gpu_size.isEmpty()) self.views[index].frame.size() else self.views[index].gpu_size;
+        }
+        frame_options.previous_resource_cache = self.views[index].canvasFrameResourceCache();
+
+        const display_list = self.views[index].canvasDisplayList();
+        const render_plan = try display_list.renderPlan(storage.render_commands);
+        const batch_plan = try render_plan.batchPlan(storage.render_batches);
+        const resource_plan = try display_list.resourcePlan(storage.resources);
+        const resource_cache_plan = try resource_plan.cachePlan(
+            frame_options.previous_resource_cache,
+            frame_options.frame_index,
+            storage.resource_cache_entries,
+            storage.resource_cache_actions,
+        );
+        const glyph_atlas_plan = try display_list.glyphAtlasPlan(storage.glyph_atlas_entries);
+
+        const full_repaint = frame_options.full_repaint or
+            self.views[index].presented_canvas_revision == 0 or
+            self.views[index].presented_canvas_has_unkeyed or
+            self.views[index].currentCanvasHasUnkeyed();
+        const changes = if (full_repaint)
+            storage.changes[0..0]
+        else
+            try self.views[index].diffPresentedCanvasSummary(storage.changes);
+        const dirty_bounds = if (full_repaint)
+            canvasFullRepaintBounds(frame_options.surface_size, render_plan.bounds)
+        else
+            clippedCanvasDirtyBounds(canvasDirtyBoundsFromChanges(changes), frame_options.surface_size);
+
+        const canvas_frame = canvas.CanvasFrame{
+            .frame_index = frame_options.frame_index,
+            .timestamp_ns = frame_options.timestamp_ns,
+            .surface_size = frame_options.surface_size,
+            .scale = frame_options.scale,
+            .full_repaint = full_repaint,
+            .display_list = display_list,
+            .render_plan = render_plan,
+            .batch_plan = batch_plan,
+            .resource_plan = resource_plan,
+            .resource_cache_plan = resource_cache_plan,
+            .glyph_atlas_plan = glyph_atlas_plan,
+            .changes = changes,
+            .dirty_bounds = dirty_bounds,
+        };
+        try self.views[index].copyCanvasFrameResourceCache(canvas_frame.resource_cache_plan.entries);
+        try self.views[index].copyPresentedCanvasSummary(display_list);
+        return canvas_frame;
     }
 
     pub fn gpuSurfaceFrame(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror!platform.GpuFrame {
@@ -3395,6 +3453,11 @@ fn canvasWidgetSliderKeyboardValue(current: f32, keyboard: canvas.WidgetKeyboard
     return null;
 }
 
+const PresentedCanvasCommand = struct {
+    id: ?canvas.ObjectId = null,
+    bounds: ?geometry.RectF = null,
+};
+
 const RuntimeView = struct {
     id: platform.ViewId = 0,
     window_id: platform.WindowId = 1,
@@ -3428,6 +3491,12 @@ const RuntimeView = struct {
     canvas_glyph_count: usize = 0,
     canvas_text_bytes: [max_canvas_text_bytes_per_view]u8 = undefined,
     canvas_text_len: usize = 0,
+    presented_canvas_revision: u64 = 0,
+    presented_canvas_commands: [max_canvas_commands_per_view]PresentedCanvasCommand = undefined,
+    presented_canvas_command_count: usize = 0,
+    presented_canvas_has_unkeyed: bool = false,
+    canvas_frame_resource_cache: [max_canvas_resources_per_view]canvas.RenderResourceCacheEntry = undefined,
+    canvas_frame_resource_cache_count: usize = 0,
     widget_layout_nodes: [max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
     widget_layout_node_count: usize = 0,
     widget_semantics_nodes: [max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
@@ -3491,12 +3560,17 @@ const RuntimeView = struct {
         self.command = copyInto(&self.command_storage, source.command) catch unreachable;
         self.copyCanvasDisplayList(source.canvasDisplayList()) catch unreachable;
         self.canvas_revision = source.canvas_revision;
+        self.copyPresentedCanvasSummaryFrom(source);
         self.copyWidgetLayoutTree(source.widgetLayoutTree()) catch unreachable;
         self.widget_revision = source.widget_revision;
     }
 
     fn canvasDisplayList(self: *const RuntimeView) canvas.DisplayList {
         return .{ .commands = self.canvas_commands[0..self.canvas_command_count] };
+    }
+
+    fn canvasFrameResourceCache(self: *const RuntimeView) []const canvas.RenderResourceCacheEntry {
+        return self.canvas_frame_resource_cache[0..self.canvas_frame_resource_cache_count];
     }
 
     fn widgetLayoutTree(self: *const RuntimeView) canvas.WidgetLayoutTree {
@@ -3525,6 +3599,103 @@ const RuntimeView = struct {
             self.canvas_command_count += 1;
         }
         self.canvas_revision += 1;
+    }
+
+    fn copyCanvasFrameResourceCache(self: *RuntimeView, entries: []const canvas.RenderResourceCacheEntry) anyerror!void {
+        if (entries.len > self.canvas_frame_resource_cache.len) return error.RenderResourceListFull;
+        @memcpy(self.canvas_frame_resource_cache[0..entries.len], entries);
+        self.canvas_frame_resource_cache_count = entries.len;
+    }
+
+    fn copyPresentedCanvasSummary(self: *RuntimeView, display_list: canvas.DisplayList) anyerror!void {
+        _ = try CanvasResourceCounts.fromDisplayList(display_list);
+
+        self.presented_canvas_command_count = 0;
+        self.presented_canvas_has_unkeyed = false;
+
+        for (display_list.commands) |command| {
+            if (self.presented_canvas_command_count >= self.presented_canvas_commands.len) return error.CanvasCommandLimitReached;
+            const id = command.objectId();
+            self.presented_canvas_commands[self.presented_canvas_command_count] = .{
+                .id = id,
+                .bounds = command.bounds(),
+            };
+            if (id == null) self.presented_canvas_has_unkeyed = true;
+            self.presented_canvas_command_count += 1;
+        }
+        self.presented_canvas_revision = self.canvas_revision;
+    }
+
+    fn copyPresentedCanvasSummaryFrom(self: *RuntimeView, source: *const RuntimeView) void {
+        self.presented_canvas_command_count = source.presented_canvas_command_count;
+        self.presented_canvas_revision = source.presented_canvas_revision;
+        self.presented_canvas_has_unkeyed = source.presented_canvas_has_unkeyed;
+        @memcpy(self.presented_canvas_commands[0..source.presented_canvas_command_count], source.presented_canvas_commands[0..source.presented_canvas_command_count]);
+    }
+
+    fn currentCanvasHasUnkeyed(self: *const RuntimeView) bool {
+        for (self.canvasDisplayList().commands) |command| {
+            if (command.objectId() == null) return true;
+        }
+        return false;
+    }
+
+    fn diffPresentedCanvasSummary(self: *const RuntimeView, output: []canvas.DiffChange) anyerror![]const canvas.DiffChange {
+        if (self.canvas_revision == self.presented_canvas_revision) return output[0..0];
+
+        var len: usize = 0;
+        for (self.presented_canvas_commands[0..self.presented_canvas_command_count]) |previous| {
+            const id = previous.id orelse continue;
+            if (self.currentCanvasCommandById(id) == null) {
+                try appendCanvasSummaryChange(output, &len, .{
+                    .kind = .removed,
+                    .id = id,
+                    .dirty_bounds = previous.bounds,
+                });
+            }
+        }
+
+        for (self.canvasDisplayList().commands, 0..) |command, index| {
+            const id = command.objectId() orelse continue;
+            const bounds = command.bounds();
+            if (self.presentedCanvasCommandById(id)) |previous| {
+                try appendCanvasSummaryChange(output, &len, .{
+                    .kind = .changed,
+                    .id = id,
+                    .previous_index = previous.index,
+                    .next_index = index,
+                    .dirty_bounds = unionRects(previous.command.bounds, bounds),
+                });
+            } else {
+                try appendCanvasSummaryChange(output, &len, .{
+                    .kind = .added,
+                    .id = id,
+                    .next_index = index,
+                    .dirty_bounds = bounds,
+                });
+            }
+        }
+
+        return output[0..len];
+    }
+
+    fn currentCanvasCommandById(self: *const RuntimeView, id: canvas.ObjectId) ?canvas.CommandRef {
+        for (self.canvasDisplayList().commands, 0..) |command, index| {
+            if (command.objectId() == id) return .{ .index = index, .command = command };
+        }
+        return null;
+    }
+
+    const PresentedCanvasCommandRef = struct {
+        index: usize,
+        command: PresentedCanvasCommand,
+    };
+
+    fn presentedCanvasCommandById(self: *const RuntimeView, id: canvas.ObjectId) ?PresentedCanvasCommandRef {
+        for (self.presented_canvas_commands[0..self.presented_canvas_command_count], 0..) |command, index| {
+            if (command.id == id) return .{ .index = index, .command = command };
+        }
+        return null;
     }
 
     fn copyWidgetLayoutTree(self: *RuntimeView, layout: canvas.WidgetLayoutTree) anyerror!void {
@@ -3878,6 +4049,49 @@ const RuntimeView = struct {
         return self.widget_text_bytes[start..end];
     }
 };
+
+fn appendCanvasSummaryChange(output: []canvas.DiffChange, len: *usize, change: canvas.DiffChange) anyerror!void {
+    if (len.* >= output.len) return error.DiffListFull;
+    output[len.*] = change;
+    len.* += 1;
+}
+
+fn canvasDirtyBoundsFromChanges(changes: []const canvas.DiffChange) ?geometry.RectF {
+    var result: ?geometry.RectF = null;
+    for (changes) |change| {
+        result = unionRects(result, change.dirty_bounds);
+    }
+    return result;
+}
+
+fn canvasFullRepaintBounds(surface_size: geometry.SizeF, render_bounds: ?geometry.RectF) ?geometry.RectF {
+    if (canvasSurfaceRect(surface_size)) |surface| return surface;
+    return render_bounds;
+}
+
+fn clippedCanvasDirtyBounds(bounds: ?geometry.RectF, surface_size: geometry.SizeF) ?geometry.RectF {
+    const dirty = bounds orelse return null;
+    const normalized = dirty.normalized();
+    if (canvasSurfaceRect(surface_size)) |surface| {
+        const clipped = geometry.RectF.intersection(surface, normalized);
+        return if (clipped.isEmpty()) null else clipped;
+    }
+    return if (normalized.isEmpty()) null else normalized;
+}
+
+fn canvasSurfaceRect(surface_size: geometry.SizeF) ?geometry.RectF {
+    const rect = geometry.RectF.fromSize(surface_size).normalized();
+    return if (rect.isEmpty()) null else rect;
+}
+
+fn unionRects(a: ?geometry.RectF, b: ?geometry.RectF) ?geometry.RectF {
+    if (a) |rect_a| {
+        if (b) |rect_b| return geometry.RectF.unionWith(rect_a.normalized(), rect_b.normalized());
+        return rect_a.normalized();
+    }
+    if (b) |rect_b| return rect_b.normalized();
+    return null;
+}
 
 const ShellResolvedView = struct {
     label: []const u8 = "",
@@ -5771,6 +5985,92 @@ test "runtime canvas frame plan computes incremental dirty from previous display
     try std.testing.expectEqual(canvas.DiffKind.changed, frame.changes[0].kind);
     try std.testing.expectEqual(@as(?canvas.ObjectId, 1), frame.changes[0].id);
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 60, 40), frame.dirty_bounds.?);
+}
+
+test "runtime next canvas frame tracks presented state and resource cache" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-next-frame", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 240),
+    });
+
+    const stops = [_]canvas.GradientStop{
+        .{ .offset = 0, .color = canvas.Color.rgb8(255, 255, 255) },
+        .{ .offset = 1, .color = canvas.Color.rgb8(24, 24, 27) },
+    };
+    const first_commands = [_]canvas.CanvasCommand{.{ .fill_rect = .{
+        .id = 1,
+        .rect = geometry.RectF.init(0, 0, 40, 40),
+        .fill = .{ .linear_gradient = .{
+            .start = geometry.PointF.init(0, 0),
+            .end = geometry.PointF.init(40, 40),
+            .stops = &stops,
+        } },
+    } }};
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &first_commands });
+
+    var render_commands: [4]canvas.RenderCommand = undefined;
+    var render_batches: [4]canvas.RenderBatch = undefined;
+    var resources: [4]canvas.RenderResource = undefined;
+    var resource_cache_entries: [4]canvas.RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [8]canvas.RenderResourceCacheAction = undefined;
+    var glyphs: [4]canvas.GlyphAtlasEntry = undefined;
+    var changes: [4]canvas.DiffChange = undefined;
+    const frame_storage = canvas.CanvasFrameStorage{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    };
+
+    const first_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{ .frame_index = 1 }, frame_storage);
+    try std.testing.expect(first_frame.full_repaint);
+    try std.testing.expect(first_frame.requiresRender());
+    try std.testing.expectEqual(@as(usize, 1), first_frame.resource_cache_plan.uploadCount());
+    try std.testing.expectEqual(@as(u64, 1), harness.runtime.views[0].presented_canvas_revision);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_resource_cache_count);
+
+    const clean_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{ .frame_index = 2 }, frame_storage);
+    try std.testing.expect(!clean_frame.full_repaint);
+    try std.testing.expect(!clean_frame.requiresRender());
+    try std.testing.expectEqual(@as(usize, 0), clean_frame.changes.len);
+    try std.testing.expectEqual(@as(usize, 1), clean_frame.resource_cache_plan.retainCount());
+
+    const moved_commands = [_]canvas.CanvasCommand{.{ .fill_rect = .{
+        .id = 1,
+        .rect = geometry.RectF.init(20, 0, 40, 40),
+        .fill = .{ .linear_gradient = .{
+            .start = geometry.PointF.init(0, 0),
+            .end = geometry.PointF.init(40, 40),
+            .stops = &stops,
+        } },
+    } }};
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &moved_commands });
+
+    const moved_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{ .frame_index = 3 }, frame_storage);
+    try std.testing.expect(!moved_frame.full_repaint);
+    try std.testing.expect(moved_frame.requiresRender());
+    try std.testing.expectEqual(@as(usize, 1), moved_frame.changes.len);
+    try std.testing.expectEqual(canvas.DiffKind.changed, moved_frame.changes[0].kind);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 60, 40), moved_frame.dirty_bounds.?);
+    try std.testing.expectEqual(@as(usize, 1), moved_frame.resource_cache_plan.retainCount());
+    try std.testing.expectEqual(@as(u64, 2), harness.runtime.views[0].presented_canvas_revision);
 }
 
 test "runtime invalidates canvas display list dirty regions" {
