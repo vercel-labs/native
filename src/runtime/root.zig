@@ -1487,6 +1487,8 @@ pub const Runtime = struct {
                     .focused = node.state.focused or (view.focused and node.id == view.canvas_widget_focused_id),
                     .enabled = !node.state.disabled,
                     .actions = canvasWidgetActions(node.actions),
+                    .text_selection = canvasTextRange(node.text_selection),
+                    .text_composition = canvasTextRange(node.text_composition),
                 };
                 widget_count.* += 1;
             }
@@ -4858,6 +4860,11 @@ fn canvasWidgetActions(actions: canvas.WidgetActions) automation.snapshot.Widget
     };
 }
 
+fn canvasTextRange(range: ?canvas.TextRange) ?automation.snapshot.TextRange {
+    if (range) |value| return .{ .start = value.start, .end = value.end };
+    return null;
+}
+
 fn writeWindowJson(window: platform.WindowInfo, output: []u8) ![]const u8 {
     var writer = std.Io.Writer.fixed(output);
     try writeWindowJsonToWriter(window, &writer);
@@ -6871,6 +6878,54 @@ test "runtime retains canvas widget layout for automation semantics" {
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "actions=[focus,press]") != null);
 }
 
+test "runtime automation snapshot exposes canvas widget text ranges" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-text-range-semantics", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(20, 30, 240, 120),
+    });
+
+    const text_field = canvas.Widget{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(12, 16, 180, 36),
+        .text = "Deploy",
+        .text_selection = .{ .anchor = 1, .focus = 4 },
+        .text_composition = canvas.TextRange.init(2, 5),
+        .semantics = .{ .label = "Release name" },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{text_field} }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    const snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expectEqual(@as(usize, 1), snapshot.widgets.len);
+    try std.testing.expectEqualStrings("textbox", snapshot.widgets[0].role);
+    try std.testing.expectEqualStrings("Release name", snapshot.widgets[0].name);
+    try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 1, .end = 4 }, snapshot.widgets[0].text_selection.?);
+    try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 2, .end = 5 }, snapshot.widgets[0].text_composition.?);
+
+    var a11y_buffer: [1024]u8 = undefined;
+    var a11y_writer = std.Io.Writer.fixed(&a11y_buffer);
+    try automation.snapshot.writeA11yText(snapshot, &a11y_writer);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#2 role=textbox name=\"Release name\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "selection=1..4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "composition=2..5") != null);
+}
+
 test "runtime emits canvas display list from focused widget layout" {
     const TestApp = struct {
         fn app(self: *@This()) App {
@@ -7252,6 +7307,8 @@ test "runtime applies text input to focused canvas text fields" {
     var snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expectEqual(@as(usize, 1), snapshot.widgets.len);
     try std.testing.expectEqualStrings("Search", snapshot.widgets[0].name);
+    try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 6, .end = 6 }, snapshot.widgets[0].text_selection.?);
+    try std.testing.expect(snapshot.widgets[0].text_composition == null);
 
     _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
     var display_list = try harness.runtime.canvasDisplayList(1, "canvas");
@@ -7311,6 +7368,8 @@ test "runtime applies text input to focused canvas text fields" {
     snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expectEqualStrings("Search", snapshot.widgets[0].name);
     try std.testing.expectEqualDeep(canvas.TextRange.init(5, 5), harness.runtime.views[0].widgetSemantics()[0].text_selection.?);
+    try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 5, .end = 5 }, snapshot.widgets[0].text_selection.?);
+    try std.testing.expect(snapshot.widgets[0].text_composition == null);
 }
 
 test "runtime applies text input to focused canvas search fields" {
