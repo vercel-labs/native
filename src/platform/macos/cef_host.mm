@@ -1528,6 +1528,9 @@ static NSString *ZeroNativeShortcutKeyForEvent(NSEvent *event) {
         case NSDownArrowFunctionKey: return @"arrowdown";
         case NSLeftArrowFunctionKey: return @"arrowleft";
         case NSRightArrowFunctionKey: return @"arrowright";
+        case NSDeleteFunctionKey: return @"delete";
+        case NSHomeFunctionKey: return @"home";
+        case NSEndFunctionKey: return @"end";
         case 0x1b: return @"escape";
         case '\r': return @"enter";
         case '\t': return @"tab";
