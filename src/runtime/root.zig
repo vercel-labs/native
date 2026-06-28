@@ -1823,6 +1823,9 @@ pub const Runtime = struct {
             .increment => try self.dispatchAutomationWidgetKey(app, view_index, action.id, "arrowright"),
             .decrement => try self.dispatchAutomationWidgetKey(app, view_index, action.id, "arrowleft"),
             .set_text => try self.setAutomationCanvasWidgetText(view_index, action.id, action.value),
+            .set_composition => try self.editAutomationCanvasWidgetText(view_index, action.id, .{ .set_composition = .{ .text = action.value } }),
+            .commit_composition => try self.editAutomationCanvasWidgetText(view_index, action.id, .commit_composition),
+            .cancel_composition => try self.editAutomationCanvasWidgetText(view_index, action.id, .cancel_composition),
             .select => try self.selectAutomationCanvasWidget(view_index, action.id),
         }
     }
@@ -1876,6 +1879,13 @@ pub const Runtime = struct {
     fn setAutomationCanvasWidgetText(self: *Runtime, view_index: usize, id: canvas.ObjectId, text: []const u8) anyerror!void {
         try self.focusAutomationCanvasWidget(view_index, id);
         const dirty = try self.views[view_index].setCanvasWidgetTextValue(id, text) orelse return;
+        self.invalidateForCanvasWidgetDirty(view_index, dirty);
+    }
+
+    fn editAutomationCanvasWidgetText(self: *Runtime, view_index: usize, id: canvas.ObjectId, edit: canvas.TextInputEvent) anyerror!void {
+        try self.focusAutomationCanvasWidget(view_index, id);
+        if (!self.views[view_index].canEditCanvasWidgetText(id)) return error.InvalidCommand;
+        const dirty = try self.views[view_index].applyCanvasWidgetTextEdit(id, edit) orelse return;
         self.invalidateForCanvasWidgetDirty(view_index, dirty);
     }
 
@@ -5307,6 +5317,9 @@ const AutomationWidgetActionKind = enum {
     increment,
     decrement,
     set_text,
+    set_composition,
+    commit_composition,
+    cancel_composition,
     select,
 };
 
@@ -5360,7 +5373,7 @@ fn parseAutomationWidgetAction(value: []const u8) !AutomationWidgetAction {
     if (id == 0) return error.InvalidCommand;
     const action = automationWidgetActionKindFromString(action_part.token) orelse return error.InvalidCommand;
     const action_value = std.mem.trim(u8, action_part.rest, " \n\r\t");
-    if (action != .set_text and action_value.len > 0) return error.InvalidCommand;
+    if (action != .set_text and action != .set_composition and action_value.len > 0) return error.InvalidCommand;
     return .{
         .view_label = view.token,
         .id = id,
@@ -5386,6 +5399,9 @@ fn automationWidgetActionKindFromString(value: []const u8) ?AutomationWidgetActi
     if (std.ascii.eqlIgnoreCase(value, "increment")) return .increment;
     if (std.ascii.eqlIgnoreCase(value, "decrement")) return .decrement;
     if (std.ascii.eqlIgnoreCase(value, "set_text") or std.ascii.eqlIgnoreCase(value, "set-text")) return .set_text;
+    if (std.ascii.eqlIgnoreCase(value, "set_composition") or std.ascii.eqlIgnoreCase(value, "set-composition")) return .set_composition;
+    if (std.ascii.eqlIgnoreCase(value, "commit_composition") or std.ascii.eqlIgnoreCase(value, "commit-composition")) return .commit_composition;
+    if (std.ascii.eqlIgnoreCase(value, "cancel_composition") or std.ascii.eqlIgnoreCase(value, "cancel-composition")) return .cancel_composition;
     if (std.ascii.eqlIgnoreCase(value, "select")) return .select;
     return null;
 }
@@ -5398,6 +5414,7 @@ fn automationWidgetActionSupported(actions: canvas.WidgetActions, action: Automa
         .increment => actions.increment,
         .decrement => actions.decrement,
         .set_text => actions.set_text,
+        .set_composition, .commit_composition, .cancel_composition => actions.set_text,
         .select => actions.select,
     };
 }
@@ -5458,10 +5475,21 @@ test "runtime parses automation widget actions" {
     try std.testing.expectEqual(AutomationWidgetActionKind.set_text, set_text_underscore.action);
     try std.testing.expectEqualStrings("", set_text_underscore.value);
 
+    const set_composition = try parseAutomationWidgetAction("canvas 7 set-composition composing text");
+    try std.testing.expectEqual(AutomationWidgetActionKind.set_composition, set_composition.action);
+    try std.testing.expectEqualStrings("composing text", set_composition.value);
+
+    const commit_composition = try parseAutomationWidgetAction("canvas 7 commit-composition");
+    try std.testing.expectEqual(AutomationWidgetActionKind.commit_composition, commit_composition.action);
+
+    const cancel_composition = try parseAutomationWidgetAction("canvas 7 cancel_composition");
+    try std.testing.expectEqual(AutomationWidgetActionKind.cancel_composition, cancel_composition.action);
+
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction(""));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 0 press"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas nope press"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 42 press extra"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 42 commit-composition extra"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 42 unknown"));
 }
 
@@ -10194,6 +10222,22 @@ test "runtime dispatches automation canvas widget actions" {
 
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 5, .action = .set_text, .value = "Hello world" });
     try std.testing.expectEqualStrings("Hello world", harness.runtime.views[0].widgetSemantics()[4].label);
+
+    try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 5, .action = .set_composition, .value = "!" });
+    try std.testing.expectEqualStrings("Hello world!", harness.runtime.views[0].widgetSemantics()[4].text_value);
+    try std.testing.expectEqualDeep(canvas.TextRange.init(11, 12), harness.runtime.views[0].widgetSemantics()[4].text_composition.?);
+
+    try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 5, .action = .commit_composition });
+    try std.testing.expectEqualStrings("Hello world!", harness.runtime.views[0].widgetSemantics()[4].text_value);
+    try std.testing.expect(harness.runtime.views[0].widgetSemantics()[4].text_composition == null);
+
+    try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 5, .action = .set_composition, .value = " draft" });
+    try std.testing.expectEqualStrings("Hello world! draft", harness.runtime.views[0].widgetSemantics()[4].text_value);
+    try std.testing.expectEqualDeep(canvas.TextRange.init(12, 18), harness.runtime.views[0].widgetSemantics()[4].text_composition.?);
+
+    try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 5, .action = .cancel_composition });
+    try std.testing.expectEqualStrings("Hello world!", harness.runtime.views[0].widgetSemantics()[4].text_value);
+    try std.testing.expect(harness.runtime.views[0].widgetSemantics()[4].text_composition == null);
     try std.testing.expect(app_state.widget_keyboard_count >= 3);
     try std.testing.expect(app_state.raw_input_count >= 3);
 }
