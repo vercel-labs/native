@@ -78,7 +78,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
             },
         );
         if (view.kind == .gpu_surface) {
-            try writer.print(" gpu_size={d}x{d} gpu_scale={d} gpu_frame={d} gpu_timestamp_ns={d} gpu_nonblank={any} gpu_sample=0x{x:0>8} canvas_revision={d} canvas_commands={d} widget_revision={d} widget_nodes={d} widget_semantics={d}", .{
+            try writer.print(" gpu_size={d}x{d} gpu_scale={d} gpu_frame={d} gpu_timestamp_ns={d} gpu_nonblank={any} gpu_sample=0x{x:0>8} canvas_revision={d} canvas_commands={d} canvas_frame_requires_render={any} canvas_frame_full_repaint={any} canvas_frame_batches={d} canvas_frame_resources={d} canvas_frame_uploads={d} canvas_frame_retains={d} canvas_frame_evicts={d} canvas_frame_glyphs={d} canvas_frame_changes={d}", .{
                 view.gpu_size.width,
                 view.gpu_size.height,
                 view.gpu_scale_factor,
@@ -88,6 +88,22 @@ pub fn writeText(input: Input, writer: anytype) !void {
                 view.gpu_sample_color,
                 view.canvas_revision,
                 view.canvas_command_count,
+                view.canvas_frame_requires_render,
+                view.canvas_frame_full_repaint,
+                view.canvas_frame_batch_count,
+                view.canvas_frame_resource_count,
+                view.canvas_frame_resource_upload_count,
+                view.canvas_frame_resource_retain_count,
+                view.canvas_frame_resource_evict_count,
+                view.canvas_frame_glyph_atlas_entry_count,
+                view.canvas_frame_change_count,
+            });
+            if (view.canvas_frame_dirty_bounds) |dirty| {
+                try writer.print(" canvas_frame_dirty=({d},{d} {d}x{d})", .{ dirty.x, dirty.y, dirty.width, dirty.height });
+            } else {
+                try writer.writeAll(" canvas_frame_dirty=null");
+            }
+            try writer.print(" widget_revision={d} widget_nodes={d} widget_semantics={d}", .{
                 view.widget_revision,
                 view.widget_node_count,
                 view.widget_semantics_count,
@@ -208,10 +224,10 @@ test "accessibility snapshot prefers explicit accessibility label" {
 }
 
 test "snapshot emits GPU surface frame proof" {
-    var buffer: [512]u8 = undefined;
+    var buffer: [1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     const windows = [_]Window{.{ .title = "Test", .bounds = geometry.RectF.init(0, 0, 100, 100) }};
-    const views = [_]platform.ViewInfo{.{ .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 100, 100), .gpu_size = geometry.SizeF.init(320, 180), .gpu_scale_factor = 2, .gpu_frame_index = 4, .gpu_timestamp_ns = 99, .gpu_frame_nonblank = true, .gpu_sample_color = 0xff336699, .canvas_revision = 2, .canvas_command_count = 5 }};
+    const views = [_]platform.ViewInfo{.{ .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 100, 100), .gpu_size = geometry.SizeF.init(320, 180), .gpu_scale_factor = 2, .gpu_frame_index = 4, .gpu_timestamp_ns = 99, .gpu_frame_nonblank = true, .gpu_sample_color = 0xff336699, .canvas_revision = 2, .canvas_command_count = 5, .canvas_frame_requires_render = true, .canvas_frame_full_repaint = true, .canvas_frame_batch_count = 3, .canvas_frame_resource_count = 2, .canvas_frame_resource_upload_count = 1, .canvas_frame_resource_retain_count = 1, .canvas_frame_resource_evict_count = 0, .canvas_frame_glyph_atlas_entry_count = 4, .canvas_frame_change_count = 0, .canvas_frame_dirty_bounds = geometry.RectF.init(0, 0, 320, 180) }};
     try writeText(.{
         .windows = &windows,
         .views = &views,
@@ -224,10 +240,20 @@ test "snapshot emits GPU surface frame proof" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_sample=0xff336699") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_revision=2") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_commands=5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_frame_requires_render=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_frame_full_repaint=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_frame_batches=3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_frame_resources=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_frame_uploads=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_frame_retains=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_frame_evicts=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_frame_glyphs=4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_frame_changes=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_frame_dirty=(0,0 320x180)") != null);
 }
 
 test "snapshot emits widget semantics" {
-    var buffer: [768]u8 = undefined;
+    var buffer: [1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     const windows = [_]Window{.{ .title = "Test", .bounds = geometry.RectF.init(0, 0, 100, 100) }};
     const views = [_]platform.ViewInfo{.{ .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 100, 100), .role = "canvas" }};
