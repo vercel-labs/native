@@ -649,6 +649,7 @@ pub const WidgetKind = enum {
     column,
     grid,
     scroll_view,
+    list,
     panel,
     text,
     button,
@@ -683,6 +684,7 @@ pub const WidgetRole = enum {
     text,
     button,
     textbox,
+    list,
     listitem,
     tab,
     checkbox,
@@ -1063,7 +1065,7 @@ pub fn emitWidgetLayout(builder: *Builder, layout: WidgetLayoutTree, tokens: Des
             clip_stack_len -= 1;
         }
         switch (widget.kind) {
-            .stack, .row, .column, .grid => {},
+            .stack, .row, .column, .grid, .list => {},
             .scroll_view => {
                 if (clip_stack_len >= clip_stack_depths.len) return error.RenderStackOverflow;
                 try builder.pushClip(.{ .id = widgetPartId(widget.id, 1), .rect = widget.frame });
@@ -1644,7 +1646,7 @@ fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, dept
     if (depth >= max_widget_depth) return error.WidgetDepthExceeded;
 
     switch (widget.kind) {
-        .stack, .row, .column, .grid => try emitWidgetChildren(builder, widget.children, tokens, depth),
+        .stack, .row, .column, .grid, .list => try emitWidgetChildren(builder, widget.children, tokens, depth),
         .scroll_view => try emitScrollViewWidget(builder, widget, tokens, depth),
         .panel => try emitPanelWidget(builder, widget, tokens, depth),
         .text => try emitTextWidget(builder, widget, tokens),
@@ -2080,6 +2082,7 @@ fn layoutWidgetDepth(
         .column => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout.gap),
         .grid => try layoutGridChildren(widget.children, content, index, depth, output, len, widget.layout.gap, widget.layout.columns),
         .scroll_view => try layoutScrollChildren(widget.children, content, index, depth, output, len, widget.value),
+        .list => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout.gap),
         .stack, .panel => {
             for (widget.children) |child| {
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len);
@@ -2420,6 +2423,7 @@ fn semanticRole(widget: Widget) WidgetRole {
     if (widget.semantics.role != .none) return widget.semantics.role;
     return switch (widget.kind) {
         .stack, .row, .column, .grid, .scroll_view, .panel => .group,
+        .list => .list,
         .text => .text,
         .button => .button,
         .text_field => .textbox,
@@ -2462,7 +2466,7 @@ fn isFocusable(widget: Widget) bool {
 fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     return switch (widget.kind) {
-        .row, .column, .grid, .stack => false,
+        .row, .column, .grid, .list, .stack => false,
         .scroll_view, .panel, .text, .button, .text_field, .list_item, .segmented_control, .checkbox, .toggle, .slider, .progress => true,
     };
 }
@@ -3792,6 +3796,71 @@ test "widget list item and segmented controls expose selectable semantics" {
     try std.testing.expectEqual(@as(?f32, 1), semantics[1].value);
 }
 
+test "widget list layout groups list items semantically" {
+    const children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .list_item,
+            .frame = geometry.RectF.init(0, 0, 0, 32),
+            .text = "Inbox",
+            .state = .{ .selected = true },
+        },
+        .{
+            .id = 3,
+            .kind = .list_item,
+            .frame = geometry.RectF.init(0, 0, 0, 32),
+            .text = "Archive",
+        },
+    };
+    const list = Widget{
+        .id = 1,
+        .kind = .list,
+        .text = "Mailboxes",
+        .layout = .{ .padding = geometry.InsetsF.all(8), .gap = 4 },
+        .children = &children,
+    };
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(list, geometry.RectF.init(0, 0, 220, 88), &nodes);
+    try std.testing.expectEqual(@as(usize, 3), layout.nodeCount());
+    try expectLayoutFrame(layout, 1, geometry.RectF.init(0, 0, 220, 88));
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(8, 8, 204, 32));
+    try expectLayoutFrame(layout, 3, geometry.RectF.init(8, 44, 204, 32));
+
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    try std.testing.expectEqual(@as(usize, 3), builder.displayList().commandCount());
+
+    const hit = layout.hitTest(geometry.PointF.init(16, 16)).?;
+    try std.testing.expectEqual(@as(ObjectId, 2), hit.id);
+    try std.testing.expectEqual(WidgetKind.list_item, hit.kind);
+    try std.testing.expect(layout.hitTest(geometry.PointF.init(16, 82)) == null);
+
+    var route_buffer: [3]WidgetEventRouteEntry = undefined;
+    const route = try layout.routePointerEvent(.{ .phase = .down, .point = geometry.PointF.init(16, 16) }, &route_buffer);
+    try std.testing.expectEqual(@as(usize, 3), route.entries.len);
+    try std.testing.expectEqual(@as(ObjectId, 1), route.entries[0].id);
+    try std.testing.expectEqual(WidgetEventPhase.capture, route.entries[0].phase);
+    try std.testing.expectEqual(@as(ObjectId, 2), route.entries[1].id);
+    try std.testing.expectEqual(WidgetEventPhase.target, route.entries[1].phase);
+    try std.testing.expectEqual(@as(ObjectId, 1), route.entries[2].id);
+    try std.testing.expectEqual(WidgetEventPhase.bubble, route.entries[2].phase);
+
+    var semantics_buffer: [3]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+    try std.testing.expectEqual(@as(usize, 3), semantics.len);
+    try std.testing.expectEqual(WidgetRole.list, semantics[0].role);
+    try std.testing.expectEqualStrings("Mailboxes", semantics[0].label);
+    try std.testing.expect(semantics[0].parent_index == null);
+    try std.testing.expectEqual(WidgetRole.listitem, semantics[1].role);
+    try std.testing.expectEqual(@as(?usize, 0), semantics[1].parent_index);
+    try std.testing.expectEqual(@as(?f32, 1), semantics[1].value);
+    try std.testing.expectEqual(WidgetRole.listitem, semantics[2].role);
+    try std.testing.expectEqual(@as(?usize, 0), semantics[2].parent_index);
+    try std.testing.expectEqual(@as(?f32, 0), semantics[2].value);
+}
+
 test "widget layout reports fixed buffer errors" {
     const children = [_]Widget{
         .{ .id = 2, .kind = .text, .text = "One" },
@@ -3929,6 +3998,29 @@ test "widget layout diff marks grid column changes as layout dirty" {
     try std.testing.expect(invalidations[0].layout_dirty);
     try std.testing.expect(invalidations[0].paint_dirty);
     try std.testing.expect(invalidations[0].semantics_dirty);
+}
+
+test "widget layout diff marks list spacing changes as layout dirty" {
+    const children = [_]Widget{
+        .{ .id = 2, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "One" },
+        .{ .id = 3, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "Two" },
+    };
+    const previous_list = Widget{ .id = 1, .kind = .list, .layout = .{ .gap = 4 }, .children = &children };
+    const next_list = Widget{ .id = 1, .kind = .list, .layout = .{ .gap = 8 }, .children = &children };
+
+    var previous_nodes: [3]WidgetLayoutNode = undefined;
+    var next_nodes: [3]WidgetLayoutNode = undefined;
+    const previous = try layoutWidgetTree(previous_list, geometry.RectF.init(0, 0, 120, 80), &previous_nodes);
+    const next = try layoutWidgetTree(next_list, geometry.RectF.init(0, 0, 120, 80), &next_nodes);
+
+    var invalidations_buffer: [3]WidgetInvalidation = undefined;
+    const invalidations = try WidgetLayoutTree.diff(previous, next, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 2), invalidations.len);
+    try std.testing.expectEqual(@as(ObjectId, 1), invalidations[0].id);
+    try std.testing.expect(invalidations[0].layout_dirty);
+    try std.testing.expectEqual(@as(ObjectId, 3), invalidations[1].id);
+    try std.testing.expect(invalidations[1].layout_dirty);
+    try std.testing.expect(invalidations[1].paint_dirty);
 }
 
 test "widget layout diff marks scroll offset changes as child layout dirty" {

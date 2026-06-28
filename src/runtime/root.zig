@@ -3696,6 +3696,7 @@ fn widgetRoleName(role: canvas.WidgetRole) []const u8 {
         .text => "text",
         .button => "button",
         .textbox => "textbox",
+        .list => "list",
         .listitem => "listitem",
         .tab => "tab",
         .checkbox => "checkbox",
@@ -5297,6 +5298,60 @@ test "runtime retains canvas widget layout for automation semantics" {
     var a11y_writer = std.Io.Writer.fixed(&a11y_buffer);
     try automation.snapshot.writeA11yText(snapshot, &a11y_writer);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#2 role=button name=\"Run query\"") != null);
+}
+
+test "runtime automation snapshot exposes canvas list roles" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-list-semantics", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(20, 30, 240, 160),
+    });
+
+    const rows = [_]canvas.Widget{
+        .{ .id = 2, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "Inbox" },
+        .{ .id = 3, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "Archive" },
+    };
+    const list = canvas.Widget{
+        .id = 1,
+        .kind = .list,
+        .text = "Mailboxes",
+        .layout = .{ .gap = 4 },
+        .children = &rows,
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(list, geometry.RectF.init(0, 0, 240, 160), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    const snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expectEqual(@as(usize, 3), snapshot.widgets.len);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.widgets[0].id);
+    try std.testing.expectEqualStrings("list", snapshot.widgets[0].role);
+    try std.testing.expectEqualStrings("Mailboxes", snapshot.widgets[0].name);
+    try std.testing.expectEqualDeep(geometry.RectF.init(20, 30, 240, 160), snapshot.widgets[0].bounds);
+    try std.testing.expectEqualStrings("listitem", snapshot.widgets[1].role);
+    try std.testing.expectEqualStrings("Inbox", snapshot.widgets[1].name);
+    try std.testing.expectEqualDeep(geometry.RectF.init(20, 30, 240, 32), snapshot.widgets[1].bounds);
+    try std.testing.expectEqualStrings("listitem", snapshot.widgets[2].role);
+    try std.testing.expectEqualStrings("Archive", snapshot.widgets[2].name);
+
+    var a11y_buffer: [1024]u8 = undefined;
+    var a11y_writer = std.Io.Writer.fixed(&a11y_buffer);
+    try automation.snapshot.writeA11yText(snapshot, &a11y_writer);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#1 role=list name=\"Mailboxes\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#2 role=listitem name=\"Inbox\"") != null);
 }
 
 test "runtime invalidates canvas widget layout and semantics changes" {
