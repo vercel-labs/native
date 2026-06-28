@@ -3676,6 +3676,8 @@ fn widgetRoleName(role: canvas.WidgetRole) []const u8 {
         .text => "text",
         .button => "button",
         .textbox => "textbox",
+        .listitem => "listitem",
+        .tab => "tab",
         .checkbox => "checkbox",
         .switch_control => "switch",
         .slider => "slider",
