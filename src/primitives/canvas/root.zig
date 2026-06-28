@@ -3030,7 +3030,7 @@ fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
         .id = widgetPartId(widget.id, 4),
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.button_size,
-        .origin = textOrigin(widget.frame, tokens.typography.button_size, tokens.spacing.md),
+        .origin = textOrigin(widget.frame, tokens.typography.button_size, densityValue(tokens, tokens.spacing.md)),
         .color = buttonTextColor(tokens, widget.state),
         .text = widget.text,
     });
@@ -3211,7 +3211,7 @@ fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens
 }
 
 fn emitSearchFieldIcon(builder: *Builder, widget: Widget, tokens: DesignTokens, icon_size: f32) Error!void {
-    const left = widget.frame.x + tokens.spacing.md;
+    const left = widget.frame.x + densityValue(tokens, tokens.spacing.md);
     const top = widget.frame.y + @max(0, (widget.frame.height - icon_size) * 0.5);
     const box = icon_size * 0.58;
     const x0 = left;
@@ -3252,7 +3252,7 @@ fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Er
             .id = widgetPartId(widget.id, 3),
             .font_id = tokens.typography.font_id,
             .size = tokens.typography.label_size,
-            .origin = textOrigin(widget.frame, tokens.typography.label_size, tokens.spacing.sm),
+            .origin = textOrigin(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.sm)),
             .color = tokens.colors.accent_text,
             .text = widget.text,
         });
@@ -3279,7 +3279,7 @@ fn emitListItemWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
         .id = widgetPartId(widget.id, 3),
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.body_size,
-        .origin = textOrigin(widget.frame, tokens.typography.body_size, tokens.spacing.md),
+        .origin = textOrigin(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md)),
         .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
         .text = widget.text,
     });
@@ -3306,7 +3306,7 @@ fn emitDataCellWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
             .id = widgetPartId(widget.id, 4),
             .font_id = tokens.typography.font_id,
             .size = tokens.typography.body_size,
-            .origin = textOrigin(widget.frame, tokens.typography.body_size, tokens.spacing.md),
+            .origin = textOrigin(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md)),
             .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
             .text = widget.text,
         });
@@ -3335,14 +3335,14 @@ fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: DesignT
         .id = widgetPartId(widget.id, 3),
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.label_size,
-        .origin = textOrigin(widget.frame, tokens.typography.label_size, tokens.spacing.md),
+        .origin = textOrigin(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.md)),
         .color = if (selected) tokens.colors.accent_text else tokens.colors.text,
         .text = widget.text,
     });
 }
 
 fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const box_size = @min(@max(14, widget.frame.height * 0.55), 20);
+    const box_size = @min(@max(densityValue(tokens, 14), widget.frame.height * 0.55), densityValue(tokens, 20));
     const box = geometry.RectF.init(
         widget.frame.x,
         widget.frame.y + (widget.frame.height - box_size) * 0.5,
@@ -3384,13 +3384,14 @@ fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
             .stroke = .{ .fill = .{ .color = tokens.colors.accent_text }, .width = 2 },
         });
     }
-    try emitControlLabel(builder, widget, tokens, box.x + box.width + tokens.spacing.sm, 6);
+    try emitControlLabel(builder, widget, tokens, box.x + box.width + densityValue(tokens, tokens.spacing.sm), 6);
 }
 
 fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const selected = booleanControlSelected(widget);
-    const track_width = @min(widget.frame.width, @max(36, widget.frame.height * 1.75));
-    const track_height = @min(widget.frame.height, 24);
+    const knob_inset = densityValue(tokens, 2);
+    const track_width = @min(widget.frame.width, @max(densityValue(tokens, 36), widget.frame.height * 1.75));
+    const track_height = @min(widget.frame.height, densityValue(tokens, 24));
     const track = geometry.RectF.init(
         widget.frame.x,
         widget.frame.y + (widget.frame.height - track_height) * 0.5,
@@ -3398,12 +3399,12 @@ fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
         track_height,
     );
     const track_radius = Radius.all(track.height * 0.5);
-    const knob_size = @max(0, track.height - 4);
+    const knob_size = @max(0, track.height - knob_inset * 2);
     const knob_x = if (selected)
-        track.x + track.width - knob_size - 2
+        track.x + track.width - knob_size - knob_inset
     else
-        track.x + 2;
-    const knob = geometry.RectF.init(knob_x, track.y + 2, knob_size, knob_size);
+        track.x + knob_inset;
+    const knob = geometry.RectF.init(knob_x, track.y + knob_inset, knob_size, knob_size);
 
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
@@ -3427,12 +3428,12 @@ fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
         .fill = .{ .color = if (selected) tokens.colors.accent_text else tokens.colors.surface },
     });
     if (widget.state.focused) try emitWidgetFocusRing(builder, widget, tokens, 4);
-    try emitControlLabel(builder, widget, tokens, track.x + track.width + tokens.spacing.sm, 5);
+    try emitControlLabel(builder, widget, tokens, track.x + track.width + densityValue(tokens, tokens.spacing.sm), 5);
 }
 
 fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const value = std.math.clamp(widget.value, 0, 1);
-    const track_height: f32 = 4;
+    const track_height: f32 = densityValue(tokens, 4);
     const track = geometry.RectF.init(
         widget.frame.x,
         widget.frame.y + (widget.frame.height - track_height) * 0.5,
@@ -3440,7 +3441,7 @@ fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
         track_height,
     );
     const active = geometry.RectF.init(track.x, track.y, track.width * value, track.height);
-    const knob_size = @min(@max(14, widget.frame.height * 0.55), 20);
+    const knob_size = @min(@max(densityValue(tokens, 14), widget.frame.height * 0.55), densityValue(tokens, 20));
     const knob_x = std.math.clamp(
         widget.frame.x + widget.frame.width * value - knob_size * 0.5,
         widget.frame.x,
@@ -3549,7 +3550,8 @@ fn centeredTextOrigin(frame: geometry.RectF, text: []const u8, size: f32) geomet
 }
 
 fn iconGlyphSize(widget: Widget, tokens: DesignTokens) f32 {
-    if (widget.frame.height > 0) return @min(@max(12, widget.frame.height * 0.48), @max(12, tokens.typography.title_size));
+    const min_size = densityValue(tokens, 12);
+    if (widget.frame.height > 0) return @min(@max(min_size, widget.frame.height * 0.48), @max(min_size, tokens.typography.title_size));
     return tokens.typography.button_size;
 }
 
@@ -3587,8 +3589,20 @@ fn widgetTextInputSize(tokens: DesignTokens) f32 {
 fn widgetTextInputInset(widget: Widget, tokens: DesignTokens) f32 {
     const text_size = widgetTextInputSize(tokens);
     return switch (widget.kind) {
-        .search_field => tokens.spacing.md + @max(8, text_size - 2) + tokens.spacing.sm,
-        else => tokens.spacing.md,
+        .search_field => densityValue(tokens, tokens.spacing.md) + @max(densityValue(tokens, 8), text_size - 2) + densityValue(tokens, tokens.spacing.sm),
+        else => densityValue(tokens, tokens.spacing.md),
+    };
+}
+
+fn densityValue(tokens: DesignTokens, value: f32) f32 {
+    return value * densityScale(tokens.density);
+}
+
+fn densityScale(density: Density) f32 {
+    return switch (density) {
+        .compact => 0.875,
+        .regular => 1,
+        .spacious => 1.125,
     };
 }
 
@@ -8401,6 +8415,69 @@ test "widget emitter applies button state tokens" {
     }
     switch (display_list.commands[3]) {
         .draw_text => |text| try std.testing.expectEqualDeep(tokens.colors.accent_text, text.color),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "widget emitter applies density tokens to spacing and affordances" {
+    const button = Widget{
+        .id = 1,
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 0, 140, 40),
+        .text = "Density",
+    };
+
+    var compact_button_commands: [4]CanvasCommand = undefined;
+    var compact_button_builder = Builder.init(&compact_button_commands);
+    try emitWidgetTree(&compact_button_builder, button, .{ .density = .compact });
+    switch (compact_button_builder.displayList().commands[2]) {
+        .draw_text => |text| try std.testing.expectApproxEqAbs(@as(f32, 10.5), text.origin.x, 0.001),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var regular_button_commands: [4]CanvasCommand = undefined;
+    var regular_button_builder = Builder.init(&regular_button_commands);
+    try emitWidgetTree(&regular_button_builder, button, .{ .density = .regular });
+    switch (regular_button_builder.displayList().commands[2]) {
+        .draw_text => |text| try std.testing.expectApproxEqAbs(@as(f32, 12), text.origin.x, 0.001),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var spacious_button_commands: [4]CanvasCommand = undefined;
+    var spacious_button_builder = Builder.init(&spacious_button_commands);
+    try emitWidgetTree(&spacious_button_builder, button, .{ .density = .spacious });
+    switch (spacious_button_builder.displayList().commands[2]) {
+        .draw_text => |text| try std.testing.expectApproxEqAbs(@as(f32, 13.5), text.origin.x, 0.001),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const checkbox = Widget{
+        .id = 2,
+        .kind = .checkbox,
+        .frame = geometry.RectF.init(0, 0, 80, 20),
+    };
+
+    var compact_checkbox_commands: [2]CanvasCommand = undefined;
+    var compact_checkbox_builder = Builder.init(&compact_checkbox_commands);
+    try emitWidgetTree(&compact_checkbox_builder, checkbox, .{ .density = .compact });
+    switch (compact_checkbox_builder.displayList().commands[0]) {
+        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(@as(f32, 12.25), fill.rect.width, 0.001),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var regular_checkbox_commands: [2]CanvasCommand = undefined;
+    var regular_checkbox_builder = Builder.init(&regular_checkbox_commands);
+    try emitWidgetTree(&regular_checkbox_builder, checkbox, .{ .density = .regular });
+    switch (regular_checkbox_builder.displayList().commands[0]) {
+        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(@as(f32, 14), fill.rect.width, 0.001),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var spacious_checkbox_commands: [2]CanvasCommand = undefined;
+    var spacious_checkbox_builder = Builder.init(&spacious_checkbox_commands);
+    try emitWidgetTree(&spacious_checkbox_builder, checkbox, .{ .density = .spacious });
+    switch (spacious_checkbox_builder.displayList().commands[0]) {
+        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(@as(f32, 15.75), fill.rect.width, 0.001),
         else => return error.TestUnexpectedResult,
     }
 }
