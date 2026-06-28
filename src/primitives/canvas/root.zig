@@ -651,6 +651,7 @@ pub const WidgetKind = enum {
     scroll_view,
     list,
     panel,
+    popover,
     text,
     button,
     text_field,
@@ -686,6 +687,7 @@ pub const WidgetRole = enum {
     button,
     textbox,
     tooltip,
+    dialog,
     list,
     listitem,
     tab,
@@ -1075,6 +1077,7 @@ pub fn emitWidgetLayout(builder: *Builder, layout: WidgetLayoutTree, tokens: Des
                 clip_stack_len += 1;
             },
             .panel => try emitPanelWidgetChrome(builder, widget, tokens),
+            .popover => try emitPopoverWidgetChrome(builder, widget, tokens),
             .text => try emitTextWidget(builder, widget, tokens),
             .button => try emitButtonWidget(builder, widget, tokens),
             .text_field => try emitTextFieldWidget(builder, widget, tokens),
@@ -1652,6 +1655,7 @@ fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, dept
         .stack, .row, .column, .grid, .list => try emitWidgetChildren(builder, widget.children, tokens, depth),
         .scroll_view => try emitScrollViewWidget(builder, widget, tokens, depth),
         .panel => try emitPanelWidget(builder, widget, tokens, depth),
+        .popover => try emitPopoverWidget(builder, widget, tokens, depth),
         .text => try emitTextWidget(builder, widget, tokens),
         .button => try emitButtonWidget(builder, widget, tokens),
         .text_field => try emitTextFieldWidget(builder, widget, tokens),
@@ -1676,6 +1680,11 @@ fn emitPanelWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, dept
     try emitWidgetChildren(builder, widget.children, tokens, depth);
 }
 
+fn emitPopoverWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
+    try emitPopoverWidgetChrome(builder, widget, tokens);
+    try emitWidgetChildren(builder, widget.children, tokens, depth);
+}
+
 fn emitScrollViewWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
     try builder.pushClip(.{ .id = widgetPartId(widget.id, 1), .rect = widget.frame });
     try emitWidgetChildren(builder, widget.children, tokens, depth);
@@ -1685,6 +1694,38 @@ fn emitScrollViewWidget(builder: *Builder, widget: Widget, tokens: DesignTokens,
 fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const radius = Radius.all(tokens.radius.lg);
     const shadow_token = tokens.shadow.sm;
+    if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
+        try builder.shadow(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = widget.frame,
+            .radius = radius,
+            .offset = .{ .dx = 0, .dy = shadow_token.y },
+            .blur = shadow_token.blur,
+            .spread = shadow_token.spread,
+            .color = tokens.colors.shadow,
+        });
+    }
+
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 2),
+        .rect = widget.frame,
+        .radius = radius,
+        .fill = .{ .color = tokens.colors.surface },
+    });
+    try builder.strokeRect(.{
+        .id = widgetPartId(widget.id, 3),
+        .rect = widget.frame,
+        .radius = radius,
+        .stroke = .{
+            .fill = .{ .color = tokens.colors.border },
+            .width = tokens.stroke.hairline,
+        },
+    });
+}
+
+fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const radius = Radius.all(tokens.radius.xl);
+    const shadow_token = tokens.shadow.md;
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
         try builder.shadow(.{
             .id = widgetPartId(widget.id, 1),
@@ -2119,7 +2160,7 @@ fn layoutWidgetDepth(
         .grid => try layoutGridChildren(widget.children, content, index, depth, output, len, widget.layout.gap, widget.layout.columns),
         .scroll_view => try layoutScrollChildren(widget.children, content, index, depth, output, len, widget.value),
         .list => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout.gap),
-        .stack, .panel => {
+        .stack, .panel, .popover => {
             for (widget.children) |child| {
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len);
             }
@@ -2459,6 +2500,7 @@ fn semanticRole(widget: Widget) WidgetRole {
     if (widget.semantics.role != .none) return widget.semantics.role;
     return switch (widget.kind) {
         .stack, .row, .column, .grid, .scroll_view, .panel => .group,
+        .popover => .dialog,
         .list => .list,
         .text => .text,
         .button => .button,
@@ -2504,7 +2546,7 @@ fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     return switch (widget.kind) {
         .row, .column, .grid, .list, .stack, .tooltip => false,
-        .scroll_view, .panel, .text, .button, .text_field, .list_item, .segmented_control, .checkbox, .toggle, .slider, .progress => true,
+        .scroll_view, .panel, .popover, .text, .button, .text_field, .list_item, .segmented_control, .checkbox, .toggle, .slider, .progress => true,
     };
 }
 
@@ -3844,6 +3886,62 @@ test "widget tooltip emits overlay chrome and tooltip semantics" {
     try std.testing.expectEqual(WidgetRole.tooltip, semantics[0].role);
     try std.testing.expectEqualStrings("Saved", semantics[0].label);
     try std.testing.expect(!semantics[0].focusable);
+}
+
+test "widget popover emits overlay chrome and routes child events" {
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 0, 100, 32),
+        .text = "Open",
+    }};
+    const popover = Widget{
+        .id = 1,
+        .kind = .popover,
+        .frame = geometry.RectF.init(20, 24, 180, 120),
+        .layout = .{ .padding = geometry.InsetsF.all(10) },
+        .semantics = .{ .label = "Command palette" },
+        .children = &children,
+    };
+
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(popover, popover.frame, &nodes);
+    try std.testing.expectEqual(@as(usize, 2), layout.nodeCount());
+    try expectLayoutFrame(layout, 1, geometry.RectF.init(20, 24, 180, 120));
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(30, 34, 100, 32));
+
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 6), display_list.commandCount());
+    try std.testing.expect(display_list.commands[0] == .shadow);
+    try std.testing.expectEqual(@as(?ObjectId, widgetPartId(1, 2)), display_list.commands[1].objectId());
+    try std.testing.expect(display_list.commands[1] == .fill_rounded_rect);
+    try std.testing.expectEqual(@as(?ObjectId, widgetPartId(2, 1)), display_list.commands[3].objectId());
+
+    try std.testing.expectEqual(@as(ObjectId, 2), layout.hitTest(geometry.PointF.init(40, 44)).?.id);
+    const blank_hit = layout.hitTest(geometry.PointF.init(190, 130)).?;
+    try std.testing.expectEqual(@as(ObjectId, 1), blank_hit.id);
+    try std.testing.expectEqual(WidgetKind.popover, blank_hit.kind);
+    try std.testing.expect(layout.hitTest(geometry.PointF.init(10, 10)) == null);
+
+    var route_buffer: [3]WidgetEventRouteEntry = undefined;
+    const route = try layout.routePointerEvent(.{ .phase = .down, .point = geometry.PointF.init(40, 44) }, &route_buffer);
+    try std.testing.expectEqual(@as(usize, 3), route.entries.len);
+    try expectRouteEntry(route.entries[0], .capture, 1);
+    try expectRouteEntry(route.entries[1], .target, 2);
+    try expectRouteEntry(route.entries[2], .bubble, 1);
+
+    var semantics_buffer: [2]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+    try std.testing.expectEqual(@as(usize, 2), semantics.len);
+    try std.testing.expectEqual(WidgetRole.dialog, semantics[0].role);
+    try std.testing.expectEqualStrings("Command palette", semantics[0].label);
+    try std.testing.expect(semantics[0].parent_index == null);
+    try std.testing.expectEqual(WidgetRole.button, semantics[1].role);
+    try std.testing.expectEqual(@as(?usize, 0), semantics[1].parent_index);
+    try std.testing.expect(semantics[1].focusable);
 }
 
 test "widget list item and segmented controls expose selectable semantics" {

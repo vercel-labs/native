@@ -3697,6 +3697,7 @@ fn widgetRoleName(role: canvas.WidgetRole) []const u8 {
         .button => "button",
         .textbox => "textbox",
         .tooltip => "tooltip",
+        .dialog => "dialog",
         .list => "list",
         .listitem => "listitem",
         .tab => "tab",
@@ -5395,6 +5396,60 @@ test "runtime automation snapshot exposes canvas tooltip roles" {
     var a11y_writer = std.Io.Writer.fixed(&a11y_buffer);
     try automation.snapshot.writeA11yText(snapshot, &a11y_writer);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#1 role=tooltip name=\"Saved\"") != null);
+}
+
+test "runtime automation snapshot exposes canvas popover dialog roles" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-popover-semantics", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(40, 50, 260, 180),
+    });
+
+    const actions = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 0, 96, 32),
+        .text = "Open",
+    }};
+    const popover = canvas.Widget{
+        .id = 1,
+        .kind = .popover,
+        .frame = geometry.RectF.init(12, 16, 180, 120),
+        .layout = .{ .padding = geometry.InsetsF.all(10) },
+        .semantics = .{ .label = "Command palette" },
+        .children = &actions,
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(popover, popover.frame, &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    const snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expectEqual(@as(usize, 2), snapshot.widgets.len);
+    try std.testing.expectEqualStrings("dialog", snapshot.widgets[0].role);
+    try std.testing.expectEqualStrings("Command palette", snapshot.widgets[0].name);
+    try std.testing.expectEqualDeep(geometry.RectF.init(52, 66, 180, 120), snapshot.widgets[0].bounds);
+    try std.testing.expectEqualStrings("button", snapshot.widgets[1].role);
+    try std.testing.expectEqualStrings("Open", snapshot.widgets[1].name);
+    try std.testing.expectEqualDeep(geometry.RectF.init(62, 76, 96, 32), snapshot.widgets[1].bounds);
+
+    var a11y_buffer: [512]u8 = undefined;
+    var a11y_writer = std.Io.Writer.fixed(&a11y_buffer);
+    try automation.snapshot.writeA11yText(snapshot, &a11y_writer);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#1 role=dialog name=\"Command palette\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#2 role=button name=\"Open\"") != null);
 }
 
 test "runtime invalidates canvas widget layout and semantics changes" {
