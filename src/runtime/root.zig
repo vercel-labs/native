@@ -673,6 +673,19 @@ pub const Runtime = struct {
         self.invalidateFor(.state, self.views[index].frame);
     }
 
+    fn updateCanvasWidgetFocusFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent) void {
+        if (input_event.kind != .key_down or !std.ascii.eqlIgnoreCase(input_event.key, "tab")) return;
+        const index = self.findViewIndex(input_event.window_id, input_event.label) orelse return;
+        if (self.views[index].kind != .gpu_surface) return;
+
+        const current_id: ?canvas.ObjectId = if (self.views[index].canvas_widget_focused_id == 0) null else self.views[index].canvas_widget_focused_id;
+        const direction: canvas.WidgetFocusDirection = if (input_event.modifiers.shift) .backward else .forward;
+        const target = self.views[index].widgetLayoutTree().focusTarget(current_id, direction) orelse return;
+        if (self.views[index].canvas_widget_focused_id == target.id) return;
+        self.views[index].canvas_widget_focused_id = target.id;
+        self.invalidateFor(.state, self.views[index].frame);
+    }
+
     fn invalidateForCanvasChanges(self: *Runtime, view_frame: geometry.RectF, changes: []const canvas.DiffChange) void {
         var emitted_dirty_region = false;
         for (changes) |change| {
@@ -988,6 +1001,7 @@ pub const Runtime = struct {
                     self.updateCanvasWidgetFocusFromPointer(pointer_event);
                     try self.dispatchEvent(app, .{ .canvas_widget_pointer = pointer_event });
                 }
+                self.updateCanvasWidgetFocusFromKeyboardInput(input_event);
                 const widget_keyboard_event = self.routeCanvasWidgetKeyboardInput(input_event, &self.widget_event_route_entries) catch |err| switch (err) {
                     error.WindowNotFound,
                     error.ViewNotFound,
@@ -6921,18 +6935,26 @@ test "runtime dispatches routed canvas widget pointer events" {
         .frame = geometry.RectF.init(0, 0, 240, 160),
     });
 
-    const children = [_]canvas.Widget{.{
-        .id = 2,
-        .kind = .button,
-        .frame = geometry.RectF.init(10, 12, 96, 32),
-        .text = "Run",
-    }};
+    const children = [_]canvas.Widget{
+        .{
+            .id = 2,
+            .kind = .button,
+            .frame = geometry.RectF.init(10, 12, 96, 32),
+            .text = "Run",
+        },
+        .{
+            .id = 3,
+            .kind = .text_field,
+            .frame = geometry.RectF.init(10, 52, 140, 32),
+            .text = "Query",
+        },
+    };
     const root = canvas.Widget{
         .id = 1,
         .kind = .panel,
         .children = &children,
     };
-    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 240, 160), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
 
@@ -6958,9 +6980,10 @@ test "runtime dispatches routed canvas widget pointer events" {
     try std.testing.expect(harness.runtime.invalidated);
 
     const snapshot = harness.runtime.automationSnapshot("Widgets");
-    try std.testing.expectEqual(@as(usize, 2), snapshot.widgets.len);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.widgets.len);
     try std.testing.expect(!snapshot.widgets[0].focused);
     try std.testing.expect(snapshot.widgets[1].focused);
+    try std.testing.expect(!snapshot.widgets[2].focused);
 
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
@@ -6981,6 +7004,39 @@ test "runtime dispatches routed canvas widget pointer events" {
     try std.testing.expectEqualStrings("\n", app_state.last_keyboard_text);
     try std.testing.expect(app_state.last_keyboard_shift);
     try std.testing.expect(app_state.last_keyboard_super);
+
+    harness.runtime.invalidated = false;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "tab",
+    } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.widget_keyboard_count);
+    try std.testing.expectEqual(@as(u32, 3), app_state.raw_input_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_keyboard_target_id);
+    try std.testing.expectEqual(canvas.WidgetKind.text_field, app_state.last_keyboard_target_kind);
+    try std.testing.expectEqualStrings("tab", app_state.last_keyboard_key);
+    try std.testing.expect(harness.runtime.invalidated);
+
+    const tab_snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expect(!tab_snapshot.widgets[1].focused);
+    try std.testing.expect(tab_snapshot.widgets[2].focused);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "tab",
+        .modifiers = .{ .shift = true },
+    } });
+    try std.testing.expectEqual(@as(u32, 3), app_state.widget_keyboard_count);
+    try std.testing.expectEqual(@as(u32, 4), app_state.raw_input_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_keyboard_target_id);
+    try std.testing.expectEqual(canvas.WidgetKind.button, app_state.last_keyboard_target_kind);
+    try std.testing.expect(app_state.last_keyboard_shift);
 }
 
 test "runtime dispatches shortcut command events" {
