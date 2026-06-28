@@ -64,10 +64,12 @@ pub fn writeText(input: Input, writer: anytype) !void {
             },
         );
         if (view.kind == .gpu_surface) {
-            try writer.print(" gpu_frame={d} gpu_nonblank={any} gpu_sample=0x{x:0>8}", .{
+            try writer.print(" gpu_frame={d} gpu_nonblank={any} gpu_sample=0x{x:0>8} canvas_revision={d} canvas_commands={d}", .{
                 view.gpu_frame_index,
                 view.gpu_frame_nonblank,
                 view.gpu_sample_color,
+                view.canvas_revision,
+                view.canvas_command_count,
             });
         }
         try writer.writeByte('\n');
@@ -153,7 +155,7 @@ test "snapshot emits GPU surface frame proof" {
     var buffer: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     const windows = [_]Window{.{ .title = "Test", .bounds = geometry.RectF.init(0, 0, 100, 100) }};
-    const views = [_]platform.ViewInfo{.{ .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 100, 100), .gpu_frame_index = 4, .gpu_frame_nonblank = true, .gpu_sample_color = 0xff336699 }};
+    const views = [_]platform.ViewInfo{.{ .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 100, 100), .gpu_frame_index = 4, .gpu_frame_nonblank = true, .gpu_sample_color = 0xff336699, .canvas_revision = 2, .canvas_command_count = 5 }};
     try writeText(.{
         .windows = &windows,
         .views = &views,
@@ -161,4 +163,6 @@ test "snapshot emits GPU surface frame proof" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_frame=4") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_nonblank=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_sample=0xff336699") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_revision=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_commands=5") != null);
 }

@@ -458,6 +458,8 @@ pub const ViewInfo = struct {
     gpu_frame_index: u64 = 0,
     gpu_frame_nonblank: bool = false,
     gpu_sample_color: u32 = 0,
+    canvas_revision: u64 = 0,
+    canvas_command_count: usize = 0,
     focused: bool = false,
     open: bool = true,
 };
@@ -1052,6 +1054,7 @@ pub const NullPlatform = struct {
     surface_value: Surface = .{},
     web_engine: WebEngine = .system,
     app_info: AppInfo = .{},
+    gpu_surfaces: bool = false,
     requested_frames: u32 = 1,
     loaded_source: ?WebViewSource = null,
     security_policy: security.Policy = .{},
@@ -1207,7 +1210,7 @@ pub const NullPlatform = struct {
             .file_drops,
             .app_activation_events,
             => true,
-            .gpu_surfaces => false,
+            .gpu_surfaces => self.gpu_surfaces,
             .tray => self.web_engine == .system,
         };
     }
@@ -1354,7 +1357,7 @@ pub const NullPlatform = struct {
     fn createView(context: ?*anyopaque, options: ViewOptions) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         if (options.kind == .webview) return createWebView(context, options.webViewOptions());
-        if (options.kind == .gpu_surface) return error.UnsupportedViewKind;
+        if (options.kind == .gpu_surface and !self.gpu_surfaces) return error.UnsupportedViewKind;
         try self.validateViewOptions(options);
         if (self.findViewIndex(options.window_id, options.label) != null) return error.DuplicateViewLabel;
         if (self.view_count >= max_views) return error.ViewLimitReached;

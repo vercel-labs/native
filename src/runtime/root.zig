@@ -2,6 +2,7 @@ const std = @import("std");
 const geometry = @import("geometry");
 const trace = @import("trace");
 const json = @import("json");
+const canvas = @import("canvas");
 const automation = @import("../automation/root.zig");
 const bridge = @import("../bridge/root.zig");
 const extensions = @import("../extensions/root.zig");
@@ -13,6 +14,11 @@ const window_state = @import("../window_state/root.zig");
 const max_async_bridge_responses: usize = 64;
 const max_bridge_origin_bytes: usize = 512;
 const max_command_id_bytes: usize = 128;
+pub const max_canvas_commands_per_view: usize = 64;
+pub const max_canvas_gradient_stops_per_view: usize = 64;
+pub const max_canvas_path_elements_per_view: usize = 128;
+pub const max_canvas_glyphs_per_view: usize = 256;
+pub const max_canvas_text_bytes_per_view: usize = 2048;
 
 pub const LifecycleEvent = enum {
     start,
@@ -523,6 +529,24 @@ pub const Runtime = struct {
         if (self.findViewIndex(window_id, label)) |current_index| self.removeViewAt(current_index);
         if (was_focused) self.ensureFocusableViewFocused(window_id);
         self.invalidateFor(.command, null);
+    }
+
+    pub fn setCanvasDisplayList(self: *Runtime, window_id: platform.WindowId, label: []const u8, display_list: canvas.DisplayList) anyerror!platform.ViewInfo {
+        try self.validateViewParent(window_id);
+        try validateViewLabel(label);
+        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+        try self.views[index].copyCanvasDisplayList(display_list);
+        self.invalidateFor(.state, self.views[index].frame);
+        return self.views[index].info();
+    }
+
+    pub fn canvasDisplayList(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror!canvas.DisplayList {
+        try self.validateViewParent(window_id);
+        try validateViewLabel(label);
+        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+        return self.views[index].canvasDisplayList();
     }
 
     pub fn listViews(self: *const Runtime, window_id: platform.WindowId, output: []platform.ViewInfo) []const platform.ViewInfo {
@@ -2548,27 +2572,8 @@ pub const Runtime = struct {
         if (index >= self.view_count) return;
         var cursor = index;
         while (cursor + 1 < self.view_count) : (cursor += 1) {
-            const next = self.views[cursor + 1];
-            self.views[cursor] = .{
-                .id = next.id,
-                .window_id = next.window_id,
-                .kind = next.kind,
-                .frame = next.frame,
-                .layer = next.layer,
-                .visible = next.visible,
-                .enabled = next.enabled,
-                .transparent = next.transparent,
-                .bridge_enabled = next.bridge_enabled,
-                .accessibility_label = next.accessibility_label,
-                .focused = next.focused,
-                .open = next.open,
-            };
-            self.views[cursor].label = copyInto(&self.views[cursor].label_storage, next.label) catch unreachable;
-            self.views[cursor].parent = if (next.parent) |parent| copyInto(&self.views[cursor].parent_storage, parent) catch unreachable else null;
-            self.views[cursor].role = copyInto(&self.views[cursor].role_storage, next.role) catch unreachable;
-            self.views[cursor].accessibility_label = copyInto(&self.views[cursor].accessibility_label_storage, next.accessibility_label) catch unreachable;
-            self.views[cursor].text = copyInto(&self.views[cursor].text_storage, next.text) catch unreachable;
-            self.views[cursor].command = copyInto(&self.views[cursor].command_storage, next.command) catch unreachable;
+            const next = &self.views[cursor + 1];
+            self.views[cursor].copyRuntimeStateFrom(next);
         }
         self.view_count -= 1;
     }
@@ -2862,6 +2867,62 @@ const FocusTraversalDirection = enum {
     previous,
 };
 
+const CanvasResourceCounts = struct {
+    command_count: usize = 0,
+    gradient_stop_count: usize = 0,
+    path_element_count: usize = 0,
+    glyph_count: usize = 0,
+    text_byte_count: usize = 0,
+
+    fn fromDisplayList(display_list: canvas.DisplayList) anyerror!CanvasResourceCounts {
+        var counts: CanvasResourceCounts = .{};
+        try addCanvasCount(&counts.command_count, display_list.commands.len, max_canvas_commands_per_view, error.CanvasCommandLimitReached);
+        for (display_list.commands) |command| try counts.addCommand(command);
+        return counts;
+    }
+
+    fn addCommand(self: *CanvasResourceCounts, command: canvas.CanvasCommand) anyerror!void {
+        switch (command) {
+            .push_clip, .pop_clip, .push_opacity, .pop_opacity, .transform, .draw_image, .blur => {},
+            .fill_rect => |value| try self.addFill(value.fill),
+            .stroke_rect => |value| try self.addStroke(value.stroke),
+            .fill_rounded_rect => |value| try self.addFill(value.fill),
+            .draw_line => |value| try self.addStroke(value.stroke),
+            .fill_path => |value| {
+                try addCanvasCount(&self.path_element_count, value.elements.len, max_canvas_path_elements_per_view, error.CanvasPathElementLimitReached);
+                try self.addFill(value.fill);
+            },
+            .stroke_path => |value| {
+                try addCanvasCount(&self.path_element_count, value.elements.len, max_canvas_path_elements_per_view, error.CanvasPathElementLimitReached);
+                try self.addStroke(value.stroke);
+            },
+            .draw_text => |value| {
+                try addCanvasCount(&self.text_byte_count, value.text.len, max_canvas_text_bytes_per_view, error.CanvasTextTooLarge);
+                try addCanvasCount(&self.glyph_count, value.glyphs.len, max_canvas_glyphs_per_view, error.CanvasGlyphLimitReached);
+            },
+            .shadow => |value| {
+                _ = value;
+            },
+        }
+    }
+
+    fn addStroke(self: *CanvasResourceCounts, stroke: canvas.Stroke) anyerror!void {
+        try self.addFill(stroke.fill);
+    }
+
+    fn addFill(self: *CanvasResourceCounts, fill: canvas.Fill) anyerror!void {
+        switch (fill) {
+            .color => {},
+            .linear_gradient => |gradient| try addCanvasCount(&self.gradient_stop_count, gradient.stops.len, max_canvas_gradient_stops_per_view, error.CanvasGradientStopLimitReached),
+        }
+    }
+};
+
+fn addCanvasCount(value: *usize, amount: usize, max_value: usize, comptime failure: anyerror) anyerror!void {
+    if (amount > max_value or value.* > max_value - amount) return failure;
+    value.* += amount;
+}
+
 const RuntimeView = struct {
     id: platform.ViewId = 0,
     window_id: platform.WindowId = 1,
@@ -2881,6 +2942,17 @@ const RuntimeView = struct {
     gpu_frame_index: u64 = 0,
     gpu_frame_nonblank: bool = false,
     gpu_sample_color: u32 = 0,
+    canvas_commands: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined,
+    canvas_command_count: usize = 0,
+    canvas_revision: u64 = 0,
+    canvas_gradient_stops: [max_canvas_gradient_stops_per_view]canvas.GradientStop = undefined,
+    canvas_gradient_stop_count: usize = 0,
+    canvas_path_elements: [max_canvas_path_elements_per_view]canvas.PathElement = undefined,
+    canvas_path_element_count: usize = 0,
+    canvas_glyphs: [max_canvas_glyphs_per_view]canvas.Glyph = undefined,
+    canvas_glyph_count: usize = 0,
+    canvas_text_bytes: [max_canvas_text_bytes_per_view]u8 = undefined,
+    canvas_text_len: usize = 0,
     focused: bool = false,
     open: bool = false,
     label_storage: [platform.max_view_label_bytes]u8 = undefined,
@@ -2911,9 +2983,151 @@ const RuntimeView = struct {
             .gpu_frame_index = self.gpu_frame_index,
             .gpu_frame_nonblank = self.gpu_frame_nonblank,
             .gpu_sample_color = self.gpu_sample_color,
+            .canvas_revision = self.canvas_revision,
+            .canvas_command_count = self.canvas_command_count,
             .focused = self.focused,
             .open = self.open,
         };
+    }
+
+    fn copyRuntimeStateFrom(self: *RuntimeView, source: *const RuntimeView) void {
+        self.* = source.*;
+        self.label = copyInto(&self.label_storage, source.label) catch unreachable;
+        self.parent = if (source.parent) |parent| copyInto(&self.parent_storage, parent) catch unreachable else null;
+        self.role = copyInto(&self.role_storage, source.role) catch unreachable;
+        self.accessibility_label = copyInto(&self.accessibility_label_storage, source.accessibility_label) catch unreachable;
+        self.text = copyInto(&self.text_storage, source.text) catch unreachable;
+        self.command = copyInto(&self.command_storage, source.command) catch unreachable;
+        self.copyCanvasDisplayList(source.canvasDisplayList()) catch unreachable;
+        self.canvas_revision = source.canvas_revision;
+    }
+
+    fn canvasDisplayList(self: *const RuntimeView) canvas.DisplayList {
+        return .{ .commands = self.canvas_commands[0..self.canvas_command_count] };
+    }
+
+    fn copyCanvasDisplayList(self: *RuntimeView, display_list: canvas.DisplayList) anyerror!void {
+        _ = try CanvasResourceCounts.fromDisplayList(display_list);
+        if (display_list.commands.len > 0 and display_list.commands.ptr == self.canvas_commands[0..].ptr) {
+            self.canvas_revision += 1;
+            return;
+        }
+
+        self.canvas_command_count = 0;
+        self.canvas_gradient_stop_count = 0;
+        self.canvas_path_element_count = 0;
+        self.canvas_glyph_count = 0;
+        self.canvas_text_len = 0;
+
+        for (display_list.commands) |command| {
+            self.canvas_commands[self.canvas_command_count] = try self.copyCanvasCommand(command);
+            self.canvas_command_count += 1;
+        }
+        self.canvas_revision += 1;
+    }
+
+    fn copyCanvasCommand(self: *RuntimeView, command: canvas.CanvasCommand) anyerror!canvas.CanvasCommand {
+        return switch (command) {
+            .push_clip => |value| .{ .push_clip = value },
+            .pop_clip => .pop_clip,
+            .push_opacity => |value| .{ .push_opacity = value },
+            .pop_opacity => .pop_opacity,
+            .transform => |value| .{ .transform = value },
+            .fill_rect => |value| blk: {
+                var copy = value;
+                copy.fill = try self.copyCanvasFill(value.fill);
+                break :blk .{ .fill_rect = copy };
+            },
+            .stroke_rect => |value| blk: {
+                var copy = value;
+                copy.stroke = try self.copyCanvasStroke(value.stroke);
+                break :blk .{ .stroke_rect = copy };
+            },
+            .fill_rounded_rect => |value| blk: {
+                var copy = value;
+                copy.fill = try self.copyCanvasFill(value.fill);
+                break :blk .{ .fill_rounded_rect = copy };
+            },
+            .draw_line => |value| blk: {
+                var copy = value;
+                copy.stroke = try self.copyCanvasStroke(value.stroke);
+                break :blk .{ .draw_line = copy };
+            },
+            .fill_path => |value| blk: {
+                var copy = value;
+                copy.elements = try self.copyCanvasPathElements(value.elements);
+                copy.fill = try self.copyCanvasFill(value.fill);
+                break :blk .{ .fill_path = copy };
+            },
+            .stroke_path => |value| blk: {
+                var copy = value;
+                copy.elements = try self.copyCanvasPathElements(value.elements);
+                copy.stroke = try self.copyCanvasStroke(value.stroke);
+                break :blk .{ .stroke_path = copy };
+            },
+            .draw_image => |value| .{ .draw_image = value },
+            .draw_text => |value| blk: {
+                var copy = value;
+                copy.text = try self.copyCanvasText(value.text);
+                copy.glyphs = try self.copyCanvasGlyphs(value.glyphs);
+                break :blk .{ .draw_text = copy };
+            },
+            .shadow => |value| .{ .shadow = value },
+            .blur => |value| .{ .blur = value },
+        };
+    }
+
+    fn copyCanvasStroke(self: *RuntimeView, stroke: canvas.Stroke) anyerror!canvas.Stroke {
+        var copy = stroke;
+        copy.fill = try self.copyCanvasFill(stroke.fill);
+        return copy;
+    }
+
+    fn copyCanvasFill(self: *RuntimeView, fill: canvas.Fill) anyerror!canvas.Fill {
+        return switch (fill) {
+            .color => |color| .{ .color = color },
+            .linear_gradient => |gradient| .{ .linear_gradient = .{
+                .start = gradient.start,
+                .end = gradient.end,
+                .stops = try self.copyCanvasGradientStops(gradient.stops),
+            } },
+        };
+    }
+
+    fn copyCanvasGradientStops(self: *RuntimeView, stops: []const canvas.GradientStop) anyerror![]const canvas.GradientStop {
+        const end = self.canvas_gradient_stop_count + stops.len;
+        if (end > self.canvas_gradient_stops.len) return error.CanvasGradientStopLimitReached;
+        const start = self.canvas_gradient_stop_count;
+        @memcpy(self.canvas_gradient_stops[start..end], stops);
+        self.canvas_gradient_stop_count = end;
+        return self.canvas_gradient_stops[start..end];
+    }
+
+    fn copyCanvasPathElements(self: *RuntimeView, elements: []const canvas.PathElement) anyerror![]const canvas.PathElement {
+        const end = self.canvas_path_element_count + elements.len;
+        if (end > self.canvas_path_elements.len) return error.CanvasPathElementLimitReached;
+        const start = self.canvas_path_element_count;
+        @memcpy(self.canvas_path_elements[start..end], elements);
+        self.canvas_path_element_count = end;
+        return self.canvas_path_elements[start..end];
+    }
+
+    fn copyCanvasGlyphs(self: *RuntimeView, glyphs: []const canvas.Glyph) anyerror![]const canvas.Glyph {
+        const end = self.canvas_glyph_count + glyphs.len;
+        if (end > self.canvas_glyphs.len) return error.CanvasGlyphLimitReached;
+        const start = self.canvas_glyph_count;
+        @memcpy(self.canvas_glyphs[start..end], glyphs);
+        self.canvas_glyph_count = end;
+        return self.canvas_glyphs[start..end];
+    }
+
+    fn copyCanvasText(self: *RuntimeView, text: []const u8) anyerror![]const u8 {
+        const end = self.canvas_text_len + text.len;
+        if (end > self.canvas_text_bytes.len) return error.CanvasTextTooLarge;
+        const start = self.canvas_text_len;
+        @memcpy(self.canvas_text_bytes[start..end], text);
+        self.canvas_text_len = end;
+        return self.canvas_text_bytes[start..end];
     }
 };
 
@@ -3375,7 +3589,7 @@ fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
     try json.writeString(writer, view.command);
     try writer.writeAll(",\"url\":");
     try json.writeString(writer, view.url);
-    try writer.print(",\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"layer\":{d},\"visible\":{},\"enabled\":{},\"transparent\":{},\"bridge\":{},\"focused\":{},\"open\":{}}}", .{
+    try writer.print(",\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"layer\":{d},\"visible\":{},\"enabled\":{},\"transparent\":{},\"bridge\":{},\"gpuFrame\":{d},\"gpuNonblank\":{},\"gpuSampleColor\":{d},\"canvasRevision\":{d},\"canvasCommandCount\":{d},\"focused\":{},\"open\":{}}}", .{
         view.frame.x,
         view.frame.y,
         view.frame.width,
@@ -3385,6 +3599,11 @@ fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
         view.enabled,
         view.transparent,
         view.bridge_enabled,
+        view.gpu_frame_index,
+        view.gpu_frame_nonblank,
+        view.gpu_sample_color,
+        view.canvas_revision,
+        view.canvas_command_count,
         view.focused,
         view.open,
     });
@@ -4460,6 +4679,156 @@ test "runtime rejects reserved GPU surface view kind until a backend supports it
     const views = harness.runtime.listViews(1, &views_buffer);
     try std.testing.expectEqual(@as(usize, 1), views.len);
     try std.testing.expectEqualStrings("main", views[0].label);
+}
+
+test "runtime retains canvas display lists on GPU surface views" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 240),
+    });
+
+    var text_storage = [_]u8{ 'O', 'K' };
+    var stops = [_]canvas.GradientStop{
+        .{ .offset = 0, .color = canvas.Color.rgb8(255, 255, 255) },
+        .{ .offset = 1, .color = canvas.Color.rgb8(37, 99, 235) },
+    };
+    var glyphs = [_]canvas.Glyph{
+        .{ .id = 42, .x = 12, .y = 24, .advance = 9 },
+    };
+    var path = [_]canvas.PathElement{
+        .{ .verb = .move_to, .points = .{ geometry.PointF.init(1, 2), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .close },
+    };
+    var commands: [4]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try builder.fillRect(.{
+        .id = 1,
+        .rect = geometry.RectF.init(0, 0, 320, 240),
+        .fill = .{ .linear_gradient = .{
+            .start = geometry.PointF.init(0, 0),
+            .end = geometry.PointF.init(320, 240),
+            .stops = &stops,
+        } },
+    });
+    try builder.fillPath(.{
+        .id = 2,
+        .elements = &path,
+        .fill = .{ .color = canvas.Color.rgb8(15, 23, 42) },
+    });
+    try builder.drawText(.{
+        .id = 3,
+        .font_id = 7,
+        .size = 16,
+        .origin = geometry.PointF.init(16, 32),
+        .color = canvas.Color.rgb8(15, 23, 42),
+        .text = text_storage[0..],
+        .glyphs = &glyphs,
+    });
+
+    const info = try harness.runtime.setCanvasDisplayList(1, "canvas", builder.displayList());
+    try std.testing.expectEqual(@as(u64, 1), info.canvas_revision);
+    try std.testing.expectEqual(@as(usize, 3), info.canvas_command_count);
+
+    text_storage[0] = 'N';
+    stops[0].offset = 0.5;
+    glyphs[0].id = 900;
+    path[0].points[0] = geometry.PointF.init(99, 99);
+
+    const retained = try harness.runtime.canvasDisplayList(1, "canvas");
+    try std.testing.expectEqual(@as(usize, 3), retained.commandCount());
+    switch (retained.commands[0]) {
+        .fill_rect => |value| switch (value.fill) {
+            .linear_gradient => |gradient| {
+                try std.testing.expectEqual(@as(f32, 0), gradient.stops[0].offset);
+                try std.testing.expectEqual(@as(f32, 1), gradient.stops[0].color.r);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (retained.commands[1]) {
+        .fill_path => |value| try std.testing.expectEqual(@as(f32, 1), value.elements[0].points[0].x),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (retained.commands[2]) {
+        .draw_text => |value| {
+            try std.testing.expectEqualStrings("OK", value.text);
+            try std.testing.expectEqual(@as(u32, 42), value.glyphs[0].id);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const snapshot = harness.runtime.automationSnapshot("Canvas");
+    const canvas_view = testViewByLabel(snapshot.views, "canvas").?;
+    try std.testing.expectEqual(@as(u64, 1), canvas_view.canvas_revision);
+    try std.testing.expectEqual(@as(usize, 3), canvas_view.canvas_command_count);
+
+    var buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try automation.snapshot.writeText(snapshot, &writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_revision=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_commands=3") != null);
+}
+
+test "runtime validates canvas display list command limits" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-limits", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 240),
+    });
+
+    var commands: [max_canvas_commands_per_view + 1]canvas.CanvasCommand = undefined;
+    for (&commands) |*command| command.* = .pop_opacity;
+    try std.testing.expectError(error.CanvasCommandLimitReached, harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &commands }));
+}
+
+test "runtime rejects canvas display lists on non-GPU views" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "native-canvas-reject", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "status",
+        .kind = .statusbar,
+        .frame = geometry.RectF.init(0, 220, 320, 20),
+    });
+
+    try std.testing.expectError(error.InvalidViewOptions, harness.runtime.setCanvasDisplayList(1, "status", .{}));
 }
 
 test "runtime rejects oversized shell before creating partial views" {
