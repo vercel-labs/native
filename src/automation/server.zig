@@ -111,4 +111,9 @@ test "server consumes automation command files" {
     const focus_next = (try server.takeCommand(&command_buffer)).?;
     try std.testing.expectEqual(protocol.Action.focus_next_view, focus_next.action);
     try std.testing.expectEqualStrings("", focus_next.value);
+
+    try writePath(std.testing.io, command_path, "widget-action canvas 2 press\n");
+    const widget_action = (try server.takeCommand(&command_buffer)).?;
+    try std.testing.expectEqual(protocol.Action.widget_action, widget_action.action);
+    try std.testing.expectEqualStrings("canvas 2 press", widget_action.value);
 }

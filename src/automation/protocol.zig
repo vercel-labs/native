@@ -14,6 +14,7 @@ pub const Action = enum {
     resize,
     bridge,
     native_command,
+    widget_action,
     menu_command,
     shortcut,
     focus_view,
@@ -36,6 +37,7 @@ pub const Command = struct {
         if (std.mem.eql(u8, action_text, "resize") and value.len > 0) return .{ .action = .resize, .value = value };
         if (std.mem.eql(u8, action_text, "bridge") and value.len > 0) return .{ .action = .bridge, .value = value };
         if (std.mem.eql(u8, action_text, "native-command") and value.len > 0) return .{ .action = .native_command, .value = value };
+        if (std.mem.eql(u8, action_text, "widget-action") and value.len > 0) return .{ .action = .widget_action, .value = value };
         if (std.mem.eql(u8, action_text, "menu-command") and value.len > 0) return .{ .action = .menu_command, .value = value };
         if (std.mem.eql(u8, action_text, "shortcut") and value.len > 0) return .{ .action = .shortcut, .value = value };
         if (std.mem.eql(u8, action_text, "focus") and value.len > 0) return .{ .action = .focus_view, .value = value };
@@ -69,6 +71,9 @@ test "commands parse reload and wait" {
     const native_command = try Command.parse("native-command app.refresh refresh-button");
     try std.testing.expectEqual(Action.native_command, native_command.action);
     try std.testing.expectEqualStrings("app.refresh refresh-button", native_command.value);
+    const widget_action = try Command.parse("widget-action canvas 2 press");
+    try std.testing.expectEqual(Action.widget_action, widget_action.action);
+    try std.testing.expectEqualStrings("canvas 2 press", widget_action.value);
     const menu_command = try Command.parse("menu-command app.refresh");
     try std.testing.expectEqual(Action.menu_command, menu_command.action);
     const shortcut = try Command.parse("shortcut app.refresh");

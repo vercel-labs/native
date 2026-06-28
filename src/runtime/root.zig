@@ -1731,6 +1731,9 @@ pub const Runtime = struct {
                     .view_label = parsed.view_label,
                 } });
             },
+            .widget_action => {
+                try self.dispatchAutomationWidgetAction(app, try parseAutomationWidgetAction(command.value));
+            },
             .menu_command => {
                 try self.dispatchPlatformEvent(app, .{ .menu_command = .{
                     .name = try parseAutomationCommandName(command.value),
@@ -1754,6 +1757,79 @@ pub const Runtime = struct {
                 _ = try self.focusPreviousView(1);
             },
             .wait => {},
+        }
+    }
+
+    fn dispatchAutomationWidgetAction(self: *Runtime, app: App, action: AutomationWidgetAction) anyerror!void {
+        const view_index = try self.automationWidgetActionViewIndex(action);
+        switch (action.action) {
+            .focus => try self.focusAutomationCanvasWidget(view_index, action.id),
+            .press => try self.dispatchAutomationWidgetKey(app, view_index, action.id, "enter"),
+            .toggle => try self.dispatchAutomationWidgetKey(app, view_index, action.id, "space"),
+            .increment => try self.dispatchAutomationWidgetKey(app, view_index, action.id, "arrowright"),
+            .decrement => try self.dispatchAutomationWidgetKey(app, view_index, action.id, "arrowleft"),
+            .set_text => try self.setAutomationCanvasWidgetText(view_index, action.id, action.value),
+            .select => try self.selectAutomationCanvasWidget(view_index, action.id),
+        }
+    }
+
+    fn automationWidgetActionViewIndex(self: *Runtime, action: AutomationWidgetAction) anyerror!usize {
+        try self.validateViewParent(1);
+        try validateViewLabel(action.view_label);
+        const view_index = self.findViewIndex(1, action.view_label) orelse return error.ViewNotFound;
+        if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
+        const actions = self.canvasWidgetActionsForId(view_index, action.id) orelse return error.InvalidCommand;
+        if (!automationWidgetActionSupported(actions, action.action)) return error.InvalidCommand;
+        return view_index;
+    }
+
+    fn canvasWidgetActionsForId(self: *const Runtime, view_index: usize, id: canvas.ObjectId) ?canvas.WidgetActions {
+        if (view_index >= self.view_count or id == 0) return null;
+        for (self.views[view_index].widgetSemantics()) |node| {
+            if (node.id == id) return node.actions;
+        }
+        return null;
+    }
+
+    fn focusAutomationCanvasWidget(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!void {
+        if (view_index >= self.view_count) return error.ViewNotFound;
+        const target = self.views[view_index].widgetLayoutTree().focusTargetById(id) orelse return error.InvalidCommand;
+        try self.focusView(self.views[view_index].window_id, self.views[view_index].label);
+        if (self.views[view_index].canvas_widget_focused_id != target.id) {
+            self.views[view_index].canvas_widget_focused_id = target.id;
+            self.invalidateFor(.state, self.views[view_index].frame);
+        }
+    }
+
+    fn dispatchAutomationWidgetKey(self: *Runtime, app: App, view_index: usize, id: canvas.ObjectId, key: []const u8) anyerror!void {
+        try self.focusAutomationCanvasWidget(view_index, id);
+        try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = self.views[view_index].window_id,
+            .label = self.views[view_index].label,
+            .kind = .key_down,
+            .key = key,
+        } });
+    }
+
+    fn selectAutomationCanvasWidget(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!void {
+        if (self.views[view_index].widgetLayoutTree().focusTargetById(id) != null) {
+            try self.focusAutomationCanvasWidget(view_index, id);
+        }
+        const dirty = try self.views[view_index].setCanvasWidgetSelected(id, true) orelse return;
+        self.invalidateForAutomationCanvasWidgetDirty(view_index, dirty);
+    }
+
+    fn setAutomationCanvasWidgetText(self: *Runtime, view_index: usize, id: canvas.ObjectId, text: []const u8) anyerror!void {
+        try self.focusAutomationCanvasWidget(view_index, id);
+        const dirty = try self.views[view_index].setCanvasWidgetTextValue(id, text) orelse return;
+        self.invalidateForAutomationCanvasWidgetDirty(view_index, dirty);
+    }
+
+    fn invalidateForAutomationCanvasWidgetDirty(self: *Runtime, view_index: usize, dirty: geometry.RectF) void {
+        if (canvasDirtyRegionForView(self.views[view_index].frame, dirty)) |dirty_region| {
+            self.invalidateFor(.state, dirty_region);
+        } else {
+            self.invalidateFor(.state, self.views[view_index].frame);
         }
     }
 
@@ -3518,6 +3594,11 @@ fn canvasTextSelectionsEqual(a: canvas.TextSelection, b: canvas.TextSelection) b
     return a.anchor == b.anchor and a.focus == b.focus;
 }
 
+fn textSelectionCollapsedAt(selection: ?canvas.TextSelection, offset: usize) bool {
+    const value = selection orelse return true;
+    return value.anchor == offset and value.focus == offset;
+}
+
 fn optionalCanvasTextRangesEqual(a: ?canvas.TextRange, b: ?canvas.TextRange) bool {
     if (a) |left| {
         if (b) |right| return left.start == right.start and left.end == right.end;
@@ -4055,6 +4136,38 @@ const RuntimeView = struct {
         try self.refreshCanvasWidgetSemantics();
         self.widget_revision += 1;
         return widget.frame;
+    }
+
+    fn setCanvasWidgetSelected(self: *RuntimeView, id: canvas.ObjectId, selected: bool) anyerror!?geometry.RectF {
+        const index = self.canvasWidgetNodeIndexById(id) orelse return null;
+        const widget = self.widget_layout_nodes[index].widget;
+        if (widget.state.disabled) return null;
+        switch (widget.kind) {
+            .list_item, .data_cell, .segmented_control => {},
+            else => return null,
+        }
+        if (widget.state.selected == selected and ((selected and widget.value >= 1) or (!selected and widget.value <= 0))) return null;
+        self.widget_layout_nodes[index].widget.state.selected = selected;
+        self.widget_layout_nodes[index].widget.value = if (selected) 1 else 0;
+        try self.refreshCanvasWidgetSemantics();
+        self.widget_revision += 1;
+        return widget.frame;
+    }
+
+    fn setCanvasWidgetTextValue(self: *RuntimeView, id: canvas.ObjectId, text: []const u8) anyerror!?geometry.RectF {
+        const index = self.canvasWidgetNodeIndexById(id) orelse return null;
+        const widget = self.widget_layout_nodes[index].widget;
+        if ((widget.kind != .text_field and widget.kind != .search_field) or widget.state.disabled) return null;
+        if (std.mem.eql(u8, widget.text, text) and widget.text_composition == null and textSelectionCollapsedAt(widget.text_selection, text.len)) return null;
+
+        try self.rewriteCanvasWidgetTextStorage(index, .{
+            .text = text,
+            .selection = canvas.TextSelection.collapsed(text.len),
+            .composition = null,
+        });
+        try self.refreshCanvasWidgetSemantics();
+        self.widget_revision += 1;
+        return self.widget_layout_nodes[index].frame;
     }
 
     fn setCanvasWidgetValue(self: *RuntimeView, index: usize, value: f32) anyerror!?geometry.RectF {
@@ -5068,6 +5181,28 @@ const AutomationNativeCommand = struct {
     view_label: []const u8 = "",
 };
 
+const AutomationWidgetActionKind = enum {
+    focus,
+    press,
+    toggle,
+    increment,
+    decrement,
+    set_text,
+    select,
+};
+
+const AutomationWidgetAction = struct {
+    view_label: []const u8,
+    id: canvas.ObjectId,
+    action: AutomationWidgetActionKind,
+    value: []const u8 = "",
+};
+
+const AutomationToken = struct {
+    token: []const u8,
+    rest: []const u8 = "",
+};
+
 const AutomationResizeCommand = struct {
     width: f32,
     height: f32,
@@ -5095,6 +5230,56 @@ fn parseAutomationNativeCommand(value: []const u8) !AutomationNativeCommand {
     return .{
         .name = trimmed[0..separator],
         .view_label = view_label,
+    };
+}
+
+fn parseAutomationWidgetAction(value: []const u8) !AutomationWidgetAction {
+    const view = takeAutomationToken(value) orelse return error.InvalidCommand;
+    const id_part = takeAutomationToken(view.rest) orelse return error.InvalidCommand;
+    const action_part = takeAutomationToken(id_part.rest) orelse return error.InvalidCommand;
+    const id = std.fmt.parseInt(canvas.ObjectId, id_part.token, 10) catch return error.InvalidCommand;
+    if (id == 0) return error.InvalidCommand;
+    const action = automationWidgetActionKindFromString(action_part.token) orelse return error.InvalidCommand;
+    const action_value = std.mem.trim(u8, action_part.rest, " \n\r\t");
+    if (action != .set_text and action_value.len > 0) return error.InvalidCommand;
+    return .{
+        .view_label = view.token,
+        .id = id,
+        .action = action,
+        .value = action_value,
+    };
+}
+
+fn takeAutomationToken(value: []const u8) ?AutomationToken {
+    const trimmed = std.mem.trim(u8, value, " \n\r\t");
+    if (trimmed.len == 0) return null;
+    const separator = std.mem.indexOfAny(u8, trimmed, " \n\r\t") orelse return .{ .token = trimmed };
+    return .{
+        .token = trimmed[0..separator],
+        .rest = std.mem.trim(u8, trimmed[separator + 1 ..], " \n\r\t"),
+    };
+}
+
+fn automationWidgetActionKindFromString(value: []const u8) ?AutomationWidgetActionKind {
+    if (std.ascii.eqlIgnoreCase(value, "focus")) return .focus;
+    if (std.ascii.eqlIgnoreCase(value, "press")) return .press;
+    if (std.ascii.eqlIgnoreCase(value, "toggle")) return .toggle;
+    if (std.ascii.eqlIgnoreCase(value, "increment")) return .increment;
+    if (std.ascii.eqlIgnoreCase(value, "decrement")) return .decrement;
+    if (std.ascii.eqlIgnoreCase(value, "set_text") or std.ascii.eqlIgnoreCase(value, "set-text")) return .set_text;
+    if (std.ascii.eqlIgnoreCase(value, "select")) return .select;
+    return null;
+}
+
+fn automationWidgetActionSupported(actions: canvas.WidgetActions, action: AutomationWidgetActionKind) bool {
+    return switch (action) {
+        .focus => actions.focus,
+        .press => actions.press,
+        .toggle => actions.toggle,
+        .increment => actions.increment,
+        .decrement => actions.decrement,
+        .set_text => actions.set_text,
+        .select => actions.select,
     };
 }
 
@@ -5136,6 +5321,29 @@ test "runtime parses automation focus view labels" {
     const label = try parseAutomationViewLabel(" refresh-button \n");
     try std.testing.expectEqualStrings("refresh-button", label);
     try std.testing.expectError(error.InvalidCommand, parseAutomationViewLabel(""));
+}
+
+test "runtime parses automation widget actions" {
+    const press = try parseAutomationWidgetAction("canvas 42 press");
+    try std.testing.expectEqualStrings("canvas", press.view_label);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 42), press.id);
+    try std.testing.expectEqual(AutomationWidgetActionKind.press, press.action);
+    try std.testing.expectEqualStrings("", press.value);
+
+    const set_text = try parseAutomationWidgetAction("canvas 7 set-text hello world");
+    try std.testing.expectEqual(@as(canvas.ObjectId, 7), set_text.id);
+    try std.testing.expectEqual(AutomationWidgetActionKind.set_text, set_text.action);
+    try std.testing.expectEqualStrings("hello world", set_text.value);
+
+    const set_text_underscore = try parseAutomationWidgetAction("canvas 7 set_text");
+    try std.testing.expectEqual(AutomationWidgetActionKind.set_text, set_text_underscore.action);
+    try std.testing.expectEqualStrings("", set_text_underscore.value);
+
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction(""));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 0 press"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas nope press"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 42 press extra"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 42 unknown"));
 }
 
 fn validateCommandName(name: []const u8) !void {
@@ -9486,6 +9694,82 @@ test "runtime dispatches routed canvas widget pointer events" {
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_keyboard_target_id);
     try std.testing.expectEqual(canvas.WidgetKind.button, app_state.last_keyboard_target_kind);
     try std.testing.expect(app_state.last_keyboard_shift);
+}
+
+test "runtime dispatches automation canvas widget actions" {
+    const TestApp = struct {
+        command_count: u32 = 0,
+        widget_keyboard_count: u32 = 0,
+        raw_input_count: u32 = 0,
+        last_command: []const u8 = "",
+        last_keyboard_target_id: canvas.ObjectId = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-automation-actions", .source = platform.WebViewSource.html("<h1>GPU</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .command => |command| {
+                    self.command_count += 1;
+                    self.last_command = command.name;
+                },
+                .gpu_surface_input => self.raw_input_count += 1,
+                .canvas_widget_keyboard => |keyboard_event| {
+                    self.widget_keyboard_count += 1;
+                    if (keyboard_event.target) |target| self.last_keyboard_target_id = target.id;
+                },
+                else => {},
+            }
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 180),
+    });
+
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(10, 10, 96, 32), .text = "Run", .command = "widget.run" },
+        .{ .id = 3, .kind = .checkbox, .frame = geometry.RectF.init(10, 52, 96, 28), .text = "Enabled" },
+        .{ .id = 4, .kind = .slider, .frame = geometry.RectF.init(10, 88, 120, 24), .value = 0.5, .semantics = .{ .label = "Amount" } },
+        .{ .id = 5, .kind = .text_field, .frame = geometry.RectF.init(10, 122, 150, 32), .text = "Draft" },
+        .{ .id = 6, .kind = .list_item, .frame = geometry.RectF.init(170, 10, 120, 32), .text = "Inbox" },
+    };
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &children }, geometry.RectF.init(0, 0, 320, 180), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 2, .action = .press });
+    try std.testing.expectEqual(@as(u32, 1), app_state.command_count);
+    try std.testing.expectEqualStrings("widget.run", app_state.last_command);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_keyboard_target_id);
+
+    try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 3, .action = .toggle });
+    try std.testing.expectEqual(@as(?f32, 1), harness.runtime.views[0].widgetSemantics()[2].value);
+
+    try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 4, .action = .increment });
+    try std.testing.expectApproxEqAbs(@as(f32, 0.55), harness.runtime.views[0].widgetSemantics()[3].value.?, 0.001);
+
+    try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 6, .action = .select });
+    try std.testing.expectEqual(@as(?f32, 1), harness.runtime.views[0].widgetSemantics()[5].value);
+
+    try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 5, .action = .set_text, .value = "Hello world" });
+    try std.testing.expectEqualStrings("Hello world", harness.runtime.views[0].widgetSemantics()[4].label);
+    try std.testing.expect(app_state.widget_keyboard_count >= 3);
+    try std.testing.expect(app_state.raw_input_count >= 3);
 }
 
 test "runtime dispatches shortcut command events" {

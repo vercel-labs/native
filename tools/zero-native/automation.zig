@@ -35,6 +35,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         } else {
             try sendCommand(allocator, io, "native-command", args[1]);
         }
+    } else if (std.mem.eql(u8, command, "widget-action")) {
+        if (args.len < 4) return usage();
+        const value = try std.mem.join(allocator, " ", args[1..]);
+        defer allocator.free(value);
+        try sendCommand(allocator, io, "widget-action", value);
     } else if (std.mem.eql(u8, command, "shortcut")) {
         if (args.len != 2) return usage();
         try sendCommand(allocator, io, "shortcut", args[1]);
@@ -71,6 +76,7 @@ fn usage() void {
         \\  resize <width> <height> [scale]
         \\  menu-command <id>
         \\  native-command <id> [view-label]
+        \\  widget-action <view-label> <widget-id> <action> [value]
         \\  shortcut <id>
         \\  focus <view-label>
         \\  focus-next
