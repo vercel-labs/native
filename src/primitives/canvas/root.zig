@@ -844,6 +844,7 @@ pub const ReferenceRenderSurface = struct {
             .fill_rounded_rect => |value| try self.fillRoundedRect(command, value, draw_bounds),
             .stroke_rect => |value| try self.strokeRect(command, value, draw_bounds),
             .draw_line => |value| try self.drawLine(command, value, draw_bounds),
+            .shadow => |value| try self.drawShadow(command, value, draw_bounds),
             else => return error.ReferenceRenderUnsupportedCommand,
         }
     }
@@ -912,6 +913,29 @@ pub const ReferenceRenderSurface = struct {
                 if (referenceDistanceToSegment(point, from, to) <= half_width) {
                     self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.stroke.fill, command.transform, point), command.opacity);
                 }
+            }
+        }
+    }
+
+    fn drawShadow(self: ReferenceRenderSurface, command: RenderCommand, value: Shadow, draw_bounds: geometry.RectF) Error!void {
+        const scale = referenceTransformScale(command.transform);
+        const blur_radius = nonNegative(value.blur) * scale;
+        const shadow_rect = command.transform.transformRect(referenceSpreadRect(value.rect.normalized().translate(value.offset), value.spread)).normalized();
+        if (shadow_rect.isEmpty()) return;
+        const shadow_radius = referenceScaleRadius(referenceSpreadRadius(value.radius, value.spread), command.transform);
+        const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return;
+
+        var y = pixel_rect.y;
+        while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
+            var x = pixel_rect.x;
+            while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
+                const point = referencePixelCenter(x, y);
+                const distance = referenceDistanceToRoundedRect(point, shadow_rect, shadow_radius);
+                const alpha = if (blur_radius <= 0)
+                    if (distance <= 0) @as(f32, 1) else @as(f32, 0)
+                else
+                    std.math.clamp(1 - distance / blur_radius, 0, 1);
+                if (alpha > 0) self.blendPixel(@intCast(x), @intCast(y), referenceScaleColorAlpha(value.color, alpha), command.opacity);
             }
         }
     }
@@ -3820,6 +3844,15 @@ fn referenceMixColor(a: Color, b: Color, t: f32) Color {
     };
 }
 
+fn referenceScaleColorAlpha(color: Color, alpha: f32) Color {
+    return .{
+        .r = color.r,
+        .g = color.g,
+        .b = color.b,
+        .a = color.a * std.math.clamp(alpha, 0, 1),
+    };
+}
+
 fn referenceDistanceToSegment(point: geometry.PointF, from: geometry.PointF, to: geometry.PointF) f32 {
     const dx = to.x - from.x;
     const dy = to.y - from.y;
@@ -3835,6 +3868,52 @@ fn referenceDistanceToSegment(point: geometry.PointF, from: geometry.PointF, to:
     const px = point.x - closest.x;
     const py = point.y - closest.y;
     return @sqrt(px * px + py * py);
+}
+
+fn referenceSpreadRect(rect: geometry.RectF, spread: f32) geometry.RectF {
+    const normalized = rect.normalized();
+    if (spread >= 0) return normalized.inflate(geometry.InsetsF.all(spread));
+    return normalized.deflate(geometry.InsetsF.all(-spread));
+}
+
+fn referenceSpreadRadius(radius: Radius, spread: f32) Radius {
+    return if (spread >= 0) referenceOutsetRadius(radius, spread) else referenceInsetRadius(radius, -spread);
+}
+
+fn referenceDistanceToRoundedRect(point: geometry.PointF, rect: geometry.RectF, radius: Radius) f32 {
+    if (referencePointInRoundedRect(point, rect, radius)) return 0;
+
+    const normalized = rect.normalized();
+    if (normalized.isEmpty()) return 0;
+
+    const max_radius = @min(normalized.width, normalized.height) * 0.5;
+    const top_left = std.math.clamp(nonNegative(radius.top_left), 0, max_radius);
+    const top_right = std.math.clamp(nonNegative(radius.top_right), 0, max_radius);
+    const bottom_right = std.math.clamp(nonNegative(radius.bottom_right), 0, max_radius);
+    const bottom_left = std.math.clamp(nonNegative(radius.bottom_left), 0, max_radius);
+
+    if (point.x < normalized.x + top_left and point.y < normalized.y + top_left) {
+        return referenceDistanceToCircle(point, geometry.PointF.init(normalized.x + top_left, normalized.y + top_left), top_left);
+    }
+    if (point.x >= normalized.maxX() - top_right and point.y < normalized.y + top_right) {
+        return referenceDistanceToCircle(point, geometry.PointF.init(normalized.maxX() - top_right, normalized.y + top_right), top_right);
+    }
+    if (point.x >= normalized.maxX() - bottom_right and point.y >= normalized.maxY() - bottom_right) {
+        return referenceDistanceToCircle(point, geometry.PointF.init(normalized.maxX() - bottom_right, normalized.maxY() - bottom_right), bottom_right);
+    }
+    if (point.x < normalized.x + bottom_left and point.y >= normalized.maxY() - bottom_left) {
+        return referenceDistanceToCircle(point, geometry.PointF.init(normalized.x + bottom_left, normalized.maxY() - bottom_left), bottom_left);
+    }
+
+    const dx = @max(@max(normalized.x - point.x, 0), point.x - normalized.maxX());
+    const dy = @max(@max(normalized.y - point.y, 0), point.y - normalized.maxY());
+    return @sqrt(dx * dx + dy * dy);
+}
+
+fn referenceDistanceToCircle(point: geometry.PointF, center: geometry.PointF, radius: f32) f32 {
+    const dx = point.x - center.x;
+    const dy = point.y - center.y;
+    return @max(0, @sqrt(dx * dx + dy * dy) - radius);
 }
 
 fn referencePixelRect(rect: geometry.RectF, width: usize, height: usize) ?ReferencePixelRect {
@@ -7490,6 +7569,43 @@ test "reference renderer draws stroked lines" {
     try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 2, 1);
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 3, 1);
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 1, 2);
+}
+
+test "reference renderer draws soft shadows" {
+    const commands = [_]CanvasCommand{.{ .shadow = .{
+        .id = 1,
+        .rect = geometry.RectF.init(1, 1, 2, 2),
+        .blur = 1,
+        .color = Color.rgba8(0, 0, 0, 128),
+    } }};
+
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [1]RenderResource = undefined;
+    var resource_cache_entries: [1]RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [1]RenderResourceCacheAction = undefined;
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(4, 4),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    var pixels: [4 * 4 * 4]u8 = undefined;
+    const surface = try ReferenceRenderSurface.init(4, 4, &pixels);
+    try surface.renderPass(frame.renderPass(), Color.rgba8(0, 0, 0, 0));
+
+    try expectPixelRgba8(.{ 0, 0, 0, 37 }, surface, 0, 0);
+    try expectPixelRgba8(.{ 0, 0, 0, 64 }, surface, 0, 1);
+    try expectPixelRgba8(.{ 0, 0, 0, 128 }, surface, 1, 1);
+    try expectPixelRgba8(.{ 0, 0, 0, 64 }, surface, 3, 2);
 }
 
 test "reference renderer rejects unsupported images" {
