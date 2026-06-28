@@ -10,6 +10,7 @@ pub const Error = error{
     GlyphAtlasListFull,
     RenderListFull,
     RenderResourceListFull,
+    TextLayoutLineListFull,
     RenderStackOverflow,
     RenderStackUnderflow,
     WidgetDepthExceeded,
@@ -243,6 +244,36 @@ pub const DrawText = struct {
     color: Color,
     text: []const u8 = "",
     glyphs: []const Glyph = &.{},
+};
+
+pub const TextWrap = enum {
+    none,
+    word,
+    character,
+};
+
+pub const TextLayoutOptions = struct {
+    max_width: f32 = 0,
+    line_height: f32 = 0,
+    wrap: TextWrap = .word,
+};
+
+pub const TextLine = struct {
+    text_start: usize = 0,
+    text_len: usize = 0,
+    glyph_start: usize = 0,
+    glyph_len: usize = 0,
+    bounds: geometry.RectF = .{},
+    baseline: f32 = 0,
+};
+
+pub const TextLayout = struct {
+    lines: []const TextLine = &.{},
+    bounds: ?geometry.RectF = null,
+
+    pub fn lineCount(self: TextLayout) usize {
+        return self.lines.len;
+    }
 };
 
 pub const Shadow = struct {
@@ -829,6 +860,28 @@ pub fn layoutWidgetTree(widget: Widget, bounds: geometry.RectF, output: []Widget
     var len: usize = 0;
     _ = try layoutWidgetDepth(widget, bounds.normalized(), null, 0, output, &len);
     return .{ .nodes = output[0..len] };
+}
+
+pub fn layoutTextRun(text: DrawText, options: TextLayoutOptions, output: []TextLine) Error!TextLayout {
+    var len: usize = 0;
+    var bounds: ?geometry.RectF = null;
+    if (text.glyphs.len > 0) {
+        try appendTextLine(output, &len, text, 0, text.text.len, 0, text.glyphs.len, lineHeight(text, options), &bounds);
+        return .{ .lines = output[0..len], .bounds = bounds };
+    }
+
+    var start: usize = 0;
+    while (start < text.text.len) {
+        const end = nextTextLineEnd(text.text, start, text.size, options);
+        try appendTextLine(output, &len, text, start, end - start, start, end - start, lineHeight(text, options), &bounds);
+        start = end;
+        if (start < text.text.len and text.text[start] == '\n') start += 1;
+        while (options.wrap == .word and start < text.text.len and isTextBreakByte(text.text[start])) start += 1;
+    }
+    if (text.text.len == 0) {
+        try appendTextLine(output, &len, text, 0, 0, 0, 0, lineHeight(text, options), &bounds);
+    }
+    return .{ .lines = output[0..len], .bounds = bounds };
 }
 
 pub fn emitWidgetLayout(builder: *Builder, layout: WidgetLayoutTree, tokens: DesignTokens) Error!void {
@@ -1919,6 +1972,100 @@ fn subpixelBucket(value: f32) u8 {
     const fraction = value - @floor(value);
     const scaled = @floor(fraction * 4.0);
     return @intFromFloat(std.math.clamp(scaled, 0, 3));
+}
+
+fn nextTextLineEnd(text: []const u8, start: usize, size: f32, options: TextLayoutOptions) usize {
+    const max_width = if (options.max_width > 0) options.max_width else std.math.inf(f32);
+    if (options.wrap == .none or max_width == std.math.inf(f32)) {
+        return nextExplicitLineEnd(text, start);
+    }
+
+    var index = start;
+    var last_break: ?usize = null;
+    while (index < text.len) : (index += 1) {
+        if (text[index] == '\n') return index;
+        const next_width = estimateTextWidth(text[start .. index + 1], size);
+        if (isTextBreakByte(text[index])) last_break = index + 1;
+        if (next_width > max_width) {
+            if (index == start) return index + 1;
+            if (options.wrap == .word) {
+                if (last_break) |break_index| {
+                    if (break_index > start) return trimTrailingTextBreak(text, start, break_index);
+                }
+            }
+            return index;
+        }
+    }
+    return text.len;
+}
+
+fn nextExplicitLineEnd(text: []const u8, start: usize) usize {
+    var index = start;
+    while (index < text.len) : (index += 1) {
+        if (text[index] == '\n') return index;
+    }
+    return text.len;
+}
+
+fn trimTrailingTextBreak(text: []const u8, start: usize, end: usize) usize {
+    var trimmed = end;
+    while (trimmed > start and isTextBreakByte(text[trimmed - 1])) {
+        trimmed -= 1;
+    }
+    return if (trimmed == start) end else trimmed;
+}
+
+fn appendTextLine(
+    output: []TextLine,
+    len: *usize,
+    text: DrawText,
+    text_start: usize,
+    text_len: usize,
+    glyph_start: usize,
+    glyph_len: usize,
+    line_height: f32,
+    bounds: *?geometry.RectF,
+) Error!void {
+    if (len.* >= output.len) return error.TextLayoutLineListFull;
+    const baseline = text.origin.y + @as(f32, @floatFromInt(len.*)) * line_height;
+    const line_bounds = geometry.RectF.init(
+        text.origin.x,
+        baseline - text.size,
+        textLineWidth(text, text_start, text_len, glyph_start, glyph_len),
+        line_height,
+    );
+    output[len.*] = .{
+        .text_start = text_start,
+        .text_len = text_len,
+        .glyph_start = glyph_start,
+        .glyph_len = glyph_len,
+        .bounds = line_bounds,
+        .baseline = baseline,
+    };
+    len.* += 1;
+    bounds.* = unionOptionalBounds(bounds.*, line_bounds);
+}
+
+fn lineHeight(text: DrawText, options: TextLayoutOptions) f32 {
+    return if (options.line_height > 0) options.line_height else text.size * 1.25;
+}
+
+fn textLineWidth(text: DrawText, text_start: usize, text_len: usize, glyph_start: usize, glyph_len: usize) f32 {
+    if (glyph_len > 0 and glyph_start < text.glyphs.len) {
+        const glyphs = text.glyphs[glyph_start..@min(text.glyphs.len, glyph_start + glyph_len)];
+        var width: f32 = 0;
+        for (glyphs) |glyph| width += estimatedGlyphAdvance(glyph, text.size);
+        return width;
+    }
+    return estimateTextWidth(text.text[text_start..@min(text.text.len, text_start + text_len)], text.size);
+}
+
+fn estimateTextWidth(text: []const u8, size: f32) f32 {
+    return @as(f32, @floatFromInt(text.len)) * size * 0.5;
+}
+
+fn isTextBreakByte(byte: u8) bool {
+    return byte == ' ' or byte == '\t';
 }
 
 fn commandsEqual(a: CanvasCommand, b: CanvasCommand) bool {
@@ -3164,6 +3311,76 @@ test "glyph atlas plan reports output overflow" {
     } }};
     var entries: [0]GlyphAtlasEntry = .{};
     try std.testing.expectError(error.GlyphAtlasListFull, (DisplayList{ .commands = &commands }).glyphAtlasPlan(&entries));
+}
+
+test "text layout wraps words into deterministic line boxes" {
+    const text = DrawText{
+        .font_id = 1,
+        .size = 10,
+        .origin = geometry.PointF.init(4, 20),
+        .color = Color.rgb8(0, 0, 0),
+        .text = "Hello world from zero",
+    };
+
+    var lines: [4]TextLine = undefined;
+    const layout = try layoutTextRun(text, .{ .max_width = 30, .line_height = 14, .wrap = .word }, &lines);
+    try std.testing.expectEqual(@as(usize, 4), layout.lineCount());
+    try std.testing.expectEqual(@as(usize, 0), layout.lines[0].text_start);
+    try std.testing.expectEqual(@as(usize, 5), layout.lines[0].text_len);
+    try expectRect(geometry.RectF.init(4, 10, 25, 14), layout.lines[0].bounds);
+    try std.testing.expectEqual(@as(usize, 6), layout.lines[1].text_start);
+    try std.testing.expectEqual(@as(usize, 5), layout.lines[1].text_len);
+    try std.testing.expectEqual(@as(f32, 34), layout.lines[1].baseline);
+    try std.testing.expectEqual(@as(usize, 12), layout.lines[2].text_start);
+    try std.testing.expectEqual(@as(usize, 4), layout.lines[2].text_len);
+    try std.testing.expectEqual(@as(usize, 17), layout.lines[3].text_start);
+    try std.testing.expectEqual(@as(usize, 4), layout.lines[3].text_len);
+    try expectRect(geometry.RectF.init(4, 10, 25, 56), layout.bounds);
+}
+
+test "text layout handles newlines and shaped glyph runs" {
+    const text = DrawText{
+        .font_id = 1,
+        .size = 12,
+        .origin = geometry.PointF.init(0, 12),
+        .color = Color.rgb8(0, 0, 0),
+        .text = "One\nTwo",
+    };
+    var lines: [2]TextLine = undefined;
+    const layout = try layoutTextRun(text, .{ .line_height = 16, .wrap = .none }, &lines);
+    try std.testing.expectEqual(@as(usize, 2), layout.lineCount());
+    try std.testing.expectEqual(@as(usize, 0), layout.lines[0].text_start);
+    try std.testing.expectEqual(@as(usize, 3), layout.lines[0].text_len);
+    try std.testing.expectEqual(@as(usize, 4), layout.lines[1].text_start);
+    try std.testing.expectEqual(@as(usize, 3), layout.lines[1].text_len);
+    try std.testing.expectEqual(@as(f32, 28), layout.lines[1].baseline);
+
+    const glyphs = [_]Glyph{
+        .{ .id = 1, .x = 0, .y = 0, .advance = 9 },
+        .{ .id = 2, .x = 9, .y = 0, .advance = 10 },
+    };
+    var shaped_lines: [1]TextLine = undefined;
+    const shaped = try layoutTextRun(.{
+        .font_id = 2,
+        .size = 14,
+        .origin = geometry.PointF.init(3, 18),
+        .color = Color.rgb8(0, 0, 0),
+        .text = "AV",
+        .glyphs = &glyphs,
+    }, .{ .line_height = 20 }, &shaped_lines);
+    try std.testing.expectEqual(@as(usize, 1), shaped.lineCount());
+    try std.testing.expectEqual(@as(usize, 2), shaped.lines[0].glyph_len);
+    try expectRect(geometry.RectF.init(3, 4, 19, 20), shaped.lines[0].bounds);
+}
+
+test "text layout reports output overflow" {
+    var lines: [0]TextLine = .{};
+    try std.testing.expectError(error.TextLayoutLineListFull, layoutTextRun(.{
+        .size = 10,
+        .origin = geometry.PointF.init(0, 10),
+        .color = Color.rgb8(0, 0, 0),
+        .text = "Hello",
+    }, .{}, &lines));
 }
 
 test "display list serializes deterministically" {
