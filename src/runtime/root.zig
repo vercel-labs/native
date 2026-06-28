@@ -1486,6 +1486,9 @@ pub const Runtime = struct {
                     .bounds = node.bounds.translate(geometry.OffsetF.init(view.frame.x, view.frame.y)),
                     .focused = node.state.focused or (view.focused and node.id == view.canvas_widget_focused_id),
                     .enabled = !node.state.disabled,
+                    .hovered = node.state.hovered or (node.id != 0 and node.id == view.canvas_widget_hovered_id),
+                    .pressed = node.state.pressed or (node.id != 0 and node.id == view.canvas_widget_pressed_id),
+                    .selected = canvasWidgetSelectedState(node),
                     .actions = canvasWidgetActions(node.actions),
                     .text_selection = canvasTextRange(node.text_selection),
                     .text_composition = canvasTextRange(node.text_composition),
@@ -4860,6 +4863,16 @@ fn canvasWidgetActions(actions: canvas.WidgetActions) automation.snapshot.Widget
     };
 }
 
+fn canvasWidgetSelectedState(node: canvas.WidgetSemanticsNode) bool {
+    if (node.state.selected) return true;
+    const value = node.value orelse return false;
+    if (value < 0.5) return false;
+    return switch (node.role) {
+        .checkbox, .switch_control, .listitem, .gridcell, .tab => true,
+        else => false,
+    };
+}
+
 fn canvasTextRange(range: ?canvas.TextRange) ?automation.snapshot.TextRange {
     if (range) |value| return .{ .start = value.start, .end = value.end };
     return null;
@@ -6867,6 +6880,9 @@ test "runtime retains canvas widget layout for automation semantics" {
     try std.testing.expectEqualStrings("button", snapshot.widgets[0].role);
     try std.testing.expectEqualStrings("Run query", snapshot.widgets[0].name);
     try std.testing.expectEqualDeep(geometry.RectF.init(60, 82, 96, 32), snapshot.widgets[0].bounds);
+    try std.testing.expect(!snapshot.widgets[0].hovered);
+    try std.testing.expect(!snapshot.widgets[0].pressed);
+    try std.testing.expect(!snapshot.widgets[0].selected);
     try std.testing.expect(snapshot.widgets[0].actions.focus);
     try std.testing.expect(snapshot.widgets[0].actions.press);
     try std.testing.expect(!snapshot.widgets[0].actions.toggle);
@@ -7565,6 +7581,11 @@ test "runtime applies pointer values to canvas controls" {
     try std.testing.expectEqual(@as(?f32, 1), semantics[0].value);
     try std.testing.expectEqual(@as(?f32, 0), semantics[1].value);
     try std.testing.expectEqual(@as(?f32, 0), semantics[2].value);
+
+    const snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expect(snapshot.widgets[0].selected);
+    try std.testing.expect(!snapshot.widgets[1].selected);
+    try std.testing.expect(!snapshot.widgets[2].selected);
 
     _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
     const display_list = try harness.runtime.canvasDisplayList(1, "canvas");
@@ -9658,6 +9679,9 @@ test "runtime dispatches routed canvas widget pointer events" {
     try std.testing.expectEqual(@as(usize, 3), snapshot.widgets.len);
     try std.testing.expect(!snapshot.widgets[0].focused);
     try std.testing.expect(snapshot.widgets[1].focused);
+    try std.testing.expect(snapshot.widgets[1].hovered);
+    try std.testing.expect(snapshot.widgets[1].pressed);
+    try std.testing.expect(!snapshot.widgets[1].selected);
     try std.testing.expect(!snapshot.widgets[2].focused);
 
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{

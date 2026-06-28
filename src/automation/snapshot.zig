@@ -53,6 +53,9 @@ pub const Widget = struct {
     bounds: geometry.RectF = .{},
     focused: bool = false,
     enabled: bool = true,
+    hovered: bool = false,
+    pressed: bool = false,
+    selected: bool = false,
     actions: WidgetActions = .{},
     text_selection: ?TextRange = null,
     text_composition: ?TextRange = null,
@@ -157,6 +160,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
             },
         );
         if (widget.value) |value| try writer.print(" value={d}", .{value});
+        try writeWidgetState(widget, writer);
         try writeWidgetActions(widget.actions, writer);
         try writeWidgetTextRanges(widget, writer);
         try writer.writeByte('\n');
@@ -205,10 +209,28 @@ pub fn writeA11yText(input: Input, writer: anytype) !void {
             widget.bounds.height,
         });
         if (widget.value) |value| try writer.print(" value={d}", .{value});
+        try writeWidgetState(widget, writer);
         try writeWidgetActions(widget.actions, writer);
         try writeWidgetTextRanges(widget, writer);
         try writer.writeByte('\n');
     }
+}
+
+fn writeWidgetState(widget: Widget, writer: anytype) !void {
+    if (!widget.hovered and !widget.pressed and !widget.selected) return;
+    try writer.writeAll(" state=[");
+    var wrote = false;
+    try writeWidgetStateFlag(widget.hovered, "hovered", &wrote, writer);
+    try writeWidgetStateFlag(widget.pressed, "pressed", &wrote, writer);
+    try writeWidgetStateFlag(widget.selected, "selected", &wrote, writer);
+    try writer.writeByte(']');
+}
+
+fn writeWidgetStateFlag(enabled: bool, name: []const u8, wrote: *bool, writer: anytype) !void {
+    if (!enabled) return;
+    if (wrote.*) try writer.writeByte(',');
+    try writer.writeAll(name);
+    wrote.* = true;
 }
 
 fn writeWidgetActions(actions: WidgetActions, writer: anytype) !void {
@@ -323,6 +345,9 @@ test "snapshot emits widget semantics" {
         .name = "Run query",
         .bounds = geometry.RectF.init(10, 12, 80, 32),
         .focused = true,
+        .hovered = true,
+        .pressed = true,
+        .selected = true,
         .actions = .{ .focus = true, .press = true },
         .text_selection = .{ .start = 4, .end = 4 },
         .text_composition = .{ .start = 0, .end = 3 },
@@ -333,11 +358,12 @@ test "snapshot emits widget semantics" {
         .widgets = &widgets,
     }, &writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "widget @w1/canvas#42 role=button name=\"Run query\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "state=[hovered,pressed,selected]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "actions=[focus,press]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "selection=4..4") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "composition=0..3") != null);
 
-    var a11y_buffer: [768]u8 = undefined;
+    var a11y_buffer: [1024]u8 = undefined;
     var a11y_writer = std.Io.Writer.fixed(&a11y_buffer);
     try writeA11yText(.{
         .windows = &windows,
@@ -346,6 +372,7 @@ test "snapshot emits widget semantics" {
     }, &a11y_writer);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "a11y root=@w1 nodes=3") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#42 role=button name=\"Run query\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "state=[hovered,pressed,selected]") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "actions=[focus,press]") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "selection=4..4") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "composition=0..3") != null);
