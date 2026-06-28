@@ -1018,6 +1018,27 @@ pub const WidgetPointerEvent = struct {
     delta: geometry.OffsetF = .{},
 };
 
+pub const WidgetKeyboardPhase = enum {
+    key_down,
+    key_up,
+    text_input,
+};
+
+pub const WidgetKeyboardModifiers = struct {
+    shift: bool = false,
+    control: bool = false,
+    alt: bool = false,
+    super: bool = false,
+};
+
+pub const WidgetKeyboardEvent = struct {
+    phase: WidgetKeyboardPhase,
+    focused_id: ?ObjectId = null,
+    key: []const u8 = "",
+    text: []const u8 = "",
+    modifiers: WidgetKeyboardModifiers = .{},
+};
+
 pub const WidgetEventPhase = enum {
     capture,
     target,
@@ -1034,6 +1055,11 @@ pub const WidgetEventRouteEntry = struct {
 
 pub const WidgetEventRoute = struct {
     target: ?WidgetHit = null,
+    entries: []const WidgetEventRouteEntry = &.{},
+};
+
+pub const WidgetKeyboardRoute = struct {
+    target: ?WidgetFocusTarget = null,
     entries: []const WidgetEventRouteEntry = &.{},
 };
 
@@ -1101,6 +1127,10 @@ pub const WidgetLayoutTree = struct {
 
     pub fn routePointerEvent(self: WidgetLayoutTree, event: WidgetPointerEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
         return routeWidgetPointerEvent(self, event, output);
+    }
+
+    pub fn routeKeyboardEvent(self: WidgetLayoutTree, event: WidgetKeyboardEvent, output: []WidgetEventRouteEntry) Error!WidgetKeyboardRoute {
+        return routeWidgetKeyboardEvent(self, event, output);
     }
 
     pub fn focusTarget(self: WidgetLayoutTree, current_id: ?ObjectId, direction: WidgetFocusDirection) ?WidgetFocusTarget {
@@ -2893,10 +2923,22 @@ fn isPointVisibleInWidgetAncestors(layout: WidgetLayoutTree, node_index: usize, 
 
 fn routeWidgetPointerEvent(layout: WidgetLayoutTree, event: WidgetPointerEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
     const target = hitTestWidgetLayout(layout, event.point) orelse return .{ .entries = output[0..0] };
+    const entries = try routeWidgetEventPath(layout, target.index, output);
+    return .{ .target = target, .entries = entries };
+}
 
+fn routeWidgetKeyboardEvent(layout: WidgetLayoutTree, event: WidgetKeyboardEvent, output: []WidgetEventRouteEntry) Error!WidgetKeyboardRoute {
+    const focused_id = event.focused_id orelse return .{ .entries = output[0..0] };
+    const target_index = widgetIndexById(layout, focused_id) orelse return .{ .entries = output[0..0] };
+    const target = focusTargetFromNode(layout.nodes[target_index], target_index) orelse return .{ .entries = output[0..0] };
+    const entries = try routeWidgetEventPath(layout, target.index, output);
+    return .{ .target = target, .entries = entries };
+}
+
+fn routeWidgetEventPath(layout: WidgetLayoutTree, target_index: usize, output: []WidgetEventRouteEntry) Error![]const WidgetEventRouteEntry {
     var path: [max_widget_depth]usize = undefined;
     var path_len: usize = 0;
-    var current: ?usize = target.index;
+    var current: ?usize = target_index;
     while (current) |node_index| {
         if (path_len >= path.len) return error.WidgetDepthExceeded;
         path[path_len] = node_index;
@@ -2910,14 +2952,14 @@ fn routeWidgetPointerEvent(layout: WidgetLayoutTree, event: WidgetPointerEvent, 
         capture_index -= 1;
         try appendWidgetEventRouteEntry(output, &len, .capture, layout.nodes[path[capture_index]], path[capture_index]);
     }
-    try appendWidgetEventRouteEntry(output, &len, .target, layout.nodes[target.index], target.index);
+    try appendWidgetEventRouteEntry(output, &len, .target, layout.nodes[target_index], target_index);
 
     var bubble_index: usize = 1;
     while (bubble_index < path_len) : (bubble_index += 1) {
         try appendWidgetEventRouteEntry(output, &len, .bubble, layout.nodes[path[bubble_index]], path[bubble_index]);
     }
 
-    return .{ .target = target, .entries = output[0..len] };
+    return output[0..len];
 }
 
 fn appendWidgetEventRouteEntry(
@@ -4501,6 +4543,93 @@ test "widget pointer route handles no hit and bounded output" {
     try std.testing.expectError(error.WidgetEventRouteListFull, layout.routePointerEvent(.{
         .phase = .down,
         .point = geometry.PointF.init(20, 20),
+    }, &small_entries));
+}
+
+test "widget keyboard route uses focused target and ancestors" {
+    const row_children = [_]Widget{.{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(0, 0, 120, 32),
+        .text = "Find",
+    }};
+    const root_children = [_]Widget{.{
+        .id = 5,
+        .kind = .row,
+        .frame = geometry.RectF.init(8, 8, 140, 40),
+        .children = &row_children,
+    }};
+    const root = Widget{
+        .id = 1,
+        .kind = .panel,
+        .children = &root_children,
+    };
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 180, 80), &nodes);
+    var route_entries: [5]WidgetEventRouteEntry = undefined;
+    const route = try layout.routeKeyboardEvent(.{
+        .phase = .key_down,
+        .focused_id = 2,
+        .key = "enter",
+    }, &route_entries);
+
+    try std.testing.expect(route.target != null);
+    try std.testing.expectEqual(@as(ObjectId, 2), route.target.?.id);
+    try std.testing.expectEqual(WidgetKind.text_field, route.target.?.kind);
+    try std.testing.expectEqual(@as(usize, 5), route.entries.len);
+    try expectRouteEntry(route.entries[0], .capture, 1);
+    try expectRouteEntry(route.entries[1], .capture, 5);
+    try expectRouteEntry(route.entries[2], .target, 2);
+    try expectRouteEntry(route.entries[3], .bubble, 5);
+    try expectRouteEntry(route.entries[4], .bubble, 1);
+}
+
+test "widget keyboard route handles missing focus non-focus targets and bounded output" {
+    const children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .text,
+            .frame = geometry.RectF.init(8, 8, 100, 20),
+            .text = "Title",
+        },
+        .{
+            .id = 3,
+            .kind = .button,
+            .frame = geometry.RectF.init(8, 36, 100, 32),
+            .text = "Disabled",
+            .state = .{ .disabled = true },
+        },
+        .{
+            .id = 4,
+            .kind = .button,
+            .frame = geometry.RectF.init(8, 76, 100, 32),
+            .text = "Run",
+        },
+    };
+    const root = Widget{ .id = 1, .kind = .panel, .children = &children };
+
+    var nodes: [5]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 140, 120), &nodes);
+
+    var empty_entries: [0]WidgetEventRouteEntry = .{};
+    const no_focus = try layout.routeKeyboardEvent(.{ .phase = .key_down, .key = "enter" }, &empty_entries);
+    try std.testing.expect(no_focus.target == null);
+    try std.testing.expectEqual(@as(usize, 0), no_focus.entries.len);
+
+    const text_target = try layout.routeKeyboardEvent(.{ .phase = .key_down, .focused_id = 2, .key = "enter" }, &empty_entries);
+    try std.testing.expect(text_target.target == null);
+    try std.testing.expectEqual(@as(usize, 0), text_target.entries.len);
+
+    const disabled_target = try layout.routeKeyboardEvent(.{ .phase = .key_down, .focused_id = 3, .key = "enter" }, &empty_entries);
+    try std.testing.expect(disabled_target.target == null);
+    try std.testing.expectEqual(@as(usize, 0), disabled_target.entries.len);
+
+    var small_entries: [1]WidgetEventRouteEntry = undefined;
+    try std.testing.expectError(error.WidgetEventRouteListFull, layout.routeKeyboardEvent(.{
+        .phase = .key_down,
+        .focused_id = 4,
+        .key = "enter",
     }, &small_entries));
 }
 
