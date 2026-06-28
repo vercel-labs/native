@@ -8,6 +8,7 @@ pub const Error = error{
     DuplicateObjectId,
     DuplicateWidgetId,
     GlyphAtlasListFull,
+    RenderBatchListFull,
     RenderListFull,
     RenderResourceListFull,
     TextLayoutLineListFull,
@@ -388,6 +389,39 @@ pub const RenderPlan = struct {
     pub fn commandCount(self: RenderPlan) usize {
         return self.commands.len;
     }
+
+    pub fn batchPlan(self: RenderPlan, output: []RenderBatch) Error!RenderBatchPlan {
+        var planner = RenderBatchPlanner.init(output);
+        return planner.build(self);
+    }
+};
+
+pub const RenderPipelineKind = enum {
+    solid,
+    linear_gradient,
+    image,
+    glyph_run,
+    path,
+    shadow,
+    blur,
+};
+
+pub const RenderBatch = struct {
+    pipeline: RenderPipelineKind,
+    command_start: usize = 0,
+    command_count: usize = 0,
+    opacity: f32 = 1,
+    clip: ?geometry.RectF = null,
+    bounds: geometry.RectF = .{},
+};
+
+pub const RenderBatchPlan = struct {
+    batches: []const RenderBatch = &.{},
+    bounds: ?geometry.RectF = null,
+
+    pub fn batchCount(self: RenderBatchPlan) usize {
+        return self.batches.len;
+    }
 };
 
 pub const RenderResourceKind = enum {
@@ -428,6 +462,7 @@ pub const CanvasFrameOptions = struct {
 
 pub const CanvasFrameStorage = struct {
     render_commands: []RenderCommand,
+    render_batches: []RenderBatch,
     resources: []RenderResource,
     glyph_atlas_entries: []GlyphAtlasEntry,
     changes: []DiffChange,
@@ -441,6 +476,7 @@ pub const CanvasFrame = struct {
     full_repaint: bool = false,
     display_list: DisplayList = .{},
     render_plan: RenderPlan = .{},
+    batch_plan: RenderBatchPlan = .{},
     resource_plan: RenderResourcePlan = .{},
     glyph_atlas_plan: GlyphAtlasPlan = .{},
     changes: []const DiffChange = &.{},
@@ -923,6 +959,7 @@ pub fn layoutTextRun(text: DrawText, options: TextLayoutOptions, output: []TextL
 
 pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: CanvasFrameOptions, storage: CanvasFrameStorage) Error!CanvasFrame {
     const render_plan = try next.renderPlan(storage.render_commands);
+    const batch_plan = try render_plan.batchPlan(storage.render_batches);
     const resource_plan = try next.resourcePlan(storage.resources);
     const glyph_atlas_plan = try next.glyphAtlasPlan(storage.glyph_atlas_entries);
 
@@ -945,6 +982,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         .full_repaint = full_repaint,
         .display_list = next,
         .render_plan = render_plan,
+        .batch_plan = batch_plan,
         .resource_plan = resource_plan,
         .glyph_atlas_plan = glyph_atlas_plan,
         .changes = changes,
@@ -1063,6 +1101,51 @@ pub const RenderPlanner = struct {
     }
 };
 
+pub const RenderBatchPlanner = struct {
+    batches: []RenderBatch,
+    len: usize = 0,
+
+    pub fn init(batches: []RenderBatch) RenderBatchPlanner {
+        return .{ .batches = batches };
+    }
+
+    pub fn reset(self: *RenderBatchPlanner) void {
+        self.len = 0;
+    }
+
+    pub fn build(self: *RenderBatchPlanner, render_plan: RenderPlan) Error!RenderBatchPlan {
+        self.reset();
+        for (render_plan.commands, 0..) |command, index| {
+            try self.consume(command, index);
+        }
+        return .{
+            .batches = self.batches[0..self.len],
+            .bounds = render_plan.bounds,
+        };
+    }
+
+    fn consume(self: *RenderBatchPlanner, command: RenderCommand, index: usize) Error!void {
+        const pipeline = renderPipelineKind(command.command);
+        if (self.len > 0 and renderBatchCanExtend(self.batches[self.len - 1], command, pipeline, index)) {
+            const batch = &self.batches[self.len - 1];
+            batch.command_count += 1;
+            batch.bounds = geometry.RectF.unionWith(batch.bounds.normalized(), command.bounds.normalized());
+            return;
+        }
+
+        if (self.len >= self.batches.len) return error.RenderBatchListFull;
+        self.batches[self.len] = .{
+            .pipeline = pipeline,
+            .command_start = index,
+            .command_count = 1,
+            .opacity = command.opacity,
+            .clip = command.clip,
+            .bounds = command.bounds,
+        };
+        self.len += 1;
+    }
+};
+
 pub const RenderResourcePlanner = struct {
     resources: []RenderResource,
     len: usize = 0,
@@ -1085,10 +1168,13 @@ pub const RenderResourcePlanner = struct {
 
     fn consume(self: *RenderResourcePlanner, command: CanvasCommand, index: usize) Error!void {
         switch (command) {
-            .push_clip, .pop_clip, .push_opacity, .pop_opacity, .transform, .draw_line, .fill_path, .stroke_path => {},
+            .push_clip, .pop_clip, .push_opacity, .pop_opacity, .transform => {},
             .fill_rect => |value| try self.consumeFill(value.fill, index, value.id, command.bounds()),
             .stroke_rect => |value| try self.consumeStroke(value.stroke, index, value.id, command.bounds()),
             .fill_rounded_rect => |value| try self.consumeFill(value.fill, index, value.id, command.bounds()),
+            .draw_line => |value| try self.consumeStroke(value.stroke, index, value.id, command.bounds()),
+            .fill_path => |value| try self.consumeFill(value.fill, index, value.id, command.bounds()),
+            .stroke_path => |value| try self.consumeStroke(value.stroke, index, value.id, command.bounds()),
             .draw_image => |value| try self.append(.{
                 .kind = .image,
                 .command_index = index,
@@ -1143,6 +1229,39 @@ pub const RenderResourcePlanner = struct {
         self.len += 1;
     }
 };
+
+fn renderBatchCanExtend(batch: RenderBatch, command: RenderCommand, pipeline: RenderPipelineKind, index: usize) bool {
+    return batch.pipeline == pipeline and
+        batch.command_start + batch.command_count == index and
+        batch.opacity == command.opacity and
+        optionalRectsEqual(batch.clip, command.clip);
+}
+
+fn renderPipelineKind(command: CanvasCommand) RenderPipelineKind {
+    return switch (command) {
+        .push_clip, .pop_clip, .push_opacity, .pop_opacity, .transform => .solid,
+        .fill_rect => |value| renderPipelineForFill(value.fill),
+        .stroke_rect => |value| renderPipelineForStroke(value.stroke),
+        .fill_rounded_rect => |value| renderPipelineForFill(value.fill),
+        .draw_line => |value| renderPipelineForStroke(value.stroke),
+        .fill_path, .stroke_path => .path,
+        .draw_image => .image,
+        .draw_text => .glyph_run,
+        .shadow => .shadow,
+        .blur => .blur,
+    };
+}
+
+fn renderPipelineForStroke(stroke: Stroke) RenderPipelineKind {
+    return renderPipelineForFill(stroke.fill);
+}
+
+fn renderPipelineForFill(fill: Fill) RenderPipelineKind {
+    return switch (fill) {
+        .color => .solid,
+        .linear_gradient => .linear_gradient,
+    };
+}
 
 pub const GlyphAtlasPlanner = struct {
     entries: []GlyphAtlasEntry,
@@ -3265,6 +3384,73 @@ test "render plan reports output and stack errors" {
     try std.testing.expectError(error.RenderStackUnderflow, (DisplayList{ .commands = &bad_opacity_commands }).renderPlan(&render_commands));
 }
 
+test "render batch plan groups adjacent commands by pipeline and state" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(255, 255, 255) },
+        .{ .offset = 1, .color = Color.rgb8(24, 24, 27) },
+    };
+    const commands = [_]CanvasCommand{
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 20, 20), .fill = .{ .color = Color.rgb8(255, 255, 255) } } },
+        .{ .fill_rounded_rect = .{ .id = 2, .rect = geometry.RectF.init(24, 0, 20, 20), .radius = Radius.all(4), .fill = .{ .color = Color.rgb8(24, 24, 27) } } },
+        .{ .fill_rect = .{ .id = 3, .rect = geometry.RectF.init(48, 0, 20, 20), .fill = .{ .linear_gradient = .{
+            .start = geometry.PointF.init(48, 0),
+            .end = geometry.PointF.init(68, 20),
+            .stops = &stops,
+        } } } },
+        .{ .draw_text = .{
+            .id = 4,
+            .font_id = 1,
+            .size = 12,
+            .origin = geometry.PointF.init(72, 18),
+            .color = Color.rgb8(15, 23, 42),
+            .text = "Hi",
+        } },
+    };
+
+    var render_commands: [4]RenderCommand = undefined;
+    const render_plan = try (DisplayList{ .commands = &commands }).renderPlan(&render_commands);
+    var batches: [4]RenderBatch = undefined;
+    const batch_plan = try render_plan.batchPlan(&batches);
+
+    try std.testing.expectEqual(@as(usize, 3), batch_plan.batchCount());
+    try std.testing.expectEqual(RenderPipelineKind.solid, batch_plan.batches[0].pipeline);
+    try std.testing.expectEqual(@as(usize, 0), batch_plan.batches[0].command_start);
+    try std.testing.expectEqual(@as(usize, 2), batch_plan.batches[0].command_count);
+    try expectRect(geometry.RectF.init(0, 0, 44, 20), batch_plan.batches[0].bounds);
+    try std.testing.expectEqual(RenderPipelineKind.linear_gradient, batch_plan.batches[1].pipeline);
+    try std.testing.expectEqual(@as(usize, 2), batch_plan.batches[1].command_start);
+    try std.testing.expectEqual(RenderPipelineKind.glyph_run, batch_plan.batches[2].pipeline);
+    try std.testing.expectEqual(@as(usize, 3), batch_plan.batches[2].command_start);
+    try expectRect(geometry.RectF.init(0, 0, 84, 21), batch_plan.bounds);
+}
+
+test "render batch plan respects clip opacity and output limits" {
+    const commands = [_]CanvasCommand{
+        .{ .push_opacity = 0.5 },
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 20, 20), .fill = .{ .color = Color.rgb8(255, 255, 255) } } },
+        .pop_opacity,
+        .{ .fill_rect = .{ .id = 2, .rect = geometry.RectF.init(24, 0, 20, 20), .fill = .{ .color = Color.rgb8(24, 24, 27) } } },
+        .{ .push_clip = .{ .rect = geometry.RectF.init(48, 0, 20, 20) } },
+        .{ .fill_rect = .{ .id = 3, .rect = geometry.RectF.init(48, 0, 20, 20), .fill = .{ .color = Color.rgb8(15, 23, 42) } } },
+        .pop_clip,
+    };
+
+    var render_commands: [3]RenderCommand = undefined;
+    const render_plan = try (DisplayList{ .commands = &commands }).renderPlan(&render_commands);
+    var batches: [3]RenderBatch = undefined;
+    const batch_plan = try render_plan.batchPlan(&batches);
+
+    try std.testing.expectEqual(@as(usize, 3), batch_plan.batchCount());
+    try std.testing.expectEqual(@as(f32, 0.5), batch_plan.batches[0].opacity);
+    try std.testing.expect(batch_plan.batches[0].clip == null);
+    try std.testing.expectEqual(@as(f32, 1), batch_plan.batches[1].opacity);
+    try std.testing.expect(batch_plan.batches[1].clip == null);
+    try expectRect(geometry.RectF.init(48, 0, 20, 20), batch_plan.batches[2].clip);
+
+    var empty_batches: [0]RenderBatch = .{};
+    try std.testing.expectError(error.RenderBatchListFull, render_plan.batchPlan(&empty_batches));
+}
+
 test "resource plan collects renderer cache inputs" {
     const stops = [_]GradientStop{
         .{ .offset = 0, .color = Color.rgb8(255, 255, 255) },
@@ -3325,6 +3511,48 @@ test "resource plan collects renderer cache inputs" {
 
     try std.testing.expectEqual(RenderResourceKind.blur, plan.resources[4].kind);
     try expectRect(geometry.RectF.init(-6, -6, 32, 32), plan.resources[4].bounds);
+}
+
+test "resource plan collects gradient resources for lines and paths" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(255, 255, 255) },
+        .{ .offset = 1, .color = Color.rgb8(24, 24, 27) },
+    };
+    const path = [_]PathElement{
+        .{ .verb = .move_to, .points = .{ geometry.PointF.init(4, 4), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(20, 20), geometry.PointF.zero(), geometry.PointF.zero() } },
+    };
+    const gradient_fill = Fill{ .linear_gradient = .{
+        .start = geometry.PointF.init(0, 0),
+        .end = geometry.PointF.init(20, 20),
+        .stops = &stops,
+    } };
+    const commands = [_]CanvasCommand{
+        .{ .draw_line = .{
+            .id = 1,
+            .from = geometry.PointF.init(0, 0),
+            .to = geometry.PointF.init(20, 20),
+            .stroke = .{ .fill = gradient_fill, .width = 2 },
+        } },
+        .{ .fill_path = .{
+            .id = 2,
+            .elements = &path,
+            .fill = gradient_fill,
+        } },
+    };
+
+    var resources: [2]RenderResource = undefined;
+    const plan = try (DisplayList{ .commands = &commands }).resourcePlan(&resources);
+    try std.testing.expectEqual(@as(usize, 2), plan.resourceCount());
+    try std.testing.expectEqual(RenderResourceKind.linear_gradient, plan.resources[0].kind);
+    try std.testing.expectEqual(@as(usize, 0), plan.resources[0].command_index);
+    try std.testing.expectEqual(@as(?ObjectId, 1), plan.resources[0].id);
+    try std.testing.expectEqual(@as(usize, 2), plan.resources[0].gradient_stop_count);
+    try expectRect(geometry.RectF.init(-1, -1, 22, 22), plan.resources[0].bounds);
+    try std.testing.expectEqual(RenderResourceKind.linear_gradient, plan.resources[1].kind);
+    try std.testing.expectEqual(@as(usize, 1), plan.resources[1].command_index);
+    try std.testing.expectEqual(@as(?ObjectId, 2), plan.resources[1].id);
+    try expectRect(geometry.RectF.init(4, 4, 16, 16), plan.resources[1].bounds);
 }
 
 test "resource plan reports output overflow" {
@@ -3436,6 +3664,7 @@ test "canvas frame plan builds first frame renderer packet" {
     };
 
     var render_commands: [2]RenderCommand = undefined;
+    var render_batches: [2]RenderBatch = undefined;
     var resources: [2]RenderResource = undefined;
     var glyphs: [2]GlyphAtlasEntry = undefined;
     var changes: [2]DiffChange = undefined;
@@ -3446,6 +3675,7 @@ test "canvas frame plan builds first frame renderer packet" {
         .scale = 2,
     }, .{
         .render_commands = &render_commands,
+        .render_batches = &render_batches,
         .resources = &resources,
         .glyph_atlas_entries = &glyphs,
         .changes = &changes,
@@ -3458,6 +3688,9 @@ test "canvas frame plan builds first frame renderer packet" {
     try std.testing.expect(frame.full_repaint);
     try std.testing.expect(frame.requiresRender());
     try std.testing.expectEqual(@as(usize, 2), frame.render_plan.commandCount());
+    try std.testing.expectEqual(@as(usize, 2), frame.batch_plan.batchCount());
+    try std.testing.expectEqual(RenderPipelineKind.linear_gradient, frame.batch_plan.batches[0].pipeline);
+    try std.testing.expectEqual(RenderPipelineKind.glyph_run, frame.batch_plan.batches[1].pipeline);
     try std.testing.expectEqual(@as(usize, 2), frame.resource_plan.resourceCount());
     try std.testing.expectEqual(@as(usize, 2), frame.glyph_atlas_plan.entryCount());
     try std.testing.expectEqual(@as(usize, 0), frame.changes.len);
@@ -3475,6 +3708,7 @@ test "canvas frame plan clips incremental dirty bounds to surface" {
     };
 
     var render_commands: [2]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
     var resources: [0]RenderResource = .{};
     var glyphs: [0]GlyphAtlasEntry = .{};
     var changes: [2]DiffChange = undefined;
@@ -3482,6 +3716,7 @@ test "canvas frame plan clips incremental dirty bounds to surface" {
         .surface_size = geometry.SizeF.init(50, 50),
     }, .{
         .render_commands = &render_commands,
+        .render_batches = &render_batches,
         .resources = &resources,
         .glyph_atlas_entries = &glyphs,
         .changes = &changes,
@@ -3489,6 +3724,7 @@ test "canvas frame plan clips incremental dirty bounds to surface" {
 
     try std.testing.expect(!frame.full_repaint);
     try std.testing.expect(frame.requiresRender());
+    try std.testing.expectEqual(@as(usize, 1), frame.batch_plan.batchCount());
     try std.testing.expectEqual(@as(usize, 1), frame.changes.len);
     try std.testing.expectEqual(DiffKind.changed, frame.changes[0].kind);
     try std.testing.expectEqual(@as(?ObjectId, 1), frame.changes[0].id);
@@ -3501,11 +3737,13 @@ test "canvas frame plan leaves unchanged retained frame clean" {
     };
 
     var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
     var resources: [0]RenderResource = .{};
     var glyphs: [0]GlyphAtlasEntry = .{};
     var changes: [1]DiffChange = undefined;
     const frame = try (DisplayList{ .commands = &commands }).framePlan(.{ .commands = &commands }, .{}, .{
         .render_commands = &render_commands,
+        .render_batches = &render_batches,
         .resources = &resources,
         .glyph_atlas_entries = &glyphs,
         .changes = &changes,
@@ -3514,6 +3752,7 @@ test "canvas frame plan leaves unchanged retained frame clean" {
     try std.testing.expect(!frame.full_repaint);
     try std.testing.expect(!frame.requiresRender());
     try std.testing.expectEqual(@as(usize, 1), frame.render_plan.commandCount());
+    try std.testing.expectEqual(@as(usize, 1), frame.batch_plan.batchCount());
     try std.testing.expectEqual(@as(usize, 0), frame.changes.len);
     try std.testing.expect(frame.dirty_bounds == null);
 }
@@ -3524,11 +3763,13 @@ test "canvas frame plan reports diff storage overflow" {
     };
 
     var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
     var resources: [0]RenderResource = .{};
     var glyphs: [0]GlyphAtlasEntry = .{};
     var changes: [0]DiffChange = .{};
     try std.testing.expectError(error.DiffListFull, (DisplayList{ .commands = &next_commands }).framePlan(.{}, .{}, .{
         .render_commands = &render_commands,
+        .render_batches = &render_batches,
         .resources = &resources,
         .glyph_atlas_entries = &glyphs,
         .changes = &changes,
