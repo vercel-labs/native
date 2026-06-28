@@ -43,6 +43,9 @@ pub const CommandSource = enum {
 };
 
 pub const ShortcutEvent = platform.ShortcutEvent;
+pub const GpuSurfaceFrameEvent = platform.GpuSurfaceFrameEvent;
+pub const GpuSurfaceResizeEvent = platform.GpuSurfaceResizeEvent;
+pub const GpuSurfaceInputEvent = platform.GpuSurfaceInputEvent;
 
 pub const InvalidationReason = enum {
     startup,
@@ -64,6 +67,9 @@ pub const Event = union(enum) {
     command: CommandEvent,
     shortcut: ShortcutEvent,
     files_dropped: platform.FileDropEvent,
+    gpu_surface_frame: GpuSurfaceFrameEvent,
+    gpu_surface_resized: GpuSurfaceResizeEvent,
+    gpu_surface_input: GpuSurfaceInputEvent,
 
     pub fn name(self: Event) []const u8 {
         return switch (self) {
@@ -71,6 +77,9 @@ pub const Event = union(enum) {
             .command => |event_value| event_value.name,
             .shortcut => "shortcut",
             .files_dropped => "files_dropped",
+            .gpu_surface_frame => "gpu_surface_frame",
+            .gpu_surface_resized => "gpu_surface_resized",
+            .gpu_surface_input => "gpu_surface_input",
         };
     }
 };
@@ -663,7 +672,7 @@ pub const Runtime = struct {
     }
 
     pub fn dispatchPlatformEvent(self: *Runtime, app: App, event_value: platform.Event) anyerror!void {
-        if (event_value != .frame_requested or self.invalidated) {
+        if ((event_value != .frame_requested and event_value != .gpu_surface_frame) or self.invalidated) {
             const event_fields = [_]trace.Field{trace.string("event", event_value.name())};
             try self.log("platform.event", null, &event_fields);
         }
@@ -760,6 +769,34 @@ pub const Runtime = struct {
                     .view_label = command.view_label,
                 });
             },
+            .gpu_surface_frame => |frame_event| {
+                try self.dispatchEvent(app, .{ .gpu_surface_frame = frame_event });
+            },
+            .gpu_surface_resized => |resize_event| {
+                if (self.findViewIndex(resize_event.window_id, resize_event.label)) |index| {
+                    self.views[index].frame = resize_event.frame;
+                }
+                try self.dispatchEvent(app, .{ .gpu_surface_resized = resize_event });
+                self.invalidateFor(.surface_resize, resize_event.frame);
+                try self.log("gpu_surface.resize", "gpu surface resized", &.{
+                    trace.string("label", resize_event.label),
+                    trace.float("width", resize_event.frame.width),
+                    trace.float("height", resize_event.frame.height),
+                    trace.float("scale", resize_event.scale_factor),
+                });
+            },
+            .gpu_surface_input => |input_event| {
+                switch (input_event.kind) {
+                    .pointer_down,
+                    .key_down,
+                    => {
+                        self.setFocusedView(input_event.window_id, input_event.label);
+                        self.invalidated = true;
+                    },
+                    else => {},
+                }
+                try self.dispatchEvent(app, .{ .gpu_surface_input = input_event });
+            },
             .menu_command => |command| {
                 try self.dispatchCommand(app, .{
                     .name = command.name,
@@ -797,6 +834,9 @@ pub const Runtime = struct {
                 self.invalidateFor(.command, null);
             },
             .files_dropped => {},
+            .gpu_surface_frame => {},
+            .gpu_surface_resized => {},
+            .gpu_surface_input => {},
             .lifecycle => {},
         }
     }
@@ -5263,6 +5303,81 @@ test "runtime dispatches app activation lifecycle events" {
     try std.testing.expectEqual(LifecycleEvent.frame, app_state.events[1]);
     try std.testing.expectEqual(LifecycleEvent.activate, app_state.events[2]);
     try std.testing.expectEqual(LifecycleEvent.deactivate, app_state.events[3]);
+}
+
+test "runtime dispatches GPU surface events" {
+    const TestApp = struct {
+        frame_count: u32 = 0,
+        resize_count: u32 = 0,
+        input_count: u32 = 0,
+        last_label: []const u8 = "",
+        last_input_kind: platform.GpuSurfaceInputKind = .pointer_move,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-events", .source = platform.WebViewSource.html("<h1>GPU</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .gpu_surface_frame => |frame_event| {
+                    self.frame_count += 1;
+                    self.last_label = frame_event.label;
+                },
+                .gpu_surface_resized => |resize_event| {
+                    self.resize_count += 1;
+                    self.last_label = resize_event.label;
+                },
+                .gpu_surface_input => |input_event| {
+                    self.input_count += 1;
+                    self.last_label = input_event.label;
+                    self.last_input_kind = input_event.kind;
+                },
+                else => {},
+            }
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(640, 360),
+        .scale_factor = 2,
+        .frame_index = 7,
+        .timestamp_ns = 42,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.frame_count);
+    try std.testing.expectEqualStrings("canvas", app_state.last_label);
+    try std.testing.expect(!harness.runtime.invalidated);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_resized = .{
+        .window_id = 1,
+        .label = "canvas",
+        .frame = geometry.RectF.init(0, 0, 800, 450),
+        .scale_factor = 2,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.resize_count);
+    try std.testing.expect(harness.runtime.invalidated);
+
+    harness.runtime.invalidated = false;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 12,
+        .y = 18,
+        .button = 0,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.input_count);
+    try std.testing.expectEqual(platform.GpuSurfaceInputKind.pointer_down, app_state.last_input_kind);
+    try std.testing.expect(harness.runtime.invalidated);
 }
 
 test "runtime dispatches shortcut command events" {

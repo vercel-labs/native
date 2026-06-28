@@ -25,6 +25,9 @@ const AppKitEventKind = enum(c_int) {
     app_activated = 8,
     app_deactivated = 9,
     files_dropped = 10,
+    gpu_surface_frame = 11,
+    gpu_surface_resize = 12,
+    gpu_surface_input = 13,
 };
 
 const AppKitEvent = extern struct {
@@ -50,6 +53,12 @@ const AppKitEvent = extern struct {
     view_label_len: usize,
     drop_paths: [*]const u8,
     drop_paths_len: usize,
+    frame_index: u64,
+    timestamp_ns: u64,
+    input_kind: c_int,
+    button: c_int,
+    delta_x: f64,
+    delta_y: f64,
 };
 
 const AppKitCallback = *const fn (context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) void;
@@ -369,6 +378,31 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
                 .paths = paths,
             } });
         },
+        .gpu_surface_frame => state.emit(.{ .gpu_surface_frame = .{
+            .window_id = event.window_id,
+            .label = event.view_label[0..event.view_label_len],
+            .size = geometry.SizeF.init(@floatCast(event.width), @floatCast(event.height)),
+            .scale_factor = @floatCast(event.scale),
+            .frame_index = event.frame_index,
+            .timestamp_ns = event.timestamp_ns,
+        } }),
+        .gpu_surface_resize => state.emit(.{ .gpu_surface_resized = .{
+            .window_id = event.window_id,
+            .label = event.view_label[0..event.view_label_len],
+            .frame = geometry.RectF.init(@floatCast(event.x), @floatCast(event.y), @floatCast(event.width), @floatCast(event.height)),
+            .scale_factor = @floatCast(event.scale),
+        } }),
+        .gpu_surface_input => state.emit(.{ .gpu_surface_input = .{
+            .window_id = event.window_id,
+            .label = event.view_label[0..event.view_label_len],
+            .kind = gpuSurfaceInputKindFromInt(event.input_kind),
+            .x = @floatCast(event.x),
+            .y = @floatCast(event.y),
+            .button = event.button,
+            .delta_x = @floatCast(event.delta_x),
+            .delta_y = @floatCast(event.delta_y),
+            .modifiers = shortcutModifiersFromFlags(event.shortcut_modifiers),
+        } }),
     }
 }
 
@@ -790,6 +824,19 @@ fn shortcutModifiersFromFlags(flags: u32) platform_mod.ShortcutModifiers {
         .control = (flags & shortcut_modifier_control) != 0,
         .option = (flags & shortcut_modifier_option) != 0,
         .shift = (flags & shortcut_modifier_shift) != 0,
+    };
+}
+
+fn gpuSurfaceInputKindFromInt(value: c_int) platform_mod.GpuSurfaceInputKind {
+    return switch (value) {
+        0 => .pointer_down,
+        1 => .pointer_up,
+        2 => .pointer_move,
+        3 => .pointer_drag,
+        4 => .scroll,
+        5 => .key_down,
+        6 => .key_up,
+        else => .pointer_move,
     };
 }
 

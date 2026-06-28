@@ -611,6 +611,44 @@ pub const FileDropEvent = struct {
     paths: []const []const u8 = &.{},
 };
 
+pub const GpuSurfaceFrameEvent = struct {
+    window_id: WindowId = 1,
+    label: []const u8,
+    size: geometry.SizeF,
+    scale_factor: f32 = 1,
+    frame_index: u64 = 0,
+    timestamp_ns: u64 = 0,
+};
+
+pub const GpuSurfaceResizeEvent = struct {
+    window_id: WindowId = 1,
+    label: []const u8,
+    frame: geometry.RectF,
+    scale_factor: f32 = 1,
+};
+
+pub const GpuSurfaceInputKind = enum {
+    pointer_down,
+    pointer_up,
+    pointer_move,
+    pointer_drag,
+    scroll,
+    key_down,
+    key_up,
+};
+
+pub const GpuSurfaceInputEvent = struct {
+    window_id: WindowId = 1,
+    label: []const u8,
+    kind: GpuSurfaceInputKind,
+    x: f32 = 0,
+    y: f32 = 0,
+    button: i32 = 0,
+    delta_x: f32 = 0,
+    delta_y: f32 = 0,
+    modifiers: ShortcutModifiers = .{},
+};
+
 pub const ClipboardData = struct {
     mime_type: []const u8 = "text/plain",
     bytes: []const u8,
@@ -631,6 +669,9 @@ pub const Event = union(enum) {
     native_command: NativeCommandEvent,
     menu_command: MenuCommandEvent,
     files_dropped: FileDropEvent,
+    gpu_surface_frame: GpuSurfaceFrameEvent,
+    gpu_surface_resized: GpuSurfaceResizeEvent,
+    gpu_surface_input: GpuSurfaceInputEvent,
 
     pub fn name(self: Event) []const u8 {
         return switch (self) {
@@ -648,6 +689,9 @@ pub const Event = union(enum) {
             .native_command => "native_command",
             .menu_command => "menu_command",
             .files_dropped => "files_dropped",
+            .gpu_surface_frame => "gpu_surface_frame",
+            .gpu_surface_resized => "gpu_surface_resized",
+            .gpu_surface_input => "gpu_surface_input",
         };
     }
 };

@@ -22,7 +22,20 @@ typedef enum {
     ZERO_NATIVE_APPKIT_EVENT_APP_ACTIVATED = 8,
     ZERO_NATIVE_APPKIT_EVENT_APP_DEACTIVATED = 9,
     ZERO_NATIVE_APPKIT_EVENT_FILES_DROPPED = 10,
+    ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_FRAME = 11,
+    ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_RESIZE = 12,
+    ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_INPUT = 13,
 } zero_native_appkit_event_kind_t;
+
+typedef enum {
+    ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DOWN = 0,
+    ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_UP = 1,
+    ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_MOVE = 2,
+    ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DRAG = 3,
+    ZERO_NATIVE_APPKIT_GPU_INPUT_SCROLL = 4,
+    ZERO_NATIVE_APPKIT_GPU_INPUT_KEY_DOWN = 5,
+    ZERO_NATIVE_APPKIT_GPU_INPUT_KEY_UP = 6,
+} zero_native_appkit_gpu_input_kind_t;
 
 typedef enum {
     ZERO_NATIVE_APPKIT_VIEW_WEBVIEW = 0,
@@ -69,6 +82,12 @@ typedef struct {
     size_t view_label_len;
     const char *drop_paths;
     size_t drop_paths_len;
+    uint64_t frame_index;
+    uint64_t timestamp_ns;
+    int input_kind;
+    int button;
+    double delta_x;
+    double delta_y;
 } zero_native_appkit_event_t;
 
 typedef void (*zero_native_appkit_event_callback_t)(void *context, const zero_native_appkit_event_t *event);

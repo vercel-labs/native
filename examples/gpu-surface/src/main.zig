@@ -105,6 +105,9 @@ const shell_scene: zero_native.ShellConfig = .{ .windows = &shell_windows };
 const GpuSurfaceApp = struct {
     refresh_count: u32 = 0,
     mode_count: u32 = 0,
+    gpu_frame_count: u64 = 0,
+    gpu_resize_count: u32 = 0,
+    gpu_input_count: u32 = 0,
 
     fn app(self: *@This()) zero_native.App {
         return .{
@@ -131,22 +134,43 @@ const GpuSurfaceApp = struct {
                     try self.toggleMode(runtime, command);
                 }
             },
+            .gpu_surface_frame => |frame_event| {
+                if (std.mem.eql(u8, frame_event.label, "canvas") and self.gpu_frame_count == 0) {
+                    self.gpu_frame_count = frame_event.frame_index + 1;
+                    try self.updateStatus(runtime, frame_event.window_id, "GPU frame 1 from canvas.");
+                }
+            },
+            .gpu_surface_resized => |resize_event| {
+                if (std.mem.eql(u8, resize_event.label, "canvas")) {
+                    self.gpu_resize_count += 1;
+                }
+            },
+            .gpu_surface_input => |input_event| {
+                if (std.mem.eql(u8, input_event.label, "canvas")) {
+                    self.gpu_input_count += 1;
+                }
+            },
             .shortcut, .files_dropped, .lifecycle => {},
         }
+    }
+
+    fn updateStatus(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId, text: []const u8) anyerror!void {
+        _ = self;
+        _ = try runtime.updateView(window_id, "status-label", .{ .text = text });
     }
 
     fn refresh(self: *@This(), runtime: *zero_native.Runtime, command: zero_native.CommandEvent) anyerror!void {
         self.refresh_count += 1;
         var status_buffer: [160]u8 = undefined;
         const status = try std.fmt.bufPrint(&status_buffer, "GPU surface refreshed from {s}. Count {d}.", .{ @tagName(command.source), self.refresh_count });
-        _ = try runtime.updateView(command.window_id, "status-label", .{ .text = status });
+        try self.updateStatus(runtime, command.window_id, status);
     }
 
     fn toggleMode(self: *@This(), runtime: *zero_native.Runtime, command: zero_native.CommandEvent) anyerror!void {
         self.mode_count += 1;
         var status_buffer: [160]u8 = undefined;
         const status = try std.fmt.bufPrint(&status_buffer, "Mode control fired from {s}. Count {d}.", .{ @tagName(command.source), self.mode_count });
-        _ = try runtime.updateView(command.window_id, "status-label", .{ .text = status });
+        try self.updateStatus(runtime, command.window_id, status);
     }
 };
 

@@ -620,6 +620,14 @@ pub fn build(b: *std.Build) void {
         \\case "$snapshot" in *'view @w1/canvas kind=gpu_surface'*'accessibility_label="Animated GPU surface"'*) ;; *) echo "gpu_surface view was missing from snapshot" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'view @w1/inspector kind=webview'*) ;; *) echo "inspector WebView was missing from snapshot" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'view @w1/toolbar kind=toolbar'*) ;; *) echo "toolbar view was missing from snapshot" >&2; exit 1 ;; esac
+        \\attempts=0
+        \\while [ "$attempts" -lt 50 ]; do
+        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\  case "$snapshot" in *'GPU frame 1 from canvas.'*) break ;; esac
+        \\  attempts=$((attempts + 1))
+        \\  sleep 0.1
+        \\done
+        \\case "$snapshot" in *'view @w1/status-label kind=label'*'GPU frame 1 from canvas.'*) ;; *) echo "gpu-surface frame event did not reach the runtime" >&2; exit 1 ;; esac
         \\"$cli" automate native-command gpu.refresh refresh >/dev/null 2>&1
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do

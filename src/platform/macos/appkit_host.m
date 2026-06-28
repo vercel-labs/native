@@ -34,6 +34,8 @@ static NSString *ZeroNativeShortcutKeyForEvent(NSEvent *event);
 static BOOL ZeroNativeShortcutUsesImplicitShift(NSString *key, NSEvent *event);
 static BOOL ZeroNativeShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventModifierFlags eventModifiers, BOOL allowImplicitShift);
 static NSEventModifierFlags ZeroNativeMenuModifierFlags(uint32_t modifiers);
+static uint32_t ZeroNativeModifierFlagsForEvent(NSEvent *event);
+static uint64_t ZeroNativeTimestampNanoseconds(void);
 static NSAccessibilityRole ZeroNativeAccessibilityRoleForNativeViewKind(NSInteger kind);
 
 static size_t ZeroNativeOverflowSize(size_t buffer_len) {
@@ -43,6 +45,23 @@ static size_t ZeroNativeOverflowSize(size_t buffer_len) {
 static NSString *ZeroNativeStringFromBytes(const char *bytes, size_t len) {
     if (!bytes || len == 0) return nil;
     return [[NSString alloc] initWithBytes:bytes length:len encoding:NSUTF8StringEncoding];
+}
+
+static uint64_t ZeroNativeTimestampNanoseconds(void) {
+    return (uint64_t)([[NSDate date] timeIntervalSince1970] * 1000000000.0);
+}
+
+static uint32_t ZeroNativeModifierFlagsForEvent(NSEvent *event) {
+    NSEventModifierFlags flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+    uint32_t modifiers = 0;
+    if ((flags & NSEventModifierFlagCommand) != 0) {
+        modifiers |= ZeroNativeShortcutModifierPrimary;
+        modifiers |= ZeroNativeShortcutModifierCommand;
+    }
+    if ((flags & NSEventModifierFlagControl) != 0) modifiers |= ZeroNativeShortcutModifierControl;
+    if ((flags & NSEventModifierFlagOption) != 0) modifiers |= ZeroNativeShortcutModifierOption;
+    if ((flags & NSEventModifierFlagShift) != 0) modifiers |= ZeroNativeShortcutModifierShift;
+    return modifiers;
 }
 
 static NSString *ZeroNativePasteboardTypeForMime(const char *mime_type, size_t mime_type_len) {
@@ -117,11 +136,20 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 @property(nonatomic, strong) id<MTLCommandQueue> commandQueue;
 @property(nonatomic, strong) CAMetalLayer *metalLayer;
 @property(nonatomic, strong) NSTimer *displayTimer;
+@property(nonatomic, assign) ZeroNativeAppKitHost *host;
+@property(nonatomic, assign) uint64_t windowId;
+@property(nonatomic, strong) NSString *surfaceLabel;
 @property(nonatomic, assign) NSUInteger frameIndex;
 @property(nonatomic, assign) BOOL renderedFrame;
+@property(nonatomic, assign) CGSize lastDrawableSize;
+@property(nonatomic, assign) CGFloat lastScale;
+- (void)configureWithHost:(ZeroNativeAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label;
 - (BOOL)isAvailable;
 - (void)updateDrawableSize;
 - (void)renderFrame;
+- (void)emitFrameEvent;
+- (void)emitResizeEvent;
+- (void)emitInputEventWithKind:(NSInteger)kind event:(NSEvent *)event button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY;
 @end
 
 @interface ZeroNativeAssetSchemeHandler : NSObject <WKURLSchemeHandler>
@@ -376,6 +404,20 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
     return self;
 }
 
+- (void)configureWithHost:(ZeroNativeAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label {
+    self.host = host;
+    self.windowId = windowId;
+    self.surfaceLabel = label ?: @"";
+    __weak ZeroNativeMetalSurfaceView *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ZeroNativeMetalSurfaceView *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf updateDrawableSize];
+        [strongSelf emitResizeEvent];
+        [strongSelf renderFrame];
+    });
+}
+
 - (void)dealloc {
     [_displayTimer invalidate];
 }
@@ -414,8 +456,15 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
     if (scale <= 0) scale = NSScreen.mainScreen.backingScaleFactor;
     if (scale <= 0) scale = 1;
     NSSize size = self.bounds.size;
+    CGSize drawableSize = CGSizeMake(MAX(1.0, size.width * scale), MAX(1.0, size.height * scale));
+    BOOL changed = fabs(self.lastDrawableSize.width - drawableSize.width) > 0.5 ||
+        fabs(self.lastDrawableSize.height - drawableSize.height) > 0.5 ||
+        fabs(self.lastScale - scale) > 0.001;
     self.metalLayer.contentsScale = scale;
-    self.metalLayer.drawableSize = CGSizeMake(MAX(1.0, size.width * scale), MAX(1.0, size.height * scale));
+    self.metalLayer.drawableSize = drawableSize;
+    self.lastDrawableSize = drawableSize;
+    self.lastScale = scale;
+    if (changed) [self emitResizeEvent];
 }
 
 - (void)renderFrame {
@@ -443,7 +492,121 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
     [commandBuffer commit];
 
     self.renderedFrame = YES;
+    [self emitFrameEvent];
     self.frameIndex += 1;
+}
+
+- (BOOL)acceptsFirstResponder {
+    return YES;
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    [self.window makeFirstResponder:self];
+    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DOWN event:event button:0 deltaX:0 deltaY:0];
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_UP event:event button:0 deltaX:0 deltaY:0];
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_MOVE event:event button:0 deltaX:0 deltaY:0];
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DRAG event:event button:0 deltaX:0 deltaY:0];
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+    [self.window makeFirstResponder:self];
+    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DOWN event:event button:1 deltaX:0 deltaY:0];
+}
+
+- (void)rightMouseUp:(NSEvent *)event {
+    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_UP event:event button:1 deltaX:0 deltaY:0];
+}
+
+- (void)rightMouseDragged:(NSEvent *)event {
+    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DRAG event:event button:1 deltaX:0 deltaY:0];
+}
+
+- (void)otherMouseDown:(NSEvent *)event {
+    [self.window makeFirstResponder:self];
+    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DOWN event:event button:(NSInteger)event.buttonNumber deltaX:0 deltaY:0];
+}
+
+- (void)otherMouseUp:(NSEvent *)event {
+    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_UP event:event button:(NSInteger)event.buttonNumber deltaX:0 deltaY:0];
+}
+
+- (void)otherMouseDragged:(NSEvent *)event {
+    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DRAG event:event button:(NSInteger)event.buttonNumber deltaX:0 deltaY:0];
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_SCROLL event:event button:0 deltaX:event.scrollingDeltaX deltaY:event.scrollingDeltaY];
+}
+
+- (void)keyDown:(NSEvent *)event {
+    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_KEY_DOWN event:event button:0 deltaX:0 deltaY:0];
+}
+
+- (void)keyUp:(NSEvent *)event {
+    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_KEY_UP event:event button:0 deltaX:0 deltaY:0];
+}
+
+- (void)emitFrameEvent {
+    if (!self.host || self.surfaceLabel.length == 0) return;
+    const char *labelBytes = self.surfaceLabel.UTF8String ?: "";
+    [self.host emitEvent:(zero_native_appkit_event_t){
+        .kind = ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_FRAME,
+        .window_id = self.windowId,
+        .width = self.bounds.size.width,
+        .height = self.bounds.size.height,
+        .scale = self.lastScale > 0 ? self.lastScale : 1,
+        .view_label = labelBytes,
+        .view_label_len = [self.surfaceLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+        .frame_index = self.frameIndex,
+        .timestamp_ns = ZeroNativeTimestampNanoseconds(),
+    }];
+    [self.host scheduleFrame];
+}
+
+- (void)emitResizeEvent {
+    if (!self.host || self.surfaceLabel.length == 0) return;
+    CGFloat y = self.superview ? (self.superview.bounds.size.height - NSMaxY(self.frame)) : self.frame.origin.y;
+    const char *labelBytes = self.surfaceLabel.UTF8String ?: "";
+    [self.host emitEvent:(zero_native_appkit_event_t){
+        .kind = ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_RESIZE,
+        .window_id = self.windowId,
+        .x = self.frame.origin.x,
+        .y = y,
+        .width = self.bounds.size.width,
+        .height = self.bounds.size.height,
+        .scale = self.lastScale > 0 ? self.lastScale : 1,
+        .view_label = labelBytes,
+        .view_label_len = [self.surfaceLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+    }];
+}
+
+- (void)emitInputEventWithKind:(NSInteger)kind event:(NSEvent *)event button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY {
+    if (!self.host || self.surfaceLabel.length == 0) return;
+    NSPoint point = event ? [self convertPoint:event.locationInWindow fromView:nil] : NSMakePoint(0, 0);
+    CGFloat y = self.bounds.size.height - point.y;
+    const char *labelBytes = self.surfaceLabel.UTF8String ?: "";
+    [self.host emitEvent:(zero_native_appkit_event_t){
+        .kind = ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_INPUT,
+        .window_id = self.windowId,
+        .x = point.x,
+        .y = y,
+        .view_label = labelBytes,
+        .view_label_len = [self.surfaceLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+        .shortcut_modifiers = event ? ZeroNativeModifierFlagsForEvent(event) : 0,
+        .input_kind = (int)kind,
+        .button = (int)button,
+        .delta_x = deltaX,
+        .delta_y = deltaY,
+    }];
 }
 
 @end
@@ -915,6 +1078,9 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
     [self configureNativeView:view command:command key:key];
 
     [parentView addSubview:view positioned:NSWindowAbove relativeTo:nil];
+    if ([view isKindOfClass:[ZeroNativeMetalSurfaceView class]]) {
+        [(ZeroNativeMetalSurfaceView *)view configureWithHost:self windowId:windowId label:label];
+    }
     self.nativeViews[key] = view;
     if (text.length > 0) {
         [self.nativeViewExplicitTextKeys addObject:key];
