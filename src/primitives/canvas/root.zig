@@ -471,6 +471,8 @@ pub const RenderCommand = struct {
     id: ?ObjectId = null,
     opacity: f32 = 1,
     clip: ?geometry.RectF = null,
+    transform: Affine = .{},
+    local_bounds: geometry.RectF,
     bounds: geometry.RectF,
 };
 
@@ -1583,6 +1585,8 @@ pub const RenderPlanner = struct {
             .id = command.objectId(),
             .opacity = self.state.opacity,
             .clip = self.state.clip,
+            .transform = self.state.transform,
+            .local_bounds = command_bounds,
             .bounds = clipped_bounds,
         };
         self.len += 1;
@@ -6047,11 +6051,15 @@ test "render plan resolves transform clip and opacity state" {
     try std.testing.expectEqual(@as(?ObjectId, 1), plan.commands[0].id);
     try std.testing.expectEqual(@as(f32, 0.5), plan.commands[0].opacity);
     try expectRect(geometry.RectF.init(10, 10, 50, 50), plan.commands[0].clip);
+    try std.testing.expectEqualDeep(Affine.translate(10, 0), plan.commands[0].transform);
+    try expectRect(geometry.RectF.init(0, 0, 30, 30), plan.commands[0].local_bounds);
     try std.testing.expectEqualDeep(geometry.RectF.init(10, 10, 30, 20), plan.commands[0].bounds);
 
     try std.testing.expectEqual(@as(?ObjectId, 3), plan.commands[1].id);
     try std.testing.expectEqual(@as(f32, 1), plan.commands[1].opacity);
     try std.testing.expect(plan.commands[1].clip == null);
+    try std.testing.expectEqualDeep(Affine.translate(10, 0), plan.commands[1].transform);
+    try expectRect(geometry.RectF.init(0, 0, 4, 4), plan.commands[1].local_bounds);
     try std.testing.expectEqualDeep(geometry.RectF.init(10, 0, 4, 4), plan.commands[1].bounds);
     try expectRect(geometry.RectF.init(10, 0, 30, 30), plan.bounds);
 }
