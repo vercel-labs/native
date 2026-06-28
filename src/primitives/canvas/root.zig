@@ -7,6 +7,7 @@ pub const Error = error{
     DiffListFull,
     DuplicateObjectId,
     DuplicateWidgetId,
+    GlyphAtlasCacheListFull,
     GlyphAtlasListFull,
     RenderBatchListFull,
     RenderListFull,
@@ -239,6 +240,62 @@ pub const GlyphAtlasPlan = struct {
 
     pub fn entryCount(self: GlyphAtlasPlan) usize {
         return self.entries.len;
+    }
+
+    pub fn cachePlan(self: GlyphAtlasPlan, previous: []const GlyphAtlasCacheEntry, frame_index: u64, entries: []GlyphAtlasCacheEntry, actions: []GlyphAtlasCacheAction) Error!GlyphAtlasCachePlan {
+        var planner = GlyphAtlasCachePlanner.init(entries, actions);
+        return planner.build(self, previous, frame_index);
+    }
+};
+
+pub const GlyphAtlasCacheEntry = struct {
+    key: GlyphAtlasKey,
+    last_used_frame: u64 = 0,
+};
+
+pub const GlyphAtlasCacheActionKind = enum {
+    upload,
+    retain,
+    evict,
+};
+
+pub const GlyphAtlasCacheAction = struct {
+    kind: GlyphAtlasCacheActionKind,
+    key: GlyphAtlasKey,
+    atlas_index: ?usize = null,
+    cache_index: ?usize = null,
+};
+
+pub const GlyphAtlasCachePlan = struct {
+    entries: []const GlyphAtlasCacheEntry = &.{},
+    actions: []const GlyphAtlasCacheAction = &.{},
+
+    pub fn entryCount(self: GlyphAtlasCachePlan) usize {
+        return self.entries.len;
+    }
+
+    pub fn actionCount(self: GlyphAtlasCachePlan) usize {
+        return self.actions.len;
+    }
+
+    pub fn uploadCount(self: GlyphAtlasCachePlan) usize {
+        return self.actionCountByKind(.upload);
+    }
+
+    pub fn retainCount(self: GlyphAtlasCachePlan) usize {
+        return self.actionCountByKind(.retain);
+    }
+
+    pub fn evictCount(self: GlyphAtlasCachePlan) usize {
+        return self.actionCountByKind(.evict);
+    }
+
+    fn actionCountByKind(self: GlyphAtlasCachePlan, kind: GlyphAtlasCacheActionKind) usize {
+        var count: usize = 0;
+        for (self.actions) |action| {
+            if (action.kind == kind) count += 1;
+        }
+        return count;
     }
 };
 
@@ -641,6 +698,7 @@ pub const CanvasFrameOptions = struct {
     full_repaint: bool = false,
     budget: CanvasFrameBudget = .{},
     previous_resource_cache: []const RenderResourceCacheEntry = &.{},
+    previous_glyph_atlas_cache: []const GlyphAtlasCacheEntry = &.{},
     previous_render_overrides: []const CanvasRenderOverride = &.{},
     render_overrides: []const CanvasRenderOverride = &.{},
 };
@@ -652,6 +710,8 @@ pub const CanvasFrameStorage = struct {
     resource_cache_entries: []RenderResourceCacheEntry,
     resource_cache_actions: []RenderResourceCacheAction,
     glyph_atlas_entries: []GlyphAtlasEntry,
+    glyph_atlas_cache_entries: []GlyphAtlasCacheEntry = &.{},
+    glyph_atlas_cache_actions: []GlyphAtlasCacheAction = &.{},
     changes: []DiffChange,
 };
 
@@ -708,6 +768,9 @@ pub const CanvasFrameDiagnostics = struct {
     resource_retain_count: usize = 0,
     resource_evict_count: usize = 0,
     glyph_atlas_entry_count: usize = 0,
+    glyph_atlas_upload_count: usize = 0,
+    glyph_atlas_retain_count: usize = 0,
+    glyph_atlas_evict_count: usize = 0,
     change_count: usize = 0,
     full_repaint: bool = false,
     requires_render: bool = false,
@@ -721,7 +784,7 @@ pub const CanvasFrameDiagnostics = struct {
 
     pub fn writeJson(self: CanvasFrameDiagnostics, writer: anytype) !void {
         try writer.print(
-            "{{\"frameIndex\":{d},\"commandCount\":{d},\"batchCount\":{d},\"resourceCount\":{d},\"resourceUploadCount\":{d},\"resourceRetainCount\":{d},\"resourceEvictCount\":{d},\"glyphAtlasEntryCount\":{d},\"changeCount\":{d},\"budgetExceededCount\":{d}",
+            "{{\"frameIndex\":{d},\"commandCount\":{d},\"batchCount\":{d},\"resourceCount\":{d},\"resourceUploadCount\":{d},\"resourceRetainCount\":{d},\"resourceEvictCount\":{d},\"glyphAtlasEntryCount\":{d},\"glyphAtlasUploadCount\":{d},\"glyphAtlasRetainCount\":{d},\"glyphAtlasEvictCount\":{d},\"changeCount\":{d},\"budgetExceededCount\":{d}",
             .{
                 self.frame_index,
                 self.command_count,
@@ -731,6 +794,9 @@ pub const CanvasFrameDiagnostics = struct {
                 self.resource_retain_count,
                 self.resource_evict_count,
                 self.glyph_atlas_entry_count,
+                self.glyph_atlas_upload_count,
+                self.glyph_atlas_retain_count,
+                self.glyph_atlas_evict_count,
                 self.change_count,
                 self.budget_status.exceededCount(),
             },
@@ -773,6 +839,7 @@ pub const CanvasRenderPass = struct {
     resources: []const RenderResource = &.{},
     resource_actions: []const RenderResourceCacheAction = &.{},
     glyph_atlas_entries: []const GlyphAtlasEntry = &.{},
+    glyph_atlas_actions: []const GlyphAtlasCacheAction = &.{},
 
     pub fn requiresRender(self: CanvasRenderPass) bool {
         return self.full_repaint or self.dirty_bounds != null;
@@ -807,6 +874,10 @@ pub const CanvasRenderPass = struct {
         return self.glyph_atlas_entries.len;
     }
 
+    pub fn glyphAtlasActionCount(self: CanvasRenderPass) usize {
+        return self.glyph_atlas_actions.len;
+    }
+
     pub fn writeJson(self: CanvasRenderPass, writer: anytype) !void {
         try writeCanvasRenderPassJson(self, writer);
     }
@@ -824,6 +895,7 @@ pub const CanvasFrame = struct {
     resource_plan: RenderResourcePlan = .{},
     resource_cache_plan: RenderResourceCachePlan = .{},
     glyph_atlas_plan: GlyphAtlasPlan = .{},
+    glyph_atlas_cache_plan: GlyphAtlasCachePlan = .{},
     changes: []const DiffChange = &.{},
     dirty_bounds: ?geometry.RectF = null,
     budget: CanvasFrameBudget = .{},
@@ -852,6 +924,9 @@ pub const CanvasFrame = struct {
             .resource_retain_count = self.resource_cache_plan.retainCount(),
             .resource_evict_count = self.resource_cache_plan.evictCount(),
             .glyph_atlas_entry_count = self.glyph_atlas_plan.entryCount(),
+            .glyph_atlas_upload_count = self.glyph_atlas_cache_plan.uploadCount(),
+            .glyph_atlas_retain_count = self.glyph_atlas_cache_plan.retainCount(),
+            .glyph_atlas_evict_count = self.glyph_atlas_cache_plan.evictCount(),
             .change_count = self.changes.len,
             .full_repaint = self.full_repaint,
             .requires_render = self.requiresRender(),
@@ -877,6 +952,7 @@ pub const CanvasFrame = struct {
             .resources = self.resource_plan.resources,
             .resource_actions = self.resource_cache_plan.actions,
             .glyph_atlas_entries = self.glyph_atlas_plan.entries,
+            .glyph_atlas_actions = self.glyph_atlas_cache_plan.actions,
         };
     }
 };
@@ -2193,6 +2269,12 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         storage.resource_cache_actions,
     );
     const glyph_atlas_plan = try next.glyphAtlasPlan(storage.glyph_atlas_entries);
+    const glyph_atlas_cache_plan = try glyph_atlas_plan.cachePlan(
+        options.previous_glyph_atlas_cache,
+        options.frame_index,
+        storage.glyph_atlas_cache_entries,
+        storage.glyph_atlas_cache_actions,
+    );
 
     const full_repaint = options.full_repaint or previous == null;
     var changes: []const DiffChange = storage.changes[0..0];
@@ -2217,6 +2299,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         .resource_plan = resource_plan,
         .resource_cache_plan = resource_cache_plan,
         .glyph_atlas_plan = glyph_atlas_plan,
+        .glyph_atlas_cache_plan = glyph_atlas_cache_plan,
         .changes = changes,
         .dirty_bounds = dirty_bounds,
         .budget = options.budget,
@@ -2952,6 +3035,68 @@ pub const GlyphAtlasPlanner = struct {
             .glyph_index = glyph_index,
         };
         self.len += 1;
+    }
+};
+
+pub const GlyphAtlasCachePlanner = struct {
+    entries: []GlyphAtlasCacheEntry,
+    actions: []GlyphAtlasCacheAction,
+    entry_len: usize = 0,
+    action_len: usize = 0,
+
+    pub fn init(entries: []GlyphAtlasCacheEntry, actions: []GlyphAtlasCacheAction) GlyphAtlasCachePlanner {
+        return .{ .entries = entries, .actions = actions };
+    }
+
+    pub fn reset(self: *GlyphAtlasCachePlanner) void {
+        self.entry_len = 0;
+        self.action_len = 0;
+    }
+
+    pub fn build(self: *GlyphAtlasCachePlanner, plan: GlyphAtlasPlan, previous: []const GlyphAtlasCacheEntry, frame_index: u64) Error!GlyphAtlasCachePlan {
+        self.reset();
+
+        for (plan.entries, 0..) |entry, atlas_index| {
+            if (findGlyphAtlasCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
+
+            const previous_index = findGlyphAtlasCacheEntry(previous, entry.key);
+            try self.appendEntry(.{
+                .key = entry.key,
+                .last_used_frame = frame_index,
+            });
+            try self.appendAction(.{
+                .kind = if (previous_index == null) .upload else .retain,
+                .key = entry.key,
+                .atlas_index = atlas_index,
+                .cache_index = previous_index,
+            });
+        }
+
+        for (previous, 0..) |entry, previous_index| {
+            if (findGlyphAtlasCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
+            try self.appendAction(.{
+                .kind = .evict,
+                .key = entry.key,
+                .cache_index = previous_index,
+            });
+        }
+
+        return .{
+            .entries = self.entries[0..self.entry_len],
+            .actions = self.actions[0..self.action_len],
+        };
+    }
+
+    fn appendEntry(self: *GlyphAtlasCachePlanner, entry: GlyphAtlasCacheEntry) Error!void {
+        if (self.entry_len >= self.entries.len) return error.GlyphAtlasCacheListFull;
+        self.entries[self.entry_len] = entry;
+        self.entry_len += 1;
+    }
+
+    fn appendAction(self: *GlyphAtlasCachePlanner, action: GlyphAtlasCacheAction) Error!void {
+        if (self.action_len >= self.actions.len) return error.GlyphAtlasCacheListFull;
+        self.actions[self.action_len] = action;
+        self.action_len += 1;
     }
 };
 
@@ -4919,6 +5064,13 @@ fn glyphAtlasKeysEqual(a: GlyphAtlasKey, b: GlyphAtlasKey) bool {
         a.subpixel_y == b.subpixel_y;
 }
 
+fn findGlyphAtlasCacheEntry(entries: []const GlyphAtlasCacheEntry, key: GlyphAtlasKey) ?usize {
+    for (entries, 0..) |entry, index| {
+        if (glyphAtlasKeysEqual(entry.key, key)) return index;
+    }
+    return null;
+}
+
 fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChange) Error![]const DiffChange {
     try validateUniqueObjectIds(previous);
     try validateUniqueObjectIds(next);
@@ -6322,6 +6474,11 @@ fn writeCanvasRenderPassJson(pass: CanvasRenderPass, writer: anytype) !void {
         if (index > 0) try writer.writeByte(',');
         try writeGlyphAtlasEntryJson(entry, writer);
     }
+    try writer.writeAll("],\"glyphAtlasActions\":[");
+    for (pass.glyph_atlas_actions, 0..) |action, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writeGlyphAtlasCacheActionJson(action, writer);
+    }
     try writer.writeAll("]}");
 }
 
@@ -6397,6 +6554,28 @@ fn writeGlyphAtlasEntryJson(entry: GlyphAtlasEntry, writer: anytype) !void {
         entry.key.subpixel_y,
         entry.command_index,
         entry.glyph_index,
+    });
+}
+
+fn writeGlyphAtlasCacheActionJson(action: GlyphAtlasCacheAction, writer: anytype) !void {
+    try writer.writeAll("{\"kind\":");
+    try json.writeString(writer, @tagName(action.kind));
+    try writer.writeAll(",\"key\":");
+    try writeGlyphAtlasKeyJson(action.key, writer);
+    try writer.writeAll(",\"atlasIndex\":");
+    try writeOptionalUsizeJson(action.atlas_index, writer);
+    try writer.writeAll(",\"cacheIndex\":");
+    try writeOptionalUsizeJson(action.cache_index, writer);
+    try writer.writeByte('}');
+}
+
+fn writeGlyphAtlasKeyJson(key: GlyphAtlasKey, writer: anytype) !void {
+    try writer.print("{{\"fontId\":{d},\"glyphId\":{d},\"size\":{d},\"subpixelX\":{d},\"subpixelY\":{d}}}", .{
+        key.font_id,
+        key.glyph_id,
+        key.size,
+        key.subpixel_x,
+        key.subpixel_y,
     });
 }
 
@@ -8536,6 +8715,8 @@ test "widget display list renders through reference surface" {
     var resource_cache_entries: [8]RenderResourceCacheEntry = undefined;
     var resource_cache_actions: [8]RenderResourceCacheAction = undefined;
     var glyphs: [64]GlyphAtlasEntry = undefined;
+    var glyph_cache_entries: [64]GlyphAtlasCacheEntry = undefined;
+    var glyph_cache_actions: [64]GlyphAtlasCacheAction = undefined;
     var changes: [0]DiffChange = .{};
     const frame = try builder.displayList().framePlan(null, .{
         .surface_size = geometry.SizeF.init(240, 128),
@@ -8546,6 +8727,8 @@ test "widget display list renders through reference surface" {
         .resource_cache_entries = &resource_cache_entries,
         .resource_cache_actions = &resource_cache_actions,
         .glyph_atlas_entries = &glyphs,
+        .glyph_atlas_cache_entries = &glyph_cache_entries,
+        .glyph_atlas_cache_actions = &glyph_cache_actions,
         .changes = &changes,
     });
 
@@ -9407,6 +9590,69 @@ test "glyph atlas plan reports output overflow" {
     try std.testing.expectError(error.GlyphAtlasListFull, (DisplayList{ .commands = &commands }).glyphAtlasPlan(&entries));
 }
 
+test "glyph atlas cache plan uploads retains and evicts glyphs" {
+    const previous = [_]GlyphAtlasCacheEntry{
+        .{
+            .key = .{ .font_id = 1, .glyph_id = 65, .size = 14, .subpixel_x = 0, .subpixel_y = 0 },
+            .last_used_frame = 3,
+        },
+        .{
+            .key = .{ .font_id = 1, .glyph_id = 66, .size = 14, .subpixel_x = 0, .subpixel_y = 0 },
+            .last_used_frame = 3,
+        },
+    };
+    const atlas_entries = [_]GlyphAtlasEntry{
+        .{
+            .key = .{ .font_id = 1, .glyph_id = 65, .size = 14, .subpixel_x = 0, .subpixel_y = 0 },
+            .command_index = 0,
+            .glyph_index = 0,
+        },
+        .{
+            .key = .{ .font_id = 1, .glyph_id = 67, .size = 14, .subpixel_x = 0, .subpixel_y = 0 },
+            .command_index = 0,
+            .glyph_index = 1,
+        },
+    };
+
+    var cache_entries: [2]GlyphAtlasCacheEntry = undefined;
+    var cache_actions: [3]GlyphAtlasCacheAction = undefined;
+    const cache = try (GlyphAtlasPlan{ .entries = &atlas_entries }).cachePlan(&previous, 4, &cache_entries, &cache_actions);
+
+    try std.testing.expectEqual(@as(usize, 2), cache.entryCount());
+    try std.testing.expectEqual(@as(usize, 3), cache.actionCount());
+    try std.testing.expectEqual(@as(usize, 1), cache.uploadCount());
+    try std.testing.expectEqual(@as(usize, 1), cache.retainCount());
+    try std.testing.expectEqual(@as(usize, 1), cache.evictCount());
+    try std.testing.expectEqual(@as(u64, 4), cache.entries[0].last_used_frame);
+    try std.testing.expectEqual(GlyphAtlasCacheActionKind.retain, cache.actions[0].kind);
+    try std.testing.expectEqual(@as(u32, 65), cache.actions[0].key.glyph_id);
+    try std.testing.expectEqual(@as(usize, 0), cache.actions[0].atlas_index.?);
+    try std.testing.expectEqual(@as(usize, 0), cache.actions[0].cache_index.?);
+    try std.testing.expectEqual(GlyphAtlasCacheActionKind.upload, cache.actions[1].kind);
+    try std.testing.expectEqual(@as(u32, 67), cache.actions[1].key.glyph_id);
+    try std.testing.expectEqual(@as(usize, 1), cache.actions[1].atlas_index.?);
+    try std.testing.expect(cache.actions[1].cache_index == null);
+    try std.testing.expectEqual(GlyphAtlasCacheActionKind.evict, cache.actions[2].kind);
+    try std.testing.expectEqual(@as(u32, 66), cache.actions[2].key.glyph_id);
+    try std.testing.expect(cache.actions[2].atlas_index == null);
+    try std.testing.expectEqual(@as(usize, 1), cache.actions[2].cache_index.?);
+}
+
+test "glyph atlas cache plan reports output overflow" {
+    const atlas_entries = [_]GlyphAtlasEntry{.{
+        .key = .{ .font_id = 1, .glyph_id = 65, .size = 14 },
+        .command_index = 0,
+        .glyph_index = 0,
+    }};
+    var no_cache_entries: [0]GlyphAtlasCacheEntry = .{};
+    var cache_actions: [1]GlyphAtlasCacheAction = undefined;
+    try std.testing.expectError(error.GlyphAtlasCacheListFull, (GlyphAtlasPlan{ .entries = &atlas_entries }).cachePlan(&.{}, 1, &no_cache_entries, &cache_actions));
+
+    var cache_entries: [1]GlyphAtlasCacheEntry = undefined;
+    var no_cache_actions: [0]GlyphAtlasCacheAction = .{};
+    try std.testing.expectError(error.GlyphAtlasCacheListFull, (GlyphAtlasPlan{ .entries = &atlas_entries }).cachePlan(&.{}, 1, &cache_entries, &no_cache_actions));
+}
+
 test "canvas frame plan builds first frame renderer packet" {
     const stops = [_]GradientStop{
         .{ .offset = 0, .color = Color.rgb8(255, 255, 255) },
@@ -9439,6 +9685,8 @@ test "canvas frame plan builds first frame renderer packet" {
     var resource_cache_entries: [2]RenderResourceCacheEntry = undefined;
     var resource_cache_actions: [2]RenderResourceCacheAction = undefined;
     var glyphs: [2]GlyphAtlasEntry = undefined;
+    var glyph_cache_entries: [2]GlyphAtlasCacheEntry = undefined;
+    var glyph_cache_actions: [2]GlyphAtlasCacheAction = undefined;
     var changes: [2]DiffChange = undefined;
     const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
         .frame_index = 7,
@@ -9459,6 +9707,8 @@ test "canvas frame plan builds first frame renderer packet" {
         .resource_cache_entries = &resource_cache_entries,
         .resource_cache_actions = &resource_cache_actions,
         .glyph_atlas_entries = &glyphs,
+        .glyph_atlas_cache_entries = &glyph_cache_entries,
+        .glyph_atlas_cache_actions = &glyph_cache_actions,
         .changes = &changes,
     });
 
@@ -9479,6 +9729,8 @@ test "canvas frame plan builds first frame renderer packet" {
     try std.testing.expectEqual(RenderResourceCacheActionKind.upload, frame.resource_cache_plan.actions[1].kind);
     try std.testing.expectEqual(@as(usize, 2), frame.resource_cache_plan.uploadCount());
     try std.testing.expectEqual(@as(usize, 2), frame.glyph_atlas_plan.entryCount());
+    try std.testing.expectEqual(@as(usize, 2), frame.glyph_atlas_cache_plan.entryCount());
+    try std.testing.expectEqual(@as(usize, 2), frame.glyph_atlas_cache_plan.uploadCount());
     try std.testing.expectEqual(@as(usize, 0), frame.changes.len);
     try expectRect(geometry.RectF.init(0, 0, 320, 200), frame.dirty_bounds);
 
@@ -9494,7 +9746,9 @@ test "canvas frame plan builds first frame renderer packet" {
     try std.testing.expectEqual(@as(usize, 2), render_pass.resourceCount());
     try std.testing.expectEqual(@as(usize, 2), render_pass.resourceActionCount());
     try std.testing.expectEqual(@as(usize, 2), render_pass.glyphAtlasEntryCount());
+    try std.testing.expectEqual(@as(usize, 2), render_pass.glyphAtlasActionCount());
     try std.testing.expectEqual(RenderResourceCacheActionKind.upload, render_pass.resource_actions[0].kind);
+    try std.testing.expectEqual(GlyphAtlasCacheActionKind.upload, render_pass.glyph_atlas_actions[0].kind);
     try expectRect(geometry.RectF.init(0, 0, 320, 200), render_pass.scissorBounds());
 
     var render_pass_json_buffer: [8192]u8 = undefined;
@@ -9508,6 +9762,7 @@ test "canvas frame plan builds first frame renderer packet" {
     try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"resources\":[{\"kind\":\"linear_gradient\",\"commandIndex\":0,\"id\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"resourceActions\":[{\"kind\":\"upload\",\"key\":{\"kind\":\"linear_gradient\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"glyphAtlasEntries\":[{\"key\":{\"fontId\":5,\"glyphId\":79") != null);
+    try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"glyphAtlasActions\":[{\"kind\":\"upload\",\"key\":{\"fontId\":5,\"glyphId\":79") != null);
 
     const diagnostics = frame.diagnostics();
     try std.testing.expectEqual(@as(u64, 7), diagnostics.frame_index);
@@ -9518,6 +9773,9 @@ test "canvas frame plan builds first frame renderer packet" {
     try std.testing.expectEqual(@as(usize, 0), diagnostics.resource_retain_count);
     try std.testing.expectEqual(@as(usize, 0), diagnostics.resource_evict_count);
     try std.testing.expectEqual(@as(usize, 2), diagnostics.glyph_atlas_entry_count);
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.glyph_atlas_upload_count);
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.glyph_atlas_retain_count);
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.glyph_atlas_evict_count);
     try std.testing.expectEqual(@as(usize, 0), diagnostics.change_count);
     try std.testing.expect(diagnostics.full_repaint);
     try std.testing.expect(diagnostics.requires_render);
@@ -9536,7 +9794,7 @@ test "canvas frame plan builds first frame renderer packet" {
     var diagnostics_json_writer = std.Io.Writer.fixed(&diagnostics_json_buffer);
     try frame.writeDiagnosticsJson(&diagnostics_json_writer);
     try std.testing.expectEqualStrings(
-        "{\"frameIndex\":7,\"commandCount\":2,\"batchCount\":2,\"resourceCount\":2,\"resourceUploadCount\":2,\"resourceRetainCount\":0,\"resourceEvictCount\":0,\"glyphAtlasEntryCount\":2,\"changeCount\":0,\"budgetExceededCount\":2,\"budgetOk\":false,\"fullRepaint\":true,\"requiresRender\":true,\"dirtyBounds\":[0,0,320,200]}",
+        "{\"frameIndex\":7,\"commandCount\":2,\"batchCount\":2,\"resourceCount\":2,\"resourceUploadCount\":2,\"resourceRetainCount\":0,\"resourceEvictCount\":0,\"glyphAtlasEntryCount\":2,\"glyphAtlasUploadCount\":2,\"glyphAtlasRetainCount\":0,\"glyphAtlasEvictCount\":0,\"changeCount\":0,\"budgetExceededCount\":2,\"budgetOk\":false,\"fullRepaint\":true,\"requiresRender\":true,\"dirtyBounds\":[0,0,320,200]}",
         diagnostics_json_writer.buffered(),
     );
 
@@ -9544,7 +9802,7 @@ test "canvas frame plan builds first frame renderer packet" {
     var clean_json_writer = std.Io.Writer.fixed(&clean_json_buffer);
     try (CanvasFrameDiagnostics{ .frame_index = 8 }).writeJson(&clean_json_writer);
     try std.testing.expectEqualStrings(
-        "{\"frameIndex\":8,\"commandCount\":0,\"batchCount\":0,\"resourceCount\":0,\"resourceUploadCount\":0,\"resourceRetainCount\":0,\"resourceEvictCount\":0,\"glyphAtlasEntryCount\":0,\"changeCount\":0,\"budgetExceededCount\":0,\"budgetOk\":true,\"fullRepaint\":false,\"requiresRender\":false,\"dirtyBounds\":null}",
+        "{\"frameIndex\":8,\"commandCount\":0,\"batchCount\":0,\"resourceCount\":0,\"resourceUploadCount\":0,\"resourceRetainCount\":0,\"resourceEvictCount\":0,\"glyphAtlasEntryCount\":0,\"glyphAtlasUploadCount\":0,\"glyphAtlasRetainCount\":0,\"glyphAtlasEvictCount\":0,\"changeCount\":0,\"budgetExceededCount\":0,\"budgetOk\":true,\"fullRepaint\":false,\"requiresRender\":false,\"dirtyBounds\":null}",
         clean_json_writer.buffered(),
     );
 }
@@ -9603,6 +9861,8 @@ test "canvas frame plan carries resource cache retain upload and evict actions" 
     var next_cache_entries: [2]RenderResourceCacheEntry = undefined;
     var next_cache_actions: [3]RenderResourceCacheAction = undefined;
     var next_glyphs: [2]GlyphAtlasEntry = undefined;
+    var next_glyph_cache_entries: [2]GlyphAtlasCacheEntry = undefined;
+    var next_glyph_cache_actions: [2]GlyphAtlasCacheAction = undefined;
     var next_changes: [2]DiffChange = undefined;
     const next_frame = try (DisplayList{ .commands = &next_commands }).framePlan(.{ .commands = &previous_commands }, .{
         .frame_index = 2,
@@ -9614,6 +9874,8 @@ test "canvas frame plan carries resource cache retain upload and evict actions" 
         .resource_cache_entries = &next_cache_entries,
         .resource_cache_actions = &next_cache_actions,
         .glyph_atlas_entries = &next_glyphs,
+        .glyph_atlas_cache_entries = &next_glyph_cache_entries,
+        .glyph_atlas_cache_actions = &next_glyph_cache_actions,
         .changes = &next_changes,
     });
 
@@ -9629,11 +9891,15 @@ test "canvas frame plan carries resource cache retain upload and evict actions" 
     try std.testing.expectEqual(RenderResourceCacheActionKind.evict, next_frame.resource_cache_plan.actions[2].kind);
     try std.testing.expectEqual(RenderResourceKind.image, next_frame.resource_cache_plan.actions[2].key.kind);
     try std.testing.expectEqual(@as(u64, 2), next_frame.resource_cache_plan.entries[0].last_used_frame);
+    try std.testing.expectEqual(@as(usize, 2), next_frame.glyph_atlas_cache_plan.uploadCount());
 
     const diagnostics = next_frame.diagnostics();
     try std.testing.expectEqual(@as(usize, 1), diagnostics.resource_retain_count);
     try std.testing.expectEqual(@as(usize, 1), diagnostics.resource_upload_count);
     try std.testing.expectEqual(@as(usize, 1), diagnostics.resource_evict_count);
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.glyph_atlas_upload_count);
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.glyph_atlas_retain_count);
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.glyph_atlas_evict_count);
     try std.testing.expectEqual(@as(usize, 2), diagnostics.change_count);
 }
 
@@ -10307,6 +10573,8 @@ test "reference renderer draws proxy text runs" {
     var resource_cache_entries: [1]RenderResourceCacheEntry = undefined;
     var resource_cache_actions: [1]RenderResourceCacheAction = undefined;
     var glyphs: [3]GlyphAtlasEntry = undefined;
+    var glyph_cache_entries: [3]GlyphAtlasCacheEntry = undefined;
+    var glyph_cache_actions: [3]GlyphAtlasCacheAction = undefined;
     var changes: [0]DiffChange = .{};
     const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
         .surface_size = geometry.SizeF.init(5, 4),
@@ -10317,6 +10585,8 @@ test "reference renderer draws proxy text runs" {
         .resource_cache_entries = &resource_cache_entries,
         .resource_cache_actions = &resource_cache_actions,
         .glyph_atlas_entries = &glyphs,
+        .glyph_atlas_cache_entries = &glyph_cache_entries,
+        .glyph_atlas_cache_actions = &glyph_cache_actions,
         .changes = &changes,
     });
 

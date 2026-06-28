@@ -157,6 +157,8 @@ const GpuDashboardApp = struct {
     cache_entries: [max_dashboard_commands]canvas.RenderResourceCacheEntry = undefined,
     cache_actions: [max_dashboard_commands * 2]canvas.RenderResourceCacheAction = undefined,
     glyphs: [max_dashboard_glyphs]canvas.GlyphAtlasEntry = undefined,
+    glyph_cache_entries: [max_dashboard_glyphs]canvas.GlyphAtlasCacheEntry = undefined,
+    glyph_cache_actions: [max_dashboard_glyphs * 2]canvas.GlyphAtlasCacheAction = undefined,
     changes: [max_dashboard_commands * 2 + 1]canvas.DiffChange = undefined,
 
     fn app(self: *@This()) zero_native.App {
@@ -338,6 +340,8 @@ const GpuDashboardApp = struct {
             .resource_cache_entries = &self.cache_entries,
             .resource_cache_actions = &self.cache_actions,
             .glyph_atlas_entries = &self.glyphs,
+            .glyph_atlas_cache_entries = &self.glyph_cache_entries,
+            .glyph_atlas_cache_actions = &self.glyph_cache_actions,
             .changes = &self.changes,
         };
     }
@@ -471,6 +475,8 @@ fn dashboardFrameStorage(
     cache_entries: []canvas.RenderResourceCacheEntry,
     cache_actions: []canvas.RenderResourceCacheAction,
     glyphs: []canvas.GlyphAtlasEntry,
+    glyph_cache_entries: []canvas.GlyphAtlasCacheEntry,
+    glyph_cache_actions: []canvas.GlyphAtlasCacheAction,
     changes: []canvas.DiffChange,
 ) canvas.CanvasFrameStorage {
     return .{
@@ -480,6 +486,8 @@ fn dashboardFrameStorage(
         .resource_cache_entries = cache_entries,
         .resource_cache_actions = cache_actions,
         .glyph_atlas_entries = glyphs,
+        .glyph_atlas_cache_entries = glyph_cache_entries,
+        .glyph_atlas_cache_actions = glyph_cache_actions,
         .changes = changes,
     };
 }
@@ -582,11 +590,13 @@ test "gpu dashboard display list renders through the reference surface" {
     var cache_entries: [max_dashboard_commands]canvas.RenderResourceCacheEntry = undefined;
     var cache_actions: [max_dashboard_commands * 2]canvas.RenderResourceCacheAction = undefined;
     var glyphs: [zero_native.runtime.max_canvas_glyphs_per_view]canvas.GlyphAtlasEntry = undefined;
+    var glyph_cache_entries: [zero_native.runtime.max_canvas_glyphs_per_view]canvas.GlyphAtlasCacheEntry = undefined;
+    var glyph_cache_actions: [zero_native.runtime.max_canvas_glyphs_per_view * 2]canvas.GlyphAtlasCacheAction = undefined;
     var changes: [max_dashboard_commands * 2 + 1]canvas.DiffChange = undefined;
     const frame = try dashboardFrame(display_list, null, .{
         .surface_size = geometry.SizeF.init(720, 520),
         .full_repaint = true,
-    }, dashboardFrameStorage(&render_commands, &render_batches, &resources, &cache_entries, &cache_actions, &glyphs, &changes));
+    }, dashboardFrameStorage(&render_commands, &render_batches, &resources, &cache_entries, &cache_actions, &glyphs, &glyph_cache_entries, &glyph_cache_actions, &changes));
 
     try std.testing.expect(frame.requiresRender());
     try std.testing.expect(frame.batch_plan.batchCount() >= 8);
@@ -630,12 +640,14 @@ test "gpu dashboard render overrides animate without rebuilding commands" {
     var cache_entries: [max_dashboard_commands]canvas.RenderResourceCacheEntry = undefined;
     var cache_actions: [max_dashboard_commands * 2]canvas.RenderResourceCacheAction = undefined;
     var glyphs: [zero_native.runtime.max_canvas_glyphs_per_view]canvas.GlyphAtlasEntry = undefined;
+    var glyph_cache_entries: [zero_native.runtime.max_canvas_glyphs_per_view]canvas.GlyphAtlasCacheEntry = undefined;
+    var glyph_cache_actions: [zero_native.runtime.max_canvas_glyphs_per_view * 2]canvas.GlyphAtlasCacheAction = undefined;
     var changes: [max_dashboard_commands * 2 + 1]canvas.DiffChange = undefined;
 
     const frame = try dashboardFrame(display_list, display_list, .{
         .surface_size = geometry.SizeF.init(720, 520),
         .render_overrides = sampled,
-    }, dashboardFrameStorage(&render_commands, &render_batches, &resources, &cache_entries, &cache_actions, &glyphs, &changes));
+    }, dashboardFrameStorage(&render_commands, &render_batches, &resources, &cache_entries, &cache_actions, &glyphs, &glyph_cache_entries, &glyph_cache_actions, &changes));
 
     try std.testing.expect(frame.requiresRender());
     try std.testing.expectEqual(@as(usize, 0), frame.changes.len);

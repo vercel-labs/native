@@ -136,7 +136,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
             },
         );
         if (view.kind == .gpu_surface) {
-            try writer.print(" gpu_size={d}x{d} gpu_scale={d} gpu_frame={d} gpu_timestamp_ns={d} gpu_nonblank={any} gpu_sample=0x{x:0>8} canvas_revision={d} canvas_commands={d} canvas_frame_requires_render={any} canvas_frame_full_repaint={any} canvas_frame_batches={d} canvas_frame_resources={d} canvas_frame_uploads={d} canvas_frame_retains={d} canvas_frame_evicts={d} canvas_frame_glyphs={d} canvas_frame_changes={d} canvas_frame_budget_exceeded={d} canvas_frame_budget_ok={any}", .{
+            try writer.print(" gpu_size={d}x{d} gpu_scale={d} gpu_frame={d} gpu_timestamp_ns={d} gpu_nonblank={any} gpu_sample=0x{x:0>8} canvas_revision={d} canvas_commands={d} canvas_frame_requires_render={any} canvas_frame_full_repaint={any} canvas_frame_batches={d} canvas_frame_resources={d} canvas_frame_uploads={d} canvas_frame_retains={d} canvas_frame_evicts={d} canvas_frame_glyphs={d} canvas_frame_glyph_uploads={d} canvas_frame_glyph_retains={d} canvas_frame_glyph_evicts={d} canvas_frame_changes={d} canvas_frame_budget_exceeded={d} canvas_frame_budget_ok={any}", .{
                 view.gpu_size.width,
                 view.gpu_size.height,
                 view.gpu_scale_factor,
@@ -154,6 +154,9 @@ pub fn writeText(input: Input, writer: anytype) !void {
                 view.canvas_frame_resource_retain_count,
                 view.canvas_frame_resource_evict_count,
                 view.canvas_frame_glyph_atlas_entry_count,
+                view.canvas_frame_glyph_atlas_upload_count,
+                view.canvas_frame_glyph_atlas_retain_count,
+                view.canvas_frame_glyph_atlas_evict_count,
                 view.canvas_frame_change_count,
                 view.canvas_frame_budget_exceeded_count,
                 view.canvas_frame_budget_ok,
