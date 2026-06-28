@@ -2351,7 +2351,7 @@ fn sampleAnimatedAffine(from: ?Affine, to: ?Affine, progress: f32) ?Affine {
     };
 }
 
-fn applyRenderOverrides(commands: []RenderCommand, overrides: []const CanvasRenderOverride) ?geometry.RectF {
+pub fn applyRenderOverrides(commands: []RenderCommand, overrides: []const CanvasRenderOverride) ?geometry.RectF {
     var bounds: ?geometry.RectF = null;
     for (commands) |*command| {
         if (command.id) |id| {
@@ -2378,7 +2378,7 @@ fn applyRenderOverride(command: *RenderCommand, override: CanvasRenderOverride) 
     }
 }
 
-fn renderOverrideDirtyBounds(commands: []const RenderCommand, previous: []const CanvasRenderOverride, next: []const CanvasRenderOverride) ?geometry.RectF {
+pub fn renderOverrideDirtyBounds(commands: []const RenderCommand, previous: []const CanvasRenderOverride, next: []const CanvasRenderOverride) ?geometry.RectF {
     if (previous.len == 0 and next.len == 0) return null;
 
     var bounds: ?geometry.RectF = null;

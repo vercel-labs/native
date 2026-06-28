@@ -619,7 +619,9 @@ pub const Runtime = struct {
         frame_options.previous_resource_cache = self.views[index].canvasFrameResourceCache();
 
         const display_list = self.views[index].canvasDisplayList();
-        const render_plan = try display_list.renderPlan(storage.render_commands);
+        var render_plan = try display_list.renderPlan(storage.render_commands);
+        const render_override_dirty_bounds = canvas.renderOverrideDirtyBounds(render_plan.commands, frame_options.previous_render_overrides, frame_options.render_overrides);
+        render_plan.bounds = canvas.applyRenderOverrides(storage.render_commands[0..render_plan.commandCount()], frame_options.render_overrides);
         const batch_plan = try render_plan.batchPlan(storage.render_batches);
         const resource_plan = try display_list.resourcePlan(storage.resources);
         const resource_cache_plan = try resource_plan.cachePlan(
@@ -641,7 +643,7 @@ pub const Runtime = struct {
         const dirty_bounds = if (full_repaint)
             canvasFullRepaintBounds(frame_options.surface_size, render_plan.bounds)
         else
-            clippedCanvasDirtyBounds(canvasDirtyBoundsFromChanges(changes), frame_options.surface_size);
+            clippedCanvasDirtyBounds(unionRects(canvasDirtyBoundsFromChanges(changes), render_override_dirty_bounds), frame_options.surface_size);
 
         const canvas_frame = canvas.CanvasFrame{
             .frame_index = frame_options.frame_index,
@@ -6167,6 +6169,81 @@ test "runtime next canvas frame tracks presented state and resource cache" {
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 60, 40), moved_frame.dirty_bounds.?);
     try std.testing.expectEqual(@as(usize, 1), moved_frame.resource_cache_plan.retainCount());
     try std.testing.expectEqual(@as(u64, 2), harness.runtime.views[0].presented_canvas_revision);
+}
+
+test "runtime next canvas frame applies render override dirty regions" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-next-frame-overrides", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 40, 20),
+    });
+
+    const commands = [_]canvas.CanvasCommand{.{ .fill_rect = .{
+        .id = 1,
+        .rect = geometry.RectF.init(0, 0, 10, 10),
+        .fill = .{ .color = canvas.Color.rgb8(255, 0, 0) },
+    } }};
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &commands });
+
+    var render_commands: [1]canvas.RenderCommand = undefined;
+    var render_batches: [1]canvas.RenderBatch = undefined;
+    var resources: [1]canvas.RenderResource = undefined;
+    var resource_cache_entries: [1]canvas.RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [2]canvas.RenderResourceCacheAction = undefined;
+    var glyphs: [1]canvas.GlyphAtlasEntry = undefined;
+    var changes: [1]canvas.DiffChange = undefined;
+    const frame_storage = canvas.CanvasFrameStorage{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    };
+
+    const first_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{ .frame_index = 1 }, frame_storage);
+    try std.testing.expect(first_frame.full_repaint);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 40, 20), first_frame.dirty_bounds.?);
+
+    const overrides = [_]canvas.CanvasRenderOverride{.{
+        .id = 1,
+        .opacity = 0.5,
+        .transform = canvas.Affine.translate(10, 0),
+    }};
+    const moved_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{
+        .frame_index = 2,
+        .render_overrides = &overrides,
+    }, frame_storage);
+    try std.testing.expect(!moved_frame.full_repaint);
+    try std.testing.expect(moved_frame.requiresRender());
+    try std.testing.expectEqual(@as(usize, 0), moved_frame.changes.len);
+    try std.testing.expectEqual(@as(f32, 0.5), moved_frame.render_plan.commands[0].opacity);
+    try std.testing.expectEqualDeep(canvas.Affine.translate(10, 0), moved_frame.render_plan.commands[0].transform);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 20, 10), moved_frame.dirty_bounds.?);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 20, 10), harness.runtime.views[0].canvas_frame_dirty_bounds.?);
+
+    const clean_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{
+        .frame_index = 3,
+        .previous_render_overrides = &overrides,
+        .render_overrides = &overrides,
+    }, frame_storage);
+    try std.testing.expect(!clean_frame.requiresRender());
+    try std.testing.expect(clean_frame.dirty_bounds == null);
+    try std.testing.expect(harness.runtime.views[0].canvas_frame_dirty_bounds == null);
 }
 
 test "runtime next canvas frame presents empty canvas once" {
