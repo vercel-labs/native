@@ -9,6 +9,7 @@ pub const Error = error{
     RenderListFull,
     RenderStackOverflow,
     RenderStackUnderflow,
+    WidgetDepthExceeded,
 };
 
 pub const ObjectId = u64;
@@ -329,6 +330,130 @@ pub const RenderPlan = struct {
     }
 };
 
+pub const Density = enum {
+    compact,
+    regular,
+    spacious,
+};
+
+pub const Easing = enum {
+    linear,
+    standard,
+    emphasized,
+    spring,
+};
+
+pub const ColorTokens = struct {
+    background: Color = Color.rgb8(255, 255, 255),
+    surface: Color = Color.rgb8(255, 255, 255),
+    surface_subtle: Color = Color.rgb8(248, 250, 252),
+    surface_pressed: Color = Color.rgb8(241, 245, 249),
+    text: Color = Color.rgb8(15, 23, 42),
+    text_muted: Color = Color.rgb8(100, 116, 139),
+    border: Color = Color.rgba8(15, 23, 42, 28),
+    accent: Color = Color.rgb8(24, 24, 27),
+    accent_text: Color = Color.rgb8(255, 255, 255),
+    focus_ring: Color = Color.rgb8(37, 99, 235),
+    shadow: Color = Color.rgba8(15, 23, 42, 38),
+    disabled: Color = Color.rgb8(226, 232, 240),
+};
+
+pub const TypographyTokens = struct {
+    font_id: FontId = 0,
+    body_size: f32 = 14,
+    label_size: f32 = 12,
+    title_size: f32 = 20,
+    button_size: f32 = 14,
+};
+
+pub const SpacingTokens = struct {
+    xs: f32 = 4,
+    sm: f32 = 8,
+    md: f32 = 12,
+    lg: f32 = 16,
+    xl: f32 = 24,
+};
+
+pub const RadiusTokens = struct {
+    sm: f32 = 4,
+    md: f32 = 6,
+    lg: f32 = 8,
+    xl: f32 = 12,
+};
+
+pub const StrokeTokens = struct {
+    hairline: f32 = 1,
+    regular: f32 = 1,
+    focus: f32 = 2,
+};
+
+pub const ShadowToken = struct {
+    y: f32 = 8,
+    blur: f32 = 24,
+    spread: f32 = -10,
+};
+
+pub const ShadowTokens = struct {
+    none: ShadowToken = .{ .y = 0, .blur = 0, .spread = 0 },
+    sm: ShadowToken = .{ .y = 6, .blur = 16, .spread = -8 },
+    md: ShadowToken = .{ .y = 14, .blur = 36, .spread = -16 },
+};
+
+pub const BlurTokens = struct {
+    none: f32 = 0,
+    sm: f32 = 8,
+    md: f32 = 16,
+};
+
+pub const MotionTokens = struct {
+    fast_ms: u32 = 120,
+    normal_ms: u32 = 180,
+    slow_ms: u32 = 260,
+    easing: Easing = .standard,
+};
+
+pub const DesignTokens = struct {
+    colors: ColorTokens = .{},
+    typography: TypographyTokens = .{},
+    spacing: SpacingTokens = .{},
+    radius: RadiusTokens = .{},
+    stroke: StrokeTokens = .{},
+    shadow: ShadowTokens = .{},
+    blur: BlurTokens = .{},
+    motion: MotionTokens = .{},
+    density: Density = .regular,
+};
+
+pub const WidgetKind = enum {
+    stack,
+    row,
+    column,
+    panel,
+    text,
+    button,
+    progress,
+};
+
+pub const WidgetState = struct {
+    hovered: bool = false,
+    pressed: bool = false,
+    focused: bool = false,
+    disabled: bool = false,
+    selected: bool = false,
+};
+
+pub const Widget = struct {
+    id: ObjectId = 0,
+    kind: WidgetKind,
+    frame: geometry.RectF = .{},
+    text: []const u8 = "",
+    value: f32 = 0,
+    state: WidgetState = .{},
+    children: []const Widget = &.{},
+};
+
+pub const max_widget_depth: usize = 32;
+
 pub const DisplayList = struct {
     commands: []const CanvasCommand = &.{},
 
@@ -458,6 +583,10 @@ pub const Builder = struct {
     }
 };
 
+pub fn emitWidgetTree(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    try emitWidgetDepth(builder, widget, tokens, 0);
+}
+
 pub const RenderPlanner = struct {
     commands: []RenderCommand,
     len: usize = 0,
@@ -555,6 +684,150 @@ pub const RenderPlanner = struct {
         self.bounds_value = unionOptionalBounds(self.bounds_value, clipped_bounds);
     }
 };
+
+fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
+    if (depth >= max_widget_depth) return error.WidgetDepthExceeded;
+
+    switch (widget.kind) {
+        .stack, .row, .column => try emitWidgetChildren(builder, widget.children, tokens, depth),
+        .panel => try emitPanelWidget(builder, widget, tokens, depth),
+        .text => try emitTextWidget(builder, widget, tokens),
+        .button => try emitButtonWidget(builder, widget, tokens),
+        .progress => try emitProgressWidget(builder, widget, tokens),
+    }
+}
+
+fn emitWidgetChildren(builder: *Builder, children: []const Widget, tokens: DesignTokens, depth: usize) Error!void {
+    for (children) |child| {
+        try emitWidgetDepth(builder, child, tokens, depth + 1);
+    }
+}
+
+fn emitPanelWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
+    const radius = Radius.all(tokens.radius.lg);
+    const shadow_token = tokens.shadow.sm;
+    if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
+        try builder.shadow(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = widget.frame,
+            .radius = radius,
+            .offset = .{ .dx = 0, .dy = shadow_token.y },
+            .blur = shadow_token.blur,
+            .spread = shadow_token.spread,
+            .color = tokens.colors.shadow,
+        });
+    }
+
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 2),
+        .rect = widget.frame,
+        .radius = radius,
+        .fill = .{ .color = tokens.colors.surface },
+    });
+    try builder.strokeRect(.{
+        .id = widgetPartId(widget.id, 3),
+        .rect = widget.frame,
+        .radius = radius,
+        .stroke = .{
+            .fill = .{ .color = tokens.colors.border },
+            .width = tokens.stroke.hairline,
+        },
+    });
+
+    try emitWidgetChildren(builder, widget.children, tokens, depth);
+}
+
+fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    try builder.drawText(.{
+        .id = widgetPartId(widget.id, 1),
+        .font_id = tokens.typography.font_id,
+        .size = tokens.typography.body_size,
+        .origin = textOrigin(widget.frame, tokens.typography.body_size, 0),
+        .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
+        .text = widget.text,
+    });
+}
+
+fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const radius = Radius.all(tokens.radius.md);
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 1),
+        .rect = widget.frame,
+        .radius = radius,
+        .fill = .{ .color = buttonFillColor(tokens, widget.state) },
+    });
+    try builder.strokeRect(.{
+        .id = widgetPartId(widget.id, 2),
+        .rect = widget.frame,
+        .radius = radius,
+        .stroke = .{
+            .fill = .{ .color = tokens.colors.border },
+            .width = tokens.stroke.regular,
+        },
+    });
+    if (widget.state.focused) {
+        try builder.strokeRect(.{
+            .id = widgetPartId(widget.id, 3),
+            .rect = widget.frame,
+            .radius = radius,
+            .stroke = .{
+                .fill = .{ .color = tokens.colors.focus_ring },
+                .width = tokens.stroke.focus,
+            },
+        });
+    }
+    try builder.drawText(.{
+        .id = widgetPartId(widget.id, 4),
+        .font_id = tokens.typography.font_id,
+        .size = tokens.typography.button_size,
+        .origin = textOrigin(widget.frame, tokens.typography.button_size, tokens.spacing.md),
+        .color = buttonTextColor(tokens, widget.state),
+        .text = widget.text,
+    });
+}
+
+fn emitProgressWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const radius = Radius.all(@min(tokens.radius.md, widget.frame.height * 0.5));
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 1),
+        .rect = widget.frame,
+        .radius = radius,
+        .fill = .{ .color = tokens.colors.surface_pressed },
+    });
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 2),
+        .rect = geometry.RectF.init(widget.frame.x, widget.frame.y, widget.frame.width * std.math.clamp(widget.value, 0, 1), widget.frame.height),
+        .radius = radius,
+        .fill = .{ .color = tokens.colors.accent },
+    });
+}
+
+fn widgetPartId(id: ObjectId, slot: ObjectId) ObjectId {
+    if (id == 0) return 0;
+    const base = id *% 16;
+    const part = base +% slot;
+    return if (part == 0) id else part;
+}
+
+fn textOrigin(frame: geometry.RectF, size: f32, inset: f32) geometry.PointF {
+    return geometry.PointF.init(
+        frame.x + inset,
+        frame.y + @max(size, (frame.height + size * 0.5) * 0.5),
+    );
+}
+
+fn buttonFillColor(tokens: DesignTokens, state: WidgetState) Color {
+    if (state.disabled) return tokens.colors.disabled;
+    if (state.pressed or state.selected) return tokens.colors.accent;
+    if (state.hovered) return tokens.colors.surface_subtle;
+    return tokens.colors.surface;
+}
+
+fn buttonTextColor(tokens: DesignTokens, state: WidgetState) Color {
+    if (state.disabled) return tokens.colors.text_muted;
+    if (state.pressed or state.selected) return tokens.colors.accent_text;
+    return tokens.colors.text;
+}
 
 fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChange) Error![]const DiffChange {
     try validateUniqueObjectIds(previous);
@@ -1143,6 +1416,137 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
     try writer.writeByte(']');
 }
 
+test "widget tree emits panel button text and progress commands" {
+    const tokens: DesignTokens = .{};
+    const children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .button,
+            .frame = geometry.RectF.init(16, 16, 120, 36),
+            .text = "Launch",
+        },
+        .{
+            .id = 3,
+            .kind = .text,
+            .frame = geometry.RectF.init(16, 64, 200, 20),
+            .text = "Frames stay retained",
+        },
+        .{
+            .id = 4,
+            .kind = .progress,
+            .frame = geometry.RectF.init(16, 96, 160, 8),
+            .value = 0.25,
+        },
+    };
+    const root = Widget{
+        .id = 1,
+        .kind = .panel,
+        .frame = geometry.RectF.init(0, 0, 240, 128),
+        .children = &children,
+    };
+
+    var commands: [12]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, root, tokens);
+
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 9), display_list.commandCount());
+    try std.testing.expectEqual(@as(?ObjectId, widgetPartId(1, 1)), display_list.commands[0].objectId());
+    try std.testing.expect(display_list.commands[0] == .shadow);
+    try std.testing.expectEqual(@as(?ObjectId, widgetPartId(1, 2)), display_list.commands[1].objectId());
+    try std.testing.expect(display_list.commands[1] == .fill_rounded_rect);
+    try std.testing.expectEqual(@as(?ObjectId, widgetPartId(2, 1)), display_list.commands[3].objectId());
+    try std.testing.expect(display_list.commands[3] == .fill_rounded_rect);
+
+    switch (display_list.commands[5]) {
+        .draw_text => |text| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(2, 4)), text.id);
+            try std.testing.expectEqualStrings("Launch", text.text);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[6]) {
+        .draw_text => |text| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(3, 1)), text.id);
+            try std.testing.expectEqualStrings("Frames stay retained", text.text);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[8]) {
+        .fill_rounded_rect => |fill| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(4, 2)), fill.id);
+            try expectRect(geometry.RectF.init(16, 96, 40, 8), fill.rect);
+            try expectFillColor(tokens.colors.accent, fill.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "widget emitter applies button state tokens" {
+    const tokens = DesignTokens{
+        .colors = .{
+            .accent = Color.rgb8(10, 20, 30),
+            .accent_text = Color.rgb8(240, 241, 242),
+            .focus_ring = Color.rgb8(1, 2, 3),
+        },
+        .stroke = .{ .focus = 3 },
+    };
+    const button = Widget{
+        .id = 7,
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 0, 140, 40),
+        .text = "Pressed",
+        .state = .{ .pressed = true, .focused = true },
+    };
+
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, button, tokens);
+
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 4), display_list.commandCount());
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.accent, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .stroke_rect => |stroke| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(7, 3)), stroke.id);
+            try std.testing.expectEqual(@as(f32, 3), stroke.stroke.width);
+            try expectFillColor(tokens.colors.focus_ring, stroke.stroke.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[3]) {
+        .draw_text => |text| try std.testing.expectEqualDeep(tokens.colors.accent_text, text.color),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "widget emitter reports depth and display list overflow" {
+    var tiny_commands: [2]CanvasCommand = undefined;
+    var tiny_builder = Builder.init(&tiny_commands);
+    try std.testing.expectError(error.DisplayListFull, emitWidgetTree(&tiny_builder, .{
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 0, 120, 36),
+        .text = "Overflow",
+    }, .{}));
+
+    var widgets: [max_widget_depth + 1]Widget = undefined;
+    var index = widgets.len;
+    while (index > 0) {
+        index -= 1;
+        widgets[index] = .{
+            .kind = .stack,
+            .children = if (index + 1 < widgets.len) widgets[index + 1 .. index + 2] else &.{},
+        };
+    }
+
+    var commands: [1]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try std.testing.expectError(error.WidgetDepthExceeded, emitWidgetTree(&builder, widgets[0], .{}));
+}
+
 test "builder records replayable commands" {
     var commands: [8]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
@@ -1371,4 +1775,11 @@ test "display list serializes deterministically" {
 fn expectRect(expected: geometry.RectF, actual: ?geometry.RectF) !void {
     try std.testing.expect(actual != null);
     try std.testing.expectEqualDeep(expected, actual.?);
+}
+
+fn expectFillColor(expected: Color, actual: Fill) !void {
+    switch (actual) {
+        .color => |color| try std.testing.expectEqualDeep(expected, color),
+        else => return error.TestUnexpectedResult,
+    }
 }
