@@ -654,6 +654,7 @@ pub const WidgetKind = enum {
     text,
     button,
     text_field,
+    tooltip,
     list_item,
     segmented_control,
     checkbox,
@@ -684,6 +685,7 @@ pub const WidgetRole = enum {
     text,
     button,
     textbox,
+    tooltip,
     list,
     listitem,
     tab,
@@ -1076,6 +1078,7 @@ pub fn emitWidgetLayout(builder: *Builder, layout: WidgetLayoutTree, tokens: Des
             .text => try emitTextWidget(builder, widget, tokens),
             .button => try emitButtonWidget(builder, widget, tokens),
             .text_field => try emitTextFieldWidget(builder, widget, tokens),
+            .tooltip => try emitTooltipWidget(builder, widget, tokens),
             .list_item => try emitListItemWidget(builder, widget, tokens),
             .segmented_control => try emitSegmentedControlWidget(builder, widget, tokens),
             .checkbox => try emitCheckboxWidget(builder, widget, tokens),
@@ -1652,6 +1655,7 @@ fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, dept
         .text => try emitTextWidget(builder, widget, tokens),
         .button => try emitButtonWidget(builder, widget, tokens),
         .text_field => try emitTextFieldWidget(builder, widget, tokens),
+        .tooltip => try emitTooltipWidget(builder, widget, tokens),
         .list_item => try emitListItemWidget(builder, widget, tokens),
         .segmented_control => try emitSegmentedControlWidget(builder, widget, tokens),
         .checkbox => try emitCheckboxWidget(builder, widget, tokens),
@@ -1783,6 +1787,38 @@ fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
             .size = tokens.typography.body_size,
             .origin = textOrigin(widget.frame, tokens.typography.body_size, tokens.spacing.md),
             .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
+            .text = widget.text,
+        });
+    }
+}
+
+fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const radius = Radius.all(tokens.radius.md);
+    const shadow_token = tokens.shadow.sm;
+    if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
+        try builder.shadow(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = widget.frame,
+            .radius = radius,
+            .offset = .{ .dx = 0, .dy = shadow_token.y },
+            .blur = shadow_token.blur,
+            .spread = shadow_token.spread,
+            .color = tokens.colors.shadow,
+        });
+    }
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 2),
+        .rect = widget.frame,
+        .radius = radius,
+        .fill = .{ .color = tokens.colors.accent },
+    });
+    if (widget.text.len > 0) {
+        try builder.drawText(.{
+            .id = widgetPartId(widget.id, 3),
+            .font_id = tokens.typography.font_id,
+            .size = tokens.typography.label_size,
+            .origin = textOrigin(widget.frame, tokens.typography.label_size, tokens.spacing.sm),
+            .color = tokens.colors.accent_text,
             .text = widget.text,
         });
     }
@@ -2088,7 +2124,7 @@ fn layoutWidgetDepth(
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len);
             }
         },
-        .text, .button, .text_field, .list_item, .segmented_control, .checkbox, .toggle, .slider, .progress => {},
+        .text, .button, .text_field, .tooltip, .list_item, .segmented_control, .checkbox, .toggle, .slider, .progress => {},
     }
 
     return index;
@@ -2427,6 +2463,7 @@ fn semanticRole(widget: Widget) WidgetRole {
         .text => .text,
         .button => .button,
         .text_field => .textbox,
+        .tooltip => .tooltip,
         .list_item => .listitem,
         .segmented_control => .tab,
         .checkbox => .checkbox,
@@ -2466,7 +2503,7 @@ fn isFocusable(widget: Widget) bool {
 fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     return switch (widget.kind) {
-        .row, .column, .grid, .list, .stack => false,
+        .row, .column, .grid, .list, .stack, .tooltip => false,
         .scroll_view, .panel, .text, .button, .text_field, .list_item, .segmented_control, .checkbox, .toggle, .slider, .progress => true,
     };
 }
@@ -3757,6 +3794,56 @@ test "widget text fields expose textbox semantics and render focused chrome" {
         .draw_text => |text| try std.testing.expectEqualStrings("search terms", text.text),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "widget tooltip emits overlay chrome and tooltip semantics" {
+    const tokens = DesignTokens{};
+    const tooltip = Widget{
+        .id = 1,
+        .kind = .tooltip,
+        .frame = geometry.RectF.init(10, 12, 140, 28),
+        .text = "Saved",
+    };
+
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(tooltip, tooltip.frame, &nodes);
+
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, tokens);
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
+    switch (display_list.commands[0]) {
+        .shadow => |shadow| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(1, 1)), shadow.id);
+            try expectRect(geometry.RectF.init(10, 12, 140, 28), shadow.rect);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[1]) {
+        .fill_rounded_rect => |fill| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(1, 2)), fill.id);
+            try expectFillColor(tokens.colors.accent, fill.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .draw_text => |text| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(1, 3)), text.id);
+            try std.testing.expectEqualStrings("Saved", text.text);
+            try std.testing.expectEqualDeep(tokens.colors.accent_text, text.color);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expect(layout.hitTest(geometry.PointF.init(20, 20)) == null);
+
+    var semantics_buffer: [1]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+    try std.testing.expectEqual(@as(usize, 1), semantics.len);
+    try std.testing.expectEqual(WidgetRole.tooltip, semantics[0].role);
+    try std.testing.expectEqualStrings("Saved", semantics[0].label);
+    try std.testing.expect(!semantics[0].focusable);
 }
 
 test "widget list item and segmented controls expose selectable semantics" {

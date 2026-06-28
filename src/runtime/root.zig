@@ -3696,6 +3696,7 @@ fn widgetRoleName(role: canvas.WidgetRole) []const u8 {
         .text => "text",
         .button => "button",
         .textbox => "textbox",
+        .tooltip => "tooltip",
         .list => "list",
         .listitem => "listitem",
         .tab => "tab",
@@ -5352,6 +5353,48 @@ test "runtime automation snapshot exposes canvas list roles" {
     try automation.snapshot.writeA11yText(snapshot, &a11y_writer);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#1 role=list name=\"Mailboxes\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#2 role=listitem name=\"Inbox\"") != null);
+}
+
+test "runtime automation snapshot exposes canvas tooltip roles" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-tooltip-semantics", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(40, 50, 240, 160),
+    });
+
+    const tooltip = canvas.Widget{
+        .id = 1,
+        .kind = .tooltip,
+        .frame = geometry.RectF.init(12, 16, 120, 28),
+        .text = "Saved",
+    };
+    var nodes: [1]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(tooltip, tooltip.frame, &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    const snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expectEqual(@as(usize, 1), snapshot.widgets.len);
+    try std.testing.expectEqualStrings("tooltip", snapshot.widgets[0].role);
+    try std.testing.expectEqualStrings("Saved", snapshot.widgets[0].name);
+    try std.testing.expectEqualDeep(geometry.RectF.init(52, 66, 120, 28), snapshot.widgets[0].bounds);
+
+    var a11y_buffer: [512]u8 = undefined;
+    var a11y_writer = std.Io.Writer.fixed(&a11y_buffer);
+    try automation.snapshot.writeA11yText(snapshot, &a11y_writer);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#1 role=tooltip name=\"Saved\"") != null);
 }
 
 test "runtime invalidates canvas widget layout and semantics changes" {
