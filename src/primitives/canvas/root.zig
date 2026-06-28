@@ -4168,7 +4168,7 @@ fn widgetGridSemantics(layout: WidgetLayoutTree, node_index: usize) WidgetGridSe
     const node = layout.nodes[node_index];
     return switch (node.widget.kind) {
         .data_grid => .{
-            .row_count = directChildCountByKind(layout, node_index, .data_row),
+            .row_count = dataGridRowCount(layout, node_index),
             .column_count = maxDataGridColumnCount(layout, node_index),
         },
         .data_row => widgetDataRowGridSemantics(layout, node_index),
@@ -4180,10 +4180,12 @@ fn widgetGridSemantics(layout: WidgetLayoutTree, node_index: usize) WidgetGridSe
 fn widgetDataRowGridSemantics(layout: WidgetLayoutTree, row_index: usize) WidgetGridSemantics {
     const grid_index = layout.nodes[row_index].parent_index orelse return .{};
     if (grid_index >= layout.nodes.len or layout.nodes[grid_index].widget.kind != .data_grid) return .{};
+    const grid = layout.nodes[grid_index].widget;
+    const row = layout.nodes[row_index].widget;
     return .{
-        .row_index = directChildOrdinalByKind(layout, grid_index, row_index, .data_row),
-        .row_count = directChildCountByKind(layout, grid_index, .data_row),
-        .column_count = directChildCountByKind(layout, row_index, .data_cell),
+        .row_index = widgetChildOrdinalByKind(grid, row.id, .data_row) orelse directChildOrdinalByKind(layout, grid_index, row_index, .data_row),
+        .row_count = dataGridRowCount(layout, grid_index),
+        .column_count = dataRowColumnCount(layout, row_index),
     };
 }
 
@@ -4192,12 +4194,46 @@ fn widgetDataCellGridSemantics(layout: WidgetLayoutTree, cell_index: usize) Widg
     if (row_index >= layout.nodes.len or layout.nodes[row_index].widget.kind != .data_row) return .{};
     const grid_index = layout.nodes[row_index].parent_index orelse return .{};
     if (grid_index >= layout.nodes.len or layout.nodes[grid_index].widget.kind != .data_grid) return .{};
+    const grid = layout.nodes[grid_index].widget;
+    const row = layout.nodes[row_index].widget;
+    const cell = layout.nodes[cell_index].widget;
     return .{
-        .row_index = directChildOrdinalByKind(layout, grid_index, row_index, .data_row),
-        .column_index = directChildOrdinalByKind(layout, row_index, cell_index, .data_cell),
-        .row_count = directChildCountByKind(layout, grid_index, .data_row),
-        .column_count = directChildCountByKind(layout, row_index, .data_cell),
+        .row_index = widgetChildOrdinalByKind(grid, row.id, .data_row) orelse directChildOrdinalByKind(layout, grid_index, row_index, .data_row),
+        .column_index = widgetChildOrdinalByKind(row, cell.id, .data_cell) orelse directChildOrdinalByKind(layout, row_index, cell_index, .data_cell),
+        .row_count = dataGridRowCount(layout, grid_index),
+        .column_count = dataRowColumnCount(layout, row_index),
     };
+}
+
+fn widgetChildCountByKind(widget: Widget, kind: WidgetKind) usize {
+    var count: usize = 0;
+    for (widget.children) |child| {
+        if (child.kind == kind) count += 1;
+    }
+    return count;
+}
+
+fn widgetChildOrdinalByKind(widget: Widget, child_id: ObjectId, kind: WidgetKind) ?usize {
+    if (child_id == 0) return null;
+    var ordinal: usize = 0;
+    for (widget.children) |child| {
+        if (child.kind != kind) continue;
+        if (child.id == child_id) return ordinal;
+        ordinal += 1;
+    }
+    return null;
+}
+
+fn dataGridRowCount(layout: WidgetLayoutTree, grid_index: usize) usize {
+    const source_count = widgetChildCountByKind(layout.nodes[grid_index].widget, .data_row);
+    if (source_count > 0) return source_count;
+    return directChildCountByKind(layout, grid_index, .data_row);
+}
+
+fn dataRowColumnCount(layout: WidgetLayoutTree, row_index: usize) usize {
+    const source_count = widgetChildCountByKind(layout.nodes[row_index].widget, .data_cell);
+    if (source_count > 0) return source_count;
+    return directChildCountByKind(layout, row_index, .data_cell);
 }
 
 fn directChildCountByKind(layout: WidgetLayoutTree, parent_index: usize, kind: WidgetKind) usize {
@@ -4220,9 +4256,16 @@ fn directChildOrdinalByKind(layout: WidgetLayoutTree, parent_index: usize, child
 
 fn maxDataGridColumnCount(layout: WidgetLayoutTree, grid_index: usize) usize {
     var max_columns: usize = 0;
+    if (layout.nodes[grid_index].widget.children.len > 0) {
+        for (layout.nodes[grid_index].widget.children) |row| {
+            if (row.kind != .data_row) continue;
+            max_columns = @max(max_columns, widgetChildCountByKind(row, .data_cell));
+        }
+        return max_columns;
+    }
     for (layout.nodes, 0..) |node, index| {
         if (node.parent_index != grid_index or node.widget.kind != .data_row) continue;
-        max_columns = @max(max_columns, directChildCountByKind(layout, index, .data_cell));
+        max_columns = @max(max_columns, dataRowColumnCount(layout, index));
     }
     return max_columns;
 }
@@ -6348,6 +6391,23 @@ test "widget virtualized data grid lays out visible rows" {
     try expectLayoutFrame(layout, 4, geometry.RectF.init(0, 25, 160, 20));
     try std.testing.expect(layout.findById(2) == null);
     try std.testing.expect(layout.findById(5) == null);
+
+    var semantics_buffer: [4]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+    try std.testing.expectEqual(@as(usize, 3), semantics.len);
+    try std.testing.expectEqual(WidgetRole.grid, semantics[0].role);
+    try std.testing.expectEqual(@as(?usize, 4), semantics[0].grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 0), semantics[0].grid_column_count);
+
+    try std.testing.expectEqual(WidgetRole.row, semantics[1].role);
+    try std.testing.expectEqual(@as(ObjectId, 3), semantics[1].id);
+    try std.testing.expectEqual(@as(?usize, 1), semantics[1].grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 4), semantics[1].grid_row_count);
+
+    try std.testing.expectEqual(WidgetRole.row, semantics[2].role);
+    try std.testing.expectEqual(@as(ObjectId, 4), semantics[2].id);
+    try std.testing.expectEqual(@as(?usize, 2), semantics[2].grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 4), semantics[2].grid_row_count);
 }
 
 test "widget scroll view offsets children and clips display list" {
