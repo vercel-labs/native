@@ -11,6 +11,7 @@ pub const Error = error{
     RenderStackOverflow,
     RenderStackUnderflow,
     WidgetDepthExceeded,
+    WidgetEventRouteListFull,
     WidgetInvalidationListFull,
     WidgetLayoutListFull,
     WidgetSemanticsListFull,
@@ -514,6 +515,53 @@ pub const WidgetHit = struct {
     state: WidgetState,
 };
 
+pub const WidgetPointerPhase = enum {
+    hover,
+    down,
+    move,
+    up,
+    cancel,
+    wheel,
+};
+
+pub const WidgetPointerEvent = struct {
+    phase: WidgetPointerPhase,
+    point: geometry.PointF,
+    delta: geometry.OffsetF = .{},
+};
+
+pub const WidgetEventPhase = enum {
+    capture,
+    target,
+    bubble,
+};
+
+pub const WidgetEventRouteEntry = struct {
+    phase: WidgetEventPhase,
+    node_index: usize,
+    id: ObjectId,
+    kind: WidgetKind,
+    bounds: geometry.RectF,
+};
+
+pub const WidgetEventRoute = struct {
+    target: ?WidgetHit = null,
+    entries: []const WidgetEventRouteEntry = &.{},
+};
+
+pub const WidgetFocusDirection = enum {
+    forward,
+    backward,
+};
+
+pub const WidgetFocusTarget = struct {
+    id: ObjectId,
+    kind: WidgetKind,
+    bounds: geometry.RectF,
+    index: usize,
+    state: WidgetState,
+};
+
 pub const WidgetSemanticsNode = struct {
     id: ObjectId,
     role: WidgetRole,
@@ -559,6 +607,14 @@ pub const WidgetLayoutTree = struct {
 
     pub fn hitTest(self: WidgetLayoutTree, point: geometry.PointF) ?WidgetHit {
         return hitTestWidgetLayout(self, point);
+    }
+
+    pub fn routePointerEvent(self: WidgetLayoutTree, event: WidgetPointerEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
+        return routeWidgetPointerEvent(self, event, output);
+    }
+
+    pub fn focusTarget(self: WidgetLayoutTree, current_id: ?ObjectId, direction: WidgetFocusDirection) ?WidgetFocusTarget {
+        return focusWidgetTarget(self, current_id, direction);
     }
 
     pub fn collectSemantics(self: WidgetLayoutTree, output: []WidgetSemanticsNode) Error![]const WidgetSemanticsNode {
@@ -1123,6 +1179,109 @@ fn hitTestWidgetLayout(layout: WidgetLayoutTree, point: geometry.PointF) ?Widget
     return null;
 }
 
+fn routeWidgetPointerEvent(layout: WidgetLayoutTree, event: WidgetPointerEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
+    const target = hitTestWidgetLayout(layout, event.point) orelse return .{ .entries = output[0..0] };
+
+    var path: [max_widget_depth]usize = undefined;
+    var path_len: usize = 0;
+    var current: ?usize = target.index;
+    while (current) |node_index| {
+        if (path_len >= path.len) return error.WidgetDepthExceeded;
+        path[path_len] = node_index;
+        path_len += 1;
+        current = layout.nodes[node_index].parent_index;
+    }
+
+    var len: usize = 0;
+    var capture_index = path_len;
+    while (capture_index > 1) {
+        capture_index -= 1;
+        try appendWidgetEventRouteEntry(output, &len, .capture, layout.nodes[path[capture_index]], path[capture_index]);
+    }
+    try appendWidgetEventRouteEntry(output, &len, .target, layout.nodes[target.index], target.index);
+
+    var bubble_index: usize = 1;
+    while (bubble_index < path_len) : (bubble_index += 1) {
+        try appendWidgetEventRouteEntry(output, &len, .bubble, layout.nodes[path[bubble_index]], path[bubble_index]);
+    }
+
+    return .{ .target = target, .entries = output[0..len] };
+}
+
+fn appendWidgetEventRouteEntry(
+    output: []WidgetEventRouteEntry,
+    len: *usize,
+    phase: WidgetEventPhase,
+    node: WidgetLayoutNode,
+    node_index: usize,
+) Error!void {
+    if (len.* >= output.len) return error.WidgetEventRouteListFull;
+    output[len.*] = .{
+        .phase = phase,
+        .node_index = node_index,
+        .id = node.widget.id,
+        .kind = node.widget.kind,
+        .bounds = node.frame,
+    };
+    len.* += 1;
+}
+
+fn focusWidgetTarget(layout: WidgetLayoutTree, current_id: ?ObjectId, direction: WidgetFocusDirection) ?WidgetFocusTarget {
+    if (layout.nodes.len == 0) return null;
+    const current_index = if (current_id) |id| widgetIndexById(layout, id) else null;
+    return switch (direction) {
+        .forward => focusForward(layout, current_index),
+        .backward => focusBackward(layout, current_index),
+    };
+}
+
+fn focusForward(layout: WidgetLayoutTree, current_index: ?usize) ?WidgetFocusTarget {
+    var index: usize = if (current_index) |value| value + 1 else 0;
+    while (index < layout.nodes.len) : (index += 1) {
+        if (focusTargetFromNode(layout.nodes[index], index)) |target| return target;
+    }
+    index = 0;
+    const stop = current_index orelse layout.nodes.len;
+    while (index < stop and index < layout.nodes.len) : (index += 1) {
+        if (focusTargetFromNode(layout.nodes[index], index)) |target| return target;
+    }
+    return null;
+}
+
+fn focusBackward(layout: WidgetLayoutTree, current_index: ?usize) ?WidgetFocusTarget {
+    var index = current_index orelse layout.nodes.len;
+    while (index > 0) {
+        index -= 1;
+        if (focusTargetFromNode(layout.nodes[index], index)) |target| return target;
+    }
+    index = layout.nodes.len;
+    const stop = if (current_index) |value| value + 1 else 0;
+    while (index > stop) {
+        index -= 1;
+        if (focusTargetFromNode(layout.nodes[index], index)) |target| return target;
+    }
+    return null;
+}
+
+fn focusTargetFromNode(node: WidgetLayoutNode, index: usize) ?WidgetFocusTarget {
+    if (!isFocusable(node.widget)) return null;
+    return .{
+        .id = node.widget.id,
+        .kind = node.widget.kind,
+        .bounds = node.frame,
+        .index = index,
+        .state = node.widget.state,
+    };
+}
+
+fn widgetIndexById(layout: WidgetLayoutTree, id: ObjectId) ?usize {
+    if (id == 0) return null;
+    for (layout.nodes, 0..) |node, index| {
+        if (node.widget.id == id) return index;
+    }
+    return null;
+}
+
 fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNode) Error![]const WidgetSemanticsNode {
     var len: usize = 0;
     var semantic_stack: [max_widget_depth]?usize = [_]?usize{null} ** max_widget_depth;
@@ -1193,6 +1352,11 @@ fn defaultFocusable(widget: Widget) bool {
         .button => !widget.state.disabled,
         else => false,
     };
+}
+
+fn isFocusable(widget: Widget) bool {
+    if (widget.id == 0 or widget.state.disabled or widget.semantics.hidden) return false;
+    return widget.semantics.focusable or defaultFocusable(widget);
 }
 
 fn isHitTarget(widget: Widget) bool {
@@ -2034,6 +2198,106 @@ test "widget layout hit testing prefers deepest topmost enabled target" {
     try std.testing.expect(layout.hitTest(geometry.PointF.init(200, 10)) == null);
 }
 
+test "widget pointer route includes capture target and bubble phases" {
+    const row_children = [_]Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 0, 80, 32),
+        .text = "Run",
+    }};
+    const root_children = [_]Widget{.{
+        .id = 5,
+        .kind = .row,
+        .frame = geometry.RectF.init(8, 8, 120, 40),
+        .children = &row_children,
+    }};
+    const root = Widget{
+        .id = 1,
+        .kind = .panel,
+        .children = &root_children,
+    };
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 160, 80), &nodes);
+    var route_entries: [5]WidgetEventRouteEntry = undefined;
+    const route = try layout.routePointerEvent(.{
+        .phase = .down,
+        .point = geometry.PointF.init(20, 20),
+    }, &route_entries);
+
+    try std.testing.expect(route.target != null);
+    try std.testing.expectEqual(@as(ObjectId, 2), route.target.?.id);
+    try std.testing.expectEqual(@as(usize, 5), route.entries.len);
+    try expectRouteEntry(route.entries[0], .capture, 1);
+    try expectRouteEntry(route.entries[1], .capture, 5);
+    try expectRouteEntry(route.entries[2], .target, 2);
+    try expectRouteEntry(route.entries[3], .bubble, 5);
+    try expectRouteEntry(route.entries[4], .bubble, 1);
+}
+
+test "widget pointer route handles no hit and bounded output" {
+    const root = Widget{
+        .id = 1,
+        .kind = .panel,
+        .children = &.{.{
+            .id = 2,
+            .kind = .button,
+            .frame = geometry.RectF.init(10, 10, 80, 32),
+            .text = "Run",
+        }},
+    };
+
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 120, 80), &nodes);
+    var empty_entries: [0]WidgetEventRouteEntry = .{};
+    const no_hit = try layout.routePointerEvent(.{
+        .phase = .down,
+        .point = geometry.PointF.init(200, 20),
+    }, &empty_entries);
+    try std.testing.expect(no_hit.target == null);
+    try std.testing.expectEqual(@as(usize, 0), no_hit.entries.len);
+
+    var small_entries: [1]WidgetEventRouteEntry = undefined;
+    try std.testing.expectError(error.WidgetEventRouteListFull, layout.routePointerEvent(.{
+        .phase = .down,
+        .point = geometry.PointF.init(20, 20),
+    }, &small_entries));
+}
+
+test "widget focus traversal skips disabled nodes and wraps" {
+    const children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .text,
+            .frame = geometry.RectF.init(0, 0, 100, 20),
+            .text = "Search",
+            .semantics = .{ .focusable = true },
+        },
+        .{
+            .id = 3,
+            .kind = .button,
+            .frame = geometry.RectF.init(0, 28, 100, 32),
+            .text = "Disabled",
+            .state = .{ .disabled = true },
+        },
+        .{
+            .id = 4,
+            .kind = .button,
+            .frame = geometry.RectF.init(0, 68, 100, 32),
+            .text = "Apply",
+        },
+    };
+    const root = Widget{ .kind = .stack, .children = &children };
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 140, 120), &nodes);
+    try std.testing.expectEqual(@as(ObjectId, 2), layout.focusTarget(null, .forward).?.id);
+    try std.testing.expectEqual(@as(ObjectId, 4), layout.focusTarget(2, .forward).?.id);
+    try std.testing.expectEqual(@as(ObjectId, 2), layout.focusTarget(4, .forward).?.id);
+    try std.testing.expectEqual(@as(ObjectId, 4), layout.focusTarget(2, .backward).?.id);
+    try std.testing.expectEqual(@as(ObjectId, 4), layout.focusTarget(null, .backward).?.id);
+}
+
 test "widget layout collects accessibility semantics" {
     const children = [_]Widget{
         .{
@@ -2590,6 +2854,11 @@ fn expectRect(expected: geometry.RectF, actual: ?geometry.RectF) !void {
 fn expectLayoutFrame(layout: WidgetLayoutTree, id: ObjectId, expected: geometry.RectF) !void {
     const node = layout.findById(id) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualDeep(expected, node.frame);
+}
+
+fn expectRouteEntry(entry: WidgetEventRouteEntry, phase: WidgetEventPhase, id: ObjectId) !void {
+    try std.testing.expectEqual(phase, entry.phase);
+    try std.testing.expectEqual(id, entry.id);
 }
 
 fn expectFillColor(expected: Color, actual: Fill) !void {
