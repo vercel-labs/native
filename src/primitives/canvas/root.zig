@@ -6,6 +6,9 @@ pub const Error = error{
     DisplayListFull,
     DiffListFull,
     DuplicateObjectId,
+    RenderListFull,
+    RenderStackOverflow,
+    RenderStackUnderflow,
 };
 
 pub const ObjectId = u64;
@@ -54,6 +57,34 @@ pub const Affine = struct {
 
     pub fn scale(x: f32, y: f32) Affine {
         return .{ .a = x, .d = y };
+    }
+
+    pub fn multiply(self: Affine, other: Affine) Affine {
+        return .{
+            .a = self.a * other.a + self.c * other.b,
+            .b = self.b * other.a + self.d * other.b,
+            .c = self.a * other.c + self.c * other.d,
+            .d = self.b * other.c + self.d * other.d,
+            .tx = self.a * other.tx + self.c * other.ty + self.tx,
+            .ty = self.b * other.tx + self.d * other.ty + self.ty,
+        };
+    }
+
+    pub fn transformPoint(self: Affine, point: geometry.PointF) geometry.PointF {
+        return .{
+            .x = self.a * point.x + self.c * point.y + self.tx,
+            .y = self.b * point.x + self.d * point.y + self.ty,
+        };
+    }
+
+    pub fn transformRect(self: Affine, rect: geometry.RectF) geometry.RectF {
+        const normalized = rect.normalized();
+        return boundsFromPoints(&.{
+            self.transformPoint(normalized.topLeft()),
+            self.transformPoint(normalized.topRight()),
+            self.transformPoint(normalized.bottomLeft()),
+            self.transformPoint(normalized.bottomRight()),
+        }) orelse geometry.RectF.zero();
     }
 };
 
@@ -273,6 +304,31 @@ pub const DiffChange = struct {
     dirty_bounds: ?geometry.RectF = null,
 };
 
+pub const max_render_state_stack: usize = 32;
+
+pub const RenderState = struct {
+    opacity: f32 = 1,
+    clip: ?geometry.RectF = null,
+    transform: Affine = .{},
+};
+
+pub const RenderCommand = struct {
+    command: CanvasCommand,
+    id: ?ObjectId = null,
+    opacity: f32 = 1,
+    clip: ?geometry.RectF = null,
+    bounds: geometry.RectF,
+};
+
+pub const RenderPlan = struct {
+    commands: []const RenderCommand = &.{},
+    bounds: ?geometry.RectF = null,
+
+    pub fn commandCount(self: RenderPlan) usize {
+        return self.commands.len;
+    }
+};
+
 pub const DisplayList = struct {
     commands: []const CanvasCommand = &.{},
 
@@ -311,6 +367,11 @@ pub const DisplayList = struct {
 
     pub fn diff(previous: DisplayList, next: DisplayList, output: []DiffChange) Error![]const DiffChange {
         return diffDisplayLists(previous, next, output);
+    }
+
+    pub fn renderPlan(self: DisplayList, output: []RenderCommand) Error!RenderPlan {
+        var planner = RenderPlanner.init(output);
+        return planner.build(self);
     }
 };
 
@@ -394,6 +455,104 @@ pub const Builder = struct {
 
     pub fn blur(self: *Builder, value: Blur) Error!void {
         try self.append(.{ .blur = value });
+    }
+};
+
+pub const RenderPlanner = struct {
+    commands: []RenderCommand,
+    len: usize = 0,
+    state: RenderState = .{},
+    bounds_value: ?geometry.RectF = null,
+    clip_stack: [max_render_state_stack]?geometry.RectF = undefined,
+    clip_stack_len: usize = 0,
+    opacity_stack: [max_render_state_stack]f32 = undefined,
+    opacity_stack_len: usize = 0,
+
+    pub fn init(commands: []RenderCommand) RenderPlanner {
+        return .{ .commands = commands };
+    }
+
+    pub fn reset(self: *RenderPlanner) void {
+        self.len = 0;
+        self.state = .{};
+        self.bounds_value = null;
+        self.clip_stack_len = 0;
+        self.opacity_stack_len = 0;
+    }
+
+    pub fn build(self: *RenderPlanner, display_list: DisplayList) Error!RenderPlan {
+        self.reset();
+        for (display_list.commands) |command| {
+            try self.consume(command);
+        }
+        return .{
+            .commands = self.commands[0..self.len],
+            .bounds = self.bounds_value,
+        };
+    }
+
+    fn consume(self: *RenderPlanner, command: CanvasCommand) Error!void {
+        switch (command) {
+            .push_clip => |clip| try self.pushClip(clip),
+            .pop_clip => try self.popClip(),
+            .push_opacity => |opacity| try self.pushOpacity(opacity),
+            .pop_opacity => try self.popOpacity(),
+            .transform => |transform| self.state.transform = self.state.transform.multiply(transform),
+            else => try self.appendDrawCommand(command),
+        }
+    }
+
+    fn pushClip(self: *RenderPlanner, clip: Clip) Error!void {
+        if (self.clip_stack_len >= self.clip_stack.len) return error.RenderStackOverflow;
+        self.clip_stack[self.clip_stack_len] = self.state.clip;
+        self.clip_stack_len += 1;
+
+        const transformed_clip = self.state.transform.transformRect(clip.rect);
+        self.state.clip = if (self.state.clip) |existing|
+            geometry.RectF.intersection(existing, transformed_clip)
+        else
+            transformed_clip;
+    }
+
+    fn popClip(self: *RenderPlanner) Error!void {
+        if (self.clip_stack_len == 0) return error.RenderStackUnderflow;
+        self.clip_stack_len -= 1;
+        self.state.clip = self.clip_stack[self.clip_stack_len];
+    }
+
+    fn pushOpacity(self: *RenderPlanner, opacity: f32) Error!void {
+        if (self.opacity_stack_len >= self.opacity_stack.len) return error.RenderStackOverflow;
+        self.opacity_stack[self.opacity_stack_len] = self.state.opacity;
+        self.opacity_stack_len += 1;
+        self.state.opacity *= std.math.clamp(opacity, 0, 1);
+    }
+
+    fn popOpacity(self: *RenderPlanner) Error!void {
+        if (self.opacity_stack_len == 0) return error.RenderStackUnderflow;
+        self.opacity_stack_len -= 1;
+        self.state.opacity = self.opacity_stack[self.opacity_stack_len];
+    }
+
+    fn appendDrawCommand(self: *RenderPlanner, command: CanvasCommand) Error!void {
+        if (self.state.opacity <= 0) return;
+        const command_bounds = command.bounds() orelse return;
+        const transformed_bounds = self.state.transform.transformRect(command_bounds);
+        const clipped_bounds = if (self.state.clip) |clip|
+            geometry.RectF.intersection(clip, transformed_bounds)
+        else
+            transformed_bounds;
+        if (clipped_bounds.isEmpty()) return;
+        if (self.len >= self.commands.len) return error.RenderListFull;
+
+        self.commands[self.len] = .{
+            .command = command,
+            .id = command.objectId(),
+            .opacity = self.state.opacity,
+            .clip = self.state.clip,
+            .bounds = clipped_bounds,
+        };
+        self.len += 1;
+        self.bounds_value = unionOptionalBounds(self.bounds_value, clipped_bounds);
     }
 };
 
@@ -495,6 +654,21 @@ fn unionOptionalBounds(a: ?geometry.RectF, b: ?geometry.RectF) ?geometry.RectF {
     }
     if (b) |rect_b| return rect_b.normalized();
     return null;
+}
+
+fn boundsFromPoints(points: []const geometry.PointF) ?geometry.RectF {
+    if (points.len == 0) return null;
+    var min_x = points[0].x;
+    var min_y = points[0].y;
+    var max_x = points[0].x;
+    var max_y = points[0].y;
+    for (points[1..]) |point| {
+        min_x = @min(min_x, point.x);
+        min_y = @min(min_y, point.y);
+        max_x = @max(max_x, point.x);
+        max_y = @max(max_y, point.y);
+    }
+    return geometry.RectF.init(min_x, min_y, max_x - min_x, max_y - min_y);
 }
 
 fn strokeBounds(rect: geometry.RectF, width: f32) geometry.RectF {
@@ -1094,6 +1268,55 @@ test "display list diff rejects duplicate object ids" {
 
     var changes: [2]DiffChange = undefined;
     try std.testing.expectError(error.DuplicateObjectId, DisplayList.diff(.{ .commands = &commands }, .{}, &changes));
+}
+
+test "affine transforms points and conservative rect bounds" {
+    const transform = Affine.translate(10, 5).multiply(Affine.scale(2, 3));
+    try std.testing.expectEqualDeep(geometry.PointF.init(14, 14), transform.transformPoint(geometry.PointF.init(2, 3)));
+    try std.testing.expectEqualDeep(geometry.RectF.init(10, 5, 20, 15), transform.transformRect(geometry.RectF.init(0, 0, 10, 5)));
+}
+
+test "render plan resolves transform clip and opacity state" {
+    const commands = [_]CanvasCommand{
+        .{ .push_clip = .{ .id = 90, .rect = geometry.RectF.init(10, 10, 50, 50) } },
+        .{ .push_opacity = 0.5 },
+        .{ .transform = Affine.translate(10, 0) },
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 30, 30), .fill = .{ .color = Color.rgb8(255, 255, 255) } } },
+        .pop_opacity,
+        .{ .fill_rect = .{ .id = 2, .rect = geometry.RectF.init(0, 0, 4, 4), .fill = .{ .color = Color.rgb8(0, 0, 0) } } },
+        .pop_clip,
+        .{ .fill_rect = .{ .id = 3, .rect = geometry.RectF.init(0, 0, 4, 4), .fill = .{ .color = Color.rgb8(17, 24, 39) } } },
+    };
+
+    var render_commands: [4]RenderCommand = undefined;
+    const plan = try (DisplayList{ .commands = &commands }).renderPlan(&render_commands);
+    try std.testing.expectEqual(@as(usize, 2), plan.commandCount());
+
+    try std.testing.expectEqual(@as(?ObjectId, 1), plan.commands[0].id);
+    try std.testing.expectEqual(@as(f32, 0.5), plan.commands[0].opacity);
+    try expectRect(geometry.RectF.init(10, 10, 50, 50), plan.commands[0].clip);
+    try std.testing.expectEqualDeep(geometry.RectF.init(10, 10, 30, 20), plan.commands[0].bounds);
+
+    try std.testing.expectEqual(@as(?ObjectId, 3), plan.commands[1].id);
+    try std.testing.expectEqual(@as(f32, 1), plan.commands[1].opacity);
+    try std.testing.expect(plan.commands[1].clip == null);
+    try std.testing.expectEqualDeep(geometry.RectF.init(10, 0, 4, 4), plan.commands[1].bounds);
+    try expectRect(geometry.RectF.init(10, 0, 30, 30), plan.bounds);
+}
+
+test "render plan reports output and stack errors" {
+    const draw_commands = [_]CanvasCommand{
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 10, 10), .fill = .{ .color = Color.rgb8(255, 255, 255) } } },
+    };
+    var empty_render_commands: [0]RenderCommand = .{};
+    try std.testing.expectError(error.RenderListFull, (DisplayList{ .commands = &draw_commands }).renderPlan(&empty_render_commands));
+
+    const bad_clip_commands = [_]CanvasCommand{.pop_clip};
+    var render_commands: [1]RenderCommand = undefined;
+    try std.testing.expectError(error.RenderStackUnderflow, (DisplayList{ .commands = &bad_clip_commands }).renderPlan(&render_commands));
+
+    const bad_opacity_commands = [_]CanvasCommand{.pop_opacity};
+    try std.testing.expectError(error.RenderStackUnderflow, (DisplayList{ .commands = &bad_opacity_commands }).renderPlan(&render_commands));
 }
 
 test "display list serializes deterministically" {
