@@ -844,6 +844,8 @@ pub const ReferenceRenderSurface = struct {
             .fill_rounded_rect => |value| try self.fillRoundedRect(command, value, draw_bounds),
             .stroke_rect => |value| try self.strokeRect(command, value, draw_bounds),
             .draw_line => |value| try self.drawLine(command, value, draw_bounds),
+            .fill_path => |value| try self.fillPath(command, value, draw_bounds),
+            .stroke_path => |value| try self.strokePath(command, value, draw_bounds),
             .shadow => |value| try self.drawShadow(command, value, draw_bounds),
             .draw_text => |value| try self.drawText(command, value, draw_bounds),
             else => return error.ReferenceRenderUnsupportedCommand,
@@ -913,6 +915,37 @@ pub const ReferenceRenderSurface = struct {
                 const point = referencePixelCenter(x, y);
                 if (referenceDistanceToSegment(point, from, to) <= half_width) {
                     self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.stroke.fill, command.transform, point), command.opacity);
+                }
+            }
+        }
+    }
+
+    fn fillPath(self: ReferenceRenderSurface, command: RenderCommand, value: FillPath, draw_bounds: geometry.RectF) Error!void {
+        const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return;
+        var y = pixel_rect.y;
+        while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
+            var x = pixel_rect.x;
+            while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
+                const point = referencePixelCenter(x, y);
+                if (referencePathContainsPoint(point, value.elements, command.transform)) {
+                    self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.fill, command.transform, point), command.opacity);
+                }
+            }
+        }
+    }
+
+    fn strokePath(self: ReferenceRenderSurface, command: RenderCommand, value: StrokePath, draw_bounds: geometry.RectF) Error!void {
+        const stroke_width = nonNegative(value.stroke.width) * referenceTransformScale(command.transform);
+        if (stroke_width <= 0) return;
+        const half_width = stroke_width * 0.5;
+        const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return;
+        var y = pixel_rect.y;
+        while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
+            var x = pixel_rect.x;
+            while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
+                const point = referencePixelCenter(x, y);
+                if (referenceDistanceToPath(point, value.elements, command.transform)) |distance| {
+                    if (distance <= half_width) self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.stroke.fill, command.transform, point), command.opacity);
                 }
             }
         }
@@ -3826,6 +3859,8 @@ const ReferencePixelRect = struct {
     height: usize = 0,
 };
 
+const reference_curve_segments: usize = 12;
+
 fn referenceCommandBounds(command: RenderCommand, scissor: ?geometry.RectF) ?geometry.RectF {
     var bounds = command.bounds.normalized();
     if (scissor) |rect| {
@@ -3903,6 +3938,166 @@ fn referenceDistanceToSegment(point: geometry.PointF, from: geometry.PointF, to:
     const px = point.x - closest.x;
     const py = point.y - closest.y;
     return @sqrt(px * px + py * py);
+}
+
+fn referencePathContainsPoint(point: geometry.PointF, elements: []const PathElement, transform: Affine) bool {
+    var inside = false;
+    var has_current = false;
+    var current = geometry.PointF.zero();
+    var subpath_start = geometry.PointF.zero();
+
+    for (elements) |element| {
+        switch (element.verb) {
+            .move_to => {
+                current = transform.transformPoint(element.points[0]);
+                subpath_start = current;
+                has_current = true;
+            },
+            .line_to => {
+                if (!has_current) {
+                    current = transform.transformPoint(element.points[0]);
+                    subpath_start = current;
+                    has_current = true;
+                    continue;
+                }
+                const next = transform.transformPoint(element.points[0]);
+                if (referenceSegmentCrossesRay(point, current, next)) inside = !inside;
+                current = next;
+            },
+            .quad_to => {
+                if (!has_current) continue;
+                const control = transform.transformPoint(element.points[0]);
+                const end = transform.transformPoint(element.points[1]);
+                var previous = current;
+                var index: usize = 1;
+                while (index <= reference_curve_segments) : (index += 1) {
+                    const t = @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(reference_curve_segments));
+                    const next = referenceQuadPoint(current, control, end, t);
+                    if (referenceSegmentCrossesRay(point, previous, next)) inside = !inside;
+                    previous = next;
+                }
+                current = end;
+            },
+            .cubic_to => {
+                if (!has_current) continue;
+                const control_a = transform.transformPoint(element.points[0]);
+                const control_b = transform.transformPoint(element.points[1]);
+                const end = transform.transformPoint(element.points[2]);
+                var previous = current;
+                var index: usize = 1;
+                while (index <= reference_curve_segments) : (index += 1) {
+                    const t = @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(reference_curve_segments));
+                    const next = referenceCubicPoint(current, control_a, control_b, end, t);
+                    if (referenceSegmentCrossesRay(point, previous, next)) inside = !inside;
+                    previous = next;
+                }
+                current = end;
+            },
+            .close => {
+                if (has_current) {
+                    if (referenceSegmentCrossesRay(point, current, subpath_start)) inside = !inside;
+                    current = subpath_start;
+                }
+            },
+        }
+    }
+
+    return inside;
+}
+
+fn referenceDistanceToPath(point: geometry.PointF, elements: []const PathElement, transform: Affine) ?f32 {
+    var has_distance = false;
+    var min_distance: f32 = 0;
+    var has_current = false;
+    var current = geometry.PointF.zero();
+    var subpath_start = geometry.PointF.zero();
+
+    for (elements) |element| {
+        switch (element.verb) {
+            .move_to => {
+                current = transform.transformPoint(element.points[0]);
+                subpath_start = current;
+                has_current = true;
+            },
+            .line_to => {
+                if (!has_current) {
+                    current = transform.transformPoint(element.points[0]);
+                    subpath_start = current;
+                    has_current = true;
+                    continue;
+                }
+                const next = transform.transformPoint(element.points[0]);
+                referenceMinDistance(&has_distance, &min_distance, referenceDistanceToSegment(point, current, next));
+                current = next;
+            },
+            .quad_to => {
+                if (!has_current) continue;
+                const control = transform.transformPoint(element.points[0]);
+                const end = transform.transformPoint(element.points[1]);
+                var previous = current;
+                var index: usize = 1;
+                while (index <= reference_curve_segments) : (index += 1) {
+                    const t = @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(reference_curve_segments));
+                    const next = referenceQuadPoint(current, control, end, t);
+                    referenceMinDistance(&has_distance, &min_distance, referenceDistanceToSegment(point, previous, next));
+                    previous = next;
+                }
+                current = end;
+            },
+            .cubic_to => {
+                if (!has_current) continue;
+                const control_a = transform.transformPoint(element.points[0]);
+                const control_b = transform.transformPoint(element.points[1]);
+                const end = transform.transformPoint(element.points[2]);
+                var previous = current;
+                var index: usize = 1;
+                while (index <= reference_curve_segments) : (index += 1) {
+                    const t = @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(reference_curve_segments));
+                    const next = referenceCubicPoint(current, control_a, control_b, end, t);
+                    referenceMinDistance(&has_distance, &min_distance, referenceDistanceToSegment(point, previous, next));
+                    previous = next;
+                }
+                current = end;
+            },
+            .close => {
+                if (has_current) {
+                    referenceMinDistance(&has_distance, &min_distance, referenceDistanceToSegment(point, current, subpath_start));
+                    current = subpath_start;
+                }
+            },
+        }
+    }
+
+    return if (has_distance) min_distance else null;
+}
+
+fn referenceMinDistance(has_distance: *bool, min_distance: *f32, distance: f32) void {
+    if (!has_distance.* or distance < min_distance.*) {
+        has_distance.* = true;
+        min_distance.* = distance;
+    }
+}
+
+fn referenceSegmentCrossesRay(point: geometry.PointF, a: geometry.PointF, b: geometry.PointF) bool {
+    if ((a.y > point.y) == (b.y > point.y)) return false;
+    const x = a.x + (point.y - a.y) * (b.x - a.x) / (b.y - a.y);
+    return x > point.x;
+}
+
+fn referenceQuadPoint(a: geometry.PointF, b: geometry.PointF, c: geometry.PointF, t: f32) geometry.PointF {
+    const u = 1 - t;
+    return geometry.PointF.init(
+        u * u * a.x + 2 * u * t * b.x + t * t * c.x,
+        u * u * a.y + 2 * u * t * b.y + t * t * c.y,
+    );
+}
+
+fn referenceCubicPoint(a: geometry.PointF, b: geometry.PointF, c: geometry.PointF, d: geometry.PointF, t: f32) geometry.PointF {
+    const u = 1 - t;
+    return geometry.PointF.init(
+        u * u * u * a.x + 3 * u * u * t * b.x + 3 * u * t * t * c.x + t * t * t * d.x,
+        u * u * u * a.y + 3 * u * u * t * b.y + 3 * u * t * t * c.y + t * t * t * d.y,
+    );
 }
 
 fn referenceSpreadRect(rect: geometry.RectF, spread: f32) geometry.RectF {
@@ -7604,6 +7799,90 @@ test "reference renderer draws stroked lines" {
     try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 2, 1);
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 3, 1);
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 1, 2);
+}
+
+test "reference renderer fills closed paths" {
+    const elements = [_]PathElement{
+        .{ .verb = .move_to, .points = .{ geometry.PointF.init(1, 1), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(3, 1), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(3, 3), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(1, 3), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .close },
+    };
+    const commands = [_]CanvasCommand{.{ .fill_path = .{
+        .id = 1,
+        .elements = &elements,
+        .fill = .{ .color = Color.rgb8(255, 0, 0) },
+    } }};
+
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [0]RenderResource = .{};
+    var resource_cache_entries: [0]RenderResourceCacheEntry = .{};
+    var resource_cache_actions: [0]RenderResourceCacheAction = .{};
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(4, 4),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    var pixels: [4 * 4 * 4]u8 = undefined;
+    const surface = try ReferenceRenderSurface.init(4, 4, &pixels);
+    try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
+
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 0, 0);
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 1, 1);
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 2, 2);
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 3, 3);
+}
+
+test "reference renderer strokes paths" {
+    const elements = [_]PathElement{
+        .{ .verb = .move_to, .points = .{ geometry.PointF.init(0.5, 1.5), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(2.5, 1.5), geometry.PointF.zero(), geometry.PointF.zero() } },
+    };
+    const commands = [_]CanvasCommand{.{ .stroke_path = .{
+        .id = 1,
+        .elements = &elements,
+        .stroke = .{ .fill = .{ .color = Color.rgb8(255, 0, 0) }, .width = 1 },
+    } }};
+
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [0]RenderResource = .{};
+    var resource_cache_entries: [0]RenderResourceCacheEntry = .{};
+    var resource_cache_actions: [0]RenderResourceCacheAction = .{};
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(4, 3),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    var pixels: [4 * 3 * 4]u8 = undefined;
+    const surface = try ReferenceRenderSurface.init(4, 3, &pixels);
+    try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
+
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 1, 0);
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 0, 1);
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 1, 1);
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 2, 1);
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 3, 1);
 }
 
 test "reference renderer draws soft shadows" {
