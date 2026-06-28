@@ -418,6 +418,39 @@ pub const RenderResourcePlan = struct {
     }
 };
 
+pub const CanvasFrameOptions = struct {
+    frame_index: u64 = 0,
+    timestamp_ns: u64 = 0,
+    surface_size: geometry.SizeF = .{},
+    scale: f32 = 1,
+    full_repaint: bool = false,
+};
+
+pub const CanvasFrameStorage = struct {
+    render_commands: []RenderCommand,
+    resources: []RenderResource,
+    glyph_atlas_entries: []GlyphAtlasEntry,
+    changes: []DiffChange,
+};
+
+pub const CanvasFrame = struct {
+    frame_index: u64 = 0,
+    timestamp_ns: u64 = 0,
+    surface_size: geometry.SizeF = .{},
+    scale: f32 = 1,
+    full_repaint: bool = false,
+    display_list: DisplayList = .{},
+    render_plan: RenderPlan = .{},
+    resource_plan: RenderResourcePlan = .{},
+    glyph_atlas_plan: GlyphAtlasPlan = .{},
+    changes: []const DiffChange = &.{},
+    dirty_bounds: ?geometry.RectF = null,
+
+    pub fn requiresRender(self: CanvasFrame) bool {
+        return self.full_repaint or self.dirty_bounds != null;
+    }
+};
+
 pub const Density = enum {
     compact,
     regular,
@@ -767,6 +800,10 @@ pub const DisplayList = struct {
         var planner = GlyphAtlasPlanner.init(output);
         return planner.build(self);
     }
+
+    pub fn framePlan(self: DisplayList, previous: ?DisplayList, options: CanvasFrameOptions, storage: CanvasFrameStorage) Error!CanvasFrame {
+        return buildCanvasFrame(previous, self, options, storage);
+    }
 };
 
 pub const Builder = struct {
@@ -882,6 +919,37 @@ pub fn layoutTextRun(text: DrawText, options: TextLayoutOptions, output: []TextL
         try appendTextLine(output, &len, text, 0, 0, 0, 0, lineHeight(text, options), &bounds);
     }
     return .{ .lines = output[0..len], .bounds = bounds };
+}
+
+pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: CanvasFrameOptions, storage: CanvasFrameStorage) Error!CanvasFrame {
+    const render_plan = try next.renderPlan(storage.render_commands);
+    const resource_plan = try next.resourcePlan(storage.resources);
+    const glyph_atlas_plan = try next.glyphAtlasPlan(storage.glyph_atlas_entries);
+
+    const full_repaint = options.full_repaint or previous == null;
+    var changes: []const DiffChange = storage.changes[0..0];
+    var dirty_bounds: ?geometry.RectF = null;
+
+    if (full_repaint) {
+        dirty_bounds = fullRepaintBounds(options.surface_size, render_plan.bounds);
+    } else {
+        changes = try DisplayList.diff(previous.?, next, storage.changes);
+        dirty_bounds = clippedDirtyBounds(dirtyBoundsFromChanges(changes), options.surface_size);
+    }
+
+    return .{
+        .frame_index = options.frame_index,
+        .timestamp_ns = options.timestamp_ns,
+        .surface_size = options.surface_size,
+        .scale = options.scale,
+        .full_repaint = full_repaint,
+        .display_list = next,
+        .render_plan = render_plan,
+        .resource_plan = resource_plan,
+        .glyph_atlas_plan = glyph_atlas_plan,
+        .changes = changes,
+        .dirty_bounds = dirty_bounds,
+    };
 }
 
 pub fn emitWidgetLayout(builder: *Builder, layout: WidgetLayoutTree, tokens: DesignTokens) Error!void {
@@ -1869,6 +1937,34 @@ fn unionOptionalBounds(a: ?geometry.RectF, b: ?geometry.RectF) ?geometry.RectF {
     }
     if (b) |rect_b| return rect_b.normalized();
     return null;
+}
+
+fn dirtyBoundsFromChanges(changes: []const DiffChange) ?geometry.RectF {
+    var result: ?geometry.RectF = null;
+    for (changes) |change| {
+        result = unionOptionalBounds(result, change.dirty_bounds);
+    }
+    return result;
+}
+
+fn fullRepaintBounds(surface_size: geometry.SizeF, render_bounds: ?geometry.RectF) ?geometry.RectF {
+    if (surfaceRect(surface_size)) |surface| return surface;
+    return render_bounds;
+}
+
+fn clippedDirtyBounds(bounds: ?geometry.RectF, surface_size: geometry.SizeF) ?geometry.RectF {
+    const dirty = bounds orelse return null;
+    const normalized = dirty.normalized();
+    if (surfaceRect(surface_size)) |surface| {
+        const clipped = geometry.RectF.intersection(surface, normalized);
+        return if (clipped.isEmpty()) null else clipped;
+    }
+    return if (normalized.isEmpty()) null else normalized;
+}
+
+fn surfaceRect(surface_size: geometry.SizeF) ?geometry.RectF {
+    const rect = geometry.RectF.fromSize(surface_size).normalized();
+    return if (rect.isEmpty()) null else rect;
 }
 
 fn boundsFromPoints(points: []const geometry.PointF) ?geometry.RectF {
@@ -3311,6 +3407,132 @@ test "glyph atlas plan reports output overflow" {
     } }};
     var entries: [0]GlyphAtlasEntry = .{};
     try std.testing.expectError(error.GlyphAtlasListFull, (DisplayList{ .commands = &commands }).glyphAtlasPlan(&entries));
+}
+
+test "canvas frame plan builds first frame renderer packet" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(255, 255, 255) },
+        .{ .offset = 1, .color = Color.rgb8(24, 24, 27) },
+    };
+    const commands = [_]CanvasCommand{
+        .{ .fill_rounded_rect = .{
+            .id = 1,
+            .rect = geometry.RectF.init(16, 16, 160, 72),
+            .radius = Radius.all(12),
+            .fill = .{ .linear_gradient = .{
+                .start = geometry.PointF.init(16, 16),
+                .end = geometry.PointF.init(176, 88),
+                .stops = &stops,
+            } },
+        } },
+        .{ .draw_text = .{
+            .id = 2,
+            .font_id = 5,
+            .size = 14,
+            .origin = geometry.PointF.init(28, 48),
+            .color = Color.rgb8(15, 23, 42),
+            .text = "OK",
+        } },
+    };
+
+    var render_commands: [2]RenderCommand = undefined;
+    var resources: [2]RenderResource = undefined;
+    var glyphs: [2]GlyphAtlasEntry = undefined;
+    var changes: [2]DiffChange = undefined;
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .frame_index = 7,
+        .timestamp_ns = 88,
+        .surface_size = geometry.SizeF.init(320, 200),
+        .scale = 2,
+    }, .{
+        .render_commands = &render_commands,
+        .resources = &resources,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    try std.testing.expectEqual(@as(u64, 7), frame.frame_index);
+    try std.testing.expectEqual(@as(u64, 88), frame.timestamp_ns);
+    try std.testing.expectEqualDeep(geometry.SizeF.init(320, 200), frame.surface_size);
+    try std.testing.expectEqual(@as(f32, 2), frame.scale);
+    try std.testing.expect(frame.full_repaint);
+    try std.testing.expect(frame.requiresRender());
+    try std.testing.expectEqual(@as(usize, 2), frame.render_plan.commandCount());
+    try std.testing.expectEqual(@as(usize, 2), frame.resource_plan.resourceCount());
+    try std.testing.expectEqual(@as(usize, 2), frame.glyph_atlas_plan.entryCount());
+    try std.testing.expectEqual(@as(usize, 0), frame.changes.len);
+    try expectRect(geometry.RectF.init(0, 0, 320, 200), frame.dirty_bounds);
+}
+
+test "canvas frame plan clips incremental dirty bounds to surface" {
+    const previous_commands = [_]CanvasCommand{
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 40, 40), .fill = .{ .color = Color.rgb8(255, 255, 255) } } },
+        .{ .fill_rect = .{ .id = 2, .rect = geometry.RectF.init(70, 0, 20, 20), .fill = .{ .color = Color.rgb8(0, 0, 0) } } },
+    };
+    const next_commands = [_]CanvasCommand{
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(20, 0, 40, 40), .fill = .{ .color = Color.rgb8(255, 255, 255) } } },
+        .{ .fill_rect = .{ .id = 2, .rect = geometry.RectF.init(70, 0, 20, 20), .fill = .{ .color = Color.rgb8(0, 0, 0) } } },
+    };
+
+    var render_commands: [2]RenderCommand = undefined;
+    var resources: [0]RenderResource = .{};
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [2]DiffChange = undefined;
+    const frame = try (DisplayList{ .commands = &next_commands }).framePlan(.{ .commands = &previous_commands }, .{
+        .surface_size = geometry.SizeF.init(50, 50),
+    }, .{
+        .render_commands = &render_commands,
+        .resources = &resources,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    try std.testing.expect(!frame.full_repaint);
+    try std.testing.expect(frame.requiresRender());
+    try std.testing.expectEqual(@as(usize, 1), frame.changes.len);
+    try std.testing.expectEqual(DiffKind.changed, frame.changes[0].kind);
+    try std.testing.expectEqual(@as(?ObjectId, 1), frame.changes[0].id);
+    try expectRect(geometry.RectF.init(0, 0, 50, 40), frame.dirty_bounds);
+}
+
+test "canvas frame plan leaves unchanged retained frame clean" {
+    const commands = [_]CanvasCommand{
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 40, 40), .fill = .{ .color = Color.rgb8(255, 255, 255) } } },
+    };
+
+    var render_commands: [1]RenderCommand = undefined;
+    var resources: [0]RenderResource = .{};
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [1]DiffChange = undefined;
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(.{ .commands = &commands }, .{}, .{
+        .render_commands = &render_commands,
+        .resources = &resources,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    try std.testing.expect(!frame.full_repaint);
+    try std.testing.expect(!frame.requiresRender());
+    try std.testing.expectEqual(@as(usize, 1), frame.render_plan.commandCount());
+    try std.testing.expectEqual(@as(usize, 0), frame.changes.len);
+    try std.testing.expect(frame.dirty_bounds == null);
+}
+
+test "canvas frame plan reports diff storage overflow" {
+    const next_commands = [_]CanvasCommand{
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 40, 40), .fill = .{ .color = Color.rgb8(255, 255, 255) } } },
+    };
+
+    var render_commands: [1]RenderCommand = undefined;
+    var resources: [0]RenderResource = .{};
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [0]DiffChange = .{};
+    try std.testing.expectError(error.DiffListFull, (DisplayList{ .commands = &next_commands }).framePlan(.{}, .{}, .{
+        .render_commands = &render_commands,
+        .resources = &resources,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    }));
 }
 
 test "text layout wraps words into deterministic line boxes" {
