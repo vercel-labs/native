@@ -1470,10 +1470,31 @@ pub const WidgetRole = enum {
     progressbar,
 };
 
+pub const WidgetActions = struct {
+    focus: bool = false,
+    press: bool = false,
+    toggle: bool = false,
+    increment: bool = false,
+    decrement: bool = false,
+    set_text: bool = false,
+    select: bool = false,
+
+    pub fn isEmpty(self: WidgetActions) bool {
+        return !self.focus and
+            !self.press and
+            !self.toggle and
+            !self.increment and
+            !self.decrement and
+            !self.set_text and
+            !self.select;
+    }
+};
+
 pub const WidgetSemantics = struct {
     role: WidgetRole = .none,
     label: []const u8 = "",
     value: ?f32 = null,
+    actions: WidgetActions = .{},
     hidden: bool = false,
     focusable: bool = false,
 };
@@ -1608,6 +1629,7 @@ pub const WidgetSemanticsNode = struct {
     bounds: geometry.RectF,
     state: WidgetState,
     focusable: bool = false,
+    actions: WidgetActions = .{},
     text_selection: ?TextRange = null,
     text_composition: ?TextRange = null,
     parent_index: ?usize = null,
@@ -3959,7 +3981,8 @@ fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNod
             .value = semanticValue(node.widget),
             .bounds = node.frame,
             .state = node.widget.state,
-            .focusable = node.widget.semantics.focusable or defaultFocusable(node.widget),
+            .focusable = node.widget.semantics.focusable or node.widget.semantics.actions.focus or defaultFocusable(node.widget),
+            .actions = semanticActions(node.widget),
             .text_selection = widgetTextSelectionRange(node.widget),
             .text_composition = widgetTextCompositionRange(node.widget),
             .parent_index = parent_index,
@@ -4021,6 +4044,42 @@ fn semanticValue(widget: Widget) ?f32 {
     };
 }
 
+fn semanticActions(widget: Widget) WidgetActions {
+    if (widget.state.disabled) return .{};
+    var actions = defaultSemanticActions(widget);
+    actions.focus = actions.focus or widget.semantics.actions.focus;
+    actions.press = actions.press or widget.semantics.actions.press;
+    actions.toggle = actions.toggle or widget.semantics.actions.toggle;
+    actions.increment = actions.increment or widget.semantics.actions.increment;
+    actions.decrement = actions.decrement or widget.semantics.actions.decrement;
+    actions.set_text = actions.set_text or widget.semantics.actions.set_text;
+    actions.select = actions.select or widget.semantics.actions.select;
+    return actions;
+}
+
+fn defaultSemanticActions(widget: Widget) WidgetActions {
+    if (widget.state.disabled) return .{};
+
+    var actions = WidgetActions{
+        .focus = widget.semantics.focusable or defaultFocusable(widget),
+    };
+    switch (widget.kind) {
+        .button, .icon_button, .menu_item => actions.press = true,
+        .checkbox, .toggle => actions.toggle = true,
+        .text_field, .search_field => actions.set_text = true,
+        .slider => {
+            actions.increment = true;
+            actions.decrement = true;
+        },
+        .list_item, .segmented_control, .data_cell => {
+            actions.select = true;
+            if (widget.command.len > 0) actions.press = true;
+        },
+        else => {},
+    }
+    return actions;
+}
+
 fn defaultFocusable(widget: Widget) bool {
     return switch (widget.kind) {
         .button, .icon_button, .text_field, .search_field, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .toggle, .slider => !widget.state.disabled,
@@ -4030,7 +4089,7 @@ fn defaultFocusable(widget: Widget) bool {
 
 fn isFocusable(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled or widget.semantics.hidden) return false;
-    return widget.semantics.focusable or defaultFocusable(widget);
+    return widget.semantics.focusable or widget.semantics.actions.focus or defaultFocusable(widget);
 }
 
 fn isHitTarget(widget: Widget) bool {
@@ -4196,8 +4255,19 @@ fn widgetSemanticsEqual(a: WidgetSemantics, b: WidgetSemantics) bool {
     return a.role == b.role and
         std.mem.eql(u8, a.label, b.label) and
         optionalF32Equal(a.value, b.value) and
+        widgetActionsEqual(a.actions, b.actions) and
         a.hidden == b.hidden and
         a.focusable == b.focusable;
+}
+
+fn widgetActionsEqual(a: WidgetActions, b: WidgetActions) bool {
+    return a.focus == b.focus and
+        a.press == b.press and
+        a.toggle == b.toggle and
+        a.increment == b.increment and
+        a.decrement == b.decrement and
+        a.set_text == b.set_text and
+        a.select == b.select;
 }
 
 fn glyphAtlasKeysEqual(a: GlyphAtlasKey, b: GlyphAtlasKey) bool {
@@ -5919,7 +5989,7 @@ test "widget data grid exposes rows cells semantics and display list" {
         .{ .id = 4, .kind = .data_cell, .text = "Status", .layout = .{ .grow = 1 } },
     };
     const deployment_cells = [_]Widget{
-        .{ .id = 6, .kind = .data_cell, .text = "Edge API", .layout = .{ .grow = 1 } },
+        .{ .id = 6, .kind = .data_cell, .text = "Edge API", .command = "cell.open", .layout = .{ .grow = 1 } },
         .{ .id = 7, .kind = .data_cell, .text = "Live", .layout = .{ .grow = 1 } },
     };
     const rows = [_]Widget{
@@ -5961,10 +6031,15 @@ test "widget data grid exposes rows cells semantics and display list" {
     try std.testing.expectEqualStrings("Name", semantics[2].label);
     try std.testing.expectEqual(@as(?usize, 1), semantics[2].parent_index);
     try std.testing.expect(semantics[2].focusable);
+    try std.testing.expect(semantics[2].actions.focus);
+    try std.testing.expect(semantics[2].actions.select);
+    try std.testing.expect(!semantics[2].actions.press);
     try std.testing.expectEqual(WidgetRole.row, semantics[4].role);
     try std.testing.expectEqual(@as(?usize, 0), semantics[4].parent_index);
     try std.testing.expectEqual(WidgetRole.gridcell, semantics[5].role);
     try std.testing.expectEqualStrings("Edge API", semantics[5].label);
+    try std.testing.expect(semantics[5].actions.select);
+    try std.testing.expect(semantics[5].actions.press);
     try expectRect(geometry.RectF.init(0, 30, 120, 28), semantics[5].bounds);
 
     var commands: [16]CanvasCommand = undefined;
@@ -6449,9 +6524,13 @@ test "widget layout collects accessibility semantics" {
     try std.testing.expectEqualStrings("Run query", semantics[1].label);
     try std.testing.expectEqual(@as(?usize, 0), semantics[1].parent_index);
     try std.testing.expect(semantics[1].focusable);
+    try std.testing.expect(semantics[1].actions.focus);
+    try std.testing.expect(semantics[1].actions.press);
+    try std.testing.expect(!semantics[1].actions.toggle);
 
     try std.testing.expectEqual(WidgetRole.progressbar, semantics[2].role);
     try std.testing.expectEqual(@as(?f32, 0.75), semantics[2].value);
+    try std.testing.expect(semantics[2].actions.isEmpty());
     try expectRect(geometry.RectF.init(10, 52, 160, 8), semantics[2].bounds);
 }
 
@@ -6497,10 +6576,17 @@ test "widget controls expose roles values focus and hit testing" {
     try std.testing.expectEqualStrings("Live", semantics[1].label);
     try std.testing.expectEqual(@as(?f32, 1), semantics[1].value);
     try std.testing.expect(semantics[1].focusable);
+    try std.testing.expect(semantics[1].actions.focus);
+    try std.testing.expect(semantics[1].actions.toggle);
     try std.testing.expectEqual(WidgetRole.switch_control, semantics[2].role);
     try std.testing.expectEqual(@as(?f32, 0), semantics[2].value);
+    try std.testing.expect(semantics[2].actions.toggle);
     try std.testing.expectEqual(WidgetRole.slider, semantics[3].role);
     try std.testing.expectEqual(@as(?f32, 0.35), semantics[3].value);
+    try std.testing.expect(semantics[3].actions.focus);
+    try std.testing.expect(semantics[3].actions.increment);
+    try std.testing.expect(semantics[3].actions.decrement);
+    try std.testing.expect(!semantics[3].actions.press);
 }
 
 test "widget icons expose image and button semantics" {
@@ -7115,15 +7201,32 @@ test "widget layout diff separates paint and semantics dirtiness" {
         .text = "Run",
         .command = "report.run",
     }};
+    const action_previous_child = [_]Widget{.{
+        .id = 2,
+        .kind = .text,
+        .frame = geometry.RectF.init(10, 10, 100, 30),
+        .text = "Report",
+    }};
+    const action_child = [_]Widget{.{
+        .id = 2,
+        .kind = .text,
+        .frame = geometry.RectF.init(10, 10, 100, 30),
+        .text = "Report",
+        .semantics = .{ .actions = .{ .focus = true, .press = true } },
+    }};
 
     var previous_nodes: [2]WidgetLayoutNode = undefined;
     var pressed_nodes: [2]WidgetLayoutNode = undefined;
     var semantic_nodes: [2]WidgetLayoutNode = undefined;
     var command_nodes: [2]WidgetLayoutNode = undefined;
+    var action_previous_nodes: [2]WidgetLayoutNode = undefined;
+    var action_nodes: [2]WidgetLayoutNode = undefined;
     const previous = try layoutWidgetTree(.{ .kind = .stack, .children = &previous_child }, geometry.RectF.init(0, 0, 140, 80), &previous_nodes);
     const pressed = try layoutWidgetTree(.{ .kind = .stack, .children = &pressed_child }, geometry.RectF.init(0, 0, 140, 80), &pressed_nodes);
     const semantic = try layoutWidgetTree(.{ .kind = .stack, .children = &semantic_child }, geometry.RectF.init(0, 0, 140, 80), &semantic_nodes);
     const command = try layoutWidgetTree(.{ .kind = .stack, .children = &command_child }, geometry.RectF.init(0, 0, 140, 80), &command_nodes);
+    const action_previous = try layoutWidgetTree(.{ .kind = .stack, .children = &action_previous_child }, geometry.RectF.init(0, 0, 140, 80), &action_previous_nodes);
+    const action = try layoutWidgetTree(.{ .kind = .stack, .children = &action_child }, geometry.RectF.init(0, 0, 140, 80), &action_nodes);
 
     var invalidations_buffer: [2]WidgetInvalidation = undefined;
     const pressed_invalidations = try WidgetLayoutTree.diff(previous, pressed, &invalidations_buffer);
@@ -7146,6 +7249,12 @@ test "widget layout diff separates paint and semantics dirtiness" {
     try std.testing.expect(!command_invalidations[0].paint_dirty);
     try std.testing.expect(command_invalidations[0].semantics_dirty);
     try std.testing.expect(command_invalidations[0].dirty_bounds == null);
+
+    const action_invalidations = try WidgetLayoutTree.diff(action_previous, action, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 1), action_invalidations.len);
+    try std.testing.expect(!action_invalidations[0].layout_dirty);
+    try std.testing.expect(!action_invalidations[0].paint_dirty);
+    try std.testing.expect(action_invalidations[0].semantics_dirty);
 }
 
 test "widget layout diff marks grid column changes as layout dirty" {

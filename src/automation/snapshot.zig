@@ -18,6 +18,26 @@ pub const Diagnostics = struct {
     command_count: usize = 0,
 };
 
+pub const WidgetActions = struct {
+    focus: bool = false,
+    press: bool = false,
+    toggle: bool = false,
+    increment: bool = false,
+    decrement: bool = false,
+    set_text: bool = false,
+    select: bool = false,
+
+    pub fn isEmpty(self: WidgetActions) bool {
+        return !self.focus and
+            !self.press and
+            !self.toggle and
+            !self.increment and
+            !self.decrement and
+            !self.set_text and
+            !self.select;
+    }
+};
+
 pub const Widget = struct {
     window_id: platform.WindowId = 1,
     view_label: []const u8 = "",
@@ -28,6 +48,7 @@ pub const Widget = struct {
     bounds: geometry.RectF = .{},
     focused: bool = false,
     enabled: bool = true,
+    actions: WidgetActions = .{},
 };
 
 pub const Input = struct {
@@ -129,6 +150,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
             },
         );
         if (widget.value) |value| try writer.print(" value={d}", .{value});
+        try writeWidgetActions(widget.actions, writer);
         try writer.writeByte('\n');
     }
     if (input.source) |source| {
@@ -175,8 +197,30 @@ pub fn writeA11yText(input: Input, writer: anytype) !void {
             widget.bounds.height,
         });
         if (widget.value) |value| try writer.print(" value={d}", .{value});
+        try writeWidgetActions(widget.actions, writer);
         try writer.writeByte('\n');
     }
+}
+
+fn writeWidgetActions(actions: WidgetActions, writer: anytype) !void {
+    if (actions.isEmpty()) return;
+    try writer.writeAll(" actions=[");
+    var wrote = false;
+    try writeWidgetAction(actions.focus, "focus", &wrote, writer);
+    try writeWidgetAction(actions.press, "press", &wrote, writer);
+    try writeWidgetAction(actions.toggle, "toggle", &wrote, writer);
+    try writeWidgetAction(actions.increment, "increment", &wrote, writer);
+    try writeWidgetAction(actions.decrement, "decrement", &wrote, writer);
+    try writeWidgetAction(actions.set_text, "set_text", &wrote, writer);
+    try writeWidgetAction(actions.select, "select", &wrote, writer);
+    try writer.writeByte(']');
+}
+
+fn writeWidgetAction(enabled: bool, name: []const u8, wrote: *bool, writer: anytype) !void {
+    if (!enabled) return;
+    if (wrote.*) try writer.writeByte(',');
+    try writer.writeAll(name);
+    wrote.* = true;
 }
 
 test "snapshot emits window and source" {
@@ -265,6 +309,7 @@ test "snapshot emits widget semantics" {
         .name = "Run query",
         .bounds = geometry.RectF.init(10, 12, 80, 32),
         .focused = true,
+        .actions = .{ .focus = true, .press = true },
     }};
     try writeText(.{
         .windows = &windows,
@@ -272,6 +317,7 @@ test "snapshot emits widget semantics" {
         .widgets = &widgets,
     }, &writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "widget @w1/canvas#42 role=button name=\"Run query\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "actions=[focus,press]") != null);
 
     var a11y_buffer: [768]u8 = undefined;
     var a11y_writer = std.Io.Writer.fixed(&a11y_buffer);
@@ -282,4 +328,5 @@ test "snapshot emits widget semantics" {
     }, &a11y_writer);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "a11y root=@w1 nodes=3") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#42 role=button name=\"Run query\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "actions=[focus,press]") != null);
 }

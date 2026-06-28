@@ -1486,6 +1486,7 @@ pub const Runtime = struct {
                     .bounds = node.bounds.translate(geometry.OffsetF.init(view.frame.x, view.frame.y)),
                     .focused = node.state.focused or (view.focused and node.id == view.canvas_widget_focused_id),
                     .enabled = !node.state.disabled,
+                    .actions = canvasWidgetActions(node.actions),
                 };
                 widget_count.* += 1;
             }
@@ -4732,6 +4733,18 @@ fn widgetRoleName(role: canvas.WidgetRole) []const u8 {
     };
 }
 
+fn canvasWidgetActions(actions: canvas.WidgetActions) automation.snapshot.WidgetActions {
+    return .{
+        .focus = actions.focus,
+        .press = actions.press,
+        .toggle = actions.toggle,
+        .increment = actions.increment,
+        .decrement = actions.decrement,
+        .set_text = actions.set_text,
+        .select = actions.select,
+    };
+}
+
 fn writeWindowJson(window: platform.WindowInfo, output: []u8) ![]const u8 {
     var writer = std.Io.Writer.fixed(output);
     try writeWindowJsonToWriter(window, &writer);
@@ -6639,11 +6652,15 @@ test "runtime retains canvas widget layout for automation semantics" {
     try std.testing.expectEqualStrings("button", snapshot.widgets[0].role);
     try std.testing.expectEqualStrings("Run query", snapshot.widgets[0].name);
     try std.testing.expectEqualDeep(geometry.RectF.init(60, 82, 96, 32), snapshot.widgets[0].bounds);
+    try std.testing.expect(snapshot.widgets[0].actions.focus);
+    try std.testing.expect(snapshot.widgets[0].actions.press);
+    try std.testing.expect(!snapshot.widgets[0].actions.toggle);
 
     var a11y_buffer: [1024]u8 = undefined;
     var a11y_writer = std.Io.Writer.fixed(&a11y_buffer);
     try automation.snapshot.writeA11yText(snapshot, &a11y_writer);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#2 role=button name=\"Run query\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "actions=[focus,press]") != null);
 }
 
 test "runtime emits canvas display list from focused widget layout" {
@@ -7651,15 +7668,20 @@ test "runtime automation snapshot exposes canvas data grid roles" {
     try std.testing.expectEqualStrings("gridcell", snapshot.widgets[2].role);
     try std.testing.expectEqualStrings("Project", snapshot.widgets[2].name);
     try std.testing.expectEqualDeep(geometry.RectF.init(20, 30, 160, 28), snapshot.widgets[2].bounds);
+    try std.testing.expect(snapshot.widgets[2].actions.focus);
+    try std.testing.expect(snapshot.widgets[2].actions.select);
+    try std.testing.expect(!snapshot.widgets[2].actions.press);
     try std.testing.expectEqualStrings("gridcell", snapshot.widgets[5].role);
     try std.testing.expectEqualStrings("Edge API", snapshot.widgets[5].name);
     try std.testing.expectEqualDeep(geometry.RectF.init(20, 60, 160, 28), snapshot.widgets[5].bounds);
+    try std.testing.expect(snapshot.widgets[5].actions.select);
 
     var a11y_buffer: [1024]u8 = undefined;
     var a11y_writer = std.Io.Writer.fixed(&a11y_buffer);
     try automation.snapshot.writeA11yText(snapshot, &a11y_writer);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#1 role=grid name=\"Deployments\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#6 role=gridcell name=\"Edge API\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "actions=[focus,select]") != null);
 }
 
 test "runtime moves focused canvas data grid cells with arrow keys" {
