@@ -10,6 +10,8 @@ pub const Error = error{
     RenderStackOverflow,
     RenderStackUnderflow,
     WidgetDepthExceeded,
+    WidgetLayoutListFull,
+    WidgetSemanticsListFull,
 };
 
 pub const ObjectId = u64;
@@ -410,6 +412,20 @@ pub const MotionTokens = struct {
     normal_ms: u32 = 180,
     slow_ms: u32 = 260,
     easing: Easing = .standard,
+    spring: SpringToken = .{},
+};
+
+pub const SpringToken = struct {
+    mass: f32 = 1,
+    stiffness: f32 = 220,
+    damping: f32 = 28,
+};
+
+pub const LayerTokens = struct {
+    base: i32 = 0,
+    floating: i32 = 100,
+    overlay: i32 = 200,
+    modal: i32 = 300,
 };
 
 pub const DesignTokens = struct {
@@ -421,6 +437,7 @@ pub const DesignTokens = struct {
     shadow: ShadowTokens = .{},
     blur: BlurTokens = .{},
     motion: MotionTokens = .{},
+    layer: LayerTokens = .{},
     density: Density = .regular,
 };
 
@@ -442,6 +459,29 @@ pub const WidgetState = struct {
     selected: bool = false,
 };
 
+pub const WidgetLayoutStyle = struct {
+    padding: geometry.InsetsF = .{},
+    gap: f32 = 0,
+    grow: f32 = 0,
+    min_size: geometry.SizeF = .{},
+};
+
+pub const WidgetRole = enum {
+    none,
+    group,
+    text,
+    button,
+    progressbar,
+};
+
+pub const WidgetSemantics = struct {
+    role: WidgetRole = .none,
+    label: []const u8 = "",
+    value: ?f32 = null,
+    hidden: bool = false,
+    focusable: bool = false,
+};
+
 pub const Widget = struct {
     id: ObjectId = 0,
     kind: WidgetKind,
@@ -449,10 +489,67 @@ pub const Widget = struct {
     text: []const u8 = "",
     value: f32 = 0,
     state: WidgetState = .{},
+    layout: WidgetLayoutStyle = .{},
+    semantics: WidgetSemantics = .{},
     children: []const Widget = &.{},
 };
 
 pub const max_widget_depth: usize = 32;
+
+pub const WidgetLayoutNode = struct {
+    widget: Widget,
+    frame: geometry.RectF,
+    depth: usize,
+    parent_index: ?usize = null,
+};
+
+pub const WidgetHit = struct {
+    id: ObjectId,
+    kind: WidgetKind,
+    bounds: geometry.RectF,
+    depth: usize,
+    index: usize,
+    state: WidgetState,
+};
+
+pub const WidgetSemanticsNode = struct {
+    id: ObjectId,
+    role: WidgetRole,
+    label: []const u8,
+    value: ?f32 = null,
+    bounds: geometry.RectF,
+    state: WidgetState,
+    focusable: bool = false,
+    parent_index: ?usize = null,
+};
+
+pub const WidgetLayoutTree = struct {
+    nodes: []const WidgetLayoutNode = &.{},
+
+    pub fn nodeCount(self: WidgetLayoutTree) usize {
+        return self.nodes.len;
+    }
+
+    pub fn findById(self: WidgetLayoutTree, id: ObjectId) ?WidgetLayoutNode {
+        if (id == 0) return null;
+        for (self.nodes) |node| {
+            if (node.widget.id == id) return node;
+        }
+        return null;
+    }
+
+    pub fn hitTest(self: WidgetLayoutTree, point: geometry.PointF) ?WidgetHit {
+        return hitTestWidgetLayout(self, point);
+    }
+
+    pub fn collectSemantics(self: WidgetLayoutTree, output: []WidgetSemanticsNode) Error![]const WidgetSemanticsNode {
+        return collectWidgetSemantics(self, output);
+    }
+
+    pub fn emitDisplayList(self: WidgetLayoutTree, builder: *Builder, tokens: DesignTokens) Error!void {
+        return emitWidgetLayout(builder, self, tokens);
+    }
+};
 
 pub const DisplayList = struct {
     commands: []const CanvasCommand = &.{},
@@ -587,6 +684,25 @@ pub fn emitWidgetTree(builder: *Builder, widget: Widget, tokens: DesignTokens) E
     try emitWidgetDepth(builder, widget, tokens, 0);
 }
 
+pub fn layoutWidgetTree(widget: Widget, bounds: geometry.RectF, output: []WidgetLayoutNode) Error!WidgetLayoutTree {
+    var len: usize = 0;
+    _ = try layoutWidgetDepth(widget, bounds.normalized(), null, 0, output, &len);
+    return .{ .nodes = output[0..len] };
+}
+
+pub fn emitWidgetLayout(builder: *Builder, layout: WidgetLayoutTree, tokens: DesignTokens) Error!void {
+    for (layout.nodes) |node| {
+        const widget = widgetWithFrame(node.widget, node.frame);
+        switch (widget.kind) {
+            .stack, .row, .column => {},
+            .panel => try emitPanelWidgetChrome(builder, widget, tokens),
+            .text => try emitTextWidget(builder, widget, tokens),
+            .button => try emitButtonWidget(builder, widget, tokens),
+            .progress => try emitProgressWidget(builder, widget, tokens),
+        }
+    }
+}
+
 pub const RenderPlanner = struct {
     commands: []RenderCommand,
     len: usize = 0,
@@ -704,6 +820,11 @@ fn emitWidgetChildren(builder: *Builder, children: []const Widget, tokens: Desig
 }
 
 fn emitPanelWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
+    try emitPanelWidgetChrome(builder, widget, tokens);
+    try emitWidgetChildren(builder, widget.children, tokens, depth);
+}
+
+fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const radius = Radius.all(tokens.radius.lg);
     const shadow_token = tokens.shadow.sm;
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
@@ -733,8 +854,6 @@ fn emitPanelWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, dept
             .width = tokens.stroke.hairline,
         },
     });
-
-    try emitWidgetChildren(builder, widget.children, tokens, depth);
 }
 
 fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
@@ -827,6 +946,244 @@ fn buttonTextColor(tokens: DesignTokens, state: WidgetState) Color {
     if (state.disabled) return tokens.colors.text_muted;
     if (state.pressed or state.selected) return tokens.colors.accent_text;
     return tokens.colors.text;
+}
+
+fn layoutWidgetDepth(
+    widget: Widget,
+    frame: geometry.RectF,
+    parent_index: ?usize,
+    depth: usize,
+    output: []WidgetLayoutNode,
+    len: *usize,
+) Error!usize {
+    if (depth >= max_widget_depth) return error.WidgetDepthExceeded;
+    if (len.* >= output.len) return error.WidgetLayoutListFull;
+
+    const index = len.*;
+    output[index] = .{
+        .widget = widgetWithFrame(widget, frame),
+        .frame = frame,
+        .depth = depth,
+        .parent_index = parent_index,
+    };
+    len.* += 1;
+
+    const content = frame.inset(widget.layout.padding);
+    switch (widget.kind) {
+        .row => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout.gap),
+        .column => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout.gap),
+        .stack, .panel => {
+            for (widget.children) |child| {
+                _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len);
+            }
+        },
+        .text, .button, .progress => {},
+    }
+
+    return index;
+}
+
+const LayoutAxis = enum {
+    horizontal,
+    vertical,
+};
+
+fn layoutAxisChildren(
+    children: []const Widget,
+    content: geometry.RectF,
+    axis: LayoutAxis,
+    parent_index: usize,
+    depth: usize,
+    output: []WidgetLayoutNode,
+    len: *usize,
+    gap: f32,
+) Error!void {
+    if (children.len == 0) return;
+
+    const available_extent = switch (axis) {
+        .horizontal => content.width,
+        .vertical => content.height,
+    };
+    const cross_extent = switch (axis) {
+        .horizontal => content.height,
+        .vertical => content.width,
+    };
+    const clamped_gap = nonNegative(gap);
+    const total_gap = clamped_gap * @as(f32, @floatFromInt(children.len - 1));
+    var fixed_extent: f32 = 0;
+    var grow_total: f32 = 0;
+    for (children) |child| {
+        const grow = nonNegative(child.layout.grow);
+        if (grow > 0) {
+            grow_total += grow;
+        } else {
+            fixed_extent += preferredMainExtent(child, axis);
+        }
+    }
+
+    const remaining = @max(0, available_extent - fixed_extent - total_gap);
+    var cursor: f32 = switch (axis) {
+        .horizontal => content.x,
+        .vertical => content.y,
+    };
+
+    for (children) |child| {
+        const grow = nonNegative(child.layout.grow);
+        const main_extent = if (grow > 0 and grow_total > 0)
+            @max(minMainExtent(child, axis), remaining * grow / grow_total)
+        else
+            preferredMainExtent(child, axis);
+        const cross = preferredCrossExtent(child, axis, cross_extent);
+        const child_frame = switch (axis) {
+            .horizontal => geometry.RectF.init(cursor, content.y + child.frame.y, main_extent, cross),
+            .vertical => geometry.RectF.init(content.x + child.frame.x, cursor, cross, main_extent),
+        };
+        _ = try layoutWidgetDepth(child, child_frame, parent_index, depth + 1, output, len);
+        cursor += main_extent + clamped_gap;
+    }
+}
+
+fn stackChildFrame(content: geometry.RectF, child: Widget) geometry.RectF {
+    const width = if (child.frame.width > 0) child.frame.width else content.width;
+    const height = if (child.frame.height > 0) child.frame.height else content.height;
+    return geometry.RectF.init(
+        content.x + child.frame.x,
+        content.y + child.frame.y,
+        @max(child.layout.min_size.width, width),
+        @max(child.layout.min_size.height, height),
+    );
+}
+
+fn preferredMainExtent(widget: Widget, axis: LayoutAxis) f32 {
+    const value = switch (axis) {
+        .horizontal => widget.frame.width,
+        .vertical => widget.frame.height,
+    };
+    return @max(minMainExtent(widget, axis), nonNegative(value));
+}
+
+fn preferredCrossExtent(widget: Widget, axis: LayoutAxis, available: f32) f32 {
+    const value = switch (axis) {
+        .horizontal => widget.frame.height,
+        .vertical => widget.frame.width,
+    };
+    const min_value = switch (axis) {
+        .horizontal => widget.layout.min_size.height,
+        .vertical => widget.layout.min_size.width,
+    };
+    return @max(min_value, if (value > 0) value else available);
+}
+
+fn minMainExtent(widget: Widget, axis: LayoutAxis) f32 {
+    return switch (axis) {
+        .horizontal => nonNegative(widget.layout.min_size.width),
+        .vertical => nonNegative(widget.layout.min_size.height),
+    };
+}
+
+fn hitTestWidgetLayout(layout: WidgetLayoutTree, point: geometry.PointF) ?WidgetHit {
+    var index = layout.nodes.len;
+    while (index > 0) {
+        index -= 1;
+        const node = layout.nodes[index];
+        if (!isHitTarget(node.widget)) continue;
+        if (!node.frame.normalized().containsPoint(point)) continue;
+        return .{
+            .id = node.widget.id,
+            .kind = node.widget.kind,
+            .bounds = node.frame,
+            .depth = node.depth,
+            .index = index,
+            .state = node.widget.state,
+        };
+    }
+    return null;
+}
+
+fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNode) Error![]const WidgetSemanticsNode {
+    var len: usize = 0;
+    var semantic_stack: [max_widget_depth]?usize = [_]?usize{null} ** max_widget_depth;
+
+    for (layout.nodes) |node| {
+        if (node.depth >= max_widget_depth) return error.WidgetDepthExceeded;
+        var cursor = node.depth + 1;
+        while (cursor < semantic_stack.len) : (cursor += 1) {
+            semantic_stack[cursor] = null;
+        }
+
+        const role = semanticRole(node.widget);
+        if (node.widget.semantics.hidden or role == .none or node.widget.id == 0) continue;
+        if (len >= output.len) return error.WidgetSemanticsListFull;
+
+        const parent_index = nearestSemanticParent(semantic_stack[0..node.depth]);
+        output[len] = .{
+            .id = node.widget.id,
+            .role = role,
+            .label = semanticLabel(node.widget),
+            .value = semanticValue(node.widget),
+            .bounds = node.frame,
+            .state = node.widget.state,
+            .focusable = node.widget.semantics.focusable or defaultFocusable(node.widget),
+            .parent_index = parent_index,
+        };
+        semantic_stack[node.depth] = len;
+        len += 1;
+    }
+
+    return output[0..len];
+}
+
+fn nearestSemanticParent(stack: []const ?usize) ?usize {
+    var index = stack.len;
+    while (index > 0) {
+        index -= 1;
+        if (stack[index]) |semantic_index| return semantic_index;
+    }
+    return null;
+}
+
+fn semanticRole(widget: Widget) WidgetRole {
+    if (widget.semantics.role != .none) return widget.semantics.role;
+    return switch (widget.kind) {
+        .stack, .row, .column, .panel => .group,
+        .text => .text,
+        .button => .button,
+        .progress => .progressbar,
+    };
+}
+
+fn semanticLabel(widget: Widget) []const u8 {
+    if (widget.semantics.label.len > 0) return widget.semantics.label;
+    return widget.text;
+}
+
+fn semanticValue(widget: Widget) ?f32 {
+    if (widget.semantics.value) |value| return value;
+    return switch (widget.kind) {
+        .progress => widget.value,
+        else => null,
+    };
+}
+
+fn defaultFocusable(widget: Widget) bool {
+    return switch (widget.kind) {
+        .button => !widget.state.disabled,
+        else => false,
+    };
+}
+
+fn isHitTarget(widget: Widget) bool {
+    if (widget.id == 0 or widget.state.disabled) return false;
+    return switch (widget.kind) {
+        .row, .column, .stack => false,
+        .panel, .text, .button, .progress => true,
+    };
+}
+
+fn widgetWithFrame(widget: Widget, frame: geometry.RectF) Widget {
+    var copy = widget;
+    copy.frame = frame;
+    return copy;
 }
 
 fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChange) Error![]const DiffChange {
@@ -1416,6 +1773,161 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
     try writer.writeByte(']');
 }
 
+test "widget layout resolves row sizing and emits laid out commands" {
+    const row_children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .button,
+            .frame = geometry.RectF.init(0, 0, 80, 32),
+            .text = "Run",
+        },
+        .{
+            .id = 3,
+            .kind = .progress,
+            .frame = geometry.RectF.init(0, 0, 0, 8),
+            .value = 0.5,
+            .layout = .{ .grow = 1, .min_size = geometry.SizeF.init(40, 8) },
+        },
+        .{
+            .id = 4,
+            .kind = .text,
+            .frame = geometry.RectF.init(0, 0, 60, 20),
+            .text = "Ready",
+        },
+    };
+    const panel_children = [_]Widget{
+        .{
+            .kind = .row,
+            .frame = geometry.RectF.init(0, 0, 0, 40),
+            .layout = .{ .gap = 8 },
+            .children = &row_children,
+        },
+    };
+    const root = Widget{
+        .id = 1,
+        .kind = .panel,
+        .layout = .{ .padding = geometry.InsetsF.all(12) },
+        .children = &panel_children,
+    };
+
+    var nodes: [8]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 300, 80), &nodes);
+    try std.testing.expectEqual(@as(usize, 5), layout.nodeCount());
+    try expectLayoutFrame(layout, 1, geometry.RectF.init(0, 0, 300, 80));
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(12, 12, 80, 32));
+    try expectLayoutFrame(layout, 3, geometry.RectF.init(100, 12, 120, 8));
+    try expectLayoutFrame(layout, 4, geometry.RectF.init(228, 12, 60, 20));
+
+    var commands: [12]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 9), display_list.commandCount());
+    switch (display_list.commands[7]) {
+        .fill_rounded_rect => |fill| try expectRect(geometry.RectF.init(100, 12, 60, 8), fill.rect),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "widget layout hit testing prefers deepest topmost enabled target" {
+    const children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .button,
+            .frame = geometry.RectF.init(8, 8, 90, 32),
+            .text = "Disabled",
+            .state = .{ .disabled = true },
+        },
+        .{
+            .id = 3,
+            .kind = .button,
+            .frame = geometry.RectF.init(16, 16, 90, 32),
+            .text = "Active",
+        },
+    };
+    const root = Widget{
+        .id = 1,
+        .kind = .panel,
+        .children = &children,
+    };
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 140, 80), &nodes);
+    const active_hit = layout.hitTest(geometry.PointF.init(24, 24)).?;
+    try std.testing.expectEqual(@as(ObjectId, 3), active_hit.id);
+    try std.testing.expectEqual(WidgetKind.button, active_hit.kind);
+
+    const panel_hit = layout.hitTest(geometry.PointF.init(10, 10)).?;
+    try std.testing.expectEqual(@as(ObjectId, 1), panel_hit.id);
+    try std.testing.expect(layout.hitTest(geometry.PointF.init(200, 10)) == null);
+}
+
+test "widget layout collects accessibility semantics" {
+    const children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .button,
+            .frame = geometry.RectF.init(10, 10, 100, 32),
+            .text = "Run",
+            .semantics = .{ .label = "Run query" },
+        },
+        .{
+            .id = 3,
+            .kind = .progress,
+            .frame = geometry.RectF.init(10, 52, 160, 8),
+            .value = 0.75,
+        },
+        .{
+            .id = 4,
+            .kind = .text,
+            .frame = geometry.RectF.init(10, 68, 120, 20),
+            .text = "Hidden note",
+            .semantics = .{ .hidden = true },
+        },
+    };
+    const root = Widget{
+        .id = 1,
+        .kind = .panel,
+        .semantics = .{ .label = "Dashboard card" },
+        .children = &children,
+    };
+
+    var nodes: [6]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    var semantics_buffer: [4]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+
+    try std.testing.expectEqual(@as(usize, 3), semantics.len);
+    try std.testing.expectEqual(WidgetRole.group, semantics[0].role);
+    try std.testing.expectEqualStrings("Dashboard card", semantics[0].label);
+    try std.testing.expect(semantics[0].parent_index == null);
+
+    try std.testing.expectEqual(WidgetRole.button, semantics[1].role);
+    try std.testing.expectEqualStrings("Run query", semantics[1].label);
+    try std.testing.expectEqual(@as(?usize, 0), semantics[1].parent_index);
+    try std.testing.expect(semantics[1].focusable);
+
+    try std.testing.expectEqual(WidgetRole.progressbar, semantics[2].role);
+    try std.testing.expectEqual(@as(?f32, 0.75), semantics[2].value);
+    try expectRect(geometry.RectF.init(10, 52, 160, 8), semantics[2].bounds);
+}
+
+test "widget layout reports fixed buffer errors" {
+    const children = [_]Widget{
+        .{ .id = 2, .kind = .text, .text = "One" },
+        .{ .id = 3, .kind = .text, .text = "Two" },
+    };
+    const root = Widget{ .id = 1, .kind = .stack, .children = &children };
+
+    var small_nodes: [2]WidgetLayoutNode = undefined;
+    try std.testing.expectError(error.WidgetLayoutListFull, layoutWidgetTree(root, geometry.RectF.init(0, 0, 100, 100), &small_nodes));
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 100, 100), &nodes);
+    var small_semantics: [1]WidgetSemanticsNode = undefined;
+    try std.testing.expectError(error.WidgetSemanticsListFull, layout.collectSemantics(&small_semantics));
+}
+
 test "widget tree emits panel button text and progress commands" {
     const tokens: DesignTokens = .{};
     const children = [_]Widget{
@@ -1775,6 +2287,11 @@ test "display list serializes deterministically" {
 fn expectRect(expected: geometry.RectF, actual: ?geometry.RectF) !void {
     try std.testing.expect(actual != null);
     try std.testing.expectEqualDeep(expected, actual.?);
+}
+
+fn expectLayoutFrame(layout: WidgetLayoutTree, id: ObjectId, expected: geometry.RectF) !void {
+    const node = layout.findById(id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualDeep(expected, node.frame);
 }
 
 fn expectFillColor(expected: Color, actual: Fill) !void {
