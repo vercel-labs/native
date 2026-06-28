@@ -747,6 +747,17 @@ pub const Runtime = struct {
         return self.views[index].widgetLayoutTree();
     }
 
+    pub fn stepCanvasWidgetKineticScroll(self: *Runtime, window_id: platform.WindowId, label: []const u8, dt_ms: f32) anyerror!platform.ViewInfo {
+        try self.validateViewParent(window_id);
+        try validateViewLabel(label);
+        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+
+        const dirty = try self.views[index].stepCanvasWidgetKineticScroll(dt_ms) orelse return self.views[index].info();
+        self.invalidateForCanvasWidgetDirty(index, dirty);
+        return self.views[index].info();
+    }
+
     pub fn setCanvasWidgetDesignTokens(self: *Runtime, window_id: platform.WindowId, label: []const u8, tokens: canvas.DesignTokens) anyerror!platform.ViewInfo {
         try self.validateViewParent(window_id);
         try validateViewLabel(label);
@@ -927,7 +938,7 @@ pub const Runtime = struct {
         if (self.views[index].kind != .gpu_surface) return;
 
         const scroll_index = self.views[index].nearestCanvasWidgetScrollIndex(pointer_event.route) orelse return;
-        const dirty = try self.views[index].applyCanvasWidgetScroll(scroll_index, pointer_event.pointer.delta.dy) orelse return;
+        const dirty = try self.views[index].applyCanvasWidgetScroll(scroll_index, pointer_event.pointer.delta.dy, .wheel) orelse return;
         if (canvasDirtyRegionForView(self.views[index].frame, dirty)) |dirty_region| {
             self.invalidateFor(.state, dirty_region);
         } else {
@@ -3618,6 +3629,11 @@ const FocusTraversalDirection = enum {
     previous,
 };
 
+const CanvasWidgetScrollSource = enum {
+    discrete,
+    wheel,
+};
+
 const CanvasResourceCounts = struct {
     command_count: usize = 0,
     gradient_stop_count: usize = 0,
@@ -3825,6 +3841,8 @@ const RuntimeView = struct {
     widget_semantics_node_count: usize = 0,
     widget_revision: u64 = 0,
     widget_tokens: canvas.DesignTokens = .{},
+    widget_scroll_states: [max_canvas_widget_nodes_per_view]canvas.ScrollState = undefined,
+    widget_scroll_physics: canvas.ScrollPhysics = .{},
     canvas_widget_focused_id: canvas.ObjectId = 0,
     canvas_widget_hovered_id: canvas.ObjectId = 0,
     canvas_widget_pressed_id: canvas.ObjectId = 0,
@@ -3898,6 +3916,8 @@ const RuntimeView = struct {
         self.copyPresentedCanvasSummaryFrom(source);
         self.copyWidgetLayoutTree(source.widgetLayoutTree()) catch unreachable;
         self.widget_revision = source.widget_revision;
+        @memcpy(self.widget_scroll_states[0..source.widget_layout_node_count], source.widget_scroll_states[0..source.widget_layout_node_count]);
+        self.widget_scroll_physics = source.widget_scroll_physics;
     }
 
     fn canvasDisplayList(self: *const RuntimeView) canvas.DisplayList {
@@ -4063,6 +4083,7 @@ const RuntimeView = struct {
 
         for (layout.nodes) |node| {
             self.widget_layout_nodes[self.widget_layout_node_count] = try self.copyWidgetLayoutNode(node, source_semantics);
+            self.widget_scroll_states[self.widget_layout_node_count] = .{ .offset = self.widget_layout_nodes[self.widget_layout_node_count].widget.value };
             self.widget_layout_node_count += 1;
         }
 
@@ -4101,7 +4122,17 @@ const RuntimeView = struct {
         return result;
     }
 
-    fn applyCanvasWidgetScroll(self: *RuntimeView, scroll_index: usize, delta_y: f32) anyerror!?geometry.RectF {
+    fn canvasWidgetScrollState(self: *const RuntimeView, scroll_index: usize, scroll_node: canvas.WidgetLayoutNode, viewport: geometry.RectF) canvas.ScrollState {
+        const retained = self.widget_scroll_states[scroll_index];
+        return (canvas.ScrollState{
+            .offset = scroll_node.widget.value,
+            .velocity = retained.velocity,
+            .viewport_extent = viewport.height,
+            .content_extent = self.canvasWidgetScrollContentExtent(scroll_index, viewport),
+        }).clamped();
+    }
+
+    fn applyCanvasWidgetScroll(self: *RuntimeView, scroll_index: usize, delta_y: f32, source: CanvasWidgetScrollSource) anyerror!?geometry.RectF {
         if (scroll_index >= self.widget_layout_node_count) return null;
         const scroll_node = self.widget_layout_nodes[scroll_index];
         if (scroll_node.widget.kind != .scroll_view or scroll_node.widget.layout.virtualized) return null;
@@ -4109,23 +4140,61 @@ const RuntimeView = struct {
         const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
         if (viewport.isEmpty()) return null;
 
-        var current = canvas.ScrollState{
-            .offset = scroll_node.widget.value,
-            .viewport_extent = viewport.height,
-            .content_extent = self.canvasWidgetScrollContentExtent(scroll_index, viewport),
+        const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
+        const next = switch (source) {
+            .wheel => current.applyWheel(delta_y, self.widget_scroll_physics),
+            .discrete => discrete: {
+                var state = current;
+                state.offset += delta_y;
+                state.velocity = 0;
+                break :discrete state.clamped();
+            },
         };
-        current = current.clamped();
-        const next = current.applyWheel(delta_y, .{});
+        self.widget_scroll_states[scroll_index] = next;
         if (next.offset == current.offset) return null;
 
         const offset_delta = next.offset - current.offset;
         self.widget_layout_nodes[scroll_index].widget.value = next.offset;
         self.translateCanvasWidgetScrollDescendants(scroll_index, -offset_delta);
 
-        const semantics = try self.widgetLayoutTree().collectSemantics(&self.widget_semantics_nodes);
-        self.widget_semantics_node_count = semantics.len;
+        try self.refreshCanvasWidgetSemantics();
         self.widget_revision += 1;
         return scroll_node.frame;
+    }
+
+    fn stepCanvasWidgetKineticScroll(self: *RuntimeView, dt_ms: f32) anyerror!?geometry.RectF {
+        var dirty: ?geometry.RectF = null;
+        var changed = false;
+
+        for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |scroll_node, scroll_index| {
+            if (scroll_node.widget.kind != .scroll_view or scroll_node.widget.layout.virtualized) continue;
+            if (@abs(self.widget_scroll_states[scroll_index].velocity) <= @max(0, self.widget_scroll_physics.stop_velocity)) {
+                self.widget_scroll_states[scroll_index].velocity = 0;
+                continue;
+            }
+
+            const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
+            if (viewport.isEmpty()) {
+                self.widget_scroll_states[scroll_index].velocity = 0;
+                continue;
+            }
+
+            const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
+            const next = current.stepKinetic(dt_ms, self.widget_scroll_physics);
+            self.widget_scroll_states[scroll_index] = next;
+            if (next.offset == current.offset) continue;
+
+            const offset_delta = next.offset - current.offset;
+            self.widget_layout_nodes[scroll_index].widget.value = next.offset;
+            self.translateCanvasWidgetScrollDescendants(scroll_index, -offset_delta);
+            dirty = unionRects(dirty, scroll_node.frame);
+            changed = true;
+        }
+
+        if (!changed) return null;
+        try self.refreshCanvasWidgetSemantics();
+        self.widget_revision += 1;
+        return dirty;
     }
 
     fn canvasWidgetScrollContentExtent(self: *const RuntimeView, scroll_index: usize, viewport: geometry.RectF) f32 {
@@ -4267,7 +4336,7 @@ const RuntimeView = struct {
             else
                 null,
             .scroll_view => if (canvasWidgetScrollKeyboardDelta(widget, keyboard)) |delta|
-                try self.applyCanvasWidgetScroll(index, delta)
+                try self.applyCanvasWidgetScroll(index, delta, .discrete)
             else
                 null,
             else => null,
@@ -7497,6 +7566,44 @@ test "runtime wheel input scrolls retained canvas scroll views" {
         }
     }
     try std.testing.expect(saw_scrolled_button);
+
+    try std.testing.expect(harness.runtime.views[0].widget_scroll_states[0].velocity > 0);
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    const kinetic = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
+    try std.testing.expectEqual(@as(u64, 3), kinetic.widget_revision);
+    try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.pendingDirtyRegions().len);
+    try std.testing.expectEqualDeep(geometry.RectF.init(10, 20, 180, 72), harness.runtime.pendingDirtyRegions()[0]);
+
+    var kinetic_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectApproxEqAbs(@as(f32, 47.04), kinetic_layout.nodes[0].widget.value, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, -47.04), kinetic_layout.nodes[1].frame.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, -3.04), kinetic_layout.nodes[2].frame.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 40.96), kinetic_layout.nodes[3].frame.y, 0.01);
+    try std.testing.expect(harness.runtime.views[0].widget_scroll_states[0].velocity > 0);
+
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    const clamped = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
+    try std.testing.expectEqual(@as(u64, 4), clamped.widget_revision);
+    try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.pendingDirtyRegions().len);
+    try std.testing.expectEqualDeep(geometry.RectF.init(10, 20, 180, 72), harness.runtime.pendingDirtyRegions()[0]);
+
+    kinetic_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 48), kinetic_layout.nodes[0].widget.value);
+    try std.testing.expectEqual(@as(f32, -48), kinetic_layout.nodes[1].frame.y);
+    try std.testing.expectEqual(@as(f32, -4), kinetic_layout.nodes[2].frame.y);
+    try std.testing.expectEqual(@as(f32, 40), kinetic_layout.nodes[3].frame.y);
+    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[0].velocity);
+
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    const idle = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
+    try std.testing.expectEqual(@as(u64, 4), idle.widget_revision);
+    try std.testing.expect(!harness.runtime.invalidated);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDirtyRegions().len);
 }
 
 test "runtime leaves virtualized canvas scroll views app driven" {
@@ -7570,6 +7677,13 @@ test "runtime leaves virtualized canvas scroll views app driven" {
     try std.testing.expectEqual(@as(f32, 0), retained.nodes[0].widget.value);
     try std.testing.expectEqualDeep(layout.nodes[1].frame, retained.nodes[1].frame);
     try std.testing.expectEqual(@as(u64, 1), harness.runtime.views[0].widget_revision);
+
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    const kinetic = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
+    try std.testing.expectEqual(@as(u64, 1), kinetic.widget_revision);
+    try std.testing.expect(!harness.runtime.invalidated);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDirtyRegions().len);
 }
 
 test "runtime applies text input to focused canvas text fields" {
