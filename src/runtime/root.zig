@@ -1984,6 +1984,7 @@ pub const Runtime = struct {
             .commit_composition => try self.editAutomationCanvasWidgetText(view_index, action.id, .commit_composition),
             .cancel_composition => try self.editAutomationCanvasWidgetText(view_index, action.id, .cancel_composition),
             .select => try self.selectAutomationCanvasWidget(view_index, action.id),
+            .drag => try self.dispatchAutomationCanvasWidgetDrag(app, view_index, action.id, action.value),
         }
     }
 
@@ -2044,6 +2045,43 @@ pub const Runtime = struct {
         if (!self.views[view_index].canEditCanvasWidgetText(id)) return error.InvalidCommand;
         const dirty = try self.views[view_index].applyCanvasWidgetTextEdit(id, edit) orelse return;
         self.invalidateForCanvasWidgetDirty(view_index, dirty);
+    }
+
+    fn dispatchAutomationCanvasWidgetDrag(self: *Runtime, app: App, view_index: usize, id: canvas.ObjectId, value: []const u8) anyerror!void {
+        if (view_index >= self.view_count) return error.ViewNotFound;
+        const delta = try parseAutomationDragDelta(value);
+        const node = self.views[view_index].widgetLayoutTree().findById(id) orelse return error.InvalidCommand;
+        const bounds = node.frame.normalized();
+        if (bounds.isEmpty()) return error.InvalidCommand;
+
+        const window_id = self.views[view_index].window_id;
+        const label = self.views[view_index].label;
+        const origin = bounds.center();
+        const previous_pressed_id = self.views[view_index].canvas_widget_pressed_id;
+        self.views[view_index].canvas_widget_pressed_id = id;
+        if (previous_pressed_id != id) self.invalidateFor(.state, self.views[view_index].frame);
+        errdefer {
+            if (view_index < self.view_count and self.views[view_index].canvas_widget_pressed_id == id) {
+                self.views[view_index].canvas_widget_pressed_id = previous_pressed_id;
+            }
+        }
+
+        try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = window_id,
+            .label = label,
+            .kind = .pointer_drag,
+            .x = origin.x + delta.dx,
+            .y = origin.y + delta.dy,
+            .delta_x = delta.dx,
+            .delta_y = delta.dy,
+        } });
+
+        if (self.findViewIndex(window_id, label)) |current_index| {
+            if (self.views[current_index].canvas_widget_pressed_id == id) {
+                self.views[current_index].canvas_widget_pressed_id = 0;
+                self.invalidateFor(.state, self.views[current_index].frame);
+            }
+        }
     }
 
     fn invalidateForCanvasWidgetDirty(self: *Runtime, view_index: usize, dirty: geometry.RectF) void {
@@ -5615,6 +5653,7 @@ const AutomationWidgetActionKind = enum {
     commit_composition,
     cancel_composition,
     select,
+    drag,
 };
 
 const AutomationWidgetAction = struct {
@@ -5667,7 +5706,7 @@ fn parseAutomationWidgetAction(value: []const u8) !AutomationWidgetAction {
     if (id == 0) return error.InvalidCommand;
     const action = automationWidgetActionKindFromString(action_part.token) orelse return error.InvalidCommand;
     const action_value = std.mem.trim(u8, action_part.rest, " \n\r\t");
-    if (action != .set_text and action != .set_composition and action_value.len > 0) return error.InvalidCommand;
+    if (action != .set_text and action != .set_composition and action != .drag and action_value.len > 0) return error.InvalidCommand;
     return .{
         .view_label = view.token,
         .id = id,
@@ -5697,6 +5736,7 @@ fn automationWidgetActionKindFromString(value: []const u8) ?AutomationWidgetActi
     if (std.ascii.eqlIgnoreCase(value, "commit_composition") or std.ascii.eqlIgnoreCase(value, "commit-composition")) return .commit_composition;
     if (std.ascii.eqlIgnoreCase(value, "cancel_composition") or std.ascii.eqlIgnoreCase(value, "cancel-composition")) return .cancel_composition;
     if (std.ascii.eqlIgnoreCase(value, "select")) return .select;
+    if (std.ascii.eqlIgnoreCase(value, "drag")) return .drag;
     return null;
 }
 
@@ -5710,7 +5750,21 @@ fn automationWidgetActionSupported(actions: canvas.WidgetActions, action: Automa
         .set_text => actions.set_text,
         .set_composition, .commit_composition, .cancel_composition => actions.set_text,
         .select => actions.select,
+        .drag => actions.drag,
     };
+}
+
+fn parseAutomationDragDelta(value: []const u8) !geometry.OffsetF {
+    const trimmed = std.mem.trim(u8, value, " \n\r\t");
+    if (trimmed.len == 0) return geometry.OffsetF.init(16, 0);
+    var parts = std.mem.tokenizeAny(u8, trimmed, " \n\r\t");
+    const dx_bytes = parts.next() orelse return error.InvalidCommand;
+    const dy_bytes = parts.next() orelse return error.InvalidCommand;
+    if (parts.next() != null) return error.InvalidCommand;
+    const dx = std.fmt.parseFloat(f32, dx_bytes) catch return error.InvalidCommand;
+    const dy = std.fmt.parseFloat(f32, dy_bytes) catch return error.InvalidCommand;
+    if (!std.math.isFinite(dx) or !std.math.isFinite(dy)) return error.InvalidCommand;
+    return geometry.OffsetF.init(dx, dy);
 }
 
 fn parseAutomationResizeCommand(value: []const u8) !AutomationResizeCommand {
@@ -5747,6 +5801,21 @@ test "runtime parses automation resize commands" {
     try std.testing.expectError(error.InvalidCommand, parseAutomationResizeCommand("900 640 1 2"));
 }
 
+test "runtime parses automation drag deltas" {
+    const default_delta = try parseAutomationDragDelta("");
+    try std.testing.expectEqual(@as(f32, 16), default_delta.dx);
+    try std.testing.expectEqual(@as(f32, 0), default_delta.dy);
+
+    const explicit_delta = try parseAutomationDragDelta("18 2");
+    try std.testing.expectEqual(@as(f32, 18), explicit_delta.dx);
+    try std.testing.expectEqual(@as(f32, 2), explicit_delta.dy);
+
+    try std.testing.expectError(error.InvalidCommand, parseAutomationDragDelta("18"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationDragDelta("18 nope"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationDragDelta("18 2 3"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationDragDelta("nan 2"));
+}
+
 test "runtime parses automation focus view labels" {
     const label = try parseAutomationViewLabel(" refresh-button \n");
     try std.testing.expectEqualStrings("refresh-button", label);
@@ -5778,6 +5847,15 @@ test "runtime parses automation widget actions" {
 
     const cancel_composition = try parseAutomationWidgetAction("canvas 7 cancel_composition");
     try std.testing.expectEqual(AutomationWidgetActionKind.cancel_composition, cancel_composition.action);
+
+    const drag = try parseAutomationWidgetAction("canvas 2 drag");
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), drag.id);
+    try std.testing.expectEqual(AutomationWidgetActionKind.drag, drag.action);
+    try std.testing.expectEqualStrings("", drag.value);
+
+    const drag_delta = try parseAutomationWidgetAction("canvas 2 drag 18 2");
+    try std.testing.expectEqual(AutomationWidgetActionKind.drag, drag_delta.action);
+    try std.testing.expectEqualStrings("18 2", drag_delta.value);
 
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction(""));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 0 press"));
@@ -10835,9 +10913,12 @@ test "runtime dispatches automation canvas widget actions" {
     const TestApp = struct {
         command_count: u32 = 0,
         widget_keyboard_count: u32 = 0,
+        widget_drag_count: u32 = 0,
         raw_input_count: u32 = 0,
         last_command: []const u8 = "",
         last_keyboard_target_id: canvas.ObjectId = 0,
+        last_drag_source_id: canvas.ObjectId = 0,
+        last_drag_dx: f32 = 0,
 
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "gpu-widget-automation-actions", .source = platform.WebViewSource.html("<h1>GPU</h1>"), .event_fn = event };
@@ -10855,6 +10936,11 @@ test "runtime dispatches automation canvas widget actions" {
                 .canvas_widget_keyboard => |keyboard_event| {
                     self.widget_keyboard_count += 1;
                     if (keyboard_event.target) |target| self.last_keyboard_target_id = target.id;
+                },
+                .canvas_widget_drag => |drag_event| {
+                    self.widget_drag_count += 1;
+                    if (drag_event.source) |source| self.last_drag_source_id = source.id;
+                    self.last_drag_dx = drag_event.drag.delta.dx;
                 },
                 else => {},
             }
@@ -10881,7 +10967,7 @@ test "runtime dispatches automation canvas widget actions" {
         .{ .id = 10, .kind = .button, .frame = geometry.RectF.init(0, 128, 0, 32), .text = "Row three" },
     };
     const children = [_]canvas.Widget{
-        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(10, 10, 96, 32), .text = "Run", .command = "widget.run" },
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(10, 10, 96, 32), .text = "Run", .command = "widget.run", .semantics = .{ .actions = .{ .drag = true } } },
         .{ .id = 3, .kind = .checkbox, .frame = geometry.RectF.init(10, 52, 96, 28), .text = "Enabled" },
         .{ .id = 4, .kind = .slider, .frame = geometry.RectF.init(10, 88, 120, 24), .value = 0.5, .semantics = .{ .label = "Amount" } },
         .{ .id = 5, .kind = .text_field, .frame = geometry.RectF.init(10, 122, 150, 32), .text = "Draft" },
@@ -10898,8 +10984,14 @@ test "runtime dispatches automation canvas widget actions" {
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_keyboard_target_id);
 
+    try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 2, .action = .drag, .value = "18 2" });
+    try std.testing.expectEqual(@as(u32, 1), app_state.widget_drag_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_drag_source_id);
+    try std.testing.expectEqual(@as(f32, 18), app_state.last_drag_dx);
+
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 3, .action = .toggle });
     try std.testing.expectEqual(@as(?f32, 1), harness.runtime.views[0].widgetSemantics()[2].value);
+    try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 3, .action = .drag }));
 
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 4, .action = .increment });
     try std.testing.expectApproxEqAbs(@as(f32, 0.55), harness.runtime.views[0].widgetSemantics()[3].value.?, 0.001);
