@@ -642,6 +642,34 @@ pub const CanvasFrameDiagnostics = struct {
     full_repaint: bool = false,
     requires_render: bool = false,
     dirty_bounds: ?geometry.RectF = null,
+
+    pub fn writeJson(self: CanvasFrameDiagnostics, writer: anytype) !void {
+        try writer.print(
+            "{{\"frameIndex\":{d},\"commandCount\":{d},\"batchCount\":{d},\"resourceCount\":{d},\"resourceUploadCount\":{d},\"resourceRetainCount\":{d},\"resourceEvictCount\":{d},\"glyphAtlasEntryCount\":{d},\"changeCount\":{d}",
+            .{
+                self.frame_index,
+                self.command_count,
+                self.batch_count,
+                self.resource_count,
+                self.resource_upload_count,
+                self.resource_retain_count,
+                self.resource_evict_count,
+                self.glyph_atlas_entry_count,
+                self.change_count,
+            },
+        );
+        try writer.writeAll(",\"fullRepaint\":");
+        try writer.writeAll(if (self.full_repaint) "true" else "false");
+        try writer.writeAll(",\"requiresRender\":");
+        try writer.writeAll(if (self.requires_render) "true" else "false");
+        try writer.writeAll(",\"dirtyBounds\":");
+        if (self.dirty_bounds) |bounds| {
+            try writeRectJson(bounds, writer);
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeByte('}');
+    }
 };
 
 pub const CanvasFrame = struct {
@@ -678,6 +706,10 @@ pub const CanvasFrame = struct {
             .requires_render = self.requiresRender(),
             .dirty_bounds = self.dirty_bounds,
         };
+    }
+
+    pub fn writeDiagnosticsJson(self: CanvasFrame, writer: anytype) !void {
+        try self.diagnostics().writeJson(writer);
     }
 };
 
@@ -6388,6 +6420,22 @@ test "canvas frame plan builds first frame renderer packet" {
     try std.testing.expect(diagnostics.full_repaint);
     try std.testing.expect(diagnostics.requires_render);
     try expectRect(geometry.RectF.init(0, 0, 320, 200), diagnostics.dirty_bounds);
+
+    var diagnostics_json_buffer: [512]u8 = undefined;
+    var diagnostics_json_writer = std.Io.Writer.fixed(&diagnostics_json_buffer);
+    try frame.writeDiagnosticsJson(&diagnostics_json_writer);
+    try std.testing.expectEqualStrings(
+        "{\"frameIndex\":7,\"commandCount\":2,\"batchCount\":2,\"resourceCount\":2,\"resourceUploadCount\":2,\"resourceRetainCount\":0,\"resourceEvictCount\":0,\"glyphAtlasEntryCount\":2,\"changeCount\":0,\"fullRepaint\":true,\"requiresRender\":true,\"dirtyBounds\":[0,0,320,200]}",
+        diagnostics_json_writer.buffered(),
+    );
+
+    var clean_json_buffer: [256]u8 = undefined;
+    var clean_json_writer = std.Io.Writer.fixed(&clean_json_buffer);
+    try (CanvasFrameDiagnostics{ .frame_index = 8 }).writeJson(&clean_json_writer);
+    try std.testing.expectEqualStrings(
+        "{\"frameIndex\":8,\"commandCount\":0,\"batchCount\":0,\"resourceCount\":0,\"resourceUploadCount\":0,\"resourceRetainCount\":0,\"resourceEvictCount\":0,\"glyphAtlasEntryCount\":0,\"changeCount\":0,\"fullRepaint\":false,\"requiresRender\":false,\"dirtyBounds\":null}",
+        clean_json_writer.buffered(),
+    );
 }
 
 test "canvas frame plan carries resource cache retain upload and evict actions" {
