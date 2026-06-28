@@ -674,6 +674,59 @@ pub const CanvasFrameDiagnostics = struct {
     }
 };
 
+pub const CanvasRenderPassLoadAction = enum {
+    skip,
+    load,
+    clear,
+};
+
+pub const CanvasRenderPass = struct {
+    frame_index: u64 = 0,
+    timestamp_ns: u64 = 0,
+    surface_size: geometry.SizeF = .{},
+    scale: f32 = 1,
+    full_repaint: bool = false,
+    dirty_bounds: ?geometry.RectF = null,
+    commands: []const RenderCommand = &.{},
+    batches: []const RenderBatch = &.{},
+    resources: []const RenderResource = &.{},
+    resource_actions: []const RenderResourceCacheAction = &.{},
+    glyph_atlas_entries: []const GlyphAtlasEntry = &.{},
+
+    pub fn requiresRender(self: CanvasRenderPass) bool {
+        return self.full_repaint or self.dirty_bounds != null;
+    }
+
+    pub fn loadAction(self: CanvasRenderPass) CanvasRenderPassLoadAction {
+        if (!self.requiresRender()) return .skip;
+        return if (self.full_repaint) .clear else .load;
+    }
+
+    pub fn scissorBounds(self: CanvasRenderPass) ?geometry.RectF {
+        return if (self.requiresRender()) self.dirty_bounds else null;
+    }
+
+    pub fn commandCount(self: CanvasRenderPass) usize {
+        return self.commands.len;
+    }
+
+    pub fn batchCount(self: CanvasRenderPass) usize {
+        return self.batches.len;
+    }
+
+    pub fn resourceCount(self: CanvasRenderPass) usize {
+        return self.resources.len;
+    }
+
+    pub fn resourceActionCount(self: CanvasRenderPass) usize {
+        return self.resource_actions.len;
+    }
+
+    pub fn glyphAtlasEntryCount(self: CanvasRenderPass) usize {
+        return self.glyph_atlas_entries.len;
+    }
+};
+
 pub const CanvasFrame = struct {
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
@@ -712,6 +765,22 @@ pub const CanvasFrame = struct {
 
     pub fn writeDiagnosticsJson(self: CanvasFrame, writer: anytype) !void {
         try self.diagnostics().writeJson(writer);
+    }
+
+    pub fn renderPass(self: CanvasFrame) CanvasRenderPass {
+        return .{
+            .frame_index = self.frame_index,
+            .timestamp_ns = self.timestamp_ns,
+            .surface_size = self.surface_size,
+            .scale = self.scale,
+            .full_repaint = self.full_repaint,
+            .dirty_bounds = self.dirty_bounds,
+            .commands = self.render_plan.commands,
+            .batches = self.batch_plan.batches,
+            .resources = self.resource_plan.resources,
+            .resource_actions = self.resource_cache_plan.actions,
+            .glyph_atlas_entries = self.glyph_atlas_plan.entries,
+        };
     }
 };
 
@@ -6511,6 +6580,21 @@ test "canvas frame plan builds first frame renderer packet" {
     try std.testing.expectEqual(@as(usize, 0), frame.changes.len);
     try expectRect(geometry.RectF.init(0, 0, 320, 200), frame.dirty_bounds);
 
+    const render_pass = frame.renderPass();
+    try std.testing.expect(render_pass.requiresRender());
+    try std.testing.expectEqual(CanvasRenderPassLoadAction.clear, render_pass.loadAction());
+    try std.testing.expectEqual(@as(u64, 7), render_pass.frame_index);
+    try std.testing.expectEqual(@as(u64, 88), render_pass.timestamp_ns);
+    try std.testing.expectEqualDeep(geometry.SizeF.init(320, 200), render_pass.surface_size);
+    try std.testing.expectEqual(@as(f32, 2), render_pass.scale);
+    try std.testing.expectEqual(@as(usize, 2), render_pass.commandCount());
+    try std.testing.expectEqual(@as(usize, 2), render_pass.batchCount());
+    try std.testing.expectEqual(@as(usize, 2), render_pass.resourceCount());
+    try std.testing.expectEqual(@as(usize, 2), render_pass.resourceActionCount());
+    try std.testing.expectEqual(@as(usize, 2), render_pass.glyphAtlasEntryCount());
+    try std.testing.expectEqual(RenderResourceCacheActionKind.upload, render_pass.resource_actions[0].kind);
+    try expectRect(geometry.RectF.init(0, 0, 320, 200), render_pass.scissorBounds());
+
     const diagnostics = frame.diagnostics();
     try std.testing.expectEqual(@as(u64, 7), diagnostics.frame_index);
     try std.testing.expectEqual(@as(usize, 2), diagnostics.command_count);
@@ -6666,6 +6750,13 @@ test "canvas frame plan clips incremental dirty bounds to surface" {
     try std.testing.expectEqual(DiffKind.changed, frame.changes[0].kind);
     try std.testing.expectEqual(@as(?ObjectId, 1), frame.changes[0].id);
     try expectRect(geometry.RectF.init(0, 0, 50, 40), frame.dirty_bounds);
+
+    const render_pass = frame.renderPass();
+    try std.testing.expect(render_pass.requiresRender());
+    try std.testing.expectEqual(CanvasRenderPassLoadAction.load, render_pass.loadAction());
+    try std.testing.expectEqual(@as(usize, 2), render_pass.commandCount());
+    try std.testing.expectEqual(@as(usize, 1), render_pass.batchCount());
+    try expectRect(geometry.RectF.init(0, 0, 50, 40), render_pass.scissorBounds());
 }
 
 test "canvas frame plan leaves unchanged retained frame clean" {
@@ -6696,6 +6787,13 @@ test "canvas frame plan leaves unchanged retained frame clean" {
     try std.testing.expectEqual(@as(usize, 1), frame.batch_plan.batchCount());
     try std.testing.expectEqual(@as(usize, 0), frame.changes.len);
     try std.testing.expect(frame.dirty_bounds == null);
+
+    const render_pass = frame.renderPass();
+    try std.testing.expect(!render_pass.requiresRender());
+    try std.testing.expectEqual(CanvasRenderPassLoadAction.skip, render_pass.loadAction());
+    try std.testing.expect(render_pass.scissorBounds() == null);
+    try std.testing.expectEqual(@as(usize, 1), render_pass.commandCount());
+    try std.testing.expectEqual(@as(usize, 1), render_pass.batchCount());
 }
 
 test "canvas frame plan reports diff storage overflow" {
