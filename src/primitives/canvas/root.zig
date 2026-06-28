@@ -1554,6 +1554,7 @@ pub const WidgetActions = struct {
     increment: bool = false,
     decrement: bool = false,
     set_text: bool = false,
+    set_selection: bool = false,
     select: bool = false,
     drag: bool = false,
     drop_files: bool = false,
@@ -1565,6 +1566,7 @@ pub const WidgetActions = struct {
             !self.increment and
             !self.decrement and
             !self.set_text and
+            !self.set_selection and
             !self.select and
             !self.drag and
             !self.drop_files;
@@ -4522,6 +4524,7 @@ fn semanticActions(widget: Widget) WidgetActions {
     actions.increment = actions.increment or widget.semantics.actions.increment;
     actions.decrement = actions.decrement or widget.semantics.actions.decrement;
     actions.set_text = actions.set_text or widget.semantics.actions.set_text;
+    actions.set_selection = actions.set_selection or widget.semantics.actions.set_selection;
     actions.select = actions.select or widget.semantics.actions.select;
     actions.drag = actions.drag or widget.semantics.actions.drag;
     actions.drop_files = actions.drop_files or widget.semantics.actions.drop_files;
@@ -4537,7 +4540,10 @@ fn defaultSemanticActions(widget: Widget) WidgetActions {
     switch (widget.kind) {
         .button, .icon_button, .menu_item => actions.press = true,
         .checkbox, .toggle => actions.toggle = true,
-        .text_field, .search_field => actions.set_text = true,
+        .text_field, .search_field => {
+            actions.set_text = true;
+            actions.set_selection = true;
+        },
         .slider => {
             actions.increment = true;
             actions.decrement = true;
@@ -4754,6 +4760,7 @@ fn widgetActionsEqual(a: WidgetActions, b: WidgetActions) bool {
         a.increment == b.increment and
         a.decrement == b.decrement and
         a.set_text == b.set_text and
+        a.set_selection == b.set_selection and
         a.select == b.select and
         a.drag == b.drag and
         a.drop_files == b.drop_files;
