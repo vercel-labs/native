@@ -969,8 +969,16 @@ pub const Runtime = struct {
         if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
         var widget_invalidations: [max_canvas_widget_invalidations_per_view]canvas.WidgetInvalidation = undefined;
         const invalidations = try canvas.WidgetLayoutTree.diff(self.views[index].widgetLayoutTree(), layout, &widget_invalidations);
+        const previous_render_state = self.views[index].canvasWidgetRenderState();
+        const next_render_state = canvasWidgetRenderStateAfterLayout(previous_render_state, layout);
+        const render_state_changed = !canvasWidgetRenderStatesEqual(previous_render_state, next_render_state);
+        const render_state_dirty = if (render_state_changed)
+            self.views[index].widgetLayoutTree().renderStateDirtyBounds(previous_render_state, next_render_state)
+        else
+            null;
         try self.views[index].copyWidgetLayoutTree(layout);
         self.invalidateForWidgetInvalidations(self.views[index].frame, invalidations);
+        if (render_state_changed) self.invalidateForCanvasWidgetRenderStateDirty(index, render_state_dirty);
         try self.refreshCanvasWidgetDisplayListIfOwned(index);
         return self.views[index].info();
     }
@@ -1251,16 +1259,35 @@ pub const Runtime = struct {
     fn invalidateForCanvasWidgetRenderStateChange(self: *Runtime, view_index: usize, previous: canvas.WidgetRenderState, next: canvas.WidgetRenderState) anyerror!void {
         if (view_index >= self.view_count) return;
         if (self.views[view_index].kind != .gpu_surface) return;
-        if (self.views[view_index].widgetLayoutTree().renderStateDirtyBounds(previous, next)) |local_dirty| {
-            if (canvasDirtyRegionForView(self.views[view_index].frame, local_dirty)) |dirty_region| {
-                self.invalidateFor(.state, dirty_region);
-            } else {
-                self.invalidateFor(.state, self.views[view_index].frame);
-            }
-        } else {
-            self.invalidateFor(.state, self.views[view_index].frame);
-        }
+        const local_dirty = self.views[view_index].widgetLayoutTree().renderStateDirtyBounds(previous, next);
+        self.invalidateForCanvasWidgetRenderStateDirty(view_index, local_dirty);
         try self.refreshCanvasWidgetDisplayListIfOwned(view_index);
+    }
+
+    fn invalidateForCanvasWidgetRenderStateDirty(self: *Runtime, view_index: usize, local_dirty: ?geometry.RectF) void {
+        if (view_index >= self.view_count) return;
+        if (self.views[view_index].kind != .gpu_surface) return;
+        if (local_dirty) |dirty| {
+            if (canvasDirtyRegionForView(self.views[view_index].frame, dirty)) |dirty_region| {
+                self.invalidateFor(.state, dirty_region);
+                return;
+            }
+        }
+        self.invalidateFor(.state, self.views[view_index].frame);
+    }
+
+    fn canvasWidgetRenderStateAfterLayout(previous: canvas.WidgetRenderState, layout: canvas.WidgetLayoutTree) canvas.WidgetRenderState {
+        return .{
+            .focused_id = if (previous.focused_id) |id| if (layout.focusTargetById(id) != null) id else null else null,
+            .hovered_id = if (previous.hovered_id) |id| if (layout.findById(id) != null) id else null else null,
+            .pressed_id = if (previous.pressed_id) |id| if (layout.findById(id) != null) id else null else null,
+        };
+    }
+
+    fn canvasWidgetRenderStatesEqual(a: canvas.WidgetRenderState, b: canvas.WidgetRenderState) bool {
+        return a.focused_id == b.focused_id and
+            a.hovered_id == b.hovered_id and
+            a.pressed_id == b.pressed_id;
     }
 
     fn updateCanvasWidgetScrollFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
@@ -8958,6 +8985,77 @@ test "runtime emits canvas display list from focused widget layout" {
         .draw_text => |text| try std.testing.expectEqualStrings("Manual", text.text),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "runtime clears focused canvas widget when layout replacement hides it" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-hidden-focus", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(50, 70, 320, 160),
+    });
+
+    const children = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(10, 10, 80, 32),
+        .text = "Run",
+    }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 320, 160), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    harness.runtime.views[0].canvas_widget_focused_id = 2;
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+
+    const retained = try harness.runtime.canvasDisplayList(1, "canvas");
+    var saw_focused_ring = false;
+    for (retained.commands) |command| {
+        if (command.objectId()) |id| {
+            if (id == testCanvasWidgetPartId(2, 3)) saw_focused_ring = true;
+        }
+    }
+    try std.testing.expect(saw_focused_ring);
+
+    const hidden_children = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(10, 10, 80, 32),
+        .text = "Run",
+        .semantics = .{ .hidden = true },
+    }};
+    var hidden_nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const hidden_layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &hidden_children }, geometry.RectF.init(0, 0, 320, 160), &hidden_nodes);
+
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", hidden_layout);
+
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expect(harness.runtime.pendingDirtyRegions().len >= 1);
+    try std.testing.expectEqualDeep(geometry.RectF.init(59, 79, 82, 34), harness.runtime.pendingDirtyRegions()[0]);
+
+    const retained_after_hide = try harness.runtime.canvasDisplayList(1, "canvas");
+    var saw_stale_focused_ring = false;
+    for (retained_after_hide.commands) |command| {
+        if (command.objectId()) |id| {
+            if (id == testCanvasWidgetPartId(2, 3)) saw_stale_focused_ring = true;
+        }
+    }
+    try std.testing.expect(!saw_stale_focused_ring);
 }
 
 test "runtime retains canvas widget design tokens" {
