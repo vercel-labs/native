@@ -1031,8 +1031,6 @@ pub const Runtime = struct {
         self.views[index].widget_revision += 1;
         if (self.views[index].canvas_display_list_widget_owned) {
             try self.refreshCanvasWidgetDisplayList(index);
-        } else {
-            self.invalidateFor(.state, self.views[index].frame);
         }
         return self.views[index].info();
     }
@@ -9812,9 +9810,13 @@ test "runtime retains canvas widget design tokens" {
         },
         .radius = .{ .md = 7 },
     };
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
     const themed = try harness.runtime.setCanvasWidgetDesignTokens(1, "canvas", tokens);
     try std.testing.expectEqual(@as(u64, 2), themed.widget_revision);
     try std.testing.expectEqualDeep(tokens, try harness.runtime.canvasWidgetDesignTokens(1, "canvas"));
+    try std.testing.expect(!harness.runtime.invalidated);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDirtyRegions().len);
 
     harness.runtime.invalidated = false;
     harness.runtime.dirty_region_count = 0;
@@ -9856,8 +9858,12 @@ test "runtime retains canvas widget design tokens" {
             .accent_text = canvas.Color.rgb8(240, 255, 250),
         },
     };
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
     const changed = try harness.runtime.setCanvasWidgetDesignTokens(1, "canvas", next_tokens);
     try std.testing.expectEqual(@as(u64, 3), changed.widget_revision);
+    try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expect(harness.runtime.pendingDirtyRegions().len >= 1);
     _ = try harness.runtime.emitCanvasWidgetDisplayListWithStoredTokens(1, "canvas");
     const changed_display_list = try harness.runtime.canvasDisplayList(1, "canvas");
     for (changed_display_list.commands) |command| {
