@@ -7425,7 +7425,7 @@ fn widgetRenderStateDirtyBounds(layout: WidgetLayoutTree, previous: WidgetRender
         const previous_widget = widgetWithRenderState(base, previous);
         const next_widget = widgetWithRenderState(base, next);
         if (widgetStatesEqual(previous_widget.state, next_widget.state)) continue;
-        bounds = unionOptionalBounds(bounds, widgetPaintChangeBounds(previous_widget, next_widget));
+        bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetPaintChangeBounds(previous_widget, next_widget)));
     }
     return bounds;
 }
@@ -12015,6 +12015,26 @@ test "widget render state dirty bounds tracks changed runtime states" {
     );
     try std.testing.expect(layout.renderStateDirtyBounds(.{ .focused_id = 2 }, .{ .focused_id = 2 }) == null);
     try std.testing.expect(layout.renderStateDirtyBounds(.{ .focused_id = 99 }, .{ .focused_id = 100 }) == null);
+}
+
+test "widget render state dirty bounds clips to scroll ancestors" {
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 50, 0, 32),
+        .text = "Tail",
+    }};
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(
+        .{ .id = 1, .kind = .scroll_view, .children = &children },
+        geometry.RectF.init(0, 0, 120, 60),
+        &nodes,
+    );
+
+    try expectRect(
+        geometry.RectF.init(0, 50, 120, 10),
+        layout.renderStateDirtyBounds(.{}, .{ .pressed_id = 2 }),
+    );
 }
 
 test "widget layout diff separates paint and semantics dirtiness" {
