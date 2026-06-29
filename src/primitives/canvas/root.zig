@@ -6784,16 +6784,25 @@ fn widgetIndexById(layout: WidgetLayoutTree, id: ObjectId) ?usize {
 fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNode) Error![]const WidgetSemanticsNode {
     var len: usize = 0;
     var semantic_stack: [max_widget_depth]?usize = [_]?usize{null} ** max_widget_depth;
+    var hidden_depth: ?usize = null;
 
     for (layout.nodes, 0..) |node, node_index| {
         if (node.depth >= max_widget_depth) return error.WidgetDepthExceeded;
+        if (hidden_depth) |depth| {
+            if (node.depth > depth) continue;
+            hidden_depth = null;
+        }
         var cursor = node.depth + 1;
         while (cursor < semantic_stack.len) : (cursor += 1) {
             semantic_stack[cursor] = null;
         }
 
         const role = semanticRole(node.widget);
-        if (node.widget.semantics.hidden or role == .none or node.widget.id == 0) continue;
+        if (node.widget.semantics.hidden) {
+            hidden_depth = node.depth;
+            continue;
+        }
+        if (role == .none or node.widget.id == 0) continue;
         if (len >= output.len) return error.WidgetSemanticsListFull;
 
         const parent_index = nearestSemanticParent(semantic_stack[0..node.depth]);
@@ -10635,6 +10644,48 @@ test "widget layout collects accessibility semantics" {
     try std.testing.expectEqual(@as(?f32, 0.75), semantics[2].value);
     try std.testing.expect(semantics[2].actions.isEmpty());
     try expectRect(geometry.RectF.init(10, 52, 160, 8), semantics[2].bounds);
+}
+
+test "widget hidden semantics suppresses descendant semantics" {
+    const hidden_children = [_]Widget{.{
+        .id = 3,
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 0, 100, 32),
+        .text = "Hidden child",
+    }};
+    const children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .panel,
+            .frame = geometry.RectF.init(8, 8, 120, 48),
+            .semantics = .{ .hidden = true },
+            .children = &hidden_children,
+        },
+        .{
+            .id = 4,
+            .kind = .button,
+            .frame = geometry.RectF.init(8, 64, 120, 32),
+            .text = "Visible",
+        },
+    };
+    const root = Widget{
+        .id = 1,
+        .kind = .panel,
+        .semantics = .{ .label = "Root" },
+        .children = &children,
+    };
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 160, 120), &nodes);
+    var semantics_buffer: [4]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+
+    try std.testing.expectEqual(@as(usize, 2), semantics.len);
+    try std.testing.expectEqual(@as(ObjectId, 1), semantics[0].id);
+    try std.testing.expectEqualStrings("Root", semantics[0].label);
+    try std.testing.expectEqual(@as(ObjectId, 4), semantics[1].id);
+    try std.testing.expectEqualStrings("Visible", semantics[1].label);
+    try std.testing.expectEqual(@as(?usize, 0), semantics[1].parent_index);
 }
 
 test "widget controls expose roles values focus and hit testing" {
