@@ -990,6 +990,16 @@ pub const Runtime = struct {
         return self.views[index].info();
     }
 
+    pub fn setGpuSurfaceInputLatencyBudget(self: *Runtime, window_id: platform.WindowId, label: []const u8, budget_ns: u64) anyerror!platform.ViewInfo {
+        try self.validateViewParent(window_id);
+        try validateViewLabel(label);
+        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+        self.views[index].gpu_input_latency_budget_ns = budget_ns;
+        self.views[index].refreshGpuSurfaceInputLatencyBudgetStatus();
+        return self.views[index].info();
+    }
+
     pub fn setCanvasWidgetLayout(self: *Runtime, window_id: platform.WindowId, label: []const u8, layout: canvas.WidgetLayoutTree) anyerror!platform.ViewInfo {
         try self.validateViewParent(window_id);
         try validateViewLabel(label);
@@ -5195,6 +5205,10 @@ const RuntimeView = struct {
         self.gpu_pending_input_timestamp_ns = 0;
         self.gpu_input_timestamp_ns = input_timestamp_ns;
         self.gpu_input_latency_ns = timestamp_ns - input_timestamp_ns;
+        self.refreshGpuSurfaceInputLatencyBudgetStatus();
+    }
+
+    fn refreshGpuSurfaceInputLatencyBudgetStatus(self: *RuntimeView) void {
         self.gpu_input_latency_budget_exceeded_count = if (self.gpu_input_latency_budget_ns > 0 and self.gpu_input_latency_ns > self.gpu_input_latency_budget_ns) 1 else 0;
         self.gpu_input_latency_budget_ok = self.gpu_input_latency_budget_exceeded_count == 0;
     }
@@ -15033,6 +15047,49 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expect(std.mem.indexOf(u8, latency_json, "\"gpuInputLatencyNs\":20000000") != null);
     try std.testing.expect(std.mem.indexOf(u8, latency_json, "\"gpuInputLatencyBudgetExceededCount\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, latency_json, "\"gpuInputLatencyBudgetOk\":false") != null);
+
+    const relaxed_budget = try harness.runtime.setGpuSurfaceInputLatencyBudget(1, "canvas", 25_000_000);
+    try std.testing.expectEqual(@as(u64, 25_000_000), relaxed_budget.gpu_input_latency_budget_ns);
+    try std.testing.expectEqual(@as(usize, 0), relaxed_budget.gpu_input_latency_budget_exceeded_count);
+    try std.testing.expect(relaxed_budget.gpu_input_latency_budget_ok);
+    const relaxed_snapshot = harness.runtime.automationSnapshot("GPU relaxed");
+    const relaxed_view = testViewByLabel(relaxed_snapshot.views, "canvas").?;
+    try std.testing.expectEqual(@as(u64, 20_000_000), relaxed_view.gpu_input_latency_ns);
+    try std.testing.expectEqual(@as(u64, 25_000_000), relaxed_view.gpu_input_latency_budget_ns);
+    try std.testing.expectEqual(@as(usize, 0), relaxed_view.gpu_input_latency_budget_exceeded_count);
+    try std.testing.expect(relaxed_view.gpu_input_latency_budget_ok);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .timestamp_ns = 100_000_000,
+        .x = 12,
+        .y = 18,
+        .button = 0,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(800, 450),
+        .scale_factor = 2,
+        .frame_index = 10,
+        .timestamp_ns = 120_000_000,
+        .nonblank = true,
+        .sample_color = 0xff336699,
+    } });
+    try std.testing.expectEqual(@as(u64, 100_000_000), app_state.last_input_timestamp_ns);
+    try std.testing.expectEqual(@as(u64, 20_000_000), app_state.last_input_latency_ns);
+    try std.testing.expectEqual(@as(u64, 25_000_000), app_state.last_input_latency_budget_ns);
+    try std.testing.expectEqual(@as(usize, 0), app_state.last_input_latency_budget_exceeded_count);
+    try std.testing.expect(app_state.last_input_latency_budget_ok);
+
+    const relaxed_frame = try harness.runtime.gpuSurfaceFrame(1, "canvas");
+    try std.testing.expectEqual(@as(u64, 100_000_000), relaxed_frame.input_timestamp_ns);
+    try std.testing.expectEqual(@as(u64, 20_000_000), relaxed_frame.input_latency_ns);
+    try std.testing.expectEqual(@as(u64, 25_000_000), relaxed_frame.input_latency_budget_ns);
+    try std.testing.expectEqual(@as(usize, 0), relaxed_frame.input_latency_budget_exceeded_count);
+    try std.testing.expect(relaxed_frame.input_latency_budget_ok);
 }
 
 test "runtime tracks retained canvas widget cursor intent" {
