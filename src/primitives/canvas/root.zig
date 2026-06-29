@@ -3104,6 +3104,8 @@ pub const Widget = struct {
 };
 
 pub const max_widget_depth: usize = 32;
+const max_widget_text_layout_lines: usize = 16;
+const max_widget_text_range_rects: usize = 4;
 
 pub const WidgetLayoutNode = struct {
     widget: Widget,
@@ -6031,7 +6033,11 @@ fn emitIconButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
 fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const radius = Radius.all(tokens.radius.md);
     const text_size = widgetTextInputSize(tokens);
-    const origin = textOrigin(widget.frame, text_size, widgetTextInputInset(widget, tokens));
+    const text_inset = widgetTextInputInset(widget, tokens);
+    const layout_options = widgetTextInputLayoutOptions(widget, text_size, text_inset);
+    const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
+    const text_color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text;
+    const draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, text_color, layout_options);
     const selection_range = widgetTextSelectionRange(widget);
     const composition_range = widgetTextCompositionRange(widget);
     const has_text_affordances = selection_range != null or composition_range != null;
@@ -6053,46 +6059,23 @@ fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
     });
     if (selection_range) |range| {
         if (!range.isCollapsed(widget.text.len)) {
-            try builder.fillRoundedRect(.{
-                .id = widgetPartId(widget.id, 3),
-                .rect = textRangeInlineRect(widget.text, widget.frame, range, text_size, widgetTextInputInset(widget, tokens)),
-                .radius = Radius.all(tokens.radius.sm),
-                .fill = .{ .color = textSelectionFillColor(tokens) },
-            });
+            try emitWidgetTextSelectionRects(builder, widget, draw_text, layout_options, range, 3, 13, max_widget_text_range_rects, tokens);
         }
     }
     if (widget.text.len > 0) {
-        try builder.drawText(.{
-            .id = widgetPartId(widget.id, if (has_text_affordances) 4 else 3),
-            .font_id = tokens.typography.font_id,
-            .size = text_size,
-            .origin = origin,
-            .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
-            .text = widget.text,
-        });
+        var command = draw_text;
+        command.id = widgetPartId(widget.id, if (has_text_affordances) 4 else 3);
+        try builder.drawText(command);
     }
     if (composition_range) |range| {
         if (!range.isCollapsed(widget.text.len)) {
-            const rect = textRangeInlineRect(widget.text, widget.frame, range, text_size, widgetTextInputInset(widget, tokens));
-            const y = rect.y + rect.height - 1;
-            try builder.drawLine(.{
-                .id = widgetPartId(widget.id, 5),
-                .from = geometry.PointF.init(rect.x, y),
-                .to = geometry.PointF.init(rect.x + rect.width, y),
-                .stroke = .{ .fill = .{ .color = tokens.colors.focus_ring }, .width = 1 },
-            });
+            try emitWidgetTextCompositionLines(builder, widget, draw_text, layout_options, range, 5, 10, max_widget_text_range_rects, tokens);
         }
     }
     if (widget.state.focused) {
         if (selection_range) |range| {
             if (range.isCollapsed(widget.text.len)) {
-                const x = origin.x + estimateTextOffsetX(widget.text, range.start, text_size);
-                try builder.drawLine(.{
-                    .id = widgetPartId(widget.id, 6),
-                    .from = geometry.PointF.init(x, origin.y - text_size),
-                    .to = geometry.PointF.init(x, origin.y + 2),
-                    .stroke = .{ .fill = .{ .color = tokens.colors.focus_ring }, .width = tokens.stroke.regular },
-                });
+                try emitWidgetTextCaret(builder, widget, draw_text, layout_options, range.start, 6, tokens);
             }
         }
     }
@@ -6103,10 +6086,12 @@ fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens
     const text_size = widgetTextInputSize(tokens);
     const icon_size = @max(8, text_size - 2);
     const text_inset = widgetTextInputInset(widget, tokens);
-    const origin = textOrigin(widget.frame, text_size, text_inset);
+    const layout_options = widgetTextInputLayoutOptions(widget, text_size, text_inset);
+    const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
     const selection_range = widgetTextSelectionRange(widget);
     const composition_range = widgetTextCompositionRange(widget);
     const text_color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text;
+    const draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, text_color, layout_options);
 
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
@@ -6126,47 +6111,26 @@ fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens
     try emitSearchFieldIcon(builder, widget, tokens, icon_size);
     if (selection_range) |range| {
         if (!range.isCollapsed(widget.text.len)) {
-            try builder.fillRoundedRect(.{
-                .id = widgetPartId(widget.id, 8),
-                .rect = textRangeInlineRect(widget.text, widget.frame, range, text_size, text_inset),
-                .radius = Radius.all(tokens.radius.sm),
-                .fill = .{ .color = textSelectionFillColor(tokens) },
-            });
+            try emitWidgetTextSelectionRects(builder, widget, draw_text, layout_options, range, 8, 0, 1, tokens);
         }
     }
     const visible_text = if (widget.text.len > 0) widget.text else widget.semantics.label;
     if (visible_text.len > 0) {
-        try builder.drawText(.{
-            .id = widgetPartId(widget.id, 9),
-            .font_id = tokens.typography.font_id,
-            .size = text_size,
-            .origin = origin,
-            .color = if (widget.text.len > 0) text_color else tokens.colors.text_muted,
-            .text = visible_text,
-        });
+        var command = draw_text;
+        command.id = widgetPartId(widget.id, 9);
+        command.text = visible_text;
+        command.color = if (widget.text.len > 0) text_color else tokens.colors.text_muted;
+        try builder.drawText(command);
     }
     if (composition_range) |range| {
         if (!range.isCollapsed(widget.text.len)) {
-            const rect = textRangeInlineRect(widget.text, widget.frame, range, text_size, text_inset);
-            const y = rect.y + rect.height - 1;
-            try builder.drawLine(.{
-                .id = widgetPartId(widget.id, 10),
-                .from = geometry.PointF.init(rect.x, y),
-                .to = geometry.PointF.init(rect.x + rect.width, y),
-                .stroke = .{ .fill = .{ .color = tokens.colors.focus_ring }, .width = 1 },
-            });
+            try emitWidgetTextCompositionLines(builder, widget, draw_text, layout_options, range, 10, 0, 1, tokens);
         }
     }
     if (widget.state.focused) {
         if (selection_range) |range| {
             if (range.isCollapsed(widget.text.len)) {
-                const x = origin.x + estimateTextOffsetX(widget.text, range.start, text_size);
-                try builder.drawLine(.{
-                    .id = widgetPartId(widget.id, 11),
-                    .from = geometry.PointF.init(x, origin.y - text_size),
-                    .to = geometry.PointF.init(x, origin.y + 2),
-                    .stroke = .{ .fill = .{ .color = tokens.colors.focus_ring }, .width = tokens.stroke.regular },
-                });
+                try emitWidgetTextCaret(builder, widget, draw_text, layout_options, range.start, 11, tokens);
             }
         }
     }
@@ -6551,11 +6515,63 @@ pub fn textSelectionForWidgetPoint(widget: Widget, point: geometry.PointF, ancho
 pub fn textOffsetForWidgetPoint(widget: Widget, point: geometry.PointF, tokens: DesignTokens) ?usize {
     if (widget.kind != .text_field and widget.kind != .search_field) return null;
     if (widget.state.disabled) return null;
-    return textOffsetForInlineX(widget.text, widget.frame, point.x, widgetTextInputSize(tokens), widgetTextInputInset(widget, tokens));
+    const text_size = widgetTextInputSize(tokens);
+    const text_inset = widgetTextInputInset(widget, tokens);
+    const layout_options = widgetTextInputLayoutOptions(widget, text_size, text_inset);
+    const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
+    const draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, tokens.colors.text, layout_options);
+    var lines: [max_widget_text_layout_lines]TextLine = undefined;
+    return layoutTextOffsetForPoint(draw_text, layout_options, point, &lines) catch null;
 }
 
 fn widgetTextInputSize(tokens: DesignTokens) f32 {
     return tokens.typography.body_size;
+}
+
+fn widgetTextInputLayoutOptions(widget: Widget, text_size: f32, inset: f32) TextLayoutOptions {
+    const line_height = widgetTextInputLineHeight(text_size);
+    return .{
+        .max_width = @max(1, widget.frame.width - inset * 2),
+        .line_height = line_height,
+        .wrap = widgetTextInputWrap(widget, line_height),
+    };
+}
+
+fn widgetTextInputLineHeight(text_size: f32) f32 {
+    return text_size * 1.25;
+}
+
+fn widgetTextInputWrap(widget: Widget, line_height: f32) TextWrap {
+    if (widget.kind == .text_field and widget.frame.height >= line_height * 2.25) return .word;
+    return .none;
+}
+
+fn widgetTextInputOrigin(widget: Widget, tokens: DesignTokens, text_size: f32, inset: f32, options: TextLayoutOptions) geometry.PointF {
+    if (options.wrap != .none) {
+        return geometry.PointF.init(
+            widget.frame.x + inset,
+            widget.frame.y + densityValue(tokens, tokens.spacing.sm) + text_size,
+        );
+    }
+    return textOrigin(widget.frame, text_size, inset);
+}
+
+fn widgetTextInputDrawText(
+    widget: Widget,
+    tokens: DesignTokens,
+    text_size: f32,
+    origin: geometry.PointF,
+    color: Color,
+    options: TextLayoutOptions,
+) DrawText {
+    return .{
+        .font_id = tokens.typography.font_id,
+        .size = text_size,
+        .origin = origin,
+        .color = color,
+        .text = widget.text,
+        .text_layout = options,
+    };
 }
 
 fn widgetTextInputInset(widget: Widget, tokens: DesignTokens) f32 {
@@ -6578,46 +6594,6 @@ fn densityScale(density: Density) f32 {
     };
 }
 
-fn textRangeInlineRect(text: []const u8, frame: geometry.RectF, range: TextRange, size: f32, inset: f32) geometry.RectF {
-    const normalized = snapTextRange(text, range);
-    const origin = textOrigin(frame, size, inset);
-    const start_x = origin.x + estimateTextOffsetX(text, normalized.start, size);
-    const end_x = origin.x + estimateTextOffsetX(text, normalized.end, size);
-    return geometry.RectF.init(
-        start_x,
-        origin.y - size,
-        @max(1, end_x - start_x),
-        size * 1.25,
-    );
-}
-
-fn estimateTextOffsetX(text: []const u8, offset: usize, size: f32) f32 {
-    const target = snapTextOffset(text, offset);
-    var cursor: usize = 0;
-    var width: f32 = 0;
-    while (cursor < target) {
-        width += size * 0.5;
-        cursor = nextTextOffset(text, cursor);
-    }
-    return width;
-}
-
-fn textOffsetForInlineX(text: []const u8, frame: geometry.RectF, x: f32, size: f32, inset: f32) usize {
-    const origin = textOrigin(frame, size, inset);
-    const relative_x = x - origin.x;
-    if (relative_x <= 0) return 0;
-
-    const advance = @max(1, size * 0.5);
-    var cursor: usize = 0;
-    var caret_x: f32 = 0;
-    while (cursor < text.len) {
-        if (relative_x < caret_x + advance * 0.5) return cursor;
-        caret_x += advance;
-        cursor = nextTextOffset(text, cursor);
-    }
-    return text.len;
-}
-
 fn textSelectionFillColor(tokens: DesignTokens) Color {
     return Color.rgba(
         tokens.colors.focus_ring.r,
@@ -6625,6 +6601,79 @@ fn textSelectionFillColor(tokens: DesignTokens) Color {
         tokens.colors.focus_ring.b,
         0.18,
     );
+}
+
+fn emitWidgetTextSelectionRects(
+    builder: *Builder,
+    widget: Widget,
+    text: DrawText,
+    options: TextLayoutOptions,
+    range: TextRange,
+    first_part: ObjectId,
+    overflow_first_part: ObjectId,
+    max_parts: usize,
+    tokens: DesignTokens,
+) Error!void {
+    var lines: [max_widget_text_layout_lines]TextLine = undefined;
+    var rect_buffer: [max_widget_text_range_rects]TextSelectionRect = undefined;
+    const rects = try layoutTextSelectionRects(text, options, range, &lines, rect_buffer[0..@min(max_parts, rect_buffer.len)]);
+    for (rects, 0..) |selection, index| {
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, widgetTextRangePart(first_part, overflow_first_part, index)),
+            .rect = selection.rect,
+            .radius = Radius.all(tokens.radius.sm),
+            .fill = .{ .color = textSelectionFillColor(tokens) },
+        });
+    }
+}
+
+fn emitWidgetTextCompositionLines(
+    builder: *Builder,
+    widget: Widget,
+    text: DrawText,
+    options: TextLayoutOptions,
+    range: TextRange,
+    first_part: ObjectId,
+    overflow_first_part: ObjectId,
+    max_parts: usize,
+    tokens: DesignTokens,
+) Error!void {
+    var lines: [max_widget_text_layout_lines]TextLine = undefined;
+    var rect_buffer: [max_widget_text_range_rects]TextSelectionRect = undefined;
+    const rects = try layoutTextSelectionRects(text, options, range, &lines, rect_buffer[0..@min(max_parts, rect_buffer.len)]);
+    for (rects, 0..) |selection, index| {
+        const y = selection.rect.y + selection.rect.height - 1;
+        try builder.drawLine(.{
+            .id = widgetPartId(widget.id, widgetTextRangePart(first_part, overflow_first_part, index)),
+            .from = geometry.PointF.init(selection.rect.x, y),
+            .to = geometry.PointF.init(selection.rect.x + selection.rect.width, y),
+            .stroke = .{ .fill = .{ .color = tokens.colors.focus_ring }, .width = 1 },
+        });
+    }
+}
+
+fn widgetTextRangePart(first_part: ObjectId, overflow_first_part: ObjectId, index: usize) ObjectId {
+    if (index == 0 or overflow_first_part == 0) return first_part + @as(ObjectId, @intCast(index));
+    return overflow_first_part + @as(ObjectId, @intCast(index - 1));
+}
+
+fn emitWidgetTextCaret(
+    builder: *Builder,
+    widget: Widget,
+    text: DrawText,
+    options: TextLayoutOptions,
+    offset: usize,
+    part: ObjectId,
+    tokens: DesignTokens,
+) Error!void {
+    var lines: [max_widget_text_layout_lines]TextLine = undefined;
+    const rect = (try layoutTextCaretRect(text, options, offset, &lines)) orelse return;
+    try builder.drawLine(.{
+        .id = widgetPartId(widget.id, part),
+        .from = geometry.PointF.init(rect.x, rect.y),
+        .to = geometry.PointF.init(rect.x, rect.y + rect.height),
+        .stroke = .{ .fill = .{ .color = tokens.colors.focus_ring }, .width = tokens.stroke.regular },
+    });
 }
 
 fn buttonFillColor(tokens: DesignTokens, state: WidgetState) Color {
@@ -12452,7 +12501,11 @@ test "widget text fields render selection caret and composition ranges" {
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[3]) {
-        .draw_text => |text| try std.testing.expectEqualStrings("abcdef", text.text),
+        .draw_text => |text| {
+            try std.testing.expectEqualStrings("abcdef", text.text);
+            try std.testing.expect(text.text_layout != null);
+            try std.testing.expectEqual(TextWrap.none, text.text_layout.?.wrap);
+        },
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[4]) {
@@ -12482,6 +12535,52 @@ test "widget text fields render selection caret and composition ranges" {
     }
 }
 
+test "widget text fields render wrapped selection geometry" {
+    const tokens = DesignTokens{
+        .colors = .{ .focus_ring = Color.rgb8(10, 20, 30) },
+        .typography = .{ .body_size = 10 },
+        .spacing = .{ .sm = 4, .md = 4 },
+    };
+    const field = Widget{
+        .id = 11,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(4, 6, 28, 60),
+        .text = "AB CD",
+        .text_selection = .{ .anchor = 1, .focus = 5 },
+        .state = .{ .focused = true },
+    };
+
+    var commands: [6]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, field, tokens);
+
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 5), display_list.commandCount());
+    switch (display_list.commands[2]) {
+        .fill_rounded_rect => |selection| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(11, 3)), selection.id);
+            try expectRect(geometry.RectF.init(13, 10, 5, 12.5), selection.rect);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[3]) {
+        .fill_rounded_rect => |selection| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(11, 13)), selection.id);
+            try expectRect(geometry.RectF.init(8, 22.5, 10, 12.5), selection.rect);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[4]) {
+        .draw_text => |text| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(11, 4)), text.id);
+            try std.testing.expectEqualStrings("AB CD", text.text);
+            try std.testing.expectEqual(TextWrap.word, text.text_layout.?.wrap);
+            try std.testing.expectEqual(@as(f32, 20), text.text_layout.?.max_width);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "widget text fields map pointer positions to caret selections" {
     const tokens = DesignTokens{};
     const field = Widget{
@@ -12506,6 +12605,18 @@ test "widget text fields map pointer positions to caret selections" {
     try std.testing.expectEqual(@as(usize, 0), textOffsetForWidgetPoint(search, geometry.PointF.init(24, 64), tokens).?);
     try std.testing.expectEqual(@as(usize, 1), textOffsetForWidgetPoint(search, geometry.PointF.init(48, 64), tokens).?);
     try std.testing.expect(textOffsetForWidgetPoint(.{ .kind = .text_field, .state = .{ .disabled = true } }, geometry.PointF.init(0, 0), tokens) == null);
+
+    const wrapped_tokens = DesignTokens{
+        .typography = .{ .body_size = 10 },
+        .spacing = .{ .sm = 4, .md = 4 },
+    };
+    const wrapped = Widget{
+        .id = 4,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(4, 6, 28, 60),
+        .text = "AB CD",
+    };
+    try std.testing.expectEqual(@as(usize, 4), textOffsetForWidgetPoint(wrapped, geometry.PointF.init(14, 24), wrapped_tokens).?);
 }
 
 test "widget tooltip emits overlay chrome and tooltip semantics" {
