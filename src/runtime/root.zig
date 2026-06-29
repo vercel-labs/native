@@ -94,6 +94,7 @@ pub const CanvasWidgetKeyboardEvent = struct {
 pub const CanvasWidgetDisplayListChrome = struct {
     prefix_command_count: usize = 0,
     suffix_command_count: usize = 0,
+    reserved_command_count: usize = 0,
 };
 
 pub const CanvasWidgetAccessibilityActionKind = enum {
@@ -660,6 +661,7 @@ pub const Runtime = struct {
         self.views[index].canvas_display_list_widget_owned = false;
         self.views[index].canvas_widget_display_list_prefix_count = 0;
         self.views[index].canvas_widget_display_list_suffix_count = 0;
+        self.views[index].canvas_widget_display_list_reserved_count = 0;
         self.invalidateForCanvasChanges(self.views[index].frame, changes);
         return self.views[index].info();
     }
@@ -1160,8 +1162,19 @@ pub const Runtime = struct {
 
     fn emitCanvasWidgetDisplayListForViewWithChrome(self: *Runtime, index: usize, chrome: CanvasWidgetDisplayListChrome) anyerror!platform.ViewInfo {
         try self.views[index].validateCanvasWidgetDisplayListChrome(chrome);
+        const previous_prefix_count = self.views[index].canvas_widget_display_list_prefix_count;
+        const previous_suffix_count = self.views[index].canvas_widget_display_list_suffix_count;
+        const previous_reserved_count = self.views[index].canvas_widget_display_list_reserved_count;
+        const previous_owned = self.views[index].canvas_display_list_widget_owned;
+        errdefer {
+            self.views[index].canvas_widget_display_list_prefix_count = previous_prefix_count;
+            self.views[index].canvas_widget_display_list_suffix_count = previous_suffix_count;
+            self.views[index].canvas_widget_display_list_reserved_count = previous_reserved_count;
+            self.views[index].canvas_display_list_widget_owned = previous_owned;
+        }
         self.views[index].canvas_widget_display_list_prefix_count = chrome.prefix_command_count;
         self.views[index].canvas_widget_display_list_suffix_count = chrome.suffix_command_count;
+        self.views[index].canvas_widget_display_list_reserved_count = chrome.reserved_command_count;
         try self.refreshCanvasWidgetDisplayList(index);
         self.views[index].canvas_display_list_widget_owned = true;
         return self.views[index].info();
@@ -1191,6 +1204,9 @@ pub const Runtime = struct {
         for (current.commands[suffix_start..current.commands.len]) |command| try chrome_storage.appendCopiedCommand(&builder, command);
 
         const display_list = builder.displayList();
+        if (display_list.commands.len + self.views[view_index].canvas_widget_display_list_reserved_count > max_canvas_commands_per_view) {
+            return error.CanvasCommandLimitReached;
+        }
         var canvas_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined;
         const changes = try canvas.DisplayList.diff(self.views[view_index].canvasDisplayList(), display_list, &canvas_changes);
         try self.views[view_index].copyCanvasDisplayList(display_list);
@@ -5014,6 +5030,7 @@ const RuntimeView = struct {
     canvas_display_list_widget_owned: bool = false,
     canvas_widget_display_list_prefix_count: usize = 0,
     canvas_widget_display_list_suffix_count: usize = 0,
+    canvas_widget_display_list_reserved_count: usize = 0,
     presented_canvas_valid: bool = false,
     presented_canvas_revision: u64 = 0,
     presented_canvas_commands: [max_canvas_commands_per_view]PresentedCanvasCommand = undefined,
@@ -5265,6 +5282,7 @@ const RuntimeView = struct {
     fn validateCanvasWidgetDisplayListChrome(self: *const RuntimeView, chrome: CanvasWidgetDisplayListChrome) anyerror!void {
         if (chrome.prefix_command_count > self.canvas_command_count) return error.InvalidCommand;
         if (chrome.suffix_command_count > self.canvas_command_count - chrome.prefix_command_count) return error.InvalidCommand;
+        if (chrome.reserved_command_count > max_canvas_commands_per_view) return error.CanvasCommandLimitReached;
     }
 
     fn canvasFrameResourceCache(self: *const RuntimeView) []const canvas.RenderResourceCacheEntry {
@@ -16532,6 +16550,52 @@ test "runtime preserves canvas chrome when widget-owned display lists refresh" {
         .draw_text => |text| try std.testing.expectEqualStrings("Launch", text.text),
         else => return error.UnexpectedCanvasCommand,
     }
+}
+
+test "runtime reserves widget-owned canvas display list command headroom" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-display-list-headroom", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 180),
+    });
+
+    var nodes: [1]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{
+        .id = 2,
+        .kind = .text,
+        .frame = geometry.RectF.init(16, 16, 120, 20),
+        .text = "Headroom",
+    }, geometry.RectF.init(0, 0, 320, 180), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    var info = try harness.runtime.emitCanvasWidgetDisplayListWithChrome(1, "canvas", .{}, .{
+        .reserved_command_count = max_canvas_commands_per_view - 1,
+    });
+    try std.testing.expectEqual(@as(usize, 1), info.canvas_command_count);
+
+    try std.testing.expectError(error.CanvasCommandLimitReached, harness.runtime.emitCanvasWidgetDisplayListWithChrome(1, "canvas", .{}, .{
+        .reserved_command_count = max_canvas_commands_per_view,
+    }));
+
+    const display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    try std.testing.expectEqual(@as(usize, 1), display_list.commandCount());
+    try std.testing.expect(display_list.findCommandById(testCanvasWidgetPartId(2, 1)) != null);
+
+    info = try harness.runtime.emitCanvasWidgetDisplayListWithChrome(1, "canvas", .{}, .{});
+    try std.testing.expectEqual(@as(usize, 1), info.canvas_command_count);
 }
 
 test "runtime dispatches shortcut command events" {
