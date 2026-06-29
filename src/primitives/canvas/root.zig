@@ -6470,6 +6470,7 @@ fn hitTestWidgetLayout(layout: WidgetLayoutTree, point: geometry.PointF) ?Widget
         index -= 1;
         const node = layout.nodes[index];
         if (!isHitTarget(node.widget)) continue;
+        if (isWidgetHiddenInAncestors(layout, index)) continue;
         if (!node.frame.normalized().containsPoint(point)) continue;
         if (!isPointVisibleInWidgetAncestors(layout, index, point)) continue;
         return widgetHitFromNode(node, index);
@@ -6540,13 +6541,14 @@ fn widgetPointerTargetById(layout: WidgetLayoutTree, id: ObjectId) ?WidgetHit {
     const index = widgetIndexById(layout, id) orelse return null;
     const node = layout.nodes[index];
     if (!isHitTarget(node.widget)) return null;
+    if (isWidgetHiddenInAncestors(layout, index)) return null;
     return widgetHitFromNode(node, index);
 }
 
 fn routeWidgetKeyboardEvent(layout: WidgetLayoutTree, event: WidgetKeyboardEvent, output: []WidgetEventRouteEntry) Error!WidgetKeyboardRoute {
     const focused_id = event.focused_id orelse return .{ .entries = output[0..0] };
     const target_index = widgetIndexById(layout, focused_id) orelse return .{ .entries = output[0..0] };
-    const target = focusTargetFromNode(layout.nodes[target_index], target_index) orelse return .{ .entries = output[0..0] };
+    const target = focusTargetFromLayoutNode(layout, target_index) orelse return .{ .entries = output[0..0] };
     const entries = try routeWidgetEventPath(layout, target.index, output);
     return .{ .target = target, .entries = entries };
 }
@@ -6570,6 +6572,7 @@ fn widgetDropTargetIndexAtPoint(layout: WidgetLayoutTree, point: geometry.PointF
         index -= 1;
         const node = layout.nodes[index];
         if (!isDropTarget(node.widget)) continue;
+        if (isWidgetHiddenInAncestors(layout, index)) continue;
         if (!node.frame.normalized().containsPoint(point)) continue;
         if (!isPointVisibleInWidgetAncestors(layout, index, point)) continue;
         return index;
@@ -6582,6 +6585,7 @@ fn widgetDragSourceIndex(layout: WidgetLayoutTree, id: ObjectId) ?usize {
     const index = widgetIndexById(layout, id) orelse return null;
     const node = layout.nodes[index];
     if (!isDragSource(node.widget)) return null;
+    if (isWidgetHiddenInAncestors(layout, index)) return null;
     return index;
 }
 
@@ -6661,18 +6665,18 @@ fn focusWidgetTarget(layout: WidgetLayoutTree, current_id: ?ObjectId, direction:
 
 fn focusWidgetTargetById(layout: WidgetLayoutTree, id: ObjectId) ?WidgetFocusTarget {
     const index = widgetIndexById(layout, id) orelse return null;
-    return focusTargetFromNode(layout.nodes[index], index);
+    return focusTargetFromLayoutNode(layout, index);
 }
 
 fn focusForward(layout: WidgetLayoutTree, current_index: ?usize) ?WidgetFocusTarget {
     var index: usize = if (current_index) |value| value + 1 else 0;
     while (index < layout.nodes.len) : (index += 1) {
-        if (focusTargetFromNode(layout.nodes[index], index)) |target| return target;
+        if (focusTargetFromLayoutNode(layout, index)) |target| return target;
     }
     index = 0;
     const stop = current_index orelse layout.nodes.len;
     while (index < stop and index < layout.nodes.len) : (index += 1) {
-        if (focusTargetFromNode(layout.nodes[index], index)) |target| return target;
+        if (focusTargetFromLayoutNode(layout, index)) |target| return target;
     }
     return null;
 }
@@ -6681,27 +6685,27 @@ fn focusBackward(layout: WidgetLayoutTree, current_index: ?usize) ?WidgetFocusTa
     var index = current_index orelse layout.nodes.len;
     while (index > 0) {
         index -= 1;
-        if (focusTargetFromNode(layout.nodes[index], index)) |target| return target;
+        if (focusTargetFromLayoutNode(layout, index)) |target| return target;
     }
     index = layout.nodes.len;
     const stop = if (current_index) |value| value + 1 else 0;
     while (index > stop) {
         index -= 1;
-        if (focusTargetFromNode(layout.nodes[index], index)) |target| return target;
+        if (focusTargetFromLayoutNode(layout, index)) |target| return target;
     }
     return null;
 }
 
 fn focusSpatial(layout: WidgetLayoutTree, current_index: usize, direction: WidgetFocusDirection) ?WidgetFocusTarget {
-    const current = focusTargetFromNode(layout.nodes[current_index], current_index) orelse return null;
+    const current = focusTargetFromLayoutNode(layout, current_index) orelse return null;
     const current_bounds = current.bounds.normalized();
     const current_center = current_bounds.center();
     var best: ?WidgetFocusTarget = null;
     var best_score = std.math.inf(f32);
 
-    for (layout.nodes, 0..) |node, index| {
+    for (layout.nodes, 0..) |_, index| {
         if (index == current_index) continue;
-        const target = focusTargetFromNode(node, index) orelse continue;
+        const target = focusTargetFromLayoutNode(layout, index) orelse continue;
         const target_bounds = target.bounds.normalized();
         const target_center = target_bounds.center();
         if (!spatialFocusCandidate(current_center, target_bounds, direction)) continue;
@@ -6714,6 +6718,12 @@ fn focusSpatial(layout: WidgetLayoutTree, current_index: usize, direction: Widge
     }
 
     return best;
+}
+
+fn focusTargetFromLayoutNode(layout: WidgetLayoutTree, index: usize) ?WidgetFocusTarget {
+    if (index >= layout.nodes.len) return null;
+    if (isWidgetHiddenInAncestors(layout, index)) return null;
+    return focusTargetFromNode(layout.nodes[index], index);
 }
 
 fn spatialFocusCandidate(
@@ -6779,6 +6789,17 @@ fn widgetIndexById(layout: WidgetLayoutTree, id: ObjectId) ?usize {
         if (node.widget.id == id) return index;
     }
     return null;
+}
+
+fn isWidgetHiddenInAncestors(layout: WidgetLayoutTree, node_index: usize) bool {
+    var current: ?usize = node_index;
+    while (current) |index| {
+        if (index >= layout.nodes.len) return false;
+        const node = layout.nodes[index];
+        if (node.widget.semantics.hidden) return true;
+        current = node.parent_index;
+    }
+    return false;
 }
 
 fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNode) Error![]const WidgetSemanticsNode {
@@ -10686,6 +10707,58 @@ test "widget hidden semantics suppresses descendant semantics" {
     try std.testing.expectEqual(@as(ObjectId, 4), semantics[1].id);
     try std.testing.expectEqualStrings("Visible", semantics[1].label);
     try std.testing.expectEqual(@as(?usize, 0), semantics[1].parent_index);
+}
+
+test "widget hidden subtrees do not receive input routes" {
+    const hidden_children = [_]Widget{.{
+        .id = 3,
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 0, 100, 32),
+        .text = "Hidden child",
+        .semantics = .{ .actions = .{ .drag = true, .drop_files = true } },
+    }};
+    const children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .panel,
+            .frame = geometry.RectF.init(8, 8, 120, 48),
+            .semantics = .{ .hidden = true },
+            .children = &hidden_children,
+        },
+        .{
+            .id = 4,
+            .kind = .button,
+            .frame = geometry.RectF.init(8, 64, 120, 32),
+            .text = "Visible",
+        },
+    };
+    const root = Widget{ .id = 1, .kind = .stack, .children = &children };
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 160, 120), &nodes);
+
+    try std.testing.expect(layout.hitTest(geometry.PointF.init(16, 16)) == null);
+    try std.testing.expectEqual(@as(ObjectId, 4), layout.hitTest(geometry.PointF.init(16, 72)).?.id);
+    try std.testing.expectEqual(@as(ObjectId, 4), layout.focusTarget(null, .forward).?.id);
+    try std.testing.expect(layout.focusTargetById(3) == null);
+
+    var route_buffer: [4]WidgetEventRouteEntry = undefined;
+    const pointer_route = try layout.routePointerEvent(.{ .phase = .down, .point = geometry.PointF.init(16, 16) }, &route_buffer);
+    try std.testing.expect(pointer_route.target == null);
+    try std.testing.expectEqual(@as(usize, 0), pointer_route.entries.len);
+
+    const keyboard_route = try layout.routeKeyboardEvent(.{ .phase = .key_down, .focused_id = 3, .key = "Enter" }, &route_buffer);
+    try std.testing.expect(keyboard_route.target == null);
+    try std.testing.expectEqual(@as(usize, 0), keyboard_route.entries.len);
+
+    const paths = [_][]const u8{"/tmp/report.csv"};
+    const drop_route = try layout.routeFileDropEvent(.{ .point = geometry.PointF.init(16, 16), .paths = &paths }, &route_buffer);
+    try std.testing.expect(drop_route.target == null);
+    try std.testing.expectEqual(@as(usize, 0), drop_route.entries.len);
+
+    const drag_route = try layout.routeDragEvent(.{ .source_id = 3, .point = geometry.PointF.init(16, 16) }, &route_buffer);
+    try std.testing.expect(drag_route.target == null);
+    try std.testing.expectEqual(@as(usize, 0), drag_route.entries.len);
 }
 
 test "widget controls expose roles values focus and hit testing" {
