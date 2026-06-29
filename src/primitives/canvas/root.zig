@@ -8349,12 +8349,7 @@ fn appendTextLine(
 ) Error!void {
     if (len.* >= output.len) return error.TextLayoutLineListFull;
     const baseline = text.origin.y + @as(f32, @floatFromInt(len.*)) * line_height;
-    const line_bounds = geometry.RectF.init(
-        text.origin.x,
-        baseline - text.size,
-        textLineWidth(text, text_start, text_len, glyph_start, glyph_len),
-        line_height,
-    );
+    const line_bounds = textLineBounds(text, text_start, text_len, glyph_start, glyph_len, baseline, line_height);
     output[len.*] = .{
         .text_start = text_start,
         .text_len = text_len,
@@ -8371,14 +8366,29 @@ fn lineHeight(text: DrawText, options: TextLayoutOptions) f32 {
     return if (options.line_height > 0) options.line_height else text.size * 1.25;
 }
 
-fn textLineWidth(text: DrawText, text_start: usize, text_len: usize, glyph_start: usize, glyph_len: usize) f32 {
+fn textLineBounds(text: DrawText, text_start: usize, text_len: usize, glyph_start: usize, glyph_len: usize, baseline: f32, line_height: f32) geometry.RectF {
     if (glyph_len > 0 and glyph_start < text.glyphs.len) {
         const glyphs = text.glyphs[glyph_start..@min(text.glyphs.len, glyph_start + glyph_len)];
-        var width: f32 = 0;
-        for (glyphs) |glyph| width += estimatedGlyphAdvance(glyph, text.size);
-        return width;
+        const origin_x = glyphs[0].x;
+        var min_x: f32 = 0;
+        var max_x = estimatedGlyphAdvance(glyphs[0], text.size);
+        var min_y = baseline - text.size;
+        var max_y = min_y + line_height;
+        for (glyphs) |glyph| {
+            const glyph_x = glyph.x - origin_x;
+            min_x = @min(min_x, glyph_x);
+            max_x = @max(max_x, glyph_x + estimatedGlyphAdvance(glyph, text.size));
+            min_y = @min(min_y, baseline + glyph.y - text.size);
+            max_y = @max(max_y, baseline + glyph.y + text.size * 0.25);
+        }
+        return geometry.RectF.init(text.origin.x + min_x, min_y, @max(0, max_x - min_x), @max(0, max_y - min_y));
     }
-    return estimateTextWidth(text.text[text_start..@min(text.text.len, text_start + text_len)], text.size);
+    return geometry.RectF.init(
+        text.origin.x,
+        baseline - text.size,
+        estimateTextWidth(text.text[text_start..@min(text.text.len, text_start + text_len)], text.size),
+        line_height,
+    );
 }
 
 fn estimateTextWidth(text: []const u8, size: f32) f32 {
@@ -14854,6 +14864,26 @@ test "text layout handles newlines and shaped glyph runs" {
     try std.testing.expectEqual(@as(usize, 1), shaped.lineCount());
     try std.testing.expectEqual(@as(usize, 2), shaped.lines[0].glyph_len);
     try expectRect(geometry.RectF.init(3, 4, 19, 20), shaped.lines[0].bounds);
+}
+
+test "text layout bounds shaped glyph positions and vertical offsets" {
+    const glyphs = [_]Glyph{
+        .{ .id = 1, .x = 2, .y = -3, .advance = 5 },
+        .{ .id = 2, .x = 6, .y = 4, .advance = 4 },
+    };
+    var lines: [1]TextLine = undefined;
+    const layout = try layoutTextRun(.{
+        .font_id = 2,
+        .size = 10,
+        .origin = geometry.PointF.init(10, 20),
+        .color = Color.rgb8(0, 0, 0),
+        .text = "AV",
+        .glyphs = &glyphs,
+    }, .{ .line_height = 12 }, &lines);
+
+    try std.testing.expectEqual(@as(usize, 1), layout.lineCount());
+    try expectRect(geometry.RectF.init(10, 7, 8, 19.5), layout.lines[0].bounds);
+    try expectRect(geometry.RectF.init(10, 7, 8, 19.5), layout.bounds);
 }
 
 test "text layout wraps shaped glyph runs by glyph advances" {
