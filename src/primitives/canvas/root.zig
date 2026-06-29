@@ -6704,9 +6704,9 @@ fn focusSpatial(layout: WidgetLayoutTree, current_index: usize, direction: Widge
         const target = focusTargetFromNode(node, index) orelse continue;
         const target_bounds = target.bounds.normalized();
         const target_center = target_bounds.center();
-        if (!spatialFocusCandidate(current_bounds, target_bounds, current_center, target_center, direction)) continue;
+        if (!spatialFocusCandidate(current_center, target_bounds, direction)) continue;
 
-        const score = spatialFocusScore(current_center, target_center, direction);
+        const score = spatialFocusScore(current_bounds, target_bounds, current_center, target_center, direction);
         if (score < best_score or (score == best_score and (best == null or target.index < best.?.index))) {
             best = target;
             best_score = score;
@@ -6717,29 +6717,41 @@ fn focusSpatial(layout: WidgetLayoutTree, current_index: usize, direction: Widge
 }
 
 fn spatialFocusCandidate(
-    current_bounds: geometry.RectF,
-    target_bounds: geometry.RectF,
     current_center: geometry.PointF,
-    target_center: geometry.PointF,
+    target_bounds: geometry.RectF,
     direction: WidgetFocusDirection,
 ) bool {
     return switch (direction) {
-        .left => target_center.x < current_center.x and rectsOverlapY(current_bounds, target_bounds),
-        .right => target_center.x > current_center.x and rectsOverlapY(current_bounds, target_bounds),
-        .up => target_center.y < current_center.y and rectsOverlapX(current_bounds, target_bounds),
-        .down => target_center.y > current_center.y and rectsOverlapX(current_bounds, target_bounds),
+        .left => target_bounds.maxX() <= current_center.x,
+        .right => target_bounds.x >= current_center.x,
+        .up => target_bounds.maxY() <= current_center.y,
+        .down => target_bounds.y >= current_center.y,
         .forward, .backward => false,
     };
 }
 
-fn spatialFocusScore(current_center: geometry.PointF, target_center: geometry.PointF, direction: WidgetFocusDirection) f32 {
+fn spatialFocusScore(current_bounds: geometry.RectF, target_bounds: geometry.RectF, current_center: geometry.PointF, target_center: geometry.PointF, direction: WidgetFocusDirection) f32 {
     const dx = @abs(target_center.x - current_center.x);
     const dy = @abs(target_center.y - current_center.y);
+    const gap_x = rectGapX(current_bounds, target_bounds);
+    const gap_y = rectGapY(current_bounds, target_bounds);
     return switch (direction) {
-        .left, .right => dx * 4096 + dy,
-        .up, .down => dy * 4096 + dx,
+        .left, .right => dx * 4096 + gap_y * 4096 + dy,
+        .up, .down => dy * 4096 + gap_x * 4096 + dx,
         .forward, .backward => std.math.inf(f32),
     };
+}
+
+fn rectGapX(a: geometry.RectF, b: geometry.RectF) f32 {
+    if (rectsOverlapX(a, b)) return 0;
+    if (b.x >= a.maxX()) return b.x - a.maxX();
+    return a.x - b.maxX();
+}
+
+fn rectGapY(a: geometry.RectF, b: geometry.RectF) f32 {
+    if (rectsOverlapY(a, b)) return 0;
+    if (b.y >= a.maxY()) return b.y - a.maxY();
+    return a.y - b.maxY();
 }
 
 fn rectsOverlapX(a: geometry.RectF, b: geometry.RectF) bool {
@@ -10537,6 +10549,38 @@ test "widget spatial focus traversal moves across data grid cells" {
     try std.testing.expect(layout.focusTarget(3, .left) == null);
     try std.testing.expect(layout.focusTarget(3, .up) == null);
     try std.testing.expect(layout.focusTarget(null, .right) == null);
+}
+
+test "widget spatial focus traversal reaches staggered targets" {
+    const children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .button,
+            .frame = geometry.RectF.init(0, 0, 40, 24),
+            .text = "Start",
+        },
+        .{
+            .id = 3,
+            .kind = .button,
+            .frame = geometry.RectF.init(72, 40, 40, 24),
+            .text = "Next",
+        },
+        .{
+            .id = 4,
+            .kind = .button,
+            .frame = geometry.RectF.init(60, 88, 40, 24),
+            .text = "Lower",
+        },
+    };
+    const root = Widget{ .kind = .stack, .children = &children };
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 140, 128), &nodes);
+    try std.testing.expectEqual(@as(ObjectId, 3), layout.focusTarget(2, .right).?.id);
+    try std.testing.expectEqual(@as(ObjectId, 3), layout.focusTarget(2, .down).?.id);
+    try std.testing.expectEqual(@as(ObjectId, 2), layout.focusTarget(3, .left).?.id);
+    try std.testing.expectEqual(@as(ObjectId, 2), layout.focusTarget(3, .up).?.id);
+    try std.testing.expectEqual(@as(ObjectId, 4), layout.focusTarget(3, .down).?.id);
 }
 
 test "widget layout collects accessibility semantics" {
