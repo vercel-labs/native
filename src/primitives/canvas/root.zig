@@ -7364,15 +7364,16 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         !optionalTextRangesEqual(previous.widget.text_composition, next.widget.text_composition);
     const behavior_dirty = !std.mem.eql(u8, previous.widget.command, next.widget.command);
     const state_dirty = !widgetStatesEqual(previous.widget.state, next.widget.state);
+    const visibility_dirty = previous.widget.semantics.hidden != next.widget.semantics.hidden;
     const semantics_dirty =
         layout_dirty or
         content_dirty or
         behavior_dirty or
         state_dirty or
         !widgetSemanticsEqual(previous.widget.semantics, next.widget.semantics);
-    const paint_dirty = layout_dirty or content_dirty or state_dirty;
+    const paint_dirty = layout_dirty or content_dirty or state_dirty or visibility_dirty;
 
-    const dirty_bounds = if (layout_dirty)
+    const dirty_bounds = if (layout_dirty or visibility_dirty)
         unionOptionalBounds(widgetFullPaintBounds(previous), widgetFullPaintBounds(next))
     else if (paint_dirty)
         widgetPaintChangeBounds(previous.widget, next.widget)
@@ -11834,6 +11835,12 @@ test "widget layout diff includes paint overdraw in dirty bounds" {
         .kind = .panel,
         .frame = geometry.RectF.init(10, 10, 100, 40),
     }};
+    const hidden_panel_child = [_]Widget{.{
+        .id = 2,
+        .kind = .panel,
+        .frame = geometry.RectF.init(10, 10, 100, 40),
+        .semantics = .{ .hidden = true },
+    }};
     const unfocused_child = [_]Widget{.{
         .id = 3,
         .kind = .button,
@@ -11850,8 +11857,10 @@ test "widget layout diff includes paint overdraw in dirty bounds" {
 
     var previous_panel_nodes: [2]WidgetLayoutNode = undefined;
     var next_panel_nodes: [1]WidgetLayoutNode = undefined;
+    var hidden_panel_nodes: [2]WidgetLayoutNode = undefined;
     const previous_panel = try layoutWidgetTree(.{ .kind = .stack, .children = &panel_child }, geometry.RectF.init(0, 0, 160, 120), &previous_panel_nodes);
     const next_panel = try layoutWidgetTree(.{ .kind = .stack, .children = &.{} }, geometry.RectF.init(0, 0, 160, 120), &next_panel_nodes);
+    const hidden_panel = try layoutWidgetTree(.{ .kind = .stack, .children = &hidden_panel_child }, geometry.RectF.init(0, 0, 160, 120), &hidden_panel_nodes);
 
     var invalidations_buffer: [2]WidgetInvalidation = undefined;
     const panel_invalidations = try WidgetLayoutTree.diff(previous_panel, next_panel, &invalidations_buffer);
@@ -11859,6 +11868,15 @@ test "widget layout diff includes paint overdraw in dirty bounds" {
     try std.testing.expectEqual(WidgetInvalidationKind.removed, panel_invalidations[0].kind);
     try std.testing.expectEqual(@as(ObjectId, 2), panel_invalidations[0].id);
     try expectRect(geometry.RectF.init(-14, -8, 148, 88), panel_invalidations[0].dirty_bounds);
+
+    const hidden_panel_invalidations = try WidgetLayoutTree.diff(previous_panel, hidden_panel, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 1), hidden_panel_invalidations.len);
+    try std.testing.expectEqual(WidgetInvalidationKind.changed, hidden_panel_invalidations[0].kind);
+    try std.testing.expectEqual(@as(ObjectId, 2), hidden_panel_invalidations[0].id);
+    try std.testing.expect(!hidden_panel_invalidations[0].layout_dirty);
+    try std.testing.expect(hidden_panel_invalidations[0].paint_dirty);
+    try std.testing.expect(hidden_panel_invalidations[0].semantics_dirty);
+    try expectRect(geometry.RectF.init(-14, -8, 148, 88), hidden_panel_invalidations[0].dirty_bounds);
 
     var unfocused_nodes: [2]WidgetLayoutNode = undefined;
     var focused_nodes: [2]WidgetLayoutNode = undefined;
