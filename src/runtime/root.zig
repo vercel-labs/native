@@ -20,6 +20,8 @@ pub const max_canvas_path_elements_per_view: usize = 128;
 pub const max_canvas_glyphs_per_view: usize = 256;
 pub const max_canvas_text_bytes_per_view: usize = 2048;
 const max_canvas_diff_changes_per_view: usize = max_canvas_commands_per_view * 2 + 1;
+const max_canvas_render_animations_per_view: usize = max_canvas_commands_per_view;
+const max_canvas_render_overrides_per_view: usize = max_canvas_commands_per_view;
 const max_canvas_pipelines_per_view: usize = 8;
 const max_canvas_pipeline_cache_actions_per_view: usize = max_canvas_pipelines_per_view * 2;
 const max_canvas_resources_per_view: usize = max_canvas_commands_per_view;
@@ -238,6 +240,8 @@ pub const Runtime = struct {
     canvas_frame_glyph_atlas_cache_entries: [max_canvas_glyphs_per_view]canvas.GlyphAtlasCacheEntry = undefined,
     canvas_frame_glyph_atlas_cache_actions: [max_canvas_glyphs_per_view * 2]canvas.GlyphAtlasCacheAction = undefined,
     canvas_frame_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined,
+    canvas_frame_render_override_samples: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
+    canvas_frame_render_override_combined: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
 
     pub fn init(options: Options) Runtime {
         return .{
@@ -619,6 +623,36 @@ pub const Runtime = struct {
         return self.views[index].canvasDisplayList();
     }
 
+    pub fn setCanvasRenderAnimations(self: *Runtime, window_id: platform.WindowId, label: []const u8, animations: []const canvas.CanvasRenderAnimation) anyerror!platform.ViewInfo {
+        try self.validateViewParent(window_id);
+        try validateViewLabel(label);
+        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+        try validateCanvasRenderAnimations(animations);
+        try self.views[index].copyCanvasRenderAnimations(animations);
+        self.invalidateFor(.state, self.views[index].frame);
+        return self.views[index].info();
+    }
+
+    pub fn clearCanvasRenderAnimations(self: *Runtime, window_id: platform.WindowId, label: []const u8) anyerror!platform.ViewInfo {
+        try self.validateViewParent(window_id);
+        try validateViewLabel(label);
+        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+        if (self.views[index].canvas_render_animation_count == 0 and self.views[index].canvas_frame_render_override_count == 0) return self.views[index].info();
+        self.views[index].canvas_render_animation_count = 0;
+        self.invalidateFor(.state, self.views[index].frame);
+        return self.views[index].info();
+    }
+
+    pub fn canvasRenderAnimations(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror![]const canvas.CanvasRenderAnimation {
+        try self.validateViewParent(window_id);
+        try validateViewLabel(label);
+        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+        return self.views[index].canvasRenderAnimations();
+    }
+
     pub fn canvasFramePlan(self: *const Runtime, window_id: platform.WindowId, label: []const u8, previous: ?canvas.DisplayList, options: canvas.CanvasFrameOptions, storage: canvas.CanvasFrameStorage) anyerror!canvas.CanvasFrame {
         try self.validateViewParent(window_id);
         try validateViewLabel(label);
@@ -691,6 +725,19 @@ pub const Runtime = struct {
         frame_options.previous_pipeline_cache = self.views[index].canvasFramePipelineCache();
         frame_options.previous_glyph_atlas_cache = self.views[index].canvasFrameGlyphAtlasCache();
         frame_options.previous_text_layout_cache = self.views[index].canvasFrameTextLayoutCache();
+        const scheduled_render_overrides = try self.views[index].sampleCanvasRenderAnimations(
+            frame_options.timestamp_ns,
+            &self.canvas_frame_render_override_samples,
+        );
+        const render_overrides = try mergeCanvasRenderOverrides(
+            scheduled_render_overrides,
+            frame_options.render_overrides,
+            &self.canvas_frame_render_override_combined,
+        );
+        if (frame_options.previous_render_overrides.len == 0) {
+            frame_options.previous_render_overrides = self.views[index].canvasFrameRenderOverrides();
+        }
+        frame_options.render_overrides = render_overrides;
 
         const display_list = self.views[index].canvasDisplayList();
         var render_plan = try display_list.renderPlan(storage.render_commands);
@@ -830,6 +877,10 @@ pub const Runtime = struct {
         try self.views[index].copyCanvasFrameTextLayoutCache(canvas_frame.text_layout_cache_plan.entries);
         try self.views[index].copyPresentedCanvasSummary(display_list);
         self.views[index].recordCanvasFrame(canvas_frame);
+        try self.views[index].copyCanvasFrameRenderOverrides(frame_options.render_overrides);
+        if (self.views[index].canvasRenderAnimationsActive(frame_options.timestamp_ns)) {
+            self.invalidateFor(.state, self.views[index].frame);
+        }
         return canvas_frame;
     }
 
@@ -4111,6 +4162,10 @@ const RuntimeView = struct {
     presented_canvas_commands: [max_canvas_commands_per_view]PresentedCanvasCommand = undefined,
     presented_canvas_command_count: usize = 0,
     presented_canvas_has_unkeyed: bool = false,
+    canvas_render_animations: [max_canvas_render_animations_per_view]canvas.CanvasRenderAnimation = undefined,
+    canvas_render_animation_count: usize = 0,
+    canvas_frame_render_overrides: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
+    canvas_frame_render_override_count: usize = 0,
     canvas_frame_resource_cache: [max_canvas_resources_per_view]canvas.RenderResourceCacheEntry = undefined,
     canvas_frame_resource_cache_count: usize = 0,
     canvas_frame_glyph_atlas_cache: [max_canvas_glyphs_per_view]canvas.GlyphAtlasCacheEntry = undefined,
@@ -4262,6 +4317,14 @@ const RuntimeView = struct {
         return self.canvas_frame_resource_cache[0..self.canvas_frame_resource_cache_count];
     }
 
+    fn canvasRenderAnimations(self: *const RuntimeView) []const canvas.CanvasRenderAnimation {
+        return self.canvas_render_animations[0..self.canvas_render_animation_count];
+    }
+
+    fn canvasFrameRenderOverrides(self: *const RuntimeView) []const canvas.CanvasRenderOverride {
+        return self.canvas_frame_render_overrides[0..self.canvas_frame_render_override_count];
+    }
+
     fn canvasFramePipelineCache(self: *const RuntimeView) []const canvas.RenderPipelineCacheEntry {
         return self.canvas_frame_pipeline_cache[0..self.canvas_frame_pipeline_cache_count];
     }
@@ -4306,6 +4369,29 @@ const RuntimeView = struct {
         if (entries.len > self.canvas_frame_resource_cache.len) return error.RenderResourceListFull;
         @memcpy(self.canvas_frame_resource_cache[0..entries.len], entries);
         self.canvas_frame_resource_cache_count = entries.len;
+    }
+
+    fn copyCanvasRenderAnimations(self: *RuntimeView, animations: []const canvas.CanvasRenderAnimation) anyerror!void {
+        if (animations.len > self.canvas_render_animations.len) return error.RenderAnimationListFull;
+        @memcpy(self.canvas_render_animations[0..animations.len], animations);
+        self.canvas_render_animation_count = animations.len;
+    }
+
+    fn copyCanvasFrameRenderOverrides(self: *RuntimeView, overrides: []const canvas.CanvasRenderOverride) anyerror!void {
+        if (overrides.len > self.canvas_frame_render_overrides.len) return error.RenderOverrideListFull;
+        @memcpy(self.canvas_frame_render_overrides[0..overrides.len], overrides);
+        self.canvas_frame_render_override_count = overrides.len;
+    }
+
+    fn sampleCanvasRenderAnimations(self: *const RuntimeView, timestamp_ns: u64, output: []canvas.CanvasRenderOverride) anyerror![]const canvas.CanvasRenderOverride {
+        return canvas.sampleCanvasRenderAnimations(self.canvasRenderAnimations(), timestamp_ns, output);
+    }
+
+    fn canvasRenderAnimationsActive(self: *const RuntimeView, timestamp_ns: u64) bool {
+        for (self.canvasRenderAnimations()) |animation| {
+            if (canvasRenderAnimationActive(animation, timestamp_ns)) return true;
+        }
+        return false;
     }
 
     fn copyCanvasFramePipelineCache(self: *RuntimeView, entries: []const canvas.RenderPipelineCacheEntry) anyerror!void {
@@ -5489,6 +5575,50 @@ fn canvasWidgetKeyboardModifiers(modifiers: platform.ShortcutModifiers) canvas.W
         .alt = modifiers.option,
         .super = modifiers.command or modifiers.primary,
     };
+}
+
+fn validateCanvasRenderAnimations(animations: []const canvas.CanvasRenderAnimation) !void {
+    if (animations.len > max_canvas_render_animations_per_view) return error.RenderAnimationListFull;
+    for (animations) |animation| {
+        if (animation.id == 0) return error.InvalidViewOptions;
+    }
+}
+
+fn mergeCanvasRenderOverrides(
+    scheduled: []const canvas.CanvasRenderOverride,
+    explicit: []const canvas.CanvasRenderOverride,
+    output: []canvas.CanvasRenderOverride,
+) ![]const canvas.CanvasRenderOverride {
+    var len: usize = 0;
+    for (scheduled) |override| {
+        if (len >= output.len) return error.RenderOverrideListFull;
+        output[len] = override;
+        len += 1;
+    }
+    for (explicit) |override| {
+        if (findCanvasRenderOverrideIndex(output[0..len], override.id)) |index| {
+            output[index] = override;
+            continue;
+        }
+        if (len >= output.len) return error.RenderOverrideListFull;
+        output[len] = override;
+        len += 1;
+    }
+    return output[0..len];
+}
+
+fn findCanvasRenderOverrideIndex(overrides: []const canvas.CanvasRenderOverride, id: canvas.ObjectId) ?usize {
+    for (overrides, 0..) |override, index| {
+        if (override.id == id) return index;
+    }
+    return null;
+}
+
+fn canvasRenderAnimationActive(animation: canvas.CanvasRenderAnimation, timestamp_ns: u64) bool {
+    if (animation.id == 0 or animation.duration_ms == 0) return false;
+    if (timestamp_ns <= animation.start_ns) return true;
+    const duration_ns = @as(u64, animation.duration_ms) * 1_000_000;
+    return timestamp_ns - animation.start_ns < duration_ns;
 }
 
 fn widgetRoleName(role: canvas.WidgetRole) []const u8 {
@@ -7572,6 +7702,103 @@ test "runtime next canvas frame applies render override dirty regions" {
     try std.testing.expect(!clean_frame.requiresRender());
     try std.testing.expect(clean_frame.dirty_bounds == null);
     try std.testing.expect(harness.runtime.views[0].canvas_frame_dirty_bounds == null);
+}
+
+test "runtime schedules canvas render animations without display list rebuild" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-runtime-animation", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 40, 20),
+    });
+
+    const commands = [_]canvas.CanvasCommand{.{ .fill_rect = .{
+        .id = 1,
+        .rect = geometry.RectF.init(0, 0, 10, 10),
+        .fill = .{ .color = canvas.Color.rgb8(255, 0, 0) },
+    } }};
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &commands });
+
+    var render_commands: [1]canvas.RenderCommand = undefined;
+    var render_batches: [1]canvas.RenderBatch = undefined;
+    var resources: [1]canvas.RenderResource = undefined;
+    var resource_cache_entries: [1]canvas.RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [2]canvas.RenderResourceCacheAction = undefined;
+    var glyphs: [1]canvas.GlyphAtlasEntry = undefined;
+    var changes: [1]canvas.DiffChange = undefined;
+    const frame_storage = canvas.CanvasFrameStorage{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    };
+
+    const start_ns: u64 = 1_000_000_000;
+    _ = try harness.runtime.nextCanvasFrame(1, "canvas", .{ .frame_index = 1, .timestamp_ns = start_ns }, frame_storage);
+    const initial_revision = harness.runtime.views[0].canvas_revision;
+
+    const animations = [_]canvas.CanvasRenderAnimation{.{
+        .id = 1,
+        .start_ns = start_ns,
+        .duration_ms = 1_000,
+        .easing = .linear,
+        .from_opacity = 0,
+        .to_opacity = 1,
+        .from_transform = canvas.Affine.translate(10, 0),
+        .to_transform = canvas.Affine.identity(),
+    }};
+    _ = try harness.runtime.setCanvasRenderAnimations(1, "canvas", &animations);
+    try std.testing.expectEqual(@as(usize, 1), (try harness.runtime.canvasRenderAnimations(1, "canvas")).len);
+    try std.testing.expect(harness.runtime.invalidated);
+
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    const mid_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{
+        .frame_index = 2,
+        .timestamp_ns = start_ns + 500_000_000,
+    }, frame_storage);
+    try std.testing.expectEqual(initial_revision, harness.runtime.views[0].canvas_revision);
+    try std.testing.expect(!mid_frame.full_repaint);
+    try std.testing.expect(mid_frame.requiresRender());
+    try std.testing.expectEqual(@as(usize, 0), mid_frame.changes.len);
+    try std.testing.expectEqual(@as(f32, 0.5), mid_frame.render_plan.commands[0].opacity);
+    try std.testing.expectEqualDeep(canvas.Affine.translate(5, 0), mid_frame.render_plan.commands[0].transform);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 15, 10), mid_frame.dirty_bounds.?);
+    try std.testing.expect(harness.runtime.invalidated);
+
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    const final_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{
+        .frame_index = 3,
+        .timestamp_ns = start_ns + 1_000_000_000,
+    }, frame_storage);
+    try std.testing.expect(final_frame.requiresRender());
+    try std.testing.expectEqual(@as(f32, 1), final_frame.render_plan.commands[0].opacity);
+    try std.testing.expectEqualDeep(canvas.Affine.identity(), final_frame.render_plan.commands[0].transform);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 15, 10), final_frame.dirty_bounds.?);
+    try std.testing.expect(!harness.runtime.invalidated);
+
+    const clean_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{
+        .frame_index = 4,
+        .timestamp_ns = start_ns + 1_016_000_000,
+    }, frame_storage);
+    try std.testing.expect(!clean_frame.requiresRender());
+    try std.testing.expect(clean_frame.dirty_bounds == null);
 }
 
 test "runtime presents next canvas frame pixels" {
