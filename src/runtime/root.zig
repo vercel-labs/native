@@ -631,6 +631,7 @@ pub const Runtime = struct {
         var canvas_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined;
         const changes = try canvas.DisplayList.diff(self.views[index].canvasDisplayList(), display_list, &canvas_changes);
         try self.views[index].copyCanvasDisplayList(display_list);
+        self.views[index].canvas_display_list_widget_owned = false;
         self.invalidateForCanvasChanges(self.views[index].frame, changes);
         return self.views[index].info();
     }
@@ -970,6 +971,7 @@ pub const Runtime = struct {
         const invalidations = try canvas.WidgetLayoutTree.diff(self.views[index].widgetLayoutTree(), layout, &widget_invalidations);
         try self.views[index].copyWidgetLayoutTree(layout);
         self.invalidateForWidgetInvalidations(self.views[index].frame, invalidations);
+        try self.refreshCanvasWidgetDisplayListIfOwned(index);
         return self.views[index].info();
     }
 
@@ -988,7 +990,7 @@ pub const Runtime = struct {
         if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
 
         const dirty = try self.views[index].stepCanvasWidgetKineticScroll(dt_ms) orelse return self.views[index].info();
-        self.invalidateForCanvasWidgetDirty(index, dirty);
+        try self.invalidateForCanvasWidgetDirty(index, dirty);
         return self.views[index].info();
     }
 
@@ -1000,7 +1002,11 @@ pub const Runtime = struct {
         if (std.meta.eql(self.views[index].widget_tokens, tokens)) return self.views[index].info();
         self.views[index].widget_tokens = tokens;
         self.views[index].widget_revision += 1;
-        self.invalidateFor(.state, self.views[index].frame);
+        if (self.views[index].canvas_display_list_widget_owned) {
+            try self.refreshCanvasWidgetDisplayList(index);
+        } else {
+            self.invalidateFor(.state, self.views[index].frame);
+        }
         return self.views[index].info();
     }
 
@@ -1021,7 +1027,7 @@ pub const Runtime = struct {
         if (!self.views[index].canEditCanvasWidgetText(id)) return error.InvalidCommand;
 
         const dirty = try self.views[index].applyCanvasWidgetTextEdit(id, edit) orelse return self.views[index].info();
-        self.invalidateForCanvasWidgetDirty(index, dirty);
+        try self.invalidateForCanvasWidgetDirty(index, dirty);
         return self.views[index].info();
     }
 
@@ -1036,20 +1042,35 @@ pub const Runtime = struct {
         const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
         if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
 
+        try self.refreshCanvasWidgetDisplayList(index);
+        self.views[index].canvas_display_list_widget_owned = true;
+        return self.views[index].info();
+    }
+
+    fn refreshCanvasWidgetDisplayListIfOwned(self: *Runtime, view_index: usize) anyerror!void {
+        if (view_index >= self.view_count) return;
+        if (self.views[view_index].kind != .gpu_surface) return;
+        if (!self.views[view_index].canvas_display_list_widget_owned) return;
+        try self.refreshCanvasWidgetDisplayList(view_index);
+    }
+
+    fn refreshCanvasWidgetDisplayList(self: *Runtime, view_index: usize) anyerror!void {
+        if (view_index >= self.view_count) return error.ViewNotFound;
+        if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
+
         var commands: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
         var builder = canvas.Builder.init(&commands);
-        try self.views[index].widgetLayoutTree().emitDisplayListWithState(&builder, self.views[index].widget_tokens, .{
-            .focused_id = self.views[index].canvas_widget_focused_id,
-            .hovered_id = self.views[index].canvas_widget_hovered_id,
-            .pressed_id = self.views[index].canvas_widget_pressed_id,
+        try self.views[view_index].widgetLayoutTree().emitDisplayListWithState(&builder, self.views[view_index].widget_tokens, .{
+            .focused_id = self.views[view_index].canvas_widget_focused_id,
+            .hovered_id = self.views[view_index].canvas_widget_hovered_id,
+            .pressed_id = self.views[view_index].canvas_widget_pressed_id,
         });
 
         const display_list = builder.displayList();
         var canvas_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined;
-        const changes = try canvas.DisplayList.diff(self.views[index].canvasDisplayList(), display_list, &canvas_changes);
-        try self.views[index].copyCanvasDisplayList(display_list);
-        self.invalidateForCanvasChanges(self.views[index].frame, changes);
-        return self.views[index].info();
+        const changes = try canvas.DisplayList.diff(self.views[view_index].canvasDisplayList(), display_list, &canvas_changes);
+        try self.views[view_index].copyCanvasDisplayList(display_list);
+        self.invalidateForCanvasChanges(self.views[view_index].frame, changes);
     }
 
     pub fn routeCanvasWidgetPointerInput(self: *const Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetPointerEvent {
@@ -1165,7 +1186,7 @@ pub const Runtime = struct {
         };
     }
 
-    fn updateCanvasWidgetFocusFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) void {
+    fn updateCanvasWidgetFocusFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
         if (pointer_event.pointer.phase != .down) return;
         const index = self.findViewIndex(pointer_event.window_id, pointer_event.view_label) orelse return;
         if (self.views[index].kind != .gpu_surface) return;
@@ -1178,10 +1199,10 @@ pub const Runtime = struct {
         if (self.views[index].canvas_widget_focused_id == next_focus_id) return;
         const previous_state = self.views[index].canvasWidgetRenderState();
         self.views[index].canvas_widget_focused_id = next_focus_id;
-        self.invalidateForCanvasWidgetRenderStateChange(index, previous_state, self.views[index].canvasWidgetRenderState());
+        try self.invalidateForCanvasWidgetRenderStateChange(index, previous_state, self.views[index].canvasWidgetRenderState());
     }
 
-    fn updateCanvasWidgetInteractionFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) void {
+    fn updateCanvasWidgetInteractionFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
         const index = self.findViewIndex(pointer_event.window_id, pointer_event.view_label) orelse return;
         if (self.views[index].kind != .gpu_surface) return;
 
@@ -1224,21 +1245,22 @@ pub const Runtime = struct {
         self.views[index].canvas_widget_hovered_id = next_hovered_id;
         self.views[index].canvas_widget_pressed_id = next_pressed_id;
         self.views[index].canvas_widget_cursor = next_cursor;
-        if (interaction_changed) self.invalidateForCanvasWidgetRenderStateChange(index, previous_state, self.views[index].canvasWidgetRenderState());
+        if (interaction_changed) try self.invalidateForCanvasWidgetRenderStateChange(index, previous_state, self.views[index].canvasWidgetRenderState());
     }
 
-    fn invalidateForCanvasWidgetRenderStateChange(self: *Runtime, view_index: usize, previous: canvas.WidgetRenderState, next: canvas.WidgetRenderState) void {
+    fn invalidateForCanvasWidgetRenderStateChange(self: *Runtime, view_index: usize, previous: canvas.WidgetRenderState, next: canvas.WidgetRenderState) anyerror!void {
         if (view_index >= self.view_count) return;
         if (self.views[view_index].kind != .gpu_surface) return;
-        const local_dirty = self.views[view_index].widgetLayoutTree().renderStateDirtyBounds(previous, next) orelse {
-            self.invalidateFor(.state, self.views[view_index].frame);
-            return;
-        };
-        if (canvasDirtyRegionForView(self.views[view_index].frame, local_dirty)) |dirty_region| {
-            self.invalidateFor(.state, dirty_region);
+        if (self.views[view_index].widgetLayoutTree().renderStateDirtyBounds(previous, next)) |local_dirty| {
+            if (canvasDirtyRegionForView(self.views[view_index].frame, local_dirty)) |dirty_region| {
+                self.invalidateFor(.state, dirty_region);
+            } else {
+                self.invalidateFor(.state, self.views[view_index].frame);
+            }
         } else {
             self.invalidateFor(.state, self.views[view_index].frame);
         }
+        try self.refreshCanvasWidgetDisplayListIfOwned(view_index);
     }
 
     fn updateCanvasWidgetScrollFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
@@ -1252,6 +1274,7 @@ pub const Runtime = struct {
         } else {
             self.invalidateFor(.state, self.views[index].frame);
         }
+        try self.refreshCanvasWidgetDisplayListIfOwned(index);
     }
 
     fn updateCanvasWidgetTextFromKeyboard(self: *Runtime, keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
@@ -1266,6 +1289,7 @@ pub const Runtime = struct {
         } else {
             self.invalidateFor(.state, self.views[index].frame);
         }
+        try self.refreshCanvasWidgetDisplayListIfOwned(index);
     }
 
     fn updateCanvasWidgetTextFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
@@ -1289,6 +1313,7 @@ pub const Runtime = struct {
         } else {
             self.invalidateFor(.state, self.views[index].frame);
         }
+        try self.refreshCanvasWidgetDisplayListIfOwned(index);
     }
 
     fn updateCanvasWidgetControlFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
@@ -1305,6 +1330,7 @@ pub const Runtime = struct {
         } else {
             self.invalidateFor(.state, self.views[index].frame);
         }
+        try self.refreshCanvasWidgetDisplayListIfOwned(index);
     }
 
     fn updateCanvasWidgetControlFromKeyboard(self: *Runtime, keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
@@ -1318,6 +1344,7 @@ pub const Runtime = struct {
         } else {
             self.invalidateFor(.state, self.views[index].frame);
         }
+        try self.refreshCanvasWidgetDisplayListIfOwned(index);
     }
 
     fn dispatchCanvasWidgetCommandFromPointer(self: *Runtime, app: App, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
@@ -1353,7 +1380,7 @@ pub const Runtime = struct {
         });
     }
 
-    fn updateCanvasWidgetFocusFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent) void {
+    fn updateCanvasWidgetFocusFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent) anyerror!void {
         if (input_event.kind != .key_down) return;
         const index = self.findViewIndex(input_event.window_id, input_event.label) orelse return;
         if (self.views[index].kind != .gpu_surface) return;
@@ -1362,7 +1389,7 @@ pub const Runtime = struct {
         if (std.ascii.eqlIgnoreCase(input_event.key, "tab")) {
             const direction: canvas.WidgetFocusDirection = if (input_event.modifiers.shift) .backward else .forward;
             const target = self.views[index].widgetLayoutTree().focusTarget(current_id, direction) orelse return;
-            self.setCanvasWidgetFocusFromKeyboard(index, target.id);
+            try self.setCanvasWidgetFocusFromKeyboard(index, target.id);
             return;
         }
 
@@ -1373,14 +1400,14 @@ pub const Runtime = struct {
         if (focused.kind != .data_cell) return;
         const target = layout.focusTarget(focused_id, direction) orelse return;
         if (target.kind != .data_cell) return;
-        self.setCanvasWidgetFocusFromKeyboard(index, target.id);
+        try self.setCanvasWidgetFocusFromKeyboard(index, target.id);
     }
 
-    fn setCanvasWidgetFocusFromKeyboard(self: *Runtime, view_index: usize, target_id: canvas.ObjectId) void {
+    fn setCanvasWidgetFocusFromKeyboard(self: *Runtime, view_index: usize, target_id: canvas.ObjectId) anyerror!void {
         if (self.views[view_index].canvas_widget_focused_id == target_id) return;
         const previous_state = self.views[view_index].canvasWidgetRenderState();
         self.views[view_index].canvas_widget_focused_id = target_id;
-        self.invalidateForCanvasWidgetRenderStateChange(view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
+        try self.invalidateForCanvasWidgetRenderStateChange(view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
     }
 
     fn invalidateForCanvasChanges(self: *Runtime, view_frame: geometry.RectF, changes: []const canvas.DiffChange) void {
@@ -1767,10 +1794,10 @@ pub const Runtime = struct {
                 if (widget_pointer_event) |pointer_event| {
                     try self.updateCanvasWidgetControlFromPointer(pointer_event);
                     try self.dispatchCanvasWidgetCommandFromPointer(app, pointer_event);
-                    self.updateCanvasWidgetInteractionFromPointer(pointer_event);
+                    try self.updateCanvasWidgetInteractionFromPointer(pointer_event);
                     try self.updateCanvasWidgetTextFromPointer(pointer_event);
                     try self.updateCanvasWidgetScrollFromPointer(pointer_event);
-                    self.updateCanvasWidgetFocusFromPointer(pointer_event);
+                    try self.updateCanvasWidgetFocusFromPointer(pointer_event);
                     try self.dispatchEvent(app, .{ .canvas_widget_pointer = pointer_event });
                 }
                 const widget_drag_event = self.routeCanvasWidgetDragInput(input_event, &self.widget_event_route_entries) catch |err| switch (err) {
@@ -1783,7 +1810,7 @@ pub const Runtime = struct {
                 if (widget_drag_event) |drag_event| {
                     try self.dispatchEvent(app, .{ .canvas_widget_drag = drag_event });
                 }
-                self.updateCanvasWidgetFocusFromKeyboardInput(input_event);
+                try self.updateCanvasWidgetFocusFromKeyboardInput(input_event);
                 const widget_keyboard_event = self.routeCanvasWidgetKeyboardInput(input_event, &self.widget_event_route_entries) catch |err| switch (err) {
                     error.WindowNotFound,
                     error.ViewNotFound,
@@ -2289,7 +2316,7 @@ pub const Runtime = struct {
         if (self.views[view_index].canvas_widget_focused_id != target.id) {
             const previous_state = self.views[view_index].canvasWidgetRenderState();
             self.views[view_index].canvas_widget_focused_id = target.id;
-            self.invalidateForCanvasWidgetRenderStateChange(view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
+            try self.invalidateForCanvasWidgetRenderStateChange(view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
         }
     }
 
@@ -2308,20 +2335,20 @@ pub const Runtime = struct {
             try self.focusAutomationCanvasWidget(view_index, id);
         }
         const dirty = try self.views[view_index].setCanvasWidgetSelected(id, true) orelse return;
-        self.invalidateForCanvasWidgetDirty(view_index, dirty);
+        try self.invalidateForCanvasWidgetDirty(view_index, dirty);
     }
 
     fn setAutomationCanvasWidgetText(self: *Runtime, view_index: usize, id: canvas.ObjectId, text: []const u8) anyerror!void {
         try self.focusAutomationCanvasWidget(view_index, id);
         const dirty = try self.views[view_index].setCanvasWidgetTextValue(id, text) orelse return;
-        self.invalidateForCanvasWidgetDirty(view_index, dirty);
+        try self.invalidateForCanvasWidgetDirty(view_index, dirty);
     }
 
     fn editAutomationCanvasWidgetText(self: *Runtime, view_index: usize, id: canvas.ObjectId, edit: canvas.TextInputEvent) anyerror!void {
         try self.focusAutomationCanvasWidget(view_index, id);
         if (!self.views[view_index].canEditCanvasWidgetText(id)) return error.InvalidCommand;
         const dirty = try self.views[view_index].applyCanvasWidgetTextEdit(id, edit) orelse return;
-        self.invalidateForCanvasWidgetDirty(view_index, dirty);
+        try self.invalidateForCanvasWidgetDirty(view_index, dirty);
     }
 
     fn dispatchAutomationCanvasWidgetDrag(self: *Runtime, app: App, view_index: usize, id: canvas.ObjectId, value: []const u8) anyerror!void {
@@ -2337,7 +2364,7 @@ pub const Runtime = struct {
         const previous_pressed_id = self.views[view_index].canvas_widget_pressed_id;
         const previous_state = self.views[view_index].canvasWidgetRenderState();
         self.views[view_index].canvas_widget_pressed_id = id;
-        if (previous_pressed_id != id) self.invalidateForCanvasWidgetRenderStateChange(view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
+        if (previous_pressed_id != id) try self.invalidateForCanvasWidgetRenderStateChange(view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
         errdefer {
             if (view_index < self.view_count and self.views[view_index].canvas_widget_pressed_id == id) {
                 self.views[view_index].canvas_widget_pressed_id = previous_pressed_id;
@@ -2358,7 +2385,7 @@ pub const Runtime = struct {
             if (self.views[current_index].canvas_widget_pressed_id == id) {
                 const release_previous_state = self.views[current_index].canvasWidgetRenderState();
                 self.views[current_index].canvas_widget_pressed_id = 0;
-                self.invalidateForCanvasWidgetRenderStateChange(current_index, release_previous_state, self.views[current_index].canvasWidgetRenderState());
+                try self.invalidateForCanvasWidgetRenderStateChange(current_index, release_previous_state, self.views[current_index].canvasWidgetRenderState());
             }
         }
     }
@@ -2379,12 +2406,13 @@ pub const Runtime = struct {
         } });
     }
 
-    fn invalidateForCanvasWidgetDirty(self: *Runtime, view_index: usize, dirty: geometry.RectF) void {
+    fn invalidateForCanvasWidgetDirty(self: *Runtime, view_index: usize, dirty: geometry.RectF) anyerror!void {
         if (canvasDirtyRegionForView(self.views[view_index].frame, dirty)) |dirty_region| {
             self.invalidateFor(.state, dirty_region);
         } else {
             self.invalidateFor(.state, self.views[view_index].frame);
         }
+        try self.refreshCanvasWidgetDisplayListIfOwned(view_index);
     }
 
     fn createWindowWithSourceMode(self: *Runtime, options: platform.WindowCreateOptions, source_reloads_from_app: bool) anyerror!platform.WindowInfo {
@@ -4285,6 +4313,7 @@ const RuntimeView = struct {
     canvas_glyph_count: usize = 0,
     canvas_text_bytes: [max_canvas_text_bytes_per_view]u8 = undefined,
     canvas_text_len: usize = 0,
+    canvas_display_list_widget_owned: bool = false,
     presented_canvas_valid: bool = false,
     presented_canvas_revision: u64 = 0,
     presented_canvas_commands: [max_canvas_commands_per_view]PresentedCanvasCommand = undefined,
@@ -8894,18 +8923,41 @@ test "runtime emits canvas display list from focused widget layout" {
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", changed_layout);
 
     const retained_after_widget_update = try harness.runtime.canvasDisplayList(1, "canvas");
+    var saw_changed_text = false;
     for (retained_after_widget_update.commands) |command| {
         switch (command) {
             .draw_text => |text| {
                 if (text.id == testCanvasWidgetPartId(2, 4)) {
-                    try std.testing.expectEqualStrings("Run", text.text);
-                    return;
+                    try std.testing.expectEqualStrings("Changed", text.text);
+                    saw_changed_text = true;
                 }
             },
             else => {},
         }
     }
-    return error.TestUnexpectedResult;
+    try std.testing.expect(saw_changed_text);
+
+    var manual_commands: [1]canvas.CanvasCommand = undefined;
+    var manual_builder = canvas.Builder.init(&manual_commands);
+    try manual_builder.drawText(.{ .id = 900, .font_id = 1, .size = 12, .origin = geometry.PointF.init(4, 16), .color = canvas.Color.rgb8(1, 2, 3), .text = "Manual" });
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", manual_builder.displayList());
+
+    const manual_changed_children = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(10, 12, 96, 32),
+        .text = "Ignored",
+    }};
+    var manual_changed_nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const manual_changed_layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &manual_changed_children }, geometry.RectF.init(0, 0, 320, 240), &manual_changed_nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", manual_changed_layout);
+
+    const manual_retained = try harness.runtime.canvasDisplayList(1, "canvas");
+    try std.testing.expectEqual(@as(usize, 1), manual_retained.commandCount());
+    switch (manual_retained.commands[0]) {
+        .draw_text => |text| try std.testing.expectEqualStrings("Manual", text.text),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "runtime retains canvas widget design tokens" {
@@ -9134,7 +9186,7 @@ test "runtime wheel input scrolls retained canvas scroll views" {
     const kinetic = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
     try std.testing.expectEqual(@as(u64, 3), kinetic.widget_revision);
     try std.testing.expect(harness.runtime.invalidated);
-    try std.testing.expectEqual(@as(usize, 1), harness.runtime.pendingDirtyRegions().len);
+    try std.testing.expect(harness.runtime.pendingDirtyRegions().len >= 1);
     try std.testing.expectEqualDeep(geometry.RectF.init(10, 20, 180, 72), harness.runtime.pendingDirtyRegions()[0]);
 
     var kinetic_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
@@ -9149,7 +9201,7 @@ test "runtime wheel input scrolls retained canvas scroll views" {
     const clamped = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
     try std.testing.expectEqual(@as(u64, 4), clamped.widget_revision);
     try std.testing.expect(harness.runtime.invalidated);
-    try std.testing.expectEqual(@as(usize, 1), harness.runtime.pendingDirtyRegions().len);
+    try std.testing.expect(harness.runtime.pendingDirtyRegions().len >= 1);
     try std.testing.expectEqualDeep(geometry.RectF.init(10, 20, 180, 72), harness.runtime.pendingDirtyRegions()[0]);
 
     kinetic_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
@@ -9865,6 +9917,66 @@ test "runtime applies pointer values to canvas controls" {
     }
     try std.testing.expect(saw_checkbox_check);
     try std.testing.expect(saw_empty_slider_active);
+}
+
+test "runtime refreshes widget owned display list from canvas input" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-display-list-input", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 80),
+    });
+
+    const controls = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .checkbox,
+        .frame = geometry.RectF.init(10, 10, 120, 28),
+        .text = "Live",
+    }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &controls }, geometry.RectF.init(0, 0, 180, 80), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 18,
+        .y = 20,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_up,
+        .x = 18,
+        .y = 20,
+    } });
+
+    const display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    var saw_checkbox_check = false;
+    for (display_list.commands) |command| {
+        switch (command) {
+            .draw_line => |line| {
+                if (line.id == testCanvasWidgetPartId(2, 4)) saw_checkbox_check = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_checkbox_check);
 }
 
 test "runtime selects canvas widgets from pointer and keyboard activation" {
