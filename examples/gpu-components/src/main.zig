@@ -24,7 +24,13 @@ const refresh_command = "components.refresh";
 const theme_command = "components.theme";
 const canvas_label = "components-canvas";
 const primary_button_fill_id: canvas.ObjectId = 104 * 16 + 1;
-const search_text_id: canvas.ObjectId = 112 * 16 + 4;
+const project_static_text_id: canvas.ObjectId = 111 * 16 + 3;
+const project_text_id: canvas.ObjectId = 111 * 16 + 4;
+const project_selection_id: canvas.ObjectId = 111 * 16 + 3;
+const project_composition_id: canvas.ObjectId = 111 * 16 + 5;
+const search_text_id: canvas.ObjectId = 112 * 16 + 9;
+const search_selection_id: canvas.ObjectId = 112 * 16 + 8;
+const search_composition_id: canvas.ObjectId = 112 * 16 + 10;
 const scroll_track_id: canvas.ObjectId = 130 * 16 + 2;
 const scroll_thumb_id: canvas.ObjectId = 130 * 16 + 3;
 const menu_item_text_id: canvas.ObjectId = 142 * 16 + 3;
@@ -633,6 +639,7 @@ test "gpu components display list covers finished live controls" {
     try std.testing.expect(display_list.commandCount() <= max_component_commands);
     try std.testing.expect(display_list.findCommandById(1) != null);
     try std.testing.expect(display_list.findCommandById(primary_button_fill_id) != null);
+    try std.testing.expect(display_list.findCommandById(project_static_text_id) != null);
     try std.testing.expect(display_list.findCommandById(search_text_id) != null);
     try std.testing.expect(display_list.findCommandById(scroll_track_id) != null);
     try std.testing.expect(display_list.findCommandById(scroll_thumb_id) != null);
@@ -820,8 +827,18 @@ test "gpu components app registers component lab on first gpu frame" {
 
     var snapshot = harness.runtime.automationSnapshot("Components");
     try std.testing.expect(componentSnapshotWidget(snapshot, 104).?.actions.press);
-    try std.testing.expectEqualStrings("textbox", componentSnapshotWidget(snapshot, 111).?.role);
-    try std.testing.expectEqualStrings("textbox", componentSnapshotWidget(snapshot, 112).?.role);
+    const project_name = componentSnapshotWidget(snapshot, 111).?;
+    try std.testing.expectEqualStrings("textbox", project_name.role);
+    try std.testing.expectEqualStrings("Project name", project_name.name);
+    try std.testing.expectEqualStrings("zero-native", project_name.text_value);
+    try std.testing.expect(project_name.actions.set_text);
+    try std.testing.expect(project_name.actions.set_selection);
+    const component_search = componentSnapshotWidget(snapshot, 112).?;
+    try std.testing.expectEqualStrings("textbox", component_search.role);
+    try std.testing.expectEqualStrings("Component search", component_search.name);
+    try std.testing.expectEqualStrings("components", component_search.text_value);
+    try std.testing.expect(component_search.actions.set_text);
+    try std.testing.expect(component_search.actions.set_selection);
     try std.testing.expect(componentSnapshotWidget(snapshot, 113).?.actions.toggle);
     try std.testing.expect(componentSnapshotWidget(snapshot, 114).?.selected);
     try std.testing.expect(componentSnapshotWidget(snapshot, 115).?.actions.increment);
@@ -837,6 +854,97 @@ test "gpu components app registers component lab on first gpu frame" {
     try std.testing.expectEqual(@as(?usize, 1), componentSnapshotWidget(snapshot, 156).?.grid_row_index);
     try std.testing.expectEqual(@as(?usize, 0), componentSnapshotWidget(snapshot, 156).?.grid_column_index);
     try std.testing.expectEqualStrings("tooltip", componentSnapshotWidget(snapshot, 160).?.role);
+
+    resetComponentDirty(&harness.runtime);
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 111 set-text zero-canvas");
+    snapshot = harness.runtime.automationSnapshot("Components");
+    var edited_project = componentSnapshotWidget(snapshot, 111).?;
+    try std.testing.expectEqualStrings("zero-canvas", edited_project.text_value);
+    try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 11, .end = 11 }, edited_project.text_selection.?);
+    display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try expectComponentTextCommand(display_list, project_text_id, "zero-canvas");
+
+    resetComponentDirty(&harness.runtime);
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 111 set-selection 4 10");
+    snapshot = harness.runtime.automationSnapshot("Components");
+    edited_project = componentSnapshotWidget(snapshot, 111).?;
+    try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 4, .end = 10 }, edited_project.text_selection.?);
+    display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try std.testing.expect(display_list.findCommandById(project_selection_id) != null);
+    try expectComponentTextCommand(display_list, project_text_id, "zero-canvas");
+
+    resetComponentDirty(&harness.runtime);
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 111 set-selection 11 11");
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 111 set-composition ++");
+    snapshot = harness.runtime.automationSnapshot("Components");
+    edited_project = componentSnapshotWidget(snapshot, 111).?;
+    try std.testing.expectEqualStrings("zero-canvas++", edited_project.text_value);
+    try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 13, .end = 13 }, edited_project.text_selection.?);
+    try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 11, .end = 13 }, edited_project.text_composition.?);
+    display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try expectComponentTextCommand(display_list, project_text_id, "zero-canvas++");
+    try std.testing.expect(display_list.findCommandById(project_composition_id) != null);
+
+    resetComponentDirty(&harness.runtime);
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 111 cancel-composition");
+    snapshot = harness.runtime.automationSnapshot("Components");
+    edited_project = componentSnapshotWidget(snapshot, 111).?;
+    try std.testing.expectEqualStrings("zero-canvas", edited_project.text_value);
+    try std.testing.expect(edited_project.text_composition == null);
+    display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try expectComponentTextCommand(display_list, project_text_id, "zero-canvas");
+    try std.testing.expect(display_list.findCommandById(project_composition_id) == null);
+
+    resetComponentDirty(&harness.runtime);
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 112 set-text controls");
+    snapshot = harness.runtime.automationSnapshot("Components");
+    var edited_search = componentSnapshotWidget(snapshot, 112).?;
+    try std.testing.expectEqualStrings("controls", edited_search.text_value);
+    try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 8, .end = 8 }, edited_search.text_selection.?);
+    display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try expectComponentTextCommand(display_list, search_text_id, "controls");
+
+    resetComponentDirty(&harness.runtime);
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 112 set-selection 0 8");
+    snapshot = harness.runtime.automationSnapshot("Components");
+    edited_search = componentSnapshotWidget(snapshot, 112).?;
+    try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 0, .end = 8 }, edited_search.text_selection.?);
+    display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try std.testing.expect(display_list.findCommandById(search_selection_id) != null);
+    try expectComponentTextCommand(display_list, search_text_id, "controls");
+
+    resetComponentDirty(&harness.runtime);
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 112 set-selection 8 8");
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 112 set-composition -native");
+    snapshot = harness.runtime.automationSnapshot("Components");
+    edited_search = componentSnapshotWidget(snapshot, 112).?;
+    try std.testing.expectEqualStrings("controls-native", edited_search.text_value);
+    try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 15, .end = 15 }, edited_search.text_selection.?);
+    try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 8, .end = 15 }, edited_search.text_composition.?);
+    display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try expectComponentTextCommand(display_list, search_text_id, "controls-native");
+    try std.testing.expect(display_list.findCommandById(search_composition_id) != null);
+
+    resetComponentDirty(&harness.runtime);
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 112 cancel-composition");
+    snapshot = harness.runtime.automationSnapshot("Components");
+    edited_search = componentSnapshotWidget(snapshot, 112).?;
+    try std.testing.expectEqualStrings("controls", edited_search.text_value);
+    try std.testing.expect(edited_search.text_composition == null);
+    display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try expectComponentTextCommand(display_list, search_text_id, "controls");
+    try std.testing.expect(display_list.findCommandById(search_composition_id) == null);
+
+    resetComponentDirty(&harness.runtime);
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 112 set-composition ++");
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 112 commit-composition");
+    snapshot = harness.runtime.automationSnapshot("Components");
+    edited_search = componentSnapshotWidget(snapshot, 112).?;
+    try std.testing.expectEqualStrings("controls++", edited_search.text_value);
+    try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 10, .end = 10 }, edited_search.text_selection.?);
+    try std.testing.expect(edited_search.text_composition == null);
+    display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try expectComponentTextCommand(display_list, search_text_id, "controls++");
 
     resetComponentDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 104 press");
@@ -858,6 +966,14 @@ test "gpu components app registers component lab on first gpu frame" {
 
     const status_view = componentViewByLabel(&harness.runtime, "status-label").?;
     try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Component") != null);
+}
+
+fn expectComponentTextCommand(display_list: canvas.DisplayList, id: canvas.ObjectId, text: []const u8) !void {
+    const command_ref = display_list.findCommandById(id) orelse return error.TestUnexpectedResult;
+    switch (command_ref.command) {
+        .draw_text => |draw| try std.testing.expectEqualStrings(text, draw.text),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 fn expectSemanticRole(semantics: []const canvas.WidgetSemanticsNode, id: canvas.ObjectId, role: canvas.WidgetRole) !void {
