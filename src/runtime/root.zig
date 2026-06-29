@@ -4207,6 +4207,14 @@ const CanvasWidgetScrollReconcileEntry = struct {
     state: canvas.ScrollState = .{},
 };
 
+const CanvasWidgetTextReconcileEntry = struct {
+    id: canvas.ObjectId = 0,
+    kind: canvas.WidgetKind = .text_field,
+    text: []const u8 = &.{},
+    text_selection: ?canvas.TextSelection = null,
+    text_composition: ?canvas.TextRange = null,
+};
+
 fn canvasWidgetInteractionTargetExists(layout: canvas.WidgetLayoutTree, id: canvas.ObjectId) bool {
     const index = canvasWidgetLayoutNodeIndexById(layout, id) orelse return false;
     if (canvasWidgetLayoutNodeHidden(layout, index)) return false;
@@ -4240,6 +4248,10 @@ fn canvasWidgetRuntimeHitTarget(widget: canvas.Widget) bool {
     };
 }
 
+fn canvasWidgetEditableTextKind(kind: canvas.WidgetKind) bool {
+    return kind == .text_field or kind == .search_field;
+}
+
 fn collectCanvasWidgetScrollReconcileEntries(
     nodes: []const canvas.WidgetLayoutNode,
     states: []const canvas.ScrollState,
@@ -4269,6 +4281,47 @@ fn canvasWidgetScrollStateForLayoutNode(
         }
     }
     return state;
+}
+
+fn collectCanvasWidgetTextReconcileEntries(
+    nodes: []const canvas.WidgetLayoutNode,
+    output: []CanvasWidgetTextReconcileEntry,
+    text_storage: []u8,
+    text_len: *usize,
+) anyerror![]const CanvasWidgetTextReconcileEntry {
+    var len: usize = 0;
+    for (nodes) |node| {
+        if (node.widget.id == 0 or !canvasWidgetEditableTextKind(node.widget.kind)) continue;
+        if (len >= output.len) break;
+        const text_range = try appendWidgetTextStorageRange(text_storage, text_len, node.widget.text);
+        output[len] = .{
+            .id = node.widget.id,
+            .kind = node.widget.kind,
+            .text = text_storage[text_range.start..text_range.end],
+            .text_selection = node.widget.text_selection,
+            .text_composition = node.widget.text_composition,
+        };
+        len += 1;
+    }
+    return output[0..len];
+}
+
+fn canvasWidgetLayoutNodeWithTextReconcileState(
+    node: canvas.WidgetLayoutNode,
+    previous: []const CanvasWidgetTextReconcileEntry,
+) canvas.WidgetLayoutNode {
+    var copy = node;
+    if (copy.widget.id == 0 or !canvasWidgetEditableTextKind(copy.widget.kind)) return copy;
+    if (copy.widget.text_selection != null or copy.widget.text_composition != null) return copy;
+
+    for (previous) |entry| {
+        if (entry.id != copy.widget.id or entry.kind != copy.widget.kind) continue;
+        if (!std.mem.eql(u8, entry.text, copy.widget.text)) continue;
+        copy.widget.text_selection = entry.text_selection;
+        copy.widget.text_composition = entry.text_composition;
+        break;
+    }
+    return copy;
 }
 
 fn appendWidgetTextStorageRange(buffer: []u8, len: *usize, value: []const u8) anyerror!WidgetTextStorageRange {
@@ -4976,13 +5029,22 @@ const RuntimeView = struct {
             self.widget_scroll_states[0..self.widget_layout_node_count],
             &previous_scroll_entries,
         );
+        var previous_text_entries: [max_canvas_widget_nodes_per_view]CanvasWidgetTextReconcileEntry = undefined;
+        var previous_text_bytes: [max_canvas_widget_text_bytes_per_view]u8 = undefined;
+        var previous_text_len: usize = 0;
+        const previous_text_states = try collectCanvasWidgetTextReconcileEntries(
+            self.widgetLayoutTree().nodes,
+            &previous_text_entries,
+            &previous_text_bytes,
+            &previous_text_len,
+        );
 
         self.widget_layout_node_count = 0;
         self.widget_semantics_node_count = 0;
         self.widget_text_len = 0;
 
         for (layout.nodes) |node| {
-            const copy = try self.copyWidgetLayoutNode(node, source_semantics);
+            const copy = canvasWidgetLayoutNodeWithTextReconcileState(try self.copyWidgetLayoutNode(node, source_semantics), previous_text_states);
             self.widget_layout_nodes[self.widget_layout_node_count] = copy;
             self.widget_scroll_states[self.widget_layout_node_count] = canvasWidgetScrollStateForLayoutNode(copy, previous_scroll_states);
             self.widget_layout_node_count += 1;
@@ -9940,6 +10002,99 @@ test "runtime applies ime composition edits to canvas text fields" {
     try std.testing.expect(snapshot.widgets[0].text_composition == null);
 
     try std.testing.expectError(error.InvalidCommand, harness.runtime.editCanvasWidgetText(1, "canvas", 99, .commit_composition));
+}
+
+test "runtime reconciles canvas text edit state across layout replacement" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-text-reconcile", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(20, 30, 260, 140),
+    });
+
+    const text_field = canvas.Widget{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(12, 16, 160, 36),
+        .text = "Cafe",
+        .semantics = .{ .label = "Name" },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{text_field} }, geometry.RectF.init(0, 0, 260, 140), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    _ = try harness.runtime.editCanvasWidgetText(1, "canvas", 2, .{ .set_selection = .{ .anchor = 1, .focus = 4 } });
+
+    const moved_text_field = canvas.Widget{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(20, 24, 180, 36),
+        .text = "Cafe",
+        .semantics = .{ .label = "Name" },
+    };
+    var moved_nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const moved_layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{moved_text_field} }, geometry.RectF.init(0, 0, 260, 140), &moved_nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", moved_layout);
+
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("Cafe", retained.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 1, .focus = 4 }, retained.nodes[1].widget.text_selection.?);
+    try std.testing.expect(retained.nodes[1].widget.text_composition == null);
+
+    _ = try harness.runtime.editCanvasWidgetText(1, "canvas", 2, .{ .set_composition = .{ .text = "af\xc3\xa9", .cursor = 4 } });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("Caf\xc3\xa9", retained.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(5), retained.nodes[1].widget.text_selection.?);
+    try std.testing.expectEqualDeep(canvas.TextRange.init(1, 5), retained.nodes[1].widget.text_composition.?);
+
+    const composed_text_field = canvas.Widget{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(24, 28, 184, 36),
+        .text = "Caf\xc3\xa9",
+        .semantics = .{ .label = "Name" },
+    };
+    var composed_nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const composed_layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{composed_text_field} }, geometry.RectF.init(0, 0, 260, 140), &composed_nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", composed_layout);
+
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("Caf\xc3\xa9", retained.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(5), retained.nodes[1].widget.text_selection.?);
+    try std.testing.expectEqualDeep(canvas.TextRange.init(1, 5), retained.nodes[1].widget.text_composition.?);
+
+    const snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expectEqualStrings("Caf\xc3\xa9", snapshot.widgets[0].text_value);
+    try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 5, .end = 5 }, snapshot.widgets[0].text_selection.?);
+    try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 1, .end = 5 }, snapshot.widgets[0].text_composition.?);
+
+    const replaced_text_field = canvas.Widget{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(24, 28, 184, 36),
+        .text = "Reset",
+        .semantics = .{ .label = "Name" },
+    };
+    var replaced_nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const replaced_layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{replaced_text_field} }, geometry.RectF.init(0, 0, 260, 140), &replaced_nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", replaced_layout);
+
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("Reset", retained.nodes[1].widget.text);
+    try std.testing.expect(retained.nodes[1].widget.text_selection == null);
+    try std.testing.expect(retained.nodes[1].widget.text_composition == null);
 }
 
 test "runtime applies pointer selection to canvas text fields" {
