@@ -3104,8 +3104,8 @@ pub const Widget = struct {
 };
 
 pub const max_widget_depth: usize = 32;
+pub const max_widget_text_range_rects: usize = 4;
 const max_widget_text_layout_lines: usize = 16;
-const max_widget_text_range_rects: usize = 4;
 
 pub const WidgetLayoutNode = struct {
     widget: Widget,
@@ -3335,6 +3335,11 @@ pub const WidgetLayoutTree = struct {
 
     pub fn collectSemantics(self: WidgetLayoutTree, output: []WidgetSemanticsNode) Error![]const WidgetSemanticsNode {
         return collectWidgetSemantics(self, output);
+    }
+
+    pub fn textGeometry(self: WidgetLayoutTree, id: ObjectId, tokens: DesignTokens) ?WidgetTextGeometry {
+        const node = self.findById(id) orelse return null;
+        return textGeometryForWidget(node.widget, tokens);
     }
 
     pub fn emitDisplayList(self: WidgetLayoutTree, builder: *Builder, tokens: DesignTokens) Error!void {
@@ -7433,6 +7438,76 @@ fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNod
     }
 
     return output[0..len];
+}
+
+pub const WidgetTextGeometry = struct {
+    caret_bounds: ?geometry.RectF = null,
+    selection_bounds: ?geometry.RectF = null,
+    selection_rect_count: usize = 0,
+    composition_bounds: ?geometry.RectF = null,
+    composition_rect_count: usize = 0,
+};
+
+pub fn textGeometryForWidget(widget: Widget, tokens: DesignTokens) WidgetTextGeometry {
+    var value: WidgetTextGeometry = .{};
+    if (widget.kind != .text_field and widget.kind != .search_field) return value;
+    if (widget.state.disabled) return value;
+
+    const text_size = widgetTextInputSize(tokens);
+    const text_inset = widgetTextInputInset(widget, tokens);
+    const layout_options = widgetTextInputLayoutOptions(widget, text_size, text_inset);
+    const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
+    const draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, tokens.colors.text, layout_options);
+
+    var lines: [max_widget_text_layout_lines]TextLine = undefined;
+    const layout = layoutTextRun(draw_text, layout_options, &lines) catch return value;
+
+    if (widgetTextSelectionRange(widget)) |range| {
+        if (range.isCollapsed(widget.text.len)) {
+            value.caret_bounds = textCaretRectForLayout(draw_text, layout, range.start);
+        } else {
+            const bounds = textRangeBoundsForLayout(draw_text, layout, range);
+            value.selection_bounds = bounds.bounds;
+            value.selection_rect_count = bounds.rect_count;
+        }
+    }
+    if (widgetTextCompositionRange(widget)) |range| {
+        if (!range.isCollapsed(widget.text.len)) {
+            const bounds = textRangeBoundsForLayout(draw_text, layout, range);
+            value.composition_bounds = bounds.bounds;
+            value.composition_rect_count = bounds.rect_count;
+        }
+    }
+    return value;
+}
+
+const TextRangeBounds = struct {
+    bounds: ?geometry.RectF = null,
+    rect_count: usize = 0,
+};
+
+fn textRangeBoundsForLayout(text: DrawText, layout: TextLayout, range: TextRange) TextRangeBounds {
+    const normalized = snapTextRange(text.text, range);
+    if (normalized.isCollapsed(text.text.len)) return .{};
+
+    var value: TextRangeBounds = .{};
+    for (layout.lines) |line| {
+        const line_range = textLineRange(text, line);
+        const start = @max(normalized.start, line_range.start);
+        const end = @min(normalized.end, line_range.end);
+        if (start >= end) continue;
+
+        const x0 = textLineCaretX(text, line, start);
+        const x1 = textLineCaretX(text, line, end);
+        const left = @min(x0, x1);
+        const right = @max(x0, x1);
+        value.bounds = unionOptionalBounds(
+            value.bounds,
+            geometry.RectF.init(left, line.bounds.y, @max(1, right - left), @max(1, line.bounds.height)),
+        );
+        value.rect_count += 1;
+    }
+    return value;
 }
 
 fn nearestSemanticParent(stack: []const ?usize) ?usize {
@@ -12441,6 +12516,9 @@ test "widget search fields expose textbox semantics and render search chrome" {
     try std.testing.expectEqualStrings("customers", semantics[0].text_value);
     try std.testing.expect(semantics[0].focusable);
     try std.testing.expectEqualDeep(TextRange.init(9, 9), semantics[0].text_selection.?);
+    const search_geometry = layout.textGeometry(10, .{}).?;
+    try expectRect(geometry.RectF.init(105, 19.5, 1, 17.5), search_geometry.caret_bounds.?);
+    try std.testing.expectEqual(@as(usize, 0), search_geometry.selection_rect_count);
 
     const tokens = DesignTokens{
         .colors = .{ .focus_ring = Color.rgb8(1, 2, 3), .text_muted = Color.rgb8(90, 91, 92) },
@@ -12490,6 +12568,12 @@ test "widget text fields render selection caret and composition ranges" {
     try std.testing.expectEqual(@as(usize, 1), semantics.len);
     try std.testing.expectEqualDeep(TextRange.init(1, 4), semantics[0].text_selection.?);
     try std.testing.expectEqualDeep(TextRange.init(2, 4), semantics[0].text_composition.?);
+    const text_geometry = layout.textGeometry(9, .{}).?;
+    try std.testing.expect(text_geometry.caret_bounds == null);
+    try std.testing.expectEqual(@as(usize, 1), text_geometry.selection_rect_count);
+    try expectRect(geometry.RectF.init(27, 17.5, 21, 17.5), text_geometry.selection_bounds.?);
+    try std.testing.expectEqual(@as(usize, 1), text_geometry.composition_rect_count);
+    try expectRect(geometry.RectF.init(34, 17.5, 14, 17.5), text_geometry.composition_bounds.?);
 
     var commands: [6]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
@@ -12553,6 +12637,12 @@ test "widget text fields render wrapped selection geometry" {
     var commands: [6]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, field, tokens);
+
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(field, field.frame, &nodes);
+    const text_geometry = layout.textGeometry(11, tokens).?;
+    try std.testing.expectEqual(@as(usize, 2), text_geometry.selection_rect_count);
+    try expectRect(geometry.RectF.init(8, 10, 10, 25), text_geometry.selection_bounds.?);
 
     const display_list = builder.displayList();
     try std.testing.expectEqual(@as(usize, 5), display_list.commandCount());
