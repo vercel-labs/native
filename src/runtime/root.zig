@@ -1010,6 +1010,7 @@ pub const Runtime = struct {
 
         const dirty = try self.views[index].stepCanvasWidgetKineticScroll(dt_ms) orelse return self.views[index].info();
         try self.invalidateForCanvasWidgetDirty(index, dirty);
+        try self.refreshCanvasWidgetDisplayListIfOwned(index);
         return self.views[index].info();
     }
 
@@ -9541,6 +9542,21 @@ test "runtime wheel input scrolls retained canvas scroll views" {
     try std.testing.expectApproxEqAbs(@as(f32, -3.04), kinetic_layout.nodes[2].frame.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 40.96), kinetic_layout.nodes[3].frame.y, 0.01);
     try std.testing.expect(harness.runtime.views[0].widget_scroll_states[0].velocity > 0);
+
+    const kinetic_display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    var saw_kinetic_scrolled_button = false;
+    for (kinetic_display_list.commands) |command| {
+        switch (command) {
+            .fill_rounded_rect => |fill| {
+                if (fill.id == testCanvasWidgetPartId(3, 1)) {
+                    try std.testing.expectApproxEqAbs(@as(f32, -3.04), fill.rect.y, 0.01);
+                    saw_kinetic_scrolled_button = true;
+                }
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_kinetic_scrolled_button);
 
     harness.runtime.invalidated = false;
     harness.runtime.dirty_region_count = 0;
