@@ -746,6 +746,40 @@ fn iosViewController() []const u8 {
     \\        let compositionRectCount: Int
     \\    }
     \\
+    \\    private final class WidgetAccessibilityElement: UIAccessibilityElement {
+    \\        private weak var owner: ZeroNativeHostViewController?
+    \\        private let node: WidgetSemantics
+    \\
+    \\        init(accessibilityContainer container: Any, owner: ZeroNativeHostViewController, node: WidgetSemantics) {
+    \\            self.owner = owner
+    \\            self.node = node
+    \\            super.init(accessibilityContainer: container)
+    \\        }
+    \\
+    \\        override func accessibilityActivate() -> Bool {
+    \\            owner?.activateWidgetAccessibilityNode(node) ?? false
+    \\        }
+    \\
+    \\        override func accessibilityIncrement() {
+    \\            _ = owner?.incrementWidgetAccessibilityNode(node)
+    \\        }
+    \\
+    \\        override func accessibilityDecrement() {
+    \\            _ = owner?.decrementWidgetAccessibilityNode(node)
+    \\        }
+    \\
+    \\        override func accessibilityScroll(_ direction: UIAccessibilityScrollDirection) -> Bool {
+    \\            switch direction {
+    \\            case .down, .right:
+    \\                return owner?.incrementWidgetAccessibilityNode(node) ?? false
+    \\            case .up, .left:
+    \\                return owner?.decrementWidgetAccessibilityNode(node) ?? false
+    \\            default:
+    \\                return false
+    \\            }
+    \\        }
+    \\    }
+    \\
     \\    override func viewDidLoad() {
     \\        super.viewDidLoad()
     \\        view.backgroundColor = .systemBackground
@@ -994,9 +1028,9 @@ fn iosViewController() []const u8 {
     \\
     \\    private func refreshWidgetAccessibility() {
     \\        let semantics = widgetSemanticsSnapshot()
-    \\        statusLabel.accessibilityValue = "Retained widget semantics: \(semantics.count)"
+    \\        statusLabel.accessibilityValue = "Accessible items: \(semantics.count)"
     \\        widgetAccessibilityElements = semantics.map { node in
-    \\            let element = UIAccessibilityElement(accessibilityContainer: webView)
+    \\            let element = WidgetAccessibilityElement(accessibilityContainer: webView, owner: self, node: node)
     \\            element.accessibilityIdentifier = "zero-native-widget-\(node.id)"
     \\            element.accessibilityLabel = node.label.isEmpty ? node.text : node.label
     \\            element.accessibilityValue = widgetAccessibilityValue(node)
@@ -1008,8 +1042,44 @@ fn iosViewController() []const u8 {
     \\    }
     \\
     \\    private func widgetAccessibilityValue(_ node: WidgetSemantics) -> String? {
-    \\        if let value = node.value { return "\(value)" }
+    \\        if let value = node.value {
+    \\            switch node.role {
+    \\            case Int32(ZERO_NATIVE_WIDGET_ROLE_CHECKBOX), Int32(ZERO_NATIVE_WIDGET_ROLE_SWITCH):
+    \\                return value >= 0.5 ? "On" : "Off"
+    \\            case Int32(ZERO_NATIVE_WIDGET_ROLE_SLIDER), Int32(ZERO_NATIVE_WIDGET_ROLE_PROGRESSBAR):
+    \\                return "\(Int((value * 100).rounded()))%"
+    \\            default:
+    \\                return "\(value)"
+    \\            }
+    \\        }
     \\        return node.text.isEmpty ? nil : node.text
+    \\    }
+    \\
+    \\    private func activateWidgetAccessibilityNode(_ node: WidgetSemantics) -> Bool {
+    \\        if widgetSupportsAction(node, UInt32(ZERO_NATIVE_WIDGET_ACTION_TOGGLE)) {
+    \\            return dispatchWidgetAction(id: node.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_TOGGLE))
+    \\        }
+    \\        if widgetSupportsAction(node, UInt32(ZERO_NATIVE_WIDGET_ACTION_PRESS)) {
+    \\            return dispatchWidgetAction(id: node.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_PRESS))
+    \\        }
+    \\        if widgetSupportsAction(node, UInt32(ZERO_NATIVE_WIDGET_ACTION_SELECT)) {
+    \\            return dispatchWidgetAction(id: node.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_SELECT))
+    \\        }
+    \\        return false
+    \\    }
+    \\
+    \\    private func incrementWidgetAccessibilityNode(_ node: WidgetSemantics) -> Bool {
+    \\        guard widgetSupportsAction(node, UInt32(ZERO_NATIVE_WIDGET_ACTION_INCREMENT)) else { return false }
+    \\        return dispatchWidgetAction(id: node.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_INCREMENT))
+    \\    }
+    \\
+    \\    private func decrementWidgetAccessibilityNode(_ node: WidgetSemantics) -> Bool {
+    \\        guard widgetSupportsAction(node, UInt32(ZERO_NATIVE_WIDGET_ACTION_DECREMENT)) else { return false }
+    \\        return dispatchWidgetAction(id: node.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_DECREMENT))
+    \\    }
+    \\
+    \\    private func widgetSupportsAction(_ node: WidgetSemantics, _ action: UInt32) -> Bool {
+    \\        return (node.actions & action) != 0
     \\    }
     \\
     \\    private func widgetAccessibilityTraits(_ node: WidgetSemantics) -> UIAccessibilityTraits {
@@ -1807,7 +1877,7 @@ fn androidActivity() []const u8 {
     \\
     \\    private fun refreshWidgetSemanticsStatus() {
     \\        if (nativeApp == 0L || !::statusLabel.isInitialized) return
-    \\        statusLabel.contentDescription = "Retained widget semantics: ${widgetSemanticsSnapshot().size}"
+    \\        statusLabel.contentDescription = "Accessible items: ${widgetSemanticsSnapshot().size}"
     \\        if (::widgetSurface.isInitialized) widgetSurface.notifyWidgetSemanticsChanged()
     \\    }
     \\
@@ -2805,7 +2875,9 @@ test "mobile package templates include native command shells" {
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "zero_native_app_widget_semantics_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "zero_native_app_widget_text_geometry") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "zero_native_app_widget_action") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ios_controller, "UIAccessibilityElement(accessibilityContainer: webView)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ios_controller, "WidgetAccessibilityElement(accessibilityContainer: webView") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ios_controller, "override func accessibilityActivate") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ios_controller, "ZERO_NATIVE_WIDGET_ACTION_KIND_INCREMENT") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "view.safeAreaInsets") != null);
     try std.testing.expect(std.mem.indexOf(u8, iosDefaultShellConfig(), "primaryCommand = \"mobile.back\"") != null);
 

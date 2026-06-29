@@ -520,7 +520,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     private fun refreshWidgetSemanticsStatus() {
         if (nativeApp == 0L || !::statusLabel.isInitialized) return
-        statusLabel.contentDescription = "Retained widget semantics: ${widgetSemanticsSnapshot().size}"
+        statusLabel.contentDescription = "Accessible items: ${widgetSemanticsSnapshot().size}"
         if (::widgetSurface.isInitialized) widgetSurface.notifyWidgetSemanticsChanged()
     }
 
