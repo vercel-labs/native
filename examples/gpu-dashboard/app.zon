@@ -27,7 +27,7 @@
                     .{ .label = "nav-customers", .kind = "list_item", .parent = "sidebar", .x = 14, .y = 102, .width = 166, .height = 32, .text = "Customers" },
                     .{ .label = "nav-latency", .kind = "list_item", .parent = "sidebar", .x = 14, .y = 140, .width = 166, .height = 32, .text = "Latency" },
                     .{ .label = "sidebar-status", .kind = "label", .parent = "sidebar", .x = 18, .y = 690, .width = 150, .height = 20, .text = "Native shell" },
-                    .{ .label = "dashboard-canvas", .kind = "gpu_surface", .parent = "body", .width = 720, .min_width = 560, .role = "Native-rendered dashboard canvas", .accessibility_label = "Native-rendered product dashboard canvas" },
+                    .{ .label = "dashboard-canvas", .kind = "gpu_surface", .parent = "body", .width = 720, .min_width = 560, .role = "Native-rendered dashboard canvas", .accessibility_label = "Native-rendered product dashboard canvas", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
                     .{ .label = "inspector", .kind = "webview", .parent = "body", .url = "zero://inline", .fill = true },
                     .{ .label = "statusbar", .kind = "statusbar", .edge = "bottom", .height = 34, .role = "Status" },
                     .{ .label = "status-label", .kind = "label", .parent = "statusbar", .x = 14, .y = 8, .width = 840, .height = 18, .text = "Canvas scene waiting for the first GPU frame." },

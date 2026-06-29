@@ -135,7 +135,7 @@ const shell_views = [_]zero_native.ShellView{
     .{ .label = "nav-customers", .kind = .list_item, .parent = "sidebar", .x = 14, .y = 102, .width = 166, .height = 32, .layer = 11, .text = "Customers" },
     .{ .label = "nav-latency", .kind = .list_item, .parent = "sidebar", .x = 14, .y = 140, .width = 166, .height = 32, .layer = 11, .text = "Latency" },
     .{ .label = "sidebar-status", .kind = .label, .parent = "sidebar", .x = 18, .y = 690, .width = 150, .height = 20, .layer = 11, .text = "Native shell" },
-    .{ .label = "dashboard-canvas", .kind = .gpu_surface, .parent = "body", .width = canvas_width, .min_width = 560, .layer = 12, .role = "Native-rendered dashboard canvas", .accessibility_label = "Native-rendered product dashboard canvas" },
+    .{ .label = "dashboard-canvas", .kind = .gpu_surface, .parent = "body", .width = canvas_width, .min_width = 560, .layer = 12, .role = "Native-rendered dashboard canvas", .accessibility_label = "Native-rendered product dashboard canvas", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
     .{ .label = "inspector", .kind = .webview, .parent = "body", .url = "zero://inline", .fill = true },
     .{ .label = "statusbar", .kind = .statusbar, .edge = .bottom, .height = statusbar_height, .layer = 30, .role = "Status" },
     .{ .label = "status-label", .kind = .label, .parent = "statusbar", .x = 14, .y = 8, .width = 840, .height = 18, .layer = 31, .text = "Canvas scene waiting for the first GPU frame." },
@@ -794,6 +794,12 @@ test "gpu dashboard scene declares native shell gpu canvas and inspector" {
     try std.testing.expect(shell_views[12].kind == .webview);
     try std.testing.expectEqualStrings("body", shell_views[11].parent.?);
     try std.testing.expectEqualStrings("body", shell_views[12].parent.?);
+    try std.testing.expect(shell_views[11].gpu_backend.? == .metal);
+    try std.testing.expect(shell_views[11].gpu_pixel_format.? == .bgra8_unorm);
+    try std.testing.expect(shell_views[11].gpu_present_mode.? == .timer);
+    try std.testing.expect(shell_views[11].gpu_alpha_mode.? == .@"opaque");
+    try std.testing.expect(shell_views[11].gpu_color_space.? == .srgb);
+    try std.testing.expect(shell_views[11].gpu_vsync.?);
 }
 
 test "gpu dashboard display list builds a complete canvas scene" {

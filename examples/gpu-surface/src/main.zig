@@ -88,7 +88,7 @@ const shell_views = [_]zero_native.ShellView{
     .{ .label = "frame-mode", .kind = .segmented_control, .parent = "toolbar", .x = 252, .y = 11, .width = 178, .height = 30, .layer = 21, .text = "Canvas|Hybrid", .command = mode_command },
     .{ .label = "refresh", .kind = .button, .parent = "toolbar", .x = 448, .y = 11, .width = 86, .height = 30, .layer = 21, .text = "Refresh", .command = refresh_command },
     .{ .label = "body", .kind = .split, .fill = true, .axis = .row },
-    .{ .label = "canvas", .kind = .gpu_surface, .parent = "body", .width = canvas_width, .min_width = 480, .layer = 10, .role = "Animated Metal surface", .accessibility_label = "Animated GPU surface" },
+    .{ .label = "canvas", .kind = .gpu_surface, .parent = "body", .width = canvas_width, .min_width = 480, .layer = 10, .role = "Animated Metal surface", .accessibility_label = "Animated GPU surface", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
     .{ .label = "inspector", .kind = .webview, .parent = "body", .url = "zero://inline", .fill = true },
     .{ .label = "statusbar", .kind = .statusbar, .edge = .bottom, .height = statusbar_height, .layer = 20, .role = "Status" },
     .{ .label = "status-label", .kind = .label, .parent = "statusbar", .x = 14, .y = 8, .width = 720, .height = 18, .layer = 21, .text = "Metal surface ready." },
@@ -195,4 +195,10 @@ test "gpu surface scene declares gpu and web siblings" {
     try std.testing.expect(shell_views[6].kind == .webview);
     try std.testing.expectEqualStrings("body", shell_views[5].parent.?);
     try std.testing.expectEqualStrings("body", shell_views[6].parent.?);
+    try std.testing.expect(shell_views[5].gpu_backend.? == .metal);
+    try std.testing.expect(shell_views[5].gpu_pixel_format.? == .bgra8_unorm);
+    try std.testing.expect(shell_views[5].gpu_present_mode.? == .timer);
+    try std.testing.expect(shell_views[5].gpu_alpha_mode.? == .@"opaque");
+    try std.testing.expect(shell_views[5].gpu_color_space.? == .srgb);
+    try std.testing.expect(shell_views[5].gpu_vsync.?);
 }

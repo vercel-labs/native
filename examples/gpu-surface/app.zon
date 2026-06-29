@@ -21,7 +21,7 @@
                     .{ .label = "frame-mode", .kind = "segmented_control", .parent = "toolbar", .x = 252, .y = 11, .width = 178, .height = 30, .text = "Canvas|Hybrid", .command = "gpu.mode" },
                     .{ .label = "refresh", .kind = "button", .parent = "toolbar", .x = 448, .y = 11, .width = 86, .height = 30, .text = "Refresh", .command = "gpu.refresh" },
                     .{ .label = "body", .kind = "split", .fill = true, .axis = "row" },
-                    .{ .label = "canvas", .kind = "gpu_surface", .parent = "body", .width = 680, .min_width = 480, .role = "Animated Metal surface", .accessibility_label = "Animated GPU surface" },
+                    .{ .label = "canvas", .kind = "gpu_surface", .parent = "body", .width = 680, .min_width = 480, .role = "Animated Metal surface", .accessibility_label = "Animated GPU surface", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
                     .{ .label = "inspector", .kind = "webview", .parent = "body", .url = "zero://inline", .fill = true },
                     .{ .label = "statusbar", .kind = "statusbar", .edge = "bottom", .height = 34, .role = "Status" },
                     .{ .label = "status-label", .kind = "label", .parent = "statusbar", .x = 14, .y = 8, .width = 720, .height = 18, .text = "Metal surface ready." },
