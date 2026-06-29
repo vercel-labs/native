@@ -4988,6 +4988,17 @@ fn canvasWidgetScrollKeyboardDelta(widget: canvas.Widget, keyboard: canvas.Widge
     return null;
 }
 
+const CanvasWidgetScrollKeyboardTarget = enum {
+    start,
+    end,
+};
+
+fn canvasWidgetScrollKeyboardTarget(keyboard: canvas.WidgetKeyboardEvent) ?CanvasWidgetScrollKeyboardTarget {
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return .start;
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return .end;
+    return null;
+}
+
 fn canvasWidgetGridNavigationDirection(input_event: GpuSurfaceInputEvent) ?canvas.WidgetFocusDirection {
     if (input_event.kind != .key_down) return null;
     if (input_event.modifiers.control or input_event.modifiers.option or input_event.modifiers.command or input_event.modifiers.primary) return null;
@@ -5849,6 +5860,34 @@ const RuntimeView = struct {
         return self.canvasWidgetDirtyBounds(scroll_index, scroll_node.frame);
     }
 
+    fn applyCanvasWidgetScrollKeyboardTarget(self: *RuntimeView, scroll_index: usize, target: CanvasWidgetScrollKeyboardTarget) anyerror!?geometry.RectF {
+        if (scroll_index >= self.widget_layout_node_count) return null;
+        const scroll_node = self.widget_layout_nodes[scroll_index];
+        if (scroll_node.widget.kind != .scroll_view or scroll_node.widget.layout.virtualized) return null;
+
+        const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
+        if (viewport.isEmpty()) return null;
+
+        const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
+        var next = current;
+        next.offset = switch (target) {
+            .start => 0,
+            .end => current.maxOffset(),
+        };
+        next.velocity = 0;
+        next = next.clamped();
+        self.widget_scroll_states[scroll_index] = next;
+        if (next.offset == current.offset) return null;
+
+        const offset_delta = next.offset - current.offset;
+        self.widget_layout_nodes[scroll_index].widget.value = next.offset;
+        self.translateCanvasWidgetScrollDescendants(scroll_index, -offset_delta);
+
+        try self.refreshCanvasWidgetSemantics();
+        self.widget_revision += 1;
+        return self.canvasWidgetDirtyBounds(scroll_index, scroll_node.frame);
+    }
+
     fn stepCanvasWidgetKineticScroll(self: *RuntimeView, dt_ms: f32) anyerror!?geometry.RectF {
         var dirty: ?geometry.RectF = null;
         var changed = false;
@@ -6032,7 +6071,9 @@ const RuntimeView = struct {
                 try self.setCanvasWidgetSelected(id, true)
             else
                 null,
-            .scroll_view => if (canvasWidgetScrollKeyboardDelta(widget, keyboard)) |delta|
+            .scroll_view => if (canvasWidgetScrollKeyboardTarget(keyboard)) |target|
+                try self.applyCanvasWidgetScrollKeyboardTarget(index, target)
+            else if (canvasWidgetScrollKeyboardDelta(widget, keyboard)) |delta|
                 try self.applyCanvasWidgetScroll(index, delta, .discrete)
             else
                 null,
@@ -11152,6 +11193,36 @@ test "runtime reconciles canvas widget render state after keyboard scroll clippi
     try std.testing.expect(snapshot.widgets[0].focused);
     try std.testing.expect(!snapshot.widgets[1].hovered);
     try std.testing.expect(!snapshot.widgets[2].hovered);
+
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "end",
+    } });
+    var keyboard_scrolled = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 40), keyboard_scrolled.findById(1).?.widget.value);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, -40, 160, 32), keyboard_scrolled.findById(2).?.frame);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 8, 160, 32), keyboard_scrolled.findById(3).?.frame);
+    try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expect(harness.runtime.pendingDirtyRegions().len >= 1);
+
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "home",
+    } });
+    keyboard_scrolled = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 0), keyboard_scrolled.findById(1).?.widget.value);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 160, 32), keyboard_scrolled.findById(2).?.frame);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 48, 160, 32), keyboard_scrolled.findById(3).?.frame);
+    try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expect(harness.runtime.pendingDirtyRegions().len >= 1);
 }
 
 test "runtime reconciles canvas widget scroll momentum across layout replacement" {
