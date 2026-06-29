@@ -2936,6 +2936,7 @@ pub const WidgetLayoutStyle = struct {
     grow: f32 = 0,
     main_alignment: WidgetMainAlignment = .start,
     cross_alignment: WidgetCrossAlignment = .stretch,
+    clip_content: bool = false,
     columns: usize = 0,
     virtualized: bool = false,
     virtual_item_extent: f32 = 0,
@@ -5457,7 +5458,7 @@ fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, dept
 
 fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
     switch (widget.kind) {
-        .stack, .row, .column, .grid, .data_grid, .list, .data_row => try emitWidgetChildren(builder, widget.children, tokens, depth),
+        .stack, .row, .column, .grid, .data_grid, .list, .data_row => try emitWidgetClippedChildren(builder, widget, tokens, depth),
         .scroll_view => try emitScrollViewWidget(builder, widget, tokens, depth),
         .panel => try emitPanelWidget(builder, widget, tokens, depth),
         .popover => try emitPopoverWidget(builder, widget, tokens, depth),
@@ -5565,32 +5566,73 @@ fn emitWidgetLayoutNodeContent(
         .progress => try emitProgressWidget(builder, widget, tokens),
     }
 
-    try emitWidgetLayoutChildren(builder, layout, node_index, tokens, state);
+    try emitWidgetLayoutClippedChildren(builder, layout, node_index, tokens, state, widget);
 }
 
 fn widgetOpacity(widget: Widget) f32 {
     return std.math.clamp(widget.opacity, 0, 1);
 }
 
+fn widgetClipsContent(widget: Widget) bool {
+    return widget.kind == .scroll_view or widget.layout.clip_content;
+}
+
+fn widgetContentClip(widget: Widget, tokens: DesignTokens) Clip {
+    return .{
+        .id = widgetPartId(widget.id, 9),
+        .rect = widget.frame,
+        .radius = widgetContentClipRadius(widget, tokens),
+    };
+}
+
+fn widgetContentClipRadius(widget: Widget, tokens: DesignTokens) Radius {
+    if (!widget.layout.clip_content) return .{};
+    return switch (widget.kind) {
+        .panel, .menu_surface => Radius.all(tokens.radius.lg),
+        .popover => Radius.all(tokens.radius.xl),
+        .tooltip => Radius.all(tokens.radius.md),
+        else => .{},
+    };
+}
+
 fn emitPanelWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
     try emitPanelWidgetChrome(builder, widget, tokens);
-    try emitWidgetChildren(builder, widget.children, tokens, depth);
+    try emitWidgetClippedChildren(builder, widget, tokens, depth);
 }
 
 fn emitPopoverWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
     try emitPopoverWidgetChrome(builder, widget, tokens);
-    try emitWidgetChildren(builder, widget.children, tokens, depth);
+    try emitWidgetClippedChildren(builder, widget, tokens, depth);
 }
 
 fn emitMenuSurfaceWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
     try emitMenuSurfaceWidgetChrome(builder, widget, tokens);
-    try emitWidgetChildren(builder, widget.children, tokens, depth);
+    try emitWidgetClippedChildren(builder, widget, tokens, depth);
 }
 
 fn emitScrollViewWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
     try builder.pushClip(.{ .id = widgetPartId(widget.id, 1), .rect = widget.frame });
     try emitWidgetChildren(builder, widget.children, tokens, depth);
     try builder.popClip();
+}
+
+fn emitWidgetClippedChildren(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
+    if (widget.layout.clip_content) try builder.pushClip(widgetContentClip(widget, tokens));
+    try emitWidgetChildren(builder, widget.children, tokens, depth);
+    if (widget.layout.clip_content) try builder.popClip();
+}
+
+fn emitWidgetLayoutClippedChildren(
+    builder: *Builder,
+    layout: WidgetLayoutTree,
+    parent_index: usize,
+    tokens: DesignTokens,
+    state: WidgetRenderState,
+    widget: Widget,
+) Error!void {
+    if (widget.layout.clip_content) try builder.pushClip(widgetContentClip(widget, tokens));
+    try emitWidgetLayoutChildren(builder, layout, parent_index, tokens, state);
+    if (widget.layout.clip_content) try builder.popClip();
 }
 
 fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
@@ -6716,7 +6758,7 @@ fn hitTestWidgetLayoutNode(layout: WidgetLayoutTree, node_index: usize, point: g
     const node = layout.nodes[node_index];
     if (node.widget.semantics.hidden) return null;
 
-    if (node.widget.kind == .scroll_view and !node.frame.normalized().containsPoint(point)) return null;
+    if (widgetClipsContent(node.widget) and !node.frame.normalized().containsPoint(point)) return null;
     if (hitTestWidgetLayoutChildren(layout, node_index, point, tokens)) |hit| return hit;
 
     if (!isHitTarget(node.widget)) return null;
@@ -6762,7 +6804,7 @@ fn isPointVisibleInWidgetAncestors(layout: WidgetLayoutTree, node_index: usize, 
     var current = layout.nodes[node_index].parent_index;
     while (current) |parent_index| {
         const parent = layout.nodes[parent_index];
-        if (parent.widget.kind == .scroll_view and !parent.frame.normalized().containsPoint(point)) return false;
+        if (widgetClipsContent(parent.widget) and !parent.frame.normalized().containsPoint(point)) return false;
         current = parent.parent_index;
     }
     return true;
@@ -6775,7 +6817,7 @@ fn isWidgetFrameVisibleInWidgetAncestors(layout: WidgetLayoutTree, node_index: u
     var current = layout.nodes[node_index].parent_index;
     while (current) |parent_index| {
         const parent = layout.nodes[parent_index];
-        if (parent.widget.kind == .scroll_view and geometry.RectF.intersection(frame, parent.frame.normalized()).isEmpty()) return false;
+        if (widgetClipsContent(parent.widget) and geometry.RectF.intersection(frame, parent.frame.normalized()).isEmpty()) return false;
         current = parent.parent_index;
     }
     return true;
@@ -7739,7 +7781,7 @@ fn widgetClippedDirtyBounds(layout: WidgetLayoutTree, node_index: usize, bounds:
     while (current) |parent_index| {
         if (parent_index >= layout.nodes.len) return null;
         const parent = layout.nodes[parent_index];
-        if (parent.widget.kind == .scroll_view) {
+        if (widgetClipsContent(parent.widget)) {
             clipped = geometry.RectF.intersection(clipped, parent.frame.normalized());
             if (clipped.isEmpty()) return null;
         }
@@ -7840,6 +7882,7 @@ fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {
         a.grow == b.grow and
         a.main_alignment == b.main_alignment and
         a.cross_alignment == b.cross_alignment and
+        a.clip_content == b.clip_content and
         a.columns == b.columns and
         a.virtualized == b.virtualized and
         a.virtual_item_extent == b.virtual_item_extent and
@@ -10163,6 +10206,52 @@ test "widget opacity wraps subtree display list commands" {
     var transparent_builder = Builder.init(&transparent_commands);
     try emitWidgetTree(&transparent_builder, .{ .kind = .stack, .opacity = 0, .children = &children }, .{});
     try std.testing.expectEqual(@as(usize, 0), transparent_builder.displayList().commandCount());
+}
+
+test "widget clip content wraps subtree display list and hit testing" {
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .text,
+        .frame = geometry.RectF.init(40, 0, 40, 20),
+        .text = "Clip",
+        .semantics = .{ .focusable = true },
+    }};
+    const root = Widget{
+        .id = 1,
+        .kind = .stack,
+        .frame = geometry.RectF.init(0, 0, 50, 20),
+        .layout = .{ .clip_content = true },
+        .children = &children,
+    };
+
+    var direct_commands: [3]CanvasCommand = undefined;
+    var direct_builder = Builder.init(&direct_commands);
+    try emitWidgetTree(&direct_builder, root, .{});
+    const direct_display_list = direct_builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), direct_display_list.commandCount());
+    switch (direct_display_list.commands[0]) {
+        .push_clip => |clip| try expectRect(geometry.RectF.init(0, 0, 50, 20), clip.rect),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (direct_display_list.commands[1]) {
+        .draw_text => |text| try std.testing.expectEqualStrings("Clip", text.text),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(direct_display_list.commands[2] == .pop_clip);
+
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, root.frame, &nodes);
+    var layout_commands: [3]CanvasCommand = undefined;
+    var layout_builder = Builder.init(&layout_commands);
+    try layout.emitDisplayList(&layout_builder, .{});
+    const layout_display_list = layout_builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), layout_display_list.commandCount());
+    try std.testing.expect(layout_display_list.commands[0] == .push_clip);
+    try std.testing.expect(layout_display_list.commands[2] == .pop_clip);
+
+    try std.testing.expectEqual(@as(ObjectId, 2), layout.hitTest(geometry.PointF.init(45, 10)).?.id);
+    try std.testing.expect(layout.hitTest(geometry.PointF.init(55, 10)) == null);
+    try std.testing.expectEqual(@as(ObjectId, 2), layout.focusTarget(null, .forward).?.id);
 }
 
 test "widget layout hit testing prefers deepest topmost enabled target" {
@@ -12648,6 +12737,45 @@ test "widget layout diff marks opacity changes as subtree paint dirty" {
     try std.testing.expect(invalidations[0].paint_dirty);
     try std.testing.expect(!invalidations[0].semantics_dirty);
     try expectRect(geometry.RectF.init(0, 0, 50, 10), invalidations[0].dirty_bounds);
+}
+
+test "widget layout diff clips paint dirtiness to clip content ancestors" {
+    const previous_children = [_]Widget{.{
+        .id = 2,
+        .kind = .text,
+        .frame = geometry.RectF.init(40, 0, 40, 20),
+        .text = "One",
+    }};
+    const next_children = [_]Widget{.{
+        .id = 2,
+        .kind = .text,
+        .frame = geometry.RectF.init(40, 0, 40, 20),
+        .text = "Two",
+    }};
+    const previous_stack = Widget{
+        .id = 1,
+        .kind = .stack,
+        .layout = .{ .clip_content = true },
+        .children = &previous_children,
+    };
+    const next_stack = Widget{
+        .id = 1,
+        .kind = .stack,
+        .layout = .{ .clip_content = true },
+        .children = &next_children,
+    };
+
+    var previous_nodes: [2]WidgetLayoutNode = undefined;
+    var next_nodes: [2]WidgetLayoutNode = undefined;
+    const previous = try layoutWidgetTree(previous_stack, geometry.RectF.init(0, 0, 50, 20), &previous_nodes);
+    const next = try layoutWidgetTree(next_stack, geometry.RectF.init(0, 0, 50, 20), &next_nodes);
+
+    var invalidations_buffer: [2]WidgetInvalidation = undefined;
+    const invalidations = try WidgetLayoutTree.diff(previous, next, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 1), invalidations.len);
+    try std.testing.expectEqual(@as(ObjectId, 2), invalidations[0].id);
+    try std.testing.expect(invalidations[0].paint_dirty);
+    try expectRect(geometry.RectF.init(40, 0, 10, 20), invalidations[0].dirty_bounds);
 }
 
 test "widget layout diff marks scroll offset changes as child layout dirty" {

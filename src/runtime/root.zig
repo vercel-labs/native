@@ -4558,7 +4558,7 @@ fn canvasWidgetSelectableTargetFrameAllowed(layout: canvas.WidgetLayoutTree, nod
     var current = layout.nodes[node_index].parent_index;
     while (current) |index| {
         if (index >= layout.nodes.len) return true;
-        if (layout.nodes[index].widget.kind == .scroll_view) return false;
+        if (canvasWidgetClipsContent(layout.nodes[index].widget)) return false;
         current = layout.nodes[index].parent_index;
     }
     return true;
@@ -4591,7 +4591,7 @@ fn canvasWidgetLayoutNodeFrameVisible(layout: canvas.WidgetLayoutTree, node_inde
     while (current) |index| {
         if (index >= layout.nodes.len) return true;
         const ancestor = layout.nodes[index];
-        if (ancestor.widget.kind == .scroll_view and geometry.RectF.intersection(frame, ancestor.frame.normalized()).isEmpty()) return false;
+        if (canvasWidgetClipsContent(ancestor.widget) and geometry.RectF.intersection(frame, ancestor.frame.normalized()).isEmpty()) return false;
         current = ancestor.parent_index;
     }
     return true;
@@ -4608,13 +4608,17 @@ fn canvasWidgetLayoutNodeClippedBounds(layout: canvas.WidgetLayoutTree, node_ind
     while (current) |index| {
         if (index >= layout.nodes.len) return null;
         const ancestor = layout.nodes[index];
-        if (ancestor.widget.kind == .scroll_view) {
+        if (canvasWidgetClipsContent(ancestor.widget)) {
             clipped = geometry.RectF.intersection(clipped, ancestor.frame.normalized());
             if (clipped.isEmpty()) return null;
         }
         current = ancestor.parent_index;
     }
     return clipped;
+}
+
+fn canvasWidgetClipsContent(widget: canvas.Widget) bool {
+    return widget.kind == .scroll_view or widget.layout.clip_content;
 }
 
 fn canvasWidgetRuntimeHitTarget(widget: canvas.Widget) bool {
@@ -16366,6 +16370,54 @@ test "runtime rejects automation canvas widget actions for scroll clipped target
     try std.testing.expectEqual(@as(u32, 1), app_state.widget_file_drop_count);
     try std.testing.expectEqual(@as(u32, 1), app_state.file_drop_count);
     try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_drop_target_id);
+}
+
+test "runtime rejects automation canvas widget actions for clip content clipped targets" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-clip-content-automation-actions", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 96, 48),
+    });
+
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .list_item, .frame = geometry.RectF.init(64, 0, 32, 32), .text = "Clipped" },
+        .{ .id = 3, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 32, 32), .text = "Visible" },
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .id = 1, .kind = .stack, .layout = .{ .clip_content = true }, .children = &children },
+        geometry.RectF.init(0, 0, 48, 40),
+        &nodes,
+    );
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    var snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expect(snapshot.widgets[1].actions.select);
+    try std.testing.expect(snapshot.widgets[2].actions.select);
+
+    try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 2, .action = .select }));
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(!retained.findById(2).?.widget.state.selected);
+
+    try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 3, .action = .select });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(3).?.widget.state.selected);
+    snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expectEqual(@as(?f32, 1), snapshot.widgets[2].value);
 }
 
 test "runtime automation protocol refreshes widget-owned canvas display lists" {
