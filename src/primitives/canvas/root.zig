@@ -2916,10 +2916,26 @@ pub const WidgetRenderState = struct {
     pressed_id: ?ObjectId = null,
 };
 
+pub const WidgetMainAlignment = enum {
+    start,
+    center,
+    end,
+    space_between,
+};
+
+pub const WidgetCrossAlignment = enum {
+    stretch,
+    start,
+    center,
+    end,
+};
+
 pub const WidgetLayoutStyle = struct {
     padding: geometry.InsetsF = .{},
     gap: f32 = 0,
     grow: f32 = 0,
+    main_alignment: WidgetMainAlignment = .start,
+    cross_alignment: WidgetCrossAlignment = .stretch,
     columns: usize = 0,
     virtualized: bool = false,
     virtual_item_extent: f32 = 0,
@@ -6377,14 +6393,14 @@ fn layoutWidgetDepth(
 
     const content = frame.inset(widget.layout.padding);
     switch (widget.kind) {
-        .row => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout.gap),
-        .column => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout.gap),
+        .row => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout),
+        .column => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout),
         .grid => try layoutGridChildren(widget.children, content, index, depth, output, len, widget.layout.gap, widget.layout.columns),
         .data_grid => if (widget.layout.virtualized)
             try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout)
         else
-            try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout.gap),
-        .data_row => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout.gap),
+            try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout),
+        .data_row => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout),
         .scroll_view => if (widget.layout.virtualized)
             try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout)
         else
@@ -6392,8 +6408,8 @@ fn layoutWidgetDepth(
         .list => if (widget.layout.virtualized)
             try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout)
         else
-            try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout.gap),
-        .menu_surface => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout.gap),
+            try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout),
+        .menu_surface => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout),
         .stack, .panel, .popover => {
             for (widget.children) |child| {
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len);
@@ -6418,7 +6434,7 @@ fn layoutAxisChildren(
     depth: usize,
     output: []WidgetLayoutNode,
     len: *usize,
-    gap: f32,
+    style: WidgetLayoutStyle,
 ) Error!void {
     if (children.len == 0) return;
 
@@ -6430,7 +6446,7 @@ fn layoutAxisChildren(
         .horizontal => content.height,
         .vertical => content.width,
     };
-    const clamped_gap = nonNegative(gap);
+    const clamped_gap = nonNegative(style.gap);
     const total_gap = clamped_gap * @as(f32, @floatFromInt(children.len - 1));
     var fixed_extent: f32 = 0;
     var grow_total: f32 = 0;
@@ -6444,10 +6460,17 @@ fn layoutAxisChildren(
     }
 
     const remaining = @max(0, available_extent - fixed_extent - total_gap);
+    const assigned_extent = assignedAxisChildrenExtent(children, axis, fixed_extent, grow_total, remaining);
+    const used_extent = assigned_extent + total_gap;
+    const free_extent = @max(0, available_extent - used_extent);
+    var child_gap = clamped_gap;
+    if (style.main_alignment == .space_between and children.len > 1) {
+        child_gap += free_extent / @as(f32, @floatFromInt(children.len - 1));
+    }
     var cursor: f32 = switch (axis) {
         .horizontal => content.x,
         .vertical => content.y,
-    };
+    } + mainAxisAlignmentOffset(style.main_alignment, free_extent);
 
     for (children) |child| {
         const grow = nonNegative(child.layout.grow);
@@ -6456,13 +6479,57 @@ fn layoutAxisChildren(
         else
             preferredMainExtent(child, axis);
         const cross = preferredCrossExtent(child, axis, cross_extent);
+        const cross_origin = alignedCrossAxisOrigin(content, axis, cross_extent, cross, child, style.cross_alignment);
         const child_frame = switch (axis) {
-            .horizontal => geometry.RectF.init(cursor, content.y + child.frame.y, main_extent, cross),
-            .vertical => geometry.RectF.init(content.x + child.frame.x, cursor, cross, main_extent),
+            .horizontal => geometry.RectF.init(cursor, cross_origin, main_extent, cross),
+            .vertical => geometry.RectF.init(cross_origin, cursor, cross, main_extent),
         };
         _ = try layoutWidgetDepth(child, child_frame, parent_index, depth + 1, output, len);
-        cursor += main_extent + clamped_gap;
+        cursor += main_extent + child_gap;
     }
+}
+
+fn assignedAxisChildrenExtent(children: []const Widget, axis: LayoutAxis, fixed_extent: f32, grow_total: f32, remaining: f32) f32 {
+    if (grow_total <= 0) return fixed_extent;
+    var assigned = fixed_extent;
+    for (children) |child| {
+        const grow = nonNegative(child.layout.grow);
+        if (grow <= 0) continue;
+        assigned += @max(minMainExtent(child, axis), remaining * grow / grow_total);
+    }
+    return assigned;
+}
+
+fn mainAxisAlignmentOffset(alignment: WidgetMainAlignment, free_extent: f32) f32 {
+    return switch (alignment) {
+        .start, .space_between => 0,
+        .center => free_extent * 0.5,
+        .end => free_extent,
+    };
+}
+
+fn alignedCrossAxisOrigin(
+    content: geometry.RectF,
+    axis: LayoutAxis,
+    available_extent: f32,
+    child_extent: f32,
+    child: Widget,
+    alignment: WidgetCrossAlignment,
+) f32 {
+    const start = switch (axis) {
+        .horizontal => content.y,
+        .vertical => content.x,
+    };
+    const offset = switch (axis) {
+        .horizontal => child.frame.y,
+        .vertical => child.frame.x,
+    };
+    const free_extent = @max(0, available_extent - child_extent);
+    return start + offset + switch (alignment) {
+        .stretch, .start => 0,
+        .center => free_extent * 0.5,
+        .end => free_extent,
+    };
 }
 
 fn layoutGridChildren(
@@ -7735,6 +7802,8 @@ fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {
     return insetsEqual(a.padding, b.padding) and
         a.gap == b.gap and
         a.grow == b.grow and
+        a.main_alignment == b.main_alignment and
+        a.cross_alignment == b.cross_alignment and
         a.columns == b.columns and
         a.virtualized == b.virtualized and
         a.virtual_item_extent == b.virtual_item_extent and
@@ -9957,6 +10026,54 @@ test "widget layout resolves row sizing and emits laid out commands" {
         .fill_rounded_rect => |fill| try expectRect(geometry.RectF.init(100, 12, 60, 8), fill.rect),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "widget layout aligns row children on main and cross axes" {
+    const centered_children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .text,
+            .frame = geometry.RectF.init(0, 0, 40, 12),
+            .text = "A",
+        },
+        .{
+            .id = 3,
+            .kind = .text,
+            .frame = geometry.RectF.init(0, 0, 20, 16),
+            .text = "B",
+        },
+    };
+    const centered = Widget{
+        .id = 1,
+        .kind = .row,
+        .layout = .{
+            .gap = 4,
+            .main_alignment = .center,
+            .cross_alignment = .center,
+        },
+        .children = &centered_children,
+    };
+
+    var centered_nodes: [3]WidgetLayoutNode = undefined;
+    const centered_layout = try layoutWidgetTree(centered, geometry.RectF.init(0, 0, 120, 40), &centered_nodes);
+    try expectLayoutFrame(centered_layout, 2, geometry.RectF.init(28, 14, 40, 12));
+    try expectLayoutFrame(centered_layout, 3, geometry.RectF.init(72, 12, 20, 16));
+
+    const spaced_children = [_]Widget{
+        .{ .id = 5, .kind = .text, .frame = geometry.RectF.init(0, 0, 40, 12), .text = "A" },
+        .{ .id = 6, .kind = .text, .frame = geometry.RectF.init(0, 0, 20, 16), .text = "B" },
+    };
+    const spaced = Widget{
+        .id = 4,
+        .kind = .row,
+        .layout = .{ .main_alignment = .space_between },
+        .children = &spaced_children,
+    };
+
+    var spaced_nodes: [3]WidgetLayoutNode = undefined;
+    const spaced_layout = try layoutWidgetTree(spaced, geometry.RectF.init(0, 0, 120, 40), &spaced_nodes);
+    try expectLayoutFrame(spaced_layout, 5, geometry.RectF.init(0, 0, 40, 12));
+    try expectLayoutFrame(spaced_layout, 6, geometry.RectF.init(100, 0, 20, 16));
 }
 
 test "widget layout hit testing prefers deepest topmost enabled target" {
@@ -12370,6 +12487,44 @@ test "widget layout diff marks list spacing changes as layout dirty" {
     try std.testing.expectEqual(@as(ObjectId, 3), invalidations[1].id);
     try std.testing.expect(invalidations[1].layout_dirty);
     try std.testing.expect(invalidations[1].paint_dirty);
+}
+
+test "widget layout diff marks axis alignment changes as layout dirty" {
+    const children = [_]Widget{
+        .{ .id = 2, .kind = .text, .frame = geometry.RectF.init(0, 0, 40, 12), .text = "A" },
+        .{ .id = 3, .kind = .text, .frame = geometry.RectF.init(0, 0, 20, 16), .text = "B" },
+    };
+    const previous_row = Widget{
+        .id = 1,
+        .kind = .row,
+        .layout = .{ .gap = 4 },
+        .children = &children,
+    };
+    const next_row = Widget{
+        .id = 1,
+        .kind = .row,
+        .layout = .{
+            .gap = 4,
+            .main_alignment = .end,
+            .cross_alignment = .center,
+        },
+        .children = &children,
+    };
+
+    var previous_nodes: [3]WidgetLayoutNode = undefined;
+    var next_nodes: [3]WidgetLayoutNode = undefined;
+    const previous = try layoutWidgetTree(previous_row, geometry.RectF.init(0, 0, 120, 40), &previous_nodes);
+    const next = try layoutWidgetTree(next_row, geometry.RectF.init(0, 0, 120, 40), &next_nodes);
+
+    var invalidations_buffer: [3]WidgetInvalidation = undefined;
+    const invalidations = try WidgetLayoutTree.diff(previous, next, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 3), invalidations.len);
+    try std.testing.expectEqual(@as(ObjectId, 1), invalidations[0].id);
+    try std.testing.expect(invalidations[0].layout_dirty);
+    try std.testing.expectEqual(@as(ObjectId, 2), invalidations[1].id);
+    try std.testing.expect(invalidations[1].layout_dirty);
+    try std.testing.expectEqual(@as(ObjectId, 3), invalidations[2].id);
+    try std.testing.expect(invalidations[2].layout_dirty);
 }
 
 test "widget layout diff marks scroll offset changes as child layout dirty" {
