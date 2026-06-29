@@ -32,6 +32,7 @@ pub const Error = error{
     RenderEncoderListFull,
     RenderStackOverflow,
     RenderStackUnderflow,
+    InvalidTransform,
     WidgetDepthExceeded,
     WidgetEventRouteListFull,
     WidgetInvalidationListFull,
@@ -113,6 +114,20 @@ pub const Affine = struct {
             self.transformPoint(normalized.bottomLeft()),
             self.transformPoint(normalized.bottomRight()),
         }) orelse geometry.RectF.zero();
+    }
+
+    pub fn inverse(self: Affine) ?Affine {
+        const determinant = self.a * self.d - self.b * self.c;
+        if (@abs(determinant) <= 0.000001) return null;
+        const inv = 1 / determinant;
+        return .{
+            .a = self.d * inv,
+            .b = -self.b * inv,
+            .c = -self.c * inv,
+            .d = self.a * inv,
+            .tx = (self.c * self.ty - self.d * self.tx) * inv,
+            .ty = (self.b * self.tx - self.a * self.ty) * inv,
+        };
     }
 };
 
@@ -3009,6 +3024,7 @@ pub const Widget = struct {
     kind: WidgetKind,
     frame: geometry.RectF = .{},
     opacity: f32 = 1,
+    transform: Affine = .{},
     text: []const u8 = "",
     command: []const u8 = "",
     image_id: ImageId = 0,
@@ -5451,8 +5467,13 @@ fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, dept
     const opacity = widgetOpacity(widget);
     if (opacity <= 0) return;
     const wrap_opacity = opacity < 1;
+    const transform = widgetTransform(widget);
+    const wrap_transform = !affinesEqual(transform, Affine.identity());
+    const inverse_transform = if (wrap_transform) transform.inverse() orelse return error.InvalidTransform else Affine.identity();
     if (wrap_opacity) try builder.pushOpacity(opacity);
+    if (wrap_transform) try builder.transform(transform);
     try emitWidgetDepthContent(builder, widget, tokens, depth);
+    if (wrap_transform) try builder.transform(inverse_transform);
     if (wrap_opacity) try builder.popOpacity();
 }
 
@@ -5524,8 +5545,13 @@ fn emitWidgetLayoutNode(
     const opacity = widgetOpacity(widget);
     if (opacity <= 0) return;
     const wrap_opacity = opacity < 1;
+    const transform = widgetTransform(widget);
+    const wrap_transform = !affinesEqual(transform, Affine.identity());
+    const inverse_transform = if (wrap_transform) transform.inverse() orelse return error.InvalidTransform else Affine.identity();
     if (wrap_opacity) try builder.pushOpacity(opacity);
+    if (wrap_transform) try builder.transform(transform);
     try emitWidgetLayoutNodeContent(builder, layout, node_index, tokens, state, widget);
+    if (wrap_transform) try builder.transform(inverse_transform);
     if (wrap_opacity) try builder.popOpacity();
 }
 
@@ -5571,6 +5597,10 @@ fn emitWidgetLayoutNodeContent(
 
 fn widgetOpacity(widget: Widget) f32 {
     return std.math.clamp(widget.opacity, 0, 1);
+}
+
+fn widgetTransform(widget: Widget) Affine {
+    return widget.transform;
 }
 
 fn widgetClipsContent(widget: Widget) bool {
@@ -6758,12 +6788,19 @@ fn hitTestWidgetLayoutNode(layout: WidgetLayoutTree, node_index: usize, point: g
     const node = layout.nodes[node_index];
     if (node.widget.semantics.hidden) return null;
 
-    if (widgetClipsContent(node.widget) and !node.frame.normalized().containsPoint(point)) return null;
-    if (hitTestWidgetLayoutChildren(layout, node_index, point, tokens)) |hit| return hit;
+    const local_point = widgetLocalHitPoint(node.widget, point) orelse return null;
+    if (widgetClipsContent(node.widget) and !node.frame.normalized().containsPoint(local_point)) return null;
+    if (hitTestWidgetLayoutChildren(layout, node_index, local_point, tokens)) |hit| return hit;
 
     if (!isHitTarget(node.widget)) return null;
-    if (!node.frame.normalized().containsPoint(point)) return null;
+    if (!node.frame.normalized().containsPoint(local_point)) return null;
     return widgetHitFromNode(node, node_index);
+}
+
+fn widgetLocalHitPoint(widget: Widget, point: geometry.PointF) ?geometry.PointF {
+    const transform = widgetTransform(widget);
+    if (affinesEqual(transform, Affine.identity())) return point;
+    return if (transform.inverse()) |inverse| inverse.transformPoint(point) else null;
 }
 
 fn widgetHitFromNode(node: WidgetLayoutNode, index: usize) WidgetHit {
@@ -7575,7 +7612,7 @@ fn diffWidgetLayoutTrees(previous: WidgetLayoutTree, next: WidgetLayoutTree, out
                 widgetVisibleSubtreeFullPaintBounds(previous, previous_index),
                 widgetVisibleSubtreeFullPaintBounds(next, next_ref.index),
             );
-        } else if (previous_node.widget.opacity != next_ref.node.widget.opacity) {
+        } else if (previous_node.widget.opacity != next_ref.node.widget.opacity or !affinesEqual(previous_node.widget.transform, next_ref.node.widget.transform)) {
             change.dirty_bounds = unionOptionalBounds(
                 widgetVisibleSubtreeFullPaintBounds(previous, previous_index),
                 widgetVisibleSubtreeFullPaintBounds(next, next_ref.index),
@@ -7653,7 +7690,7 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         !optionalTextSelectionsEqual(previous.widget.text_selection, next.widget.text_selection) or
         !optionalTextRangesEqual(previous.widget.text_composition, next.widget.text_composition);
     const behavior_dirty = !std.mem.eql(u8, previous.widget.command, next.widget.command);
-    const visual_dirty = previous.widget.opacity != next.widget.opacity;
+    const visual_dirty = previous.widget.opacity != next.widget.opacity or !affinesEqual(previous.widget.transform, next.widget.transform);
     const state_dirty = !widgetStatesEqual(previous.widget.state, next.widget.state);
     const visibility_dirty = previous.widget.semantics.hidden != next.widget.semantics.hidden;
     const layer_dirty = previous.widget.layer != next.widget.layer;
@@ -7726,6 +7763,10 @@ fn appendOptionalObjectId(output: []?ObjectId, len: *usize, maybe_id: ?ObjectId)
 }
 
 fn widgetFullPaintBounds(node: WidgetLayoutNode) geometry.RectF {
+    return widgetFullPaintBoundsWithTransform(node, widgetTransform(node.widget));
+}
+
+fn widgetFullPaintBoundsWithTransform(node: WidgetLayoutNode, transform: Affine) geometry.RectF {
     var bounds = node.frame.normalized();
     if (widgetFrameStrokeBounds(node.widget)) |stroke_bounds| {
         bounds = geometry.RectF.unionWith(bounds, stroke_bounds.normalized());
@@ -7733,7 +7774,7 @@ fn widgetFullPaintBounds(node: WidgetLayoutNode) geometry.RectF {
     if (widgetShadowPaintBounds(node.widget)) |shadow_bounds| {
         bounds = geometry.RectF.unionWith(bounds, shadow_bounds.normalized());
     }
-    return bounds;
+    return transform.transformRect(bounds).normalized();
 }
 
 fn widgetVisibleSubtreeFullPaintBounds(layout: WidgetLayoutTree, root_index: usize) ?geometry.RectF {
@@ -7754,9 +7795,28 @@ fn widgetVisibleSubtreeFullPaintBounds(layout: WidgetLayoutTree, root_index: usi
             hidden_depth = node.depth;
             continue;
         }
-        bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetFullPaintBounds(node)));
+        bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetFullPaintBoundsWithTransform(node, widgetAccumulatedTransform(layout, index))));
     }
     return bounds;
+}
+
+fn widgetAccumulatedTransform(layout: WidgetLayoutTree, node_index: usize) Affine {
+    var indices: [max_widget_depth]usize = undefined;
+    var len: usize = 0;
+    var current: ?usize = node_index;
+    while (current) |index| {
+        if (index >= layout.nodes.len or len >= indices.len) break;
+        indices[len] = index;
+        len += 1;
+        current = layout.nodes[index].parent_index;
+    }
+
+    var transform = Affine.identity();
+    while (len > 0) {
+        len -= 1;
+        transform = transform.multiply(widgetTransform(layout.nodes[indices[len]].widget));
+    }
+    return transform;
 }
 
 fn widgetChangedClippedDirtyBounds(
@@ -10206,6 +10266,79 @@ test "widget opacity wraps subtree display list commands" {
     var transparent_builder = Builder.init(&transparent_commands);
     try emitWidgetTree(&transparent_builder, .{ .kind = .stack, .opacity = 0, .children = &children }, .{});
     try std.testing.expectEqual(@as(usize, 0), transparent_builder.displayList().commandCount());
+}
+
+test "widget transform wraps subtree display list commands" {
+    const children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .text,
+            .frame = geometry.RectF.init(0, 0, 40, 20),
+            .transform = Affine.translate(20, 0),
+            .text = "Move",
+        },
+        .{
+            .id = 3,
+            .kind = .text,
+            .frame = geometry.RectF.init(0, 24, 40, 20),
+            .text = "Still",
+        },
+    };
+    const root = Widget{ .kind = .stack, .children = &children };
+
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, root, .{});
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 4), display_list.commandCount());
+    switch (display_list.commands[0]) {
+        .transform => |transform| try std.testing.expectEqualDeep(Affine.translate(20, 0), transform),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[1]) {
+        .draw_text => |text| try std.testing.expectEqualStrings("Move", text.text),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .transform => |transform| try std.testing.expectEqualDeep(Affine.translate(-20, 0), transform),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[3]) {
+        .draw_text => |text| try std.testing.expectEqualStrings("Still", text.text),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var render_commands: [2]RenderCommand = undefined;
+    const render_plan = try display_list.renderPlan(&render_commands);
+    try std.testing.expectEqual(@as(usize, 2), render_plan.commandCount());
+    try std.testing.expectEqualDeep(Affine.translate(20, 0), render_plan.commands[0].transform);
+    try std.testing.expectEqualDeep(Affine.identity(), render_plan.commands[1].transform);
+
+    var invalid_commands: [1]CanvasCommand = undefined;
+    var invalid_builder = Builder.init(&invalid_commands);
+    try std.testing.expectError(error.InvalidTransform, emitWidgetTree(&invalid_builder, .{
+        .kind = .text,
+        .transform = Affine.scale(0, 1),
+        .text = "Bad",
+    }, .{}));
+    try std.testing.expectEqual(@as(usize, 0), invalid_builder.displayList().commandCount());
+}
+
+test "widget transform affects hit testing" {
+    const button = Widget{
+        .id = 4,
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 0, 32, 24),
+        .transform = Affine.translate(40, 0),
+        .text = "Go",
+    };
+
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(button, button.frame, &nodes);
+    try std.testing.expect(layout.hitTest(geometry.PointF.init(8, 12)) == null);
+    const hit = layout.hitTest(geometry.PointF.init(48, 12)).?;
+    try std.testing.expectEqual(@as(ObjectId, 4), hit.id);
+    try std.testing.expectEqual(WidgetKind.button, hit.kind);
 }
 
 test "widget clip content wraps subtree display list and hit testing" {
@@ -12739,6 +12872,40 @@ test "widget layout diff marks opacity changes as subtree paint dirty" {
     try expectRect(geometry.RectF.init(0, 0, 50, 10), invalidations[0].dirty_bounds);
 }
 
+test "widget layout diff marks transform changes as subtree paint dirty" {
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .text,
+        .frame = geometry.RectF.init(20, 0, 30, 10),
+        .text = "Move",
+    }};
+    const previous_stack = Widget{
+        .id = 1,
+        .kind = .stack,
+        .children = &children,
+    };
+    const next_stack = Widget{
+        .id = 1,
+        .kind = .stack,
+        .transform = Affine.translate(10, 0),
+        .children = &children,
+    };
+
+    var previous_nodes: [2]WidgetLayoutNode = undefined;
+    var next_nodes: [2]WidgetLayoutNode = undefined;
+    const previous = try layoutWidgetTree(previous_stack, geometry.RectF.init(0, 0, 10, 10), &previous_nodes);
+    const next = try layoutWidgetTree(next_stack, geometry.RectF.init(0, 0, 10, 10), &next_nodes);
+
+    var invalidations_buffer: [2]WidgetInvalidation = undefined;
+    const invalidations = try WidgetLayoutTree.diff(previous, next, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 1), invalidations.len);
+    try std.testing.expectEqual(@as(ObjectId, 1), invalidations[0].id);
+    try std.testing.expect(!invalidations[0].layout_dirty);
+    try std.testing.expect(invalidations[0].paint_dirty);
+    try std.testing.expect(!invalidations[0].semantics_dirty);
+    try expectRect(geometry.RectF.init(0, 0, 60, 10), invalidations[0].dirty_bounds);
+}
+
 test "widget layout diff clips paint dirtiness to clip content ancestors" {
     const previous_children = [_]Widget{.{
         .id = 2,
@@ -13571,6 +13738,11 @@ test "affine transforms points and conservative rect bounds" {
     const transform = Affine.translate(10, 5).multiply(Affine.scale(2, 3));
     try std.testing.expectEqualDeep(geometry.PointF.init(14, 14), transform.transformPoint(geometry.PointF.init(2, 3)));
     try std.testing.expectEqualDeep(geometry.RectF.init(10, 5, 20, 15), transform.transformRect(geometry.RectF.init(0, 0, 10, 5)));
+    const inverse = transform.inverse().?;
+    const restored = inverse.transformPoint(geometry.PointF.init(14, 14));
+    try std.testing.expectApproxEqAbs(@as(f32, 2), restored.x, 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 3), restored.y, 0.00001);
+    try std.testing.expect(Affine.scale(0, 1).inverse() == null);
 }
 
 test "render plan resolves transform clip and opacity state" {
