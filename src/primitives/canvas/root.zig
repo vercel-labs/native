@@ -3007,6 +3007,7 @@ pub const Widget = struct {
     id: ObjectId = 0,
     kind: WidgetKind,
     frame: geometry.RectF = .{},
+    opacity: f32 = 1,
     text: []const u8 = "",
     command: []const u8 = "",
     image_id: ImageId = 0,
@@ -5446,6 +5447,15 @@ fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, dept
     if (depth >= max_widget_depth) return error.WidgetDepthExceeded;
     if (widget.semantics.hidden) return;
 
+    const opacity = widgetOpacity(widget);
+    if (opacity <= 0) return;
+    const wrap_opacity = opacity < 1;
+    if (wrap_opacity) try builder.pushOpacity(opacity);
+    try emitWidgetDepthContent(builder, widget, tokens, depth);
+    if (wrap_opacity) try builder.popOpacity();
+}
+
+fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
     switch (widget.kind) {
         .stack, .row, .column, .grid, .data_grid, .list, .data_row => try emitWidgetChildren(builder, widget.children, tokens, depth),
         .scroll_view => try emitScrollViewWidget(builder, widget, tokens, depth),
@@ -5510,6 +5520,22 @@ fn emitWidgetLayoutNode(
     if (node.widget.semantics.hidden) return;
 
     const widget = widgetWithRenderState(widgetWithFrame(node.widget, node.frame), state);
+    const opacity = widgetOpacity(widget);
+    if (opacity <= 0) return;
+    const wrap_opacity = opacity < 1;
+    if (wrap_opacity) try builder.pushOpacity(opacity);
+    try emitWidgetLayoutNodeContent(builder, layout, node_index, tokens, state, widget);
+    if (wrap_opacity) try builder.popOpacity();
+}
+
+fn emitWidgetLayoutNodeContent(
+    builder: *Builder,
+    layout: WidgetLayoutTree,
+    node_index: usize,
+    tokens: DesignTokens,
+    state: WidgetRenderState,
+    widget: Widget,
+) Error!void {
     switch (widget.kind) {
         .stack, .row, .column, .grid, .data_grid, .list, .data_row => {},
         .scroll_view => {
@@ -5540,6 +5566,10 @@ fn emitWidgetLayoutNode(
     }
 
     try emitWidgetLayoutChildren(builder, layout, node_index, tokens, state);
+}
+
+fn widgetOpacity(widget: Widget) f32 {
+    return std.math.clamp(widget.opacity, 0, 1);
 }
 
 fn emitPanelWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
@@ -7503,6 +7533,11 @@ fn diffWidgetLayoutTrees(previous: WidgetLayoutTree, next: WidgetLayoutTree, out
                 widgetVisibleSubtreeFullPaintBounds(previous, previous_index),
                 widgetVisibleSubtreeFullPaintBounds(next, next_ref.index),
             );
+        } else if (previous_node.widget.opacity != next_ref.node.widget.opacity) {
+            change.dirty_bounds = unionOptionalBounds(
+                widgetVisibleSubtreeFullPaintBounds(previous, previous_index),
+                widgetVisibleSubtreeFullPaintBounds(next, next_ref.index),
+            );
         } else {
             change.dirty_bounds = widgetChangedClippedDirtyBounds(previous, previous_index, next, next_ref.index, change.dirty_bounds);
         }
@@ -7576,6 +7611,7 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         !optionalTextSelectionsEqual(previous.widget.text_selection, next.widget.text_selection) or
         !optionalTextRangesEqual(previous.widget.text_composition, next.widget.text_composition);
     const behavior_dirty = !std.mem.eql(u8, previous.widget.command, next.widget.command);
+    const visual_dirty = previous.widget.opacity != next.widget.opacity;
     const state_dirty = !widgetStatesEqual(previous.widget.state, next.widget.state);
     const visibility_dirty = previous.widget.semantics.hidden != next.widget.semantics.hidden;
     const layer_dirty = previous.widget.layer != next.widget.layer;
@@ -7585,7 +7621,7 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         behavior_dirty or
         state_dirty or
         !widgetSemanticsEqual(previous.widget.semantics, next.widget.semantics);
-    const paint_dirty = layout_dirty or content_dirty or state_dirty or visibility_dirty or layer_dirty;
+    const paint_dirty = layout_dirty or content_dirty or visual_dirty or state_dirty or visibility_dirty or layer_dirty;
 
     const dirty_bounds = if (layout_dirty or visibility_dirty or layer_dirty)
         unionOptionalBounds(widgetFullPaintBounds(previous), widgetFullPaintBounds(next))
@@ -10076,6 +10112,59 @@ test "widget layout aligns row children on main and cross axes" {
     try expectLayoutFrame(spaced_layout, 6, geometry.RectF.init(100, 0, 20, 16));
 }
 
+test "widget opacity wraps subtree display list commands" {
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .text,
+        .frame = geometry.RectF.init(8, 10, 80, 20),
+        .text = "Fade",
+    }};
+    const root = Widget{
+        .id = 1,
+        .kind = .stack,
+        .opacity = 0.5,
+        .children = &children,
+    };
+
+    var direct_commands: [3]CanvasCommand = undefined;
+    var direct_builder = Builder.init(&direct_commands);
+    try emitWidgetTree(&direct_builder, root, .{});
+    const direct_display_list = direct_builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), direct_display_list.commandCount());
+    switch (direct_display_list.commands[0]) {
+        .push_opacity => |opacity| try std.testing.expectEqual(@as(f32, 0.5), opacity),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (direct_display_list.commands[1]) {
+        .draw_text => |text| try std.testing.expectEqualStrings("Fade", text.text),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(direct_display_list.commands[2] == .pop_opacity);
+
+    var render_commands: [1]RenderCommand = undefined;
+    const render_plan = try direct_display_list.renderPlan(&render_commands);
+    try std.testing.expectEqual(@as(usize, 1), render_plan.commandCount());
+    try std.testing.expectEqual(@as(f32, 0.5), render_plan.commands[0].opacity);
+
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 100, 40), &nodes);
+    var layout_commands: [3]CanvasCommand = undefined;
+    var layout_builder = Builder.init(&layout_commands);
+    try layout.emitDisplayList(&layout_builder, .{});
+    const layout_display_list = layout_builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), layout_display_list.commandCount());
+    switch (layout_display_list.commands[0]) {
+        .push_opacity => |opacity| try std.testing.expectEqual(@as(f32, 0.5), opacity),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(layout_display_list.commands[2] == .pop_opacity);
+
+    var transparent_commands: [1]CanvasCommand = undefined;
+    var transparent_builder = Builder.init(&transparent_commands);
+    try emitWidgetTree(&transparent_builder, .{ .kind = .stack, .opacity = 0, .children = &children }, .{});
+    try std.testing.expectEqual(@as(usize, 0), transparent_builder.displayList().commandCount());
+}
+
 test "widget layout hit testing prefers deepest topmost enabled target" {
     const children = [_]Widget{
         .{
@@ -12525,6 +12614,40 @@ test "widget layout diff marks axis alignment changes as layout dirty" {
     try std.testing.expect(invalidations[1].layout_dirty);
     try std.testing.expectEqual(@as(ObjectId, 3), invalidations[2].id);
     try std.testing.expect(invalidations[2].layout_dirty);
+}
+
+test "widget layout diff marks opacity changes as subtree paint dirty" {
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .text,
+        .frame = geometry.RectF.init(20, 0, 30, 10),
+        .text = "Fade",
+    }};
+    const previous_stack = Widget{
+        .id = 1,
+        .kind = .stack,
+        .children = &children,
+    };
+    const next_stack = Widget{
+        .id = 1,
+        .kind = .stack,
+        .opacity = 0.5,
+        .children = &children,
+    };
+
+    var previous_nodes: [2]WidgetLayoutNode = undefined;
+    var next_nodes: [2]WidgetLayoutNode = undefined;
+    const previous = try layoutWidgetTree(previous_stack, geometry.RectF.init(0, 0, 10, 10), &previous_nodes);
+    const next = try layoutWidgetTree(next_stack, geometry.RectF.init(0, 0, 10, 10), &next_nodes);
+
+    var invalidations_buffer: [2]WidgetInvalidation = undefined;
+    const invalidations = try WidgetLayoutTree.diff(previous, next, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 1), invalidations.len);
+    try std.testing.expectEqual(@as(ObjectId, 1), invalidations[0].id);
+    try std.testing.expect(!invalidations[0].layout_dirty);
+    try std.testing.expect(invalidations[0].paint_dirty);
+    try std.testing.expect(!invalidations[0].semantics_dirty);
+    try expectRect(geometry.RectF.init(0, 0, 50, 10), invalidations[0].dirty_bounds);
 }
 
 test "widget layout diff marks scroll offset changes as child layout dirty" {
