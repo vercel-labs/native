@@ -7558,11 +7558,29 @@ fn referenceSampleLinearGradient(gradient: LinearGradient, transform: Affine, po
 fn referenceMixColor(a: Color, b: Color, t: f32) Color {
     const value = std.math.clamp(t, 0, 1);
     return .{
-        .r = a.r + (b.r - a.r) * value,
-        .g = a.g + (b.g - a.g) * value,
-        .b = a.b + (b.b - a.b) * value,
+        .r = referenceMixSrgb(a.r, b.r, value),
+        .g = referenceMixSrgb(a.g, b.g, value),
+        .b = referenceMixSrgb(a.b, b.b, value),
         .a = a.a + (b.a - a.a) * value,
     };
+}
+
+fn referenceMixSrgb(a: f32, b: f32, t: f32) f32 {
+    const start = referenceSrgbToLinear(a);
+    const end = referenceSrgbToLinear(b);
+    return referenceLinearToSrgb(start + (end - start) * std.math.clamp(t, 0, 1));
+}
+
+fn referenceSrgbToLinear(value: f32) f32 {
+    const channel = std.math.clamp(value, 0, 1);
+    if (channel <= 0.04045) return channel / 12.92;
+    return std.math.pow(f32, (channel + 0.055) / 1.055, 2.4);
+}
+
+fn referenceLinearToSrgb(value: f32) f32 {
+    const channel = std.math.clamp(value, 0, 1);
+    if (channel <= 0.0031308) return channel * 12.92;
+    return 1.055 * std.math.pow(f32, channel, 1.0 / 2.4) - 0.055;
 }
 
 fn referenceScaleColorAlpha(color: Color, alpha: f32) Color {
@@ -7888,9 +7906,9 @@ fn referenceSampleImage(image: ReferenceImage, src: geometry.RectF, u: f32, v: f
     const bottom_right = referenceImagePixel(image, x1, y1);
 
     return .{
-        referenceBilinearChannel(top_left[0], top_right[0], bottom_left[0], bottom_right[0], tx, ty),
-        referenceBilinearChannel(top_left[1], top_right[1], bottom_left[1], bottom_right[1], tx, ty),
-        referenceBilinearChannel(top_left[2], top_right[2], bottom_left[2], bottom_right[2], tx, ty),
+        referenceBilinearSrgbChannel(top_left[0], top_right[0], bottom_left[0], bottom_right[0], tx, ty),
+        referenceBilinearSrgbChannel(top_left[1], top_right[1], bottom_left[1], bottom_right[1], tx, ty),
+        referenceBilinearSrgbChannel(top_left[2], top_right[2], bottom_left[2], bottom_right[2], tx, ty),
         referenceBilinearChannel(top_left[3], top_right[3], bottom_left[3], bottom_right[3], tx, ty),
     };
 }
@@ -7905,10 +7923,22 @@ fn referenceImagePixel(image: ReferenceImage, x: i32, y: i32) [4]u8 {
     };
 }
 
+fn referenceBilinearSrgbChannel(top_left: u8, top_right: u8, bottom_left: u8, bottom_right: u8, tx: f32, ty: f32) u8 {
+    const top = referenceLerpSrgbByte(top_left, top_right, tx);
+    const bottom = referenceLerpSrgbByte(bottom_left, bottom_right, tx);
+    return colorChannelToByte(referenceLinearToSrgb(top + (bottom - top) * std.math.clamp(ty, 0, 1)));
+}
+
 fn referenceBilinearChannel(top_left: u8, top_right: u8, bottom_left: u8, bottom_right: u8, tx: f32, ty: f32) u8 {
     const top = referenceLerpByte(top_left, top_right, tx);
     const bottom = referenceLerpByte(bottom_left, bottom_right, tx);
     return colorChannelToByte((top + (bottom - top) * ty) / 255.0);
+}
+
+fn referenceLerpSrgbByte(a: u8, b: u8, t: f32) f32 {
+    const start = referenceSrgbToLinear(@as(f32, @floatFromInt(a)) / 255.0);
+    const end = referenceSrgbToLinear(@as(f32, @floatFromInt(b)) / 255.0);
+    return start + (end - start) * std.math.clamp(t, 0, 1);
 }
 
 fn referenceLerpByte(a: u8, b: u8, t: f32) f32 {
@@ -13869,7 +13899,7 @@ test "reference renderer samples transformed clipped linear gradients" {
 
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 0, 0);
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 1, 0);
-    try expectPixelRgba8(.{ 64, 0, 191, 255 }, surface, 2, 0);
+    try expectPixelRgba8(.{ 137, 0, 225, 255 }, surface, 2, 0);
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 3, 0);
 }
 
@@ -14252,8 +14282,8 @@ test "reference renderer draws image resources" {
 
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 0, 0);
     try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 0, 1);
-    try expectPixelRgba8(.{ 191, 0, 64, 255 }, surface, 1, 1);
-    try expectPixelRgba8(.{ 64, 0, 191, 255 }, surface, 2, 1);
+    try expectPixelRgba8(.{ 225, 0, 137, 255 }, surface, 1, 1);
+    try expectPixelRgba8(.{ 137, 0, 225, 255 }, surface, 2, 1);
     try expectPixelRgba8(.{ 0, 0, 255, 255 }, surface, 3, 2);
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 0, 3);
 }
@@ -14301,8 +14331,8 @@ test "reference renderer bilinear-filters scaled images" {
     try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
 
     try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 0, 0);
-    try expectPixelRgba8(.{ 159, 64, 64, 255 }, surface, 1, 1);
-    try expectPixelRgba8(.{ 159, 191, 191, 255 }, surface, 2, 2);
+    try expectPixelRgba8(.{ 207, 137, 137, 255 }, surface, 1, 1);
+    try expectPixelRgba8(.{ 207, 225, 225, 255 }, surface, 2, 2);
     try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 3, 3);
 }
 
