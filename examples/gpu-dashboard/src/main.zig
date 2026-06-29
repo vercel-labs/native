@@ -1032,6 +1032,33 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 103 press");
     try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
     try std.testing.expectEqual(@as(u32, 1), app.mode_count);
+    snapshot = harness.runtime.automationSnapshot("Dashboard");
+    try std.testing.expect(dashboardSnapshotWidget(snapshot, 103).?.focused);
+
+    resetDashboardDirty(&harness.runtime);
+    try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "dashboard-canvas",
+        .kind = .key_down,
+        .key = "tab",
+    } });
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
+    snapshot = harness.runtime.automationSnapshot("Dashboard");
+    try std.testing.expect(!dashboardSnapshotWidget(snapshot, 103).?.focused);
+    try std.testing.expect(dashboardSnapshotWidget(snapshot, 105).?.focused);
+
+    resetDashboardDirty(&harness.runtime);
+    try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "dashboard-canvas",
+        .kind = .key_down,
+        .key = "tab",
+        .modifiers = .{ .shift = true },
+    } });
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
+    snapshot = harness.runtime.automationSnapshot("Dashboard");
+    try std.testing.expect(dashboardSnapshotWidget(snapshot, 103).?.focused);
+    try std.testing.expect(!dashboardSnapshotWidget(snapshot, 105).?.focused);
 
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 112 select");
     snapshot = harness.runtime.automationSnapshot("Dashboard");
