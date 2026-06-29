@@ -706,6 +706,19 @@ pub const Runtime = struct {
                 storage.pipeline_cache_entries,
                 storage.pipeline_cache_actions,
             );
+        const path_geometry_plan = if (storage.path_geometries.len == 0)
+            canvas.RenderPathGeometryPlan{}
+        else
+            try render_plan.pathGeometryPlan(storage.path_geometries);
+        const path_geometry_cache_plan = if (storage.path_geometry_cache_entries.len == 0 and storage.path_geometry_cache_actions.len == 0)
+            canvas.RenderPathGeometryCachePlan{}
+        else
+            try path_geometry_plan.cachePlan(
+                frame_options.previous_path_geometry_cache,
+                frame_options.frame_index,
+                storage.path_geometry_cache_entries,
+                storage.path_geometry_cache_actions,
+            );
         const layer_plan = if (storage.layers.len == 0)
             canvas.RenderLayerPlan{}
         else
@@ -780,6 +793,8 @@ pub const Runtime = struct {
             .render_plan = render_plan,
             .batch_plan = batch_plan,
             .pipeline_cache_plan = pipeline_cache_plan,
+            .path_geometry_plan = path_geometry_plan,
+            .path_geometry_cache_plan = path_geometry_cache_plan,
             .layer_plan = layer_plan,
             .layer_cache_plan = layer_cache_plan,
             .resource_plan = resource_plan,
@@ -4930,6 +4945,8 @@ fn canvasFrameBudgetIsUnset(budget: canvas.CanvasFrameBudget) bool {
         budget.max_encoder_commands == 0 and
         budget.max_pipelines == 0 and
         budget.max_pipeline_uploads == 0 and
+        budget.max_path_geometries == 0 and
+        budget.max_path_geometry_uploads == 0 and
         budget.max_layers == 0 and
         budget.max_layer_uploads == 0 and
         budget.max_resources == 0 and

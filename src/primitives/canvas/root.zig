@@ -1186,6 +1186,7 @@ pub const CanvasFrameOptions = struct {
     full_repaint: bool = false,
     budget: CanvasFrameBudget = .{},
     previous_pipeline_cache: []const RenderPipelineCacheEntry = &.{},
+    previous_path_geometry_cache: []const RenderPathGeometryCacheEntry = &.{},
     previous_resource_cache: []const RenderResourceCacheEntry = &.{},
     previous_layer_cache: []const RenderLayerCacheEntry = &.{},
     previous_visual_effect_cache: []const VisualEffectCacheEntry = &.{},
@@ -1201,6 +1202,9 @@ pub const CanvasFrameStorage = struct {
     render_batches: []RenderBatch,
     pipeline_cache_entries: []RenderPipelineCacheEntry = &.{},
     pipeline_cache_actions: []RenderPipelineCacheAction = &.{},
+    path_geometries: []RenderPathGeometry = &.{},
+    path_geometry_cache_entries: []RenderPathGeometryCacheEntry = &.{},
+    path_geometry_cache_actions: []RenderPathGeometryCacheAction = &.{},
     layers: []RenderLayer = &.{},
     layer_cache_entries: []RenderLayerCacheEntry = &.{},
     layer_cache_actions: []RenderLayerCacheAction = &.{},
@@ -1226,6 +1230,8 @@ pub const CanvasFrameBudget = struct {
     max_encoder_commands: usize = 0,
     max_pipelines: usize = 0,
     max_pipeline_uploads: usize = 0,
+    max_path_geometries: usize = 0,
+    max_path_geometry_uploads: usize = 0,
     max_layers: usize = 0,
     max_layer_uploads: usize = 0,
     max_resources: usize = 0,
@@ -1244,6 +1250,8 @@ pub const CanvasFrameBudget = struct {
             .encoder_commands_over = budgetExceeded(self.max_encoder_commands, diagnostics.encoder_command_count),
             .pipelines_over = budgetExceeded(self.max_pipelines, diagnostics.pipeline_count),
             .pipeline_uploads_over = budgetExceeded(self.max_pipeline_uploads, diagnostics.pipeline_upload_count),
+            .path_geometries_over = budgetExceeded(self.max_path_geometries, diagnostics.path_geometry_count),
+            .path_geometry_uploads_over = budgetExceeded(self.max_path_geometry_uploads, diagnostics.path_geometry_upload_count),
             .layers_over = budgetExceeded(self.max_layers, diagnostics.layer_count),
             .layer_uploads_over = budgetExceeded(self.max_layer_uploads, diagnostics.layer_upload_count),
             .resources_over = budgetExceeded(self.max_resources, diagnostics.resource_count),
@@ -1264,6 +1272,8 @@ pub const CanvasFrameBudgetStatus = struct {
     encoder_commands_over: bool = false,
     pipelines_over: bool = false,
     pipeline_uploads_over: bool = false,
+    path_geometries_over: bool = false,
+    path_geometry_uploads_over: bool = false,
     layers_over: bool = false,
     layer_uploads_over: bool = false,
     resources_over: bool = false,
@@ -1286,6 +1296,8 @@ pub const CanvasFrameBudgetStatus = struct {
         if (self.encoder_commands_over) count += 1;
         if (self.pipelines_over) count += 1;
         if (self.pipeline_uploads_over) count += 1;
+        if (self.path_geometries_over) count += 1;
+        if (self.path_geometry_uploads_over) count += 1;
         if (self.layers_over) count += 1;
         if (self.layer_uploads_over) count += 1;
         if (self.resources_over) count += 1;
@@ -1312,6 +1324,12 @@ pub const CanvasFrameDiagnostics = struct {
     pipeline_upload_count: usize = 0,
     pipeline_retain_count: usize = 0,
     pipeline_evict_count: usize = 0,
+    path_geometry_count: usize = 0,
+    path_geometry_vertex_count: usize = 0,
+    path_geometry_index_count: usize = 0,
+    path_geometry_upload_count: usize = 0,
+    path_geometry_retain_count: usize = 0,
+    path_geometry_evict_count: usize = 0,
     layer_count: usize = 0,
     layer_opacity_count: usize = 0,
     layer_clip_count: usize = 0,
@@ -1351,7 +1369,7 @@ pub const CanvasFrameDiagnostics = struct {
 
     pub fn writeJson(self: CanvasFrameDiagnostics, writer: anytype) !void {
         try writer.print(
-            "{{\"frameIndex\":{d},\"commandCount\":{d},\"batchCount\":{d},\"encoderCommandCount\":{d},\"encoderCacheActionCount\":{d},\"encoderBindPipelineCount\":{d},\"encoderDrawBatchCount\":{d},\"pipelineCount\":{d},\"pipelineUploadCount\":{d},\"pipelineRetainCount\":{d},\"pipelineEvictCount\":{d},\"layerCount\":{d},\"layerOpacityCount\":{d},\"layerClipCount\":{d},\"layerTransformCount\":{d},\"layerUploadCount\":{d},\"layerRetainCount\":{d},\"layerEvictCount\":{d}",
+            "{{\"frameIndex\":{d},\"commandCount\":{d},\"batchCount\":{d},\"encoderCommandCount\":{d},\"encoderCacheActionCount\":{d},\"encoderBindPipelineCount\":{d},\"encoderDrawBatchCount\":{d},\"pipelineCount\":{d},\"pipelineUploadCount\":{d},\"pipelineRetainCount\":{d},\"pipelineEvictCount\":{d},\"pathGeometryCount\":{d},\"pathGeometryVertexCount\":{d},\"pathGeometryIndexCount\":{d},\"pathGeometryUploadCount\":{d},\"pathGeometryRetainCount\":{d},\"pathGeometryEvictCount\":{d},\"layerCount\":{d},\"layerOpacityCount\":{d},\"layerClipCount\":{d},\"layerTransformCount\":{d},\"layerUploadCount\":{d},\"layerRetainCount\":{d},\"layerEvictCount\":{d}",
             .{
                 self.frame_index,
                 self.command_count,
@@ -1364,6 +1382,12 @@ pub const CanvasFrameDiagnostics = struct {
                 self.pipeline_upload_count,
                 self.pipeline_retain_count,
                 self.pipeline_evict_count,
+                self.path_geometry_count,
+                self.path_geometry_vertex_count,
+                self.path_geometry_index_count,
+                self.path_geometry_upload_count,
+                self.path_geometry_retain_count,
+                self.path_geometry_evict_count,
                 self.layer_count,
                 self.layer_opacity_count,
                 self.layer_clip_count,
@@ -1436,6 +1460,7 @@ pub const RenderEncoderCommand = union(enum) {
     begin_pass: RenderEncoderBeginPass,
     set_scissor: geometry.RectF,
     pipeline_cache: RenderPipelineCacheAction,
+    path_geometry_cache: RenderPathGeometryCacheAction,
     layer_cache: RenderLayerCacheAction,
     resource_cache: RenderResourceCacheAction,
     visual_effect_cache: VisualEffectCacheAction,
@@ -1457,7 +1482,7 @@ pub const RenderEncoderPlan = struct {
         var count: usize = 0;
         for (self.commands) |command| {
             switch (command) {
-                .pipeline_cache, .layer_cache, .resource_cache, .visual_effect_cache, .glyph_atlas_cache, .text_layout_cache => count += 1,
+                .pipeline_cache, .path_geometry_cache, .layer_cache, .resource_cache, .visual_effect_cache, .glyph_atlas_cache, .text_layout_cache => count += 1,
                 else => {},
             }
         }
@@ -1497,6 +1522,8 @@ pub const CanvasRenderPass = struct {
     commands: []const RenderCommand = &.{},
     batches: []const RenderBatch = &.{},
     pipeline_actions: []const RenderPipelineCacheAction = &.{},
+    path_geometries: []const RenderPathGeometry = &.{},
+    path_geometry_actions: []const RenderPathGeometryCacheAction = &.{},
     layers: []const RenderLayer = &.{},
     layer_actions: []const RenderLayerCacheAction = &.{},
     resources: []const RenderResource = &.{},
@@ -1533,6 +1560,26 @@ pub const CanvasRenderPass = struct {
         return self.pipeline_actions.len;
     }
 
+    pub fn pathGeometryCount(self: CanvasRenderPass) usize {
+        return self.path_geometries.len;
+    }
+
+    pub fn pathGeometryActionCount(self: CanvasRenderPass) usize {
+        return self.path_geometry_actions.len;
+    }
+
+    pub fn pathGeometryVertexCount(self: CanvasRenderPass) usize {
+        var count: usize = 0;
+        for (self.path_geometries) |geometry_plan| count += geometry_plan.vertex_count;
+        return count;
+    }
+
+    pub fn pathGeometryIndexCount(self: CanvasRenderPass) usize {
+        var count: usize = 0;
+        for (self.path_geometries) |geometry_plan| count += geometry_plan.index_count;
+        return count;
+    }
+
     pub fn layerCount(self: CanvasRenderPass) usize {
         return self.layers.len;
     }
@@ -1551,6 +1598,7 @@ pub const CanvasRenderPass = struct {
     pub fn encoderCacheActionCount(self: CanvasRenderPass) usize {
         if (!self.requiresRender()) return 0;
         return self.pipeline_actions.len +
+            self.path_geometry_actions.len +
             self.layer_actions.len +
             self.resource_actions.len +
             self.visual_effect_actions.len +
@@ -1633,6 +1681,8 @@ pub const CanvasFrame = struct {
     render_plan: RenderPlan = .{},
     batch_plan: RenderBatchPlan = .{},
     pipeline_cache_plan: RenderPipelineCachePlan = .{},
+    path_geometry_plan: RenderPathGeometryPlan = .{},
+    path_geometry_cache_plan: RenderPathGeometryCachePlan = .{},
     layer_plan: RenderLayerPlan = .{},
     layer_cache_plan: RenderLayerCachePlan = .{},
     resource_plan: RenderResourcePlan = .{},
@@ -1675,6 +1725,12 @@ pub const CanvasFrame = struct {
             .pipeline_upload_count = self.pipeline_cache_plan.uploadCount(),
             .pipeline_retain_count = self.pipeline_cache_plan.retainCount(),
             .pipeline_evict_count = self.pipeline_cache_plan.evictCount(),
+            .path_geometry_count = self.path_geometry_plan.geometryCount(),
+            .path_geometry_vertex_count = self.path_geometry_plan.vertexCount(),
+            .path_geometry_index_count = self.path_geometry_plan.indexCount(),
+            .path_geometry_upload_count = self.path_geometry_cache_plan.uploadCount(),
+            .path_geometry_retain_count = self.path_geometry_cache_plan.retainCount(),
+            .path_geometry_evict_count = self.path_geometry_cache_plan.evictCount(),
             .layer_count = self.layer_plan.layerCount(),
             .layer_opacity_count = self.layer_plan.opacityLayerCount(),
             .layer_clip_count = self.layer_plan.clipLayerCount(),
@@ -1724,6 +1780,8 @@ pub const CanvasFrame = struct {
             .commands = self.render_plan.commands,
             .batches = self.batch_plan.batches,
             .pipeline_actions = self.pipeline_cache_plan.actions,
+            .path_geometries = self.path_geometry_plan.geometries,
+            .path_geometry_actions = self.path_geometry_cache_plan.actions,
             .layers = self.layer_plan.layers,
             .layer_actions = self.layer_cache_plan.actions,
             .resources = self.resource_plan.resources,
@@ -3071,6 +3129,19 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
             storage.pipeline_cache_entries,
             storage.pipeline_cache_actions,
         );
+    const path_geometry_plan = if (storage.path_geometries.len == 0)
+        RenderPathGeometryPlan{}
+    else
+        try render_plan.pathGeometryPlan(storage.path_geometries);
+    const path_geometry_cache_plan = if (storage.path_geometry_cache_entries.len == 0 and storage.path_geometry_cache_actions.len == 0)
+        RenderPathGeometryCachePlan{}
+    else
+        try path_geometry_plan.cachePlan(
+            options.previous_path_geometry_cache,
+            options.frame_index,
+            storage.path_geometry_cache_entries,
+            storage.path_geometry_cache_actions,
+        );
     const layer_plan = if (storage.layers.len == 0)
         RenderLayerPlan{}
     else
@@ -3143,6 +3214,8 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         .render_plan = render_plan,
         .batch_plan = batch_plan,
         .pipeline_cache_plan = pipeline_cache_plan,
+        .path_geometry_plan = path_geometry_plan,
+        .path_geometry_cache_plan = path_geometry_cache_plan,
         .layer_plan = layer_plan,
         .layer_cache_plan = layer_cache_plan,
         .resource_plan = resource_plan,
@@ -3574,6 +3647,7 @@ pub const RenderEncoderPlanner = struct {
         if (pass.scissorBounds()) |bounds| try self.append(.{ .set_scissor = bounds });
 
         for (pass.pipeline_actions) |action| try self.append(.{ .pipeline_cache = action });
+        for (pass.path_geometry_actions) |action| try self.append(.{ .path_geometry_cache = action });
         for (pass.layer_actions) |action| try self.append(.{ .layer_cache = action });
         for (pass.resource_actions) |action| try self.append(.{ .resource_cache = action });
         for (pass.visual_effect_actions) |action| try self.append(.{ .visual_effect_cache = action });
@@ -8201,6 +8275,16 @@ fn writeCanvasRenderPassJson(pass: CanvasRenderPass, writer: anytype) !void {
         if (index > 0) try writer.writeByte(',');
         try writeRenderPipelineCacheActionJson(action, writer);
     }
+    try writer.writeAll("],\"pathGeometries\":[");
+    for (pass.path_geometries, 0..) |geometry_plan, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writeRenderPathGeometryJson(geometry_plan, writer);
+    }
+    try writer.writeAll("],\"pathGeometryActions\":[");
+    for (pass.path_geometry_actions, 0..) |action, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writeRenderPathGeometryCacheActionJson(action, writer);
+    }
     try writer.writeAll("],\"layers\":[");
     for (pass.layers, 0..) |layer, index| {
         if (index > 0) try writer.writeByte(',');
@@ -8290,6 +8374,50 @@ fn writeRenderPipelineCacheActionJson(action: RenderPipelineCacheAction, writer:
     try writer.writeAll(",\"cacheIndex\":");
     try writeOptionalUsizeJson(action.cache_index, writer);
     try writer.writeByte('}');
+}
+
+fn writeRenderPathGeometryJson(geometry_plan: RenderPathGeometry, writer: anytype) !void {
+    try writer.writeAll("{\"kind\":");
+    try json.writeString(writer, @tagName(geometry_plan.kind));
+    try writer.print(",\"commandIndex\":{d},\"id\":", .{geometry_plan.command_index});
+    try writeOptionalObjectIdJson(geometry_plan.id, writer);
+    try writer.writeAll(",\"bounds\":");
+    try writeRectJson(geometry_plan.bounds, writer);
+    try writer.print(
+        ",\"elementCount\":{d},\"contourCount\":{d},\"lineSegmentCount\":{d},\"quadraticSegmentCount\":{d},\"cubicSegmentCount\":{d},\"flattenedSegmentCount\":{d},\"vertexCount\":{d},\"indexCount\":{d},\"strokeWidth\":{d},\"fingerprint\":{d}}}",
+        .{
+            geometry_plan.element_count,
+            geometry_plan.contour_count,
+            geometry_plan.line_segment_count,
+            geometry_plan.quadratic_segment_count,
+            geometry_plan.cubic_segment_count,
+            geometry_plan.flattened_segment_count,
+            geometry_plan.vertex_count,
+            geometry_plan.index_count,
+            geometry_plan.stroke_width,
+            geometry_plan.fingerprint,
+        },
+    );
+}
+
+fn writeRenderPathGeometryCacheActionJson(action: RenderPathGeometryCacheAction, writer: anytype) !void {
+    try writer.writeAll("{\"kind\":");
+    try json.writeString(writer, @tagName(action.kind));
+    try writer.writeAll(",\"key\":");
+    try writeRenderPathGeometryKeyJson(action.key, writer);
+    try writer.writeAll(",\"geometryIndex\":");
+    try writeOptionalUsizeJson(action.geometry_index, writer);
+    try writer.writeAll(",\"cacheIndex\":");
+    try writeOptionalUsizeJson(action.cache_index, writer);
+    try writer.writeByte('}');
+}
+
+fn writeRenderPathGeometryKeyJson(key: RenderPathGeometryKey, writer: anytype) !void {
+    try writer.writeAll("{\"kind\":");
+    try json.writeString(writer, @tagName(key.kind));
+    try writer.writeAll(",\"id\":");
+    try writeOptionalObjectIdJson(key.id, writer);
+    try writer.print(",\"commandIndex\":{d},\"fingerprint\":{d}}}", .{ key.command_index, key.fingerprint });
 }
 
 fn writeRenderLayerJson(layer: RenderLayer, writer: anytype) !void {
@@ -12083,6 +12211,10 @@ test "canvas frame plan builds first frame renderer packet" {
     try std.testing.expectEqual(@as(usize, 2), render_pass.commandCount());
     try std.testing.expectEqual(@as(usize, 2), render_pass.batchCount());
     try std.testing.expectEqual(@as(usize, 2), render_pass.pipelineActionCount());
+    try std.testing.expectEqual(@as(usize, 0), render_pass.pathGeometryCount());
+    try std.testing.expectEqual(@as(usize, 0), render_pass.pathGeometryActionCount());
+    try std.testing.expectEqual(@as(usize, 0), render_pass.pathGeometryVertexCount());
+    try std.testing.expectEqual(@as(usize, 0), render_pass.pathGeometryIndexCount());
     try std.testing.expectEqual(@as(usize, 0), render_pass.layerCount());
     try std.testing.expectEqual(@as(usize, 0), render_pass.layerActionCount());
     try std.testing.expectEqual(@as(usize, 14), render_pass.encoderCommandCount());
@@ -12133,6 +12265,7 @@ test "canvas frame plan builds first frame renderer packet" {
     try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"commands\":[{\"index\":0,\"id\":1,\"opacity\":1,\"clip\":null,\"transform\":[1,0,0,1,0,0],\"localBounds\":[16,16,160,72],\"bounds\":[16,16,160,72],\"command\":{\"op\":\"fill_rounded_rect\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"batches\":[{\"pipeline\":\"linear_gradient\",\"commandStart\":0,\"commandCount\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"pipelineActions\":[{\"kind\":\"upload\",\"pipeline\":\"linear_gradient\",\"batchIndex\":0,\"cacheIndex\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"pathGeometries\":[],\"pathGeometryActions\":[]") != null);
     try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"layers\":[],\"layerActions\":[]") != null);
     try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"resources\":[{\"kind\":\"linear_gradient\",\"commandIndex\":0,\"id\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"resourceActions\":[{\"kind\":\"upload\",\"key\":{\"kind\":\"linear_gradient\"") != null);
@@ -12153,6 +12286,12 @@ test "canvas frame plan builds first frame renderer packet" {
     try std.testing.expectEqual(@as(usize, 2), diagnostics.pipeline_upload_count);
     try std.testing.expectEqual(@as(usize, 0), diagnostics.pipeline_retain_count);
     try std.testing.expectEqual(@as(usize, 0), diagnostics.pipeline_evict_count);
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.path_geometry_count);
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.path_geometry_vertex_count);
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.path_geometry_index_count);
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.path_geometry_upload_count);
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.path_geometry_retain_count);
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.path_geometry_evict_count);
     try std.testing.expectEqual(@as(usize, 0), diagnostics.layer_count);
     try std.testing.expectEqual(@as(usize, 0), diagnostics.layer_opacity_count);
     try std.testing.expectEqual(@as(usize, 0), diagnostics.layer_clip_count);
@@ -12183,6 +12322,8 @@ test "canvas frame plan builds first frame renderer packet" {
     try std.testing.expect(diagnostics.budget_status.encoder_commands_over);
     try std.testing.expect(!diagnostics.budget_status.pipelines_over);
     try std.testing.expect(diagnostics.budget_status.pipeline_uploads_over);
+    try std.testing.expect(!diagnostics.budget_status.path_geometries_over);
+    try std.testing.expect(!diagnostics.budget_status.path_geometry_uploads_over);
     try std.testing.expect(!diagnostics.budget_status.layers_over);
     try std.testing.expect(!diagnostics.budget_status.layer_uploads_over);
     try std.testing.expect(!diagnostics.budget_status.resources_over);
@@ -12198,7 +12339,7 @@ test "canvas frame plan builds first frame renderer packet" {
     var diagnostics_json_writer = std.Io.Writer.fixed(&diagnostics_json_buffer);
     try frame.writeDiagnosticsJson(&diagnostics_json_writer);
     try std.testing.expectEqualStrings(
-        "{\"frameIndex\":7,\"commandCount\":2,\"batchCount\":2,\"encoderCommandCount\":14,\"encoderCacheActionCount\":7,\"encoderBindPipelineCount\":2,\"encoderDrawBatchCount\":2,\"pipelineCount\":2,\"pipelineUploadCount\":2,\"pipelineRetainCount\":0,\"pipelineEvictCount\":0,\"layerCount\":0,\"layerOpacityCount\":0,\"layerClipCount\":0,\"layerTransformCount\":0,\"layerUploadCount\":0,\"layerRetainCount\":0,\"layerEvictCount\":0,\"resourceCount\":2,\"resourceUploadCount\":2,\"resourceRetainCount\":0,\"resourceEvictCount\":0,\"visualEffectCount\":0,\"visualEffectShadowCount\":0,\"visualEffectBlurCount\":0,\"visualEffectUploadCount\":0,\"visualEffectRetainCount\":0,\"visualEffectEvictCount\":0,\"glyphAtlasEntryCount\":2,\"glyphAtlasUploadCount\":2,\"glyphAtlasRetainCount\":0,\"glyphAtlasEvictCount\":0,\"textLayoutCount\":1,\"textLayoutLineCount\":1,\"textLayoutUploadCount\":1,\"textLayoutRetainCount\":0,\"textLayoutEvictCount\":0,\"changeCount\":0,\"budgetExceededCount\":4,\"budgetOk\":false,\"fullRepaint\":true,\"requiresRender\":true,\"dirtyBounds\":[0,0,320,200]}",
+        "{\"frameIndex\":7,\"commandCount\":2,\"batchCount\":2,\"encoderCommandCount\":14,\"encoderCacheActionCount\":7,\"encoderBindPipelineCount\":2,\"encoderDrawBatchCount\":2,\"pipelineCount\":2,\"pipelineUploadCount\":2,\"pipelineRetainCount\":0,\"pipelineEvictCount\":0,\"pathGeometryCount\":0,\"pathGeometryVertexCount\":0,\"pathGeometryIndexCount\":0,\"pathGeometryUploadCount\":0,\"pathGeometryRetainCount\":0,\"pathGeometryEvictCount\":0,\"layerCount\":0,\"layerOpacityCount\":0,\"layerClipCount\":0,\"layerTransformCount\":0,\"layerUploadCount\":0,\"layerRetainCount\":0,\"layerEvictCount\":0,\"resourceCount\":2,\"resourceUploadCount\":2,\"resourceRetainCount\":0,\"resourceEvictCount\":0,\"visualEffectCount\":0,\"visualEffectShadowCount\":0,\"visualEffectBlurCount\":0,\"visualEffectUploadCount\":0,\"visualEffectRetainCount\":0,\"visualEffectEvictCount\":0,\"glyphAtlasEntryCount\":2,\"glyphAtlasUploadCount\":2,\"glyphAtlasRetainCount\":0,\"glyphAtlasEvictCount\":0,\"textLayoutCount\":1,\"textLayoutLineCount\":1,\"textLayoutUploadCount\":1,\"textLayoutRetainCount\":0,\"textLayoutEvictCount\":0,\"changeCount\":0,\"budgetExceededCount\":4,\"budgetOk\":false,\"fullRepaint\":true,\"requiresRender\":true,\"dirtyBounds\":[0,0,320,200]}",
         diagnostics_json_writer.buffered(),
     );
 
@@ -12206,7 +12347,7 @@ test "canvas frame plan builds first frame renderer packet" {
     var clean_json_writer = std.Io.Writer.fixed(&clean_json_buffer);
     try (CanvasFrameDiagnostics{ .frame_index = 8 }).writeJson(&clean_json_writer);
     try std.testing.expectEqualStrings(
-        "{\"frameIndex\":8,\"commandCount\":0,\"batchCount\":0,\"encoderCommandCount\":0,\"encoderCacheActionCount\":0,\"encoderBindPipelineCount\":0,\"encoderDrawBatchCount\":0,\"pipelineCount\":0,\"pipelineUploadCount\":0,\"pipelineRetainCount\":0,\"pipelineEvictCount\":0,\"layerCount\":0,\"layerOpacityCount\":0,\"layerClipCount\":0,\"layerTransformCount\":0,\"layerUploadCount\":0,\"layerRetainCount\":0,\"layerEvictCount\":0,\"resourceCount\":0,\"resourceUploadCount\":0,\"resourceRetainCount\":0,\"resourceEvictCount\":0,\"visualEffectCount\":0,\"visualEffectShadowCount\":0,\"visualEffectBlurCount\":0,\"visualEffectUploadCount\":0,\"visualEffectRetainCount\":0,\"visualEffectEvictCount\":0,\"glyphAtlasEntryCount\":0,\"glyphAtlasUploadCount\":0,\"glyphAtlasRetainCount\":0,\"glyphAtlasEvictCount\":0,\"textLayoutCount\":0,\"textLayoutLineCount\":0,\"textLayoutUploadCount\":0,\"textLayoutRetainCount\":0,\"textLayoutEvictCount\":0,\"changeCount\":0,\"budgetExceededCount\":0,\"budgetOk\":true,\"fullRepaint\":false,\"requiresRender\":false,\"dirtyBounds\":null}",
+        "{\"frameIndex\":8,\"commandCount\":0,\"batchCount\":0,\"encoderCommandCount\":0,\"encoderCacheActionCount\":0,\"encoderBindPipelineCount\":0,\"encoderDrawBatchCount\":0,\"pipelineCount\":0,\"pipelineUploadCount\":0,\"pipelineRetainCount\":0,\"pipelineEvictCount\":0,\"pathGeometryCount\":0,\"pathGeometryVertexCount\":0,\"pathGeometryIndexCount\":0,\"pathGeometryUploadCount\":0,\"pathGeometryRetainCount\":0,\"pathGeometryEvictCount\":0,\"layerCount\":0,\"layerOpacityCount\":0,\"layerClipCount\":0,\"layerTransformCount\":0,\"layerUploadCount\":0,\"layerRetainCount\":0,\"layerEvictCount\":0,\"resourceCount\":0,\"resourceUploadCount\":0,\"resourceRetainCount\":0,\"resourceEvictCount\":0,\"visualEffectCount\":0,\"visualEffectShadowCount\":0,\"visualEffectBlurCount\":0,\"visualEffectUploadCount\":0,\"visualEffectRetainCount\":0,\"visualEffectEvictCount\":0,\"glyphAtlasEntryCount\":0,\"glyphAtlasUploadCount\":0,\"glyphAtlasRetainCount\":0,\"glyphAtlasEvictCount\":0,\"textLayoutCount\":0,\"textLayoutLineCount\":0,\"textLayoutUploadCount\":0,\"textLayoutRetainCount\":0,\"textLayoutEvictCount\":0,\"changeCount\":0,\"budgetExceededCount\":0,\"budgetOk\":true,\"fullRepaint\":false,\"requiresRender\":false,\"dirtyBounds\":null}",
         clean_json_writer.buffered(),
     );
 }
@@ -12229,6 +12370,87 @@ test "render encoder plan skips clean passes and reports output overflow" {
 
     var too_small: [3]RenderEncoderCommand = undefined;
     try std.testing.expectError(error.RenderEncoderListFull, pass.encoderPlan(&too_small));
+}
+
+test "canvas frame plan carries path geometry cache actions" {
+    const path = [_]PathElement{
+        .{ .verb = .move_to, .points = .{ geometry.PointF.init(0, 0), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(20, 0), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(0, 20), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .close },
+    };
+    const commands = [_]CanvasCommand{.{ .fill_path = .{
+        .id = 1,
+        .elements = &path,
+        .fill = .{ .color = Color.rgb8(255, 255, 255) },
+    } }};
+
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var pipeline_cache_entries: [1]RenderPipelineCacheEntry = undefined;
+    var pipeline_cache_actions: [1]RenderPipelineCacheAction = undefined;
+    var path_geometries: [1]RenderPathGeometry = undefined;
+    var path_geometry_cache_entries: [1]RenderPathGeometryCacheEntry = undefined;
+    var path_geometry_cache_actions: [1]RenderPathGeometryCacheAction = undefined;
+    var resources: [0]RenderResource = .{};
+    var resource_cache_entries: [0]RenderResourceCacheEntry = .{};
+    var resource_cache_actions: [0]RenderResourceCacheAction = .{};
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [1]DiffChange = undefined;
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .frame_index = 4,
+        .surface_size = geometry.SizeF.init(64, 64),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .pipeline_cache_entries = &pipeline_cache_entries,
+        .pipeline_cache_actions = &pipeline_cache_actions,
+        .path_geometries = &path_geometries,
+        .path_geometry_cache_entries = &path_geometry_cache_entries,
+        .path_geometry_cache_actions = &path_geometry_cache_actions,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), frame.path_geometry_plan.geometryCount());
+    try std.testing.expectEqual(@as(usize, 3), frame.path_geometry_plan.vertexCount());
+    try std.testing.expectEqual(@as(usize, 3), frame.path_geometry_plan.indexCount());
+    try std.testing.expectEqual(@as(usize, 1), frame.path_geometry_cache_plan.entryCount());
+    try std.testing.expectEqual(@as(usize, 1), frame.path_geometry_cache_plan.uploadCount());
+    try std.testing.expectEqual(RenderPathGeometryCacheActionKind.upload, frame.path_geometry_cache_plan.actions[0].kind);
+
+    const render_pass = frame.renderPass();
+    try std.testing.expectEqual(@as(usize, 1), render_pass.pathGeometryCount());
+    try std.testing.expectEqual(@as(usize, 1), render_pass.pathGeometryActionCount());
+    try std.testing.expectEqual(@as(usize, 3), render_pass.pathGeometryVertexCount());
+    try std.testing.expectEqual(@as(usize, 3), render_pass.pathGeometryIndexCount());
+    try std.testing.expectEqual(@as(usize, 2), render_pass.encoderCacheActionCount());
+
+    var encoder_commands: [8]RenderEncoderCommand = undefined;
+    const encoder_plan = try render_pass.encoderPlan(&encoder_commands);
+    try std.testing.expectEqual(@as(usize, 7), encoder_plan.commandCount());
+    try std.testing.expectEqual(@as(usize, 2), encoder_plan.cacheActionCount());
+    switch (encoder_plan.commands[2]) {
+        .pipeline_cache => |action| try std.testing.expectEqual(RenderPipelineKind.path, action.pipeline),
+        else => return error.TestExpectedEqual,
+    }
+    switch (encoder_plan.commands[3]) {
+        .path_geometry_cache => |action| {
+            try std.testing.expectEqual(RenderPathGeometryCacheActionKind.upload, action.kind);
+            try std.testing.expectEqual(RenderPathGeometryKind.fill, action.key.kind);
+            try std.testing.expectEqual(@as(?ObjectId, 1), action.key.id);
+        },
+        else => return error.TestExpectedEqual,
+    }
+
+    const diagnostics = frame.diagnostics();
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.path_geometry_count);
+    try std.testing.expectEqual(@as(usize, 3), diagnostics.path_geometry_vertex_count);
+    try std.testing.expectEqual(@as(usize, 3), diagnostics.path_geometry_index_count);
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.path_geometry_upload_count);
 }
 
 test "canvas frame plan carries resource cache retain upload and evict actions" {
