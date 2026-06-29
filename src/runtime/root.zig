@@ -1015,6 +1015,7 @@ pub const Runtime = struct {
         if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
 
         const dirty = try self.views[index].stepCanvasWidgetKineticScroll(dt_ms) orelse return self.views[index].info();
+        self.views[index].reconcileCanvasWidgetInteractionAfterScroll(null);
         try self.invalidateForCanvasWidgetDirty(index, dirty);
         try self.refreshCanvasWidgetDisplayListIfOwned(index);
         return self.views[index].info();
@@ -1312,6 +1313,7 @@ pub const Runtime = struct {
         if (self.views[index].kind != .gpu_surface) return;
 
         const dirty = try self.views[index].applyCanvasWidgetScrollRoute(pointer_event.route, pointer_event.pointer.delta.dy, .wheel) orelse return;
+        self.views[index].reconcileCanvasWidgetInteractionAfterScroll(pointer_event.pointer.point);
         if (canvasDirtyRegionForView(self.views[index].frame, dirty)) |dirty_region| {
             self.invalidateFor(.state, dirty_region);
         } else {
@@ -4261,6 +4263,7 @@ const CanvasWidgetTextReconcileEntry = struct {
 fn canvasWidgetInteractionTargetExists(layout: canvas.WidgetLayoutTree, id: canvas.ObjectId) bool {
     const index = canvasWidgetLayoutNodeIndexById(layout, id) orelse return false;
     if (canvasWidgetLayoutNodeHidden(layout, index)) return false;
+    if (!canvasWidgetLayoutNodeFrameVisible(layout, index)) return false;
     return canvasWidgetRuntimeHitTarget(layout.nodes[index].widget);
 }
 
@@ -4281,6 +4284,20 @@ fn canvasWidgetLayoutNodeHidden(layout: canvas.WidgetLayoutTree, node_index: usi
         current = node.parent_index;
     }
     return false;
+}
+
+fn canvasWidgetLayoutNodeFrameVisible(layout: canvas.WidgetLayoutTree, node_index: usize) bool {
+    if (node_index >= layout.nodes.len) return false;
+    const frame = layout.nodes[node_index].frame.normalized();
+    if (frame.isEmpty()) return false;
+    var current = layout.nodes[node_index].parent_index;
+    while (current) |index| {
+        if (index >= layout.nodes.len) return true;
+        const ancestor = layout.nodes[index];
+        if (ancestor.widget.kind == .scroll_view and geometry.RectF.intersection(frame, ancestor.frame.normalized()).isEmpty()) return false;
+        current = ancestor.parent_index;
+    }
+    return true;
 }
 
 fn canvasWidgetRuntimeHitTarget(widget: canvas.Widget) bool {
@@ -5312,6 +5329,30 @@ const RuntimeView = struct {
             .hovered_id = if (self.canvas_widget_hovered_id == 0) null else self.canvas_widget_hovered_id,
             .pressed_id = if (self.canvas_widget_pressed_id == 0) null else self.canvas_widget_pressed_id,
         };
+    }
+
+    fn reconcileCanvasWidgetInteractionAfterScroll(self: *RuntimeView, point: ?geometry.PointF) void {
+        const layout = self.widgetLayoutTree();
+        var next_hovered_id = self.canvas_widget_hovered_id;
+        var next_cursor = self.canvas_widget_cursor;
+
+        if (point) |value| {
+            const hit = layout.hitTest(value);
+            next_hovered_id = if (hit) |target| target.id else 0;
+            next_cursor = platformCursorFromCanvas(layout.cursorForHit(hit));
+        } else if (!canvasWidgetInteractionTargetExists(layout, next_hovered_id)) {
+            next_hovered_id = 0;
+            next_cursor = .arrow;
+        }
+
+        var next_pressed_id = self.canvas_widget_pressed_id;
+        if (!canvasWidgetInteractionTargetExists(layout, next_pressed_id)) {
+            next_pressed_id = 0;
+        }
+
+        self.canvas_widget_hovered_id = next_hovered_id;
+        self.canvas_widget_pressed_id = next_pressed_id;
+        self.canvas_widget_cursor = next_cursor;
     }
 
     fn applyCanvasWidgetScrollRoute(self: *RuntimeView, route: []const canvas.WidgetEventRouteEntry, delta_y: f32, source: CanvasWidgetScrollSource) anyerror!?geometry.RectF {
@@ -9971,6 +10012,78 @@ test "runtime wheel input scrolls retained canvas scroll views" {
     try std.testing.expectEqual(@as(u64, 4), idle.widget_revision);
     try std.testing.expect(!harness.runtime.invalidated);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDirtyRegions().len);
+}
+
+test "runtime refreshes hovered canvas widget after scroll clipping" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-scroll-hover", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 160, 40),
+    });
+
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "One" },
+        .{ .id = 3, .kind = .button, .frame = geometry.RectF.init(0, 48, 0, 32), .text = "Two" },
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .id = 1, .kind = .scroll_view, .children = &children },
+        geometry.RectF.init(0, 0, 160, 40),
+        &nodes,
+    );
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_move,
+        .x = 12,
+        .y = 12,
+    } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_hovered_id);
+    try std.testing.expectEqual(platform.Cursor.pointing_hand, harness.runtime.views[0].canvas_widget_cursor);
+
+    var snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expect(snapshot.widgets[1].hovered);
+    try std.testing.expect(!snapshot.widgets[2].hovered);
+
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .scroll,
+        .x = 12,
+        .y = 12,
+        .delta_y = 40,
+    } });
+
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, -40, 160, 32), retained.findById(2).?.frame);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 8, 160, 32), retained.findById(3).?.frame);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_widget_hovered_id);
+    try std.testing.expectEqual(platform.Cursor.pointing_hand, harness.runtime.views[0].canvas_widget_cursor);
+    try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.pendingDirtyRegions().len);
+    try std.testing.expectEqualDeep(geometry.RectF.init(10, 20, 160, 40), harness.runtime.pendingDirtyRegions()[0]);
+
+    snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expect(!snapshot.widgets[1].hovered);
+    try std.testing.expect(snapshot.widgets[2].hovered);
 }
 
 test "runtime reconciles canvas widget scroll momentum across layout replacement" {
