@@ -5168,15 +5168,24 @@ pub const GlyphAtlasPlanner = struct {
             return;
         }
 
-        for (text.text, 0..) |byte, byte_index| {
+        var text_offset: usize = 0;
+        var scalar_index: usize = 0;
+        while (text_offset < text.text.len) {
+            const next_offset = nextTextOffset(text.text, text_offset);
+            defer {
+                text_offset = next_offset;
+                scalar_index += 1;
+            }
+            if (isReferenceTextSpace(text.text[text_offset])) continue;
+
             const key = GlyphAtlasKey{
                 .font_id = text.font_id,
-                .glyph_id = byte,
+                .glyph_id = fallbackGlyphId(text.text[text_offset..next_offset]),
                 .size = text.size,
-                .subpixel_x = subpixelBucket(text.origin.x + @as(f32, @floatFromInt(byte_index)) * text.size * 0.5),
+                .subpixel_x = subpixelBucket(text.origin.x + @as(f32, @floatFromInt(scalar_index)) * text.size * 0.5),
                 .subpixel_y = subpixelBucket(text.origin.y),
             };
-            try self.appendUnique(key, command_index, byte_index);
+            try self.appendUnique(key, command_index, scalar_index);
         }
     }
 
@@ -8384,6 +8393,27 @@ fn textOffsetForScalarIndex(text: []const u8, scalar_index: usize) usize {
         offset = nextTextOffset(text, offset);
     }
     return offset;
+}
+
+fn fallbackGlyphId(bytes: []const u8) u32 {
+    if (bytes.len == 0) return 0;
+    const first = bytes[0];
+    const len = utf8SequenceLength(first);
+    if (len == 1 or len > bytes.len) return first;
+
+    var value: u32 = switch (len) {
+        2 => @as(u32, first & 0x1f),
+        3 => @as(u32, first & 0x0f),
+        4 => @as(u32, first & 0x07),
+        else => return first,
+    };
+    var index: usize = 1;
+    while (index < len) : (index += 1) {
+        const byte = bytes[index];
+        if (!isUtf8ContinuationByte(byte)) return first;
+        value = (value << 6) | @as(u32, byte & 0x3f);
+    }
+    return value;
 }
 
 fn utf8ScalarCount(text: []const u8) usize {
@@ -12794,24 +12824,26 @@ test "glyph atlas plan deduplicates shaped glyph keys" {
     try std.testing.expectEqual(@as(u8, 2), plan.entries[2].key.subpixel_x);
 }
 
-test "glyph atlas plan falls back to byte glyph keys" {
+test "glyph atlas plan falls back to utf8 scalar glyph keys" {
     const commands = [_]CanvasCommand{.{ .draw_text = .{
         .id = 1,
         .font_id = 3,
         .size = 12,
         .origin = geometry.PointF.init(0.5, 8.75),
         .color = Color.rgb8(15, 23, 42),
-        .text = "ABC",
+        .text = "A é",
     } }};
 
-    var entries: [3]GlyphAtlasEntry = undefined;
+    var entries: [2]GlyphAtlasEntry = undefined;
     const plan = try (DisplayList{ .commands = &commands }).glyphAtlasPlan(&entries);
-    try std.testing.expectEqual(@as(usize, 3), plan.entryCount());
+    try std.testing.expectEqual(@as(usize, 2), plan.entryCount());
     try std.testing.expectEqual(@as(u32, 'A'), plan.entries[0].key.glyph_id);
     try std.testing.expectEqual(@as(u8, 2), plan.entries[0].key.subpixel_x);
     try std.testing.expectEqual(@as(u8, 3), plan.entries[0].key.subpixel_y);
-    try std.testing.expectEqual(@as(u32, 'B'), plan.entries[1].key.glyph_id);
-    try std.testing.expectEqual(@as(u32, 'C'), plan.entries[2].key.glyph_id);
+    try std.testing.expectEqual(@as(usize, 0), plan.entries[0].glyph_index);
+    try std.testing.expectEqual(@as(u32, 0x00e9), plan.entries[1].key.glyph_id);
+    try std.testing.expectEqual(@as(u8, 2), plan.entries[1].key.subpixel_x);
+    try std.testing.expectEqual(@as(usize, 2), plan.entries[1].glyph_index);
 }
 
 test "glyph atlas plan reports output overflow" {
