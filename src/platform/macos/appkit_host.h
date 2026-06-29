@@ -25,6 +25,7 @@ typedef enum {
     ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_FRAME = 11,
     ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_RESIZE = 12,
     ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_INPUT = 13,
+    ZERO_NATIVE_APPKIT_EVENT_WIDGET_ACCESSIBILITY_ACTION = 14,
 } zero_native_appkit_event_kind_t;
 
 typedef enum {
@@ -100,6 +101,17 @@ enum {
     ZERO_NATIVE_APPKIT_WIDGET_ACTION_SELECT = 1u << 7,
 };
 
+typedef enum {
+    ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_FOCUS = 0,
+    ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_PRESS = 1,
+    ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_TOGGLE = 2,
+    ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_INCREMENT = 3,
+    ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_DECREMENT = 4,
+    ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_SET_TEXT = 5,
+    ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_SET_SELECTION = 6,
+    ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_SELECT = 7,
+} zero_native_appkit_widget_accessibility_action_t;
+
 typedef struct {
     uint64_t id;
     int role;
@@ -152,6 +164,8 @@ typedef struct {
     int button;
     double delta_x;
     double delta_y;
+    uint64_t widget_id;
+    int widget_action;
 } zero_native_appkit_event_t;
 
 typedef void (*zero_native_appkit_event_callback_t)(void *context, const zero_native_appkit_event_t *event);

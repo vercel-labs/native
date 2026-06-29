@@ -1144,6 +1144,24 @@ pub const WidgetAccessibilitySnapshot = struct {
     nodes: []const WidgetAccessibilityNode = &.{},
 };
 
+pub const WidgetAccessibilityActionKind = enum(c_int) {
+    focus = 0,
+    press = 1,
+    toggle = 2,
+    increment = 3,
+    decrement = 4,
+    set_text = 5,
+    set_selection = 6,
+    select = 7,
+};
+
+pub const WidgetAccessibilityActionEvent = struct {
+    window_id: WindowId = 1,
+    label: []const u8,
+    id: u64,
+    action: WidgetAccessibilityActionKind,
+};
+
 pub const ClipboardData = struct {
     mime_type: []const u8 = "text/plain",
     bytes: []const u8,
@@ -1167,6 +1185,7 @@ pub const Event = union(enum) {
     gpu_surface_frame: GpuSurfaceFrameEvent,
     gpu_surface_resized: GpuSurfaceResizeEvent,
     gpu_surface_input: GpuSurfaceInputEvent,
+    widget_accessibility_action: WidgetAccessibilityActionEvent,
 
     pub fn name(self: Event) []const u8 {
         return switch (self) {
@@ -1187,6 +1206,7 @@ pub const Event = union(enum) {
             .gpu_surface_frame => "gpu_surface_frame",
             .gpu_surface_resized => "gpu_surface_resized",
             .gpu_surface_input => "gpu_surface_input",
+            .widget_accessibility_action => "widget_accessibility_action",
         };
     }
 };

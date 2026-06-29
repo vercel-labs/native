@@ -2122,6 +2122,12 @@ pub const Runtime = struct {
                 }
                 try self.dispatchEvent(app, .{ .gpu_surface_input = input_event });
             },
+            .widget_accessibility_action => |action_event| {
+                _ = try self.dispatchCanvasWidgetAccessibilityAction(app, action_event.window_id, action_event.label, .{
+                    .id = action_event.id,
+                    .action = canvasWidgetAccessibilityActionKindFromPlatform(action_event.action),
+                });
+            },
             .menu_command => |command| {
                 try self.dispatchCommand(app, .{
                     .name = command.name,
@@ -7755,6 +7761,19 @@ fn canvasWidgetAccessibilityActionSupported(actions: canvas.WidgetActions, actio
         .select => actions.select,
         .drag => actions.drag,
         .drop_files => actions.drop_files,
+    };
+}
+
+fn canvasWidgetAccessibilityActionKindFromPlatform(action: platform.WidgetAccessibilityActionKind) CanvasWidgetAccessibilityActionKind {
+    return switch (action) {
+        .focus => .focus,
+        .press => .press,
+        .toggle => .toggle,
+        .increment => .increment,
+        .decrement => .decrement,
+        .set_text => .set_text,
+        .set_selection => .set_selection,
+        .select => .select,
     };
 }
 
@@ -14336,6 +14355,15 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     _ = try runtime.dispatchCanvasWidgetAccessibilityAction(app_state.app(), 1, "canvas", .{ .id = 2, .action = .focus });
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), runtime.views[0].canvas_widget_focused_id);
     try std.testing.expect(platform_state.nodes[1].focused);
+
+    try runtime.dispatchPlatformEvent(app_state.app(), .{ .widget_accessibility_action = .{
+        .window_id = 1,
+        .label = "canvas",
+        .id = 3,
+        .action = .toggle,
+    } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expect(!platform_state.nodes[2].selected);
 }
 
 test "runtime automation snapshot exposes canvas icon roles" {

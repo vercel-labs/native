@@ -28,6 +28,7 @@ const AppKitEventKind = enum(c_int) {
     gpu_surface_frame = 11,
     gpu_surface_resize = 12,
     gpu_surface_input = 13,
+    widget_accessibility_action = 14,
 };
 
 const AppKitEvent = extern struct {
@@ -65,6 +66,8 @@ const AppKitEvent = extern struct {
     button: c_int,
     delta_x: f64,
     delta_y: f64,
+    widget_id: u64,
+    widget_action: c_int,
 };
 
 const AppKitCallback = *const fn (context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) void;
@@ -442,6 +445,14 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             .scale_factor = @floatCast(event.scale),
         } }),
         .gpu_surface_input => state.emit(.{ .gpu_surface_input = gpuSurfaceInputEventFromAppKitEvent(event) }),
+        .widget_accessibility_action => if (widgetAccessibilityActionFromInt(event.widget_action)) |action| {
+            state.emit(.{ .widget_accessibility_action = .{
+                .window_id = event.window_id,
+                .label = event.view_label[0..event.view_label_len],
+                .id = event.widget_id,
+                .action = action,
+            } });
+        },
     }
 }
 
@@ -964,6 +975,20 @@ fn gpuSurfaceInputKindFromInt(value: c_int) platform_mod.GpuSurfaceInputKind {
         5 => .key_down,
         6 => .key_up,
         else => .pointer_move,
+    };
+}
+
+fn widgetAccessibilityActionFromInt(value: c_int) ?platform_mod.WidgetAccessibilityActionKind {
+    return switch (value) {
+        0 => .focus,
+        1 => .press,
+        2 => .toggle,
+        3 => .increment,
+        4 => .decrement,
+        5 => .set_text,
+        6 => .set_selection,
+        7 => .select,
+        else => null,
     };
 }
 

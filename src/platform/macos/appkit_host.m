@@ -172,6 +172,14 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 @property(nonatomic, strong) NSString *webViewLabel;
 @end
 
+@class ZeroNativeMetalSurfaceView;
+
+@interface ZeroNativeWidgetAccessibilityElement : NSAccessibilityElement
+@property(nonatomic, assign) ZeroNativeMetalSurfaceView *surfaceView;
+@property(nonatomic, assign) uint64_t widgetId;
+@property(nonatomic, assign) uint32_t actionFlags;
+@end
+
 @interface ZeroNativeMetalSurfaceView : NSView
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> commandQueue;
@@ -204,6 +212,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (void)emitFrameEventWithFrameIndex:(NSUInteger)frameIndex sampleColor:(uint32_t)sampleColor nonblank:(BOOL)nonblank;
 - (void)emitResizeEvent;
 - (void)emitInputEventWithKind:(NSInteger)kind event:(NSEvent *)event button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY;
+- (BOOL)emitWidgetAccessibilityActionWithId:(uint64_t)widgetId action:(NSInteger)action;
 @end
 
 @interface ZeroNativeAssetSchemeHandler : NSObject <WKURLSchemeHandler>
@@ -431,6 +440,55 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 
 @end
 
+@implementation ZeroNativeWidgetAccessibilityElement
+
+- (NSArray *)accessibilityActionNames {
+    if (!self.accessibilityEnabled) return @[];
+    NSMutableArray *actions = [NSMutableArray arrayWithCapacity:3];
+    if ((self.actionFlags & (ZERO_NATIVE_APPKIT_WIDGET_ACTION_PRESS |
+                             ZERO_NATIVE_APPKIT_WIDGET_ACTION_TOGGLE |
+                             ZERO_NATIVE_APPKIT_WIDGET_ACTION_SELECT |
+                             ZERO_NATIVE_APPKIT_WIDGET_ACTION_FOCUS)) != 0) {
+        [actions addObject:NSAccessibilityPressAction];
+    }
+    if ((self.actionFlags & ZERO_NATIVE_APPKIT_WIDGET_ACTION_INCREMENT) != 0) {
+        [actions addObject:NSAccessibilityIncrementAction];
+    }
+    if ((self.actionFlags & ZERO_NATIVE_APPKIT_WIDGET_ACTION_DECREMENT) != 0) {
+        [actions addObject:NSAccessibilityDecrementAction];
+    }
+    return actions;
+}
+
+- (BOOL)accessibilityPerformPress {
+    if (!self.accessibilityEnabled) return NO;
+    if ((self.actionFlags & ZERO_NATIVE_APPKIT_WIDGET_ACTION_TOGGLE) != 0) {
+        return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_TOGGLE];
+    }
+    if ((self.actionFlags & ZERO_NATIVE_APPKIT_WIDGET_ACTION_PRESS) != 0) {
+        return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_PRESS];
+    }
+    if ((self.actionFlags & ZERO_NATIVE_APPKIT_WIDGET_ACTION_SELECT) != 0) {
+        return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_SELECT];
+    }
+    if ((self.actionFlags & ZERO_NATIVE_APPKIT_WIDGET_ACTION_FOCUS) != 0) {
+        return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_FOCUS];
+    }
+    return NO;
+}
+
+- (BOOL)accessibilityPerformIncrement {
+    if (!self.accessibilityEnabled || (self.actionFlags & ZERO_NATIVE_APPKIT_WIDGET_ACTION_INCREMENT) == 0) return NO;
+    return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_INCREMENT];
+}
+
+- (BOOL)accessibilityPerformDecrement {
+    if (!self.accessibilityEnabled || (self.actionFlags & ZERO_NATIVE_APPKIT_WIDGET_ACTION_DECREMENT) == 0) return NO;
+    return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_DECREMENT];
+}
+
+@end
+
 @implementation ZeroNativeMetalSurfaceView
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
@@ -577,7 +635,10 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
         NSString *label = ZeroNativeStringFromBytes(node.label, node.label_len) ?: @"";
         NSString *textValue = ZeroNativeStringFromBytes(node.text_value, node.text_value_len) ?: @"";
         NSString *name = label.length > 0 ? label : textValue;
-        NSAccessibilityElement *element = [[NSAccessibilityElement alloc] initWithAccessibilityContainer:self];
+        ZeroNativeWidgetAccessibilityElement *element = [[ZeroNativeWidgetAccessibilityElement alloc] initWithAccessibilityContainer:self];
+        element.surfaceView = self;
+        element.widgetId = node.id;
+        element.actionFlags = node.action_flags;
         element.accessibilityRole = ZeroNativeAccessibilityRoleForWidgetRole(node.role);
         element.accessibilityIdentifier = [NSString stringWithFormat:@"zero-native-widget-%llu", node.id];
         element.accessibilityLabel = name;
@@ -828,6 +889,22 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
         .delta_y = deltaY,
     }];
     [self requestRetainedCanvasFrame];
+}
+
+- (BOOL)emitWidgetAccessibilityActionWithId:(uint64_t)widgetId action:(NSInteger)action {
+    if (!self.host || self.surfaceLabel.length == 0 || widgetId == 0) return NO;
+    const char *labelBytes = self.surfaceLabel.UTF8String ?: "";
+    [self.host emitEvent:(zero_native_appkit_event_t){
+        .kind = ZERO_NATIVE_APPKIT_EVENT_WIDGET_ACCESSIBILITY_ACTION,
+        .window_id = self.windowId,
+        .timestamp_ns = ZeroNativeTimestampNanoseconds(),
+        .view_label = labelBytes,
+        .view_label_len = [self.surfaceLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+        .widget_id = widgetId,
+        .widget_action = (int)action,
+    }];
+    [self requestRetainedCanvasFrame];
+    return YES;
 }
 
 @end
