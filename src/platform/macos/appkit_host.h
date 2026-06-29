@@ -59,6 +59,64 @@ typedef enum {
     ZERO_NATIVE_APPKIT_VIEW_LIST_ITEM = 18,
 } zero_native_appkit_view_kind_t;
 
+typedef enum {
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_NONE = 0,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_GROUP = 1,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_TEXT = 2,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_IMAGE = 3,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_BUTTON = 4,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_TEXTBOX = 5,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_TOOLTIP = 6,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_DIALOG = 7,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_MENU = 8,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_MENUITEM = 9,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_LIST = 10,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_LISTITEM = 11,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_ROW = 12,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_GRID = 13,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_GRIDCELL = 14,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_TAB = 15,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_CHECKBOX = 16,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_SWITCH = 17,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_SLIDER = 18,
+    ZERO_NATIVE_APPKIT_WIDGET_ROLE_PROGRESSBAR = 19,
+} zero_native_appkit_widget_role_t;
+
+enum {
+    ZERO_NATIVE_APPKIT_WIDGET_STATE_ENABLED = 1u << 0,
+    ZERO_NATIVE_APPKIT_WIDGET_STATE_FOCUSED = 1u << 1,
+    ZERO_NATIVE_APPKIT_WIDGET_STATE_SELECTED = 1u << 2,
+    ZERO_NATIVE_APPKIT_WIDGET_STATE_PRESSED = 1u << 3,
+};
+
+enum {
+    ZERO_NATIVE_APPKIT_WIDGET_ACTION_FOCUS = 1u << 0,
+    ZERO_NATIVE_APPKIT_WIDGET_ACTION_PRESS = 1u << 1,
+    ZERO_NATIVE_APPKIT_WIDGET_ACTION_TOGGLE = 1u << 2,
+    ZERO_NATIVE_APPKIT_WIDGET_ACTION_INCREMENT = 1u << 3,
+    ZERO_NATIVE_APPKIT_WIDGET_ACTION_DECREMENT = 1u << 4,
+    ZERO_NATIVE_APPKIT_WIDGET_ACTION_SET_TEXT = 1u << 5,
+    ZERO_NATIVE_APPKIT_WIDGET_ACTION_SET_SELECTION = 1u << 6,
+    ZERO_NATIVE_APPKIT_WIDGET_ACTION_SELECT = 1u << 7,
+};
+
+typedef struct {
+    uint64_t id;
+    int role;
+    const char *label;
+    size_t label_len;
+    const char *text_value;
+    size_t text_value_len;
+    int has_value;
+    double value;
+    double x;
+    double y;
+    double width;
+    double height;
+    uint32_t state_flags;
+    uint32_t action_flags;
+} zero_native_appkit_widget_accessibility_node_t;
+
 typedef struct {
     zero_native_appkit_event_kind_t kind;
     uint64_t window_id;
@@ -123,6 +181,7 @@ int zero_native_appkit_set_view_visible(zero_native_appkit_host_t *host, uint64_
 int zero_native_appkit_focus_view(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len);
 int zero_native_appkit_close_view(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len);
 int zero_native_appkit_present_gpu_surface_pixels(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, size_t width, size_t height, double scale, const uint8_t *rgba8, size_t rgba8_len);
+int zero_native_appkit_update_widget_accessibility(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const zero_native_appkit_widget_accessibility_node_t *nodes, size_t node_count);
 size_t zero_native_appkit_clipboard_read(zero_native_appkit_host_t *host, char *buffer, size_t buffer_len);
 void zero_native_appkit_clipboard_write(zero_native_appkit_host_t *host, const char *text, size_t text_len);
 size_t zero_native_appkit_clipboard_read_data(zero_native_appkit_host_t *host, const char *mime_type, size_t mime_type_len, char *buffer, size_t buffer_len);

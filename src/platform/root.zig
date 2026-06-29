@@ -163,6 +163,7 @@ pub const max_menu_key_bytes: usize = 32;
 pub const max_shortcuts: usize = 64;
 pub const max_shortcut_id_bytes: usize = 64;
 pub const max_shortcut_key_bytes: usize = 32;
+pub const max_widget_accessibility_nodes: usize = 64;
 
 pub const ShortcutModifiers = struct {
     primary: bool = false,
@@ -1075,6 +1076,74 @@ pub const GpuSurfacePixels = struct {
     }
 };
 
+pub const WidgetAccessibilityRole = enum(c_int) {
+    none = 0,
+    group = 1,
+    text = 2,
+    image = 3,
+    button = 4,
+    textbox = 5,
+    tooltip = 6,
+    dialog = 7,
+    menu = 8,
+    menuitem = 9,
+    list = 10,
+    listitem = 11,
+    row = 12,
+    grid = 13,
+    gridcell = 14,
+    tab = 15,
+    checkbox = 16,
+    switch_control = 17,
+    slider = 18,
+    progressbar = 19,
+};
+
+pub const WidgetAccessibilityActions = struct {
+    focus: bool = false,
+    press: bool = false,
+    toggle: bool = false,
+    increment: bool = false,
+    decrement: bool = false,
+    set_text: bool = false,
+    set_selection: bool = false,
+    select: bool = false,
+    drag: bool = false,
+    drop_files: bool = false,
+};
+
+pub const WidgetAccessibilityNode = struct {
+    id: u64 = 0,
+    parent_id: ?u64 = null,
+    role: WidgetAccessibilityRole = .none,
+    label: []const u8 = "",
+    text_value: []const u8 = "",
+    value: ?f32 = null,
+    bounds: geometry.RectF = .{},
+    grid_row_index: ?usize = null,
+    grid_column_index: ?usize = null,
+    grid_row_count: ?usize = null,
+    grid_column_count: ?usize = null,
+    list_item_index: ?u32 = null,
+    list_item_count: ?u32 = null,
+    scroll_offset: ?f32 = null,
+    scroll_viewport_extent: ?f32 = null,
+    scroll_content_extent: ?f32 = null,
+    enabled: bool = true,
+    focused: bool = false,
+    hovered: bool = false,
+    pressed: bool = false,
+    selected: bool = false,
+    focusable: bool = false,
+    actions: WidgetAccessibilityActions = .{},
+};
+
+pub const WidgetAccessibilitySnapshot = struct {
+    window_id: WindowId = 1,
+    view_label: []const u8,
+    nodes: []const WidgetAccessibilityNode = &.{},
+};
+
 pub const ClipboardData = struct {
     mime_type: []const u8 = "text/plain",
     bytes: []const u8,
@@ -1187,6 +1256,7 @@ pub const PlatformServices = struct {
     configure_shortcuts_fn: ?*const fn (context: ?*anyopaque, shortcuts: []const Shortcut) anyerror!void = null,
     emit_window_event_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void = null,
     present_gpu_surface_pixels_fn: ?*const fn (context: ?*anyopaque, pixels: GpuSurfacePixels) anyerror!void = null,
+    update_widget_accessibility_fn: ?*const fn (context: ?*anyopaque, snapshot: WidgetAccessibilitySnapshot) anyerror!void = null,
 
     pub fn readClipboard(self: PlatformServices, buffer: []u8) anyerror![]const u8 {
         const read_fn = self.read_clipboard_fn orelse return error.UnsupportedService;
@@ -1422,6 +1492,13 @@ pub const PlatformServices = struct {
         if (pixels.label.len == 0 or pixels.label.len > max_view_label_bytes) return error.InvalidGpuSurfacePixels;
         const present_fn = self.present_gpu_surface_pixels_fn orelse return error.UnsupportedService;
         return present_fn(self.context, pixels);
+    }
+
+    pub fn updateWidgetAccessibility(self: PlatformServices, snapshot: WidgetAccessibilitySnapshot) anyerror!void {
+        if (snapshot.view_label.len == 0 or snapshot.view_label.len > max_view_label_bytes) return error.InvalidViewOptions;
+        if (snapshot.nodes.len > max_widget_accessibility_nodes) return error.InvalidViewOptions;
+        const update_fn = self.update_widget_accessibility_fn orelse return;
+        return update_fn(self.context, snapshot);
     }
 };
 

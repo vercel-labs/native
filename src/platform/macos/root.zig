@@ -100,6 +100,7 @@ extern fn zero_native_appkit_set_view_visible(host: *AppKitHost, window_id: u64,
 extern fn zero_native_appkit_focus_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn zero_native_appkit_close_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn zero_native_appkit_present_gpu_surface_pixels(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, width: usize, height: usize, scale: f64, rgba8: [*]const u8, rgba8_len: usize) c_int;
+extern fn zero_native_appkit_update_widget_accessibility(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, nodes: [*]const AppKitWidgetAccessibilityNode, node_count: usize) c_int;
 extern fn zero_native_appkit_create_webview(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, transparent: c_int, bridge_enabled: c_int) c_int;
 extern fn zero_native_appkit_set_webview_frame(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn zero_native_appkit_navigate_webview(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize) c_int;
@@ -161,6 +162,36 @@ const AppKitMessageDialogOpts = extern struct {
     tertiary_button: [*]const u8,
     tertiary_button_len: usize,
 };
+
+const AppKitWidgetAccessibilityNode = extern struct {
+    id: u64,
+    role: c_int,
+    label: [*]const u8,
+    label_len: usize,
+    text_value: [*]const u8,
+    text_value_len: usize,
+    has_value: c_int,
+    value: f64,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    state_flags: u32,
+    action_flags: u32,
+};
+
+const widget_state_enabled: u32 = 1 << 0;
+const widget_state_focused: u32 = 1 << 1;
+const widget_state_selected: u32 = 1 << 2;
+const widget_state_pressed: u32 = 1 << 3;
+const widget_action_focus: u32 = 1 << 0;
+const widget_action_press: u32 = 1 << 1;
+const widget_action_toggle: u32 = 1 << 2;
+const widget_action_increment: u32 = 1 << 3;
+const widget_action_decrement: u32 = 1 << 4;
+const widget_action_set_text: u32 = 1 << 5;
+const widget_action_set_selection: u32 = 1 << 6;
+const widget_action_select: u32 = 1 << 7;
 
 const AppKitTrayCallback = *const fn (context: ?*anyopaque, item_id: u32) callconv(.c) void;
 
@@ -260,6 +291,7 @@ pub const MacPlatform = struct {
                 .configure_shortcuts_fn = configureShortcuts,
                 .emit_window_event_fn = emitWindowEvent,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
+                .update_widget_accessibility_fn = updateWidgetAccessibility,
             },
             .app_info = self.app_info,
         };
@@ -648,6 +680,61 @@ fn presentGpuSurfacePixels(context: ?*anyopaque, pixels: platform_mod.GpuSurface
         pixels.rgba8.ptr,
         pixels.rgba8.len,
     ) == 0) return error.ViewNotFound;
+}
+
+fn updateWidgetAccessibility(context: ?*anyopaque, snapshot: platform_mod.WidgetAccessibilitySnapshot) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedViewKind;
+    if (snapshot.nodes.len > platform_mod.max_widget_accessibility_nodes) return error.InvalidViewOptions;
+    var nodes: [platform_mod.max_widget_accessibility_nodes]AppKitWidgetAccessibilityNode = undefined;
+    for (snapshot.nodes, 0..) |node, index| {
+        nodes[index] = .{
+            .id = node.id,
+            .role = @intFromEnum(node.role),
+            .label = node.label.ptr,
+            .label_len = node.label.len,
+            .text_value = node.text_value.ptr,
+            .text_value_len = node.text_value.len,
+            .has_value = if (node.value != null) 1 else 0,
+            .value = node.value orelse 0,
+            .x = node.bounds.x,
+            .y = node.bounds.y,
+            .width = node.bounds.width,
+            .height = node.bounds.height,
+            .state_flags = widgetStateFlags(node),
+            .action_flags = widgetActionFlags(node.actions),
+        };
+    }
+    if (zero_native_appkit_update_widget_accessibility(
+        self.host,
+        snapshot.window_id,
+        snapshot.view_label.ptr,
+        snapshot.view_label.len,
+        nodes[0..snapshot.nodes.len].ptr,
+        snapshot.nodes.len,
+    ) == 0) return error.ViewNotFound;
+}
+
+fn widgetStateFlags(node: platform_mod.WidgetAccessibilityNode) u32 {
+    var flags: u32 = 0;
+    if (node.enabled) flags |= widget_state_enabled;
+    if (node.focused) flags |= widget_state_focused;
+    if (node.selected) flags |= widget_state_selected;
+    if (node.pressed) flags |= widget_state_pressed;
+    return flags;
+}
+
+fn widgetActionFlags(actions: platform_mod.WidgetAccessibilityActions) u32 {
+    var flags: u32 = 0;
+    if (actions.focus) flags |= widget_action_focus;
+    if (actions.press) flags |= widget_action_press;
+    if (actions.toggle) flags |= widget_action_toggle;
+    if (actions.increment) flags |= widget_action_increment;
+    if (actions.decrement) flags |= widget_action_decrement;
+    if (actions.set_text) flags |= widget_action_set_text;
+    if (actions.set_selection) flags |= widget_action_set_selection;
+    if (actions.select) flags |= widget_action_select;
+    return flags;
 }
 
 fn createWebView(context: ?*anyopaque, options: platform_mod.WebViewOptions) anyerror!void {

@@ -1220,14 +1220,57 @@ pub const Runtime = struct {
         self.views[index].canvas_widget_display_list_reserved_count = chrome.reserved_command_count;
         try self.refreshCanvasWidgetDisplayList(index);
         self.views[index].canvas_display_list_widget_owned = true;
+        try self.publishCanvasWidgetAccessibility(index);
         return self.views[index].info();
     }
 
     fn refreshCanvasWidgetDisplayListIfOwned(self: *Runtime, view_index: usize) anyerror!void {
         if (view_index >= self.view_count) return;
         if (self.views[view_index].kind != .gpu_surface) return;
+        try self.publishCanvasWidgetAccessibility(view_index);
         if (!self.views[view_index].canvas_display_list_widget_owned) return;
         try self.refreshCanvasWidgetDisplayList(view_index);
+    }
+
+    fn publishCanvasWidgetAccessibility(self: *Runtime, view_index: usize) anyerror!void {
+        if (view_index >= self.view_count) return;
+        const view = &self.views[view_index];
+        if (view.kind != .gpu_surface) return;
+        var nodes: [platform.max_widget_accessibility_nodes]platform.WidgetAccessibilityNode = undefined;
+        const semantics = view.widgetSemantics();
+        const count = @min(semantics.len, nodes.len);
+        for (semantics[0..count], 0..) |node, index| {
+            nodes[index] = .{
+                .id = node.id,
+                .parent_id = canvasWidgetSemanticParentId(semantics, node.parent_index),
+                .role = platformWidgetAccessibilityRole(node.role),
+                .label = node.label,
+                .text_value = node.text_value,
+                .value = node.value,
+                .bounds = node.bounds,
+                .grid_row_index = node.grid_row_index,
+                .grid_column_index = node.grid_column_index,
+                .grid_row_count = node.grid_row_count,
+                .grid_column_count = node.grid_column_count,
+                .list_item_index = if (node.list.present) node.list.item_index else null,
+                .list_item_count = if (node.list.present) node.list.item_count else null,
+                .scroll_offset = if (node.scroll.present) node.scroll.offset else null,
+                .scroll_viewport_extent = if (node.scroll.present) node.scroll.viewport_extent else null,
+                .scroll_content_extent = if (node.scroll.present) node.scroll.content_extent else null,
+                .enabled = !node.state.disabled,
+                .focused = node.state.focused or (view.focused and node.id == view.canvas_widget_focused_id),
+                .hovered = node.state.hovered or (node.id != 0 and node.id == view.canvas_widget_hovered_id),
+                .pressed = node.state.pressed or (node.id != 0 and node.id == view.canvas_widget_pressed_id),
+                .selected = canvasWidgetSelectedState(node),
+                .focusable = node.focusable,
+                .actions = platformWidgetAccessibilityActions(node.actions),
+            };
+        }
+        try self.options.platform.services.updateWidgetAccessibility(.{
+            .window_id = view.window_id,
+            .view_label = view.label,
+            .nodes = nodes[0..count],
+        });
     }
 
     fn refreshCanvasWidgetDisplayList(self: *Runtime, view_index: usize) anyerror!void {
@@ -7069,7 +7112,47 @@ fn widgetRoleName(role: canvas.WidgetRole) []const u8 {
     };
 }
 
+fn platformWidgetAccessibilityRole(role: canvas.WidgetRole) platform.WidgetAccessibilityRole {
+    return switch (role) {
+        .none => .none,
+        .group => .group,
+        .text => .text,
+        .image => .image,
+        .button => .button,
+        .textbox => .textbox,
+        .tooltip => .tooltip,
+        .dialog => .dialog,
+        .menu => .menu,
+        .menuitem => .menuitem,
+        .list => .list,
+        .listitem => .listitem,
+        .row => .row,
+        .grid => .grid,
+        .gridcell => .gridcell,
+        .tab => .tab,
+        .checkbox => .checkbox,
+        .switch_control => .switch_control,
+        .slider => .slider,
+        .progressbar => .progressbar,
+    };
+}
+
 fn canvasWidgetActions(actions: canvas.WidgetActions) automation.snapshot.WidgetActions {
+    return .{
+        .focus = actions.focus,
+        .press = actions.press,
+        .toggle = actions.toggle,
+        .increment = actions.increment,
+        .decrement = actions.decrement,
+        .set_text = actions.set_text,
+        .set_selection = actions.set_selection,
+        .select = actions.select,
+        .drag = actions.drag,
+        .drop_files = actions.drop_files,
+    };
+}
+
+fn platformWidgetAccessibilityActions(actions: canvas.WidgetActions) platform.WidgetAccessibilityActions {
     return .{
         .focus = actions.focus,
         .press = actions.press,
@@ -14145,6 +14228,114 @@ test "runtime moves focused canvas data grid cells with arrow keys" {
     try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_widget_focused_id);
     try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_target_id);
     try std.testing.expectEqual(@as(u32, 5), app_state.widget_keyboard_count);
+}
+
+test "runtime publishes canvas widget accessibility snapshots to platform" {
+    const WidgetAccessibilityPlatform = struct {
+        update_count: usize = 0,
+        window_id: platform.WindowId = 0,
+        view_label: [platform.max_view_label_bytes]u8 = undefined,
+        view_label_len: usize = 0,
+        nodes: [8]platform.WidgetAccessibilityNode = undefined,
+        node_count: usize = 0,
+
+        fn platformValue(self: *@This()) platform.Platform {
+            return .{
+                .context = self,
+                .name = "widget-a11y",
+                .surface_value = .{ .id = 1, .size = geometry.SizeF.init(320, 240), .scale_factor = 1 },
+                .run_fn = run,
+                .services = .{
+                    .context = self,
+                    .load_webview_fn = loadWebView,
+                    .create_view_fn = createView,
+                    .focus_view_fn = focusView,
+                    .update_widget_accessibility_fn = updateWidgetAccessibility,
+                },
+            };
+        }
+
+        fn run(context: *anyopaque, handler: platform.EventHandler, handler_context: *anyopaque) anyerror!void {
+            _ = context;
+            _ = handler;
+            _ = handler_context;
+        }
+
+        fn createView(context: ?*anyopaque, options: platform.ViewOptions) anyerror!void {
+            _ = context;
+            _ = options;
+        }
+
+        fn focusView(context: ?*anyopaque, window_id: platform.WindowId, label: []const u8) anyerror!void {
+            _ = context;
+            _ = window_id;
+            _ = label;
+        }
+
+        fn loadWebView(context: ?*anyopaque, source: platform.WebViewSource) anyerror!void {
+            _ = context;
+            _ = source;
+        }
+
+        fn updateWidgetAccessibility(context: ?*anyopaque, snapshot: platform.WidgetAccessibilitySnapshot) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.update_count += 1;
+            self.window_id = snapshot.window_id;
+            self.view_label_len = (try copyInto(&self.view_label, snapshot.view_label)).len;
+            self.node_count = @min(snapshot.nodes.len, self.nodes.len);
+            for (snapshot.nodes[0..self.node_count], 0..) |node, index| {
+                self.nodes[index] = node;
+            }
+        }
+    };
+
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-platform-a11y", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var platform_state: WidgetAccessibilityPlatform = .{};
+    var runtime = Runtime.init(.{ .platform = platform_state.platformValue() });
+    var app_state: TestApp = .{};
+    try runtime.dispatchPlatformEvent(app_state.app(), .app_start);
+    _ = try runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 160),
+    });
+
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(12, 14, 96, 32), .text = "Deploy", .command = "deploy.run" },
+        .{ .id = 3, .kind = .checkbox, .frame = geometry.RectF.init(12, 58, 120, 28), .text = "Preview", .state = .{ .selected = true } },
+    };
+    var layout_nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{
+        .id = 1,
+        .kind = .stack,
+        .frame = geometry.RectF.init(0, 0, 320, 160),
+        .semantics = .{ .label = "Actions" },
+        .children = &children,
+    }, geometry.RectF.init(0, 0, 320, 160), &layout_nodes);
+    _ = try runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try std.testing.expect(platform_state.update_count >= 1);
+    try std.testing.expectEqual(@as(platform.WindowId, 1), platform_state.window_id);
+    try std.testing.expectEqualStrings("canvas", platform_state.view_label[0..platform_state.view_label_len]);
+    try std.testing.expectEqual(@as(usize, 3), platform_state.node_count);
+    try std.testing.expectEqual(platform.WidgetAccessibilityRole.group, platform_state.nodes[0].role);
+    try std.testing.expectEqual(platform.WidgetAccessibilityRole.button, platform_state.nodes[1].role);
+    try std.testing.expectEqual(platform.WidgetAccessibilityRole.checkbox, platform_state.nodes[2].role);
+    try std.testing.expectEqualStrings("Deploy", platform_state.nodes[1].label);
+    try std.testing.expect(platform_state.nodes[1].actions.press);
+    try std.testing.expect(platform_state.nodes[2].selected);
+    try std.testing.expectEqual(@as(f32, 12), platform_state.nodes[1].bounds.x);
+    try std.testing.expectEqual(@as(f32, 14), platform_state.nodes[1].bounds.y);
+
+    _ = try runtime.dispatchCanvasWidgetAccessibilityAction(app_state.app(), 1, "canvas", .{ .id = 2, .action = .focus });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expect(platform_state.nodes[1].focused);
 }
 
 test "runtime automation snapshot exposes canvas icon roles" {

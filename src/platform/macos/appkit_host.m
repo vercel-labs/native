@@ -37,6 +37,7 @@ static NSEventModifierFlags ZeroNativeMenuModifierFlags(uint32_t modifiers);
 static uint32_t ZeroNativeModifierFlagsForEvent(NSEvent *event);
 static uint64_t ZeroNativeTimestampNanoseconds(void);
 static NSAccessibilityRole ZeroNativeAccessibilityRoleForNativeViewKind(NSInteger kind);
+static NSAccessibilityRole ZeroNativeAccessibilityRoleForWidgetRole(NSInteger role);
 
 static size_t ZeroNativeOverflowSize(size_t buffer_len) {
     return buffer_len == SIZE_MAX ? SIZE_MAX : buffer_len + 1;
@@ -106,6 +107,46 @@ static NSAccessibilityRole ZeroNativeAccessibilityRoleForNativeViewKind(NSIntege
     }
 }
 
+static NSAccessibilityRole ZeroNativeAccessibilityRoleForWidgetRole(NSInteger role) {
+    switch (role) {
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_TEXT:
+            return NSAccessibilityStaticTextRole;
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_IMAGE:
+            return NSAccessibilityImageRole;
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_BUTTON:
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_TAB:
+            return NSAccessibilityButtonRole;
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_TEXTBOX:
+            return NSAccessibilityTextFieldRole;
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_CHECKBOX:
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_SWITCH:
+            return NSAccessibilityCheckBoxRole;
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_MENU:
+            return NSAccessibilityMenuRole;
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_MENUITEM:
+            return NSAccessibilityMenuItemRole;
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_LIST:
+            return NSAccessibilityListRole;
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_ROW:
+            return NSAccessibilityRowRole;
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_GRID:
+            return NSAccessibilityTableRole;
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_GRIDCELL:
+            return NSAccessibilityCellRole;
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_SLIDER:
+            return NSAccessibilitySliderRole;
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_PROGRESSBAR:
+            return NSAccessibilityProgressIndicatorRole;
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_TOOLTIP:
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_DIALOG:
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_GROUP:
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_LISTITEM:
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_NONE:
+        default:
+            return NSAccessibilityGroupRole;
+    }
+}
+
 static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSString *account) {
     return [@{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
@@ -151,10 +192,12 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 @property(nonatomic, assign) NSUInteger canvasTextureWidth;
 @property(nonatomic, assign) NSUInteger canvasTextureHeight;
 @property(nonatomic, assign) BOOL hasCanvasTexture;
+@property(nonatomic, strong) NSArray<NSAccessibilityElement *> *widgetAccessibilityElements;
 - (void)configureWithHost:(ZeroNativeAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label;
 - (BOOL)isAvailable;
 - (void)updateDrawableSize;
 - (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
+- (void)updateWidgetAccessibilityWithNodes:(const zero_native_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count;
 - (void)stopDisplayTimer;
 - (void)requestRetainedCanvasFrame;
 - (void)renderFrame;
@@ -234,6 +277,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (BOOL)setNativeViewVisibleInWindow:(uint64_t)windowId label:(NSString *)label visible:(BOOL)visible;
 - (BOOL)focusNativeViewInWindow:(uint64_t)windowId label:(NSString *)label;
 - (BOOL)presentGpuSurfacePixelsInWindow:(uint64_t)windowId label:(NSString *)label width:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
+- (BOOL)updateWidgetAccessibilityInWindow:(uint64_t)windowId label:(NSString *)label nodes:(const zero_native_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count;
 - (BOOL)nativeView:(NSView *)candidate isInSubtreeRootedAt:(NSView *)root;
 - (NSArray<NSString *> *)nativeViewKeysInSubtreeForWindow:(uint64_t)windowId rootKey:(NSString *)rootKey;
 - (BOOL)closeNativeViewInWindow:(uint64_t)windowId label:(NSString *)label;
@@ -434,6 +478,10 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
     [self stopDisplayTimer];
 }
 
+- (NSArray *)accessibilityChildren {
+    return self.widgetAccessibilityElements ?: @[];
+}
+
 - (BOOL)isAvailable {
     return self.device != nil && self.commandQueue != nil && self.metalLayer != nil;
 }
@@ -514,6 +562,39 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
     [self stopDisplayTimer];
     [self renderFrame];
     return YES;
+}
+
+- (void)updateWidgetAccessibilityWithNodes:(const zero_native_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count {
+    if (!nodes || count == 0) {
+        self.widgetAccessibilityElements = @[];
+        NSAccessibilityPostNotification(self, NSAccessibilityChildrenChangedNotification);
+        return;
+    }
+
+    NSMutableArray<NSAccessibilityElement *> *elements = [NSMutableArray arrayWithCapacity:count];
+    for (NSUInteger index = 0; index < count; index++) {
+        const zero_native_appkit_widget_accessibility_node_t node = nodes[index];
+        NSString *label = ZeroNativeStringFromBytes(node.label, node.label_len) ?: @"";
+        NSString *textValue = ZeroNativeStringFromBytes(node.text_value, node.text_value_len) ?: @"";
+        NSString *name = label.length > 0 ? label : textValue;
+        NSAccessibilityElement *element = [[NSAccessibilityElement alloc] initWithAccessibilityContainer:self];
+        element.accessibilityRole = ZeroNativeAccessibilityRoleForWidgetRole(node.role);
+        element.accessibilityIdentifier = [NSString stringWithFormat:@"zero-native-widget-%llu", node.id];
+        element.accessibilityLabel = name;
+        if (node.has_value) {
+            element.accessibilityValue = [NSString stringWithFormat:@"%.3f", node.value];
+        } else if (textValue.length > 0) {
+            element.accessibilityValue = textValue;
+        }
+        element.accessibilityEnabled = (node.state_flags & ZERO_NATIVE_APPKIT_WIDGET_STATE_ENABLED) != 0;
+        element.accessibilityFocused = (node.state_flags & ZERO_NATIVE_APPKIT_WIDGET_STATE_FOCUSED) != 0;
+        element.accessibilitySelected = (node.state_flags & ZERO_NATIVE_APPKIT_WIDGET_STATE_SELECTED) != 0;
+        CGFloat nativeY = self.bounds.size.height - node.y - node.height;
+        element.accessibilityFrameInParentSpace = NSMakeRect(node.x, nativeY, node.width, node.height);
+        [elements addObject:element];
+    }
+    self.widgetAccessibilityElements = elements;
+    NSAccessibilityPostNotification(self, NSAccessibilityChildrenChangedNotification);
 }
 
 - (void)stopDisplayTimer {
@@ -1306,6 +1387,14 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
     NSView *view = self.nativeViews[key];
     if (![view isKindOfClass:[ZeroNativeMetalSurfaceView class]]) return NO;
     return [(ZeroNativeMetalSurfaceView *)view presentPixelsWithWidth:width height:height scale:scale rgba8:rgba8 byteLength:byteLength];
+}
+
+- (BOOL)updateWidgetAccessibilityInWindow:(uint64_t)windowId label:(NSString *)label nodes:(const zero_native_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count {
+    NSString *key = [self nativeViewKeyForWindow:windowId label:label];
+    NSView *view = self.nativeViews[key];
+    if (![view isKindOfClass:[ZeroNativeMetalSurfaceView class]]) return NO;
+    [(ZeroNativeMetalSurfaceView *)view updateWidgetAccessibilityWithNodes:nodes count:count];
+    return YES;
 }
 
 - (BOOL)nativeView:(NSView *)candidate isInSubtreeRootedAt:(NSView *)root {
@@ -2740,6 +2829,12 @@ int zero_native_appkit_present_gpu_surface_pixels(zero_native_appkit_host_t *hos
     ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     return [object presentGpuSurfacePixelsInWindow:window_id label:labelString ?: @"" width:width height:height scale:scale rgba8:rgba8 byteLength:rgba8_len] ? 1 : 0;
+}
+
+int zero_native_appkit_update_widget_accessibility(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const zero_native_appkit_widget_accessibility_node_t *nodes, size_t node_count) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    return [object updateWidgetAccessibilityInWindow:window_id label:labelString ?: @"" nodes:nodes count:node_count] ? 1 : 0;
 }
 
 int zero_native_appkit_create_webview(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled) {
