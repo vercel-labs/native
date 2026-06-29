@@ -7826,17 +7826,50 @@ fn referenceImageDestinationRect(dst: geometry.RectF, src: geometry.RectF, fit: 
 }
 
 fn referenceSampleImage(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32) [4]u8 {
-    const sample_x_f = src.x + std.math.clamp(u, 0, 1) * src.width;
-    const sample_y_f = src.y + std.math.clamp(v, 0, 1) * src.height;
-    const sample_x = clampI32(referenceFloor(sample_x_f), 0, @intCast(image.width - 1));
-    const sample_y = clampI32(referenceFloor(sample_y_f), 0, @intCast(image.height - 1));
-    const index = (@as(usize, @intCast(sample_y)) * image.width + @as(usize, @intCast(sample_x))) * 4;
+    const sample_x_f = src.x + std.math.clamp(u, 0, 1) * src.width - 0.5;
+    const sample_y_f = src.y + std.math.clamp(v, 0, 1) * src.height - 0.5;
+    const x_floor = referenceFloor(sample_x_f);
+    const y_floor = referenceFloor(sample_y_f);
+    const x0 = clampI32(x_floor, 0, @intCast(image.width - 1));
+    const y0 = clampI32(y_floor, 0, @intCast(image.height - 1));
+    const x1 = clampI32(x_floor + 1, 0, @intCast(image.width - 1));
+    const y1 = clampI32(y_floor + 1, 0, @intCast(image.height - 1));
+    const tx = std.math.clamp(sample_x_f - @as(f32, @floatFromInt(x_floor)), 0, 1);
+    const ty = std.math.clamp(sample_y_f - @as(f32, @floatFromInt(y_floor)), 0, 1);
+
+    const top_left = referenceImagePixel(image, x0, y0);
+    const top_right = referenceImagePixel(image, x1, y0);
+    const bottom_left = referenceImagePixel(image, x0, y1);
+    const bottom_right = referenceImagePixel(image, x1, y1);
+
+    return .{
+        referenceBilinearChannel(top_left[0], top_right[0], bottom_left[0], bottom_right[0], tx, ty),
+        referenceBilinearChannel(top_left[1], top_right[1], bottom_left[1], bottom_right[1], tx, ty),
+        referenceBilinearChannel(top_left[2], top_right[2], bottom_left[2], bottom_right[2], tx, ty),
+        referenceBilinearChannel(top_left[3], top_right[3], bottom_left[3], bottom_right[3], tx, ty),
+    };
+}
+
+fn referenceImagePixel(image: ReferenceImage, x: i32, y: i32) [4]u8 {
+    const index = (@as(usize, @intCast(y)) * image.width + @as(usize, @intCast(x))) * 4;
     return .{
         image.pixels[index + 0],
         image.pixels[index + 1],
         image.pixels[index + 2],
         image.pixels[index + 3],
     };
+}
+
+fn referenceBilinearChannel(top_left: u8, top_right: u8, bottom_left: u8, bottom_right: u8, tx: f32, ty: f32) u8 {
+    const top = referenceLerpByte(top_left, top_right, tx);
+    const bottom = referenceLerpByte(bottom_left, bottom_right, tx);
+    return colorChannelToByte((top + (bottom - top) * ty) / 255.0);
+}
+
+fn referenceLerpByte(a: u8, b: u8, t: f32) f32 {
+    const start: f32 = @floatFromInt(a);
+    const end: f32 = @floatFromInt(b);
+    return start + (end - start) * std.math.clamp(t, 0, 1);
 }
 
 fn referencePointInRoundedRect(point: geometry.PointF, rect: geometry.RectF, radius: Radius) bool {
@@ -14010,9 +14043,58 @@ test "reference renderer draws image resources" {
 
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 0, 0);
     try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 0, 1);
-    try expectPixelRgba8(.{ 0, 0, 255, 255 }, surface, 2, 1);
+    try expectPixelRgba8(.{ 191, 0, 64, 255 }, surface, 1, 1);
+    try expectPixelRgba8(.{ 64, 0, 191, 255 }, surface, 2, 1);
     try expectPixelRgba8(.{ 0, 0, 255, 255 }, surface, 3, 2);
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 0, 3);
+}
+
+test "reference renderer bilinear-filters scaled images" {
+    const commands = [_]CanvasCommand{.{ .draw_image = .{
+        .id = 1,
+        .image_id = 42,
+        .dst = geometry.RectF.init(0, 0, 4, 4),
+    } }};
+    const image_pixels = [_]u8{
+        255, 0,   0,   255,
+        0,   255, 0,   255,
+        0,   0,   255, 255,
+        255, 255, 255, 255,
+    };
+    const images = [_]ReferenceImage{.{
+        .id = 42,
+        .width = 2,
+        .height = 2,
+        .pixels = &image_pixels,
+    }};
+
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [1]RenderResource = undefined;
+    var resource_cache_entries: [1]RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [1]RenderResourceCacheAction = undefined;
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(4, 4),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    var pixels: [4 * 4 * 4]u8 = undefined;
+    const surface = (try ReferenceRenderSurface.init(4, 4, &pixels)).withImages(&images);
+    try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
+
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 0, 0);
+    try expectPixelRgba8(.{ 159, 64, 64, 255 }, surface, 1, 1);
+    try expectPixelRgba8(.{ 159, 191, 191, 255 }, surface, 2, 2);
+    try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 3, 3);
 }
 
 test "reference renderer rejects unsupported images" {
