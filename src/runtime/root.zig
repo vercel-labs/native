@@ -7180,6 +7180,14 @@ fn platformWidgetAccessibilityTextRange(range: ?canvas.TextRange) ?platform.Widg
     return .{ .start = value.start, .end = value.end };
 }
 
+fn platformWidgetAccessibilityNodeById(nodes: []const platform.WidgetAccessibilityNode, id: u64) ?platform.WidgetAccessibilityNode {
+    if (id == 0) return null;
+    for (nodes) |node| {
+        if (node.id == id) return node;
+    }
+    return null;
+}
+
 fn canvasWidgetSemanticsById(nodes: []const canvas.WidgetSemanticsNode, id: canvas.ObjectId) ?canvas.WidgetSemanticsNode {
     if (id == 0) return null;
     for (nodes) |node| {
@@ -14262,7 +14270,7 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
         window_id: platform.WindowId = 0,
         view_label: [platform.max_view_label_bytes]u8 = undefined,
         view_label_len: usize = 0,
-        nodes: [8]platform.WidgetAccessibilityNode = undefined,
+        nodes: [16]platform.WidgetAccessibilityNode = undefined,
         node_count: usize = 0,
 
         fn platformValue(self: *@This()) platform.Platform {
@@ -14332,12 +14340,25 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
         .frame = geometry.RectF.init(0, 0, 320, 160),
     });
 
+    const header_cells = [_]canvas.Widget{
+        .{ .id = 12, .kind = .data_cell, .text = "Project", .layout = .{ .grow = 1 } },
+        .{ .id = 13, .kind = .data_cell, .text = "Status", .layout = .{ .grow = 1 } },
+    };
+    const row_cells = [_]canvas.Widget{
+        .{ .id = 15, .kind = .data_cell, .text = "Edge API", .layout = .{ .grow = 1 } },
+        .{ .id = 16, .kind = .data_cell, .text = "Live", .layout = .{ .grow = 1 } },
+    };
+    const rows = [_]canvas.Widget{
+        .{ .id = 11, .kind = .data_row, .children = &header_cells },
+        .{ .id = 14, .kind = .data_row, .children = &row_cells },
+    };
     const children = [_]canvas.Widget{
         .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(12, 14, 96, 32), .text = "Deploy", .command = "deploy.run" },
         .{ .id = 3, .kind = .checkbox, .frame = geometry.RectF.init(12, 58, 120, 28), .text = "Preview", .state = .{ .selected = true } },
         .{ .id = 4, .kind = .text_field, .frame = geometry.RectF.init(12, 96, 160, 28), .text = "Search", .text_selection = canvas.TextSelection{ .anchor = 1, .focus = 4 }, .text_composition = canvas.TextRange.init(2, 5) },
+        .{ .id = 10, .kind = .data_grid, .frame = geometry.RectF.init(12, 132, 220, 64), .text = "Deployments", .layout = .{ .gap = 2 }, .children = &rows },
     };
-    var layout_nodes: [4]canvas.WidgetLayoutNode = undefined;
+    var layout_nodes: [16]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(.{
         .id = 1,
         .kind = .stack,
@@ -14350,11 +14371,26 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     try std.testing.expect(platform_state.update_count >= 1);
     try std.testing.expectEqual(@as(platform.WindowId, 1), platform_state.window_id);
     try std.testing.expectEqualStrings("canvas", platform_state.view_label[0..platform_state.view_label_len]);
-    try std.testing.expectEqual(@as(usize, 4), platform_state.node_count);
+    try std.testing.expectEqual(@as(usize, 11), platform_state.node_count);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.group, platform_state.nodes[0].role);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.button, platform_state.nodes[1].role);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.checkbox, platform_state.nodes[2].role);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.textbox, platform_state.nodes[3].role);
+    const grid_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 10).?;
+    const row_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 14).?;
+    const cell_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 16).?;
+    try std.testing.expectEqual(platform.WidgetAccessibilityRole.grid, grid_node.role);
+    try std.testing.expectEqual(@as(?usize, 2), grid_node.grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), grid_node.grid_column_count);
+    try std.testing.expectEqual(platform.WidgetAccessibilityRole.row, row_node.role);
+    try std.testing.expectEqual(@as(?usize, 1), row_node.grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 2), row_node.grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), row_node.grid_column_count);
+    try std.testing.expectEqual(platform.WidgetAccessibilityRole.gridcell, cell_node.role);
+    try std.testing.expectEqual(@as(?usize, 1), cell_node.grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 1), cell_node.grid_column_index);
+    try std.testing.expectEqual(@as(?usize, 2), cell_node.grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), cell_node.grid_column_count);
     try std.testing.expectEqualStrings("Deploy", platform_state.nodes[1].label);
     try std.testing.expect(platform_state.nodes[1].actions.press);
     try std.testing.expect(platform_state.nodes[2].selected);

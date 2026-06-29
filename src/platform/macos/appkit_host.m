@@ -643,7 +643,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (void)updateWidgetAccessibilityWithNodes:(const zero_native_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count {
     if (!nodes || count == 0) {
         self.widgetAccessibilityElements = @[];
-        NSAccessibilityPostNotification(self, NSAccessibilityChildrenChangedNotification);
+        NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
         return;
     }
 
@@ -653,10 +653,11 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
         NSString *label = ZeroNativeStringFromBytes(node.label, node.label_len) ?: @"";
         NSString *textValue = ZeroNativeStringFromBytes(node.text_value, node.text_value_len) ?: @"";
         NSString *name = label.length > 0 ? label : textValue;
-        ZeroNativeWidgetAccessibilityElement *element = [[ZeroNativeWidgetAccessibilityElement alloc] initWithAccessibilityContainer:self];
+        ZeroNativeWidgetAccessibilityElement *element = [[ZeroNativeWidgetAccessibilityElement alloc] init];
         element.surfaceView = self;
         element.widgetId = node.id;
         element.actionFlags = node.action_flags;
+        element.accessibilityParent = self;
         element.accessibilityRole = ZeroNativeAccessibilityRoleForWidgetRole(node.role);
         element.accessibilityIdentifier = [NSString stringWithFormat:@"zero-native-widget-%llu", node.id];
         element.accessibilityLabel = name;
@@ -664,6 +665,35 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
             element.accessibilityValue = [NSString stringWithFormat:@"%.3f", node.value];
         } else if (textValue.length > 0) {
             element.accessibilityValue = textValue;
+        }
+        if (node.has_grid_row_count) {
+            element.accessibilityRowCount = (NSInteger)node.grid_row_count;
+        }
+        if (node.has_grid_column_count) {
+            element.accessibilityColumnCount = (NSInteger)node.grid_column_count;
+        }
+        if (node.has_grid_row_index) {
+            element.accessibilityRowIndexRange = NSMakeRange(node.grid_row_index, 1);
+            if (node.role == ZERO_NATIVE_APPKIT_WIDGET_ROLE_ROW) {
+                element.accessibilityIndex = (NSInteger)node.grid_row_index;
+            }
+        }
+        if (node.has_grid_column_index) {
+            element.accessibilityColumnIndexRange = NSMakeRange(node.grid_column_index, 1);
+        }
+        if (node.has_list_item_index) {
+            element.accessibilityIndex = (NSInteger)node.list_item_index;
+            if (node.has_list_item_count && !node.has_value) {
+                uint32_t displayIndex = node.list_item_index == UINT32_MAX ? node.list_item_index : node.list_item_index + 1;
+                element.accessibilityValueDescription = [NSString stringWithFormat:@"%u of %u", displayIndex, node.list_item_count];
+            }
+        }
+        if (node.has_scroll_offset) {
+            element.accessibilityMinValue = @0;
+            if (node.has_scroll_viewport_extent && node.has_scroll_content_extent) {
+                element.accessibilityMaxValue = @(MAX(0, node.scroll_content_extent - node.scroll_viewport_extent));
+            }
+            element.accessibilityValue = @(node.scroll_offset);
         }
         if (textValue.length > 0) {
             NSRange visibleRange = NSMakeRange(0, textValue.length);
@@ -685,7 +715,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
         [elements addObject:element];
     }
     self.widgetAccessibilityElements = elements;
-    NSAccessibilityPostNotification(self, NSAccessibilityChildrenChangedNotification);
+    NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
 }
 
 - (void)stopDisplayTimer {

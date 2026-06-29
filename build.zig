@@ -313,6 +313,12 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilitySelectedTextRanges" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilityVisibleCharacterRange" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-widget-accessibility-grid-metrics", "Verify AppKit GPU widget accessibility publishes grid and scroll metrics", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilityRowIndexRange" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilityColumnIndexRange" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilityRowCount" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilityMaxValue" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-builtin-bridge-policy", "Verify bridge policy docs include guarded dialog commands", &.{
         .{ .path = "docs/src/app/security/page.mdx", .pattern = ".{ .name = \"zero-native.dialog.saveFile\"" },
         .{ .path = "docs/src/app/bridge/builtin-commands/page.mdx", .pattern = ".{ .name = \"zero-native.dialog.saveFile\"" },
