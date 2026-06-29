@@ -2938,6 +2938,7 @@ pub const DesignTokens = struct {
     shadow: ShadowTokens = .{},
     blur: BlurTokens = .{},
     motion: MotionTokens = .{},
+    scroll: ScrollPhysics = .{},
     layer: LayerTokens = .{},
     density: Density = .regular,
 

@@ -5141,7 +5141,6 @@ const RuntimeView = struct {
     widget_revision: u64 = 0,
     widget_tokens: canvas.DesignTokens = .{},
     widget_scroll_states: [max_canvas_widget_nodes_per_view]canvas.ScrollState = undefined,
-    widget_scroll_physics: canvas.ScrollPhysics = .{},
     canvas_widget_focused_id: canvas.ObjectId = 0,
     canvas_widget_hovered_id: canvas.ObjectId = 0,
     canvas_widget_pressed_id: canvas.ObjectId = 0,
@@ -5294,7 +5293,6 @@ const RuntimeView = struct {
         self.copyWidgetLayoutTree(source.widgetLayoutTree()) catch unreachable;
         self.widget_revision = source.widget_revision;
         @memcpy(self.widget_scroll_states[0..source.widget_layout_node_count], source.widget_scroll_states[0..source.widget_layout_node_count]);
-        self.widget_scroll_physics = source.widget_scroll_physics;
     }
 
     fn canvasDisplayList(self: *const RuntimeView) canvas.DisplayList {
@@ -5831,7 +5829,7 @@ const RuntimeView = struct {
 
         const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
         const next = switch (source) {
-            .wheel => current.applyWheel(delta_y, self.widget_scroll_physics),
+            .wheel => current.applyWheel(delta_y, self.widget_tokens.scroll),
             .discrete => discrete: {
                 var state = current;
                 state.offset += delta_y;
@@ -5854,10 +5852,11 @@ const RuntimeView = struct {
     fn stepCanvasWidgetKineticScroll(self: *RuntimeView, dt_ms: f32) anyerror!?geometry.RectF {
         var dirty: ?geometry.RectF = null;
         var changed = false;
+        const physics = self.widget_tokens.scroll;
 
         for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |scroll_node, scroll_index| {
             if (scroll_node.widget.kind != .scroll_view or scroll_node.widget.layout.virtualized) continue;
-            if (@abs(self.widget_scroll_states[scroll_index].velocity) <= @max(0, self.widget_scroll_physics.stop_velocity)) {
+            if (@abs(self.widget_scroll_states[scroll_index].velocity) <= @max(0, physics.stop_velocity)) {
                 self.widget_scroll_states[scroll_index].velocity = 0;
                 continue;
             }
@@ -5869,7 +5868,7 @@ const RuntimeView = struct {
             }
 
             const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
-            const next = current.stepKinetic(dt_ms, self.widget_scroll_physics);
+            const next = current.stepKinetic(dt_ms, physics);
             self.widget_scroll_states[scroll_index] = next;
             if (next.offset == current.offset) continue;
 
@@ -10790,6 +10789,73 @@ test "runtime wheel input scrolls retained canvas scroll views" {
     try std.testing.expectEqual(@as(u64, 4), idle.widget_revision);
     try std.testing.expect(!harness.runtime.invalidated);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDirtyRegions().len);
+}
+
+test "runtime applies stored design token scroll physics" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-token-scroll", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "One" },
+        .{ .id = 3, .kind = .button, .frame = geometry.RectF.init(0, 44, 0, 32), .text = "Two" },
+        .{ .id = 4, .kind = .button, .frame = geometry.RectF.init(0, 88, 0, 32), .text = "Three" },
+    };
+    const scroll = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .children = &children,
+    };
+    var nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(scroll, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    const tokens = canvas.DesignTokens{
+        .scroll = .{
+            .wheel_multiplier = 0.5,
+            .wheel_velocity_scale = 4,
+            .deceleration_per_second = 1,
+            .stop_velocity = 0,
+        },
+    };
+    _ = try harness.runtime.setCanvasWidgetDesignTokens(1, "canvas", tokens);
+    try std.testing.expectEqualDeep(tokens, try harness.runtime.canvasWidgetDesignTokens(1, "canvas"));
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .scroll,
+        .x = 20,
+        .y = 20,
+        .delta_y = 40,
+    } });
+
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 20), retained.nodes[0].widget.value);
+    try std.testing.expectEqual(@as(f32, -20), retained.nodes[1].frame.y);
+    try std.testing.expectEqual(@as(f32, 80), harness.runtime.views[0].widget_scroll_states[0].velocity);
+
+    _ = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectApproxEqAbs(@as(f32, 21.28), retained.nodes[0].widget.value, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -21.28), retained.nodes[1].frame.y, 0.001);
+    try std.testing.expectEqual(@as(f32, 80), harness.runtime.views[0].widget_scroll_states[0].velocity);
 }
 
 test "runtime refreshes hovered canvas widget after scroll clipping" {
