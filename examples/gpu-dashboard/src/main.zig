@@ -156,6 +156,9 @@ const GpuDashboardApp = struct {
     render_batches: [max_dashboard_commands]canvas.RenderBatch = undefined,
     pipeline_cache_entries: [max_dashboard_pipelines]canvas.RenderPipelineCacheEntry = undefined,
     pipeline_cache_actions: [max_dashboard_pipelines * 2]canvas.RenderPipelineCacheAction = undefined,
+    layers: [max_dashboard_commands]canvas.RenderLayer = undefined,
+    layer_cache_entries: [max_dashboard_commands]canvas.RenderLayerCacheEntry = undefined,
+    layer_cache_actions: [max_dashboard_commands * 2]canvas.RenderLayerCacheAction = undefined,
     resources: [max_dashboard_commands]canvas.RenderResource = undefined,
     cache_entries: [max_dashboard_commands]canvas.RenderResourceCacheEntry = undefined,
     cache_actions: [max_dashboard_commands * 2]canvas.RenderResourceCacheAction = undefined,
@@ -348,6 +351,9 @@ const GpuDashboardApp = struct {
             .render_batches = &self.render_batches,
             .pipeline_cache_entries = &self.pipeline_cache_entries,
             .pipeline_cache_actions = &self.pipeline_cache_actions,
+            .layers = &self.layers,
+            .layer_cache_entries = &self.layer_cache_entries,
+            .layer_cache_actions = &self.layer_cache_actions,
             .resources = &self.resources,
             .resource_cache_entries = &self.cache_entries,
             .resource_cache_actions = &self.cache_actions,
@@ -492,6 +498,9 @@ fn dashboardFrameStorage(
     render_batches: []canvas.RenderBatch,
     pipeline_cache_entries: []canvas.RenderPipelineCacheEntry,
     pipeline_cache_actions: []canvas.RenderPipelineCacheAction,
+    layers: []canvas.RenderLayer,
+    layer_cache_entries: []canvas.RenderLayerCacheEntry,
+    layer_cache_actions: []canvas.RenderLayerCacheAction,
     resources: []canvas.RenderResource,
     cache_entries: []canvas.RenderResourceCacheEntry,
     cache_actions: []canvas.RenderResourceCacheAction,
@@ -512,6 +521,9 @@ fn dashboardFrameStorage(
         .render_batches = render_batches,
         .pipeline_cache_entries = pipeline_cache_entries,
         .pipeline_cache_actions = pipeline_cache_actions,
+        .layers = layers,
+        .layer_cache_entries = layer_cache_entries,
+        .layer_cache_actions = layer_cache_actions,
         .resources = resources,
         .resource_cache_entries = cache_entries,
         .resource_cache_actions = cache_actions,
@@ -641,6 +653,9 @@ test "gpu dashboard display list renders through the reference surface" {
     var render_batches: [max_dashboard_commands]canvas.RenderBatch = undefined;
     var pipeline_cache_entries: [max_dashboard_pipelines]canvas.RenderPipelineCacheEntry = undefined;
     var pipeline_cache_actions: [max_dashboard_pipelines * 2]canvas.RenderPipelineCacheAction = undefined;
+    var layers: [max_dashboard_commands]canvas.RenderLayer = undefined;
+    var layer_cache_entries: [max_dashboard_commands]canvas.RenderLayerCacheEntry = undefined;
+    var layer_cache_actions: [max_dashboard_commands * 2]canvas.RenderLayerCacheAction = undefined;
     var resources: [max_dashboard_commands]canvas.RenderResource = undefined;
     var cache_entries: [max_dashboard_commands]canvas.RenderResourceCacheEntry = undefined;
     var cache_actions: [max_dashboard_commands * 2]canvas.RenderResourceCacheAction = undefined;
@@ -658,12 +673,14 @@ test "gpu dashboard display list renders through the reference surface" {
     const frame = try dashboardFrame(display_list, null, .{
         .surface_size = geometry.SizeF.init(720, 520),
         .full_repaint = true,
-    }, dashboardFrameStorage(&render_commands, &render_batches, &pipeline_cache_entries, &pipeline_cache_actions, &resources, &cache_entries, &cache_actions, &visual_effects, &visual_effect_cache_entries, &visual_effect_cache_actions, &glyphs, &glyph_cache_entries, &glyph_cache_actions, &text_layout_plans, &text_layout_lines, &text_layout_cache_entries, &text_layout_cache_actions, &changes));
+    }, dashboardFrameStorage(&render_commands, &render_batches, &pipeline_cache_entries, &pipeline_cache_actions, &layers, &layer_cache_entries, &layer_cache_actions, &resources, &cache_entries, &cache_actions, &visual_effects, &visual_effect_cache_entries, &visual_effect_cache_actions, &glyphs, &glyph_cache_entries, &glyph_cache_actions, &text_layout_plans, &text_layout_lines, &text_layout_cache_entries, &text_layout_cache_actions, &changes));
 
     try std.testing.expect(frame.requiresRender());
     try std.testing.expect(frame.batch_plan.batchCount() >= 8);
     try std.testing.expect(frame.pipeline_cache_plan.entryCount() >= 4);
     try std.testing.expect(frame.pipeline_cache_plan.uploadCount() >= 4);
+    try std.testing.expectEqual(@as(usize, 0), frame.layer_plan.layerCount());
+    try std.testing.expectEqual(@as(usize, 0), frame.layer_cache_plan.actionCount());
     try std.testing.expect(frame.resource_plan.resourceCount() >= 8);
     try std.testing.expect(frame.visual_effect_plan.effectCount() >= 4);
     try std.testing.expect(frame.visual_effect_plan.shadowCount() >= 4);
@@ -710,6 +727,9 @@ test "gpu dashboard render overrides animate without rebuilding commands" {
     var render_batches: [max_dashboard_commands]canvas.RenderBatch = undefined;
     var pipeline_cache_entries: [max_dashboard_pipelines]canvas.RenderPipelineCacheEntry = undefined;
     var pipeline_cache_actions: [max_dashboard_pipelines * 2]canvas.RenderPipelineCacheAction = undefined;
+    var layers: [max_dashboard_commands]canvas.RenderLayer = undefined;
+    var layer_cache_entries: [max_dashboard_commands]canvas.RenderLayerCacheEntry = undefined;
+    var layer_cache_actions: [max_dashboard_commands * 2]canvas.RenderLayerCacheAction = undefined;
     var resources: [max_dashboard_commands]canvas.RenderResource = undefined;
     var cache_entries: [max_dashboard_commands]canvas.RenderResourceCacheEntry = undefined;
     var cache_actions: [max_dashboard_commands * 2]canvas.RenderResourceCacheAction = undefined;
@@ -728,10 +748,13 @@ test "gpu dashboard render overrides animate without rebuilding commands" {
     const frame = try dashboardFrame(display_list, display_list, .{
         .surface_size = geometry.SizeF.init(720, 520),
         .render_overrides = sampled,
-    }, dashboardFrameStorage(&render_commands, &render_batches, &pipeline_cache_entries, &pipeline_cache_actions, &resources, &cache_entries, &cache_actions, &visual_effects, &visual_effect_cache_entries, &visual_effect_cache_actions, &glyphs, &glyph_cache_entries, &glyph_cache_actions, &text_layout_plans, &text_layout_lines, &text_layout_cache_entries, &text_layout_cache_actions, &changes));
+    }, dashboardFrameStorage(&render_commands, &render_batches, &pipeline_cache_entries, &pipeline_cache_actions, &layers, &layer_cache_entries, &layer_cache_actions, &resources, &cache_entries, &cache_actions, &visual_effects, &visual_effect_cache_entries, &visual_effect_cache_actions, &glyphs, &glyph_cache_entries, &glyph_cache_actions, &text_layout_plans, &text_layout_lines, &text_layout_cache_entries, &text_layout_cache_actions, &changes));
 
     try std.testing.expect(frame.requiresRender());
     try std.testing.expect(frame.pipeline_cache_plan.entryCount() >= 4);
+    try std.testing.expectEqual(@as(usize, 1), frame.layer_plan.layerCount());
+    try std.testing.expectEqual(@as(usize, 1), frame.layer_cache_plan.uploadCount());
+    try std.testing.expectEqual(@as(usize, 1), frame.renderPass().layerActionCount());
     try std.testing.expect(frame.visual_effect_plan.effectCount() >= 4);
     try std.testing.expectEqual(@as(usize, 0), frame.changes.len);
     try std.testing.expect(frame.dirty_bounds != null);

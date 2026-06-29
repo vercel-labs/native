@@ -240,14 +240,13 @@ pub const Runtime = struct {
     canvas_frame_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined,
 
     pub fn init(options: Options) Runtime {
-        var runtime = Runtime{
+        return .{
             .options = options,
             .surface = options.platform.surface(),
+            .windows = undefined,
+            .views = undefined,
+            .shell_layouts = undefined,
         };
-        runtime.windows = undefined;
-        runtime.views = undefined;
-        runtime.shell_layouts = undefined;
-        return runtime;
     }
 
     pub fn invalidate(self: *Runtime) void {
@@ -707,6 +706,19 @@ pub const Runtime = struct {
                 storage.pipeline_cache_entries,
                 storage.pipeline_cache_actions,
             );
+        const layer_plan = if (storage.layers.len == 0)
+            canvas.RenderLayerPlan{}
+        else
+            try render_plan.layerPlan(storage.layers);
+        const layer_cache_plan = if (storage.layer_cache_entries.len == 0 and storage.layer_cache_actions.len == 0)
+            canvas.RenderLayerCachePlan{}
+        else
+            try layer_plan.cachePlan(
+                frame_options.previous_layer_cache,
+                frame_options.frame_index,
+                storage.layer_cache_entries,
+                storage.layer_cache_actions,
+            );
         const resource_plan = try display_list.resourcePlan(storage.resources);
         const resource_cache_plan = try resource_plan.cachePlan(
             frame_options.previous_resource_cache,
@@ -768,6 +780,8 @@ pub const Runtime = struct {
             .render_plan = render_plan,
             .batch_plan = batch_plan,
             .pipeline_cache_plan = pipeline_cache_plan,
+            .layer_plan = layer_plan,
+            .layer_cache_plan = layer_cache_plan,
             .resource_plan = resource_plan,
             .resource_cache_plan = resource_cache_plan,
             .visual_effect_plan = visual_effect_plan,
@@ -4916,6 +4930,8 @@ fn canvasFrameBudgetIsUnset(budget: canvas.CanvasFrameBudget) bool {
         budget.max_encoder_commands == 0 and
         budget.max_pipelines == 0 and
         budget.max_pipeline_uploads == 0 and
+        budget.max_layers == 0 and
+        budget.max_layer_uploads == 0 and
         budget.max_resources == 0 and
         budget.max_resource_uploads == 0 and
         budget.max_visual_effects == 0 and
