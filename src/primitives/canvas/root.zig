@@ -232,6 +232,11 @@ pub const ImageFit = enum {
     cover,
 };
 
+pub const ImageSampling = enum {
+    nearest,
+    linear,
+};
+
 pub const DrawImage = struct {
     id: ObjectId = 0,
     image_id: ImageId,
@@ -239,6 +244,7 @@ pub const DrawImage = struct {
     dst: geometry.RectF,
     opacity: f32 = 1,
     fit: ImageFit = .stretch,
+    sampling: ImageSampling = .linear,
 };
 
 pub const Glyph = struct {
@@ -2338,7 +2344,7 @@ pub const ReferenceRenderSurface = struct {
                 if (!dst_rect.containsPoint(point)) continue;
                 const u = std.math.clamp((point.x - dst_rect.x) / dst_rect.width, 0, 1);
                 const v = std.math.clamp((point.y - dst_rect.y) / dst_rect.height, 0, 1);
-                const sample = referenceSampleImage(image, src_rect, u, v);
+                const sample = referenceSampleImage(image, src_rect, u, v, value.sampling);
                 const index = (y * self.width + x) * 4;
                 const dst = [4]u8{
                     self.pixels[index + 0],
@@ -3031,6 +3037,7 @@ pub const Widget = struct {
     image_id: ImageId = 0,
     image_src: ?geometry.RectF = null,
     image_fit: ImageFit = .stretch,
+    image_sampling: ImageSampling = .linear,
     image_opacity: f32 = 1,
     text_selection: ?TextSelection = null,
     text_composition: ?TextRange = null,
@@ -4881,6 +4888,7 @@ fn drawImageFingerprint(image: DrawImage) u64 {
     hash = resourceHashU64(hash, image.image_id);
     hash = resourceHashOptionalRect(hash, image.src);
     hash = resourceHashEnum(hash, @intFromEnum(image.fit));
+    hash = resourceHashEnum(hash, @intFromEnum(image.sampling));
     return hash;
 }
 
@@ -5811,6 +5819,7 @@ fn emitImageWidget(builder: *Builder, widget: Widget) Error!void {
         .dst = widget.frame,
         .opacity = widget.image_opacity,
         .fit = widget.image_fit,
+        .sampling = widget.image_sampling,
     });
 }
 
@@ -7703,6 +7712,7 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         previous.widget.image_id != next.widget.image_id or
         !optionalRectsEqual(previous.widget.image_src, next.widget.image_src) or
         previous.widget.image_fit != next.widget.image_fit or
+        previous.widget.image_sampling != next.widget.image_sampling or
         previous.widget.image_opacity != next.widget.image_opacity or
         !optionalTextSelectionsEqual(previous.widget.text_selection, next.widget.text_selection) or
         !optionalTextRangesEqual(previous.widget.text_composition, next.widget.text_composition);
@@ -8582,7 +8592,22 @@ const ReferencePremultipliedLinearColor = struct {
     a: f32 = 0,
 };
 
-fn referenceSampleImage(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32) [4]u8 {
+fn referenceSampleImage(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32, sampling: ImageSampling) [4]u8 {
+    return switch (sampling) {
+        .nearest => referenceSampleImageNearest(image, src, u, v),
+        .linear => referenceSampleImageLinear(image, src, u, v),
+    };
+}
+
+fn referenceSampleImageNearest(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32) [4]u8 {
+    const sample_x_f = src.x + std.math.clamp(u, 0, 1) * src.width;
+    const sample_y_f = src.y + std.math.clamp(v, 0, 1) * src.height;
+    const x = clampI32(referenceFloor(sample_x_f), 0, @intCast(image.width - 1));
+    const y = clampI32(referenceFloor(sample_y_f), 0, @intCast(image.height - 1));
+    return referenceImagePixel(image, x, y);
+}
+
+fn referenceSampleImageLinear(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32) [4]u8 {
     const sample_x_f = src.x + std.math.clamp(u, 0, 1) * src.width - 0.5;
     const sample_y_f = src.y + std.math.clamp(v, 0, 1) * src.height - 0.5;
     const x_floor = referenceFloor(sample_x_f);
@@ -9403,7 +9428,8 @@ fn drawImagesEqual(a: DrawImage, b: DrawImage) bool {
         optionalRectsEqual(a.src, b.src) and
         rectsEqual(a.dst, b.dst) and
         a.opacity == b.opacity and
-        a.fit == b.fit;
+        a.fit == b.fit and
+        a.sampling == b.sampling;
 }
 
 fn drawTextsEqual(a: DrawText, b: DrawText) bool {
@@ -9622,6 +9648,8 @@ fn writeCommandJson(command: CanvasCommand, writer: anytype) !void {
             }
             try writer.print(",\"opacity\":{d},\"fit\":", .{value.opacity});
             try json.writeString(writer, @tagName(value.fit));
+            try writer.writeAll(",\"sampling\":");
+            try json.writeString(writer, @tagName(value.sampling));
         },
         .draw_text => |value| {
             try writer.print(",\"id\":{d},\"font\":{d},\"size\":{d},\"origin\":", .{ value.id, value.font_id, value.size });
@@ -11900,6 +11928,7 @@ test "widget image emits draw image and exposes image semantics" {
         .image_id = 42,
         .image_src = geometry.RectF.init(0, 0, 320, 192),
         .image_fit = .cover,
+        .image_sampling = .nearest,
         .image_opacity = 0.75,
         .semantics = .{ .label = "Deployment preview" },
     };
@@ -11927,6 +11956,7 @@ test "widget image emits draw image and exposes image semantics" {
             try expectRect(geometry.RectF.init(0, 0, 320, 192), draw.src);
             try expectRect(geometry.RectF.init(12, 14, 80, 48), draw.dst);
             try std.testing.expectEqual(ImageFit.cover, draw.fit);
+            try std.testing.expectEqual(ImageSampling.nearest, draw.sampling);
             try std.testing.expectEqual(@as(f32, 0.75), draw.opacity);
         },
         else => return error.TestUnexpectedResult,
@@ -12729,6 +12759,7 @@ test "widget layout diff separates paint and semantics dirtiness" {
         .image_id = 12,
         .image_src = geometry.RectF.init(0, 0, 640, 360),
         .image_fit = .contain,
+        .image_sampling = .nearest,
         .image_opacity = 0.5,
     }};
 
@@ -16321,6 +16352,55 @@ test "reference renderer bilinear-filters scaled images" {
     try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 0, 0);
     try expectPixelRgba8(.{ 207, 137, 137, 255 }, surface, 1, 1);
     try expectPixelRgba8(.{ 207, 225, 225, 255 }, surface, 2, 2);
+    try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 3, 3);
+}
+
+test "reference renderer nearest-filters scaled images" {
+    const commands = [_]CanvasCommand{.{ .draw_image = .{
+        .id = 1,
+        .image_id = 42,
+        .dst = geometry.RectF.init(0, 0, 4, 4),
+        .sampling = .nearest,
+    } }};
+    const image_pixels = [_]u8{
+        255, 0,   0,   255,
+        0,   255, 0,   255,
+        0,   0,   255, 255,
+        255, 255, 255, 255,
+    };
+    const images = [_]ReferenceImage{.{
+        .id = 42,
+        .width = 2,
+        .height = 2,
+        .pixels = &image_pixels,
+    }};
+
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [1]RenderResource = undefined;
+    var resource_cache_entries: [1]RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [1]RenderResourceCacheAction = undefined;
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(4, 4),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    var pixels: [4 * 4 * 4]u8 = undefined;
+    const surface = (try ReferenceRenderSurface.init(4, 4, &pixels)).withImages(&images);
+    try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
+
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 0, 0);
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 1, 1);
+    try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 2, 2);
     try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 3, 3);
 }
 
