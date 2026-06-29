@@ -16,7 +16,7 @@ const statusbar_height: f32 = 34;
 const max_dashboard_pipelines: usize = 8;
 const max_dashboard_commands: usize = zero_native.runtime.max_canvas_commands_per_view;
 const max_dashboard_glyphs: usize = zero_native.runtime.max_canvas_glyphs_per_view;
-const max_dashboard_widgets: usize = 10;
+const max_dashboard_widgets: usize = 32;
 const refresh_command = "dashboard.refresh";
 const mode_command = "dashboard.mode";
 
@@ -420,6 +420,46 @@ fn buildDashboardWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!can
         .{ .id = 106, .kind = .list_item, .text = "Activation 74.2%, up 6.1%" },
         .{ .id = 107, .kind = .list_item, .text = "Latency 8.6ms, down 2.4ms" },
     };
+    const nav_items = [_]canvas.Widget{
+        .{ .id = 111, .kind = .list_item, .text = "Overview", .state = .{ .selected = true } },
+        .{ .id = 112, .kind = .list_item, .text = "Customers" },
+        .{ .id = 113, .kind = .list_item, .text = "Latency" },
+    };
+    const activity_items = [_]canvas.Widget{
+        .{ .id = 121, .kind = .list_item, .frame = rect(0, 0, 0, 32), .text = "Signed enterprise renewal" },
+        .{ .id = 122, .kind = .list_item, .frame = rect(0, 36, 0, 32), .text = "Usage spike in EU region" },
+        .{ .id = 123, .kind = .list_item, .frame = rect(0, 72, 0, 32), .text = "Latency budget recovered" },
+        .{ .id = 124, .kind = .list_item, .frame = rect(0, 108, 0, 32), .text = "Queued invoice batch" },
+    };
+    const form_fields = [_]canvas.Widget{
+        .{
+            .id = 131,
+            .kind = .text_field,
+            .frame = rect(12, 12, 160, 30),
+            .text = "$13.4M",
+            .semantics = .{ .label = "Forecast amount" },
+        },
+        .{
+            .id = 132,
+            .kind = .search_field,
+            .frame = rect(184, 12, 180, 30),
+            .text = "enterprise",
+            .semantics = .{ .label = "Segment search" },
+        },
+    };
+    const filter_items = [_]canvas.Widget{
+        .{ .id = 142, .kind = .menu_item, .text = "Last 30 days" },
+        .{ .id = 143, .kind = .menu_item, .text = "Enterprise" },
+        .{ .id = 144, .kind = .menu_item, .text = "High intent" },
+    };
+    const filter_menu = [_]canvas.Widget{.{
+        .id = 141,
+        .kind = .menu_surface,
+        .frame = rect(12, 12, 154, 92),
+        .layout = .{ .gap = 2 },
+        .semantics = .{ .label = "Filter options" },
+        .children = &filter_items,
+    }};
     const dashboard_widgets = [_]canvas.Widget{
         .{
             .id = 101,
@@ -461,6 +501,36 @@ fn buildDashboardWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!can
             .frame = rect(250, 454, 256, 12),
             .value = 0.68,
             .semantics = .{ .label = "Conversion progress" },
+        },
+        .{
+            .id = 110,
+            .kind = .list,
+            .frame = rect(54, 136, 126, 120),
+            .layout = .{ .gap = 8 },
+            .semantics = .{ .label = "Dashboard navigation" },
+            .children = &nav_items,
+        },
+        .{
+            .id = 120,
+            .kind = .scroll_view,
+            .frame = rect(522, 248, 126, 100),
+            .value = 18,
+            .semantics = .{ .label = "Recent activity" },
+            .children = &activity_items,
+        },
+        .{
+            .id = 130,
+            .kind = .panel,
+            .frame = rect(226, 448, 422, 56),
+            .semantics = .{ .label = "Forecast form" },
+            .children = &form_fields,
+        },
+        .{
+            .id = 140,
+            .kind = .popover,
+            .frame = rect(470, 86, 178, 122),
+            .semantics = .{ .label = "Revenue filter popover" },
+            .children = &filter_menu,
         },
     };
     return canvas.layoutWidgetTree(.{ .kind = .stack, .children = &dashboard_widgets }, rect(0, 0, canvas_width, window_height - toolbar_height - statusbar_height), nodes);
@@ -795,15 +865,40 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     try std.testing.expectEqual(@as(u64, 1_000_000_000), animations[0].start_ns);
 
     const widget_layout = try harness.runtime.canvasWidgetLayout(1, "dashboard-canvas");
-    try std.testing.expectEqual(@as(usize, 10), widget_layout.nodeCount());
+    try std.testing.expectEqual(@as(usize, 27), widget_layout.nodeCount());
     try std.testing.expectEqualStrings("Dashboard metrics", widget_layout.nodes[4].widget.semantics.label);
 
     const snapshot = harness.runtime.automationSnapshot("Dashboard");
-    try std.testing.expectEqual(@as(usize, 9), snapshot.widgets.len);
+    try std.testing.expectEqual(@as(usize, 26), snapshot.widgets.len);
     try std.testing.expectEqualStrings("button", snapshot.widgets[2].role);
     try std.testing.expectEqualStrings("Live render status", snapshot.widgets[2].name);
     try std.testing.expectEqualStrings("progressbar", snapshot.widgets[8].role);
     try std.testing.expectEqualStrings("Conversion progress", snapshot.widgets[8].name);
+    try std.testing.expectEqualStrings("list", snapshot.widgets[9].role);
+    try std.testing.expectEqualStrings("Dashboard navigation", snapshot.widgets[9].name);
+    try std.testing.expectEqualStrings("listitem", snapshot.widgets[10].role);
+    try std.testing.expect(snapshot.widgets[10].selected);
+    try std.testing.expect(snapshot.widgets[10].list.present);
+    try std.testing.expectEqual(@as(u32, 0), snapshot.widgets[10].list.item_index);
+    try std.testing.expectEqual(@as(u32, 3), snapshot.widgets[10].list.item_count);
+    try std.testing.expectEqualStrings("group", snapshot.widgets[13].role);
+    try std.testing.expectEqualStrings("Recent activity", snapshot.widgets[13].name);
+    try std.testing.expect(snapshot.widgets[13].scroll.present);
+    try std.testing.expect(snapshot.widgets[13].scroll.content_extent > snapshot.widgets[13].scroll.viewport_extent);
+    try std.testing.expect(snapshot.widgets[13].actions.increment);
+    try std.testing.expect(snapshot.widgets[13].actions.decrement);
+    try std.testing.expectEqualStrings("textbox", snapshot.widgets[19].role);
+    try std.testing.expectEqualStrings("Forecast amount", snapshot.widgets[19].name);
+    try std.testing.expectEqualStrings("$13.4M", snapshot.widgets[19].text_value);
+    try std.testing.expectEqualStrings("textbox", snapshot.widgets[20].role);
+    try std.testing.expectEqualStrings("Segment search", snapshot.widgets[20].name);
+    try std.testing.expectEqualStrings("enterprise", snapshot.widgets[20].text_value);
+    try std.testing.expectEqualStrings("dialog", snapshot.widgets[21].role);
+    try std.testing.expectEqualStrings("Revenue filter popover", snapshot.widgets[21].name);
+    try std.testing.expectEqualStrings("menu", snapshot.widgets[22].role);
+    try std.testing.expectEqualStrings("Filter options", snapshot.widgets[22].name);
+    try std.testing.expectEqualStrings("menuitem", snapshot.widgets[23].role);
+    try std.testing.expectEqualStrings("Last 30 days", snapshot.widgets[23].name);
 
     try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_frame = .{
         .label = "dashboard-canvas",
