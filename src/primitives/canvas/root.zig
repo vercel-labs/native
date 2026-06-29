@@ -49,6 +49,7 @@ pub const default_glyph_atlas_cache_retention_frames: u64 = 120;
 pub const default_text_layout_cache_retention_frames: u64 = 120;
 
 const max_reference_text_layout_lines: usize = 64;
+const max_reference_blur_kernel_samples: usize = 4096;
 
 pub const Color = struct {
     r: f32 = 0,
@@ -2440,13 +2441,23 @@ pub const ReferenceRenderSurface = struct {
         @memcpy(scratch[0..self.pixels.len], self.pixels);
         const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return;
         const kernel_radius: i64 = @intCast(@max(1, referenceCeil(radius)));
+        const kernel_width: usize = @intCast(kernel_radius * 2 + 1);
+        const kernel_sample_count = kernel_width * kernel_width;
+        var kernel_storage: [max_reference_blur_kernel_samples]f32 = undefined;
+        const kernel: ?[]const f32 = if (kernel_sample_count <= kernel_storage.len)
+            referenceBlurKernel(kernel_storage[0..kernel_sample_count], kernel_radius, radius)
+        else
+            null;
         var y = pixel_rect.y;
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
                 const x_i: i64 = @intCast(x);
                 const y_i: i64 = @intCast(y);
-                const blurred = referenceBlurSample(scratch, self.width, self.height, x_i, y_i, kernel_radius, radius);
+                const blurred = if (kernel) |weights|
+                    referenceBlurSampleWithKernel(scratch, self.width, self.height, x_i, y_i, kernel_radius, weights)
+                else
+                    referenceBlurSample(scratch, self.width, self.height, x_i, y_i, kernel_radius, radius);
                 const index = (y * self.width + x) * 4;
                 const dst = [4]u8{
                     self.pixels[index + 0],
@@ -2561,6 +2572,54 @@ pub const ReferenceRenderSurface = struct {
     }
 };
 
+fn referenceBlurKernel(output: []f32, kernel_radius: i64, radius: f32) []const f32 {
+    const kernel_width: usize = @intCast(kernel_radius * 2 + 1);
+    var index: usize = 0;
+    var dy: i64 = -kernel_radius;
+    while (dy <= kernel_radius) : (dy += 1) {
+        var dx: i64 = -kernel_radius;
+        while (dx <= kernel_radius) : (dx += 1) {
+            output[index] = referenceBlurWeight(dx, dy, radius);
+            index += 1;
+        }
+    }
+    return output[0 .. kernel_width * kernel_width];
+}
+
+fn referenceBlurSampleWithKernel(source: []const u8, width: usize, height: usize, x: i64, y: i64, kernel_radius: i64, kernel: []const f32) [4]u8 {
+    const width_i: i64 = @intCast(width);
+    const height_i: i64 = @intCast(height);
+    const kernel_width: usize = @intCast(kernel_radius * 2 + 1);
+    var premultiplied = [_]f32{0} ** 3;
+    var alpha_total: f32 = 0;
+    var weight_total: f32 = 0;
+
+    var dy: i64 = -kernel_radius;
+    while (dy <= kernel_radius) : (dy += 1) {
+        const sample_y = y + dy;
+        if (sample_y < 0 or sample_y >= height_i) continue;
+
+        var dx: i64 = -kernel_radius;
+        while (dx <= kernel_radius) : (dx += 1) {
+            const sample_x = x + dx;
+            if (sample_x < 0 or sample_x >= width_i) continue;
+
+            const kernel_y: usize = @intCast(dy + kernel_radius);
+            const kernel_x: usize = @intCast(dx + kernel_radius);
+            const weight = kernel[kernel_y * kernel_width + kernel_x];
+            const sample_index = (@as(usize, @intCast(sample_y)) * width + @as(usize, @intCast(sample_x))) * 4;
+            const alpha = @as(f32, @floatFromInt(source[sample_index + 3])) / 255.0;
+            premultiplied[0] += (@as(f32, @floatFromInt(source[sample_index + 0])) / 255.0) * alpha * weight;
+            premultiplied[1] += (@as(f32, @floatFromInt(source[sample_index + 1])) / 255.0) * alpha * weight;
+            premultiplied[2] += (@as(f32, @floatFromInt(source[sample_index + 2])) / 255.0) * alpha * weight;
+            alpha_total += alpha * weight;
+            weight_total += weight;
+        }
+    }
+
+    return referenceBlurOutput(premultiplied, alpha_total, weight_total);
+}
+
 fn referenceBlurSample(source: []const u8, width: usize, height: usize, x: i64, y: i64, kernel_radius: i64, radius: f32) [4]u8 {
     const width_i: i64 = @intCast(width);
     const height_i: i64 = @intCast(height);
@@ -2589,6 +2648,10 @@ fn referenceBlurSample(source: []const u8, width: usize, height: usize, x: i64, 
         }
     }
 
+    return referenceBlurOutput(premultiplied, alpha_total, weight_total);
+}
+
+fn referenceBlurOutput(premultiplied: [3]f32, alpha_total: f32, weight_total: f32) [4]u8 {
     if (weight_total <= 0) return .{ 0, 0, 0, 0 };
     const alpha = alpha_total / weight_total;
     if (alpha <= 0) return .{ 0, 0, 0, 0 };
