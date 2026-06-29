@@ -318,9 +318,18 @@ fn componentTokens() canvas.DesignTokens {
 fn buildComponentsWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!canvas.WidgetLayoutTree {
     const nav_items = [_]canvas.Widget{
         .{ .id = 121, .kind = .list_item, .text = "Controls", .state = .{ .selected = true } },
+        .{ .id = 122, .kind = .list_item, .text = "Inputs" },
+        .{ .id = 123, .kind = .list_item, .text = "Data" },
+        .{ .id = 124, .kind = .list_item, .text = "Virtualized" },
+        .{ .id = 125, .kind = .list_item, .text = "Performance" },
+        .{ .id = 126, .kind = .list_item, .text = "A11y" },
     };
     const scroll_items = [_]canvas.Widget{
-        .{ .id = 131, .kind = .list_item, .frame = rect(0, 92, 0, 30), .text = "Scroll physics" },
+        .{ .id = 131, .kind = .list_item, .text = "Pointer routing" },
+        .{ .id = 132, .kind = .list_item, .text = "Focus traversal" },
+        .{ .id = 133, .kind = .list_item, .text = "Scroll physics" },
+        .{ .id = 134, .kind = .list_item, .text = "Logical ranges" },
+        .{ .id = 135, .kind = .list_item, .text = "Dirty bounds" },
     };
     const form_controls = [_]canvas.Widget{
         .{ .id = 111, .kind = .text_field, .frame = rect(16, 48, 132, 30), .text = "zero-native", .semantics = .{ .label = "Project name" } },
@@ -342,14 +351,35 @@ fn buildComponentsWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!ca
         .semantics = .{ .label = "Component actions" },
         .children = &menu_items,
     }};
-    const data_cells = [_]canvas.Widget{
+    const row0_cells = [_]canvas.Widget{
+        .{ .id = 154, .kind = .data_cell, .text = "Focus ring", .layout = .{ .grow = 1 } },
+        .{ .id = 155, .kind = .data_cell, .text = "Ready", .layout = .{ .grow = 1 } },
+    };
+    const row1_cells = [_]canvas.Widget{
         .{ .id = 156, .kind = .data_cell, .text = "Wheel/Home/End", .command = "components.open", .layout = .{ .grow = 1 } },
+        .{ .id = 157, .kind = .data_cell, .text = "Covered", .layout = .{ .grow = 1 } },
+    };
+    const row2_cells = [_]canvas.Widget{
+        .{ .id = 158, .kind = .data_cell, .text = "Virtual range", .layout = .{ .grow = 1 } },
+        .{ .id = 159, .kind = .data_cell, .text = "Visible", .layout = .{ .grow = 1 } },
+    };
+    const row3_cells = [_]canvas.Widget{
+        .{ .id = 161, .kind = .data_cell, .text = "Cached text", .layout = .{ .grow = 1 } },
+        .{ .id = 162, .kind = .data_cell, .text = "Warm", .layout = .{ .grow = 1 } },
+    };
+    const row4_cells = [_]canvas.Widget{
+        .{ .id = 163, .kind = .data_cell, .text = "GPU batches", .layout = .{ .grow = 1 } },
+        .{ .id = 164, .kind = .data_cell, .text = "Stable", .layout = .{ .grow = 1 } },
     };
     const data_rows = [_]canvas.Widget{
-        .{ .id = 151, .kind = .data_row, .frame = rect(0, 0, 0, 28), .children = &data_cells },
+        .{ .id = 151, .kind = .data_row, .frame = rect(0, 0, 0, 28), .children = &row0_cells },
+        .{ .id = 152, .kind = .data_row, .frame = rect(0, 0, 0, 28), .children = &row1_cells },
+        .{ .id = 153, .kind = .data_row, .frame = rect(0, 0, 0, 28), .children = &row2_cells },
+        .{ .id = 165, .kind = .data_row, .frame = rect(0, 0, 0, 28), .children = &row3_cells },
+        .{ .id = 166, .kind = .data_row, .frame = rect(0, 0, 0, 28), .children = &row4_cells },
     };
     const data_panel_children = [_]canvas.Widget{
-        .{ .id = 150, .kind = .data_grid, .frame = rect(16, 48, 304, 60), .text = "Finished component behavior", .layout = .{ .gap = 2 }, .children = &data_rows },
+        .{ .id = 150, .kind = .data_grid, .frame = rect(16, 48, 304, 28), .text = "Finished component behavior", .value = 30, .layout = .{ .gap = 2, .virtualized = true, .virtual_item_extent = 28 }, .children = &data_rows },
         .{ .id = 160, .kind = .tooltip, .frame = rect(22, 124, 176, 32), .text = "Tooltip rendered on GPU", .semantics = .{ .label = "GPU tooltip" } },
     };
     const top_widgets = [_]canvas.Widget{
@@ -359,8 +389,8 @@ fn buildComponentsWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!ca
         .{ .id = 104, .kind = .button, .frame = rect(574, 54, 118, 34), .text = "Primary", .state = .{ .selected = true }, .command = refresh_command, .semantics = .{ .label = "Primary action" } },
         .{ .id = 105, .kind = .icon_button, .frame = rect(706, 54, 34, 34), .text = "+", .semantics = .{ .label = "Add component" } },
         .{ .id = 106, .kind = .column, .frame = rect(64, 130, 328, 246), .semantics = .{ .label = "Input controls" }, .children = &form_controls },
-        .{ .id = 120, .kind = .list, .frame = rect(424, 142, 152, 120), .layout = .{ .gap = 8 }, .semantics = .{ .label = "Component navigation" }, .children = &nav_items },
-        .{ .id = 130, .kind = .scroll_view, .frame = rect(604, 142, 164, 104), .value = 20, .semantics = .{ .label = "Scrollable behavior list" }, .children = &scroll_items },
+        .{ .id = 120, .kind = .list, .frame = rect(424, 142, 152, 28), .layout = .{ .gap = 8, .virtualized = true, .virtual_item_extent = 28 }, .semantics = .{ .label = "Component navigation" }, .children = &nav_items },
+        .{ .id = 130, .kind = .scroll_view, .frame = rect(604, 142, 164, 28), .value = 36, .layout = .{ .gap = 8, .virtualized = true, .virtual_item_extent = 28 }, .semantics = .{ .label = "Scrollable behavior list" }, .children = &scroll_items },
         .{ .id = 140, .kind = .popover, .frame = rect(424, 286, 174, 88), .backdrop_blur = 12, .semantics = .{ .label = "Actions popover" }, .children = &popover_children },
         .{ .id = 149, .kind = .column, .frame = rect(64, 408, 344, 174), .semantics = .{ .label = "Data controls" }, .children = &data_panel_children },
     };
@@ -674,7 +704,7 @@ test "gpu components semantics cover retained widget families" {
     try expectSemanticRole(semantics, 142, .menuitem);
     try expectSemanticRole(semantics, 149, .group);
     try expectSemanticRole(semantics, 150, .grid);
-    try expectSemanticRole(semantics, 151, .row);
+    try expectSemanticRole(semantics, 152, .row);
     try expectSemanticRole(semantics, 156, .gridcell);
     try expectSemanticRole(semantics, 160, .tooltip);
 
@@ -689,6 +719,11 @@ test "gpu components semantics cover retained widget families" {
     const selected_nav = expectSemantic(semantics, 121);
     try std.testing.expect(selected_nav.state.selected);
     try std.testing.expect(selected_nav.list.present);
+    try std.testing.expectEqual(@as(u32, 6), selected_nav.list.item_count);
+    try std.testing.expectEqual(@as(?usize, 5), expectSemantic(semantics, 150).grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), expectSemantic(semantics, 150).grid_column_count);
+    try std.testing.expectEqual(@as(?usize, 1), expectSemantic(semantics, 156).grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 0), expectSemantic(semantics, 156).grid_column_index);
 }
 
 test "gpu components image widget exposes image semantics and display command" {
@@ -758,6 +793,8 @@ test "gpu components app registers component lab on first gpu frame" {
     const widget_layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
     try std.testing.expect(widget_layout.nodeCount() >= 26);
     try std.testing.expectEqualStrings("Input controls", widget_layout.findById(106).?.widget.semantics.label);
+    try std.testing.expect(widget_layout.findById(151) == null);
+    try std.testing.expect(widget_layout.findById(152) != null);
 
     var snapshot = harness.runtime.automationSnapshot("Components");
     try std.testing.expect(componentSnapshotWidget(snapshot, 104).?.actions.press);
@@ -769,8 +806,14 @@ test "gpu components app registers component lab on first gpu frame" {
     try std.testing.expectEqualStrings("progressbar", componentSnapshotWidget(snapshot, 116).?.role);
     try std.testing.expectEqualStrings("tab", componentSnapshotWidget(snapshot, 117).?.role);
     try std.testing.expect(componentSnapshotWidget(snapshot, 130).?.scroll.present);
+    try std.testing.expectEqual(@as(f32, 28), componentSnapshotWidget(snapshot, 130).?.scroll.viewport_extent);
+    try std.testing.expect(componentSnapshotWidget(snapshot, 130).?.scroll.content_extent > 28);
     try std.testing.expectEqualStrings("menuitem", componentSnapshotWidget(snapshot, 142).?.role);
+    try std.testing.expectEqual(@as(?usize, 5), componentSnapshotWidget(snapshot, 150).?.grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), componentSnapshotWidget(snapshot, 150).?.grid_column_count);
     try std.testing.expectEqualStrings("gridcell", componentSnapshotWidget(snapshot, 156).?.role);
+    try std.testing.expectEqual(@as(?usize, 1), componentSnapshotWidget(snapshot, 156).?.grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 0), componentSnapshotWidget(snapshot, 156).?.grid_column_index);
     try std.testing.expectEqualStrings("tooltip", componentSnapshotWidget(snapshot, 160).?.role);
 
     resetComponentDirty(&harness.runtime);

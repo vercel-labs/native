@@ -4884,6 +4884,9 @@ fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, states
 fn canvasWidgetLayoutScrollContentExtent(nodes: []const canvas.WidgetLayoutNode, scroll_index: usize, viewport: geometry.RectF) f32 {
     if (scroll_index >= nodes.len) return 0;
     const scroll_node = nodes[scroll_index];
+    if (scroll_node.widget.layout.virtualized) {
+        return @max(viewport.height, canvas.virtualWidgetScrollContentExtent(scroll_node.widget, viewport.height));
+    }
     const scroll_depth = scroll_node.depth;
     const offset = @max(0, scroll_node.widget.value);
     var bottom = viewport.maxY();
@@ -11626,6 +11629,10 @@ test "runtime leaves virtualized canvas scroll views app driven" {
     var nodes: [5]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(scroll, geometry.RectF.init(0, 0, 160, 48), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    const retained_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(usize, 0), retained_layout.nodes[0].widget.children.len);
+    try std.testing.expectEqual(@as(?u32, 4), retained_layout.nodes[0].widget.semantics.list_item_count);
+    try std.testing.expectEqual(@as(f32, 20), retained_layout.nodes[0].widget.layout.virtual_item_extent);
 
     harness.runtime.invalidated = false;
     harness.runtime.dirty_region_count = 0;

@@ -7104,12 +7104,16 @@ fn layoutVirtualVerticalChildren(
         .scroll_offset = scroll_y,
         .overscan = style.virtual_overscan,
     });
+    output[parent_index].widget.layout.virtual_item_extent = range.item_extent;
+    output[parent_index].widget.semantics.list_item_count = saturatingU32(children.len);
     if (range.isEmpty()) return;
 
     const stride = range.item_extent + range.item_gap;
     var index = range.start_index;
     while (index < range.end_index) : (index += 1) {
-        const child = children[index];
+        var child = children[index];
+        child.semantics.list_item_index = saturatingU32(index);
+        child.semantics.list_item_count = saturatingU32(children.len);
         const y = content.y + @as(f32, @floatFromInt(index)) * stride - range.scroll_offset + child.frame.y;
         const width = @max(child.layout.min_size.width, if (child.frame.width > 0) child.frame.width else content.width);
         const height = @max(child.layout.min_size.height, if (child.frame.height > 0) child.frame.height else range.item_extent);
@@ -7761,7 +7765,11 @@ fn widgetDataRowGridSemantics(layout: WidgetLayoutTree, row_index: usize) Widget
     const grid = layout.nodes[grid_index].widget;
     const row = layout.nodes[row_index].widget;
     return .{
-        .row_index = widgetChildOrdinalByKind(grid, row.id, .data_row) orelse directChildOrdinalByKind(layout, grid_index, row_index, .data_row),
+        .row_index = if (row.semantics.list_item_index) |source_index|
+            @as(usize, @intCast(source_index))
+        else
+            widgetChildOrdinalByKind(grid, row.id, .data_row) orelse
+                directChildOrdinalByKind(layout, grid_index, row_index, .data_row),
         .row_count = dataGridRowCount(layout, grid_index),
         .column_count = dataRowColumnCount(layout, row_index),
     };
@@ -7776,7 +7784,11 @@ fn widgetDataCellGridSemantics(layout: WidgetLayoutTree, cell_index: usize) Widg
     const row = layout.nodes[row_index].widget;
     const cell = layout.nodes[cell_index].widget;
     return .{
-        .row_index = widgetChildOrdinalByKind(grid, row.id, .data_row) orelse directChildOrdinalByKind(layout, grid_index, row_index, .data_row),
+        .row_index = if (row.semantics.list_item_index) |source_index|
+            @as(usize, @intCast(source_index))
+        else
+            widgetChildOrdinalByKind(grid, row.id, .data_row) orelse
+                directChildOrdinalByKind(layout, grid_index, row_index, .data_row),
         .column_index = widgetChildOrdinalByKind(row, cell.id, .data_cell) orelse directChildOrdinalByKind(layout, row_index, cell_index, .data_cell),
         .row_count = dataGridRowCount(layout, grid_index),
         .column_count = dataRowColumnCount(layout, row_index),
@@ -7803,6 +7815,7 @@ fn widgetChildOrdinalByKind(widget: Widget, child_id: ObjectId, kind: WidgetKind
 }
 
 fn dataGridRowCount(layout: WidgetLayoutTree, grid_index: usize) usize {
+    if (layout.nodes[grid_index].widget.semantics.list_item_count) |virtual_count| return @intCast(virtual_count);
     const source_count = widgetChildCountByKind(layout.nodes[grid_index].widget, .data_row);
     if (source_count > 0) return source_count;
     return directChildCountByKind(layout, grid_index, .data_row);
@@ -7933,14 +7946,22 @@ fn widgetScrollContentExtent(layout: WidgetLayoutTree, scroll_index: usize, view
     return @max(0, bottom - viewport.y);
 }
 
-fn virtualWidgetScrollContentExtent(widget: Widget, viewport_extent: f32) f32 {
-    if (widget.children.len == 0) return 0;
+pub fn virtualWidgetScrollContentExtent(widget: Widget, viewport_extent: f32) f32 {
+    const item_count = if (widget.children.len > 0)
+        widget.children.len
+    else if (widget.semantics.list_item_count) |count|
+        @as(usize, @intCast(count))
+    else
+        0;
+    if (item_count == 0) return 0;
     const item_extent = if (widget.layout.virtual_item_extent > 0)
         widget.layout.virtual_item_extent
+    else if (widget.children.len > 0)
+        preferredMainExtent(widget.children[0], .vertical)
     else
-        preferredMainExtent(widget.children[0], .vertical);
+        return 0;
     return virtualListRange(.{
-        .item_count = widget.children.len,
+        .item_count = item_count,
         .item_extent = item_extent,
         .item_gap = widget.layout.gap,
         .viewport_extent = viewport_extent,
@@ -11280,6 +11301,10 @@ test "widget virtualized data grid lays out visible rows" {
     var nodes: [4]WidgetLayoutNode = undefined;
     const layout = try layoutWidgetTree(grid, geometry.RectF.init(0, 0, 160, 45), &nodes);
     try std.testing.expectEqual(@as(usize, 3), layout.nodeCount());
+    try std.testing.expectEqual(@as(?u32, 4), layout.nodes[0].widget.semantics.list_item_count);
+    try std.testing.expectEqual(@as(f32, 20), layout.nodes[0].widget.layout.virtual_item_extent);
+    try std.testing.expectEqual(@as(?u32, 1), layout.nodes[1].widget.semantics.list_item_index);
+    try std.testing.expectEqual(@as(?u32, 2), layout.nodes[2].widget.semantics.list_item_index);
     try expectLayoutFrame(layout, 1, geometry.RectF.init(0, 0, 160, 45));
     try expectLayoutFrame(layout, 3, geometry.RectF.init(0, 0, 160, 20));
     try expectLayoutFrame(layout, 4, geometry.RectF.init(0, 25, 160, 20));
@@ -11490,6 +11515,8 @@ test "widget virtualized scroll view lays out only visible overscan children" {
     var nodes: [6]WidgetLayoutNode = undefined;
     const layout = try layoutWidgetTree(scroll, geometry.RectF.init(0, 0, 120, 50), &nodes);
     try std.testing.expectEqual(@as(usize, 6), layout.nodeCount());
+    try std.testing.expectEqual(@as(?u32, 10), layout.nodes[0].widget.semantics.list_item_count);
+    try std.testing.expectEqual(@as(f32, 20), layout.nodes[0].widget.layout.virtual_item_extent);
     try expectLayoutFrame(layout, 1, geometry.RectF.init(0, 0, 120, 50));
     try expectLayoutFrame(layout, 2, geometry.RectF.init(0, -45, 120, 20));
     try expectLayoutFrame(layout, 3, geometry.RectF.init(0, -20, 120, 20));
