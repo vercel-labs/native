@@ -2003,6 +2003,10 @@ pub const Runtime = struct {
         };
     }
 
+    pub fn dispatchAutomationCommand(self: *Runtime, app: App, line: []const u8) anyerror!void {
+        try self.dispatchAutomationProtocolCommand(app, try automation.protocol.Command.parse(line));
+    }
+
     fn appendAutomationWidgets(self: *Runtime, window_id: platform.WindowId, widget_count: *usize) void {
         for (self.views[0..self.view_count]) |view| {
             if (!view.open or view.window_id != window_id or view.kind != .gpu_surface) continue;
@@ -2261,6 +2265,10 @@ pub const Runtime = struct {
         const server = self.options.automation orelse return;
         var buffer: [automation.protocol.max_command_bytes]u8 = undefined;
         const command = try server.takeCommand(&buffer) orelse return;
+        try self.dispatchAutomationProtocolCommand(app, command);
+    }
+
+    fn dispatchAutomationProtocolCommand(self: *Runtime, app: App, command: automation.protocol.Command) anyerror!void {
         switch (command.action) {
             .reload => {
                 self.command_count += 1;

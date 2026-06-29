@@ -661,6 +661,13 @@ fn gpuFrameEvent(frame: zero_native.platform.GpuFrame) zero_native.GpuSurfaceFra
     };
 }
 
+fn dashboardSnapshotWidget(snapshot: zero_native.automation.snapshot.Input, id: u64) ?zero_native.automation.snapshot.Widget {
+    for (snapshot.widgets) |widget| {
+        if (widget.id == id and std.mem.eql(u8, widget.view_label, "dashboard-canvas")) return widget;
+    }
+    return null;
+}
+
 fn color(r: u8, g: u8, b: u8) canvas.Color {
     return canvas.Color.rgb8(r, g, b);
 }
@@ -868,37 +875,86 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     try std.testing.expectEqual(@as(usize, 27), widget_layout.nodeCount());
     try std.testing.expectEqualStrings("Dashboard metrics", widget_layout.nodes[4].widget.semantics.label);
 
-    const snapshot = harness.runtime.automationSnapshot("Dashboard");
+    var snapshot = harness.runtime.automationSnapshot("Dashboard");
     try std.testing.expectEqual(@as(usize, 26), snapshot.widgets.len);
-    try std.testing.expectEqualStrings("button", snapshot.widgets[2].role);
-    try std.testing.expectEqualStrings("Live render status", snapshot.widgets[2].name);
-    try std.testing.expectEqualStrings("progressbar", snapshot.widgets[8].role);
-    try std.testing.expectEqualStrings("Conversion progress", snapshot.widgets[8].name);
-    try std.testing.expectEqualStrings("list", snapshot.widgets[9].role);
-    try std.testing.expectEqualStrings("Dashboard navigation", snapshot.widgets[9].name);
-    try std.testing.expectEqualStrings("listitem", snapshot.widgets[10].role);
-    try std.testing.expect(snapshot.widgets[10].selected);
-    try std.testing.expect(snapshot.widgets[10].list.present);
-    try std.testing.expectEqual(@as(u32, 0), snapshot.widgets[10].list.item_index);
-    try std.testing.expectEqual(@as(u32, 3), snapshot.widgets[10].list.item_count);
-    try std.testing.expectEqualStrings("group", snapshot.widgets[13].role);
-    try std.testing.expectEqualStrings("Recent activity", snapshot.widgets[13].name);
-    try std.testing.expect(snapshot.widgets[13].scroll.present);
-    try std.testing.expect(snapshot.widgets[13].scroll.content_extent > snapshot.widgets[13].scroll.viewport_extent);
-    try std.testing.expect(snapshot.widgets[13].actions.increment);
-    try std.testing.expect(snapshot.widgets[13].actions.decrement);
-    try std.testing.expectEqualStrings("textbox", snapshot.widgets[19].role);
-    try std.testing.expectEqualStrings("Forecast amount", snapshot.widgets[19].name);
-    try std.testing.expectEqualStrings("$13.4M", snapshot.widgets[19].text_value);
-    try std.testing.expectEqualStrings("textbox", snapshot.widgets[20].role);
-    try std.testing.expectEqualStrings("Segment search", snapshot.widgets[20].name);
-    try std.testing.expectEqualStrings("enterprise", snapshot.widgets[20].text_value);
-    try std.testing.expectEqualStrings("dialog", snapshot.widgets[21].role);
-    try std.testing.expectEqualStrings("Revenue filter popover", snapshot.widgets[21].name);
-    try std.testing.expectEqualStrings("menu", snapshot.widgets[22].role);
-    try std.testing.expectEqualStrings("Filter options", snapshot.widgets[22].name);
-    try std.testing.expectEqualStrings("menuitem", snapshot.widgets[23].role);
-    try std.testing.expectEqualStrings("Last 30 days", snapshot.widgets[23].name);
+
+    const live_render = dashboardSnapshotWidget(snapshot, 103).?;
+    try std.testing.expectEqualStrings("button", live_render.role);
+    try std.testing.expectEqualStrings("Live render status", live_render.name);
+    try std.testing.expect(live_render.actions.press);
+
+    const progress = dashboardSnapshotWidget(snapshot, 109).?;
+    try std.testing.expectEqualStrings("progressbar", progress.role);
+    try std.testing.expectEqualStrings("Conversion progress", progress.name);
+
+    const nav_list = dashboardSnapshotWidget(snapshot, 110).?;
+    try std.testing.expectEqualStrings("list", nav_list.role);
+    try std.testing.expectEqualStrings("Dashboard navigation", nav_list.name);
+
+    const overview = dashboardSnapshotWidget(snapshot, 111).?;
+    try std.testing.expectEqualStrings("listitem", overview.role);
+    try std.testing.expect(overview.selected);
+    try std.testing.expect(overview.list.present);
+    try std.testing.expectEqual(@as(u32, 0), overview.list.item_index);
+    try std.testing.expectEqual(@as(u32, 3), overview.list.item_count);
+
+    const recent = dashboardSnapshotWidget(snapshot, 120).?;
+    try std.testing.expectEqualStrings("group", recent.role);
+    try std.testing.expectEqualStrings("Recent activity", recent.name);
+    try std.testing.expect(recent.scroll.present);
+    try std.testing.expect(recent.scroll.content_extent > recent.scroll.viewport_extent);
+    try std.testing.expect(recent.actions.increment);
+    try std.testing.expect(recent.actions.decrement);
+
+    const forecast = dashboardSnapshotWidget(snapshot, 131).?;
+    try std.testing.expectEqualStrings("textbox", forecast.role);
+    try std.testing.expectEqualStrings("Forecast amount", forecast.name);
+    try std.testing.expectEqualStrings("$13.4M", forecast.text_value);
+    try std.testing.expect(forecast.actions.set_text);
+    try std.testing.expect(forecast.actions.set_selection);
+
+    const search = dashboardSnapshotWidget(snapshot, 132).?;
+    try std.testing.expectEqualStrings("textbox", search.role);
+    try std.testing.expectEqualStrings("Segment search", search.name);
+    try std.testing.expectEqualStrings("enterprise", search.text_value);
+
+    const popover = dashboardSnapshotWidget(snapshot, 140).?;
+    try std.testing.expectEqualStrings("dialog", popover.role);
+    try std.testing.expectEqualStrings("Revenue filter popover", popover.name);
+
+    const menu = dashboardSnapshotWidget(snapshot, 141).?;
+    try std.testing.expectEqualStrings("menu", menu.role);
+    try std.testing.expectEqualStrings("Filter options", menu.name);
+
+    const menu_item = dashboardSnapshotWidget(snapshot, 142).?;
+    try std.testing.expectEqualStrings("menuitem", menu_item.role);
+    try std.testing.expectEqualStrings("Last 30 days", menu_item.name);
+
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 103 press");
+    try std.testing.expectEqual(@as(u32, 1), app.mode_count);
+
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 112 select");
+    snapshot = harness.runtime.automationSnapshot("Dashboard");
+    try std.testing.expect(!dashboardSnapshotWidget(snapshot, 111).?.selected);
+    try std.testing.expect(dashboardSnapshotWidget(snapshot, 112).?.selected);
+
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 131 set-text $14.1M");
+    snapshot = harness.runtime.automationSnapshot("Dashboard");
+    const updated_forecast = dashboardSnapshotWidget(snapshot, 131).?;
+    try std.testing.expectEqualStrings("$14.1M", updated_forecast.text_value);
+    try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 6, .end = 6 }, updated_forecast.text_selection.?);
+
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 120 increment");
+    var scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "dashboard-canvas");
+    try std.testing.expectEqual(@as(f32, 40), scrolled_layout.findById(120).?.widget.value);
+    snapshot = harness.runtime.automationSnapshot("Dashboard");
+    try std.testing.expectEqual(@as(f32, 40), dashboardSnapshotWidget(snapshot, 120).?.scroll.offset);
+
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 120 decrement");
+    scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "dashboard-canvas");
+    try std.testing.expectEqual(@as(f32, 5), scrolled_layout.findById(120).?.widget.value);
+    snapshot = harness.runtime.automationSnapshot("Dashboard");
+    try std.testing.expectEqual(@as(f32, 5), dashboardSnapshotWidget(snapshot, 120).?.scroll.offset);
 
     try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_frame = .{
         .label = "dashboard-canvas",
