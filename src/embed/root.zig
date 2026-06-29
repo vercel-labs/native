@@ -55,6 +55,20 @@ pub const MobileWidgetAction = enum(u32) {
     drop_files = 1 << 9,
 };
 
+pub const MobileWidgetActionKind = enum(c_int) {
+    focus = 0,
+    press = 1,
+    toggle = 2,
+    increment = 3,
+    decrement = 4,
+    set_text = 5,
+    set_selection = 6,
+    set_composition = 7,
+    commit_composition = 8,
+    cancel_composition = 9,
+    select = 10,
+};
+
 pub const MobileWidgetSemantics = extern struct {
     id: u64 = 0,
     parent_id: u64 = 0,
@@ -85,6 +99,16 @@ pub const MobileWidgetSemantics = extern struct {
     scroll_viewport_extent: f32 = 0,
     scroll_content_extent: f32 = 0,
     has_scroll: c_int = 0,
+};
+
+pub const MobileWidgetActionRequest = extern struct {
+    id: u64 = 0,
+    action: c_int = @intFromEnum(MobileWidgetActionKind.focus),
+    text: ?[*]const u8 = null,
+    text_len: usize = 0,
+    selection_anchor: usize = 0,
+    selection_focus: usize = 0,
+    has_selection: c_int = 0,
 };
 
 pub const EmbeddedApp = struct {
@@ -184,6 +208,10 @@ pub const EmbeddedApp = struct {
 
     pub fn widgetSemantics(self: *const EmbeddedApp) anyerror![]const canvas.WidgetSemanticsNode {
         return self.runtime.canvasWidgetSemantics(1, mobile_gpu_surface_label);
+    }
+
+    pub fn widgetAction(self: *EmbeddedApp, action: runtime.CanvasWidgetAccessibilityAction) anyerror!void {
+        _ = try self.runtime.dispatchCanvasWidgetAccessibilityAction(self.app, 1, mobile_gpu_surface_label, action);
     }
 
     pub fn stop(self: *EmbeddedApp) anyerror!void {
@@ -565,6 +593,40 @@ pub fn zero_native_app_widget_semantics_at(app: ?*anyopaque, index: usize, out: 
     return 1;
 }
 
+pub fn zero_native_app_widget_action(app: ?*anyopaque, request: ?*const MobileWidgetActionRequest) c_int {
+    const self = mobileApp(app) orelse return 0;
+    const value = request orelse {
+        recordError(self, error.InvalidCommand);
+        return 0;
+    };
+    const kind = mobileWidgetActionKindFromInt(value.action) catch |err| {
+        recordError(self, err);
+        return 0;
+    };
+    const text_value = inputSlice(value.text, value.text_len) catch |err| {
+        recordError(self, err);
+        return 0;
+    };
+    if (kind == .set_selection and value.has_selection == 0) {
+        recordError(self, error.InvalidCommand);
+        return 0;
+    }
+    self.embedded.widgetAction(.{
+        .id = value.id,
+        .action = kind,
+        .text = text_value,
+        .selection = if (value.has_selection != 0) .{
+            .anchor = value.selection_anchor,
+            .focus = value.selection_focus,
+        } else null,
+    }) catch |err| {
+        recordError(self, err);
+        return 0;
+    };
+    self.last_error = null;
+    return 1;
+}
+
 fn mobileTouchKindFromPhase(phase: c_int) anyerror!platform.GpuSurfaceInputKind {
     return switch (phase) {
         0, 5 => .pointer_down,
@@ -599,6 +661,23 @@ fn mobileModifiersFromMask(mask: u32) platform.ShortcutModifiers {
         .control = (mask & 4) != 0,
         .option = (mask & 8) != 0,
         .shift = (mask & 16) != 0,
+    };
+}
+
+fn mobileWidgetActionKindFromInt(value: c_int) anyerror!runtime.CanvasWidgetAccessibilityActionKind {
+    return switch (value) {
+        @intFromEnum(MobileWidgetActionKind.focus) => .focus,
+        @intFromEnum(MobileWidgetActionKind.press) => .press,
+        @intFromEnum(MobileWidgetActionKind.toggle) => .toggle,
+        @intFromEnum(MobileWidgetActionKind.increment) => .increment,
+        @intFromEnum(MobileWidgetActionKind.decrement) => .decrement,
+        @intFromEnum(MobileWidgetActionKind.set_text) => .set_text,
+        @intFromEnum(MobileWidgetActionKind.set_selection) => .set_selection,
+        @intFromEnum(MobileWidgetActionKind.set_composition) => .set_composition,
+        @intFromEnum(MobileWidgetActionKind.commit_composition) => .commit_composition,
+        @intFromEnum(MobileWidgetActionKind.cancel_composition) => .cancel_composition,
+        @intFromEnum(MobileWidgetActionKind.select) => .select,
+        else => error.InvalidCommand,
     };
 }
 
@@ -738,6 +817,17 @@ fn mobileTextRangeStart(range: ?canvas.TextRange) isize {
 fn mobileTextRangeEnd(range: ?canvas.TextRange) isize {
     const value = range orelse return -1;
     return mobileOptionalIndex(value.end);
+}
+
+fn mobileWidgetSemanticsByIdForTest(app: ?*anyopaque, id: u64) !MobileWidgetSemantics {
+    const count = zero_native_app_widget_semantics_count(app);
+    var index: usize = 0;
+    while (index < count) : (index += 1) {
+        var node: MobileWidgetSemantics = .{};
+        try std.testing.expectEqual(@as(c_int, 1), zero_native_app_widget_semantics_at(app, index, &node));
+        if (node.id == id) return node;
+    }
+    return error.TestUnexpectedResult;
 }
 
 fn nowNanoseconds() u64 {
@@ -998,6 +1088,150 @@ test "mobile C ABI exposes GPU widget accessibility semantics" {
     try std.testing.expect((text_node.actions & @intFromEnum(MobileWidgetAction.set_selection)) != 0);
 
     try std.testing.expectEqual(@as(c_int, 0), zero_native_app_widget_semantics_at(app, 99, &text_node));
+    try std.testing.expectEqualStrings("InvalidCommand", std.mem.span(zero_native_app_last_error_name(app)));
+}
+
+test "mobile C ABI dispatches GPU widget accessibility actions" {
+    const app = zero_native_app_create() orelse return error.TestUnexpectedResult;
+    defer zero_native_app_destroy(app);
+
+    const self = mobileApp(app).?;
+    self.null_platform.gpu_surfaces = true;
+    zero_native_app_start(app);
+    _ = try self.embedded.runtime.createView(.{
+        .window_id = 1,
+        .label = mobile_gpu_surface_label,
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 360, 220),
+    });
+
+    const children = [_]canvas.Widget{
+        .{
+            .id = 2,
+            .kind = .button,
+            .frame = geometry.RectF.init(12, 16, 96, 32),
+            .text = "Run",
+            .command = "widget.run",
+            .semantics = .{ .label = "Run report" },
+        },
+        .{
+            .id = 3,
+            .kind = .checkbox,
+            .frame = geometry.RectF.init(12, 56, 144, 28),
+            .text = "Enabled",
+        },
+        .{
+            .id = 4,
+            .kind = .slider,
+            .frame = geometry.RectF.init(12, 92, 160, 32),
+            .value = 0.5,
+            .semantics = .{ .label = "Confidence" },
+        },
+        .{
+            .id = 5,
+            .kind = .text_field,
+            .frame = geometry.RectF.init(12, 136, 180, 32),
+            .text = "Draft",
+            .semantics = .{ .label = "Report title" },
+        },
+        .{
+            .id = 6,
+            .kind = .list_item,
+            .frame = geometry.RectF.init(210, 16, 120, 32),
+            .text = "Inbox",
+        },
+    };
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{
+        .id = 1,
+        .kind = .panel,
+        .children = &children,
+        .semantics = .{ .label = "Mobile action widgets" },
+    }, geometry.RectF.init(0, 0, 360, 220), &nodes);
+    _ = try self.embedded.runtime.setCanvasWidgetLayout(1, mobile_gpu_surface_label, layout);
+
+    var action = MobileWidgetActionRequest{ .id = 2, .action = @intFromEnum(MobileWidgetActionKind.press) };
+    try std.testing.expectEqual(@as(c_int, 1), zero_native_app_widget_action(app, &action));
+    try std.testing.expectEqual(@as(usize, 1), zero_native_app_last_command_count(app));
+    try std.testing.expectEqualStrings("widget.run", std.mem.span(zero_native_app_last_command_name(app)));
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), self.embedded.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(platform.GpuSurfaceInputKind.key_down, self.last_input_kind);
+    try std.testing.expectEqualStrings("enter", self.last_input_key[0..self.last_input_key_len]);
+
+    action = .{ .id = 3, .action = @intFromEnum(MobileWidgetActionKind.toggle) };
+    try std.testing.expectEqual(@as(c_int, 1), zero_native_app_widget_action(app, &action));
+    const checkbox = try mobileWidgetSemanticsByIdForTest(app, 3);
+    try std.testing.expectEqual(@as(c_int, 1), checkbox.has_value);
+    try std.testing.expectEqual(@as(f32, 1), checkbox.value);
+    try std.testing.expect((checkbox.flags & @intFromEnum(MobileWidgetFlag.selected)) != 0);
+
+    action = .{ .id = 4, .action = @intFromEnum(MobileWidgetActionKind.increment) };
+    try std.testing.expectEqual(@as(c_int, 1), zero_native_app_widget_action(app, &action));
+    const slider = try mobileWidgetSemanticsByIdForTest(app, 4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.55), slider.value, 0.001);
+
+    const title = "Hello world";
+    action = .{
+        .id = 5,
+        .action = @intFromEnum(MobileWidgetActionKind.set_text),
+        .text = title,
+        .text_len = title.len,
+    };
+    try std.testing.expectEqual(@as(c_int, 1), zero_native_app_widget_action(app, &action));
+    var text_field = try mobileWidgetSemanticsByIdForTest(app, 5);
+    try std.testing.expectEqualStrings(title, text_field.text.?[0..text_field.text_len]);
+    try std.testing.expectEqual(@as(isize, @intCast(title.len)), text_field.text_selection_start);
+    try std.testing.expectEqual(@as(isize, @intCast(title.len)), text_field.text_selection_end);
+
+    const composition = "!";
+    action = .{
+        .id = 5,
+        .action = @intFromEnum(MobileWidgetActionKind.set_composition),
+        .text = composition,
+        .text_len = composition.len,
+    };
+    try std.testing.expectEqual(@as(c_int, 1), zero_native_app_widget_action(app, &action));
+    text_field = try mobileWidgetSemanticsByIdForTest(app, 5);
+    try std.testing.expectEqualStrings("Hello world!", text_field.text.?[0..text_field.text_len]);
+    try std.testing.expectEqual(@as(isize, @intCast(title.len)), text_field.text_composition_start);
+    try std.testing.expectEqual(@as(isize, @intCast(title.len + composition.len)), text_field.text_composition_end);
+
+    action = .{ .id = 5, .action = @intFromEnum(MobileWidgetActionKind.commit_composition) };
+    try std.testing.expectEqual(@as(c_int, 1), zero_native_app_widget_action(app, &action));
+    text_field = try mobileWidgetSemanticsByIdForTest(app, 5);
+    try std.testing.expectEqualStrings("Hello world!", text_field.text.?[0..text_field.text_len]);
+    try std.testing.expectEqual(@as(isize, -1), text_field.text_composition_start);
+    try std.testing.expectEqual(@as(isize, -1), text_field.text_composition_end);
+
+    action = .{
+        .id = 5,
+        .action = @intFromEnum(MobileWidgetActionKind.set_selection),
+        .selection_anchor = 0,
+        .selection_focus = 5,
+        .has_selection = 1,
+    };
+    try std.testing.expectEqual(@as(c_int, 1), zero_native_app_widget_action(app, &action));
+    text_field = try mobileWidgetSemanticsByIdForTest(app, 5);
+    try std.testing.expectEqual(@as(isize, 0), text_field.text_selection_start);
+    try std.testing.expectEqual(@as(isize, 5), text_field.text_selection_end);
+
+    action = .{ .id = 6, .action = @intFromEnum(MobileWidgetActionKind.select) };
+    try std.testing.expectEqual(@as(c_int, 1), zero_native_app_widget_action(app, &action));
+    const list_item = try mobileWidgetSemanticsByIdForTest(app, 6);
+    try std.testing.expectEqual(@as(c_int, 1), list_item.has_value);
+    try std.testing.expectEqual(@as(f32, 1), list_item.value);
+    try std.testing.expect((list_item.flags & @intFromEnum(MobileWidgetFlag.selected)) != 0);
+
+    action = .{ .id = 99, .action = @intFromEnum(MobileWidgetActionKind.press) };
+    try std.testing.expectEqual(@as(c_int, 0), zero_native_app_widget_action(app, &action));
+    try std.testing.expectEqualStrings("InvalidCommand", std.mem.span(zero_native_app_last_error_name(app)));
+
+    action = .{ .id = 5, .action = @intFromEnum(MobileWidgetActionKind.set_selection) };
+    try std.testing.expectEqual(@as(c_int, 0), zero_native_app_widget_action(app, &action));
+    try std.testing.expectEqualStrings("InvalidCommand", std.mem.span(zero_native_app_last_error_name(app)));
+
+    action = .{ .id = 2, .action = 999 };
+    try std.testing.expectEqual(@as(c_int, 0), zero_native_app_widget_action(app, &action));
     try std.testing.expectEqualStrings("InvalidCommand", std.mem.span(zero_native_app_last_error_name(app)));
 }
 

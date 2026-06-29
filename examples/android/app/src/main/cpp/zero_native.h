@@ -48,6 +48,20 @@ enum {
   ZERO_NATIVE_WIDGET_ACTION_DROP_FILES = 1u << 9,
 };
 
+enum {
+  ZERO_NATIVE_WIDGET_ACTION_KIND_FOCUS = 0,
+  ZERO_NATIVE_WIDGET_ACTION_KIND_PRESS = 1,
+  ZERO_NATIVE_WIDGET_ACTION_KIND_TOGGLE = 2,
+  ZERO_NATIVE_WIDGET_ACTION_KIND_INCREMENT = 3,
+  ZERO_NATIVE_WIDGET_ACTION_KIND_DECREMENT = 4,
+  ZERO_NATIVE_WIDGET_ACTION_KIND_SET_TEXT = 5,
+  ZERO_NATIVE_WIDGET_ACTION_KIND_SET_SELECTION = 6,
+  ZERO_NATIVE_WIDGET_ACTION_KIND_SET_COMPOSITION = 7,
+  ZERO_NATIVE_WIDGET_ACTION_KIND_COMMIT_COMPOSITION = 8,
+  ZERO_NATIVE_WIDGET_ACTION_KIND_CANCEL_COMPOSITION = 9,
+  ZERO_NATIVE_WIDGET_ACTION_KIND_SELECT = 10,
+};
+
 typedef struct zero_native_widget_semantics {
   uint64_t id;
   uint64_t parent_id;
@@ -80,6 +94,16 @@ typedef struct zero_native_widget_semantics {
   int has_scroll;
 } zero_native_widget_semantics_t;
 
+typedef struct zero_native_widget_action {
+  uint64_t id;
+  int action;
+  const char *text;
+  uintptr_t text_len;
+  uintptr_t selection_anchor;
+  uintptr_t selection_focus;
+  int has_selection;
+} zero_native_widget_action_t;
+
 void *zero_native_app_create(void);
 void zero_native_app_destroy(void *app);
 void zero_native_app_start(void *app);
@@ -101,3 +125,4 @@ const char *zero_native_app_last_command_name(void *app);
 const char *zero_native_app_last_error_name(void *app);
 uintptr_t zero_native_app_widget_semantics_count(void *app);
 int zero_native_app_widget_semantics_at(void *app, uintptr_t index, zero_native_widget_semantics_t *out);
+int zero_native_app_widget_action(void *app, const zero_native_widget_action_t *action);

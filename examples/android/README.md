@@ -48,7 +48,7 @@ Install on an emulator or device:
 - The Android system Back action dispatches `mobile.back` through the same command path.
 - `onTouchEvent` forwards pointer id, phase, position, and pressure.
 - The JNI bridge exposes hardware key, committed text, and IME composition entry points for GPU/widget text fields.
-- The embedded C ABI can expose retained GPU/widget accessibility semantics by indexed snapshot for Android accessibility providers.
+- The embedded C ABI can expose retained GPU/widget accessibility semantics by indexed snapshot and dispatch widget accessibility actions for Android accessibility providers.
 - `surfaceDestroyed` and `onDestroy` stop and destroy the app.
 
 The `app.zon` shell view tree describes this header and WebView workspace. Native mobile layout is still implemented in Kotlin so Android owns soft-keyboard relayout, Back handling, orientation changes, and activity lifecycle while zero-native receives the viewport metrics needed for GPU/widget layout.

@@ -9,7 +9,7 @@ Both hosts leave keyboard avoidance in the native layout system while forwarding
 
 Android orientation and screen-size changes stay in the same activity so the embedded runtime survives rotation while resize/frame events update the content surface.
 
-The embedded ABI also includes hardware key, committed text, IME composition, and retained GPU/widget accessibility semantics entry points for future GPU/widget text fields.
+The embedded ABI also includes hardware key, committed text, IME composition, retained GPU/widget accessibility semantics, and widget accessibility action entry points for future GPU/widget text fields.
 
 Use those platform folders when building or running the example.
 

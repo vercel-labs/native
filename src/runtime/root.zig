@@ -96,6 +96,27 @@ pub const CanvasWidgetDisplayListChrome = struct {
     suffix_command_count: usize = 0,
 };
 
+pub const CanvasWidgetAccessibilityActionKind = enum {
+    focus,
+    press,
+    toggle,
+    increment,
+    decrement,
+    set_text,
+    set_selection,
+    set_composition,
+    commit_composition,
+    cancel_composition,
+    select,
+};
+
+pub const CanvasWidgetAccessibilityAction = struct {
+    id: canvas.ObjectId,
+    action: CanvasWidgetAccessibilityActionKind,
+    text: []const u8 = "",
+    selection: ?canvas.TextSelection = null,
+};
+
 pub const CanvasWidgetFileDropEvent = struct {
     window_id: platform.WindowId = 1,
     view_label: []const u8,
@@ -1021,6 +1042,31 @@ pub const Runtime = struct {
         const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
         if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
         return self.views[index].widgetSemantics();
+    }
+
+    pub fn dispatchCanvasWidgetAccessibilityAction(self: *Runtime, app: App, window_id: platform.WindowId, label: []const u8, action: CanvasWidgetAccessibilityAction) anyerror!platform.ViewInfo {
+        try self.validateViewParent(window_id);
+        try validateViewLabel(label);
+        if (action.id == 0) return error.InvalidCommand;
+        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+        const actions = self.canvasWidgetActionsForId(index, action.id) orelse return error.InvalidCommand;
+        if (!canvasWidgetAccessibilityActionSupported(actions, action.action)) return error.InvalidCommand;
+
+        switch (action.action) {
+            .focus => try self.focusAutomationCanvasWidget(index, action.id),
+            .press => try self.dispatchAutomationWidgetKey(app, index, action.id, "enter"),
+            .toggle => try self.dispatchAutomationWidgetKey(app, index, action.id, "space"),
+            .increment => try self.dispatchAutomationWidgetKey(app, index, action.id, "arrowright"),
+            .decrement => try self.dispatchAutomationWidgetKey(app, index, action.id, "arrowleft"),
+            .set_text => try self.setAutomationCanvasWidgetText(index, action.id, action.text),
+            .set_selection => try self.editAutomationCanvasWidgetText(index, action.id, .{ .set_selection = action.selection orelse return error.InvalidCommand }),
+            .set_composition => try self.editAutomationCanvasWidgetText(index, action.id, .{ .set_composition = .{ .text = action.text } }),
+            .commit_composition => try self.editAutomationCanvasWidgetText(index, action.id, .commit_composition),
+            .cancel_composition => try self.editAutomationCanvasWidgetText(index, action.id, .cancel_composition),
+            .select => try self.selectAutomationCanvasWidget(index, action.id),
+        }
+        return self.views[index].info();
     }
 
     pub fn stepCanvasWidgetKineticScroll(self: *Runtime, window_id: platform.WindowId, label: []const u8, dt_ms: f32) anyerror!platform.ViewInfo {
@@ -7310,6 +7356,20 @@ fn automationWidgetActionSupported(actions: canvas.WidgetActions, action: Automa
         .select => actions.select,
         .drag => actions.drag,
         .drop_files => actions.drop_files,
+    };
+}
+
+fn canvasWidgetAccessibilityActionSupported(actions: canvas.WidgetActions, action: CanvasWidgetAccessibilityActionKind) bool {
+    return switch (action) {
+        .focus => actions.focus,
+        .press => actions.press,
+        .toggle => actions.toggle,
+        .increment => actions.increment,
+        .decrement => actions.decrement,
+        .set_text => actions.set_text,
+        .set_selection => actions.set_selection,
+        .set_composition, .commit_composition, .cancel_composition => actions.set_text,
+        .select => actions.select,
     };
 }
 

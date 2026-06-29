@@ -189,3 +189,7 @@ pub export fn zero_native_app_widget_semantics_count(app: ?*anyopaque) usize {
 pub export fn zero_native_app_widget_semantics_at(app: ?*anyopaque, index: usize, out: ?*embed.MobileWidgetSemantics) c_int {
     return embed.zero_native_app_widget_semantics_at(app, index, out);
 }
+
+pub export fn zero_native_app_widget_action(app: ?*anyopaque, action: ?*const embed.MobileWidgetActionRequest) c_int {
+    return embed.zero_native_app_widget_action(app, action);
+}
