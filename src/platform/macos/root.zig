@@ -425,6 +425,7 @@ fn gpuSurfaceInputEventFromAppKitEvent(event: *const AppKitEvent) platform_mod.G
         .window_id = event.window_id,
         .label = event.view_label[0..event.view_label_len],
         .kind = gpuSurfaceInputKindFromInt(event.input_kind),
+        .timestamp_ns = event.timestamp_ns,
         .x = @floatCast(event.x),
         .y = @floatCast(event.y),
         .button = event.button,
@@ -1094,6 +1095,7 @@ test "mac gpu surface input preserves key and text" {
     event.view_label = label.ptr;
     event.view_label_len = label.len;
     event.input_kind = 5;
+    event.timestamp_ns = 123_000_000;
     event.x = 12;
     event.y = 18;
     event.button = 1;
@@ -1109,6 +1111,7 @@ test "mac gpu surface input preserves key and text" {
     try std.testing.expectEqual(@as(platform_mod.WindowId, 7), input.window_id);
     try std.testing.expectEqualStrings("canvas", input.label);
     try std.testing.expectEqual(platform_mod.GpuSurfaceInputKind.key_down, input.kind);
+    try std.testing.expectEqual(@as(u64, 123_000_000), input.timestamp_ns);
     try std.testing.expectEqual(@as(f32, 12), input.x);
     try std.testing.expectEqual(@as(f32, 18), input.y);
     try std.testing.expectEqual(@as(i32, 1), input.button);

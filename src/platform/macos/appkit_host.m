@@ -717,6 +717,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
     [self.host emitEvent:(zero_native_appkit_event_t){
         .kind = ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_INPUT,
         .window_id = self.windowId,
+        .timestamp_ns = ZeroNativeTimestampNanoseconds(),
         .x = point.x,
         .y = y,
         .view_label = labelBytes,

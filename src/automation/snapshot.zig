@@ -137,7 +137,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
             },
         );
         if (view.kind == .gpu_surface) {
-            try writer.print(" gpu_size={d}x{d} gpu_scale={d} gpu_backend={s} gpu_pixel_format={s} gpu_present_mode={s} gpu_status={s} gpu_frame={d} gpu_timestamp_ns={d} gpu_nonblank={any} gpu_sample=0x{x:0>8}", .{
+            try writer.print(" gpu_size={d}x{d} gpu_scale={d} gpu_backend={s} gpu_pixel_format={s} gpu_present_mode={s} gpu_status={s} gpu_frame={d} gpu_timestamp_ns={d} gpu_input_timestamp_ns={d} gpu_input_latency_ns={d} gpu_input_latency_budget_ns={d} gpu_input_latency_budget_exceeded={d} gpu_input_latency_budget_ok={any} gpu_nonblank={any} gpu_sample=0x{x:0>8}", .{
                 view.gpu_size.width,
                 view.gpu_size.height,
                 view.gpu_scale_factor,
@@ -147,6 +147,11 @@ pub fn writeText(input: Input, writer: anytype) !void {
                 @tagName(view.gpu_status),
                 view.gpu_frame_index,
                 view.gpu_timestamp_ns,
+                view.gpu_input_timestamp_ns,
+                view.gpu_input_latency_ns,
+                view.gpu_input_latency_budget_ns,
+                view.gpu_input_latency_budget_exceeded_count,
+                view.gpu_input_latency_budget_ok,
                 view.gpu_frame_nonblank,
                 view.gpu_sample_color,
             });
@@ -448,7 +453,7 @@ test "accessibility snapshot prefers explicit accessibility label" {
 }
 
 test "snapshot emits GPU surface frame proof" {
-    var buffer: [4096]u8 = undefined;
+    var buffer: [8192]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     const windows = [_]Window{.{ .title = "Test", .bounds = geometry.RectF.init(0, 0, 100, 100) }};
     const views = [_]platform.ViewInfo{.{
@@ -463,6 +468,11 @@ test "snapshot emits GPU surface frame proof" {
         .gpu_status = .ready,
         .gpu_frame_index = 4,
         .gpu_timestamp_ns = 99,
+        .gpu_input_timestamp_ns = 80,
+        .gpu_input_latency_ns = 19,
+        .gpu_input_latency_budget_ns = 16,
+        .gpu_input_latency_budget_exceeded_count = 1,
+        .gpu_input_latency_budget_ok = false,
         .gpu_frame_nonblank = true,
         .gpu_sample_color = 0xff336699,
         .canvas_revision = 2,
@@ -532,6 +542,11 @@ test "snapshot emits GPU surface frame proof" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_status=ready") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_frame=4") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_timestamp_ns=99") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_input_timestamp_ns=80") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_input_latency_ns=19") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_input_latency_budget_ns=16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_input_latency_budget_exceeded=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_input_latency_budget_ok=false") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_nonblank=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_sample=0xff336699") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_revision=2") != null);
