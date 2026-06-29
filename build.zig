@@ -308,6 +308,11 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "emitWidgetAccessibilityActionWithId" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "ZERO_NATIVE_APPKIT_EVENT_WIDGET_ACCESSIBILITY_ACTION" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-widget-accessibility-text-ranges", "Verify AppKit GPU widget accessibility publishes text selection ranges", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilitySelectedTextRange" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilitySelectedTextRanges" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilityVisibleCharacterRange" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-builtin-bridge-policy", "Verify bridge policy docs include guarded dialog commands", &.{
         .{ .path = "docs/src/app/security/page.mdx", .pattern = ".{ .name = \"zero-native.dialog.saveFile\"" },
         .{ .path = "docs/src/app/bridge/builtin-commands/page.mdx", .pattern = ".{ .name = \"zero-native.dialog.saveFile\"" },

@@ -38,6 +38,8 @@ static uint32_t ZeroNativeModifierFlagsForEvent(NSEvent *event);
 static uint64_t ZeroNativeTimestampNanoseconds(void);
 static NSAccessibilityRole ZeroNativeAccessibilityRoleForNativeViewKind(NSInteger kind);
 static NSAccessibilityRole ZeroNativeAccessibilityRoleForWidgetRole(NSInteger role);
+static NSRange ZeroNativeClampedRange(NSUInteger start, NSUInteger end, NSUInteger length);
+static NSString *ZeroNativeSubstringForRange(NSString *value, NSRange range);
 
 static size_t ZeroNativeOverflowSize(size_t buffer_len) {
     return buffer_len == SIZE_MAX ? SIZE_MAX : buffer_len + 1;
@@ -145,6 +147,22 @@ static NSAccessibilityRole ZeroNativeAccessibilityRoleForWidgetRole(NSInteger ro
         default:
             return NSAccessibilityGroupRole;
     }
+}
+
+static NSRange ZeroNativeClampedRange(NSUInteger start, NSUInteger end, NSUInteger length) {
+    NSUInteger clampedStart = MIN(start, length);
+    NSUInteger clampedEnd = MIN(end, length);
+    if (clampedEnd < clampedStart) {
+        NSUInteger temp = clampedStart;
+        clampedStart = clampedEnd;
+        clampedEnd = temp;
+    }
+    return NSMakeRange(clampedStart, clampedEnd - clampedStart);
+}
+
+static NSString *ZeroNativeSubstringForRange(NSString *value, NSRange range) {
+    if (range.location > value.length || NSMaxRange(range) > value.length) return @"";
+    return [value substringWithRange:range];
 }
 
 static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSString *account) {
@@ -646,6 +664,18 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
             element.accessibilityValue = [NSString stringWithFormat:@"%.3f", node.value];
         } else if (textValue.length > 0) {
             element.accessibilityValue = textValue;
+        }
+        if (textValue.length > 0) {
+            NSRange visibleRange = NSMakeRange(0, textValue.length);
+            element.accessibilityNumberOfCharacters = (NSInteger)textValue.length;
+            element.accessibilityVisibleCharacterRange = visibleRange;
+            if (node.has_text_selection) {
+                NSRange selectedRange = ZeroNativeClampedRange(node.text_selection_start, node.text_selection_end, textValue.length);
+                element.accessibilitySelectedTextRange = selectedRange;
+                element.accessibilitySelectedTextRanges = @[[NSValue valueWithRange:selectedRange]];
+                element.accessibilitySelectedText = ZeroNativeSubstringForRange(textValue, selectedRange);
+                element.accessibilityInsertionPointLineNumber = 0;
+            }
         }
         element.accessibilityEnabled = (node.state_flags & ZERO_NATIVE_APPKIT_WIDGET_STATE_ENABLED) != 0;
         element.accessibilityFocused = (node.state_flags & ZERO_NATIVE_APPKIT_WIDGET_STATE_FOCUSED) != 0;

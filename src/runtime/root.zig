@@ -1246,6 +1246,8 @@ pub const Runtime = struct {
                 .role = platformWidgetAccessibilityRole(node.role),
                 .label = node.label,
                 .text_value = node.text_value,
+                .text_selection = platformWidgetAccessibilityTextRange(node.text_selection),
+                .text_composition = platformWidgetAccessibilityTextRange(node.text_composition),
                 .value = node.value,
                 .bounds = node.bounds,
                 .grid_row_index = node.grid_row_index,
@@ -7171,6 +7173,11 @@ fn platformWidgetAccessibilityActions(actions: canvas.WidgetActions) platform.Wi
         .drag = actions.drag,
         .drop_files = actions.drop_files,
     };
+}
+
+fn platformWidgetAccessibilityTextRange(range: ?canvas.TextRange) ?platform.WidgetAccessibilityTextRange {
+    const value = range orelse return null;
+    return .{ .start = value.start, .end = value.end };
 }
 
 fn canvasWidgetSemanticsById(nodes: []const canvas.WidgetSemanticsNode, id: canvas.ObjectId) ?canvas.WidgetSemanticsNode {
@@ -14328,6 +14335,7 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     const children = [_]canvas.Widget{
         .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(12, 14, 96, 32), .text = "Deploy", .command = "deploy.run" },
         .{ .id = 3, .kind = .checkbox, .frame = geometry.RectF.init(12, 58, 120, 28), .text = "Preview", .state = .{ .selected = true } },
+        .{ .id = 4, .kind = .text_field, .frame = geometry.RectF.init(12, 96, 160, 28), .text = "Search", .text_selection = canvas.TextSelection{ .anchor = 1, .focus = 4 }, .text_composition = canvas.TextRange.init(2, 5) },
     };
     var layout_nodes: [4]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(.{
@@ -14342,13 +14350,19 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     try std.testing.expect(platform_state.update_count >= 1);
     try std.testing.expectEqual(@as(platform.WindowId, 1), platform_state.window_id);
     try std.testing.expectEqualStrings("canvas", platform_state.view_label[0..platform_state.view_label_len]);
-    try std.testing.expectEqual(@as(usize, 3), platform_state.node_count);
+    try std.testing.expectEqual(@as(usize, 4), platform_state.node_count);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.group, platform_state.nodes[0].role);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.button, platform_state.nodes[1].role);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.checkbox, platform_state.nodes[2].role);
+    try std.testing.expectEqual(platform.WidgetAccessibilityRole.textbox, platform_state.nodes[3].role);
     try std.testing.expectEqualStrings("Deploy", platform_state.nodes[1].label);
     try std.testing.expect(platform_state.nodes[1].actions.press);
     try std.testing.expect(platform_state.nodes[2].selected);
+    try std.testing.expectEqualStrings("Search", platform_state.nodes[3].text_value);
+    try std.testing.expectEqualDeep(platform.WidgetAccessibilityTextRange{ .start = 1, .end = 4 }, platform_state.nodes[3].text_selection.?);
+    try std.testing.expectEqualDeep(platform.WidgetAccessibilityTextRange{ .start = 2, .end = 5 }, platform_state.nodes[3].text_composition.?);
+    try std.testing.expect(platform_state.nodes[3].actions.set_text);
+    try std.testing.expect(platform_state.nodes[3].actions.set_selection);
     try std.testing.expectEqual(@as(f32, 12), platform_state.nodes[1].bounds.x);
     try std.testing.expectEqual(@as(f32, 14), platform_state.nodes[1].bounds.y);
 

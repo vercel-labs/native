@@ -1112,12 +1112,19 @@ pub const WidgetAccessibilityActions = struct {
     drop_files: bool = false,
 };
 
+pub const WidgetAccessibilityTextRange = struct {
+    start: usize = 0,
+    end: usize = 0,
+};
+
 pub const WidgetAccessibilityNode = struct {
     id: u64 = 0,
     parent_id: ?u64 = null,
     role: WidgetAccessibilityRole = .none,
     label: []const u8 = "",
     text_value: []const u8 = "",
+    text_selection: ?WidgetAccessibilityTextRange = null,
+    text_composition: ?WidgetAccessibilityTextRange = null,
     value: ?f32 = null,
     bounds: geometry.RectF = .{},
     grid_row_index: ?usize = null,

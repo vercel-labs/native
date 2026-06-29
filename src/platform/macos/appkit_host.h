@@ -119,6 +119,12 @@ typedef struct {
     size_t label_len;
     const char *text_value;
     size_t text_value_len;
+    int has_text_selection;
+    size_t text_selection_start;
+    size_t text_selection_end;
+    int has_text_composition;
+    size_t text_composition_start;
+    size_t text_composition_end;
     int has_value;
     double value;
     double x;
