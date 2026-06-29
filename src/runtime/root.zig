@@ -13989,6 +13989,108 @@ test "runtime dispatches automation canvas widget actions" {
     try std.testing.expect(app_state.raw_input_count >= 3);
 }
 
+test "runtime automation protocol refreshes widget-owned canvas display lists" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-automation-display-list", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 180),
+    });
+
+    const list_items = [_]canvas.Widget{
+        .{ .id = 4, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 30), .text = "Overview" },
+        .{ .id = 5, .kind = .list_item, .frame = geometry.RectF.init(0, 36, 0, 30), .text = "Customers" },
+    };
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .text_field, .frame = geometry.RectF.init(10, 12, 150, 32), .text = "Draft" },
+        .{ .id = 3, .kind = .list, .frame = geometry.RectF.init(10, 58, 150, 72), .layout = .{ .gap = 6 }, .children = &list_items },
+    };
+    var nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 320, 180), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+
+    var display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    var saw_initial_text = false;
+    var saw_initial_selection = false;
+    for (display_list.commands) |command| {
+        switch (command) {
+            .draw_text => |text| {
+                if (text.id == testCanvasWidgetPartId(2, 3)) {
+                    try std.testing.expectEqualStrings("Draft", text.text);
+                    saw_initial_text = true;
+                }
+            },
+            .fill_rounded_rect => |fill| {
+                if (fill.id == testCanvasWidgetPartId(5, 1)) saw_initial_selection = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_initial_text);
+    try std.testing.expect(!saw_initial_selection);
+
+    try harness.runtime.dispatchAutomationCommand(app, "widget-action canvas 2 set-text Launch");
+
+    display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    var saw_updated_text = false;
+    var saw_stale_text = false;
+    var saw_text_caret = false;
+    for (display_list.commands) |command| {
+        switch (command) {
+            .draw_text => |text| {
+                if (text.id == testCanvasWidgetPartId(2, 4)) {
+                    try std.testing.expectEqualStrings("Launch", text.text);
+                    saw_updated_text = true;
+                }
+                if (std.mem.eql(u8, text.text, "Draft")) saw_stale_text = true;
+            },
+            .draw_line => |line| {
+                if (line.id == testCanvasWidgetPartId(2, 6)) saw_text_caret = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_updated_text);
+    try std.testing.expect(!saw_stale_text);
+    try std.testing.expect(saw_text_caret);
+
+    var snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expectEqualStrings("Launch", snapshot.widgets[0].text_value);
+    try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 6, .end = 6 }, snapshot.widgets[0].text_selection.?);
+
+    try harness.runtime.dispatchAutomationCommand(app, "widget-action canvas 5 select");
+
+    display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    var saw_selected_item_fill = false;
+    for (display_list.commands) |command| {
+        switch (command) {
+            .fill_rounded_rect => |fill| {
+                if (fill.id == testCanvasWidgetPartId(5, 1)) saw_selected_item_fill = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_selected_item_fill);
+
+    snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expect(!snapshot.widgets[2].selected);
+    try std.testing.expect(snapshot.widgets[3].selected);
+}
+
 test "runtime dispatches shortcut command events" {
     const TestApp = struct {
         command_count: u32 = 0,
