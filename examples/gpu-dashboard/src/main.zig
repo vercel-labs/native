@@ -29,6 +29,8 @@ const confidence_active_command_id: canvas.ObjectId = 134 * 16 + 2;
 const deployment_region_text_command_id: canvas.ObjectId = 156 * 16 + 4;
 const overview_fill_command_id: canvas.ObjectId = 111 * 16 + 1;
 const customers_fill_command_id: canvas.ObjectId = 112 * 16 + 1;
+const activity_scroll_track_command_id: canvas.ObjectId = 120 * 16 + 2;
+const activity_scroll_thumb_command_id: canvas.ObjectId = 120 * 16 + 3;
 const activity_first_text_command_id: canvas.ObjectId = 121 * 16 + 3;
 const filter_popover_blur_command_id: canvas.ObjectId = 140 * 16 + 12;
 const dashboard_glass_blur: f32 = 14;
@@ -856,10 +858,12 @@ test "gpu dashboard display list builds a complete canvas scene" {
     try buildDashboardDisplayListFromWidgets(&builder);
     const display_list = builder.displayList();
 
-    try std.testing.expectEqual(@as(usize, 62), display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, 64), display_list.commandCount());
     try std.testing.expect(display_list.findCommandById(1) != null);
     try std.testing.expect(display_list.findCommandById(deployment_region_text_command_id) != null);
     try std.testing.expect(display_list.findCommandById(live_button_fill_command_id) != null);
+    try std.testing.expect(display_list.findCommandById(activity_scroll_track_command_id) != null);
+    try std.testing.expect(display_list.findCommandById(activity_scroll_thumb_command_id) != null);
     try std.testing.expect(display_list.findCommandById(filter_popover_blur_command_id) != null);
     const bounds = display_list.bounds().?;
     try std.testing.expect(bounds.x <= 0);
@@ -926,7 +930,7 @@ test "gpu dashboard display list renders through the reference surface" {
     const surface = try canvas.ReferenceRenderSurface.initWithScratch(720, 520, pixels, scratch);
     try surface.renderPass(frame.renderPass(), color(0, 0, 0));
 
-    try std.testing.expectEqual(@as(u64, 15096528737378625560), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 17535322711022946563), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(8, 8));
     try expectVisiblePixel(surface.pixelRgba8(64, 64));
     try expectVisiblePixel(surface.pixelRgba8(240, 140));
@@ -1012,9 +1016,11 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     try std.testing.expect(app.canvas_installed);
 
     var display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    try std.testing.expectEqual(@as(usize, 62), display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, 64), display_list.commandCount());
     try std.testing.expect(display_list.findCommandById(1) != null);
     try std.testing.expect(display_list.findCommandById(deployment_region_text_command_id) != null);
+    try std.testing.expect(display_list.findCommandById(activity_scroll_track_command_id) != null);
+    try std.testing.expect(display_list.findCommandById(activity_scroll_thumb_command_id) != null);
     try std.testing.expect(display_list.findCommandById(overview_fill_command_id) != null);
     try std.testing.expect(display_list.findCommandById(customers_fill_command_id) == null);
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_present_count);
@@ -1271,7 +1277,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     const frame = try harness.runtime.gpuSurfaceFrame(1, "dashboard-canvas");
     try std.testing.expect(frame.canvas_revision > 1);
-    try std.testing.expectEqual(@as(usize, 62), frame.canvas_command_count);
+    try std.testing.expectEqual(@as(usize, 64), frame.canvas_command_count);
     try std.testing.expect(frame.canvas_frame_requires_render);
     try std.testing.expect(!frame.canvas_frame_full_repaint);
     try std.testing.expect(frame.canvas_frame_change_count > 0);

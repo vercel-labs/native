@@ -5730,6 +5730,7 @@ fn emitWidgetLayoutNodeContent(
             try builder.pushClip(.{ .id = widgetPartId(widget.id, 1), .rect = widget.frame });
             try emitWidgetLayoutChildren(builder, layout, node_index, tokens, state);
             try builder.popClip();
+            try emitScrollViewScrollbar(builder, widget.frame, widgetScrollSemantics(layout, node_index).metrics, tokens, widget.id);
             return;
         },
         .panel => try emitPanelWidgetChrome(builder, widget, tokens),
@@ -5819,12 +5820,93 @@ fn emitScrollViewWidget(builder: *Builder, widget: Widget, tokens: DesignTokens,
     try builder.pushClip(.{ .id = widgetPartId(widget.id, 1), .rect = widget.frame });
     try emitWidgetChildren(builder, widget.children, tokens, depth);
     try builder.popClip();
+    try emitScrollViewScrollbar(builder, widget.frame, widgetScrollMetricsForWidget(widget), tokens, widget.id);
 }
 
 fn emitWidgetClippedChildren(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
     if (widget.layout.clip_content) try builder.pushClip(widgetContentClip(widget, tokens));
     try emitWidgetChildren(builder, widget.children, tokens, depth);
     if (widget.layout.clip_content) try builder.popClip();
+}
+
+const ScrollbarGeometry = struct {
+    track: geometry.RectF,
+    thumb: geometry.RectF,
+};
+
+fn emitScrollViewScrollbar(builder: *Builder, frame: geometry.RectF, metrics: WidgetScrollMetrics, tokens: DesignTokens, id: ObjectId) Error!void {
+    const scrollbar = scrollViewScrollbarGeometry(frame, metrics, tokens) orelse return;
+    const radius = Radius.all(scrollbar.track.width * 0.5);
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(id, 2),
+        .rect = scrollbar.track,
+        .radius = radius,
+        .fill = .{ .color = colorWithAlpha(tokens.colors.border, @min(tokens.colors.border.a, 0.22)) },
+    });
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(id, 3),
+        .rect = scrollbar.thumb,
+        .radius = radius,
+        .fill = .{ .color = colorWithAlpha(tokens.colors.text_muted, 0.55) },
+    });
+}
+
+fn scrollViewScrollbarGeometry(frame: geometry.RectF, metrics: WidgetScrollMetrics, tokens: DesignTokens) ?ScrollbarGeometry {
+    if (!metrics.present) return null;
+    const viewport = nonNegative(metrics.viewport_extent);
+    const content = nonNegative(metrics.content_extent);
+    const max_offset = @max(0, content - viewport);
+    if (frame.isEmpty() or viewport <= 0 or content <= viewport or max_offset <= 0) return null;
+
+    const inset = densityValue(tokens, 3);
+    const thickness = @min(@max(densityValue(tokens, 3), frame.width * 0.0125), densityValue(tokens, 6));
+    const track_height = @max(0, frame.height - inset * 2);
+    if (track_height <= 0 or thickness <= 0) return null;
+
+    const track = geometry.RectF.init(
+        frame.x + frame.width - inset - thickness,
+        frame.y + inset,
+        thickness,
+        track_height,
+    );
+    const thumb_ratio = std.math.clamp(viewport / content, 0, 1);
+    const min_thumb = @min(track_height, densityValue(tokens, 18));
+    const thumb_height = @min(track_height, @max(min_thumb, track_height * thumb_ratio));
+    const travel = @max(0, track_height - thumb_height);
+    const offset_ratio = std.math.clamp(nonNegative(metrics.offset) / max_offset, 0, 1);
+    return .{
+        .track = track,
+        .thumb = geometry.RectF.init(track.x, track.y + travel * offset_ratio, track.width, thumb_height),
+    };
+}
+
+fn widgetScrollMetricsForWidget(widget: Widget) WidgetScrollMetrics {
+    if (widget.kind != .scroll_view) return .{};
+
+    const viewport = widget.frame.inset(widget.layout.padding).normalized();
+    if (viewport.isEmpty()) return .{};
+
+    const content_extent = widgetScrollContentExtentForWidget(widget, viewport);
+    const max_offset = @max(0, content_extent - viewport.height);
+    return .{
+        .present = true,
+        .offset = std.math.clamp(nonNegative(widget.value), 0, max_offset),
+        .viewport_extent = viewport.height,
+        .content_extent = content_extent,
+    };
+}
+
+fn widgetScrollContentExtentForWidget(widget: Widget, viewport: geometry.RectF) f32 {
+    if (widget.layout.virtualized) {
+        return @max(viewport.height, virtualWidgetScrollContentExtent(widget, viewport.height));
+    }
+
+    const offset = nonNegative(widget.value);
+    var bottom = viewport.maxY();
+    for (widget.children) |child| {
+        bottom = @max(bottom, child.frame.maxY() + offset);
+    }
+    return @max(0, bottom - viewport.y);
 }
 
 fn emitWidgetLayoutClippedChildren(
@@ -6618,6 +6700,10 @@ fn textSelectionFillColor(tokens: DesignTokens) Color {
         tokens.colors.focus_ring.b,
         0.18,
     );
+}
+
+fn colorWithAlpha(color: Color, alpha: f32) Color {
+    return Color.rgba(color.r, color.g, color.b, std.math.clamp(alpha, 0, 1));
 }
 
 fn emitWidgetTextSelectionRects(
@@ -11164,16 +11250,33 @@ test "widget scroll view offsets children and clips display list" {
     try expectLayoutFrame(layout, 3, geometry.RectF.init(0, 24, 120, 32));
     try expectLayoutFrame(layout, 4, geometry.RectF.init(0, 60, 120, 32));
 
-    var commands: [12]CanvasCommand = undefined;
+    var commands: [16]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try layout.emitDisplayList(&builder, .{});
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 11), display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, 13), display_list.commandCount());
     switch (display_list.commands[0]) {
         .push_clip => |clip| try expectRect(geometry.RectF.init(0, 0, 120, 60), clip.rect),
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expect(display_list.commands[display_list.commands.len - 1] == .pop_clip);
+    try std.testing.expect(display_list.commands[10] == .pop_clip);
+    switch (display_list.commands[11]) {
+        .fill_rounded_rect => |track| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(1, 2)), track.id);
+            try expectRect(geometry.RectF.init(114, 3, 3, 54), track.rect);
+            try expectFillColor(Color.rgba8(15, 23, 42, 28), track.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[12]) {
+        .fill_rounded_rect => |thumb| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(1, 3)), thumb.id);
+            try std.testing.expectApproxEqAbs(@as(f32, 12.642), thumb.rect.y, 0.001);
+            try std.testing.expectApproxEqAbs(@as(f32, 28.928), thumb.rect.height, 0.001);
+            try expectFillColor(Color.rgba(100.0 / 255.0, 116.0 / 255.0, 139.0 / 255.0, 0.55), thumb.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 
     try std.testing.expectEqual(@as(ObjectId, 2), layout.hitTest(geometry.PointF.init(10, 4)).?.id);
     try std.testing.expectEqual(@as(ObjectId, 3), layout.hitTest(geometry.PointF.init(10, 50)).?.id);
