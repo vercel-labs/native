@@ -4328,6 +4328,26 @@ fn canvasWidgetLayoutNodeFrameVisible(layout: canvas.WidgetLayoutTree, node_inde
     return true;
 }
 
+fn canvasWidgetLayoutNodeClippedBounds(layout: canvas.WidgetLayoutTree, node_index: usize, bounds: geometry.RectF) ?geometry.RectF {
+    if (node_index >= layout.nodes.len) return null;
+    if (canvasWidgetLayoutNodeHidden(layout, node_index)) return null;
+
+    var clipped = bounds.normalized();
+    if (clipped.isEmpty()) return null;
+
+    var current = layout.nodes[node_index].parent_index;
+    while (current) |index| {
+        if (index >= layout.nodes.len) return null;
+        const ancestor = layout.nodes[index];
+        if (ancestor.widget.kind == .scroll_view) {
+            clipped = geometry.RectF.intersection(clipped, ancestor.frame.normalized());
+            if (clipped.isEmpty()) return null;
+        }
+        current = ancestor.parent_index;
+    }
+    return clipped;
+}
+
 fn canvasWidgetRuntimeHitTarget(widget: canvas.Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     return switch (widget.kind) {
@@ -5450,7 +5470,7 @@ const RuntimeView = struct {
 
         try self.refreshCanvasWidgetSemantics();
         self.widget_revision += 1;
-        return scroll_node.frame;
+        return self.canvasWidgetDirtyBounds(scroll_index, scroll_node.frame);
     }
 
     fn stepCanvasWidgetKineticScroll(self: *RuntimeView, dt_ms: f32) anyerror!?geometry.RectF {
@@ -5478,7 +5498,7 @@ const RuntimeView = struct {
             const offset_delta = next.offset - current.offset;
             self.widget_layout_nodes[scroll_index].widget.value = next.offset;
             self.translateCanvasWidgetScrollDescendants(scroll_index, -offset_delta);
-            dirty = unionRects(dirty, scroll_node.frame);
+            dirty = unionRects(dirty, self.canvasWidgetDirtyBounds(scroll_index, scroll_node.frame));
             changed = true;
         }
 
@@ -5527,11 +5547,14 @@ const RuntimeView = struct {
         const semantics = try self.widgetLayoutTree().collectSemantics(&self.widget_semantics_nodes);
         self.widget_semantics_node_count = semantics.len;
         self.widget_revision += 1;
-        return self.widget_layout_nodes[index].frame;
+        return self.canvasWidgetDirtyBounds(index, self.widget_layout_nodes[index].frame);
     }
 
     fn canEditCanvasWidgetText(self: *const RuntimeView, id: canvas.ObjectId) bool {
         const index = self.canvasWidgetNodeIndexById(id) orelse return false;
+        const layout = self.widgetLayoutTree();
+        if (canvasWidgetLayoutNodeHidden(layout, index)) return false;
+        if (!canvasWidgetLayoutNodeFrameVisible(layout, index)) return false;
         const widget = self.widget_layout_nodes[index].widget;
         return (widget.kind == .text_field or widget.kind == .search_field) and !widget.state.disabled;
     }
@@ -5550,7 +5573,7 @@ const RuntimeView = struct {
         self.widget_layout_nodes[index].widget.text_composition = null;
         try self.refreshCanvasWidgetSemantics();
         self.widget_revision += 1;
-        return widget.frame;
+        return self.canvasWidgetDirtyBounds(index, widget.frame);
     }
 
     fn canvasWidgetNodeIndexById(self: *const RuntimeView, id: canvas.ObjectId) ?usize {
@@ -5659,7 +5682,7 @@ const RuntimeView = struct {
         self.widget_layout_nodes[index].widget.value = if (!selected) 1 else 0;
         try self.refreshCanvasWidgetSemantics();
         self.widget_revision += 1;
-        return widget.frame;
+        return self.canvasWidgetDirtyBounds(index, widget.frame);
     }
 
     fn setCanvasWidgetSelected(self: *RuntimeView, id: canvas.ObjectId, selected: bool) anyerror!?geometry.RectF {
@@ -5681,14 +5704,14 @@ const RuntimeView = struct {
                 if (!canvasWidgetSelectableSelected(node.widget)) continue;
                 node.widget.state.selected = false;
                 node.widget.value = 0;
-                dirty = unionRects(dirty, node.frame);
+                dirty = unionRects(dirty, self.canvasWidgetDirtyBounds(sibling_index, node.frame));
                 changed = true;
             }
         }
 
         const target_value: f32 = if (selected) 1 else 0;
         if (self.widget_layout_nodes[index].widget.state.selected != selected or self.widget_layout_nodes[index].widget.value != target_value) {
-            dirty = unionRects(dirty, self.widget_layout_nodes[index].frame);
+            dirty = unionRects(dirty, self.canvasWidgetDirtyBounds(index, self.widget_layout_nodes[index].frame));
             changed = true;
         }
         if (!changed) return null;
@@ -5712,7 +5735,7 @@ const RuntimeView = struct {
         });
         try self.refreshCanvasWidgetSemantics();
         self.widget_revision += 1;
-        return self.widget_layout_nodes[index].frame;
+        return self.canvasWidgetDirtyBounds(index, self.widget_layout_nodes[index].frame);
     }
 
     fn setCanvasWidgetValue(self: *RuntimeView, index: usize, value: f32) anyerror!?geometry.RectF {
@@ -5723,12 +5746,16 @@ const RuntimeView = struct {
         self.widget_layout_nodes[index].widget.value = next_value;
         try self.refreshCanvasWidgetSemantics();
         self.widget_revision += 1;
-        return widget.frame;
+        return self.canvasWidgetDirtyBounds(index, widget.frame);
     }
 
     fn refreshCanvasWidgetSemantics(self: *RuntimeView) anyerror!void {
         const semantics = try self.widgetLayoutTree().collectSemantics(&self.widget_semantics_nodes);
         self.widget_semantics_node_count = semantics.len;
+    }
+
+    fn canvasWidgetDirtyBounds(self: *const RuntimeView, node_index: usize, bounds: geometry.RectF) ?geometry.RectF {
+        return canvasWidgetLayoutNodeClippedBounds(self.widgetLayoutTree(), node_index, bounds);
     }
 
     fn copyWidgetLayoutNode(self: *RuntimeView, node: canvas.WidgetLayoutNode, source_semantics: []const canvas.WidgetSemanticsNode) anyerror!canvas.WidgetLayoutNode {
@@ -10912,6 +10939,64 @@ test "runtime applies ime composition edits to canvas text fields" {
     try std.testing.expect(snapshot.widgets[0].text_composition == null);
 
     try std.testing.expectError(error.InvalidCommand, harness.runtime.editCanvasWidgetText(1, "canvas", 99, .commit_composition));
+}
+
+test "runtime clips canvas widget text edit dirty bounds to scroll ancestors" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-clipped-text-dirty", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 160, 48),
+    });
+
+    const partially_visible_children = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(0, 40, 0, 32),
+        .text = "Draft",
+    }};
+    var partially_visible_nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const partially_visible_layout = try canvas.layoutWidgetTree(
+        .{ .id = 1, .kind = .scroll_view, .children = &partially_visible_children },
+        geometry.RectF.init(0, 0, 160, 48),
+        &partially_visible_nodes,
+    );
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", partially_visible_layout);
+
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    _ = try harness.runtime.editCanvasWidgetText(1, "canvas", 2, .{ .insert_text = "!" });
+    try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.pendingDirtyRegions().len);
+    try std.testing.expectEqualDeep(geometry.RectF.init(10, 60, 160, 8), harness.runtime.pendingDirtyRegions()[0]);
+
+    const fully_clipped_children = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(0, 64, 0, 32),
+        .text = "Draft",
+    }};
+    var fully_clipped_nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const fully_clipped_layout = try canvas.layoutWidgetTree(
+        .{ .id = 1, .kind = .scroll_view, .children = &fully_clipped_children },
+        geometry.RectF.init(0, 0, 160, 48),
+        &fully_clipped_nodes,
+    );
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", fully_clipped_layout);
+
+    try std.testing.expectError(error.InvalidCommand, harness.runtime.editCanvasWidgetText(1, "canvas", 2, .{ .insert_text = "!" }));
 }
 
 test "runtime reconciles canvas text edit state across layout replacement" {
