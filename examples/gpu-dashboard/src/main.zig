@@ -17,10 +17,16 @@ const max_dashboard_pipelines: usize = 8;
 const max_dashboard_commands: usize = zero_native.runtime.max_canvas_commands_per_view;
 const max_dashboard_glyphs: usize = zero_native.runtime.max_canvas_glyphs_per_view;
 const max_dashboard_widgets: usize = 32;
+const dashboard_chrome_prefix_commands: usize = 10;
+const dashboard_chrome_suffix_commands: usize = 5;
 const refresh_command = "dashboard.refresh";
 const mode_command = "dashboard.mode";
 const live_button_fill_command_id: canvas.ObjectId = 103 * 16 + 1;
 const live_button_text_command_id: canvas.ObjectId = 103 * 16 + 4;
+const forecast_text_command_id: canvas.ObjectId = 131 * 16 + 4;
+const overview_fill_command_id: canvas.ObjectId = 111 * 16 + 1;
+const customers_fill_command_id: canvas.ObjectId = 112 * 16 + 1;
+const activity_first_text_command_id: canvas.ObjectId = 121 * 16 + 3;
 
 const bg_stops = [_]canvas.GradientStop{
     .{ .offset = 0, .color = color(246, 248, 252) },
@@ -361,6 +367,10 @@ fn installDashboardCanvasModel(runtime: *zero_native.Runtime, window_id: zero_na
     try buildDashboardDisplayList(&builder, layout);
     _ = try runtime.setCanvasDisplayList(window_id, "dashboard-canvas", builder.displayList());
     _ = try runtime.setCanvasWidgetLayout(window_id, "dashboard-canvas", layout);
+    _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, "dashboard-canvas", dashboardWidgetTokens(), .{
+        .prefix_command_count = dashboard_chrome_prefix_commands,
+        .suffix_command_count = dashboard_chrome_suffix_commands,
+    });
 }
 
 fn buildDashboardDisplayListFromWidgets(builder: *canvas.Builder) canvas.Error!void {
@@ -687,6 +697,22 @@ fn dashboardSnapshotWidget(snapshot: zero_native.automation.snapshot.Input, id: 
     return null;
 }
 
+fn expectDashboardTextCommand(display_list: canvas.DisplayList, id: canvas.ObjectId, expected: []const u8) !void {
+    const command_ref = display_list.findCommandById(id) orelse return error.MissingDashboardCommand;
+    switch (command_ref.command) {
+        .draw_text => |text| try std.testing.expectEqualStrings(expected, text.text),
+        else => return error.UnexpectedDashboardCommand,
+    }
+}
+
+fn dashboardTextCommandOriginY(display_list: canvas.DisplayList, id: canvas.ObjectId) !f32 {
+    const command_ref = display_list.findCommandById(id) orelse return error.MissingDashboardCommand;
+    return switch (command_ref.command) {
+        .draw_text => |text| text.origin.y,
+        else => error.UnexpectedDashboardCommand,
+    };
+}
+
 fn color(r: u8, g: u8, b: u8) canvas.Color {
     return canvas.Color.rgb8(r, g, b);
 }
@@ -881,8 +907,12 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     } });
     try std.testing.expect(app.canvas_installed);
 
-    const display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
+    var display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
     try std.testing.expectEqual(@as(usize, 62), display_list.commandCount());
+    try std.testing.expect(display_list.findCommandById(1) != null);
+    try std.testing.expect(display_list.findCommandById(15) != null);
+    try std.testing.expect(display_list.findCommandById(overview_fill_command_id) != null);
+    try std.testing.expect(display_list.findCommandById(customers_fill_command_id) == null);
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_present_count);
     try std.testing.expectEqual(@as(usize, 1440), harness.null_platform.gpu_surface_present_width);
     try std.testing.expectEqual(@as(usize, 1040), harness.null_platform.gpu_surface_present_height);
@@ -957,24 +987,38 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     snapshot = harness.runtime.automationSnapshot("Dashboard");
     try std.testing.expect(!dashboardSnapshotWidget(snapshot, 111).?.selected);
     try std.testing.expect(dashboardSnapshotWidget(snapshot, 112).?.selected);
+    display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
+    try std.testing.expect(display_list.findCommandById(1) != null);
+    try std.testing.expect(display_list.findCommandById(15) != null);
+    try std.testing.expect(display_list.findCommandById(overview_fill_command_id) == null);
+    try std.testing.expect(display_list.findCommandById(customers_fill_command_id) != null);
 
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 131 set-text $14.1M");
     snapshot = harness.runtime.automationSnapshot("Dashboard");
     const updated_forecast = dashboardSnapshotWidget(snapshot, 131).?;
     try std.testing.expectEqualStrings("$14.1M", updated_forecast.text_value);
     try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 6, .end = 6 }, updated_forecast.text_selection.?);
+    display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
+    try expectDashboardTextCommand(display_list, forecast_text_command_id, "$14.1M");
+    const activity_y_before_scroll = try dashboardTextCommandOriginY(display_list, activity_first_text_command_id);
 
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 120 increment");
     var scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "dashboard-canvas");
     try std.testing.expectEqual(@as(f32, 40), scrolled_layout.findById(120).?.widget.value);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
     try std.testing.expectEqual(@as(f32, 40), dashboardSnapshotWidget(snapshot, 120).?.scroll.offset);
+    display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
+    const activity_y_after_increment = try dashboardTextCommandOriginY(display_list, activity_first_text_command_id);
+    try std.testing.expect(activity_y_after_increment < activity_y_before_scroll);
 
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 120 decrement");
     scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "dashboard-canvas");
     try std.testing.expectEqual(@as(f32, 5), scrolled_layout.findById(120).?.widget.value);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
     try std.testing.expectEqual(@as(f32, 5), dashboardSnapshotWidget(snapshot, 120).?.scroll.offset);
+    display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
+    const activity_y_after_decrement = try dashboardTextCommandOriginY(display_list, activity_first_text_command_id);
+    try std.testing.expect(activity_y_after_decrement > activity_y_after_increment);
 
     try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_frame = .{
         .label = "dashboard-canvas",
@@ -986,10 +1030,12 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     } });
 
     const frame = try harness.runtime.gpuSurfaceFrame(1, "dashboard-canvas");
-    try std.testing.expectEqual(@as(u64, 1), frame.canvas_revision);
+    try std.testing.expect(frame.canvas_revision > 1);
     try std.testing.expectEqual(@as(usize, 62), frame.canvas_command_count);
     try std.testing.expect(frame.canvas_frame_requires_render);
     try std.testing.expect(!frame.canvas_frame_full_repaint);
+    try std.testing.expect(frame.canvas_frame_change_count > 0);
+    try std.testing.expect(frame.canvas_frame_dirty_bounds != null);
     try std.testing.expect(frame.canvas_frame_batch_count >= 8);
     try std.testing.expect(frame.canvas_frame_encoder_command_count >= frame.canvas_frame_batch_count);
     try std.testing.expectEqual(frame.canvas_frame_batch_count, frame.canvas_frame_encoder_draw_batch_count);

@@ -91,6 +91,11 @@ pub const CanvasWidgetKeyboardEvent = struct {
     route: []const canvas.WidgetEventRouteEntry = &.{},
 };
 
+pub const CanvasWidgetDisplayListChrome = struct {
+    prefix_command_count: usize = 0,
+    suffix_command_count: usize = 0,
+};
+
 pub const CanvasWidgetFileDropEvent = struct {
     window_id: platform.WindowId = 1,
     view_label: []const u8,
@@ -632,6 +637,8 @@ pub const Runtime = struct {
         const changes = try canvas.DisplayList.diff(self.views[index].canvasDisplayList(), display_list, &canvas_changes);
         try self.views[index].copyCanvasDisplayList(display_list);
         self.views[index].canvas_display_list_widget_owned = false;
+        self.views[index].canvas_widget_display_list_prefix_count = 0;
+        self.views[index].canvas_widget_display_list_suffix_count = 0;
         self.invalidateForCanvasChanges(self.views[index].frame, changes);
         return self.views[index].info();
     }
@@ -1058,16 +1065,39 @@ pub const Runtime = struct {
     }
 
     pub fn emitCanvasWidgetDisplayList(self: *Runtime, window_id: platform.WindowId, label: []const u8, tokens: canvas.DesignTokens) anyerror!platform.ViewInfo {
-        _ = try self.setCanvasWidgetDesignTokens(window_id, label, tokens);
-        return self.emitCanvasWidgetDisplayListWithStoredTokens(window_id, label);
+        return self.emitCanvasWidgetDisplayListWithChrome(window_id, label, tokens, .{});
     }
 
     pub fn emitCanvasWidgetDisplayListWithStoredTokens(self: *Runtime, window_id: platform.WindowId, label: []const u8) anyerror!platform.ViewInfo {
+        return self.emitCanvasWidgetDisplayListWithStoredTokensAndChrome(window_id, label, .{});
+    }
+
+    pub fn emitCanvasWidgetDisplayListWithChrome(self: *Runtime, window_id: platform.WindowId, label: []const u8, tokens: canvas.DesignTokens, chrome: CanvasWidgetDisplayListChrome) anyerror!platform.ViewInfo {
+        try self.validateViewParent(window_id);
+        try validateViewLabel(label);
+        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+        if (!std.meta.eql(self.views[index].widget_tokens, tokens)) {
+            self.views[index].widget_tokens = tokens;
+            self.views[index].widget_revision += 1;
+        }
+
+        return self.emitCanvasWidgetDisplayListForViewWithChrome(index, chrome);
+    }
+
+    pub fn emitCanvasWidgetDisplayListWithStoredTokensAndChrome(self: *Runtime, window_id: platform.WindowId, label: []const u8, chrome: CanvasWidgetDisplayListChrome) anyerror!platform.ViewInfo {
         try self.validateViewParent(window_id);
         try validateViewLabel(label);
         const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
         if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
 
+        return self.emitCanvasWidgetDisplayListForViewWithChrome(index, chrome);
+    }
+
+    fn emitCanvasWidgetDisplayListForViewWithChrome(self: *Runtime, index: usize, chrome: CanvasWidgetDisplayListChrome) anyerror!platform.ViewInfo {
+        try self.views[index].validateCanvasWidgetDisplayListChrome(chrome);
+        self.views[index].canvas_widget_display_list_prefix_count = chrome.prefix_command_count;
+        self.views[index].canvas_widget_display_list_suffix_count = chrome.suffix_command_count;
         try self.refreshCanvasWidgetDisplayList(index);
         self.views[index].canvas_display_list_widget_owned = true;
         return self.views[index].info();
@@ -1085,8 +1115,16 @@ pub const Runtime = struct {
         if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
 
         var commands: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
+        var chrome_storage = CanvasDisplayListScratch{};
         var builder = canvas.Builder.init(&commands);
+        const current = self.views[view_index].canvasDisplayList();
+        const prefix_count = self.views[view_index].canvas_widget_display_list_prefix_count;
+        const suffix_count = self.views[view_index].canvas_widget_display_list_suffix_count;
+        if (prefix_count > current.commands.len or suffix_count > current.commands.len - prefix_count) return error.InvalidCommand;
+        for (current.commands[0..prefix_count]) |command| try chrome_storage.appendCopiedCommand(&builder, command);
         try self.views[view_index].widgetLayoutTree().emitDisplayListWithState(&builder, self.views[view_index].widget_tokens, self.views[view_index].canvasWidgetRenderState());
+        const suffix_start = current.commands.len - suffix_count;
+        for (current.commands[suffix_start..current.commands.len]) |command| try chrome_storage.appendCopiedCommand(&builder, command);
 
         const display_list = builder.displayList();
         var canvas_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined;
@@ -4236,6 +4274,125 @@ const CanvasResourceCounts = struct {
     }
 };
 
+const CanvasDisplayListScratch = struct {
+    gradient_stops: [max_canvas_gradient_stops_per_view]canvas.GradientStop = undefined,
+    gradient_stop_count: usize = 0,
+    path_elements: [max_canvas_path_elements_per_view]canvas.PathElement = undefined,
+    path_element_count: usize = 0,
+    glyphs: [max_canvas_glyphs_per_view]canvas.Glyph = undefined,
+    glyph_count: usize = 0,
+    text_bytes: [max_canvas_text_bytes_per_view]u8 = undefined,
+    text_len: usize = 0,
+
+    fn appendCopiedCommand(self: *CanvasDisplayListScratch, builder: *canvas.Builder, command: canvas.CanvasCommand) anyerror!void {
+        try builder.append(try self.copyCanvasCommand(command));
+    }
+
+    fn copyCanvasCommand(self: *CanvasDisplayListScratch, command: canvas.CanvasCommand) anyerror!canvas.CanvasCommand {
+        return switch (command) {
+            .push_clip => |value| .{ .push_clip = value },
+            .pop_clip => .pop_clip,
+            .push_opacity => |value| .{ .push_opacity = value },
+            .pop_opacity => .pop_opacity,
+            .transform => |value| .{ .transform = value },
+            .fill_rect => |value| blk: {
+                var copy = value;
+                copy.fill = try self.copyCanvasFill(value.fill);
+                break :blk .{ .fill_rect = copy };
+            },
+            .stroke_rect => |value| blk: {
+                var copy = value;
+                copy.stroke = try self.copyCanvasStroke(value.stroke);
+                break :blk .{ .stroke_rect = copy };
+            },
+            .fill_rounded_rect => |value| blk: {
+                var copy = value;
+                copy.fill = try self.copyCanvasFill(value.fill);
+                break :blk .{ .fill_rounded_rect = copy };
+            },
+            .draw_line => |value| blk: {
+                var copy = value;
+                copy.stroke = try self.copyCanvasStroke(value.stroke);
+                break :blk .{ .draw_line = copy };
+            },
+            .fill_path => |value| blk: {
+                var copy = value;
+                copy.elements = try self.copyCanvasPathElements(value.elements);
+                copy.fill = try self.copyCanvasFill(value.fill);
+                break :blk .{ .fill_path = copy };
+            },
+            .stroke_path => |value| blk: {
+                var copy = value;
+                copy.elements = try self.copyCanvasPathElements(value.elements);
+                copy.stroke = try self.copyCanvasStroke(value.stroke);
+                break :blk .{ .stroke_path = copy };
+            },
+            .draw_image => |value| .{ .draw_image = value },
+            .draw_text => |value| blk: {
+                var copy = value;
+                copy.text = try self.copyCanvasText(value.text);
+                copy.glyphs = try self.copyCanvasGlyphs(value.glyphs);
+                break :blk .{ .draw_text = copy };
+            },
+            .shadow => |value| .{ .shadow = value },
+            .blur => |value| .{ .blur = value },
+        };
+    }
+
+    fn copyCanvasStroke(self: *CanvasDisplayListScratch, stroke: canvas.Stroke) anyerror!canvas.Stroke {
+        var copy = stroke;
+        copy.fill = try self.copyCanvasFill(stroke.fill);
+        return copy;
+    }
+
+    fn copyCanvasFill(self: *CanvasDisplayListScratch, fill: canvas.Fill) anyerror!canvas.Fill {
+        return switch (fill) {
+            .color => |color| .{ .color = color },
+            .linear_gradient => |gradient| .{ .linear_gradient = .{
+                .start = gradient.start,
+                .end = gradient.end,
+                .stops = try self.copyCanvasGradientStops(gradient.stops),
+            } },
+        };
+    }
+
+    fn copyCanvasGradientStops(self: *CanvasDisplayListScratch, stops: []const canvas.GradientStop) anyerror![]const canvas.GradientStop {
+        const end = self.gradient_stop_count + stops.len;
+        if (end > self.gradient_stops.len) return error.CanvasGradientStopLimitReached;
+        const start = self.gradient_stop_count;
+        @memcpy(self.gradient_stops[start..end], stops);
+        self.gradient_stop_count = end;
+        return self.gradient_stops[start..end];
+    }
+
+    fn copyCanvasPathElements(self: *CanvasDisplayListScratch, elements: []const canvas.PathElement) anyerror![]const canvas.PathElement {
+        const end = self.path_element_count + elements.len;
+        if (end > self.path_elements.len) return error.CanvasPathElementLimitReached;
+        const start = self.path_element_count;
+        @memcpy(self.path_elements[start..end], elements);
+        self.path_element_count = end;
+        return self.path_elements[start..end];
+    }
+
+    fn copyCanvasGlyphs(self: *CanvasDisplayListScratch, glyphs: []const canvas.Glyph) anyerror![]const canvas.Glyph {
+        const end = self.glyph_count + glyphs.len;
+        if (end > self.glyphs.len) return error.CanvasGlyphLimitReached;
+        const start = self.glyph_count;
+        @memcpy(self.glyphs[start..end], glyphs);
+        self.glyph_count = end;
+        return self.glyphs[start..end];
+    }
+
+    fn copyCanvasText(self: *CanvasDisplayListScratch, text: []const u8) anyerror![]const u8 {
+        const end = self.text_len + text.len;
+        if (end > self.text_bytes.len) return error.CanvasTextTooLarge;
+        const start = self.text_len;
+        @memcpy(self.text_bytes[start..end], text);
+        self.text_len = end;
+        return self.text_bytes[start..end];
+    }
+};
+
 fn addCanvasCount(value: *usize, amount: usize, max_value: usize, comptime failure: anyerror) anyerror!void {
     if (amount > max_value or value.* > max_value - amount) return failure;
     value.* += amount;
@@ -4751,6 +4908,8 @@ const RuntimeView = struct {
     canvas_text_bytes: [max_canvas_text_bytes_per_view]u8 = undefined,
     canvas_text_len: usize = 0,
     canvas_display_list_widget_owned: bool = false,
+    canvas_widget_display_list_prefix_count: usize = 0,
+    canvas_widget_display_list_suffix_count: usize = 0,
     presented_canvas_valid: bool = false,
     presented_canvas_revision: u64 = 0,
     presented_canvas_commands: [max_canvas_commands_per_view]PresentedCanvasCommand = undefined,
@@ -4959,6 +5118,11 @@ const RuntimeView = struct {
 
     fn canvasDisplayList(self: *const RuntimeView) canvas.DisplayList {
         return .{ .commands = self.canvas_commands[0..self.canvas_command_count] };
+    }
+
+    fn validateCanvasWidgetDisplayListChrome(self: *const RuntimeView, chrome: CanvasWidgetDisplayListChrome) anyerror!void {
+        if (chrome.prefix_command_count > self.canvas_command_count) return error.InvalidCommand;
+        if (chrome.suffix_command_count > self.canvas_command_count - chrome.prefix_command_count) return error.InvalidCommand;
     }
 
     fn canvasFrameResourceCache(self: *const RuntimeView) []const canvas.RenderResourceCacheEntry {
@@ -5224,7 +5388,7 @@ const RuntimeView = struct {
                 .id = id,
                 .bounds = command.bounds(),
             };
-            if (id == null) self.presented_canvas_has_unkeyed = true;
+            if (id == null and command.bounds() != null) self.presented_canvas_has_unkeyed = true;
             self.presented_canvas_command_count += 1;
         }
         self.presented_canvas_revision = self.canvas_revision;
@@ -5240,7 +5404,7 @@ const RuntimeView = struct {
 
     fn currentCanvasHasUnkeyed(self: *const RuntimeView) bool {
         for (self.canvasDisplayList().commands) |command| {
-            if (command.objectId() == null) return true;
+            if (command.objectId() == null and command.bounds() != null) return true;
         }
         return false;
     }
@@ -5720,7 +5884,7 @@ const RuntimeView = struct {
         self.widget_layout_nodes[index].widget.value = target_value;
         try self.refreshCanvasWidgetSemantics();
         self.widget_revision += 1;
-        return dirty;
+        return dirty orelse self.widget_layout_nodes[index].frame;
     }
 
     fn setCanvasWidgetTextValue(self: *RuntimeView, id: canvas.ObjectId, text: []const u8) anyerror!?geometry.RectF {
@@ -9128,8 +9292,9 @@ test "runtime next canvas frame keeps unchanged clipped display lists incrementa
 
     _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &changed_commands });
     const changed_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{ .frame_index = 3 }, frame_storage);
-    try std.testing.expect(changed_frame.full_repaint);
+    try std.testing.expect(!changed_frame.full_repaint);
     try std.testing.expect(changed_frame.requiresRender());
+    try std.testing.expect(changed_frame.dirty_bounds != null);
 }
 
 test "runtime invalidates canvas display list dirty regions" {
@@ -15353,6 +15518,88 @@ test "runtime automation protocol refreshes widget-owned canvas display lists" {
     snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expect(!snapshot.widgets[2].selected);
     try std.testing.expect(snapshot.widgets[3].selected);
+}
+
+test "runtime preserves canvas chrome when widget-owned display lists refresh" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-chrome-display-list", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 180),
+    });
+
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .text_field, .frame = geometry.RectF.init(24, 24, 150, 32), .text = "Draft" },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 320, 180), &nodes);
+
+    const stops = [_]canvas.GradientStop{
+        .{ .offset = 0, .color = canvas.Color.rgb8(48, 111, 237) },
+        .{ .offset = 1, .color = canvas.Color.rgb8(16, 185, 129) },
+    };
+    var commands: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try builder.drawText(.{
+        .id = 10,
+        .font_id = 1,
+        .size = 12,
+        .origin = geometry.PointF.init(16, 16),
+        .color = canvas.Color.rgb8(18, 24, 38),
+        .text = "Chrome header",
+    });
+    try layout.emitDisplayList(&builder, .{});
+    try builder.fillRect(.{
+        .id = 11,
+        .rect = geometry.RectF.init(16, 148, 288, 12),
+        .fill = .{ .linear_gradient = .{
+            .start = geometry.PointF.init(16, 148),
+            .end = geometry.PointF.init(304, 148),
+            .stops = &stops,
+        } },
+    });
+
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", builder.displayList());
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try harness.runtime.emitCanvasWidgetDisplayListWithChrome(1, "canvas", .{}, .{
+        .prefix_command_count = 1,
+        .suffix_command_count = 1,
+    });
+
+    var display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    try std.testing.expectEqual(@as(usize, 5), display_list.commandCount());
+    switch (display_list.findCommandById(10).?.command) {
+        .draw_text => |text| try std.testing.expectEqualStrings("Chrome header", text.text),
+        else => return error.UnexpectedCanvasCommand,
+    }
+    try std.testing.expect(display_list.findCommandById(11) != null);
+    try std.testing.expect(display_list.findCommandById(testCanvasWidgetPartId(2, 3)) != null);
+
+    try harness.runtime.dispatchAutomationCommand(app, "widget-action canvas 2 set-text Launch");
+
+    display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    switch (display_list.findCommandById(10).?.command) {
+        .draw_text => |text| try std.testing.expectEqualStrings("Chrome header", text.text),
+        else => return error.UnexpectedCanvasCommand,
+    }
+    try std.testing.expect(display_list.findCommandById(11) != null);
+    switch (display_list.findCommandById(testCanvasWidgetPartId(2, 4)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualStrings("Launch", text.text),
+        else => return error.UnexpectedCanvasCommand,
+    }
 }
 
 test "runtime dispatches shortcut command events" {
