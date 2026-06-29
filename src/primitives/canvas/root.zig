@@ -3032,6 +3032,7 @@ pub const WidgetPointerEvent = struct {
     phase: WidgetPointerPhase,
     point: geometry.PointF,
     delta: geometry.OffsetF = .{},
+    captured_id: ?ObjectId = null,
 };
 
 pub const WidgetKeyboardPhase = enum {
@@ -6521,9 +6522,25 @@ fn isPointVisibleInWidgetAncestors(layout: WidgetLayoutTree, node_index: usize, 
 }
 
 fn routeWidgetPointerEvent(layout: WidgetLayoutTree, event: WidgetPointerEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
-    const target = hitTestWidgetLayout(layout, event.point) orelse return .{ .entries = output[0..0] };
+    const target = capturedWidgetPointerTarget(layout, event) orelse
+        hitTestWidgetLayout(layout, event.point) orelse return .{ .entries = output[0..0] };
     const entries = try routeWidgetEventPath(layout, target.index, output);
     return .{ .target = target, .entries = entries };
+}
+
+fn capturedWidgetPointerTarget(layout: WidgetLayoutTree, event: WidgetPointerEvent) ?WidgetHit {
+    const id = event.captured_id orelse return null;
+    return switch (event.phase) {
+        .move, .up, .cancel => widgetPointerTargetById(layout, id),
+        .hover, .down, .wheel => null,
+    };
+}
+
+fn widgetPointerTargetById(layout: WidgetLayoutTree, id: ObjectId) ?WidgetHit {
+    const index = widgetIndexById(layout, id) orelse return null;
+    const node = layout.nodes[index];
+    if (!isHitTarget(node.widget)) return null;
+    return widgetHitFromNode(node, index);
 }
 
 fn routeWidgetKeyboardEvent(layout: WidgetLayoutTree, event: WidgetKeyboardEvent, output: []WidgetEventRouteEntry) Error!WidgetKeyboardRoute {
@@ -9966,6 +9983,102 @@ test "widget pointer route includes capture target and bubble phases" {
     try expectRouteEntry(route.entries[2], .target, 2);
     try expectRouteEntry(route.entries[3], .bubble, 5);
     try expectRouteEntry(route.entries[4], .bubble, 1);
+}
+
+test "widget pointer route honors captured target for drag lifecycle" {
+    const row_children = [_]Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 0, 80, 32),
+        .text = "Run",
+    }};
+    const root_children = [_]Widget{.{
+        .id = 5,
+        .kind = .row,
+        .frame = geometry.RectF.init(8, 8, 120, 40),
+        .children = &row_children,
+    }};
+    const root = Widget{
+        .id = 1,
+        .kind = .panel,
+        .children = &root_children,
+    };
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 160, 80), &nodes);
+
+    var move_entries: [5]WidgetEventRouteEntry = undefined;
+    const move_route = try layout.routePointerEvent(.{
+        .phase = .move,
+        .point = geometry.PointF.init(220, 120),
+        .captured_id = 2,
+    }, &move_entries);
+    try std.testing.expect(move_route.target != null);
+    try std.testing.expectEqual(@as(ObjectId, 2), move_route.target.?.id);
+    try std.testing.expectEqual(@as(usize, 5), move_route.entries.len);
+    try expectRouteEntry(move_route.entries[0], .capture, 1);
+    try expectRouteEntry(move_route.entries[1], .capture, 5);
+    try expectRouteEntry(move_route.entries[2], .target, 2);
+    try expectRouteEntry(move_route.entries[3], .bubble, 5);
+    try expectRouteEntry(move_route.entries[4], .bubble, 1);
+
+    var up_entries: [5]WidgetEventRouteEntry = undefined;
+    const up_route = try layout.routePointerEvent(.{
+        .phase = .up,
+        .point = geometry.PointF.init(220, 120),
+        .captured_id = 2,
+    }, &up_entries);
+    try std.testing.expectEqual(@as(ObjectId, 2), up_route.target.?.id);
+
+    var cancel_entries: [5]WidgetEventRouteEntry = undefined;
+    const cancel_route = try layout.routePointerEvent(.{
+        .phase = .cancel,
+        .point = geometry.PointF.init(220, 120),
+        .captured_id = 2,
+    }, &cancel_entries);
+    try std.testing.expectEqual(@as(ObjectId, 2), cancel_route.target.?.id);
+}
+
+test "widget pointer capture does not retarget hover down or wheel" {
+    const root = Widget{
+        .id = 1,
+        .kind = .panel,
+        .children = &.{.{
+            .id = 2,
+            .kind = .button,
+            .frame = geometry.RectF.init(10, 10, 80, 32),
+            .text = "Run",
+        }},
+    };
+
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 120, 80), &nodes);
+    var empty_entries: [0]WidgetEventRouteEntry = .{};
+
+    const hover_route = try layout.routePointerEvent(.{
+        .phase = .hover,
+        .point = geometry.PointF.init(200, 20),
+        .captured_id = 2,
+    }, &empty_entries);
+    try std.testing.expect(hover_route.target == null);
+    try std.testing.expectEqual(@as(usize, 0), hover_route.entries.len);
+
+    const down_route = try layout.routePointerEvent(.{
+        .phase = .down,
+        .point = geometry.PointF.init(200, 20),
+        .captured_id = 2,
+    }, &empty_entries);
+    try std.testing.expect(down_route.target == null);
+    try std.testing.expectEqual(@as(usize, 0), down_route.entries.len);
+
+    const wheel_route = try layout.routePointerEvent(.{
+        .phase = .wheel,
+        .point = geometry.PointF.init(200, 20),
+        .delta = geometry.OffsetF.init(0, -16),
+        .captured_id = 2,
+    }, &empty_entries);
+    try std.testing.expect(wheel_route.target == null);
+    try std.testing.expectEqual(@as(usize, 0), wheel_route.entries.len);
 }
 
 test "widget pointer route handles no hit and bounded output" {
