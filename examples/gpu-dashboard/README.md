@@ -6,7 +6,7 @@ This example combines native app chrome, a `gpu_surface`, and a retained canvas 
 - A GPU surface registered with explicit presentation settings and a dashboard display list.
 - Retained widget semantics for dashboard lists, forms, popovers, and scrolling.
 - A WebView inspector sibling in the same split layout.
-- Frame diagnostics for canvas command, batch, and resource planning.
+- Frame diagnostics for canvas profile risk, work units, commands, batches, and dirty regions.
 
 Run with the macOS system backend:
 

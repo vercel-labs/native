@@ -235,11 +235,7 @@ const GpuDashboardApp = struct {
         if (!self.reported_planned_frame and frame_event.canvas_command_count > 0) {
             self.reported_planned_frame = true;
             var status_buffer: [192]u8 = undefined;
-            const status = try std.fmt.bufPrint(
-                &status_buffer,
-                "Canvas frame planned: {d} commands, {d} batches, {d} pipelines, {d} resources.",
-                .{ frame_event.canvas_command_count, frame_event.canvas_frame_batch_count, frame_event.canvas_frame_pipeline_count, frame_event.canvas_frame_resource_count },
-            );
+            const status = try dashboardFrameStatus(&status_buffer, frame_event);
             try self.updateStatus(runtime, frame_event.window_id, status);
         }
     }
@@ -711,9 +707,36 @@ fn gpuFrameEvent(frame: zero_native.platform.GpuFrame) zero_native.GpuSurfaceFra
     };
 }
 
+fn dashboardFrameStatus(buffer: []u8, frame_event: zero_native.GpuSurfaceFrameEvent) std.fmt.BufPrintError![]u8 {
+    return std.fmt.bufPrint(
+        buffer,
+        "Canvas frame: {s} risk, {d} work units, {d} commands, {d} batches, dirty {d}%.",
+        .{
+            @tagName(frame_event.canvas_frame_profile_risk),
+            frame_event.canvas_frame_profile_work_units,
+            frame_event.canvas_command_count,
+            frame_event.canvas_frame_batch_count,
+            dashboardDirtyPercent(frame_event.canvas_frame_profile_dirty_ratio),
+        },
+    );
+}
+
+fn dashboardDirtyPercent(ratio: f32) u32 {
+    return @as(u32, @intFromFloat(@round(std.math.clamp(ratio, 0, 1) * 100.0)));
+}
+
 fn dashboardSnapshotWidget(snapshot: zero_native.automation.snapshot.Input, id: u64) ?zero_native.automation.snapshot.Widget {
     for (snapshot.widgets) |widget| {
         if (widget.id == id and std.mem.eql(u8, widget.view_label, "dashboard-canvas")) return widget;
+    }
+    return null;
+}
+
+fn dashboardViewByLabel(runtime: *const zero_native.Runtime, label: []const u8) ?zero_native.ViewInfo {
+    var views_buffer: [zero_native.platform.max_views + zero_native.platform.max_webviews + 1]zero_native.ViewInfo = undefined;
+    const views = runtime.listViews(1, &views_buffer);
+    for (views) |view| {
+        if (std.mem.eql(u8, view.label, label)) return view;
     }
     return null;
 }
@@ -1192,6 +1215,11 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
         .timestamp_ns = 1_016_000_000,
         .nonblank = true,
     } });
+    const status_view = dashboardViewByLabel(&harness.runtime, "status-label").?;
+    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Canvas frame:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "risk") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "work units") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "dirty") != null);
 
     const frame = try harness.runtime.gpuSurfaceFrame(1, "dashboard-canvas");
     try std.testing.expect(frame.canvas_revision > 1);
@@ -1308,6 +1336,10 @@ test "gpu dashboard frame event adapter preserves renderer diagnostics" {
     try std.testing.expectEqual(frame.canvas_frame_profile_dirty_area, event_value.canvas_frame_profile_dirty_area);
     try std.testing.expectEqual(frame.canvas_frame_profile_dirty_ratio, event_value.canvas_frame_profile_dirty_ratio);
     try std.testing.expectEqual(frame.widget_semantics_count, event_value.widget_semantics_count);
+
+    var status_buffer: [128]u8 = undefined;
+    const status = try dashboardFrameStatus(&status_buffer, event_value);
+    try std.testing.expectEqualStrings("Canvas frame: moderate risk, 88 work units, 62 commands, 12 batches, dirty 0%.", status);
 }
 
 fn expectVisiblePixel(pixel: [4]u8) !void {
