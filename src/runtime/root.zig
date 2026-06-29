@@ -940,6 +940,9 @@ pub const Runtime = struct {
             try self.views[index].copyPresentedCanvasSummary(display_list);
             self.views[index].recordCanvasFrame(canvas_frame);
             try self.views[index].copyCanvasFrameRenderOverrides(frame_options.render_overrides);
+            if (self.views[index].pruneCompletedNoopCanvasRenderAnimations(frame_options.timestamp_ns)) {
+                self.views[index].compactCanvasFrameRenderOverrideNoops();
+            }
             if (self.views[index].canvasRenderAnimationsActive(frame_options.timestamp_ns)) {
                 self.invalidateFor(.state, self.views[index].frame);
             }
@@ -5414,8 +5417,33 @@ const RuntimeView = struct {
         self.canvas_frame_render_override_count = overrides.len;
     }
 
+    fn compactCanvasFrameRenderOverrideNoops(self: *RuntimeView) void {
+        var len: usize = 0;
+        for (self.canvasFrameRenderOverrides()) |override| {
+            if (canvasRenderOverrideNoop(override)) continue;
+            self.canvas_frame_render_overrides[len] = override;
+            len += 1;
+        }
+        self.canvas_frame_render_override_count = len;
+    }
+
     fn sampleCanvasRenderAnimations(self: *const RuntimeView, timestamp_ns: u64, output: []canvas.CanvasRenderOverride) anyerror![]const canvas.CanvasRenderOverride {
         return canvas.sampleCanvasRenderAnimations(self.canvasRenderAnimations(), timestamp_ns, output);
+    }
+
+    fn pruneCompletedNoopCanvasRenderAnimations(self: *RuntimeView, timestamp_ns: u64) bool {
+        var len: usize = 0;
+        var pruned = false;
+        for (self.canvasRenderAnimations()) |animation| {
+            if (!canvasRenderAnimationActive(animation, timestamp_ns) and canvasRenderAnimationFinalOverrideNoop(animation)) {
+                pruned = true;
+                continue;
+            }
+            self.canvas_render_animations[len] = animation;
+            len += 1;
+        }
+        self.canvas_render_animation_count = len;
+        return pruned;
     }
 
     fn canvasRenderAnimationsActive(self: *const RuntimeView, timestamp_ns: u64) bool {
@@ -6881,6 +6909,31 @@ fn findCanvasRenderOverrideIndex(overrides: []const canvas.CanvasRenderOverride,
         if (override.id == id) return index;
     }
     return null;
+}
+
+fn canvasRenderOverrideNoop(override: canvas.CanvasRenderOverride) bool {
+    return canvasRenderOverrideOpacityNoop(override.opacity) and canvasRenderOverrideTransformNoop(override.transform);
+}
+
+fn canvasRenderAnimationFinalOverrideNoop(animation: canvas.CanvasRenderAnimation) bool {
+    return canvasRenderOverrideOpacityNoop(animation.to_opacity) and canvasRenderOverrideTransformNoop(animation.to_transform);
+}
+
+fn canvasRenderOverrideOpacityNoop(opacity: ?f32) bool {
+    return opacity == null or opacity.? == 1;
+}
+
+fn canvasRenderOverrideTransformNoop(transform: ?canvas.Affine) bool {
+    return transform == null or canvasAffinesEqual(transform.?, canvas.Affine.identity());
+}
+
+fn canvasAffinesEqual(a: canvas.Affine, b: canvas.Affine) bool {
+    return a.a == b.a and
+        a.b == b.b and
+        a.c == b.c and
+        a.d == b.d and
+        a.tx == b.tx and
+        a.ty == b.ty;
 }
 
 fn canvasRenderAnimationActive(animation: canvas.CanvasRenderAnimation, timestamp_ns: u64) bool {
@@ -9491,6 +9544,8 @@ test "runtime schedules canvas render animations without display list rebuild" {
     try std.testing.expectEqualDeep(canvas.Affine.identity(), final_frame.render_plan.commands[0].transform);
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 15, 10), final_frame.dirty_bounds.?);
     try std.testing.expect(!harness.runtime.invalidated);
+    try std.testing.expectEqual(@as(usize, 0), (try harness.runtime.canvasRenderAnimations(1, "canvas")).len);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvasFrameRenderOverrides().len);
 
     const clean_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{
         .frame_index = 4,
@@ -9498,6 +9553,22 @@ test "runtime schedules canvas render animations without display list rebuild" {
     }, frame_storage);
     try std.testing.expect(!clean_frame.requiresRender());
     try std.testing.expect(clean_frame.dirty_bounds == null);
+}
+
+test "runtime classifies render animation final overrides for cleanup" {
+    try std.testing.expect(canvasRenderAnimationFinalOverrideNoop(.{
+        .id = 1,
+        .to_opacity = 1,
+        .to_transform = canvas.Affine.identity(),
+    }));
+    try std.testing.expect(!canvasRenderAnimationFinalOverrideNoop(.{
+        .id = 2,
+        .to_opacity = 0,
+    }));
+    try std.testing.expect(!canvasRenderAnimationFinalOverrideNoop(.{
+        .id = 3,
+        .to_transform = canvas.Affine.translate(8, 0),
+    }));
 }
 
 test "runtime presents next canvas frame pixels" {
