@@ -45,6 +45,9 @@ pub const ObjectId = u64;
 pub const ImageId = u64;
 pub const FontId = u64;
 
+pub const default_glyph_atlas_cache_retention_frames: u64 = 120;
+pub const default_text_layout_cache_retention_frames: u64 = 120;
+
 const max_reference_text_layout_lines: usize = 64;
 
 pub const Color = struct {
@@ -280,8 +283,12 @@ pub const GlyphAtlasPlan = struct {
     }
 
     pub fn cachePlan(self: GlyphAtlasPlan, previous: []const GlyphAtlasCacheEntry, frame_index: u64, entries: []GlyphAtlasCacheEntry, actions: []GlyphAtlasCacheAction) Error!GlyphAtlasCachePlan {
+        return self.cachePlanWithRetention(previous, frame_index, default_glyph_atlas_cache_retention_frames, entries, actions);
+    }
+
+    pub fn cachePlanWithRetention(self: GlyphAtlasPlan, previous: []const GlyphAtlasCacheEntry, frame_index: u64, retention_frames: u64, entries: []GlyphAtlasCacheEntry, actions: []GlyphAtlasCacheAction) Error!GlyphAtlasCachePlan {
         var planner = GlyphAtlasCachePlanner.init(entries, actions);
-        return planner.build(self, previous, frame_index);
+        return planner.build(self, previous, frame_index, retention_frames);
     }
 };
 
@@ -406,8 +413,12 @@ pub const TextLayoutPlan = struct {
     }
 
     pub fn cachePlan(self: TextLayoutPlan, previous: []const TextLayoutCacheEntry, frame_index: u64, entries: []TextLayoutCacheEntry, actions: []TextLayoutCacheAction) Error!TextLayoutCachePlan {
+        return self.cachePlanWithRetention(previous, frame_index, default_text_layout_cache_retention_frames, entries, actions);
+    }
+
+    pub fn cachePlanWithRetention(self: TextLayoutPlan, previous: []const TextLayoutCacheEntry, frame_index: u64, retention_frames: u64, entries: []TextLayoutCacheEntry, actions: []TextLayoutCacheAction) Error!TextLayoutCachePlan {
         var planner = TextLayoutCachePlanner.init(entries, actions);
-        return planner.build(self, previous, frame_index);
+        return planner.build(self, previous, frame_index, retention_frames);
     }
 };
 
@@ -425,8 +436,12 @@ pub const TextLayoutPlanSet = struct {
     }
 
     pub fn cachePlan(self: TextLayoutPlanSet, previous: []const TextLayoutCacheEntry, frame_index: u64, entries: []TextLayoutCacheEntry, actions: []TextLayoutCacheAction) Error!TextLayoutCachePlan {
+        return self.cachePlanWithRetention(previous, frame_index, default_text_layout_cache_retention_frames, entries, actions);
+    }
+
+    pub fn cachePlanWithRetention(self: TextLayoutPlanSet, previous: []const TextLayoutCacheEntry, frame_index: u64, retention_frames: u64, entries: []TextLayoutCacheEntry, actions: []TextLayoutCacheAction) Error!TextLayoutCachePlan {
         var planner = TextLayoutCachePlanner.init(entries, actions);
-        return planner.buildMany(self.plans, previous, frame_index);
+        return planner.buildMany(self.plans, previous, frame_index, retention_frames);
     }
 };
 
@@ -1323,6 +1338,8 @@ pub const CanvasFrameOptions = struct {
     previous_visual_effect_cache: []const VisualEffectCacheEntry = &.{},
     previous_glyph_atlas_cache: []const GlyphAtlasCacheEntry = &.{},
     previous_text_layout_cache: []const TextLayoutCacheEntry = &.{},
+    glyph_atlas_cache_retention_frames: u64 = default_glyph_atlas_cache_retention_frames,
+    text_layout_cache_retention_frames: u64 = default_text_layout_cache_retention_frames,
     text_layout_options: TextLayoutOptions = .{},
     previous_render_overrides: []const CanvasRenderOverride = &.{},
     render_overrides: []const CanvasRenderOverride = &.{},
@@ -3739,9 +3756,10 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
             storage.visual_effect_cache_actions,
         );
     const glyph_atlas_plan = try next.glyphAtlasPlan(storage.glyph_atlas_entries);
-    const glyph_atlas_cache_plan = try glyph_atlas_plan.cachePlan(
+    const glyph_atlas_cache_plan = try glyph_atlas_plan.cachePlanWithRetention(
         options.previous_glyph_atlas_cache,
         options.frame_index,
+        options.glyph_atlas_cache_retention_frames,
         storage.glyph_atlas_cache_entries,
         storage.glyph_atlas_cache_actions,
     );
@@ -3749,9 +3767,10 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const text_layout_cache_plan = if (storage.text_layout_cache_entries.len == 0 and storage.text_layout_cache_actions.len == 0)
         TextLayoutCachePlan{}
     else
-        try text_layout_plan.cachePlan(
+        try text_layout_plan.cachePlanWithRetention(
             options.previous_text_layout_cache,
             options.frame_index,
+            options.text_layout_cache_retention_frames,
             storage.text_layout_cache_entries,
             storage.text_layout_cache_actions,
         );
@@ -5081,6 +5100,12 @@ fn findTextLayoutCacheEntry(entries: []const TextLayoutCacheEntry, key: TextLayo
     return null;
 }
 
+fn shouldRetainUnusedCacheEntry(frame_index: u64, last_used_frame: u64, retention_frames: u64) bool {
+    if (retention_frames == 0) return false;
+    if (frame_index <= last_used_frame) return true;
+    return frame_index - last_used_frame <= retention_frames;
+}
+
 fn textLayoutKeysEqual(a: TextLayoutKey, b: TextLayoutKey) bool {
     return a.font_id == b.font_id and
         a.size == b.size and
@@ -5394,7 +5419,7 @@ pub const GlyphAtlasCachePlanner = struct {
         self.action_len = 0;
     }
 
-    pub fn build(self: *GlyphAtlasCachePlanner, plan: GlyphAtlasPlan, previous: []const GlyphAtlasCacheEntry, frame_index: u64) Error!GlyphAtlasCachePlan {
+    pub fn build(self: *GlyphAtlasCachePlanner, plan: GlyphAtlasPlan, previous: []const GlyphAtlasCacheEntry, frame_index: u64, retention_frames: u64) Error!GlyphAtlasCachePlan {
         self.reset();
 
         for (plan.entries, 0..) |entry, atlas_index| {
@@ -5415,11 +5440,20 @@ pub const GlyphAtlasCachePlanner = struct {
 
         for (previous, 0..) |entry, previous_index| {
             if (findGlyphAtlasCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
-            try self.appendAction(.{
-                .kind = .evict,
-                .key = entry.key,
-                .cache_index = previous_index,
-            });
+            if (shouldRetainUnusedCacheEntry(frame_index, entry.last_used_frame, retention_frames) and self.hasEntryCapacity()) {
+                try self.appendEntry(entry);
+                try self.appendAction(.{
+                    .kind = .retain,
+                    .key = entry.key,
+                    .cache_index = previous_index,
+                });
+            } else {
+                try self.appendAction(.{
+                    .kind = .evict,
+                    .key = entry.key,
+                    .cache_index = previous_index,
+                });
+            }
         }
 
         return .{
@@ -5432,6 +5466,10 @@ pub const GlyphAtlasCachePlanner = struct {
         if (self.entry_len >= self.entries.len) return error.GlyphAtlasCacheListFull;
         self.entries[self.entry_len] = entry;
         self.entry_len += 1;
+    }
+
+    fn hasEntryCapacity(self: *GlyphAtlasCachePlanner) bool {
+        return self.entry_len < self.entries.len;
     }
 
     fn appendAction(self: *GlyphAtlasCachePlanner, action: GlyphAtlasCacheAction) Error!void {
@@ -5493,11 +5531,11 @@ pub const TextLayoutCachePlanner = struct {
         self.action_len = 0;
     }
 
-    pub fn build(self: *TextLayoutCachePlanner, plan: TextLayoutPlan, previous: []const TextLayoutCacheEntry, frame_index: u64) Error!TextLayoutCachePlan {
-        return self.buildMany(&.{plan}, previous, frame_index);
+    pub fn build(self: *TextLayoutCachePlanner, plan: TextLayoutPlan, previous: []const TextLayoutCacheEntry, frame_index: u64, retention_frames: u64) Error!TextLayoutCachePlan {
+        return self.buildMany(&.{plan}, previous, frame_index, retention_frames);
     }
 
-    pub fn buildMany(self: *TextLayoutCachePlanner, plans: []const TextLayoutPlan, previous: []const TextLayoutCacheEntry, frame_index: u64) Error!TextLayoutCachePlan {
+    pub fn buildMany(self: *TextLayoutCachePlanner, plans: []const TextLayoutPlan, previous: []const TextLayoutCacheEntry, frame_index: u64, retention_frames: u64) Error!TextLayoutCachePlan {
         self.reset();
 
         for (plans, 0..) |plan, layout_index| {
@@ -5520,11 +5558,20 @@ pub const TextLayoutCachePlanner = struct {
 
         for (previous, 0..) |entry, index| {
             if (findTextLayoutCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
-            try self.appendAction(.{
-                .kind = .evict,
-                .key = entry.key,
-                .cache_index = index,
-            });
+            if (shouldRetainUnusedCacheEntry(frame_index, entry.last_used_frame, retention_frames) and self.hasEntryCapacity()) {
+                try self.appendEntry(entry);
+                try self.appendAction(.{
+                    .kind = .retain,
+                    .key = entry.key,
+                    .cache_index = index,
+                });
+            } else {
+                try self.appendAction(.{
+                    .kind = .evict,
+                    .key = entry.key,
+                    .cache_index = index,
+                });
+            }
         }
 
         return .{
@@ -5537,6 +5584,10 @@ pub const TextLayoutCachePlanner = struct {
         if (self.entry_len >= self.entries.len) return error.TextLayoutCacheListFull;
         self.entries[self.entry_len] = entry;
         self.entry_len += 1;
+    }
+
+    fn hasEntryCapacity(self: *TextLayoutCachePlanner) bool {
+        return self.entry_len < self.entries.len;
     }
 
     fn appendAction(self: *TextLayoutCachePlanner, action: TextLayoutCacheAction) Error!void {
@@ -15621,6 +15672,48 @@ test "glyph atlas cache plan uploads retains and evicts glyphs" {
     try std.testing.expectEqual(@as(usize, 1), cache.actions[2].cache_index.?);
 }
 
+test "glyph atlas cache plan keeps recent unused glyphs warm" {
+    const previous = [_]GlyphAtlasCacheEntry{
+        .{
+            .key = .{ .font_id = 1, .glyph_id = 65, .size = 14 },
+            .last_used_frame = 3,
+        },
+        .{
+            .key = .{ .font_id = 1, .glyph_id = 66, .size = 14 },
+            .last_used_frame = 3,
+        },
+    };
+    const atlas_entries = [_]GlyphAtlasEntry{.{
+        .key = .{ .font_id = 1, .glyph_id = 65, .size = 14 },
+        .command_index = 0,
+        .glyph_index = 0,
+    }};
+
+    var warm_entries: [2]GlyphAtlasCacheEntry = undefined;
+    var warm_actions: [2]GlyphAtlasCacheAction = undefined;
+    const warm = try (GlyphAtlasPlan{ .entries = &atlas_entries }).cachePlanWithRetention(&previous, 4, 2, &warm_entries, &warm_actions);
+    try std.testing.expectEqual(@as(usize, 2), warm.entryCount());
+    try std.testing.expectEqual(@as(usize, 0), warm.uploadCount());
+    try std.testing.expectEqual(@as(usize, 2), warm.retainCount());
+    try std.testing.expectEqual(@as(usize, 0), warm.evictCount());
+    try std.testing.expectEqual(@as(u64, 4), warm.entries[0].last_used_frame);
+    try std.testing.expectEqual(@as(u64, 3), warm.entries[1].last_used_frame);
+    try std.testing.expectEqual(@as(?usize, 0), warm.actions[0].atlas_index);
+    try std.testing.expectEqual(@as(?usize, 0), warm.actions[0].cache_index);
+    try std.testing.expect(warm.actions[1].atlas_index == null);
+    try std.testing.expectEqual(@as(?usize, 1), warm.actions[1].cache_index);
+
+    var stale_entries: [2]GlyphAtlasCacheEntry = undefined;
+    var stale_actions: [2]GlyphAtlasCacheAction = undefined;
+    const stale = try (GlyphAtlasPlan{ .entries = &atlas_entries }).cachePlanWithRetention(&previous, 6, 2, &stale_entries, &stale_actions);
+    try std.testing.expectEqual(@as(usize, 1), stale.entryCount());
+    try std.testing.expectEqual(@as(usize, 1), stale.retainCount());
+    try std.testing.expectEqual(@as(usize, 1), stale.evictCount());
+    try std.testing.expectEqual(GlyphAtlasCacheActionKind.evict, stale.actions[1].kind);
+    try std.testing.expectEqual(@as(u32, 66), stale.actions[1].key.glyph_id);
+    try std.testing.expectEqual(@as(?usize, 1), stale.actions[1].cache_index);
+}
+
 test "glyph atlas cache plan reports output overflow" {
     const atlas_entries = [_]GlyphAtlasEntry{.{
         .key = .{ .font_id = 1, .glyph_id = 65, .size = 14 },
@@ -17702,6 +17795,61 @@ test "display list text layout plan caches multiple text runs" {
     const retained = try plan_set.cachePlan(first.entries, 2, &retained_entries, &retained_actions);
     try std.testing.expectEqual(@as(usize, 2), retained.retainCount());
     try std.testing.expectEqual(@as(usize, 0), retained.evictCount());
+}
+
+test "text layout cache keeps recent unused layouts warm" {
+    const commands = [_]CanvasCommand{
+        .{ .draw_text = .{
+            .id = 1,
+            .font_id = 1,
+            .size = 10,
+            .origin = geometry.PointF.init(0, 10),
+            .color = Color.rgb8(0, 0, 0),
+            .text = "Alpha",
+        } },
+        .{ .draw_text = .{
+            .id = 2,
+            .font_id = 1,
+            .size = 10,
+            .origin = geometry.PointF.init(0, 28),
+            .color = Color.rgb8(0, 0, 0),
+            .text = "Beta",
+        } },
+    };
+
+    var plans: [2]TextLayoutPlan = undefined;
+    var lines: [2]TextLine = undefined;
+    const plan_set = try (DisplayList{ .commands = &commands }).textLayoutPlan(.{}, &plans, &lines);
+
+    var first_entries: [2]TextLayoutCacheEntry = undefined;
+    var first_actions: [2]TextLayoutCacheAction = undefined;
+    const first = try plan_set.cachePlanWithRetention(&.{}, 1, 2, &first_entries, &first_actions);
+    try std.testing.expectEqual(@as(usize, 2), first.uploadCount());
+
+    const visible_plan_set = TextLayoutPlanSet{ .plans = plan_set.plans[0..1] };
+    var warm_entries: [2]TextLayoutCacheEntry = undefined;
+    var warm_actions: [2]TextLayoutCacheAction = undefined;
+    const warm = try visible_plan_set.cachePlanWithRetention(first.entries, 2, 2, &warm_entries, &warm_actions);
+    try std.testing.expectEqual(@as(usize, 2), warm.entryCount());
+    try std.testing.expectEqual(@as(usize, 0), warm.uploadCount());
+    try std.testing.expectEqual(@as(usize, 2), warm.retainCount());
+    try std.testing.expectEqual(@as(usize, 0), warm.evictCount());
+    try std.testing.expectEqual(@as(u64, 2), warm.entries[0].last_used_frame);
+    try std.testing.expectEqual(@as(u64, 1), warm.entries[1].last_used_frame);
+    try std.testing.expectEqual(@as(?usize, 0), warm.actions[0].layout_index);
+    try std.testing.expectEqual(@as(?usize, 0), warm.actions[0].cache_index);
+    try std.testing.expect(warm.actions[1].layout_index == null);
+    try std.testing.expectEqual(@as(?usize, 1), warm.actions[1].cache_index);
+
+    var stale_entries: [2]TextLayoutCacheEntry = undefined;
+    var stale_actions: [2]TextLayoutCacheAction = undefined;
+    const stale = try visible_plan_set.cachePlanWithRetention(first.entries, 4, 2, &stale_entries, &stale_actions);
+    try std.testing.expectEqual(@as(usize, 1), stale.entryCount());
+    try std.testing.expectEqual(@as(usize, 1), stale.retainCount());
+    try std.testing.expectEqual(@as(usize, 1), stale.evictCount());
+    try std.testing.expectEqual(TextLayoutCacheActionKind.evict, stale.actions[1].kind);
+    try std.testing.expect(stale.actions[1].layout_index == null);
+    try std.testing.expectEqual(@as(?usize, 1), stale.actions[1].cache_index);
 }
 
 test "display list text layout plan honors per-run options" {
