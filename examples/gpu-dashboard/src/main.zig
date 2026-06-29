@@ -702,6 +702,7 @@ test "gpu dashboard display list renders through the reference surface" {
     const surface = try canvas.ReferenceRenderSurface.init(720, 520, pixels);
     try surface.renderPass(frame.renderPass(), color(0, 0, 0));
 
+    try std.testing.expectEqual(@as(u64, 5239693544687084243), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(8, 8));
     try expectVisiblePixel(surface.pixelRgba8(64, 64));
     try expectVisiblePixel(surface.pixelRgba8(240, 140));
@@ -915,4 +916,12 @@ test "gpu dashboard frame event adapter preserves renderer diagnostics" {
 fn expectVisiblePixel(pixel: [4]u8) !void {
     try std.testing.expect(pixel[3] > 0);
     try std.testing.expect(pixel[0] != 0 or pixel[1] != 0 or pixel[2] != 0);
+}
+
+fn referenceSurfaceSignature(pixels: []const u8) u64 {
+    var hash: u64 = 14695981039346656037;
+    for (pixels) |byte| {
+        hash = (hash ^ byte) *% 1099511628211;
+    }
+    return hash;
 }
