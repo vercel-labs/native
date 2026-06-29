@@ -1550,8 +1550,190 @@ pub const CanvasFrameDiagnostics = struct {
     }
 };
 
+pub const CanvasFrameProfileRisk = enum {
+    idle,
+    low,
+    moderate,
+    high,
+};
+
+pub const CanvasFrameProfile = struct {
+    frame_index: u64 = 0,
+    requires_render: bool = false,
+    full_repaint: bool = false,
+    dirty_bounds: ?geometry.RectF = null,
+    surface_area: f32 = 0,
+    dirty_area: f32 = 0,
+    dirty_ratio: f32 = 0,
+    command_count: usize = 0,
+    batch_count: usize = 0,
+    encoder_command_count: usize = 0,
+    cache_action_count: usize = 0,
+    cache_upload_count: usize = 0,
+    cache_retain_count: usize = 0,
+    cache_evict_count: usize = 0,
+    path_geometry_vertex_count: usize = 0,
+    path_geometry_index_count: usize = 0,
+    image_count: usize = 0,
+    layer_count: usize = 0,
+    visual_effect_count: usize = 0,
+    glyph_atlas_entry_count: usize = 0,
+    text_layout_line_count: usize = 0,
+    work_units: usize = 0,
+    risk: CanvasFrameProfileRisk = .idle,
+
+    pub fn writeJson(self: CanvasFrameProfile, writer: anytype) !void {
+        try writer.print(
+            "{{\"frameIndex\":{d},\"requiresRender\":{},\"fullRepaint\":{},\"dirtyBounds\":",
+            .{ self.frame_index, self.requires_render, self.full_repaint },
+        );
+        try writeOptionalRectJson(self.dirty_bounds, writer);
+        try writer.print(
+            ",\"surfaceArea\":{d},\"dirtyArea\":{d},\"dirtyRatio\":{d},\"commandCount\":{d},\"batchCount\":{d},\"encoderCommandCount\":{d},\"cacheActionCount\":{d},\"cacheUploadCount\":{d},\"cacheRetainCount\":{d},\"cacheEvictCount\":{d},\"pathGeometryVertexCount\":{d},\"pathGeometryIndexCount\":{d},\"imageCount\":{d},\"layerCount\":{d},\"visualEffectCount\":{d},\"glyphAtlasEntryCount\":{d},\"textLayoutLineCount\":{d},\"workUnits\":{d},\"risk\":",
+            .{
+                self.surface_area,
+                self.dirty_area,
+                self.dirty_ratio,
+                self.command_count,
+                self.batch_count,
+                self.encoder_command_count,
+                self.cache_action_count,
+                self.cache_upload_count,
+                self.cache_retain_count,
+                self.cache_evict_count,
+                self.path_geometry_vertex_count,
+                self.path_geometry_index_count,
+                self.image_count,
+                self.layer_count,
+                self.visual_effect_count,
+                self.glyph_atlas_entry_count,
+                self.text_layout_line_count,
+                self.work_units,
+            },
+        );
+        try json.writeString(writer, @tagName(self.risk));
+        try writer.writeByte('}');
+    }
+};
+
 fn budgetExceeded(limit: usize, value: usize) bool {
     return limit > 0 and value > limit;
+}
+
+fn canvasFrameProfile(frame: CanvasFrame) CanvasFrameProfile {
+    const diagnostics = frame.diagnosticsWithoutBudgetStatus();
+    const surface_area = sizeArea(frame.surface_size);
+    const dirty_area = optionalRectArea(frame.dirty_bounds);
+    const cache_upload_count = diagnostics.pipeline_upload_count +
+        diagnostics.path_geometry_upload_count +
+        diagnostics.image_upload_count +
+        diagnostics.layer_upload_count +
+        diagnostics.resource_upload_count +
+        diagnostics.visual_effect_upload_count +
+        diagnostics.glyph_atlas_upload_count +
+        diagnostics.text_layout_upload_count;
+    const cache_retain_count = diagnostics.pipeline_retain_count +
+        diagnostics.path_geometry_retain_count +
+        diagnostics.image_retain_count +
+        diagnostics.layer_retain_count +
+        diagnostics.resource_retain_count +
+        diagnostics.visual_effect_retain_count +
+        diagnostics.glyph_atlas_retain_count +
+        diagnostics.text_layout_retain_count;
+    const cache_evict_count = diagnostics.pipeline_evict_count +
+        diagnostics.path_geometry_evict_count +
+        diagnostics.image_evict_count +
+        diagnostics.layer_evict_count +
+        diagnostics.resource_evict_count +
+        diagnostics.visual_effect_evict_count +
+        diagnostics.glyph_atlas_evict_count +
+        diagnostics.text_layout_evict_count;
+    var profile = CanvasFrameProfile{
+        .frame_index = frame.frame_index,
+        .requires_render = frame.requiresRender(),
+        .full_repaint = frame.full_repaint,
+        .dirty_bounds = frame.dirty_bounds,
+        .surface_area = surface_area,
+        .dirty_area = dirty_area,
+        .dirty_ratio = dirtyAreaRatio(dirty_area, surface_area),
+        .command_count = diagnostics.command_count,
+        .batch_count = diagnostics.batch_count,
+        .encoder_command_count = diagnostics.encoder_command_count,
+        .cache_action_count = cache_upload_count + cache_retain_count + cache_evict_count,
+        .cache_upload_count = cache_upload_count,
+        .cache_retain_count = cache_retain_count,
+        .cache_evict_count = cache_evict_count,
+        .path_geometry_vertex_count = diagnostics.path_geometry_vertex_count,
+        .path_geometry_index_count = diagnostics.path_geometry_index_count,
+        .image_count = diagnostics.image_count,
+        .layer_count = diagnostics.layer_count,
+        .visual_effect_count = diagnostics.visual_effect_count,
+        .glyph_atlas_entry_count = diagnostics.glyph_atlas_entry_count,
+        .text_layout_line_count = diagnostics.text_layout_line_count,
+    };
+    profile.work_units = canvasFrameProfileWorkUnits(profile, diagnostics);
+    profile.risk = canvasFrameProfileRisk(profile, diagnostics);
+    return profile;
+}
+
+fn canvasFrameProfileWorkUnits(profile: CanvasFrameProfile, diagnostics: CanvasFrameDiagnostics) usize {
+    if (!profile.requires_render) return 0;
+
+    var units = profile.command_count +
+        profile.batch_count * 2 +
+        profile.encoder_command_count +
+        profile.cache_upload_count * 12 +
+        profile.cache_retain_count +
+        profile.cache_evict_count * 3 +
+        profile.image_count * 4 +
+        profile.layer_count * 3 +
+        diagnostics.visual_effect_shadow_count * 20 +
+        diagnostics.visual_effect_blur_count * 24 +
+        profile.glyph_atlas_entry_count * 2 +
+        profile.text_layout_line_count * 2;
+    units += profile.path_geometry_vertex_count / 8;
+    units += profile.path_geometry_index_count / 12;
+    if (profile.full_repaint or profile.dirty_ratio >= 0.75) {
+        units += 25;
+    } else if (profile.dirty_ratio >= 0.25) {
+        units += 10;
+    }
+    return units;
+}
+
+fn canvasFrameProfileRisk(profile: CanvasFrameProfile, diagnostics: CanvasFrameDiagnostics) CanvasFrameProfileRisk {
+    if (!profile.requires_render) return .idle;
+    if (profile.full_repaint or
+        profile.dirty_ratio >= 0.75 or
+        profile.cache_upload_count > 16 or
+        profile.work_units >= 160 or
+        (diagnostics.visual_effect_blur_count > 0 and profile.dirty_ratio >= 0.25))
+    {
+        return .high;
+    }
+    if (profile.dirty_ratio >= 0.25 or
+        profile.cache_upload_count > 4 or
+        profile.work_units >= 80 or
+        profile.visual_effect_count > 0)
+    {
+        return .moderate;
+    }
+    return .low;
+}
+
+fn sizeArea(size: geometry.SizeF) f32 {
+    return nonNegative(size.width) * nonNegative(size.height);
+}
+
+fn optionalRectArea(rect: ?geometry.RectF) f32 {
+    const value = rect orelse return 0;
+    const normalized = value.normalized();
+    return nonNegative(normalized.width) * nonNegative(normalized.height);
+}
+
+fn dirtyAreaRatio(dirty_area: f32, surface_area: f32) f32 {
+    if (surface_area <= 0) return if (dirty_area > 0) 1 else 0;
+    return std.math.clamp(dirty_area / surface_area, 0, 1);
 }
 
 pub const CanvasRenderPassLoadAction = enum {
@@ -1896,6 +2078,14 @@ pub const CanvasFrame = struct {
 
     pub fn writeDiagnosticsJson(self: CanvasFrame, writer: anytype) !void {
         try self.diagnostics().writeJson(writer);
+    }
+
+    pub fn profile(self: CanvasFrame) CanvasFrameProfile {
+        return canvasFrameProfile(self);
+    }
+
+    pub fn writeProfileJson(self: CanvasFrame, writer: anytype) !void {
+        try self.profile().writeJson(writer);
     }
 
     pub fn renderPass(self: CanvasFrame) CanvasRenderPass {
@@ -12951,6 +13141,15 @@ test "canvas frame plan carries image cache actions" {
     try std.testing.expectEqual(@as(usize, 1), diagnostics.image_upload_count);
     try std.testing.expectEqual(@as(usize, 0), diagnostics.image_retain_count);
     try std.testing.expectEqual(@as(usize, 0), diagnostics.image_evict_count);
+
+    const profile = frame.profile();
+    try std.testing.expectEqual(@as(u64, 6), profile.frame_index);
+    try std.testing.expect(profile.requires_render);
+    try std.testing.expect(profile.full_repaint);
+    try std.testing.expectEqual(@as(usize, 3), profile.cache_action_count);
+    try std.testing.expectEqual(@as(usize, 3), profile.cache_upload_count);
+    try std.testing.expectEqual(@as(usize, 1), profile.image_count);
+    try std.testing.expectEqual(CanvasFrameProfileRisk.high, profile.risk);
 }
 
 test "canvas frame plan carries resource cache retain upload and evict actions" {
@@ -13092,6 +13291,21 @@ test "canvas frame plan clips incremental dirty bounds to surface" {
     try std.testing.expectEqual(@as(usize, 2), render_pass.commandCount());
     try std.testing.expectEqual(@as(usize, 1), render_pass.batchCount());
     try expectRect(geometry.RectF.init(0, 0, 50, 40), render_pass.scissorBounds());
+
+    const profile = frame.profile();
+    try std.testing.expect(profile.requires_render);
+    try std.testing.expect(!profile.full_repaint);
+    try std.testing.expectEqual(@as(f32, 2500), profile.surface_area);
+    try std.testing.expectEqual(@as(f32, 2000), profile.dirty_area);
+    try std.testing.expectEqual(@as(f32, 0.8), profile.dirty_ratio);
+    try std.testing.expectEqual(CanvasFrameProfileRisk.high, profile.risk);
+
+    var profile_json_buffer: [1024]u8 = undefined;
+    var profile_json_writer = std.Io.Writer.fixed(&profile_json_buffer);
+    try frame.writeProfileJson(&profile_json_writer);
+    const profile_json = profile_json_writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, profile_json, "\"dirtyArea\":2000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile_json, "\"risk\":\"high\"") != null);
 }
 
 test "canvas frame plan leaves unchanged retained frame clean" {
@@ -13129,6 +13343,12 @@ test "canvas frame plan leaves unchanged retained frame clean" {
     try std.testing.expect(render_pass.scissorBounds() == null);
     try std.testing.expectEqual(@as(usize, 1), render_pass.commandCount());
     try std.testing.expectEqual(@as(usize, 1), render_pass.batchCount());
+
+    const profile = frame.profile();
+    try std.testing.expect(!profile.requires_render);
+    try std.testing.expectEqual(CanvasFrameProfileRisk.idle, profile.risk);
+    try std.testing.expectEqual(@as(usize, 0), profile.encoder_command_count);
+    try std.testing.expectEqual(@as(usize, 0), profile.work_units);
 }
 
 test "canvas frame plan applies render overrides without display list changes" {
