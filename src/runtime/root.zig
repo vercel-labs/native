@@ -4202,6 +4202,42 @@ const WidgetTextStorageRange = struct {
     end: usize = 0,
 };
 
+const CanvasWidgetScrollReconcileEntry = struct {
+    id: canvas.ObjectId = 0,
+    state: canvas.ScrollState = .{},
+};
+
+fn collectCanvasWidgetScrollReconcileEntries(
+    nodes: []const canvas.WidgetLayoutNode,
+    states: []const canvas.ScrollState,
+    output: []CanvasWidgetScrollReconcileEntry,
+) []const CanvasWidgetScrollReconcileEntry {
+    var len: usize = 0;
+    const count = @min(nodes.len, states.len);
+    for (nodes[0..count], 0..) |node, index| {
+        if (node.widget.kind != .scroll_view or node.widget.id == 0) continue;
+        if (len >= output.len) break;
+        output[len] = .{ .id = node.widget.id, .state = states[index] };
+        len += 1;
+    }
+    return output[0..len];
+}
+
+fn canvasWidgetScrollStateForLayoutNode(
+    node: canvas.WidgetLayoutNode,
+    previous: []const CanvasWidgetScrollReconcileEntry,
+) canvas.ScrollState {
+    var state = canvas.ScrollState{ .offset = node.widget.value };
+    if (node.widget.kind != .scroll_view or node.widget.id == 0) return state;
+    for (previous) |entry| {
+        if (entry.id == node.widget.id) {
+            state.velocity = entry.state.velocity;
+            return state;
+        }
+    }
+    return state;
+}
+
 fn appendWidgetTextStorageRange(buffer: []u8, len: *usize, value: []const u8) anyerror!WidgetTextStorageRange {
     const end = len.* + value.len;
     if (end > buffer.len) return error.WidgetTextTooLarge;
@@ -4901,14 +4937,21 @@ const RuntimeView = struct {
         }
 
         const source_semantics = try layout.collectSemantics(&self.widget_semantics_nodes);
+        var previous_scroll_entries: [max_canvas_widget_nodes_per_view]CanvasWidgetScrollReconcileEntry = undefined;
+        const previous_scroll_states = collectCanvasWidgetScrollReconcileEntries(
+            self.widgetLayoutTree().nodes,
+            self.widget_scroll_states[0..self.widget_layout_node_count],
+            &previous_scroll_entries,
+        );
 
         self.widget_layout_node_count = 0;
         self.widget_semantics_node_count = 0;
         self.widget_text_len = 0;
 
         for (layout.nodes) |node| {
-            self.widget_layout_nodes[self.widget_layout_node_count] = try self.copyWidgetLayoutNode(node, source_semantics);
-            self.widget_scroll_states[self.widget_layout_node_count] = .{ .offset = self.widget_layout_nodes[self.widget_layout_node_count].widget.value };
+            const copy = try self.copyWidgetLayoutNode(node, source_semantics);
+            self.widget_layout_nodes[self.widget_layout_node_count] = copy;
+            self.widget_scroll_states[self.widget_layout_node_count] = canvasWidgetScrollStateForLayoutNode(copy, previous_scroll_states);
             self.widget_layout_node_count += 1;
         }
 
@@ -9315,6 +9358,89 @@ test "runtime wheel input scrolls retained canvas scroll views" {
     try std.testing.expectEqual(@as(u64, 4), idle.widget_revision);
     try std.testing.expect(!harness.runtime.invalidated);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDirtyRegions().len);
+}
+
+test "runtime reconciles canvas widget scroll momentum across layout replacement" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-scroll-reconcile", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 220, 96),
+    });
+
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "One" },
+        .{ .id = 3, .kind = .button, .frame = geometry.RectF.init(0, 44, 0, 32), .text = "Two" },
+        .{ .id = 4, .kind = .button, .frame = geometry.RectF.init(0, 88, 0, 32), .text = "Three" },
+    };
+    const scroll = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .frame = geometry.RectF.init(0, 0, 180, 72),
+        .children = &children,
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(scroll, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .scroll,
+        .x = 20,
+        .y = 20,
+        .delta_y = 24,
+    } });
+    try std.testing.expect(harness.runtime.views[0].widget_scroll_states[0].velocity > 0);
+
+    const scrolled = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const current_offset = scrolled.findById(1).?.widget.value;
+    try std.testing.expectEqual(@as(f32, 24), current_offset);
+
+    const refreshed_scroll = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .frame = geometry.RectF.init(24, 12, 180, 72),
+        .value = current_offset,
+        .children = &children,
+    };
+    const refreshed_widgets = [_]canvas.Widget{
+        .{ .id = 10, .kind = .text, .frame = geometry.RectF.init(8, 0, 120, 12), .text = "Activity" },
+        refreshed_scroll,
+    };
+    var refreshed_nodes: [6]canvas.WidgetLayoutNode = undefined;
+    const refreshed_layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &refreshed_widgets }, geometry.RectF.init(0, 0, 220, 96), &refreshed_nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", refreshed_layout);
+
+    const refreshed = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 24), refreshed.findById(1).?.widget.value);
+    try std.testing.expect(harness.runtime.views[0].widget_scroll_states[2].velocity > 0);
+
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    const kinetic = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
+    try std.testing.expectEqual(@as(u64, 4), kinetic.widget_revision);
+    try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expect(harness.runtime.pendingDirtyRegions().len >= 1);
+    try std.testing.expectEqualDeep(geometry.RectF.init(34, 32, 180, 72), harness.runtime.pendingDirtyRegions()[0]);
+
+    const kinetic_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectApproxEqAbs(@as(f32, 47.04), kinetic_layout.findById(1).?.widget.value, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, -35.04), kinetic_layout.findById(2).?.frame.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 8.96), kinetic_layout.findById(3).?.frame.y, 0.01);
 }
 
 test "runtime chains wheel input from saturated nested canvas scroll views" {
