@@ -7897,6 +7897,13 @@ fn referenceImageDestinationRect(dst: geometry.RectF, src: geometry.RectF, fit: 
     );
 }
 
+const ReferencePremultipliedLinearColor = struct {
+    r: f32 = 0,
+    g: f32 = 0,
+    b: f32 = 0,
+    a: f32 = 0,
+};
+
 fn referenceSampleImage(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32) [4]u8 {
     const sample_x_f = src.x + std.math.clamp(u, 0, 1) * src.width - 0.5;
     const sample_y_f = src.y + std.math.clamp(v, 0, 1) * src.height - 0.5;
@@ -7914,11 +7921,15 @@ fn referenceSampleImage(image: ReferenceImage, src: geometry.RectF, u: f32, v: f
     const bottom_left = referenceImagePixel(image, x0, y1);
     const bottom_right = referenceImagePixel(image, x1, y1);
 
+    const sample = referenceBilinearPremultipliedLinearColor(top_left, top_right, bottom_left, bottom_right, tx, ty);
+    if (sample.a <= 0.000001) return .{ 0, 0, 0, 0 };
+
+    const inverse_alpha = 1 / sample.a;
     return .{
-        referenceBilinearSrgbChannel(top_left[0], top_right[0], bottom_left[0], bottom_right[0], tx, ty),
-        referenceBilinearSrgbChannel(top_left[1], top_right[1], bottom_left[1], bottom_right[1], tx, ty),
-        referenceBilinearSrgbChannel(top_left[2], top_right[2], bottom_left[2], bottom_right[2], tx, ty),
-        referenceBilinearChannel(top_left[3], top_right[3], bottom_left[3], bottom_right[3], tx, ty),
+        colorChannelToByte(referenceLinearToSrgb(sample.r * inverse_alpha)),
+        colorChannelToByte(referenceLinearToSrgb(sample.g * inverse_alpha)),
+        colorChannelToByte(referenceLinearToSrgb(sample.b * inverse_alpha)),
+        colorChannelToByte(sample.a),
     };
 }
 
@@ -7932,28 +7943,30 @@ fn referenceImagePixel(image: ReferenceImage, x: i32, y: i32) [4]u8 {
     };
 }
 
-fn referenceBilinearSrgbChannel(top_left: u8, top_right: u8, bottom_left: u8, bottom_right: u8, tx: f32, ty: f32) u8 {
-    const top = referenceLerpSrgbByte(top_left, top_right, tx);
-    const bottom = referenceLerpSrgbByte(bottom_left, bottom_right, tx);
-    return colorChannelToByte(referenceLinearToSrgb(top + (bottom - top) * std.math.clamp(ty, 0, 1)));
+fn referenceBilinearPremultipliedLinearColor(top_left: [4]u8, top_right: [4]u8, bottom_left: [4]u8, bottom_right: [4]u8, tx: f32, ty: f32) ReferencePremultipliedLinearColor {
+    const top = referenceMixPremultipliedLinearColor(referencePremultiplySrgba8(top_left), referencePremultiplySrgba8(top_right), tx);
+    const bottom = referenceMixPremultipliedLinearColor(referencePremultiplySrgba8(bottom_left), referencePremultiplySrgba8(bottom_right), tx);
+    return referenceMixPremultipliedLinearColor(top, bottom, ty);
 }
 
-fn referenceBilinearChannel(top_left: u8, top_right: u8, bottom_left: u8, bottom_right: u8, tx: f32, ty: f32) u8 {
-    const top = referenceLerpByte(top_left, top_right, tx);
-    const bottom = referenceLerpByte(bottom_left, bottom_right, tx);
-    return colorChannelToByte((top + (bottom - top) * ty) / 255.0);
+fn referencePremultiplySrgba8(pixel: [4]u8) ReferencePremultipliedLinearColor {
+    const alpha = @as(f32, @floatFromInt(pixel[3])) / 255.0;
+    return .{
+        .r = referenceSrgbToLinear(@as(f32, @floatFromInt(pixel[0])) / 255.0) * alpha,
+        .g = referenceSrgbToLinear(@as(f32, @floatFromInt(pixel[1])) / 255.0) * alpha,
+        .b = referenceSrgbToLinear(@as(f32, @floatFromInt(pixel[2])) / 255.0) * alpha,
+        .a = alpha,
+    };
 }
 
-fn referenceLerpSrgbByte(a: u8, b: u8, t: f32) f32 {
-    const start = referenceSrgbToLinear(@as(f32, @floatFromInt(a)) / 255.0);
-    const end = referenceSrgbToLinear(@as(f32, @floatFromInt(b)) / 255.0);
-    return start + (end - start) * std.math.clamp(t, 0, 1);
-}
-
-fn referenceLerpByte(a: u8, b: u8, t: f32) f32 {
-    const start: f32 = @floatFromInt(a);
-    const end: f32 = @floatFromInt(b);
-    return start + (end - start) * std.math.clamp(t, 0, 1);
+fn referenceMixPremultipliedLinearColor(a: ReferencePremultipliedLinearColor, b: ReferencePremultipliedLinearColor, t: f32) ReferencePremultipliedLinearColor {
+    const value = std.math.clamp(t, 0, 1);
+    return .{
+        .r = a.r + (b.r - a.r) * value,
+        .g = a.g + (b.g - a.g) * value,
+        .b = a.b + (b.b - a.b) * value,
+        .a = a.a + (b.a - a.a) * value,
+    };
 }
 
 fn referencePointInRoundedRect(point: geometry.PointF, rect: geometry.RectF, radius: Radius) bool {
@@ -14416,6 +14429,52 @@ test "reference renderer bilinear-filters scaled images" {
     try expectPixelRgba8(.{ 207, 137, 137, 255 }, surface, 1, 1);
     try expectPixelRgba8(.{ 207, 225, 225, 255 }, surface, 2, 2);
     try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 3, 3);
+}
+
+test "reference renderer filters scaled image alpha premultiplied" {
+    const commands = [_]CanvasCommand{.{ .draw_image = .{
+        .id = 1,
+        .image_id = 42,
+        .dst = geometry.RectF.init(0, 0, 4, 1),
+    } }};
+    const image_pixels = [_]u8{
+        255, 0, 0,   255,
+        0,   0, 255, 0,
+    };
+    const images = [_]ReferenceImage{.{
+        .id = 42,
+        .width = 2,
+        .height = 1,
+        .pixels = &image_pixels,
+    }};
+
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [1]RenderResource = undefined;
+    var resource_cache_entries: [1]RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [1]RenderResourceCacheAction = undefined;
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(4, 1),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    var pixels: [4 * 1 * 4]u8 = undefined;
+    const surface = (try ReferenceRenderSurface.init(4, 1, &pixels)).withImages(&images);
+    try surface.renderPass(frame.renderPass(), Color.rgba8(0, 0, 0, 0));
+
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 0, 0);
+    try expectPixelRgba8(.{ 255, 0, 0, 191 }, surface, 1, 0);
+    try expectPixelRgba8(.{ 255, 0, 0, 64 }, surface, 2, 0);
+    try expectPixelRgba8(.{ 0, 0, 0, 0 }, surface, 3, 0);
 }
 
 test "reference renderer rejects unsupported images" {
