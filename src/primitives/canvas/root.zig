@@ -2617,6 +2617,7 @@ pub const ThemeOptions = struct {
     color_scheme: ColorScheme = .light,
     contrast: ColorContrast = .standard,
     density: Density = .regular,
+    reduce_motion: bool = false,
 };
 
 pub const ColorTokens = struct {
@@ -2773,6 +2774,15 @@ pub const MotionTokens = struct {
     slow_ms: u32 = 260,
     easing: Easing = .standard,
     spring: SpringToken = .{},
+
+    pub fn reduced() MotionTokens {
+        return .{
+            .fast_ms = 0,
+            .normal_ms = 0,
+            .slow_ms = 0,
+            .easing = .linear,
+        };
+    }
 
     pub fn durationMs(self: MotionTokens, duration: MotionDuration) u32 {
         return switch (duration) {
@@ -2934,6 +2944,7 @@ pub const DesignTokens = struct {
     pub fn theme(options: ThemeOptions) DesignTokens {
         return .{
             .colors = ColorTokens.theme(options.color_scheme, options.contrast),
+            .motion = if (options.reduce_motion) MotionTokens.reduced() else .{},
             .density = options.density,
         };
     }
@@ -11971,6 +11982,12 @@ test "design tokens provide theme and contrast palettes" {
     try std.testing.expectEqualDeep(ColorTokens.highContrastDark(), high_contrast.colors);
     try std.testing.expectEqualDeep(Color.rgb8(0, 0, 0), high_contrast.colors.background);
     try std.testing.expectEqualDeep(Color.rgba8(255, 255, 255, 190), high_contrast.colors.border);
+
+    const reduced_motion = DesignTokens.theme(.{ .reduce_motion = true });
+    try std.testing.expectEqual(@as(u32, 0), reduced_motion.motion.durationMs(.fast));
+    try std.testing.expectEqual(@as(u32, 0), reduced_motion.motion.durationMs(.normal));
+    try std.testing.expectEqual(@as(u32, 0), reduced_motion.motion.durationMs(.slow));
+    try std.testing.expectEqual(Easing.linear, reduced_motion.motion.easing);
 }
 
 test "themed design tokens flow into widget display lists" {
@@ -16278,6 +16295,20 @@ test "motion tokens build render animations" {
     try std.testing.expectEqual(@as(f32, 3), override_animation.spring.mass);
     try std.testing.expectEqual(@as(f32, 140), override_animation.spring.stiffness);
     try std.testing.expectEqual(@as(f32, 18), override_animation.spring.damping);
+
+    const reduced = MotionTokens.reduced();
+    try std.testing.expectEqual(@as(u32, 0), reduced.durationMs(.fast));
+    try std.testing.expectEqual(@as(u32, 0), reduced.durationMs(.normal));
+    try std.testing.expectEqual(@as(u32, 0), reduced.durationMs(.slow));
+    const reduced_animation = reduced.animation(.{
+        .id = 9,
+        .duration = .slow,
+        .from_opacity = 0,
+        .to_opacity = 1,
+    });
+    try std.testing.expectEqual(@as(u32, 0), reduced_animation.duration_ms);
+    try std.testing.expectEqual(Easing.linear, reduced_animation.easing);
+    try std.testing.expectEqual(@as(f32, 1), motionProgress(reduced_animation, reduced_animation.start_ns));
 }
 
 test "reference renderer clears and fills solid rect render pass" {
