@@ -8553,7 +8553,7 @@ test "runtime retains canvas widget layout for automation semantics" {
     try std.testing.expectEqual(@as(usize, 1), info.widget_semantics_count);
     try std.testing.expect(harness.runtime.invalidated);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.pendingDirtyRegions().len);
-    try std.testing.expectEqualDeep(geometry.RectF.init(60, 82, 96, 32), harness.runtime.pendingDirtyRegions()[0]);
+    try std.testing.expectEqualDeep(geometry.RectF.init(59.5, 81.5, 97, 33), harness.runtime.pendingDirtyRegions()[0]);
 
     const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqual(@as(usize, 2), retained.nodeCount());
@@ -10472,7 +10472,7 @@ test "runtime invalidates canvas widget layout and semantics changes" {
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", moved);
     try std.testing.expect(harness.runtime.invalidated);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.pendingDirtyRegions().len);
-    try std.testing.expectEqualDeep(geometry.RectF.init(60, 80, 100, 32), harness.runtime.pendingDirtyRegions()[0]);
+    try std.testing.expectEqualDeep(geometry.RectF.init(59.5, 79.5, 101, 33), harness.runtime.pendingDirtyRegions()[0]);
 
     const renamed_children = [_]canvas.Widget{.{
         .id = 2,

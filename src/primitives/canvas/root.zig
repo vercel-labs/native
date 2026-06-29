@@ -7243,7 +7243,7 @@ fn diffWidgetLayoutTrees(previous: WidgetLayoutTree, next: WidgetLayoutTree, out
                 .kind = .removed,
                 .id = id,
                 .previous_index = previous_index,
-                .dirty_bounds = previous_node.frame,
+                .dirty_bounds = widgetFullPaintBounds(previous_node),
                 .layout_dirty = true,
                 .paint_dirty = true,
                 .semantics_dirty = true,
@@ -7265,7 +7265,7 @@ fn diffWidgetLayoutTrees(previous: WidgetLayoutTree, next: WidgetLayoutTree, out
                 .kind = .added,
                 .id = id,
                 .next_index = next_index,
-                .dirty_bounds = next_node.frame,
+                .dirty_bounds = widgetFullPaintBounds(next_node),
                 .layout_dirty = true,
                 .paint_dirty = true,
                 .semantics_dirty = true,
@@ -7327,18 +7327,111 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         !widgetSemanticsEqual(previous.widget.semantics, next.widget.semantics);
     const paint_dirty = layout_dirty or content_dirty or state_dirty;
 
+    const dirty_bounds = if (layout_dirty)
+        unionOptionalBounds(widgetFullPaintBounds(previous), widgetFullPaintBounds(next))
+    else if (paint_dirty)
+        widgetPaintChangeBounds(previous.widget, next.widget)
+    else
+        null;
+
     return .{
         .kind = .changed,
         .id = previous.widget.id,
         .previous_index = previous_index,
         .next_index = next_index,
-        .dirty_bounds = if (layout_dirty or paint_dirty)
-            unionOptionalBounds(previous.frame, next.frame)
-        else
-            null,
+        .dirty_bounds = dirty_bounds,
         .layout_dirty = layout_dirty,
         .paint_dirty = paint_dirty,
         .semantics_dirty = semantics_dirty,
+    };
+}
+
+fn widgetFullPaintBounds(node: WidgetLayoutNode) geometry.RectF {
+    var bounds = node.frame.normalized();
+    if (widgetFrameStrokeBounds(node.widget)) |stroke_bounds| {
+        bounds = geometry.RectF.unionWith(bounds, stroke_bounds.normalized());
+    }
+    if (widgetShadowPaintBounds(node.widget)) |shadow_bounds| {
+        bounds = geometry.RectF.unionWith(bounds, shadow_bounds.normalized());
+    }
+    return bounds;
+}
+
+fn widgetPaintChangeBounds(previous: Widget, next: Widget) ?geometry.RectF {
+    var bounds = unionOptionalBounds(previous.frame, next.frame);
+    bounds = unionOptionalBounds(bounds, widgetFocusPaintBounds(previous));
+    bounds = unionOptionalBounds(bounds, widgetFocusPaintBounds(next));
+    return bounds;
+}
+
+fn widgetFrameStrokeBounds(widget: Widget) ?geometry.RectF {
+    const width = widgetFrameStrokeWidth(widget);
+    if (width <= 0) return null;
+    return strokeBounds(widget.frame, width);
+}
+
+fn widgetFocusPaintBounds(widget: Widget) ?geometry.RectF {
+    if (!widget.state.focused or widgetFocusStrokeWidth(widget) <= 0) return null;
+    const tokens: DesignTokens = .{};
+    return strokeBounds(widget.frame, tokens.stroke.focus);
+}
+
+fn widgetFrameStrokeWidth(widget: Widget) f32 {
+    const tokens: DesignTokens = .{};
+    return switch (widget.kind) {
+        .panel, .popover, .menu_surface => tokens.stroke.hairline,
+        .button, .icon_button, .text_field, .search_field, .segmented_control => if (widget.state.focused) tokens.stroke.focus else tokens.stroke.regular,
+        .data_cell => if (widget.state.focused) tokens.stroke.focus else tokens.stroke.hairline,
+        .slider => if (widget.state.focused) tokens.stroke.focus else tokens.stroke.regular,
+        .list_item, .menu_item, .checkbox, .toggle => if (widget.state.focused) tokens.stroke.focus else 0,
+        else => 0,
+    };
+}
+
+fn widgetFocusStrokeWidth(widget: Widget) f32 {
+    const tokens: DesignTokens = .{};
+    return switch (widget.kind) {
+        .button,
+        .icon_button,
+        .text_field,
+        .search_field,
+        .menu_item,
+        .list_item,
+        .data_cell,
+        .segmented_control,
+        .checkbox,
+        .toggle,
+        .slider,
+        => tokens.stroke.focus,
+        else => 0,
+    };
+}
+
+fn widgetShadowPaintBounds(widget: Widget) ?geometry.RectF {
+    const tokens: DesignTokens = .{};
+    const token = switch (widget.kind) {
+        .panel, .tooltip => tokens.shadow.sm,
+        .popover, .menu_surface => tokens.shadow.md,
+        else => return null,
+    };
+    if (token.y == 0 and token.blur == 0 and token.spread == 0) return null;
+    return shadowBounds(.{
+        .rect = widget.frame,
+        .radius = widgetShadowRadius(widget),
+        .offset = .{ .dx = 0, .dy = token.y },
+        .blur = token.blur,
+        .spread = token.spread,
+        .color = tokens.colors.shadow,
+    });
+}
+
+fn widgetShadowRadius(widget: Widget) Radius {
+    const tokens: DesignTokens = .{};
+    return switch (widget.kind) {
+        .popover => Radius.all(tokens.radius.xl),
+        .panel, .menu_surface => Radius.all(tokens.radius.lg),
+        .tooltip => Radius.all(tokens.radius.md),
+        else => Radius.all(0),
     };
 }
 
@@ -11478,7 +11571,7 @@ test "widget layout diff tracks added removed and layout changes by id" {
     try std.testing.expect(invalidations[0].layout_dirty);
     try std.testing.expect(invalidations[0].paint_dirty);
     try std.testing.expect(invalidations[0].semantics_dirty);
-    try expectRect(geometry.RectF.init(10, 10, 110, 30), invalidations[0].dirty_bounds);
+    try expectRect(geometry.RectF.init(9.5, 9, 111.5, 32), invalidations[0].dirty_bounds);
 
     try std.testing.expectEqual(WidgetInvalidationKind.removed, invalidations[1].kind);
     try std.testing.expectEqual(@as(ObjectId, 3), invalidations[1].id);
@@ -11487,6 +11580,50 @@ test "widget layout diff tracks added removed and layout changes by id" {
     try std.testing.expectEqual(WidgetInvalidationKind.added, invalidations[2].kind);
     try std.testing.expectEqual(@as(ObjectId, 4), invalidations[2].id);
     try expectRect(geometry.RectF.init(10, 50, 100, 20), invalidations[2].dirty_bounds);
+}
+
+test "widget layout diff includes paint overdraw in dirty bounds" {
+    const panel_child = [_]Widget{.{
+        .id = 2,
+        .kind = .panel,
+        .frame = geometry.RectF.init(10, 10, 100, 40),
+    }};
+    const unfocused_child = [_]Widget{.{
+        .id = 3,
+        .kind = .button,
+        .frame = geometry.RectF.init(10, 70, 100, 30),
+        .text = "Focus",
+    }};
+    const focused_child = [_]Widget{.{
+        .id = 3,
+        .kind = .button,
+        .frame = geometry.RectF.init(10, 70, 100, 30),
+        .text = "Focus",
+        .state = .{ .focused = true },
+    }};
+
+    var previous_panel_nodes: [2]WidgetLayoutNode = undefined;
+    var next_panel_nodes: [1]WidgetLayoutNode = undefined;
+    const previous_panel = try layoutWidgetTree(.{ .kind = .stack, .children = &panel_child }, geometry.RectF.init(0, 0, 160, 120), &previous_panel_nodes);
+    const next_panel = try layoutWidgetTree(.{ .kind = .stack, .children = &.{} }, geometry.RectF.init(0, 0, 160, 120), &next_panel_nodes);
+
+    var invalidations_buffer: [2]WidgetInvalidation = undefined;
+    const panel_invalidations = try WidgetLayoutTree.diff(previous_panel, next_panel, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 1), panel_invalidations.len);
+    try std.testing.expectEqual(WidgetInvalidationKind.removed, panel_invalidations[0].kind);
+    try std.testing.expectEqual(@as(ObjectId, 2), panel_invalidations[0].id);
+    try expectRect(geometry.RectF.init(-14, -8, 148, 88), panel_invalidations[0].dirty_bounds);
+
+    var unfocused_nodes: [2]WidgetLayoutNode = undefined;
+    var focused_nodes: [2]WidgetLayoutNode = undefined;
+    const unfocused = try layoutWidgetTree(.{ .kind = .stack, .children = &unfocused_child }, geometry.RectF.init(0, 0, 160, 120), &unfocused_nodes);
+    const focused = try layoutWidgetTree(.{ .kind = .stack, .children = &focused_child }, geometry.RectF.init(0, 0, 160, 120), &focused_nodes);
+
+    const focus_invalidations = try WidgetLayoutTree.diff(unfocused, focused, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 1), focus_invalidations.len);
+    try std.testing.expectEqual(WidgetInvalidationKind.changed, focus_invalidations[0].kind);
+    try std.testing.expectEqual(@as(ObjectId, 3), focus_invalidations[0].id);
+    try expectRect(geometry.RectF.init(9, 69, 102, 32), focus_invalidations[0].dirty_bounds);
 }
 
 test "widget layout diff separates paint and semantics dirtiness" {
