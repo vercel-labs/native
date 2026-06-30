@@ -3434,6 +3434,195 @@ pub const PixelSnapTokens = struct {
     scale: f32 = 1,
 };
 
+pub const ColorTokenOverrides = struct {
+    background: ?Color = null,
+    surface: ?Color = null,
+    surface_subtle: ?Color = null,
+    surface_pressed: ?Color = null,
+    text: ?Color = null,
+    text_muted: ?Color = null,
+    border: ?Color = null,
+    accent: ?Color = null,
+    accent_text: ?Color = null,
+    destructive: ?Color = null,
+    destructive_text: ?Color = null,
+    focus_ring: ?Color = null,
+    shadow: ?Color = null,
+    disabled: ?Color = null,
+
+    pub fn apply(self: ColorTokenOverrides, base: ColorTokens) ColorTokens {
+        return applyFlatTokenOverrides(ColorTokens, base, self);
+    }
+};
+
+pub const TypographyTokenOverrides = struct {
+    font_id: ?FontId = null,
+    mono_font_id: ?FontId = null,
+    font_family: ?FontFamily = null,
+    mono_font_family: ?FontFamily = null,
+    body_size: ?f32 = null,
+    label_size: ?f32 = null,
+    title_size: ?f32 = null,
+    button_size: ?f32 = null,
+
+    pub fn apply(self: TypographyTokenOverrides, base: TypographyTokens) TypographyTokens {
+        return applyFlatTokenOverrides(TypographyTokens, base, self);
+    }
+};
+
+pub const SpacingTokenOverrides = struct {
+    xs: ?f32 = null,
+    sm: ?f32 = null,
+    md: ?f32 = null,
+    lg: ?f32 = null,
+    xl: ?f32 = null,
+
+    pub fn apply(self: SpacingTokenOverrides, base: SpacingTokens) SpacingTokens {
+        return applyFlatTokenOverrides(SpacingTokens, base, self);
+    }
+};
+
+pub const RadiusTokenOverrides = struct {
+    sm: ?f32 = null,
+    md: ?f32 = null,
+    lg: ?f32 = null,
+    xl: ?f32 = null,
+
+    pub fn apply(self: RadiusTokenOverrides, base: RadiusTokens) RadiusTokens {
+        return applyFlatTokenOverrides(RadiusTokens, base, self);
+    }
+};
+
+pub const StrokeTokenOverrides = struct {
+    hairline: ?f32 = null,
+    regular: ?f32 = null,
+    focus: ?f32 = null,
+
+    pub fn apply(self: StrokeTokenOverrides, base: StrokeTokens) StrokeTokens {
+        return applyFlatTokenOverrides(StrokeTokens, base, self);
+    }
+};
+
+pub const ShadowTokenOverrides = struct {
+    y: ?f32 = null,
+    blur: ?f32 = null,
+    spread: ?f32 = null,
+
+    pub fn apply(self: ShadowTokenOverrides, base: ShadowToken) ShadowToken {
+        return applyFlatTokenOverrides(ShadowToken, base, self);
+    }
+};
+
+pub const ShadowTokensOverrides = struct {
+    none: ShadowTokenOverrides = .{},
+    sm: ShadowTokenOverrides = .{},
+    md: ShadowTokenOverrides = .{},
+
+    pub fn apply(self: ShadowTokensOverrides, base: ShadowTokens) ShadowTokens {
+        var next = base;
+        next.none = self.none.apply(next.none);
+        next.sm = self.sm.apply(next.sm);
+        next.md = self.md.apply(next.md);
+        return next;
+    }
+};
+
+pub const BlurTokenOverrides = struct {
+    none: ?f32 = null,
+    sm: ?f32 = null,
+    md: ?f32 = null,
+
+    pub fn apply(self: BlurTokenOverrides, base: BlurTokens) BlurTokens {
+        return applyFlatTokenOverrides(BlurTokens, base, self);
+    }
+};
+
+pub const SpringTokenOverrides = struct {
+    mass: ?f32 = null,
+    stiffness: ?f32 = null,
+    damping: ?f32 = null,
+
+    pub fn apply(self: SpringTokenOverrides, base: SpringToken) SpringToken {
+        return applyFlatTokenOverrides(SpringToken, base, self);
+    }
+};
+
+pub const MotionTokenOverrides = struct {
+    fast_ms: ?u32 = null,
+    normal_ms: ?u32 = null,
+    slow_ms: ?u32 = null,
+    easing: ?Easing = null,
+    spring: SpringTokenOverrides = .{},
+
+    pub fn apply(self: MotionTokenOverrides, base: MotionTokens) MotionTokens {
+        var next = applyFlatTokenOverrides(MotionTokens, base, .{
+            .fast_ms = self.fast_ms,
+            .normal_ms = self.normal_ms,
+            .slow_ms = self.slow_ms,
+            .easing = self.easing,
+        });
+        next.spring = self.spring.apply(next.spring);
+        return next;
+    }
+};
+
+pub const ScrollPhysicsOverrides = struct {
+    wheel_multiplier: ?f32 = null,
+    wheel_velocity_scale: ?f32 = null,
+    deceleration_per_second: ?f32 = null,
+    stop_velocity: ?f32 = null,
+    rubberband_extent_ratio: ?f32 = null,
+    rubberband_max_extent: ?f32 = null,
+    rubberband_resistance: ?f32 = null,
+    rubberband_return_per_second: ?f32 = null,
+    rubberband_velocity_decay_per_second: ?f32 = null,
+    rubberband_snap_distance: ?f32 = null,
+
+    pub fn apply(self: ScrollPhysicsOverrides, base: ScrollPhysics) ScrollPhysics {
+        return applyFlatTokenOverrides(ScrollPhysics, base, self);
+    }
+};
+
+pub const LayerTokenOverrides = struct {
+    base: ?i32 = null,
+    floating: ?i32 = null,
+    overlay: ?i32 = null,
+    modal: ?i32 = null,
+
+    pub fn apply(self: LayerTokenOverrides, base: LayerTokens) LayerTokens {
+        return applyFlatTokenOverrides(LayerTokens, base, self);
+    }
+};
+
+pub const PixelSnapTokenOverrides = struct {
+    geometry: ?bool = null,
+    text: ?bool = null,
+    scale: ?f32 = null,
+
+    pub fn apply(self: PixelSnapTokenOverrides, base: PixelSnapTokens) PixelSnapTokens {
+        return applyFlatTokenOverrides(PixelSnapTokens, base, self);
+    }
+};
+
+pub const DesignTokenOverrides = struct {
+    colors: ColorTokenOverrides = .{},
+    typography: TypographyTokenOverrides = .{},
+    spacing: SpacingTokenOverrides = .{},
+    radius: RadiusTokenOverrides = .{},
+    stroke: StrokeTokenOverrides = .{},
+    shadow: ShadowTokensOverrides = .{},
+    blur: BlurTokenOverrides = .{},
+    motion: MotionTokenOverrides = .{},
+    scroll: ScrollPhysicsOverrides = .{},
+    layer: LayerTokenOverrides = .{},
+    pixel_snap: PixelSnapTokenOverrides = .{},
+    density: ?Density = null,
+
+    pub fn apply(self: DesignTokenOverrides, base: DesignTokens) DesignTokens {
+        return base.withOverrides(self);
+    }
+};
+
 pub const DesignTokens = struct {
     colors: ColorTokens = .{},
     typography: TypographyTokens = .{},
@@ -3455,7 +3644,38 @@ pub const DesignTokens = struct {
             .density = options.density,
         };
     }
+
+    pub fn themeWithOverrides(options: ThemeOptions, overrides: DesignTokenOverrides) DesignTokens {
+        return theme(options).withOverrides(overrides);
+    }
+
+    pub fn withOverrides(self: DesignTokens, overrides: DesignTokenOverrides) DesignTokens {
+        var next = self;
+        next.colors = overrides.colors.apply(next.colors);
+        next.typography = overrides.typography.apply(next.typography);
+        next.spacing = overrides.spacing.apply(next.spacing);
+        next.radius = overrides.radius.apply(next.radius);
+        next.stroke = overrides.stroke.apply(next.stroke);
+        next.shadow = overrides.shadow.apply(next.shadow);
+        next.blur = overrides.blur.apply(next.blur);
+        next.motion = overrides.motion.apply(next.motion);
+        next.scroll = overrides.scroll.apply(next.scroll);
+        next.layer = overrides.layer.apply(next.layer);
+        next.pixel_snap = overrides.pixel_snap.apply(next.pixel_snap);
+        if (overrides.density) |density| next.density = density;
+        return next;
+    }
 };
+
+fn applyFlatTokenOverrides(comptime Token: type, base: Token, overrides: anytype) Token {
+    var next = base;
+    inline for (@typeInfo(@TypeOf(overrides)).@"struct".fields) |field| {
+        if (@field(overrides, field.name)) |value| {
+            @field(next, field.name) = value;
+        }
+    }
+    return next;
+}
 
 pub const WidgetKind = enum {
     stack,
@@ -14037,6 +14257,112 @@ test "design tokens provide theme and contrast palettes" {
     try std.testing.expectEqual(@as(u32, 0), reduced_motion.motion.durationMs(.normal));
     try std.testing.expectEqual(@as(u32, 0), reduced_motion.motion.durationMs(.slow));
     try std.testing.expectEqual(Easing.linear, reduced_motion.motion.easing);
+}
+
+test "design token overrides compose with built-in themes" {
+    const overrides = DesignTokenOverrides{
+        .colors = .{
+            .accent = Color.rgb8(12, 34, 56),
+            .accent_text = Color.rgb8(240, 244, 248),
+            .focus_ring = Color.rgb8(96, 165, 250),
+        },
+        .typography = .{
+            .font_family = .system_sans,
+            .button_size = 16,
+        },
+        .spacing = .{ .md = 14 },
+        .radius = .{ .md = 6, .xl = 18 },
+        .stroke = .{ .focus = 3 },
+        .shadow = .{ .md = .{ .blur = 32, .spread = -16 } },
+        .blur = .{ .md = 22 },
+        .motion = .{
+            .normal_ms = 140,
+            .easing = .emphasized,
+            .spring = .{ .damping = 20 },
+        },
+        .scroll = .{
+            .wheel_multiplier = 1.25,
+            .rubberband_max_extent = 120,
+        },
+        .layer = .{ .overlay = 240 },
+        .pixel_snap = .{ .geometry = true, .text = true, .scale = 2 },
+        .density = .spacious,
+    };
+    const base = DesignTokens.theme(.{ .color_scheme = .dark, .reduce_motion = true });
+    const tokens = base.withOverrides(overrides);
+
+    try std.testing.expectEqualDeep(ColorTokens.dark().background, tokens.colors.background);
+    try std.testing.expectEqualDeep(Color.rgb8(12, 34, 56), tokens.colors.accent);
+    try std.testing.expectEqualDeep(Color.rgb8(240, 244, 248), tokens.colors.accent_text);
+    try std.testing.expectEqualDeep(Color.rgb8(96, 165, 250), tokens.colors.focus_ring);
+    try std.testing.expectEqual(FontFamily.system_sans, tokens.typography.font_family);
+    try std.testing.expectEqual(default_mono_font_family, tokens.typography.mono_font_family);
+    try std.testing.expectEqual(@as(f32, 16), tokens.typography.button_size);
+    try std.testing.expectEqual(@as(f32, 14), tokens.spacing.md);
+    try std.testing.expectEqual(@as(f32, 6), tokens.radius.md);
+    try std.testing.expectEqual(@as(f32, 18), tokens.radius.xl);
+    try std.testing.expectEqual(@as(f32, 3), tokens.stroke.focus);
+    try std.testing.expectEqual(@as(f32, 32), tokens.shadow.md.blur);
+    try std.testing.expectEqual(@as(f32, -16), tokens.shadow.md.spread);
+    try std.testing.expectEqual(@as(f32, 22), tokens.blur.md);
+    try std.testing.expectEqual(@as(u32, 0), tokens.motion.durationMs(.fast));
+    try std.testing.expectEqual(@as(u32, 140), tokens.motion.durationMs(.normal));
+    try std.testing.expectEqual(Easing.emphasized, tokens.motion.easing);
+    try std.testing.expectEqual(@as(f32, 20), tokens.motion.spring.damping);
+    try std.testing.expectEqual(@as(f32, 1.25), tokens.scroll.wheel_multiplier);
+    try std.testing.expectEqual(@as(f32, 120), tokens.scroll.rubberband_max_extent);
+    try std.testing.expectEqual(@as(i32, 240), tokens.layer.overlay);
+    try std.testing.expect(tokens.pixel_snap.geometry);
+    try std.testing.expect(tokens.pixel_snap.text);
+    try std.testing.expectEqual(@as(f32, 2), tokens.pixel_snap.scale);
+    try std.testing.expectEqual(Density.spacious, tokens.density);
+
+    const rebuilt = DesignTokens.themeWithOverrides(.{ .color_scheme = .dark, .reduce_motion = true }, overrides);
+    try std.testing.expectEqualDeep(tokens, rebuilt);
+    try std.testing.expectEqualDeep(tokens, overrides.apply(base));
+}
+
+test "design token overrides flow into widget display lists" {
+    const tokens = DesignTokens.themeWithOverrides(.{}, .{
+        .colors = .{
+            .accent = Color.rgb8(80, 40, 120),
+            .accent_text = Color.rgb8(250, 250, 255),
+            .focus_ring = Color.rgb8(180, 120, 255),
+        },
+        .stroke = .{ .focus = 4 },
+        .radius = .{ .md = 5 },
+    });
+    const button = Widget{
+        .id = 42,
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 0, 120, 36),
+        .text = "Brand",
+        .state = .{ .selected = true, .focused = true },
+    };
+
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, button, tokens);
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 4), display_list.commandCount());
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| {
+            try expectFillColor(tokens.colors.accent, fill.fill);
+            try std.testing.expectEqualDeep(Radius.all(5), fill.radius);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .stroke_rect => |stroke| {
+            try expectFillColor(tokens.colors.focus_ring, stroke.stroke.fill);
+            try std.testing.expectEqual(@as(f32, 4), stroke.stroke.width);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[3]) {
+        .draw_text => |text| try std.testing.expectEqualDeep(tokens.colors.accent_text, text.color),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "typography tokens expose customizable font family metadata" {
