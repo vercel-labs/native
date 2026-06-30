@@ -3457,6 +3457,10 @@ pub const ControlTokens = struct {
     toggle: ControlVisualTokens = .{},
     slider: ControlVisualTokens = .{},
     progress: ControlVisualTokens = .{},
+    panel: ControlVisualTokens = .{},
+    popover: ControlVisualTokens = .{},
+    menu_surface: ControlVisualTokens = .{},
+    tooltip: ControlVisualTokens = .{},
 };
 
 pub const ColorTokenOverrides = struct {
@@ -3656,6 +3660,10 @@ pub const ControlTokenOverrides = struct {
     toggle: ControlVisualTokenOverrides = .{},
     slider: ControlVisualTokenOverrides = .{},
     progress: ControlVisualTokenOverrides = .{},
+    panel: ControlVisualTokenOverrides = .{},
+    popover: ControlVisualTokenOverrides = .{},
+    menu_surface: ControlVisualTokenOverrides = .{},
+    tooltip: ControlVisualTokenOverrides = .{},
 
     pub fn apply(self: ControlTokenOverrides, base: ControlTokens) ControlTokens {
         var next = base;
@@ -3673,6 +3681,10 @@ pub const ControlTokenOverrides = struct {
         next.toggle = self.toggle.apply(next.toggle);
         next.slider = self.slider.apply(next.slider);
         next.progress = self.progress.apply(next.progress);
+        next.panel = self.panel.apply(next.panel);
+        next.popover = self.popover.apply(next.popover);
+        next.menu_surface = self.menu_surface.apply(next.menu_surface);
+        next.tooltip = self.tooltip.apply(next.tooltip);
         return next;
     }
 };
@@ -7156,6 +7168,7 @@ fn emitWidgetLayoutClippedChildren(
 fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const radius = widgetRadius(widget, tokens.radius.lg);
     const shadow_token = tokens.shadow.sm;
+    const visual = surfaceControlVisualTokens(widget, tokens);
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
         try builder.shadow(.{
             .id = widgetPartId(widget.id, 1),
@@ -7172,14 +7185,14 @@ fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
-        .fill = widgetBackgroundFill(widget, tokens.colors.surface),
+        .fill = widgetBackgroundFill(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, widget.state.hovered, tokens.colors.surface)),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 3),
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = widgetBorderFill(widget, tokens.colors.border),
+            .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
             .width = widgetStrokeWidth(widget, tokens.stroke.hairline),
         },
     });
@@ -7188,6 +7201,7 @@ fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens
 fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const radius = widgetRadius(widget, tokens.radius.xl);
     const shadow_token = tokens.shadow.md;
+    const visual = surfaceControlVisualTokens(widget, tokens);
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
         try builder.shadow(.{
             .id = widgetPartId(widget.id, 1),
@@ -7204,14 +7218,14 @@ fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignToke
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
-        .fill = widgetBackgroundFill(widget, tokens.colors.surface),
+        .fill = widgetBackgroundFill(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, widget.state.hovered, tokens.colors.surface)),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 3),
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = widgetBorderFill(widget, tokens.colors.border),
+            .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
             .width = widgetStrokeWidth(widget, tokens.stroke.hairline),
         },
     });
@@ -7220,6 +7234,7 @@ fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignToke
 fn emitMenuSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const radius = widgetRadius(widget, tokens.radius.lg);
     const shadow_token = tokens.shadow.md;
+    const visual = surfaceControlVisualTokens(widget, tokens);
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
         try builder.shadow(.{
             .id = widgetPartId(widget.id, 1),
@@ -7236,14 +7251,14 @@ fn emitMenuSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: Design
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
-        .fill = widgetBackgroundFill(widget, tokens.colors.surface),
+        .fill = widgetBackgroundFill(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, widget.state.hovered, tokens.colors.surface)),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 3),
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = widgetBorderFill(widget, tokens.colors.border),
+            .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
             .width = widgetStrokeWidth(widget, tokens.stroke.hairline),
         },
     });
@@ -7494,6 +7509,7 @@ fn emitSearchFieldIcon(builder: *Builder, widget: Widget, tokens: DesignTokens, 
 fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const radius = widgetRadius(widget, tokens.radius.md);
     const shadow_token = tokens.shadow.sm;
+    const visual = surfaceControlVisualTokens(widget, tokens);
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
         try builder.shadow(.{
             .id = widgetPartId(widget.id, 1),
@@ -7509,7 +7525,7 @@ fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Er
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
-        .fill = widgetAccentFill(widget, tokens.colors.accent),
+        .fill = widgetAccentFill(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, widget.state.hovered, tokens.colors.accent)),
     });
     if (widget.text.len > 0) {
         const text_size = widgetLabelTextSize(widget, tokens);
@@ -7519,7 +7535,7 @@ fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Er
             .font_id = tokens.typography.font_id,
             .size = text_size,
             .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset)),
-            .color = widgetAccentForegroundColor(widget, tokens, tokens.colors.accent_text),
+            .color = widgetAccentForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.accent_text),
             .text = widget.text,
             .text_layout = boundedTextLayout(widget.frame, text_size, text_inset, .start, .none),
         });
@@ -8315,6 +8331,16 @@ fn selectionControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVis
         .toggle => tokens.controls.toggle,
         .slider => tokens.controls.slider,
         .progress => tokens.controls.progress,
+        else => .{},
+    };
+}
+
+fn surfaceControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    return switch (widget.kind) {
+        .panel => tokens.controls.panel,
+        .popover => tokens.controls.popover,
+        .menu_surface => tokens.controls.menu_surface,
+        .tooltip => tokens.controls.tooltip,
         else => .{},
     };
 }
@@ -14503,6 +14529,22 @@ test "design token overrides compose with built-in themes" {
                 .background = Color.rgb8(54, 60, 66),
                 .active_background = Color.rgb8(66, 84, 102),
             },
+            .panel = .{
+                .background = Color.rgb8(16, 22, 28),
+                .border = Color.rgb8(58, 68, 78),
+            },
+            .popover = .{
+                .background = Color.rgb8(18, 24, 32),
+                .border = Color.rgb8(62, 72, 84),
+            },
+            .menu_surface = .{
+                .background = Color.rgb8(20, 26, 34),
+                .border = Color.rgb8(66, 76, 88),
+            },
+            .tooltip = .{
+                .background = Color.rgb8(238, 242, 246),
+                .foreground = Color.rgb8(18, 24, 30),
+            },
         },
         .density = .spacious,
     };
@@ -14560,6 +14602,14 @@ test "design token overrides compose with built-in themes" {
     try std.testing.expectEqualDeep(Color.rgb8(245, 248, 250), tokens.controls.slider.foreground.?);
     try std.testing.expectEqualDeep(Color.rgb8(54, 60, 66), tokens.controls.progress.background.?);
     try std.testing.expectEqualDeep(Color.rgb8(66, 84, 102), tokens.controls.progress.active_background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(16, 22, 28), tokens.controls.panel.background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(58, 68, 78), tokens.controls.panel.border.?);
+    try std.testing.expectEqualDeep(Color.rgb8(18, 24, 32), tokens.controls.popover.background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(62, 72, 84), tokens.controls.popover.border.?);
+    try std.testing.expectEqualDeep(Color.rgb8(20, 26, 34), tokens.controls.menu_surface.background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(66, 76, 88), tokens.controls.menu_surface.border.?);
+    try std.testing.expectEqualDeep(Color.rgb8(238, 242, 246), tokens.controls.tooltip.background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(18, 24, 30), tokens.controls.tooltip.foreground.?);
     try std.testing.expectEqual(Density.spacious, tokens.density);
 
     const rebuilt = DesignTokens.themeWithOverrides(.{ .color_scheme = .dark, .reduce_motion = true }, overrides);
@@ -17129,6 +17179,71 @@ test "widget emitter applies selection and range control tokens" {
     }
     switch (display_list.commands[17]) {
         .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(40, 80, 120), fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "widget emitter applies surface control tokens" {
+    const tokens = DesignTokens{
+        .controls = .{
+            .panel = .{
+                .background = Color.rgb8(20, 24, 28),
+                .border = Color.rgb8(80, 88, 96),
+            },
+            .popover = .{
+                .hover_background = Color.rgb8(24, 30, 36),
+                .border = Color.rgb8(90, 98, 106),
+            },
+            .menu_surface = .{
+                .active_background = Color.rgb8(28, 36, 44),
+                .border = Color.rgb8(100, 108, 116),
+            },
+            .tooltip = .{
+                .background = Color.rgb8(240, 244, 248),
+                .foreground = Color.rgb8(18, 24, 30),
+            },
+        },
+    };
+
+    var commands: [12]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, .{ .id = 70, .kind = .panel, .frame = geometry.RectF.init(0, 0, 160, 80) }, tokens);
+    try emitWidgetTree(&builder, .{ .id = 71, .kind = .popover, .frame = geometry.RectF.init(0, 90, 160, 80), .state = .{ .hovered = true } }, tokens);
+    try emitWidgetTree(&builder, .{ .id = 72, .kind = .menu_surface, .frame = geometry.RectF.init(0, 180, 160, 80), .state = .{ .selected = true } }, tokens);
+    try emitWidgetTree(&builder, .{ .id = 73, .kind = .tooltip, .frame = geometry.RectF.init(0, 270, 120, 28), .text = "Hint" }, tokens);
+
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 12), display_list.commandCount());
+    switch (display_list.commands[1]) {
+        .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(20, 24, 28), fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .stroke_rect => |stroke| try expectFillColor(Color.rgb8(80, 88, 96), stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[4]) {
+        .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(24, 30, 36), fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[5]) {
+        .stroke_rect => |stroke| try expectFillColor(Color.rgb8(90, 98, 106), stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[7]) {
+        .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(28, 36, 44), fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[8]) {
+        .stroke_rect => |stroke| try expectFillColor(Color.rgb8(100, 108, 116), stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[10]) {
+        .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(240, 244, 248), fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[11]) {
+        .draw_text => |text| try std.testing.expectEqualDeep(Color.rgb8(18, 24, 30), text.color),
         else => return error.TestUnexpectedResult,
     }
 }
