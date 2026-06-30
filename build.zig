@@ -829,7 +829,7 @@ pub fn build(b: *std.Build) void {
         \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
         \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
         \\    case "$snapshot" in *'Clicked toggle #133: off.'*'widget @w1/dashboard-canvas#133 role=switch'*'value=0'*)
-        \\      case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
+        \\      case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
         \\      ;;
         \\    esac
         \\  fi
@@ -838,7 +838,7 @@ pub fn build(b: *std.Build) void {
         \\done
         \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "dashboard switch click did not request a GPU frame" >&2; exit 1; fi
         \\case "$snapshot" in *'Clicked toggle #133: off.'*'widget @w1/dashboard-canvas#133 role=switch'*'value=0'*) ;; *) echo "dashboard switch click did not route through pointer input" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "dashboard switch click did not present an incremental GPU packet" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "dashboard switch click did not present an incremental GPU packet without pipeline uploads" >&2; exit 1 ;; esac
         \\echo "gpu-dashboard smoke ok"
         ,
         "sh",
@@ -906,7 +906,7 @@ pub fn build(b: *std.Build) void {
         \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
         \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
         \\    case "$snapshot" in *'Clicked checkbox #113: on.'*'widget @w1/components-canvas#113 role=checkbox'*'value=1'*)
-        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
+        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
         \\      ;;
         \\    esac
         \\  fi
@@ -915,7 +915,7 @@ pub fn build(b: *std.Build) void {
         \\done
         \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "checkbox automation click did not request a GPU frame" >&2; exit 1; fi
         \\case "$snapshot" in *'Clicked checkbox #113: on.'*'widget @w1/components-canvas#113 role=checkbox'*'value=1'*) ;; *) echo "checkbox automation click did not route through pointer input" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "checkbox automation click did not present an incremental GPU packet" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "checkbox automation click did not present an incremental GPU packet without pipeline uploads" >&2; exit 1 ;; esac
         \\"$cli" automate widget-action components-canvas 114 toggle >/dev/null 2>&1
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
@@ -936,7 +936,7 @@ pub fn build(b: *std.Build) void {
         \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
         \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
         \\    case "$snapshot" in *'Clicked toggle #114: on.'*'widget @w1/components-canvas#114 role=switch'*'value=1'*)
-        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
+        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
         \\      ;;
         \\    esac
         \\  fi
@@ -945,7 +945,7 @@ pub fn build(b: *std.Build) void {
         \\done
         \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "switch automation click did not request a GPU frame" >&2; exit 1; fi
         \\case "$snapshot" in *'Clicked toggle #114: on.'*'widget @w1/components-canvas#114 role=switch'*'value=1'*) ;; *) echo "switch automation click did not route through pointer input" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "switch automation click did not present an incremental GPU packet" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "switch automation click did not present an incremental GPU packet without pipeline uploads" >&2; exit 1 ;; esac
         \\echo "gpu-components smoke ok"
         ,
         "sh",
