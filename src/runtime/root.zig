@@ -8347,6 +8347,8 @@ fn canvasWidgetAccessibilityActionKindFromPlatform(action: platform.WidgetAccess
         .set_text => .set_text,
         .set_selection => .set_selection,
         .select => .select,
+        .drag => .drag,
+        .drop_files => .drop_files,
     };
 }
 
@@ -18840,6 +18842,16 @@ test "runtime dispatches automation canvas widget actions" {
     try std.testing.expectEqual(@as(u32, 2), app_state.widget_drag_count);
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_drag_source_id);
     try std.testing.expectEqual(@as(f32, 8), app_state.last_drag_dx);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .widget_accessibility_action = .{
+        .window_id = 1,
+        .label = "canvas",
+        .id = 2,
+        .action = .drag,
+    } });
+    try std.testing.expectEqual(@as(u32, 3), app_state.widget_drag_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_drag_source_id);
+    try std.testing.expectEqual(@as(f32, 16), app_state.last_drag_dx);
 
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 3, .action = .toggle });
     try std.testing.expectEqual(@as(?f32, 1), harness.runtime.views[0].widgetSemantics()[2].value);

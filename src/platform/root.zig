@@ -1216,6 +1216,8 @@ pub const WidgetAccessibilityActionKind = enum(c_int) {
     set_text = 5,
     set_selection = 6,
     select = 7,
+    drag = 8,
+    drop_files = 9,
 };
 
 pub const WidgetAccessibilityActionEvent = struct {

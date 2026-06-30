@@ -225,6 +225,8 @@ const widget_action_decrement: u32 = 1 << 4;
 const widget_action_set_text: u32 = 1 << 5;
 const widget_action_set_selection: u32 = 1 << 6;
 const widget_action_select: u32 = 1 << 7;
+const widget_action_drag: u32 = 1 << 8;
+const widget_action_drop_files: u32 = 1 << 9;
 
 const AppKitTrayCallback = *const fn (context: ?*anyopaque, item_id: u32) callconv(.c) void;
 
@@ -857,6 +859,8 @@ fn widgetActionFlags(actions: platform_mod.WidgetAccessibilityActions) u32 {
     if (actions.set_text) flags |= widget_action_set_text;
     if (actions.set_selection) flags |= widget_action_set_selection;
     if (actions.select) flags |= widget_action_select;
+    if (actions.drag) flags |= widget_action_drag;
+    if (actions.drop_files) flags |= widget_action_drop_files;
     return flags;
 }
 
@@ -1113,6 +1117,8 @@ fn widgetAccessibilityActionFromInt(value: c_int) ?platform_mod.WidgetAccessibil
         5 => .set_text,
         6 => .set_selection,
         7 => .select,
+        8 => .drag,
+        9 => .drop_files,
         else => null,
     };
 }
@@ -1324,6 +1330,38 @@ fn flattenFilters(filters: []const platform_mod.FileFilter, buffer: []u8) []cons
 
 test "mac platform module exports type" {
     _ = MacPlatform;
+}
+
+test "mac widget accessibility maps retained action flags" {
+    try std.testing.expectEqual(@as(u32, 0), widgetActionFlags(.{}));
+    const flags = widgetActionFlags(.{
+        .focus = true,
+        .press = true,
+        .toggle = true,
+        .increment = true,
+        .decrement = true,
+        .set_text = true,
+        .set_selection = true,
+        .select = true,
+        .drag = true,
+        .drop_files = true,
+    });
+    try std.testing.expect(flags & widget_action_focus != 0);
+    try std.testing.expect(flags & widget_action_press != 0);
+    try std.testing.expect(flags & widget_action_toggle != 0);
+    try std.testing.expect(flags & widget_action_increment != 0);
+    try std.testing.expect(flags & widget_action_decrement != 0);
+    try std.testing.expect(flags & widget_action_set_text != 0);
+    try std.testing.expect(flags & widget_action_set_selection != 0);
+    try std.testing.expect(flags & widget_action_select != 0);
+    try std.testing.expect(flags & widget_action_drag != 0);
+    try std.testing.expect(flags & widget_action_drop_files != 0);
+}
+
+test "mac widget accessibility maps retained action events" {
+    try std.testing.expectEqual(platform_mod.WidgetAccessibilityActionKind.drag, widgetAccessibilityActionFromInt(8).?);
+    try std.testing.expectEqual(platform_mod.WidgetAccessibilityActionKind.drop_files, widgetAccessibilityActionFromInt(9).?);
+    try std.testing.expect(widgetAccessibilityActionFromInt(10) == null);
 }
 
 test "mac gpu surface input preserves key and text" {
