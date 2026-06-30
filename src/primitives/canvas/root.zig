@@ -2071,6 +2071,10 @@ pub const CanvasGpuPacket = struct {
     pub fn fullyRepresentable(self: CanvasGpuPacket) bool {
         return self.unsupported_command_count == 0;
     }
+
+    pub fn writeJson(self: CanvasGpuPacket, writer: anytype) !void {
+        try writeCanvasGpuPacketJson(self, writer);
+    }
 };
 
 pub const CanvasGpuPacketSummary = struct {
@@ -10958,6 +10962,188 @@ fn writeCanvasRenderPassJson(pass: CanvasRenderPass, writer: anytype) !void {
     try writer.writeAll("]}");
 }
 
+fn writeCanvasGpuPacketJson(packet: CanvasGpuPacket, writer: anytype) !void {
+    try writer.print(
+        "{{\"frameIndex\":{d},\"timestampNs\":{d},\"surfaceWidth\":{d},\"surfaceHeight\":{d},\"scale\":{d},\"loadAction\":",
+        .{ packet.frame_index, packet.timestamp_ns, packet.surface_size.width, packet.surface_size.height, packet.scale },
+    );
+    try json.writeString(writer, @tagName(packet.load_action));
+    try writer.writeAll(",\"requiresRender\":");
+    try writer.writeAll(if (packet.requiresRender()) "true" else "false");
+    try writer.writeAll(",\"scissorBounds\":");
+    try writeOptionalRectJson(packet.scissor, writer);
+    try writer.print(
+        ",\"commandCount\":{d},\"cacheActionCount\":{d},\"cachedResourceCommandCount\":{d},\"unsupportedCommandCount\":{d}",
+        .{ packet.commandCount(), packet.cacheActionCount(), packet.cachedResourceCommandCount(), packet.unsupported_command_count },
+    );
+    try writer.writeAll(",\"representable\":");
+    try writer.writeAll(if (packet.fullyRepresentable()) "true" else "false");
+    try writer.writeAll(",\"commands\":[");
+    for (packet.commands, 0..) |command, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writeCanvasGpuCommandJson(command, writer);
+    }
+    try writer.writeAll("]}");
+}
+
+fn writeCanvasGpuCommandJson(command: CanvasGpuCommand, writer: anytype) !void {
+    try writer.print("{{\"index\":{d},\"id\":", .{command.command_index});
+    try writeOptionalObjectIdJson(command.id, writer);
+    try writer.writeAll(",\"kind\":");
+    try json.writeString(writer, @tagName(command.kind));
+    try writer.writeAll(",\"pipeline\":");
+    if (command.pipeline) |pipeline| {
+        try json.writeString(writer, @tagName(pipeline));
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"bounds\":");
+    try writeRectJson(command.bounds, writer);
+    try writer.writeAll(",\"shape\":");
+    try writeCanvasGpuShapeJson(command.shape, writer);
+    try writer.writeAll(",\"paint\":");
+    try writeCanvasGpuPaintJson(command.paint, writer);
+    try writer.print(",\"strokeWidth\":{d}", .{command.stroke_width});
+    try writer.writeAll(",\"image\":");
+    try writeCanvasGpuImageJson(command.image, writer);
+    try writer.writeAll(",\"text\":");
+    try writeCanvasGpuTextJson(command.text, writer);
+    try writer.writeAll(",\"effect\":");
+    try writeCanvasGpuEffectJson(command.effect, writer);
+    try writer.writeAll(",\"clip\":");
+    try writeOptionalRectJson(command.clip, writer);
+    try writer.print(",\"opacity\":{d},\"transform\":", .{command.opacity});
+    try writeAffineJson(command.transform, writer);
+    try writer.writeAll(",\"usesPathGeometry\":");
+    try writer.writeAll(if (command.uses_path_geometry) "true" else "false");
+    try writer.writeAll(",\"usesImage\":");
+    try writer.writeAll(if (command.uses_image) "true" else "false");
+    try writer.writeAll(",\"usesResource\":");
+    try writer.writeAll(if (command.uses_resource) "true" else "false");
+    try writer.writeAll(",\"usesVisualEffect\":");
+    try writer.writeAll(if (command.uses_visual_effect) "true" else "false");
+    try writer.writeAll(",\"usesGlyphAtlas\":");
+    try writer.writeAll(if (command.uses_glyph_atlas) "true" else "false");
+    try writer.writeAll(",\"usesTextLayout\":");
+    try writer.writeAll(if (command.uses_text_layout) "true" else "false");
+    try writer.writeByte('}');
+}
+
+fn writeCanvasGpuShapeJson(shape: CanvasGpuShape, writer: anytype) !void {
+    switch (shape) {
+        .none => try writer.writeAll("null"),
+        .rect => |rect| {
+            try writer.writeAll("{\"kind\":\"rect\",\"rect\":");
+            try writeRectJson(rect, writer);
+            try writer.writeByte('}');
+        },
+        .rounded_rect => |rounded_rect| {
+            try writer.writeAll("{\"kind\":\"rounded_rect\",\"rect\":");
+            try writeRectJson(rounded_rect.rect, writer);
+            try writer.writeAll(",\"radius\":");
+            try writeRadiusJson(rounded_rect.radius, writer);
+            try writer.writeByte('}');
+        },
+        .stroke_rect => |stroke_rect| {
+            try writer.writeAll("{\"kind\":\"stroke_rect\",\"rect\":");
+            try writeRectJson(stroke_rect.rect, writer);
+            try writer.writeAll(",\"radius\":");
+            try writeRadiusJson(stroke_rect.radius, writer);
+            try writer.print(",\"width\":{d}}}", .{stroke_rect.width});
+        },
+        .line => |line| {
+            try writer.writeAll("{\"kind\":\"line\",\"from\":");
+            try writePointJson(line.from, writer);
+            try writer.writeAll(",\"to\":");
+            try writePointJson(line.to, writer);
+            try writer.print(",\"width\":{d}}}", .{line.width});
+        },
+    }
+}
+
+fn writeCanvasGpuPaintJson(paint: CanvasGpuPaint, writer: anytype) !void {
+    switch (paint) {
+        .none => try writer.writeAll("null"),
+        .color => |color| {
+            try writer.writeAll("{\"kind\":\"color\",\"color\":");
+            try writeColorJson(color, writer);
+            try writer.writeByte('}');
+        },
+        .linear_gradient => |gradient| {
+            try writer.writeAll("{\"kind\":\"linear_gradient\",\"start\":");
+            try writePointJson(gradient.start, writer);
+            try writer.writeAll(",\"end\":");
+            try writePointJson(gradient.end, writer);
+            try writer.writeAll(",\"stops\":[");
+            for (gradient.stops, 0..) |stop, index| {
+                if (index > 0) try writer.writeByte(',');
+                try writer.print("{{\"offset\":{d},\"color\":", .{stop.offset});
+                try writeColorJson(stop.color, writer);
+                try writer.writeByte('}');
+            }
+            try writer.writeAll("]}");
+        },
+    }
+}
+
+fn writeCanvasGpuImageJson(image: ?CanvasGpuImage, writer: anytype) !void {
+    const value = image orelse {
+        try writer.writeAll("null");
+        return;
+    };
+    try writer.print("{{\"image\":{d},\"src\":", .{value.image_id});
+    try writeOptionalRectJson(value.src, writer);
+    try writer.writeAll(",\"dst\":");
+    try writeRectJson(value.dst, writer);
+    try writer.print(",\"opacity\":{d},\"fit\":", .{value.opacity});
+    try json.writeString(writer, @tagName(value.fit));
+    try writer.writeAll(",\"sampling\":");
+    try json.writeString(writer, @tagName(value.sampling));
+    try writer.writeByte('}');
+}
+
+fn writeCanvasGpuTextJson(text: ?CanvasGpuText, writer: anytype) !void {
+    const value = text orelse {
+        try writer.writeAll("null");
+        return;
+    };
+    try writer.print("{{\"font\":{d},\"size\":{d},\"origin\":", .{ value.font_id, value.size });
+    try writePointJson(value.origin, writer);
+    try writer.writeAll(",\"color\":");
+    try writeColorJson(value.color, writer);
+    try writer.writeAll(",\"text\":");
+    try json.writeString(writer, value.text);
+    try writer.writeAll(",\"glyphs\":");
+    try writeGlyphsJson(value.glyphs, writer);
+    try writer.writeAll(",\"layout\":");
+    if (value.text_layout) |options| {
+        try writeTextLayoutOptionsJson(options, writer);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeByte('}');
+}
+
+fn writeCanvasGpuEffectJson(effect: CanvasGpuEffect, writer: anytype) !void {
+    switch (effect) {
+        .none => try writer.writeAll("null"),
+        .shadow => |shadow| {
+            try writer.writeAll("{\"kind\":\"shadow\",\"rect\":");
+            try writeRectJson(shadow.rect, writer);
+            try writer.writeAll(",\"radius\":");
+            try writeRadiusJson(shadow.radius, writer);
+            try writer.print(",\"offset\":[{d},{d}],\"blur\":{d},\"spread\":{d},\"color\":", .{ shadow.offset.dx, shadow.offset.dy, shadow.blur, shadow.spread });
+            try writeColorJson(shadow.color, writer);
+            try writer.writeByte('}');
+        },
+        .blur => |blur| {
+            try writer.writeAll("{\"kind\":\"blur\",\"rect\":");
+            try writeRectJson(blur.rect, writer);
+            try writer.print(",\"radius\":{d}}}", .{blur.radius});
+        },
+    }
+}
+
 fn writeRenderCommandJson(command: RenderCommand, index: usize, writer: anytype) !void {
     try writer.print("{{\"index\":{d},\"id\":", .{index});
     try writeOptionalObjectIdJson(command.id, writer);
@@ -16874,6 +17060,20 @@ test "canvas render pass builds gpu packet for backend handoff" {
         },
         else => return error.TestExpectedEqual,
     }
+
+    var packet_json_buffer: [16384]u8 = undefined;
+    var packet_json_writer = std.Io.Writer.fixed(&packet_json_buffer);
+    try packet.writeJson(&packet_json_writer);
+    const packet_json = packet_json_writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"loadAction\":\"clear\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"commandCount\":9") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"kind\":\"fill_rounded_rect_gradient\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"shape\":{\"kind\":\"rounded_rect\",\"rect\":[16,0,24,12],\"radius\":[4,4,4,4]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"paint\":{\"kind\":\"linear_gradient\",\"start\":[16,0],\"end\":[40,12]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"image\":{\"image\":42,\"src\":[4,8,32,24],\"dst\":[44,0,16,16],\"opacity\":0.75,\"fit\":\"cover\",\"sampling\":\"nearest\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"text\":{\"font\":7,\"size\":12,\"origin\":[0,32]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"effect\":{\"kind\":\"shadow\",\"rect\":[0,36,40,20],\"radius\":[6,6,6,6],\"offset\":[2,3],\"blur\":8,\"spread\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"effect\":{\"kind\":\"blur\",\"rect\":[44,36,20,20],\"radius\":4}") != null);
 }
 
 test "canvas gpu packet skips clean passes and reports output overflow" {
@@ -16882,6 +17082,13 @@ test "canvas gpu packet skips clean passes and reports output overflow" {
     try std.testing.expect(!clean_packet.requiresRender());
     try std.testing.expect(clean_packet.fullyRepresentable());
     try std.testing.expectEqual(@as(usize, 0), clean_packet.commandCount());
+    var clean_packet_json_buffer: [512]u8 = undefined;
+    var clean_packet_json_writer = std.Io.Writer.fixed(&clean_packet_json_buffer);
+    try clean_packet.writeJson(&clean_packet_json_writer);
+    try std.testing.expectEqualStrings(
+        "{\"frameIndex\":0,\"timestampNs\":0,\"surfaceWidth\":0,\"surfaceHeight\":0,\"scale\":1,\"loadAction\":\"skip\",\"requiresRender\":false,\"scissorBounds\":null,\"commandCount\":0,\"cacheActionCount\":0,\"cachedResourceCommandCount\":0,\"unsupportedCommandCount\":0,\"representable\":true,\"commands\":[]}",
+        clean_packet_json_writer.buffered(),
+    );
 
     const render_commands = [_]RenderCommand{.{
         .command = .{ .fill_rect = .{
