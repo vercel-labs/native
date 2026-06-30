@@ -163,6 +163,8 @@ static NSAccessibilityRole ZeroNativeAccessibilityRoleForWidgetRole(NSInteger ro
         case ZERO_NATIVE_APPKIT_WIDGET_ROLE_CHECKBOX:
         case ZERO_NATIVE_APPKIT_WIDGET_ROLE_SWITCH:
             return NSAccessibilityCheckBoxRole;
+        case ZERO_NATIVE_APPKIT_WIDGET_ROLE_RADIO:
+            return NSAccessibilityRadioButtonRole;
         case ZERO_NATIVE_APPKIT_WIDGET_ROLE_MENU:
             return NSAccessibilityMenuRole;
         case ZERO_NATIVE_APPKIT_WIDGET_ROLE_MENUITEM:

@@ -250,7 +250,7 @@ const GpuComponentsApp = struct {
         const widget = node.widget;
         var status_buffer: [192]u8 = undefined;
         const status = switch (widget.kind) {
-            .checkbox, .toggle => try std.fmt.bufPrint(
+            .checkbox, .radio, .toggle => try std.fmt.bufPrint(
                 &status_buffer,
                 "{s} {s} #{d}: {s}.",
                 .{ action, @tagName(widget.kind), id, if (widget.state.selected or widget.value >= 0.5) "on" else "off" },
@@ -729,6 +729,10 @@ fn buildComponentsWidgetLayoutWithScrollAndSize(nodes: []canvas.WidgetLayoutNode
         .{ .id = 117, .kind = .segmented_control, .text = "Small", .size = .sm, .state = .{ .selected = true }, .semantics = .{ .label = "Small density" } },
         .{ .id = 119, .kind = .segmented_control, .text = "Large", .size = .lg, .semantics = .{ .label = "Large density" } },
     };
+    const radio_controls = [_]canvas.Widget{
+        .{ .id = 169, .kind = .radio, .text = "Card", .state = .{ .selected = true }, .semantics = .{ .label = "Card layout" } },
+        .{ .id = 170, .kind = .radio, .text = "List", .semantics = .{ .label = "List layout" } },
+    };
     const form_controls = [_]canvas.Widget{
         .{ .id = 111, .kind = .text_field, .frame = rect(0, 0, 148, 34), .text = "zero-native", .semantics = .{ .label = "Project name" } },
         .{ .id = 112, .kind = .search_field, .frame = rect(166, 0, 172, 34), .text = "components", .semantics = .{ .label = "Component search" } },
@@ -736,7 +740,8 @@ fn buildComponentsWidgetLayoutWithScrollAndSize(nodes: []canvas.WidgetLayoutNode
         .{ .id = 114, .kind = .toggle, .frame = rect(166, 52, 116, 30), .text = "Live", .value = 1, .state = .{ .selected = true }, .semantics = .{ .label = "Live toggle" } },
         .{ .id = 115, .kind = .slider, .frame = rect(0, 108, 176, 28), .value = 0.62, .semantics = .{ .label = "Density slider" } },
         .{ .id = 116, .kind = .progress, .frame = rect(202, 118, 134, 8), .value = 1, .semantics = .{ .label = "Build progress" } },
-        .{ .id = 168, .kind = .row, .frame = rect(0, 164, 148, 34), .layout = .{ .gap = 4 }, .semantics = .{ .label = "Density segments" }, .children = &segment_controls },
+        .{ .id = 167, .kind = .row, .frame = rect(0, 148, 160, 28), .layout = .{ .gap = 10, .cross_alignment = .center }, .semantics = .{ .label = "Layout radio group" }, .children = &radio_controls },
+        .{ .id = 168, .kind = .row, .frame = rect(0, 200, 148, 34), .layout = .{ .gap = 4 }, .semantics = .{ .label = "Density segments" }, .children = &segment_controls },
         .{ .id = 118, .kind = .image, .frame = rect(190, 160, 124, 54), .image_id = preview_image_id, .image_src = rect(0, 0, 4, 4), .image_fit = .cover, .image_sampling = .nearest, .image_opacity = 0.94, .semantics = .{ .label = "GPU image preview" } },
     };
     const menu_items = [_]canvas.Widget{
@@ -1137,7 +1142,8 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetFrame(layout, 114, rect(230, 176, 116, 30));
     try expectComponentWidgetFrame(layout, 115, rect(64, 232, 176, 28));
     try expectComponentWidgetFrame(layout, 116, rect(266, 242, 134, 8));
-    try expectComponentWidgetFrame(layout, 168, rect(64, 288, 148, 34));
+    try expectComponentWidgetFrame(layout, 167, rect(64, 272, 160, 28));
+    try expectComponentWidgetFrame(layout, 168, rect(64, 324, 148, 34));
     try expectComponentWidgetFrame(layout, 118, rect(254, 284, 124, 54));
     try expectComponentWidgetFrame(layout, 120, rect(456, 124, 170, 56));
     try expectComponentWidgetFrame(layout, 130, rect(652, 124, 186, 56));
@@ -1145,6 +1151,7 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetsDoNotOverlap(layout, 111, 112);
     try expectComponentWidgetsDoNotOverlap(layout, 113, 114);
     try expectComponentWidgetsDoNotOverlap(layout, 115, 116);
+    try expectComponentWidgetsDoNotOverlap(layout, 167, 118);
     try expectComponentWidgetsDoNotOverlap(layout, 168, 118);
     try expectComponentWidgetsDoNotOverlap(layout, 106, 120);
     try expectComponentWidgetsDoNotOverlap(layout, 120, 130);
@@ -1297,7 +1304,7 @@ test "gpu components display list renders stable reference snapshot" {
     const surface = (try canvas.ReferenceRenderSurface.initWithScratch(@intFromFloat(canvas_width), @intFromFloat(canvas_height), pixels, scratch)).withImages(&preview_images);
     try surface.renderPass(frame.renderPass(), color(247, 249, 252));
 
-    try std.testing.expectEqual(@as(u64, 10362675976940852315), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 12778769604304034319), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -1364,7 +1371,10 @@ test "gpu components semantics cover retained widget families" {
     try expectSemanticRole(semantics, 152, .row);
     try expectSemanticRole(semantics, 156, .gridcell);
     try expectSemanticRole(semantics, 160, .tooltip);
+    try expectSemanticRole(semantics, 167, .group);
     try expectSemanticRole(semantics, 168, .group);
+    try expectSemanticRole(semantics, 169, .radio);
+    try expectSemanticRole(semantics, 170, .radio);
 
     const slider = expectSemantic(semantics, 115);
     try std.testing.expectEqual(@as(?f32, 0.62), slider.value);
@@ -1531,6 +1541,15 @@ test "gpu components app registers component lab on first gpu frame" {
     try std.testing.expectEqualStrings("progressbar", componentSnapshotWidget(snapshot, 116).?.role);
     try std.testing.expectApproxEqAbs(@as(f32, 1), componentSnapshotWidget(snapshot, 116).?.value.?, 0.001);
     try std.testing.expectEqualStrings("tab", componentSnapshotWidget(snapshot, 117).?.role);
+    const selected_radio = componentSnapshotWidget(snapshot, 169).?;
+    try std.testing.expectEqualStrings("radio", selected_radio.role);
+    try std.testing.expect(selected_radio.selected);
+    try std.testing.expect(selected_radio.actions.select);
+    try std.testing.expect(!selected_radio.actions.toggle);
+    const unselected_radio = componentSnapshotWidget(snapshot, 170).?;
+    try std.testing.expectEqualStrings("radio", unselected_radio.role);
+    try std.testing.expect(!unselected_radio.selected);
+    try std.testing.expect(unselected_radio.actions.select);
     const snapshot_nav_list = componentSnapshotWidget(snapshot, 120).?;
     try std.testing.expect(snapshot_nav_list.scroll.present);
     try std.testing.expect(snapshot_nav_list.actions.increment);

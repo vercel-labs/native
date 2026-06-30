@@ -31,6 +31,7 @@ pub const MobileWidgetRole = enum(c_int) {
     switch_control = 17,
     slider = 18,
     progressbar = 19,
+    radio = 20,
 };
 
 pub const MobileWidgetFlag = enum(u32) {
@@ -1052,6 +1053,7 @@ fn mobileWidgetRole(role: canvas.WidgetRole) MobileWidgetRole {
         .gridcell => .gridcell,
         .tab => .tab,
         .checkbox => .checkbox,
+        .radio => .radio,
         .switch_control => .switch_control,
         .slider => .slider,
         .progressbar => .progressbar,

@@ -14,7 +14,7 @@ const window_state = @import("../window_state/root.zig");
 const max_async_bridge_responses: usize = 64;
 const max_bridge_origin_bytes: usize = 512;
 const max_command_id_bytes: usize = 128;
-pub const max_canvas_commands_per_view: usize = 72;
+pub const max_canvas_commands_per_view: usize = 128;
 pub const max_canvas_gradient_stops_per_view: usize = 64;
 pub const max_canvas_path_elements_per_view: usize = 128;
 pub const max_canvas_glyphs_per_view: usize = 256;
@@ -5332,7 +5332,7 @@ fn canvasWidgetRuntimeHitTarget(widget: canvas.Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     return switch (widget.kind) {
         .row, .column, .grid, .data_grid, .data_row, .list, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner => false,
-        .scroll_view, .panel, .popover, .menu_surface, .text, .button, .icon_button, .text_field, .search_field, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .toggle, .slider, .progress => true,
+        .scroll_view, .panel, .popover, .menu_surface, .text, .button, .icon_button, .text_field, .search_field, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .toggle, .slider, .progress => true,
     };
 }
 
@@ -5343,6 +5343,7 @@ fn canvasWidgetEditableTextKind(kind: canvas.WidgetKind) bool {
 fn canvasWidgetRuntimeControlKind(kind: canvas.WidgetKind) bool {
     return switch (kind) {
         .checkbox,
+        .radio,
         .toggle,
         .slider,
         .list_item,
@@ -5448,7 +5449,7 @@ fn canvasWidgetLayoutNodeWithControlReconcileState(
             .slider => {
                 copy.widget.value = std.math.clamp(entry.value, 0, 1);
             },
-            .list_item, .menu_item, .data_cell, .segmented_control => {
+            .radio, .list_item, .menu_item, .data_cell, .segmented_control => {
                 const selected = entry.state.selected or entry.value >= 0.5;
                 copy.widget.state.selected = selected;
                 copy.widget.value = if (selected) 1 else 0;
@@ -5629,7 +5630,7 @@ fn optionalCanvasTextRangesEqual(a: ?canvas.TextRange, b: ?canvas.TextRange) boo
 
 fn canvasWidgetCommandable(kind: canvas.WidgetKind) bool {
     return switch (kind) {
-        .button, .icon_button, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .toggle => true,
+        .button, .icon_button, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .toggle => true,
         else => false,
     };
 }
@@ -5644,7 +5645,7 @@ fn canvasWidgetSelectableSelected(widget: canvas.Widget) bool {
 
 fn canvasWidgetSelectionClearsSiblings(kind: canvas.WidgetKind) bool {
     return switch (kind) {
-        .list_item, .menu_item, .data_cell, .segmented_control => true,
+        .list_item, .menu_item, .data_cell, .segmented_control, .radio => true,
         else => false,
     };
 }
@@ -5698,13 +5699,14 @@ fn canvasWidgetSpatialFocusAllowed(focused_kind: canvas.WidgetKind, target_kind:
         .data_cell => true,
         .list_item, .menu_item => direction == .up or direction == .down,
         .segmented_control => direction == .left or direction == .right,
+        .radio => true,
         else => false,
     };
 }
 
 fn canvasWidgetGroupHomeEndFocusKind(kind: canvas.WidgetKind) bool {
     return switch (kind) {
-        .list_item, .menu_item, .data_cell, .segmented_control => true,
+        .list_item, .menu_item, .data_cell, .segmented_control, .radio => true,
         else => false,
     };
 }
@@ -7065,7 +7067,7 @@ const RuntimeView = struct {
         const widget = self.widget_layout_nodes[index].widget;
         if (widget.state.disabled) return null;
         switch (widget.kind) {
-            .list_item, .menu_item, .data_cell, .segmented_control => {},
+            .list_item, .menu_item, .data_cell, .segmented_control, .radio => {},
             else => return null,
         }
 
@@ -8116,6 +8118,7 @@ fn widgetRoleName(role: canvas.WidgetRole) []const u8 {
         .gridcell => "gridcell",
         .tab => "tab",
         .checkbox => "checkbox",
+        .radio => "radio",
         .switch_control => "switch",
         .slider => "slider",
         .progressbar => "progressbar",
@@ -8141,6 +8144,7 @@ fn platformWidgetAccessibilityRole(role: canvas.WidgetRole) platform.WidgetAcces
         .gridcell => .gridcell,
         .tab => .tab,
         .checkbox => .checkbox,
+        .radio => .radio,
         .switch_control => .switch_control,
         .slider => .slider,
         .progressbar => .progressbar,
@@ -8209,7 +8213,7 @@ fn canvasWidgetSelectedState(node: canvas.WidgetSemanticsNode) bool {
     const value = node.value orelse return false;
     if (value < 0.5) return false;
     return switch (node.role) {
-        .checkbox, .switch_control, .listitem, .gridcell, .tab => true,
+        .checkbox, .radio, .switch_control, .listitem, .gridcell, .tab => true,
         else => false,
     };
 }
@@ -15495,6 +15499,21 @@ test "runtime reconciles canvas control state across layout replacement" {
             .text = "Archive",
         },
     };
+    const radio_items = [_]canvas.Widget{
+        .{
+            .id = 16,
+            .kind = .radio,
+            .frame = geometry.RectF.init(0, 0, 80, 30),
+            .text = "Monthly",
+            .state = .{ .selected = true },
+        },
+        .{
+            .id = 17,
+            .kind = .radio,
+            .frame = geometry.RectF.init(88, 0, 72, 30),
+            .text = "Annual",
+        },
+    };
     const controls = [_]canvas.Widget{
         .{
             .id = 2,
@@ -15537,8 +15556,13 @@ test "runtime reconciles canvas control state across layout replacement" {
             .frame = geometry.RectF.init(150, 96, 110, 72),
             .children = &menu_items,
         },
+        .{
+            .kind = .row,
+            .frame = geometry.RectF.init(150, 178, 160, 30),
+            .children = &radio_items,
+        },
     };
-    var nodes: [16]canvas.WidgetLayoutNode = undefined;
+    var nodes: [20]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &controls }, geometry.RectF.init(0, 0, 280, 220), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
 
@@ -15549,6 +15573,7 @@ test "runtime reconciles canvas control state across layout replacement" {
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 8, .action = .select });
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 12, .action = .select });
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 14, .action = .select });
+    try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 17, .action = .select });
 
     var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expect(retained.findById(2).?.widget.state.selected);
@@ -15564,6 +15589,8 @@ test "runtime reconciles canvas control state across layout replacement" {
     try std.testing.expect(retained.findById(12).?.widget.state.selected);
     try std.testing.expect(!retained.findById(13).?.widget.state.selected);
     try std.testing.expect(retained.findById(14).?.widget.state.selected);
+    try std.testing.expect(!retained.findById(16).?.widget.state.selected);
+    try std.testing.expect(retained.findById(17).?.widget.state.selected);
 
     harness.runtime.invalidated = false;
     harness.runtime.dirty_region_count = 0;
@@ -15591,6 +15618,10 @@ test "runtime reconciles canvas control state across layout replacement" {
     try std.testing.expectEqual(@as(f32, 0), retained.findById(13).?.widget.value);
     try std.testing.expect(retained.findById(14).?.widget.state.selected);
     try std.testing.expectEqual(@as(f32, 1), retained.findById(14).?.widget.value);
+    try std.testing.expect(!retained.findById(16).?.widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(16).?.widget.value);
+    try std.testing.expect(retained.findById(17).?.widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 1), retained.findById(17).?.widget.value);
     try std.testing.expect(!harness.runtime.invalidated);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDirtyRegions().len);
 
@@ -15606,6 +15637,8 @@ test "runtime reconciles canvas control state across layout replacement" {
     try std.testing.expectEqual(@as(?f32, 1), canvasWidgetSemanticsById(semantics, 12).?.value);
     try std.testing.expectEqual(@as(?f32, 0), canvasWidgetSemanticsById(semantics, 13).?.value);
     try std.testing.expectEqual(@as(?f32, 1), canvasWidgetSemanticsById(semantics, 14).?.value);
+    try std.testing.expectEqual(@as(?f32, 0), canvasWidgetSemanticsById(semantics, 16).?.value);
+    try std.testing.expectEqual(@as(?f32, 1), canvasWidgetSemanticsById(semantics, 17).?.value);
 }
 
 test "runtime drives retained settings and data grid workflow" {

@@ -3456,6 +3456,7 @@ pub const ControlTokens = struct {
     list_item: ControlVisualTokens = .{},
     segmented_control: ControlVisualTokens = .{},
     checkbox: ControlVisualTokens = .{},
+    radio: ControlVisualTokens = .{},
     toggle: ControlVisualTokens = .{},
     slider: ControlVisualTokens = .{},
     progress: ControlVisualTokens = .{},
@@ -3666,6 +3667,7 @@ pub const ControlTokenOverrides = struct {
     list_item: ControlVisualTokenOverrides = .{},
     segmented_control: ControlVisualTokenOverrides = .{},
     checkbox: ControlVisualTokenOverrides = .{},
+    radio: ControlVisualTokenOverrides = .{},
     toggle: ControlVisualTokenOverrides = .{},
     slider: ControlVisualTokenOverrides = .{},
     progress: ControlVisualTokenOverrides = .{},
@@ -3692,6 +3694,7 @@ pub const ControlTokenOverrides = struct {
         next.list_item = self.list_item.apply(next.list_item);
         next.segmented_control = self.segmented_control.apply(next.segmented_control);
         next.checkbox = self.checkbox.apply(next.checkbox);
+        next.radio = self.radio.apply(next.radio);
         next.toggle = self.toggle.apply(next.toggle);
         next.slider = self.slider.apply(next.slider);
         next.progress = self.progress.apply(next.progress);
@@ -3811,6 +3814,7 @@ pub const WidgetKind = enum {
     data_cell,
     segmented_control,
     checkbox,
+    radio,
     toggle,
     slider,
     progress,
@@ -3913,6 +3917,7 @@ pub const WidgetRole = enum {
     gridcell,
     tab,
     checkbox,
+    radio,
     switch_control,
     slider,
     progressbar,
@@ -7193,6 +7198,7 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         .data_cell => try emitDataCellWidget(builder, paint_widget, tokens),
         .segmented_control => try emitSegmentedControlWidget(builder, paint_widget, tokens),
         .checkbox => try emitCheckboxWidget(builder, paint_widget, tokens),
+        .radio => try emitRadioWidget(builder, paint_widget, tokens),
         .toggle => try emitToggleWidget(builder, paint_widget, tokens),
         .slider => try emitSliderWidget(builder, paint_widget, tokens),
         .progress => try emitProgressWidget(builder, paint_widget, tokens),
@@ -7291,6 +7297,7 @@ fn emitWidgetLayoutNodeContent(
         .data_cell => try emitDataCellWidget(builder, paint_widget, tokens),
         .segmented_control => try emitSegmentedControlWidget(builder, paint_widget, tokens),
         .checkbox => try emitCheckboxWidget(builder, paint_widget, tokens),
+        .radio => try emitRadioWidget(builder, paint_widget, tokens),
         .toggle => try emitToggleWidget(builder, paint_widget, tokens),
         .slider => try emitSliderWidget(builder, paint_widget, tokens),
         .progress => try emitProgressWidget(builder, paint_widget, tokens),
@@ -8178,6 +8185,51 @@ fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
     try emitControlLabelWithColor(builder, widget, tokens, box.x + box.width + widgetControlInset(widget, tokens, tokens.spacing.sm), 6, visual.foreground orelse tokens.colors.text);
 }
 
+fn emitRadioWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = selectionControlVisualTokens(widget, tokens);
+    const circle_size = @min(@max(widgetSizedDensityValue(widget, tokens, 14), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
+    const circle = pixelSnapGeometryRect(tokens, geometry.RectF.init(
+        widget.frame.x,
+        widget.frame.y + (widget.frame.height - circle_size) * 0.5,
+        circle_size,
+        circle_size,
+    ));
+    const selected = booleanControlSelected(widget);
+    const radius = controlRadius(widget, visual, circle.height * 0.5);
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 1),
+        .rect = circle,
+        .radius = radius,
+        .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, false, widget.state.hovered, tokens.colors.surface))),
+    });
+    try builder.strokeRect(.{
+        .id = widgetPartId(widget.id, 2),
+        .rect = circle,
+        .radius = radius,
+        .stroke = .{
+            .fill = if (selected) widgetAccentFill(widget, visual.border orelse visual.active_background orelse tokens.colors.accent) else widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+            .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
+        },
+    });
+    if (widget.state.focused) try emitWidgetFocusRing(builder, widget, tokens, 3);
+    if (selected) {
+        const dot_size = @max(0, circle_size * 0.48);
+        const dot = pixelSnapGeometryRect(tokens, geometry.RectF.init(
+            circle.x + (circle.width - dot_size) * 0.5,
+            circle.y + (circle.height - dot_size) * 0.5,
+            dot_size,
+            dot_size,
+        ));
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, 4),
+            .rect = dot,
+            .radius = Radius.all(dot.height * 0.5),
+            .fill = colorFill(widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent)),
+        });
+    }
+    try emitControlLabelWithColor(builder, widget, tokens, circle.x + circle.width + widgetControlInset(widget, tokens, tokens.spacing.sm), 5, visual.foreground orelse tokens.colors.text);
+}
+
 fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const selected = booleanControlSelected(widget);
     const visual = selectionControlVisualTokens(widget, tokens);
@@ -8826,6 +8878,7 @@ fn selectionControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVis
     return switch (widget.kind) {
         .segmented_control => tokens.controls.segmented_control,
         .checkbox => tokens.controls.checkbox,
+        .radio => tokens.controls.radio,
         .toggle => tokens.controls.toggle,
         .slider => tokens.controls.slider,
         .progress => tokens.controls.progress,
@@ -8966,7 +9019,7 @@ fn layoutWidgetDepth(
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len, tokens);
             }
         },
-        .text, .icon, .image, .avatar, .badge, .button, .icon_button, .text_field, .search_field, .tooltip, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .toggle, .slider, .progress, .separator, .skeleton, .spinner => {},
+        .text, .icon, .image, .avatar, .badge, .button, .icon_button, .text_field, .search_field, .tooltip, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .toggle, .slider, .progress, .separator, .skeleton, .spinner => {},
     }
 
     return index;
@@ -9212,6 +9265,7 @@ pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF 
         .data_row => geometry.SizeF.init(0, widgetDefaultRowHeight(widget, tokens)),
         .segmented_control => intrinsicSegmentedControlSize(widget, tokens),
         .checkbox => intrinsicCheckboxWidgetSize(widget, tokens),
+        .radio => intrinsicRadioWidgetSize(widget, tokens),
         .toggle => intrinsicToggleWidgetSize(widget, tokens),
         .slider => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 160), @max(widgetSizedDensityValue(widget, tokens, 28), widgetSizedDensityValue(widget, tokens, 20))),
         .progress => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 160), widgetSizedDensityValue(widget, tokens, 8)),
@@ -9277,6 +9331,14 @@ fn intrinsicCheckboxWidgetSize(widget: Widget, tokens: DesignTokens) geometry.Si
     const label_width = estimateTextWidthForFont(tokens.typography.font_id, widget.text, label_size);
     const gap = if (widget.text.len > 0) widgetControlInset(widget, tokens, tokens.spacing.sm) else 0;
     return geometry.SizeF.init(box_size + gap + label_width, @max(box_size, widgetLineHeight(label_size)));
+}
+
+fn intrinsicRadioWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
+    const circle_size = widgetSizedDensityValue(widget, tokens, 18);
+    const label_size = widgetLabelTextSize(widget, tokens);
+    const label_width = estimateTextWidthForFont(tokens.typography.font_id, widget.text, label_size);
+    const gap = if (widget.text.len > 0) widgetControlInset(widget, tokens, tokens.spacing.sm) else 0;
+    return geometry.SizeF.init(circle_size + gap + label_width, @max(circle_size, widgetLineHeight(label_size)));
 }
 
 fn intrinsicToggleWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
@@ -9412,6 +9474,7 @@ pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor 
         .data_cell,
         .segmented_control,
         .checkbox,
+        .radio,
         .toggle,
         => .pointing_hand,
         .slider => .resize_horizontal,
@@ -9495,7 +9558,7 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
             .{ .kind = .toggle, .actions = .{ .toggle = true } }
         else
             null,
-        .list_item, .menu_item, .data_cell, .segmented_control => if (isWidgetActivationKey(keyboard.key))
+        .radio, .list_item, .menu_item, .data_cell, .segmented_control => if (isWidgetActivationKey(keyboard.key))
             .{
                 .kind = .select,
                 .actions = .{
@@ -9553,7 +9616,7 @@ pub fn widgetSemanticControlIntentWithActions(widget: Widget, action: WidgetSema
 
 fn widgetSemanticPressControlIntent(widget: Widget, actions: WidgetActions) WidgetControlIntent {
     return switch (widget.kind) {
-        .list_item, .menu_item, .data_cell, .segmented_control => if (actions.select)
+        .radio, .list_item, .menu_item, .data_cell, .segmented_control => if (actions.select)
             .{
                 .kind = .select,
                 .actions = .{
@@ -10070,6 +10133,7 @@ fn semanticRole(widget: Widget) WidgetRole {
         .data_cell => .gridcell,
         .segmented_control => .tab,
         .checkbox => .checkbox,
+        .radio => .radio,
         .toggle => .switch_control,
         .slider => .slider,
         .progress => .progressbar,
@@ -10086,7 +10150,7 @@ fn semanticLabel(widget: Widget) []const u8 {
 fn semanticValue(widget: Widget) ?f32 {
     if (widget.semantics.value) |value| return value;
     return switch (widget.kind) {
-        .list_item, .menu_item, .data_cell, .segmented_control => if (widget.state.selected or widget.value >= 0.5) 1 else 0,
+        .radio, .list_item, .menu_item, .data_cell, .segmented_control => if (widget.state.selected or widget.value >= 0.5) 1 else 0,
         .checkbox, .toggle => if (booleanControlSelected(widget)) 1 else 0,
         .slider, .progress => std.math.clamp(widget.value, 0, 1),
         .spinner => null,
@@ -10378,6 +10442,10 @@ fn defaultSemanticActions(widget: Widget) WidgetActions {
             actions.select = true;
         },
         .checkbox, .toggle => actions.toggle = true,
+        .radio => {
+            actions.select = true;
+            if (widget.command.len > 0) actions.press = true;
+        },
         .text_field, .search_field => {
             actions.set_text = true;
             actions.set_selection = true;
@@ -10397,7 +10465,7 @@ fn defaultSemanticActions(widget: Widget) WidgetActions {
 
 fn defaultFocusable(widget: Widget) bool {
     return switch (widget.kind) {
-        .scroll_view, .button, .icon_button, .text_field, .search_field, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .toggle, .slider => !widget.state.disabled,
+        .scroll_view, .button, .icon_button, .text_field, .search_field, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .toggle, .slider => !widget.state.disabled,
         else => false,
     };
 }
@@ -10425,7 +10493,7 @@ fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     return switch (widget.kind) {
         .row, .column, .grid, .data_grid, .data_row, .list, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner => false,
-        .scroll_view, .panel, .popover, .menu_surface, .text, .button, .icon_button, .text_field, .search_field, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .toggle, .slider, .progress => true,
+        .scroll_view, .panel, .popover, .menu_surface, .text, .button, .icon_button, .text_field, .search_field, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .toggle, .slider, .progress => true,
     };
 }
 
@@ -10761,7 +10829,7 @@ fn widgetFrameStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
         .text_field, .search_field => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, textInputControlVisualTokens(widget, tokens), tokens.stroke.regular),
         .segmented_control => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectionControlVisualTokens(widget, tokens), tokens.stroke.regular),
         .data_cell => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, listItemControlVisualTokens(widget, tokens), tokens.stroke.hairline),
-        .checkbox, .toggle, .slider => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectionControlVisualTokens(widget, tokens), tokens.stroke.regular),
+        .checkbox, .radio, .toggle, .slider => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectionControlVisualTokens(widget, tokens), tokens.stroke.regular),
         .avatar, .badge => controlStrokeWidth(widget, componentControlVisualTokens(widget, tokens), tokens.stroke.hairline),
         .list_item, .menu_item => if (widget.state.focused) tokens.stroke.focus else 0,
         else => 0,
@@ -10779,6 +10847,7 @@ fn widgetFocusStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
         .data_cell,
         .segmented_control,
         .checkbox,
+        .radio,
         .toggle,
         .slider,
         => tokens.stroke.focus,
@@ -15391,6 +15460,11 @@ test "design token overrides compose with built-in themes" {
                 .foreground = Color.rgb8(248, 250, 252),
                 .border = Color.rgb8(76, 88, 100),
             },
+            .radio = .{
+                .active_background = Color.rgb8(46, 58, 70),
+                .foreground = Color.rgb8(249, 251, 253),
+                .border = Color.rgb8(78, 90, 102),
+            },
             .toggle = .{
                 .background = Color.rgb8(50, 56, 64),
                 .active_background = Color.rgb8(58, 72, 86),
@@ -15497,6 +15571,9 @@ test "design token overrides compose with built-in themes" {
     try std.testing.expectEqualDeep(Color.rgb8(44, 54, 64), tokens.controls.checkbox.active_background.?);
     try std.testing.expectEqualDeep(Color.rgb8(248, 250, 252), tokens.controls.checkbox.foreground.?);
     try std.testing.expectEqualDeep(Color.rgb8(76, 88, 100), tokens.controls.checkbox.border.?);
+    try std.testing.expectEqualDeep(Color.rgb8(46, 58, 70), tokens.controls.radio.active_background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(249, 251, 253), tokens.controls.radio.foreground.?);
+    try std.testing.expectEqualDeep(Color.rgb8(78, 90, 102), tokens.controls.radio.border.?);
     try std.testing.expectEqualDeep(Color.rgb8(50, 56, 64), tokens.controls.toggle.background.?);
     try std.testing.expectEqualDeep(Color.rgb8(58, 72, 86), tokens.controls.toggle.active_background.?);
     try std.testing.expectEqualDeep(Color.rgb8(252, 252, 253), tokens.controls.toggle.foreground.?);
@@ -15899,48 +15976,62 @@ test "widget controls expose roles values focus and hit testing" {
         },
         .{
             .id = 3,
-            .kind = .toggle,
+            .kind = .radio,
             .frame = geometry.RectF.init(10, 46, 120, 28),
-            .text = "Focus",
+            .text = "Monthly",
+            .state = .{ .selected = true },
         },
         .{
             .id = 4,
+            .kind = .toggle,
+            .frame = geometry.RectF.init(10, 82, 120, 28),
+            .text = "Focus",
+        },
+        .{
+            .id = 5,
             .kind = .slider,
-            .frame = geometry.RectF.init(10, 82, 160, 32),
+            .frame = geometry.RectF.init(10, 118, 160, 32),
             .value = 0.35,
         },
     };
     const root = Widget{ .id = 1, .kind = .panel, .children = &children };
 
-    var nodes: [5]WidgetLayoutNode = undefined;
-    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 220, 140), &nodes);
+    var nodes: [6]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 220, 176), &nodes);
     try std.testing.expectEqual(@as(ObjectId, 2), layout.focusTarget(null, .forward).?.id);
     try std.testing.expectEqual(@as(ObjectId, 3), layout.focusTarget(2, .forward).?.id);
     try std.testing.expectEqual(@as(ObjectId, 4), layout.focusTarget(3, .forward).?.id);
-    try std.testing.expectEqual(@as(ObjectId, 3), layout.focusTarget(4, .backward).?.id);
+    try std.testing.expectEqual(@as(ObjectId, 5), layout.focusTarget(4, .forward).?.id);
+    try std.testing.expectEqual(@as(ObjectId, 4), layout.focusTarget(5, .backward).?.id);
 
-    const slider_hit = layout.hitTest(geometry.PointF.init(40, 94)).?;
-    try std.testing.expectEqual(@as(ObjectId, 4), slider_hit.id);
+    const slider_hit = layout.hitTest(geometry.PointF.init(40, 130)).?;
+    try std.testing.expectEqual(@as(ObjectId, 5), slider_hit.id);
     try std.testing.expectEqual(WidgetKind.slider, slider_hit.kind);
 
-    var semantics_buffer: [4]WidgetSemanticsNode = undefined;
+    var semantics_buffer: [5]WidgetSemanticsNode = undefined;
     const semantics = try layout.collectSemantics(&semantics_buffer);
-    try std.testing.expectEqual(@as(usize, 4), semantics.len);
+    try std.testing.expectEqual(@as(usize, 5), semantics.len);
     try std.testing.expectEqual(WidgetRole.checkbox, semantics[1].role);
     try std.testing.expectEqualStrings("Live", semantics[1].label);
     try std.testing.expectEqual(@as(?f32, 1), semantics[1].value);
     try std.testing.expect(semantics[1].focusable);
     try std.testing.expect(semantics[1].actions.focus);
     try std.testing.expect(semantics[1].actions.toggle);
-    try std.testing.expectEqual(WidgetRole.switch_control, semantics[2].role);
-    try std.testing.expectEqual(@as(?f32, 0), semantics[2].value);
-    try std.testing.expect(semantics[2].actions.toggle);
-    try std.testing.expectEqual(WidgetRole.slider, semantics[3].role);
-    try std.testing.expectEqual(@as(?f32, 0.35), semantics[3].value);
-    try std.testing.expect(semantics[3].actions.focus);
-    try std.testing.expect(semantics[3].actions.increment);
-    try std.testing.expect(semantics[3].actions.decrement);
-    try std.testing.expect(!semantics[3].actions.press);
+    try std.testing.expectEqual(WidgetRole.radio, semantics[2].role);
+    try std.testing.expectEqualStrings("Monthly", semantics[2].label);
+    try std.testing.expectEqual(@as(?f32, 1), semantics[2].value);
+    try std.testing.expect(semantics[2].focusable);
+    try std.testing.expect(semantics[2].actions.select);
+    try std.testing.expect(!semantics[2].actions.toggle);
+    try std.testing.expectEqual(WidgetRole.switch_control, semantics[3].role);
+    try std.testing.expectEqual(@as(?f32, 0), semantics[3].value);
+    try std.testing.expect(semantics[3].actions.toggle);
+    try std.testing.expectEqual(WidgetRole.slider, semantics[4].role);
+    try std.testing.expectEqual(@as(?f32, 0.35), semantics[4].value);
+    try std.testing.expect(semantics[4].actions.focus);
+    try std.testing.expect(semantics[4].actions.increment);
+    try std.testing.expect(semantics[4].actions.decrement);
+    try std.testing.expect(!semantics[4].actions.press);
 }
 
 test "widget icons expose image and button semantics" {
@@ -18099,6 +18190,43 @@ test "widget emitter applies selection and range control tokens" {
     }
 }
 
+test "widget emitter applies radio control tokens" {
+    const tokens = DesignTokens{
+        .controls = .{
+            .radio = .{
+                .active_background = Color.rgb8(36, 72, 108),
+                .foreground = Color.rgb8(248, 250, 252),
+                .border = Color.rgb8(90, 106, 122),
+            },
+        },
+    };
+
+    var commands: [5]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, .{
+        .id = 65,
+        .kind = .radio,
+        .frame = geometry.RectF.init(0, 0, 140, 32),
+        .text = "Monthly",
+        .state = .{ .selected = true },
+    }, tokens);
+
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 4), display_list.commandCount());
+    switch (display_list.commands[1]) {
+        .stroke_rect => |stroke| try expectFillColor(Color.rgb8(90, 106, 122), stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(36, 72, 108), fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[3]) {
+        .draw_text => |text| try std.testing.expectEqualDeep(Color.rgb8(248, 250, 252), text.color),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "widget emitter applies surface control tokens" {
     const tokens = DesignTokens{
         .controls = .{
@@ -18601,7 +18729,7 @@ test "widget explicit layers override token defaults for overlay ordering" {
     try std.testing.expectEqual(@as(ObjectId, 3), layout.hitTest(geometry.PointF.init(20, 20)).?.id);
 }
 
-test "widget emitter renders checkbox toggle and slider controls" {
+test "widget emitter renders checkbox radio toggle and slider controls" {
     const tokens = DesignTokens{
         .colors = .{
             .accent = Color.rgb8(10, 20, 30),
@@ -18610,7 +18738,7 @@ test "widget emitter renders checkbox toggle and slider controls" {
         },
         .stroke = .{ .focus = 3 },
     };
-    var commands: [16]CanvasCommand = undefined;
+    var commands: [20]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, .{
         .id = 10,
@@ -18621,21 +18749,28 @@ test "widget emitter renders checkbox toggle and slider controls" {
     }, tokens);
     try emitWidgetTree(&builder, .{
         .id = 11,
-        .kind = .toggle,
+        .kind = .radio,
         .frame = geometry.RectF.init(0, 40, 120, 32),
+        .text = "Monthly",
+        .state = .{ .selected = true, .focused = true },
+    }, tokens);
+    try emitWidgetTree(&builder, .{
+        .id = 12,
+        .kind = .toggle,
+        .frame = geometry.RectF.init(0, 80, 120, 32),
         .text = "Mode",
         .value = 1,
     }, tokens);
     try emitWidgetTree(&builder, .{
-        .id = 12,
+        .id = 13,
         .kind = .slider,
-        .frame = geometry.RectF.init(0, 84, 160, 32),
+        .frame = geometry.RectF.init(0, 124, 160, 32),
         .value = 0.25,
         .state = .{ .focused = true },
     }, tokens);
 
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 14), display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, 19), display_list.commandCount());
     switch (display_list.commands[0]) {
         .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.accent, fill.fill),
         else => return error.TestUnexpectedResult,
@@ -18647,20 +18782,35 @@ test "widget emitter renders checkbox toggle and slider controls" {
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[6]) {
-        .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.accent, fill.fill),
+        .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface, fill.fill),
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[9]) {
-        .draw_text => |text| try std.testing.expectEqualStrings("Mode", text.text),
+        .fill_rounded_rect => |fill| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(11, 4)), fill.id);
+            try expectFillColor(tokens.colors.accent, fill.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[10]) {
+        .draw_text => |text| try std.testing.expectEqualStrings("Monthly", text.text),
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[11]) {
-        .fill_rounded_rect => |fill| try expectRect(geometry.RectF.init(0, 98, 40, 4), fill.rect),
+        .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.accent, fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[13]) {
+    switch (display_list.commands[14]) {
+        .draw_text => |text| try std.testing.expectEqualStrings("Mode", text.text),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[16]) {
+        .fill_rounded_rect => |fill| try expectRect(geometry.RectF.init(0, 138, 40, 4), fill.rect),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[18]) {
         .stroke_rect => |stroke| {
-            try std.testing.expectEqual(@as(ObjectId, widgetPartId(12, 4)), stroke.id);
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(13, 4)), stroke.id);
             try std.testing.expectEqual(@as(f32, 3), stroke.stroke.width);
             try expectFillColor(tokens.colors.focus_ring, stroke.stroke.fill);
         },
@@ -22319,6 +22469,12 @@ test "widget keyboard control intents map activation keys" {
     try std.testing.expect(selected.actions.select);
     try std.testing.expect(selected.actions.press);
 
+    const radio = widgetKeyboardControlIntent(.{ .kind = .radio, .text = "Annual", .command = "billing.cadence" }, .{ .phase = .key_down, .key = "space" }).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.select, radio.kind);
+    try std.testing.expect(radio.actions.select);
+    try std.testing.expect(radio.actions.press);
+    try std.testing.expect(!radio.actions.toggle);
+
     try std.testing.expect(widgetKeyboardControlIntent(.{ .kind = .button, .text = "Save" }, .{ .phase = .key_down, .key = "enter", .modifiers = .{ .super = true } }) == null);
     try std.testing.expect(widgetKeyboardControlIntent(.{ .kind = .button, .text = "Save", .state = .{ .disabled = true } }, .{ .phase = .key_down, .key = "enter" }) == null);
     try std.testing.expect(widgetKeyboardControlIntent(.{ .kind = .button, .text = "Save" }, .{ .phase = .key_up, .key = "enter" }) == null);
@@ -22369,6 +22525,12 @@ test "widget semantic control intents map built-in actions" {
     try std.testing.expectEqual(WidgetControlIntentKind.select, selected.kind);
     try std.testing.expect(selected.actions.select);
     try std.testing.expect(selected.actions.press);
+
+    const radio = widgetSemanticControlIntent(.{ .kind = .radio, .text = "Annual", .command = "billing.cadence" }, .select).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.select, radio.kind);
+    try std.testing.expect(radio.actions.select);
+    try std.testing.expect(radio.actions.press);
+    try std.testing.expect(!radio.actions.toggle);
 
     const pressed_menu_item = widgetSemanticControlIntent(.{ .kind = .menu_item, .text = "Archive", .command = "archive" }, .press).?;
     try std.testing.expectEqual(WidgetControlIntentKind.select, pressed_menu_item.kind);
