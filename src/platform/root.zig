@@ -1241,10 +1241,20 @@ pub const ClipboardData = struct {
     bytes: []const u8,
 };
 
+pub const ColorScheme = enum {
+    light,
+    dark,
+};
+
+pub const Appearance = struct {
+    color_scheme: ColorScheme = .light,
+};
+
 pub const Event = union(enum) {
     app_start,
     app_activated,
     app_deactivated,
+    appearance_changed: Appearance,
     frame_requested,
     app_shutdown,
     surface_resized: Surface,
@@ -1266,6 +1276,7 @@ pub const Event = union(enum) {
             .app_start => "app_start",
             .app_activated => "app_activated",
             .app_deactivated => "app_deactivated",
+            .appearance_changed => "appearance_changed",
             .frame_requested => "frame_requested",
             .app_shutdown => "app_shutdown",
             .surface_resized => "surface_resized",
@@ -1890,6 +1901,7 @@ pub const NullPlatform = struct {
     fn run(context: *anyopaque, handler: EventHandler, handler_context: *anyopaque) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context));
         try handler(handler_context, .app_start);
+        try handler(handler_context, .{ .appearance_changed = .{} });
         try handler(handler_context, .{ .surface_resized = self.surface_value });
         const count = self.app_info.startupWindowCount();
         var index: usize = 0;
@@ -2755,7 +2767,7 @@ pub const windows = @import("windows/root.zig");
 
 test "null platform emits deterministic lifecycle events" {
     const Recorder = struct {
-        names: [5][]const u8 = undefined,
+        names: [6][]const u8 = undefined,
         len: usize = 0,
 
         fn handle(context: *anyopaque, event: Event) anyerror!void {
@@ -2769,12 +2781,13 @@ test "null platform emits deterministic lifecycle events" {
     var recorder: Recorder = .{};
     try null_platform.platform().run(Recorder.handle, &recorder);
 
-    try std.testing.expectEqual(@as(usize, 5), recorder.len);
+    try std.testing.expectEqual(@as(usize, 6), recorder.len);
     try std.testing.expectEqualStrings("app_start", recorder.names[0]);
-    try std.testing.expectEqualStrings("surface_resized", recorder.names[1]);
-    try std.testing.expectEqualStrings("window_frame_changed", recorder.names[2]);
-    try std.testing.expectEqualStrings("frame_requested", recorder.names[3]);
-    try std.testing.expectEqualStrings("app_shutdown", recorder.names[4]);
+    try std.testing.expectEqualStrings("appearance_changed", recorder.names[1]);
+    try std.testing.expectEqualStrings("surface_resized", recorder.names[2]);
+    try std.testing.expectEqualStrings("window_frame_changed", recorder.names[3]);
+    try std.testing.expectEqualStrings("frame_requested", recorder.names[4]);
+    try std.testing.expectEqualStrings("app_shutdown", recorder.names[5]);
 }
 
 test "null platform records loaded webview source" {

@@ -25,6 +25,7 @@ static const uint32_t ZeroNativeShortcutModifierCommand = 1u << 1;
 static const uint32_t ZeroNativeShortcutModifierControl = 1u << 2;
 static const uint32_t ZeroNativeShortcutModifierOption = 1u << 3;
 static const uint32_t ZeroNativeShortcutModifierShift = 1u << 4;
+static void *ZeroNativeAppKitAppearanceObservationContext = &ZeroNativeAppKitAppearanceObservationContext;
 static NSRect constrainFrame(NSRect frame);
 static NSString *ZeroNativeAppKitBridgeScript(void);
 static NSString *ZeroNativeMimeTypeForPath(NSString *path);
@@ -48,6 +49,7 @@ static NSCursor *ZeroNativeCursorForKind(NSInteger kind);
 static NSRange ZeroNativeClampedRange(NSUInteger start, NSUInteger end, NSUInteger length);
 static NSString *ZeroNativeSubstringForRange(NSString *value, NSRange range);
 static NSString *ZeroNativeStringFromTextInput(id value);
+static int ZeroNativeAppKitColorSchemeForAppearance(NSAppearance *appearance);
 
 static size_t ZeroNativeOverflowSize(size_t buffer_len) {
     return buffer_len == SIZE_MAX ? SIZE_MAX : buffer_len + 1;
@@ -63,6 +65,12 @@ static NSString *ZeroNativeStringFromTextInput(id value) {
     if ([value isKindOfClass:[NSAttributedString class]]) return ((NSAttributedString *)value).string ?: @"";
     if ([value isKindOfClass:[NSString class]]) return (NSString *)value;
     return [value description] ?: @"";
+}
+
+static int ZeroNativeAppKitColorSchemeForAppearance(NSAppearance *appearance) {
+    NSAppearance *effective = appearance ?: NSApp.effectiveAppearance;
+    NSString *bestMatch = [effective bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
+    return [bestMatch isEqualToString:NSAppearanceNameDarkAqua] ? ZERO_NATIVE_APPKIT_COLOR_SCHEME_DARK : ZERO_NATIVE_APPKIT_COLOR_SCHEME_LIGHT;
 }
 
 static uint64_t ZeroNativeTimestampNanoseconds(void) {
@@ -307,6 +315,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (void)emitQueuedScrollInputEvent;
 - (void)emitInputEventWithKind:(NSInteger)kind point:(NSPoint)point timestampNs:(uint64_t)timestampNs modifiers:(uint32_t)modifiers keyText:(NSString *)keyText inputText:(NSString *)inputText button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY;
 - (void)emitSyntheticKeyDownWithKey:(NSString *)key modifiers:(uint32_t)modifiers;
+- (void)emitSelectAllTextInputCommand;
 - (void)emitTextInputEventWithKind:(NSInteger)kind text:(NSString *)text compositionCursor:(NSInteger)compositionCursor;
 - (NSAccessibilityElement *)focusedTextAccessibilityElement;
 - (BOOL)emitWidgetAccessibilityActionWithId:(uint64_t)widgetId action:(NSInteger)action;
@@ -356,6 +365,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 @property(nonatomic, assign) void *bridgeContext;
 @property(nonatomic, assign) BOOL didShutdown;
 @property(nonatomic, assign) BOOL observesApplicationActivation;
+@property(nonatomic, assign) BOOL observesAppearanceChanges;
 @property(nonatomic, assign) NSInteger bridgeFrameKeepalive;
 @property(nonatomic, strong) id shortcutEventMonitor;
 @property(nonatomic, strong) NSArray<ZeroNativeShortcut *> *shortcuts;
@@ -422,6 +432,9 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (void)stopApplicationActivationObservers;
 - (void)applicationDidBecomeActive:(NSNotification *)notification;
 - (void)applicationDidResignActive:(NSNotification *)notification;
+- (void)startAppearanceObservers;
+- (void)stopAppearanceObservers;
+- (void)emitAppearanceChanged;
 - (void)emitResize;
 - (void)emitResizeForWindowId:(uint64_t)windowId;
 - (void)emitDeferredResizeForWindowId:(uint64_t)windowId;
@@ -2140,6 +2153,10 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
     [self requestRetainedCanvasFrame];
 }
 
+- (void)emitSelectAllTextInputCommand {
+    [self emitSyntheticKeyDownWithKey:@"a" modifiers:(ZeroNativeShortcutModifierPrimary | ZeroNativeShortcutModifierCommand)];
+}
+
 - (void)emitTextInputEventWithKind:(NSInteger)kind text:(NSString *)text compositionCursor:(NSInteger)compositionCursor {
     if (!self.host || self.surfaceLabel.length == 0) return;
     self.interpretedKeyEventEmittedInput = YES;
@@ -2294,6 +2311,12 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
     [self emitTextInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_TEXT_INPUT text:text compositionCursor:-1];
 }
 
+- (void)selectAll:(id)sender {
+    (void)sender;
+    if (![self focusedTextAccessibilityElement]) return;
+    [self emitSelectAllTextInputCommand];
+}
+
 - (void)doCommandBySelector:(SEL)selector {
     if (![self focusedTextAccessibilityElement]) return;
     if (selector == @selector(deleteBackward:)) {
@@ -2324,6 +2347,8 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
         [self emitSyntheticKeyDownWithKey:@"home" modifiers:ZeroNativeShortcutModifierShift];
     } else if (selector == @selector(moveToEndOfLineAndModifySelection:)) {
         [self emitSyntheticKeyDownWithKey:@"end" modifiers:ZeroNativeShortcutModifierShift];
+    } else if (selector == @selector(selectAll:)) {
+        [self emitSelectAllTextInputCommand];
     } else if (selector == @selector(insertNewline:)) {
         [self emitSyntheticKeyDownWithKey:@"enter" modifiers:0];
     } else if (selector == @selector(insertTab:)) {
@@ -2552,6 +2577,7 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
 - (void)dealloc {
     [self.automationFrameTimer invalidate];
     self.automationFrameTimer = nil;
+    [self stopAppearanceObservers];
     if (self.shortcutEventMonitor) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
@@ -3709,11 +3735,14 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
         }];
     }
 
+    [self startApplicationActivationObservers];
+    [self startAppearanceObservers];
+
     [self emitEvent:(zero_native_appkit_event_t){ .kind = ZERO_NATIVE_APPKIT_EVENT_START }];
+    [self emitAppearanceChanged];
     [self emitResize];
     [self emitWindowFrame:YES];
 
-    [self startApplicationActivationObservers];
     [self scheduleFrame];
     [NSApp run];
 }
@@ -3727,6 +3756,7 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
     }
+    [self stopAppearanceObservers];
     [self stopApplicationActivationObservers];
     [NSApp stop:nil];
     NSEvent *event = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
@@ -3775,6 +3805,40 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
 - (void)applicationDidResignActive:(NSNotification *)notification {
     (void)notification;
     [self emitEvent:(zero_native_appkit_event_t){ .kind = ZERO_NATIVE_APPKIT_EVENT_APP_DEACTIVATED }];
+}
+
+- (void)startAppearanceObservers {
+    if (self.observesAppearanceChanges) {
+        return;
+    }
+    [NSApp addObserver:self forKeyPath:@"effectiveAppearance" options:NSKeyValueObservingOptionNew context:ZeroNativeAppKitAppearanceObservationContext];
+    self.observesAppearanceChanges = YES;
+}
+
+- (void)stopAppearanceObservers {
+    if (!self.observesAppearanceChanges) {
+        return;
+    }
+    [NSApp removeObserver:self forKeyPath:@"effectiveAppearance" context:ZeroNativeAppKitAppearanceObservationContext];
+    self.observesAppearanceChanges = NO;
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context {
+    (void)keyPath;
+    (void)object;
+    (void)change;
+    if (context == ZeroNativeAppKitAppearanceObservationContext) {
+        [self emitAppearanceChanged];
+        return;
+    }
+    [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+}
+
+- (void)emitAppearanceChanged {
+    [self emitEvent:(zero_native_appkit_event_t){
+        .kind = ZERO_NATIVE_APPKIT_EVENT_APPEARANCE_CHANGED,
+        .color_scheme = ZeroNativeAppKitColorSchemeForAppearance(NSApp.effectiveAppearance),
+    }];
 }
 
 - (void)emitResize {

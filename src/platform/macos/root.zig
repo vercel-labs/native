@@ -29,6 +29,7 @@ const AppKitEventKind = enum(c_int) {
     gpu_surface_resize = 12,
     gpu_surface_input = 13,
     widget_accessibility_action = 14,
+    appearance_changed = 15,
 };
 
 const AppKitEvent = extern struct {
@@ -76,6 +77,7 @@ const AppKitEvent = extern struct {
     widget_text_selection_end: usize,
     has_composition_cursor: c_int,
     composition_cursor: usize,
+    color_scheme: c_int,
 };
 
 const AppKitCallback = *const fn (context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) void;
@@ -415,6 +417,9 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
         .shutdown => state.emit(.app_shutdown),
         .app_activated => state.emit(.app_activated),
         .app_deactivated => state.emit(.app_deactivated),
+        .appearance_changed => state.emit(.{ .appearance_changed = .{
+            .color_scheme = appKitColorScheme(event.color_scheme),
+        } }),
         .resize => {
             const surface: platform_mod.Surface = .{
                 .id = event.window_id,
@@ -499,6 +504,13 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             } });
         },
     }
+}
+
+fn appKitColorScheme(value: c_int) platform_mod.ColorScheme {
+    return switch (value) {
+        1 => .dark,
+        else => .light,
+    };
 }
 
 fn appkitBridgeCallback(context: ?*anyopaque, window_id: u64, webview_label: [*]const u8, webview_label_len: usize, message: [*]const u8, message_len: usize, origin: [*]const u8, origin_len: usize) callconv(.c) void {
@@ -1458,4 +1470,10 @@ test "mac gpu surface input preserves ime composition cursor" {
     try std.testing.expectEqual(platform_mod.GpuSurfaceInputKind.ime_set_composition, input.kind);
     try std.testing.expectEqualStrings("compose", input.text);
     try std.testing.expectEqual(@as(?usize, 4), input.composition_cursor);
+}
+
+test "mac appearance event maps color scheme" {
+    try std.testing.expectEqual(platform_mod.ColorScheme.light, appKitColorScheme(0));
+    try std.testing.expectEqual(platform_mod.ColorScheme.dark, appKitColorScheme(1));
+    try std.testing.expectEqual(platform_mod.ColorScheme.light, appKitColorScheme(42));
 }

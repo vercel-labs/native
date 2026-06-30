@@ -120,6 +120,7 @@ const GpuComponentsApp = struct {
     refresh_count: u32 = 0,
     theme_count: u32 = 0,
     theme_mode: ComponentThemeMode = .light,
+    theme_overridden: bool = false,
     canvas_installed: bool = false,
     reported_planned_frame: bool = false,
     virtual_scroll: ComponentVirtualScroll = .{},
@@ -190,6 +191,7 @@ const GpuComponentsApp = struct {
             .gpu_surface_frame => |frame_event| try self.handleGpuFrame(runtime, frame_event),
             .canvas_widget_pointer => |pointer_event| try self.handleWidgetPointer(runtime, pointer_event),
             .canvas_widget_keyboard => |keyboard_event| try self.handleWidgetKeyboard(runtime, keyboard_event),
+            .appearance_changed => |appearance| try self.applySystemAppearance(runtime, appearance),
             .gpu_surface_resized, .gpu_surface_input, .shortcut, .files_dropped, .canvas_widget_file_drop, .canvas_widget_drag, .lifecycle => {},
         }
     }
@@ -339,6 +341,7 @@ const GpuComponentsApp = struct {
 
     fn changeTheme(self: *@This(), runtime: *zero_native.Runtime, command: zero_native.CommandEvent) anyerror!void {
         self.theme_count += 1;
+        self.theme_overridden = true;
         self.theme_mode = self.theme_mode.next();
         const gpu_frame = try runtime.gpuSurfaceFrame(command.window_id, canvas_label);
         _ = self.updateCanvasSize(componentSurfaceSize(gpu_frame.size));
@@ -352,6 +355,26 @@ const GpuComponentsApp = struct {
             .{ self.theme_mode.label(), @tagName(command.source), self.theme_count },
         );
         try self.updateStatus(runtime, command.window_id, status);
+    }
+
+    fn applySystemAppearance(self: *@This(), runtime: *zero_native.Runtime, appearance: zero_native.Appearance) anyerror!void {
+        if (self.theme_overridden) return;
+        const next = componentThemeModeForAppearance(appearance);
+        if (self.theme_mode == next) return;
+        self.theme_mode = next;
+        if (!self.canvas_installed) return;
+
+        const gpu_frame = runtime.gpuSurfaceFrame(1, canvas_label) catch |err| switch (err) {
+            error.WindowNotFound, error.ViewNotFound, error.InvalidViewOptions => return,
+            else => return err,
+        };
+        _ = self.updateCanvasSize(componentSurfaceSize(gpu_frame.size));
+        try installComponentsCanvasModel(runtime, 1, self.virtual_scroll, self.componentTokens(), self.canvas_size);
+        _ = try self.presentComponentsCanvas(runtime, gpuFrameEvent(gpu_frame), true);
+
+        var status_buffer: [160]u8 = undefined;
+        const status = try std.fmt.bufPrint(&status_buffer, "GPU component theme: {s} from system appearance.", .{self.theme_mode.label()});
+        try self.updateStatus(runtime, 1, status);
     }
 
     fn presentComponentsCanvas(self: *@This(), runtime: *zero_native.Runtime, frame_event: zero_native.GpuSurfaceFrameEvent, full_repaint: bool) anyerror!void {
@@ -648,6 +671,13 @@ fn componentTokensForScale(mode: ComponentThemeMode, pixel_snap_scale: f32) canv
     tokens.scroll = .{ .wheel_multiplier = 1.1, .wheel_velocity_scale = 72, .deceleration_per_second = 0.88, .stop_velocity = 4 };
     tokens.pixel_snap = .{ .geometry = true, .text = true, .scale = normalizedPixelSnapScale(pixel_snap_scale) };
     return tokens;
+}
+
+fn componentThemeModeForAppearance(appearance: zero_native.Appearance) ComponentThemeMode {
+    return switch (appearance.color_scheme) {
+        .light => .light,
+        .dark => .dark,
+    };
 }
 
 fn normalizedPixelSnapScale(scale_factor: f32) f32 {
@@ -1736,6 +1766,50 @@ test "gpu components native theme command updates retained design tokens" {
     const themed_layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
     try expectComponentWidgetFrame(themed_layout, 111, rect(64, 124, 148, 34));
     try expectComponentWidgetFrame(themed_layout, 160, rect(456, 410, 176, 32));
+}
+
+test "gpu components follow system appearance until toolbar theme override" {
+    var harness: zero_native.TestHarness() = undefined;
+    harness.init(.{ .size = geometry.SizeF.init(window_width, window_height) });
+    harness.null_platform.gpu_surfaces = true;
+
+    var app = GpuComponentsApp{};
+    defer app.deinit();
+    const app_handle = app.app();
+    try harness.start(app_handle);
+
+    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .appearance_changed = .{ .color_scheme = .dark } });
+    try std.testing.expectEqual(ComponentThemeMode.dark, app.theme_mode);
+
+    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(canvas_width, canvas_height),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expectEqualDeep(componentTokensForScale(.dark, 2), try harness.runtime.canvasWidgetDesignTokens(1, canvas_label));
+
+    const packet_count_before_light = harness.null_platform.gpu_surface_packet_present_count;
+    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .appearance_changed = .{ .color_scheme = .light } });
+    try std.testing.expectEqual(ComponentThemeMode.light, app.theme_mode);
+    try std.testing.expectEqualDeep(componentTokensForScale(.light, 2), try harness.runtime.canvasWidgetDesignTokens(1, canvas_label));
+    try std.testing.expect(harness.null_platform.gpu_surface_packet_present_count > packet_count_before_light);
+    const status_view = componentViewByLabel(&harness.runtime, "status-label").?;
+    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "GPU component theme: Light from system appearance.") != null);
+
+    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .native_command = .{
+        .name = theme_command,
+        .window_id = 1,
+        .view_label = "theme-mode",
+    } });
+    try std.testing.expect(app.theme_overridden);
+    try std.testing.expectEqual(ComponentThemeMode.dark, app.theme_mode);
+
+    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .appearance_changed = .{ .color_scheme = .light } });
+    try std.testing.expectEqual(ComponentThemeMode.dark, app.theme_mode);
+    try std.testing.expectEqualDeep(componentTokensForScale(.dark, 2), try harness.runtime.canvasWidgetDesignTokens(1, canvas_label));
 }
 
 test "gpu components pointer clicks update retained controls" {

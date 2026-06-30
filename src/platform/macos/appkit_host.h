@@ -26,7 +26,13 @@ typedef enum {
     ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_RESIZE = 12,
     ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_INPUT = 13,
     ZERO_NATIVE_APPKIT_EVENT_WIDGET_ACCESSIBILITY_ACTION = 14,
+    ZERO_NATIVE_APPKIT_EVENT_APPEARANCE_CHANGED = 15,
 } zero_native_appkit_event_kind_t;
+
+typedef enum {
+    ZERO_NATIVE_APPKIT_COLOR_SCHEME_LIGHT = 0,
+    ZERO_NATIVE_APPKIT_COLOR_SCHEME_DARK = 1,
+} zero_native_appkit_color_scheme_t;
 
 typedef enum {
     ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DOWN = 0,
@@ -213,6 +219,7 @@ typedef struct {
     size_t widget_text_selection_end;
     int has_composition_cursor;
     size_t composition_cursor;
+    int color_scheme;
 } zero_native_appkit_event_t;
 
 typedef void (*zero_native_appkit_event_callback_t)(void *context, const zero_native_appkit_event_t *event);

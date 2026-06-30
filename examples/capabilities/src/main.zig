@@ -110,7 +110,7 @@ const CapabilitiesApp = struct {
                 },
                 else => {},
             },
-            .command, .shortcut, .gpu_surface_frame, .gpu_surface_resized, .gpu_surface_input, .canvas_widget_pointer, .canvas_widget_keyboard, .canvas_widget_file_drop, .canvas_widget_drag => {},
+            .appearance_changed, .command, .shortcut, .gpu_surface_frame, .gpu_surface_resized, .gpu_surface_input, .canvas_widget_pointer, .canvas_widget_keyboard, .canvas_widget_file_drop, .canvas_widget_drag => {},
         }
     }
 };

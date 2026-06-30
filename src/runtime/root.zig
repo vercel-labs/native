@@ -21,6 +21,7 @@ pub const max_canvas_glyphs_per_view: usize = 256;
 pub const max_canvas_text_bytes_per_view: usize = 2048;
 const max_canvas_diff_changes_per_view: usize = max_canvas_commands_per_view * 2 + 1;
 const max_canvas_render_animations_per_view: usize = max_canvas_commands_per_view;
+const max_canvas_render_animation_dirty_bounds_per_view: usize = 8;
 const max_canvas_render_overrides_per_view: usize = max_canvas_commands_per_view;
 const max_canvas_pipelines_per_view: usize = 8;
 const max_canvas_pipeline_cache_actions_per_view: usize = max_canvas_pipelines_per_view * 2;
@@ -74,6 +75,7 @@ pub const CommandSource = enum {
 };
 
 pub const ShortcutEvent = platform.ShortcutEvent;
+pub const Appearance = platform.Appearance;
 pub const GpuFrame = platform.GpuFrame;
 pub const GpuSurfaceFrameEvent = platform.GpuSurfaceFrameEvent;
 pub const GpuSurfaceResizeEvent = platform.GpuSurfaceResizeEvent;
@@ -173,6 +175,7 @@ pub const FrameDiagnostics = struct {
 
 pub const Event = union(enum) {
     lifecycle: LifecycleEvent,
+    appearance_changed: Appearance,
     command: CommandEvent,
     shortcut: ShortcutEvent,
     files_dropped: platform.FileDropEvent,
@@ -187,6 +190,7 @@ pub const Event = union(enum) {
     pub fn name(self: Event) []const u8 {
         return switch (self) {
             .lifecycle => |event_value| @tagName(event_value),
+            .appearance_changed => "appearance_changed",
             .command => |event_value| event_value.name,
             .shortcut => "shortcut",
             .files_dropped => "files_dropped",
@@ -260,6 +264,7 @@ pub const Options = struct {
 pub const Runtime = struct {
     options: Options,
     surface: platform.Surface,
+    appearance: platform.Appearance = .{},
     windows: [platform.max_windows]RuntimeWindow = undefined,
     window_count: usize = 0,
     views: [platform.max_views]RuntimeView = undefined,
@@ -1011,6 +1016,7 @@ pub const Runtime = struct {
 
         var render_plan = try display_list.renderPlan(storage.render_commands);
         const render_override_dirty_bounds = canvas.renderOverrideDirtyBounds(render_plan.commands, frame_options.previous_render_overrides, frame_options.render_overrides);
+        const render_animation_dirty_bounds = self.views[index].canvasRenderAnimationDirtyBoundsForOverrides(frame_options.previous_render_overrides, frame_options.render_overrides);
         render_plan.bounds = canvas.applyRenderOverrides(storage.render_commands[0..render_plan.commandCount()], frame_options.render_overrides);
         const batch_plan = try render_plan.batchPlan(storage.render_batches);
         const pipeline_cache_plan = if (storage.pipeline_cache_entries.len == 0 and storage.pipeline_cache_actions.len == 0)
@@ -1112,7 +1118,7 @@ pub const Runtime = struct {
         const dirty_bounds = if (full_repaint)
             canvasFullRepaintBounds(frame_options.surface_size, render_plan.bounds)
         else
-            clippedCanvasDirtyBounds(unionRects(canvasDirtyBoundsFromChanges(changes), render_override_dirty_bounds), frame_options.surface_size);
+            clippedCanvasDirtyBounds(unionRects(canvasDirtyBoundsFromChanges(changes), unionRects(render_override_dirty_bounds, render_animation_dirty_bounds)), frame_options.surface_size);
 
         const canvas_frame = canvas.CanvasFrame{
             .frame_index = frame_options.frame_index,
@@ -1532,6 +1538,7 @@ pub const Runtime = struct {
             error.RenderAnimationListFull => return,
             else => return err,
         };
+        self.views[view_index].replaceCanvasRenderAnimationDirtyBounds(render_animation.id, animation.dirty_bounds) catch {};
     }
 
     fn publishCanvasWidgetAccessibility(self: *Runtime, view_index: usize) anyerror!void {
@@ -2192,6 +2199,10 @@ pub const Runtime = struct {
                 try self.dispatchEvent(app, .{ .lifecycle = .deactivate });
                 self.emitAppLifecycleEvent("app:deactivate") catch |err| try self.log("app.deactivate.emit_failed", @errorName(err), &.{});
             },
+            .appearance_changed => |appearance| {
+                self.appearance = appearance;
+                try self.dispatchEvent(app, .{ .appearance_changed = appearance });
+            },
             .surface_resized => |surface_value| {
                 self.surface = surface_value;
                 if (self.findWindowIndexById(surface_value.id)) |index| {
@@ -2545,6 +2556,9 @@ pub const Runtime = struct {
             },
             .shortcut => {
                 self.invalidateFor(.command, null);
+            },
+            .appearance_changed => {
+                self.invalidateFor(.state, null);
             },
             .files_dropped => {},
             .gpu_surface_frame => {},
@@ -4969,6 +4983,12 @@ const CanvasWidgetToggleAnimation = struct {
     id: canvas.ObjectId,
     selected: bool,
     travel: f32,
+    dirty_bounds: ?geometry.RectF,
+};
+
+const CanvasRenderAnimationDirtyBounds = struct {
+    id: canvas.ObjectId,
+    bounds: ?geometry.RectF,
 };
 
 const CanvasResourceCounts = struct {
@@ -5773,6 +5793,8 @@ const RuntimeView = struct {
     presented_canvas_has_unkeyed: bool = false,
     canvas_render_animations: [max_canvas_render_animations_per_view]canvas.CanvasRenderAnimation = undefined,
     canvas_render_animation_count: usize = 0,
+    canvas_render_animation_dirty_bounds: [max_canvas_render_animation_dirty_bounds_per_view]CanvasRenderAnimationDirtyBounds = undefined,
+    canvas_render_animation_dirty_bounds_count: usize = 0,
     canvas_frame_render_overrides: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
     canvas_frame_render_override_count: usize = 0,
     canvas_frame_path_geometry_cache: [max_canvas_path_geometries_per_view]canvas.RenderPathGeometryCacheEntry = undefined,
@@ -6167,6 +6189,7 @@ const RuntimeView = struct {
         if (animations.len > self.canvas_render_animations.len) return error.RenderAnimationListFull;
         @memcpy(self.canvas_render_animations[0..animations.len], animations);
         self.canvas_render_animation_count = animations.len;
+        self.canvas_render_animation_dirty_bounds_count = 0;
     }
 
     fn replaceCanvasRenderAnimation(self: *RuntimeView, animation: canvas.CanvasRenderAnimation) anyerror!void {
@@ -6191,6 +6214,50 @@ const RuntimeView = struct {
             len += 1;
         }
         self.canvas_render_animation_count = len;
+        self.removeCanvasRenderAnimationDirtyBounds(id);
+    }
+
+    fn replaceCanvasRenderAnimationDirtyBounds(self: *RuntimeView, id: canvas.ObjectId, bounds: ?geometry.RectF) anyerror!void {
+        if (id == 0) return error.InvalidViewOptions;
+        if (bounds == null) {
+            self.removeCanvasRenderAnimationDirtyBounds(id);
+            return;
+        }
+        for (self.canvas_render_animation_dirty_bounds[0..self.canvas_render_animation_dirty_bounds_count]) |*entry| {
+            if (entry.id == id) {
+                entry.bounds = bounds;
+                return;
+            }
+        }
+        if (self.canvas_render_animation_dirty_bounds_count >= self.canvas_render_animation_dirty_bounds.len) return error.RenderAnimationListFull;
+        self.canvas_render_animation_dirty_bounds[self.canvas_render_animation_dirty_bounds_count] = .{
+            .id = id,
+            .bounds = bounds,
+        };
+        self.canvas_render_animation_dirty_bounds_count += 1;
+    }
+
+    fn removeCanvasRenderAnimationDirtyBounds(self: *RuntimeView, id: canvas.ObjectId) void {
+        var len: usize = 0;
+        for (self.canvas_render_animation_dirty_bounds[0..self.canvas_render_animation_dirty_bounds_count]) |entry| {
+            if (entry.id == id) continue;
+            self.canvas_render_animation_dirty_bounds[len] = entry;
+            len += 1;
+        }
+        self.canvas_render_animation_dirty_bounds_count = len;
+    }
+
+    fn canvasRenderAnimationDirtyBoundsForOverrides(
+        self: *const RuntimeView,
+        previous: []const canvas.CanvasRenderOverride,
+        next: []const canvas.CanvasRenderOverride,
+    ) ?geometry.RectF {
+        var bounds: ?geometry.RectF = null;
+        for (self.canvas_render_animation_dirty_bounds[0..self.canvas_render_animation_dirty_bounds_count]) |entry| {
+            if (findCanvasRenderOverrideIndex(previous, entry.id) == null and findCanvasRenderOverrideIndex(next, entry.id) == null) continue;
+            bounds = unionRects(bounds, entry.bounds);
+        }
+        return bounds;
     }
 
     fn copyCanvasFrameRenderOverrides(self: *RuntimeView, overrides: []const canvas.CanvasRenderOverride) anyerror!void {
@@ -6219,6 +6286,7 @@ const RuntimeView = struct {
         for (self.canvasRenderAnimations()) |animation| {
             if (!canvasRenderAnimationActive(animation, timestamp_ns) and canvasRenderAnimationFinalOverrideNoop(animation)) {
                 pruned = true;
+                self.removeCanvasRenderAnimationDirtyBounds(animation.id);
                 continue;
             }
             self.canvas_render_animations[len] = animation;
@@ -6896,6 +6964,7 @@ const RuntimeView = struct {
             .id = id,
             .selected = canvasWidgetBooleanSelected(widget),
             .travel = travel,
+            .dirty_bounds = self.canvasWidgetDirtyBounds(index, widget.frame),
         };
     }
 
@@ -15182,12 +15251,17 @@ test "runtime batches pointer widget display list refreshes" {
     try std.testing.expectEqual(harness.runtime.views[0].widget_tokens.motion.durationMs(.fast), animations[0].duration_ms);
     try std.testing.expectApproxEqAbs(-travel, animations[0].from_transform.?.tx, 0.001);
     try std.testing.expectEqual(canvas.Affine.identity(), animations[0].to_transform.?);
+    const expected_toggle_dirty = harness.runtime.views[0].canvasWidgetDirtyBounds(1, retained.nodes[1].widget.frame).?;
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_render_animation_dirty_bounds_count);
+    try std.testing.expectEqual(canvas.toggleWidgetKnobCommandId(4), harness.runtime.views[0].canvas_render_animation_dirty_bounds[0].id);
+    try std.testing.expectEqualDeep(expected_toggle_dirty, harness.runtime.views[0].canvas_render_animation_dirty_bounds[0].bounds.?);
 
     var overrides: [1]canvas.CanvasRenderOverride = undefined;
     const sampled = try canvas.sampleCanvasRenderAnimations(animations, 110 + 60_000_000, &overrides);
     try std.testing.expectEqual(@as(usize, 1), sampled.len);
     try std.testing.expect(sampled[0].transform.?.tx > -travel);
     try std.testing.expect(sampled[0].transform.?.tx < 0);
+    try std.testing.expectEqualDeep(expected_toggle_dirty, harness.runtime.views[0].canvasRenderAnimationDirtyBoundsForOverrides(&.{}, sampled).?);
 
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
@@ -21180,7 +21254,8 @@ test "runtime gates JavaScript command API with command permission" {
     };
 
     const command_permission = [_][]const u8{security.permission_command};
-    var allowed: TestHarness() = undefined;
+    const allowed = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(allowed);
     allowed.init(.{});
     allowed.runtime.options.js_window_api = true;
     allowed.runtime.options.security.permissions = &command_permission;
@@ -21204,7 +21279,8 @@ test "runtime gates JavaScript command API with command permission" {
     try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "\"id\":\"app.save\"") != null);
 
     const filesystem_only = [_][]const u8{security.permission_filesystem};
-    var denied: TestHarness() = undefined;
+    const denied = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(denied);
     denied.init(.{});
     denied.runtime.options.js_window_api = true;
     denied.runtime.options.security.permissions = &filesystem_only;
@@ -21953,7 +22029,8 @@ test "runtime gates JavaScript view API with view permission" {
     };
 
     const view_permission = [_][]const u8{security.permission_view};
-    var allowed: TestHarness() = undefined;
+    const allowed = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(allowed);
     allowed.init(.{});
     allowed.runtime.options.js_window_api = true;
     allowed.runtime.options.security.permissions = &view_permission;
@@ -21967,7 +22044,8 @@ test "runtime gates JavaScript view API with view permission" {
     try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
 
     const command_permission = [_][]const u8{security.permission_command};
-    var denied: TestHarness() = undefined;
+    const denied = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(denied);
     denied.init(.{});
     denied.runtime.options.js_window_api = true;
     denied.runtime.options.security.permissions = &command_permission;
@@ -22548,7 +22626,8 @@ test "runtime gates built-in OS bridge commands through explicit policy" {
     var app_state: u8 = 0;
     const app = App{ .context = &app_state, .name = "os-bridge", .source = platform.WebViewSource.html("<p>OS</p>") };
 
-    var denied: TestHarness() = undefined;
+    const denied = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(denied);
     denied.init(.{});
     try denied.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
         .bytes = "{\"id\":\"open\",\"command\":\"zero-native.os.openUrl\",\"payload\":{\"url\":\"https://example.com/docs\"}}",
@@ -22571,7 +22650,8 @@ test "runtime gates built-in OS bridge commands through explicit policy" {
     };
     const allowed_urls = [_][]const u8{"https://example.com/*"};
 
-    var allowed: TestHarness() = undefined;
+    const allowed = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(allowed);
     allowed.init(.{});
     allowed.runtime.options.security.permissions = &grants;
     allowed.runtime.options.security.navigation.external_links = .{
@@ -22621,7 +22701,8 @@ test "runtime gates built-in clipboard bridge commands through explicit policy" 
     var app_state: u8 = 0;
     const app = App{ .context = &app_state, .name = "clipboard-bridge", .source = platform.WebViewSource.html("<p>Clipboard</p>") };
 
-    var denied: TestHarness() = undefined;
+    const denied = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(denied);
     denied.init(.{});
     try denied.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
         .bytes = "{\"id\":\"write\",\"command\":\"zero-native.clipboard.writeText\",\"payload\":{\"text\":\"plain text\"}}",
@@ -22640,7 +22721,8 @@ test "runtime gates built-in clipboard bridge commands through explicit policy" 
         .{ .name = "zero-native.clipboard.write", .permissions = &clipboard_permission, .origins = &origins },
     };
 
-    var allowed: TestHarness() = undefined;
+    const allowed = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(allowed);
     allowed.init(.{});
     allowed.runtime.options.security.permissions = &grants;
     allowed.runtime.options.builtin_bridge = .{ .enabled = true, .commands = &policies };
@@ -22678,7 +22760,8 @@ test "runtime gates built-in credential bridge commands through explicit policy"
     var app_state: u8 = 0;
     const app = App{ .context = &app_state, .name = "credential-bridge", .source = platform.WebViewSource.html("<p>Credentials</p>") };
 
-    var denied: TestHarness() = undefined;
+    const denied = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(denied);
     denied.init(.{});
     try denied.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
         .bytes = "{\"id\":\"set\",\"command\":\"zero-native.credentials.set\",\"payload\":{\"service\":\"dev.zero-native.test\",\"account\":\"alice\",\"secret\":\"secret-token\"}}",
@@ -22696,7 +22779,8 @@ test "runtime gates built-in credential bridge commands through explicit policy"
         .{ .name = "zero-native.credentials.delete", .permissions = &credential_permission, .origins = &origins },
     };
 
-    var allowed: TestHarness() = undefined;
+    const allowed = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(allowed);
     allowed.init(.{});
     allowed.runtime.options.security.permissions = &grants;
     allowed.runtime.options.builtin_bridge = .{ .enabled = true, .commands = &policies };
