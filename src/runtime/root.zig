@@ -1740,10 +1740,12 @@ pub const Runtime = struct {
     }
 
     fn updateCanvasWidgetTextFromKeyboard(self: *Runtime, keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
-        const edit = keyboard_event.keyboard.textEditEvent() orelse return;
         const index = self.findViewIndex(keyboard_event.window_id, keyboard_event.view_label) orelse return;
         if (self.views[index].kind != .gpu_surface) return;
         const target = keyboard_event.target orelse return;
+        const edit = canvasWidgetSearchFieldKeyboardTextEditEvent(target.kind, keyboard_event.keyboard) orelse
+            keyboard_event.keyboard.textEditEvent() orelse
+            return;
 
         const dirty = try self.views[index].applyCanvasWidgetTextEdit(target.id, edit) orelse return;
         if (canvasDirtyRegionForView(self.views[index].frame, dirty)) |dirty_region| {
@@ -7541,6 +7543,13 @@ fn canvasWidgetTextEditEventFromGpuInput(input_event: GpuSurfaceInputEvent) ?can
         .scroll,
         => null,
     };
+}
+
+fn canvasWidgetSearchFieldKeyboardTextEditEvent(kind: canvas.WidgetKind, keyboard: canvas.WidgetKeyboardEvent) ?canvas.TextInputEvent {
+    if (kind != .search_field or keyboard.phase != .key_down) return null;
+    if (keyboard.modifiers.shift or keyboard.modifiers.hasNavigationModifier()) return null;
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "escape") or std.ascii.eqlIgnoreCase(keyboard.key, "esc")) return .clear;
+    return null;
 }
 
 fn gpuInputHasTextCommandModifier(input_event: GpuSurfaceInputEvent) bool {
@@ -13660,6 +13669,17 @@ test "runtime applies text input to focused canvas text fields" {
     try std.testing.expectEqualStrings("x", retained.nodes[1].widget.text);
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(1), retained.nodes[1].widget.text_selection.?);
 
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "escape",
+    } });
+    try std.testing.expectEqual(@as(u64, 5), harness.runtime.views[0].widget_revision);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("x", retained.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(1), retained.nodes[1].widget.text_selection.?);
+
     _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
     display_list = try harness.runtime.canvasDisplayList(1, "canvas");
     var saw_deleted_text = false;
@@ -14338,6 +14358,38 @@ test "runtime applies text input to focused canvas search fields" {
     }
     try std.testing.expect(saw_search_icon);
     try std.testing.expect(saw_inserted_text);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "escape",
+    } });
+    try std.testing.expectEqual(@as(u64, 3), harness.runtime.views[0].widget_revision);
+
+    const cleared = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("", cleared.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), cleared.nodes[1].widget.text_selection.?);
+    try std.testing.expectEqualDeep(canvas.TextRange.init(0, 0), harness.runtime.views[0].widgetSemantics()[0].text_selection.?);
+    const cleared_snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expectEqualStrings("", cleared_snapshot.widgets[0].text_value);
+    try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 0, .end = 0 }, cleared_snapshot.widgets[0].text_selection.?);
+
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+    const cleared_display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    var saw_search_placeholder = false;
+    for (cleared_display_list.commands) |command| {
+        switch (command) {
+            .draw_text => |text| {
+                if (text.id == testCanvasWidgetPartId(2, 9)) {
+                    try std.testing.expectEqualStrings("Search", text.text);
+                    saw_search_placeholder = true;
+                }
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_search_placeholder);
 }
 
 test "runtime applies pointer values to canvas controls" {

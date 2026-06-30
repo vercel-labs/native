@@ -571,6 +571,7 @@ pub const TextInputEvent = union(enum) {
     insert_text: []const u8,
     delete_backward,
     delete_forward,
+    clear,
     move_caret: TextCaretMove,
     set_selection: TextSelection,
     set_composition: TextCompositionUpdate,
@@ -3984,6 +3985,11 @@ pub fn applyTextInputEvent(state: TextEditState, event: TextInputEvent, output: 
         .insert_text => |text| replaceTextEditRange(normalized, activeTextReplaceRange(normalized), text, output, null, text.len),
         .delete_backward => deleteBackwardTextEdit(normalized, output),
         .delete_forward => deleteForwardTextEdit(normalized, output),
+        .clear => .{
+            .text = "",
+            .selection = TextSelection.collapsed(0),
+            .composition = null,
+        },
         .move_caret => |move| moveTextCaret(normalized, move),
         .set_selection => |selection| .{
             .text = normalized.text,
@@ -18887,6 +18893,14 @@ test "text edit state applies utf8-aware caret insert and delete events" {
     state = try state.apply(.{ .insert_text = "x" }, &storage_b);
     try std.testing.expectEqualStrings("AxB", state.text);
     try std.testing.expectEqual(@as(usize, 2), state.selection.focus);
+
+    state = try state.apply(.clear, &storage_a);
+    try std.testing.expectEqualStrings("", state.text);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(0), state.selection);
+
+    state = try state.apply(.{ .insert_text = "AxB" }, &storage_b);
+    try std.testing.expectEqualStrings("AxB", state.text);
+    try std.testing.expectEqual(@as(usize, 3), state.selection.focus);
 
     state = try state.apply(.{ .set_selection = .{ .anchor = 1, .focus = 3 } }, &storage_a);
     state = try state.apply(.delete_forward, &storage_a);
