@@ -20,6 +20,9 @@ const max_dashboard_glyphs: usize = zero_native.runtime.max_canvas_glyphs_per_vi
 const max_dashboard_widgets: usize = 40;
 const dashboard_chrome_prefix_commands: usize = 4;
 const dashboard_chrome_suffix_commands: usize = 0;
+const expected_dashboard_command_count: usize = 63;
+const expected_dashboard_interaction_command_count: usize = 64;
+const expected_dashboard_reference_signature: u64 = 10588035201567630944;
 const refresh_command = "dashboard.refresh";
 const mode_command = "dashboard.mode";
 const live_button_fill_command_id: canvas.ObjectId = 103 * 16 + 1;
@@ -1029,7 +1032,7 @@ test "gpu dashboard display list builds a complete canvas scene" {
     try buildDashboardDisplayListFromWidgets(&builder);
     const display_list = builder.displayList();
 
-    try std.testing.expectEqual(@as(usize, 64), display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, expected_dashboard_command_count), display_list.commandCount());
     try std.testing.expect(display_list.findCommandById(1) != null);
     try std.testing.expect(display_list.findCommandById(deployment_region_text_command_id) != null);
     try std.testing.expect(display_list.findCommandById(live_button_fill_command_id) != null);
@@ -1130,7 +1133,7 @@ test "gpu dashboard display list renders through the reference surface" {
     const surface = try canvas.ReferenceRenderSurface.initWithScratch(canvas_pixel_width, 520, pixels, scratch);
     try surface.renderPass(frame.renderPass(), color(0, 0, 0));
 
-    try std.testing.expectEqual(@as(u64, 17457816620034739986), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, expected_dashboard_reference_signature), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(8, 8));
     try expectVisiblePixel(surface.pixelRgba8(64, 64));
     try expectVisiblePixel(surface.pixelRgba8(240, 140));
@@ -1232,7 +1235,7 @@ test "gpu dashboard scheduled animations render without display list rebuild" {
     try std.testing.expect(app.canvas_installed);
     const initial_frame = try harness.runtime.gpuSurfaceFrame(1, "dashboard-canvas");
     try std.testing.expect(initial_frame.canvas_revision > 0);
-    try std.testing.expectEqual(@as(usize, 64), initial_frame.canvas_command_count);
+    try std.testing.expectEqual(@as(usize, expected_dashboard_command_count), initial_frame.canvas_command_count);
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_packet_present_count);
 
     const animation_frame = try harness.runtime.nextCanvasFrame(1, "dashboard-canvas", .{
@@ -1243,7 +1246,7 @@ test "gpu dashboard scheduled animations render without display list rebuild" {
     }, app.frameStorage());
     const animation_view_frame = try harness.runtime.gpuSurfaceFrame(1, "dashboard-canvas");
     try std.testing.expectEqual(initial_frame.canvas_revision, animation_view_frame.canvas_revision);
-    try std.testing.expectEqual(@as(usize, 64), animation_frame.display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, expected_dashboard_command_count), animation_frame.display_list.commandCount());
     try std.testing.expect(animation_frame.requiresRender());
     try std.testing.expect(!animation_frame.full_repaint);
     try std.testing.expectEqual(@as(usize, 0), animation_frame.changes.len);
@@ -1285,7 +1288,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     try std.testing.expectEqualDeep(dashboardWidgetTokensForScale(2), try harness.runtime.canvasWidgetDesignTokens(1, "dashboard-canvas"));
 
     var display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    try std.testing.expectEqual(@as(usize, 64), display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, expected_dashboard_command_count), display_list.commandCount());
     try std.testing.expect(display_list.findCommandById(1) != null);
     try std.testing.expect(display_list.findCommandById(deployment_region_text_command_id) != null);
     try std.testing.expect(display_list.findCommandById(activity_scroll_track_command_id) != null);
@@ -1510,7 +1513,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     const updated_confidence = dashboardSnapshotWidget(snapshot, 134).?;
     try std.testing.expectApproxEqAbs(@as(f32, 0.67), updated_confidence.value.?, 0.001);
     display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    try std.testing.expectApproxEqAbs(@as(f32, 52.26), try dashboardRoundedRectCommandWidth(display_list, confidence_active_command_id), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 52.5), try dashboardRoundedRectCommandWidth(display_list, confidence_active_command_id), 0.001);
 
     resetDashboardDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 120 increment");
@@ -1551,7 +1554,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     const frame = try harness.runtime.gpuSurfaceFrame(1, "dashboard-canvas");
     try std.testing.expect(frame.canvas_revision > 1);
-    try std.testing.expectEqual(@as(usize, 64), frame.canvas_command_count);
+    try std.testing.expectEqual(@as(usize, expected_dashboard_interaction_command_count), frame.canvas_command_count);
     try std.testing.expect(!frame.canvas_frame_requires_render);
     try std.testing.expect(!frame.canvas_frame_full_repaint);
     try std.testing.expectEqual(@as(usize, 0), frame.canvas_frame_change_count);

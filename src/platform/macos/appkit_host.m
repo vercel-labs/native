@@ -676,6 +676,13 @@ static NSRect ZeroNativePacketRect(id value) {
     );
 }
 
+static BOOL ZeroNativePacketRectIntersects(NSRect a, NSRect b) {
+    a = CGRectStandardize(a);
+    b = CGRectStandardize(b);
+    if (NSIsEmptyRect(a) || NSIsEmptyRect(b)) return NO;
+    return !NSIsEmptyRect(NSIntersectionRect(a, b));
+}
+
 static NSPoint ZeroNativePacketPoint(id value) {
     NSArray *array = ZeroNativePacketArray(value, 2);
     if (!array) return NSZeroPoint;
@@ -1271,6 +1278,10 @@ static BOOL ZeroNativePacketDrawImage(NSDictionary *packetImage, NSDictionary<NS
 
 static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef context, CGFloat scale, BOOL hasClip, NSRect clipRect, NSDictionary<NSString *, NSImage *> *imageCache) {
     if (!command) return NO;
+    if (hasClip) {
+        NSArray *bounds = ZeroNativePacketArray(command[@"bounds"], 4);
+        if (bounds && !ZeroNativePacketRectIntersects(ZeroNativePacketRect(bounds), clipRect)) return YES;
+    }
 
     NSString *kind = [command[@"kind"] isKindOfClass:[NSString class]] ? command[@"kind"] : @"";
     CGFloat opacity = fmax(0.0, fmin(1.0, ZeroNativePacketNumber(command[@"opacity"], 1)));

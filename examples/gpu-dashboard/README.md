@@ -9,7 +9,7 @@ This example combines native app chrome, a `gpu_surface`, and a retained canvas 
 - A WebView inspector sibling in the same split layout.
 - Frame diagnostics for canvas profile risk, work units, commands, batches, and dirty regions.
 
-Run with the macOS system backend:
+Run with the macOS system backend. The GPU dashboard defaults to `ReleaseFast`; pass `-Doptimize=Debug` only when debugging renderer internals.
 
 ```sh
 zig build run -Dplatform=macos -Dweb-engine=system

@@ -7,7 +7,7 @@ This example shows a real GPU-backed child surface in the native view tree:
 - A WebView sibling pane in the same split layout.
 - Native controls that dispatch commands back to Zig.
 
-Run with the macOS system backend:
+Run with the macOS system backend. The GPU surface example defaults to `ReleaseFast`; pass `-Doptimize=Debug` only when debugging renderer internals.
 
 ```sh
 zig build run -Dplatform=macos -Dweb-engine=system

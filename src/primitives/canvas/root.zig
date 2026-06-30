@@ -3208,6 +3208,12 @@ pub const ScrollPhysics = struct {
     wheel_velocity_scale: f32 = 60,
     deceleration_per_second: f32 = 0.86,
     stop_velocity: f32 = 5,
+    rubberband_extent_ratio: f32 = 0.42,
+    rubberband_max_extent: f32 = 96,
+    rubberband_resistance: f32 = 0.38,
+    rubberband_return_per_second: f32 = 18,
+    rubberband_velocity_decay_per_second: f32 = 0,
+    rubberband_snap_distance: f32 = 0.5,
 };
 
 pub const ScrollState = struct {
@@ -3229,26 +3235,89 @@ pub const ScrollState = struct {
     }
 
     pub fn applyWheel(self: ScrollState, delta: f32, physics: ScrollPhysics) ScrollState {
+        return self.applyWheelWithRubberband(delta, physics, true);
+    }
+
+    pub fn applyWheelClamped(self: ScrollState, delta: f32, physics: ScrollPhysics) ScrollState {
+        return self.applyWheelWithRubberband(delta, physics, false);
+    }
+
+    pub fn visualOffset(self: ScrollState) f32 {
+        return std.math.clamp(self.offset, 0, self.maxOffset());
+    }
+
+    pub fn overscroll(self: ScrollState) f32 {
+        return self.offset - self.visualOffset();
+    }
+
+    pub fn needsKineticStep(self: ScrollState, physics: ScrollPhysics) bool {
+        return @abs(self.velocity) > nonNegative(physics.stop_velocity) or @abs(self.overscroll()) > @max(0.01, nonNegative(physics.rubberband_snap_distance));
+    }
+
+    fn applyWheelWithRubberband(self: ScrollState, delta: f32, physics: ScrollPhysics, rubberband: bool) ScrollState {
         var next = self;
         const scaled_delta = delta * physics.wheel_multiplier;
-        next.offset += scaled_delta;
+        var effective_delta = scaled_delta;
+        if (rubberband and scaled_delta != 0) {
+            const max_offset = next.maxOffset();
+            const moving_outward =
+                (next.offset <= 0 and scaled_delta < 0) or
+                (next.offset >= max_offset and scaled_delta > 0);
+            if (moving_outward) {
+                effective_delta *= std.math.clamp(physics.rubberband_resistance, 0, 1);
+            }
+        }
+        next.offset += effective_delta;
         next.velocity = scaled_delta * physics.wheel_velocity_scale;
-        return next.clamped();
+        return if (rubberband) next.rubberbanded(physics) else next.clamped();
     }
 
     pub fn stepKinetic(self: ScrollState, dt_ms: f32, physics: ScrollPhysics) ScrollState {
-        var next = self.clamped();
+        var next = self;
+        const dt_seconds = nonNegative(dt_ms) / 1000.0;
+        if (@abs(next.overscroll()) > 0.01) {
+            const bounded = next.visualOffset();
+            const overscroll_delta = next.offset - bounded;
+            const recovery = std.math.clamp(nonNegative(physics.rubberband_return_per_second) * dt_seconds, 0, 1);
+            next.offset -= overscroll_delta * recovery;
+            const velocity_decay = std.math.pow(f32, std.math.clamp(physics.rubberband_velocity_decay_per_second, 0, 1), dt_seconds);
+            next.velocity *= velocity_decay;
+            if (@abs(next.offset - bounded) <= nonNegative(physics.rubberband_snap_distance) and @abs(next.velocity) <= nonNegative(physics.stop_velocity) * 4) {
+                next.offset = bounded;
+                next.velocity = 0;
+            }
+            return next.rubberbanded(physics);
+        }
+
         if (@abs(next.velocity) <= nonNegative(physics.stop_velocity)) {
             next.velocity = 0;
             return next;
         }
 
-        const dt_seconds = nonNegative(dt_ms) / 1000.0;
         next.offset += next.velocity * dt_seconds;
         const decay = std.math.pow(f32, std.math.clamp(physics.deceleration_per_second, 0, 1), dt_seconds);
         next.velocity *= decay;
         if (@abs(next.velocity) <= nonNegative(physics.stop_velocity)) next.velocity = 0;
-        return next.clamped();
+        return next.rubberbanded(physics);
+    }
+
+    fn rubberbanded(self: ScrollState, physics: ScrollPhysics) ScrollState {
+        const extent = self.rubberbandExtent(physics);
+        if (extent <= 0) return self.clamped();
+        var next = self;
+        const min_offset = -extent;
+        const max_offset = next.maxOffset() + extent;
+        next.offset = std.math.clamp(next.offset, min_offset, max_offset);
+        return next;
+    }
+
+    fn rubberbandExtent(self: ScrollState, physics: ScrollPhysics) f32 {
+        const viewport_extent = nonNegative(self.viewport_extent);
+        if (viewport_extent <= 0) return 0;
+        const ratio_extent = viewport_extent * nonNegative(physics.rubberband_extent_ratio);
+        const max_extent = nonNegative(physics.rubberband_max_extent);
+        if (max_extent <= 0) return ratio_extent;
+        return @min(ratio_extent, max_extent);
     }
 };
 
@@ -6668,7 +6737,7 @@ fn widgetScrollContentExtentForWidget(widget: Widget, viewport: geometry.RectF) 
         return @max(viewport.height, virtualWidgetScrollContentExtent(widget, viewport.height));
     }
 
-    const offset = nonNegative(widget.value);
+    const offset = widget.value;
     var bottom = viewport.maxY();
     for (widget.children) |child| {
         bottom = @max(bottom, child.frame.maxY() + offset);
@@ -7806,7 +7875,7 @@ fn layoutScrollChildren(
     len: *usize,
     scroll_y: f32,
 ) Error!void {
-    const scrolled_content = content.translate(geometry.OffsetF.init(0, -nonNegative(scroll_y)));
+    const scrolled_content = content.translate(geometry.OffsetF.init(0, -scroll_y));
     for (children) |child| {
         _ = try layoutWidgetDepth(child, stackChildFrame(scrolled_content, child), parent_index, depth + 1, output, len);
     }
@@ -8690,7 +8759,7 @@ fn widgetScrollContentExtent(layout: WidgetLayoutTree, scroll_index: usize, view
     }
 
     const scroll_depth = scroll_node.depth;
-    const offset = nonNegative(scroll_node.widget.value);
+    const offset = scroll_node.widget.value;
     var bottom = viewport.maxY();
     var index = scroll_index + 1;
     while (index < layout.nodes.len and layout.nodes[index].depth > scroll_depth) : (index += 1) {
@@ -12451,7 +12520,15 @@ test "scroll state applies wheel deltas kinetic decay and bounds" {
     try std.testing.expect(stepped.velocity > 0);
     try std.testing.expect(stepped.velocity < wheeled.velocity);
 
-    const clamped = wheeled.applyWheel(1000, physics);
+    const rubberbanded = wheeled.applyWheel(1000, physics);
+    try std.testing.expectEqual(@as(f32, 302), rubberbanded.offset);
+    try std.testing.expect(rubberbanded.velocity > 0);
+
+    const rebounding = rubberbanded.stepKinetic(16, physics);
+    try std.testing.expect(rebounding.offset < rubberbanded.offset);
+    try std.testing.expect(rebounding.offset >= rubberbanded.visualOffset());
+
+    const clamped = wheeled.applyWheelClamped(1000, physics);
     try std.testing.expectEqual(@as(f32, 260), clamped.offset);
     try std.testing.expectEqual(@as(f32, 0), clamped.velocity);
 }

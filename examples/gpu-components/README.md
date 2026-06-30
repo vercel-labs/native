@@ -7,7 +7,7 @@ This example is a retained GPU widget lab for trying the finished native-first c
 - Retained widget semantics for focus, press, toggle, select, text editing, scrolling, and data-grid roles.
 - Token-driven rounded corners, shadows, blur, typography, color, and scroll physics.
 
-Run with the macOS system backend:
+Run with the macOS system backend. The GPU component lab defaults to `ReleaseFast`; pass `-Doptimize=Debug` only when debugging renderer internals.
 
 ```sh
 zig build run -Dplatform=macos -Dweb-engine=system

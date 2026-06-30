@@ -1491,6 +1491,23 @@ pub const Runtime = struct {
         };
     }
 
+    fn advanceCanvasWidgetKineticScrollForFrame(self: *Runtime, view_index: usize, frame_interval_ns: u64, skip_step: bool) anyerror!void {
+        if (view_index >= self.view_count) return;
+        if (self.views[view_index].kind != .gpu_surface) return;
+        if (!self.views[view_index].canvasWidgetKineticScrollActive()) return;
+
+        if (skip_step) {
+            try self.requestCanvasFrameForView(view_index);
+            return;
+        }
+
+        _ = try self.stepCanvasWidgetKineticScroll(
+            self.views[view_index].window_id,
+            self.views[view_index].label,
+            canvasWidgetKineticScrollFrameMs(frame_interval_ns),
+        );
+    }
+
     fn publishCanvasWidgetAccessibility(self: *Runtime, view_index: usize) anyerror!void {
         if (view_index >= self.view_count) return;
         const view = &self.views[view_index];
@@ -2222,6 +2239,7 @@ pub const Runtime = struct {
             .gpu_surface_frame => |frame_event| {
                 var enriched_frame_event = frame_event;
                 if (self.findViewIndex(frame_event.window_id, frame_event.label)) |index| {
+                    const had_pending_input = self.views[index].gpu_pending_input_timestamp_ns != 0;
                     if (!sizesEqual(self.views[index].gpu_size, frame_event.size) or self.views[index].gpu_scale_factor != frame_event.scale_factor) {
                         self.views[index].presented_canvas_valid = false;
                     }
@@ -2232,6 +2250,7 @@ pub const Runtime = struct {
                     self.views[index].recordGpuSurfaceFrameInterval(frame_event.frame_interval_ns);
                     self.views[index].recordGpuSurfaceFirstFrameLatency(frame_event.timestamp_ns);
                     self.views[index].recordGpuSurfaceInputLatencyForFrame(frame_event.timestamp_ns);
+                    try self.advanceCanvasWidgetKineticScrollForFrame(index, frame_event.frame_interval_ns, had_pending_input);
                     self.views[index].gpu_frame_nonblank = frame_event.nonblank;
                     self.views[index].gpu_sample_color = frame_event.sample_color;
                     self.views[index].gpu_backend = frame_event.backend;
@@ -5447,7 +5466,7 @@ fn canvasWidgetLayoutScrollContentExtent(nodes: []const canvas.WidgetLayoutNode,
         return @max(viewport.height, canvas.virtualWidgetScrollContentExtent(scroll_node.widget, viewport.height));
     }
     const scroll_depth = scroll_node.depth;
-    const offset = @max(0, scroll_node.widget.value);
+    const offset = scroll_node.widget.value;
     var bottom = viewport.maxY();
     var index = scroll_index + 1;
     while (index < nodes.len and nodes[index].depth > scroll_depth) : (index += 1) {
@@ -5550,6 +5569,11 @@ fn canvasWidgetScrollKeyboardDelta(widget: canvas.Widget, keyboard: canvas.Widge
     if (std.ascii.eqlIgnoreCase(keyboard.key, "pageup")) return -page_step;
     if (std.ascii.eqlIgnoreCase(keyboard.key, "pagedown")) return page_step;
     return null;
+}
+
+fn canvasWidgetKineticScrollFrameMs(frame_interval_ns: u64) f32 {
+    const normalized = if (frame_interval_ns > 0) frame_interval_ns else platform.default_gpu_frame_interval_ns;
+    return @as(f32, @floatFromInt(normalized)) / 1_000_000.0;
 }
 
 const CanvasWidgetScrollKeyboardTarget = enum {
@@ -5958,6 +5982,16 @@ const RuntimeView = struct {
     fn refreshGpuSurfaceFirstFrameLatencyBudgetStatus(self: *RuntimeView) void {
         self.gpu_first_frame_latency_budget_exceeded_count = if (self.gpu_first_frame_latency_budget_ns > 0 and self.gpu_first_frame_latency_ns > self.gpu_first_frame_latency_budget_ns) 1 else 0;
         self.gpu_first_frame_latency_budget_ok = self.gpu_first_frame_latency_budget_exceeded_count == 0;
+    }
+
+    fn canvasWidgetKineticScrollActive(self: *const RuntimeView) bool {
+        for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
+            if (node.widget.kind != .scroll_view or node.widget.layout.virtualized) continue;
+            const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+            if (viewport.isEmpty()) continue;
+            if (self.canvasWidgetScrollState(index, node, viewport).needsKineticStep(self.widget_tokens.scroll)) return true;
+        }
+        return false;
     }
 
     fn copyRuntimeStateFrom(self: *RuntimeView, source: *const RuntimeView) void {
@@ -6490,7 +6524,12 @@ const RuntimeView = struct {
     fn applyCanvasWidgetScrollRoute(self: *RuntimeView, route: []const canvas.WidgetEventRouteEntry, delta_y: f32, source: CanvasWidgetScrollSource) anyerror!?geometry.RectF {
         var depth_limit: ?usize = null;
         while (self.deepestCanvasWidgetScrollIndex(route, depth_limit)) |scroll_index| {
-            if (try self.applyCanvasWidgetScroll(scroll_index, delta_y, source)) |dirty| return dirty;
+            const has_scroll_parent = self.deepestCanvasWidgetScrollIndex(route, self.widget_layout_nodes[scroll_index].depth) != null;
+            if (has_scroll_parent and !self.canvasWidgetScrollCanConsume(scroll_index, delta_y)) {
+                depth_limit = self.widget_layout_nodes[scroll_index].depth;
+                continue;
+            }
+            if (try self.applyCanvasWidgetScroll(scroll_index, delta_y, source, !has_scroll_parent)) |dirty| return dirty;
             depth_limit = self.widget_layout_nodes[scroll_index].depth;
         }
         return null;
@@ -6515,15 +6554,30 @@ const RuntimeView = struct {
 
     fn canvasWidgetScrollState(self: *const RuntimeView, scroll_index: usize, scroll_node: canvas.WidgetLayoutNode, viewport: geometry.RectF) canvas.ScrollState {
         const retained = self.widget_scroll_states[scroll_index];
-        return (canvas.ScrollState{
+        return .{
             .offset = scroll_node.widget.value,
             .velocity = retained.velocity,
             .viewport_extent = viewport.height,
             .content_extent = self.canvasWidgetScrollContentExtent(scroll_index, viewport),
-        }).clamped();
+        };
     }
 
-    fn applyCanvasWidgetScroll(self: *RuntimeView, scroll_index: usize, delta_y: f32, source: CanvasWidgetScrollSource) anyerror!?geometry.RectF {
+    fn canvasWidgetScrollCanConsume(self: *const RuntimeView, scroll_index: usize, delta_y: f32) bool {
+        if (scroll_index >= self.widget_layout_node_count or delta_y == 0) return false;
+        const scroll_node = self.widget_layout_nodes[scroll_index];
+        if (scroll_node.widget.kind != .scroll_view or scroll_node.widget.layout.virtualized) return false;
+
+        const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
+        if (viewport.isEmpty()) return false;
+
+        const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
+        const max_offset = current.maxOffset();
+        if (current.offset < 0) return delta_y > 0;
+        if (current.offset > max_offset) return delta_y < 0;
+        return if (delta_y > 0) current.offset < max_offset else current.offset > 0;
+    }
+
+    fn applyCanvasWidgetScroll(self: *RuntimeView, scroll_index: usize, delta_y: f32, source: CanvasWidgetScrollSource, allow_rubberband: bool) anyerror!?geometry.RectF {
         if (scroll_index >= self.widget_layout_node_count) return null;
         const scroll_node = self.widget_layout_nodes[scroll_index];
         if (scroll_node.widget.kind != .scroll_view or scroll_node.widget.layout.virtualized) return null;
@@ -6533,7 +6587,10 @@ const RuntimeView = struct {
 
         const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
         const next = switch (source) {
-            .wheel => current.applyWheel(delta_y, self.widget_tokens.scroll),
+            .wheel => if (allow_rubberband)
+                current.applyWheel(delta_y, self.widget_tokens.scroll)
+            else
+                current.applyWheelClamped(delta_y, self.widget_tokens.scroll),
             .discrete => discrete: {
                 var state = current;
                 state.offset += delta_y;
@@ -6588,10 +6645,6 @@ const RuntimeView = struct {
 
         for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |scroll_node, scroll_index| {
             if (scroll_node.widget.kind != .scroll_view or scroll_node.widget.layout.virtualized) continue;
-            if (@abs(self.widget_scroll_states[scroll_index].velocity) <= @max(0, physics.stop_velocity)) {
-                self.widget_scroll_states[scroll_index].velocity = 0;
-                continue;
-            }
 
             const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
             if (viewport.isEmpty()) {
@@ -6600,6 +6653,11 @@ const RuntimeView = struct {
             }
 
             const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
+            if (!current.needsKineticStep(physics)) {
+                self.widget_scroll_states[scroll_index].velocity = 0;
+                continue;
+            }
+
             const next = current.stepKinetic(dt_ms, physics);
             self.widget_scroll_states[scroll_index] = next;
             if (next.offset == current.offset) continue;
@@ -6619,7 +6677,7 @@ const RuntimeView = struct {
 
     fn canvasWidgetScrollContentExtent(self: *const RuntimeView, scroll_index: usize, viewport: geometry.RectF) f32 {
         const scroll_depth = self.widget_layout_nodes[scroll_index].depth;
-        const offset = @max(0, self.widget_layout_nodes[scroll_index].widget.value);
+        const offset = self.widget_layout_nodes[scroll_index].widget.value;
         var bottom = viewport.maxY();
         var index = scroll_index + 1;
         while (index < self.widget_layout_node_count and self.widget_layout_nodes[index].depth > scroll_depth) : (index += 1) {
@@ -6798,7 +6856,7 @@ const RuntimeView = struct {
             .scroll_view => if (canvasWidgetScrollKeyboardTarget(keyboard)) |target|
                 try self.applyCanvasWidgetScrollKeyboardTarget(index, target)
             else if (canvasWidgetScrollKeyboardDelta(widget, keyboard)) |delta|
-                try self.applyCanvasWidgetScroll(index, delta, .discrete)
+                try self.applyCanvasWidgetScroll(index, delta, .discrete, false)
             else
                 null,
             else => null,
@@ -12787,6 +12845,7 @@ test "runtime wheel input scrolls retained canvas scroll views" {
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = "canvas",
+        .timestamp_ns = 1_000_000_000,
         .kind = .scroll,
         .x = 20,
         .y = 20,
@@ -12848,13 +12907,40 @@ test "runtime wheel input scrolls retained canvas scroll views" {
     try std.testing.expect(harness.runtime.views[0].widget_scroll_states[0].velocity > 0);
     harness.runtime.invalidated = false;
     harness.runtime.dirty_region_count = 0;
-    const kinetic = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
+    harness.null_platform.gpu_surface_frame_request_count = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = "canvas",
+        .size = geometry.SizeF.init(180, 72),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_016_000_000,
+        .frame_interval_ns = 16_000_000,
+        .nonblank = true,
+    } });
+    var kinetic_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 24), kinetic_layout.nodes[0].widget.value);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_frame_request_count);
+
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    harness.null_platform.gpu_surface_frame_request_count = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = "canvas",
+        .size = geometry.SizeF.init(180, 72),
+        .scale_factor = 2,
+        .frame_index = 2,
+        .timestamp_ns = 1_032_000_000,
+        .frame_interval_ns = 16_000_000,
+        .nonblank = true,
+    } });
+    const kinetic = try harness.runtime.gpuSurfaceFrame(1, "canvas");
     try std.testing.expectEqual(@as(u64, 3), kinetic.widget_revision);
     try std.testing.expect(harness.runtime.invalidated);
     try std.testing.expect(harness.runtime.pendingDirtyRegions().len >= 1);
     try std.testing.expectEqualDeep(geometry.RectF.init(10, 20, 180, 72), harness.runtime.pendingDirtyRegions()[0]);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_frame_request_count);
 
-    var kinetic_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    kinetic_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectApproxEqAbs(@as(f32, 47.04), kinetic_layout.nodes[0].widget.value, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, -47.04), kinetic_layout.nodes[1].frame.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, -3.04), kinetic_layout.nodes[2].frame.y, 0.01);
@@ -12878,23 +12964,40 @@ test "runtime wheel input scrolls retained canvas scroll views" {
 
     harness.runtime.invalidated = false;
     harness.runtime.dirty_region_count = 0;
-    const clamped = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
-    try std.testing.expectEqual(@as(u64, 4), clamped.widget_revision);
+    const overscrolled = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
+    try std.testing.expectEqual(@as(u64, 4), overscrolled.widget_revision);
     try std.testing.expect(harness.runtime.invalidated);
     try std.testing.expect(harness.runtime.pendingDirtyRegions().len >= 1);
     try std.testing.expectEqualDeep(geometry.RectF.init(10, 20, 180, 72), harness.runtime.pendingDirtyRegions()[0]);
 
     kinetic_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
-    try std.testing.expectEqual(@as(f32, 48), kinetic_layout.nodes[0].widget.value);
-    try std.testing.expectEqual(@as(f32, -48), kinetic_layout.nodes[1].frame.y);
-    try std.testing.expectEqual(@as(f32, -4), kinetic_layout.nodes[2].frame.y);
-    try std.testing.expectEqual(@as(f32, 40), kinetic_layout.nodes[3].frame.y);
+    try std.testing.expect(kinetic_layout.nodes[0].widget.value > 48);
+    try std.testing.expect(kinetic_layout.nodes[0].widget.value <= 78.24);
+    try std.testing.expectApproxEqAbs(-kinetic_layout.nodes[0].widget.value, kinetic_layout.nodes[1].frame.y, 0.01);
+    try std.testing.expectApproxEqAbs(44 - kinetic_layout.nodes[0].widget.value, kinetic_layout.nodes[2].frame.y, 0.01);
+    try std.testing.expectApproxEqAbs(88 - kinetic_layout.nodes[0].widget.value, kinetic_layout.nodes[3].frame.y, 0.01);
+
+    var settle_frame: usize = 0;
+    while (settle_frame < 48) : (settle_frame += 1) {
+        harness.runtime.invalidated = false;
+        harness.runtime.dirty_region_count = 0;
+        _ = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
+        kinetic_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        if (@abs(kinetic_layout.nodes[0].widget.value - 48) <= 0.01 and harness.runtime.views[0].widget_scroll_states[0].velocity == 0) break;
+    }
+
+    try std.testing.expect(settle_frame < 48);
+    try std.testing.expectApproxEqAbs(@as(f32, 48), kinetic_layout.nodes[0].widget.value, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, -48), kinetic_layout.nodes[1].frame.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, -4), kinetic_layout.nodes[2].frame.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 40), kinetic_layout.nodes[3].frame.y, 0.01);
     try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[0].velocity);
 
+    const settled_revision = harness.runtime.views[0].widget_revision;
     harness.runtime.invalidated = false;
     harness.runtime.dirty_region_count = 0;
     const idle = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
-    try std.testing.expectEqual(@as(u64, 4), idle.widget_revision);
+    try std.testing.expectEqual(settled_revision, idle.widget_revision);
     try std.testing.expect(!harness.runtime.invalidated);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDirtyRegions().len);
 }

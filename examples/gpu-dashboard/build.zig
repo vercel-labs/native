@@ -25,7 +25,9 @@ const app_exe_name = "gpu-dashboard";
 
 pub fn build(b: *std.Build) void {
     const target = zeroNativeTarget(b);
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize_request = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size");
+    const optimize = exampleOptimizeMode(b, optimize_request, .Debug);
+    const app_optimize = exampleOptimizeMode(b, optimize_request, .ReleaseFast);
     const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
     const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .off;
     const debug_overlay = b.option(bool, "debug-overlay", "Enable debug overlay output") orelse false;
@@ -56,7 +58,6 @@ pub fn build(b: *std.Build) void {
         @panic("-Dweb-engine=chromium currently requires -Dplatform=macos");
     }
 
-    const zero_native_mod = zeroNativeModule(b, target, optimize, zero_native_path);
     const options = b.addOptions();
     options.addOption([]const u8, "platform", switch (selected_platform) {
         .auto => unreachable,
@@ -72,14 +73,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "js_bridge", js_bridge_enabled);
     const options_mod = options.createModule();
 
-    const runner_mod = localModule(b, target, optimize, "src/runner.zig");
-    runner_mod.addImport("zero-native", zero_native_mod);
-    runner_mod.addImport("build_options", options_mod);
-    runner_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path("app.zon") }));
-
-    const app_mod = localModule(b, target, optimize, "src/main.zig");
-    app_mod.addImport("zero-native", zero_native_mod);
-    app_mod.addImport("runner", runner_mod);
+    const app_mod = appModule(b, target, app_optimize, zero_native_path, options_mod);
     const exe = b.addExecutable(.{
         .name = app_exe_name,
         .root_module = app_mod,
@@ -92,9 +86,33 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run.step);
 
-    const tests = b.addTest(.{ .root_module = app_mod });
+    const test_app_mod = if (app_optimize == optimize) app_mod else appModule(b, target, optimize, zero_native_path, options_mod);
+    const tests = b.addTest(.{ .root_module = test_app_mod });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+fn exampleOptimizeMode(b: *std.Build, requested: ?std.builtin.OptimizeMode, default_mode: std.builtin.OptimizeMode) std.builtin.OptimizeMode {
+    if (requested) |mode| return mode;
+    return switch (b.release_mode) {
+        .off => default_mode,
+        .any, .fast => .ReleaseFast,
+        .safe => .ReleaseSafe,
+        .small => .ReleaseSmall,
+    };
+}
+
+fn appModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, zero_native_path: []const u8, options_mod: *std.Build.Module) *std.Build.Module {
+    const zero_native_mod = zeroNativeModule(b, target, optimize, zero_native_path);
+    const runner_mod = localModule(b, target, optimize, "src/runner.zig");
+    runner_mod.addImport("zero-native", zero_native_mod);
+    runner_mod.addImport("build_options", options_mod);
+    runner_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path("app.zon") }));
+
+    const app_mod = localModule(b, target, optimize, "src/main.zig");
+    app_mod.addImport("zero-native", zero_native_mod);
+    app_mod.addImport("runner", runner_mod);
+    return app_mod;
 }
 
 fn zeroNativeTarget(b: *std.Build) std.Build.ResolvedTarget {
