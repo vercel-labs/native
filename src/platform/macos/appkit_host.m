@@ -912,6 +912,18 @@ static BOOL ZeroNativePacketApplyBlur(NSDictionary *effect, CGFloat opacity, CGC
     return YES;
 }
 
+static NSLineBreakMode ZeroNativePacketTextLineBreakMode(NSString *wrap) {
+    if ([wrap isEqualToString:@"none"]) return NSLineBreakByClipping;
+    if ([wrap isEqualToString:@"character"]) return NSLineBreakByCharWrapping;
+    return NSLineBreakByWordWrapping;
+}
+
+static NSTextAlignment ZeroNativePacketTextAlignment(NSString *align) {
+    if ([align isEqualToString:@"center"]) return NSTextAlignmentCenter;
+    if ([align isEqualToString:@"end"]) return NSTextAlignmentRight;
+    return NSTextAlignmentNatural;
+}
+
 static BOOL ZeroNativePacketDrawText(NSDictionary *text, CGFloat opacity) {
     if (!text) return NO;
     NSString *value = [text[@"text"] isKindOfClass:[NSString class]] ? text[@"text"] : @"";
@@ -920,10 +932,40 @@ static BOOL ZeroNativePacketDrawText(NSDictionary *text, CGFloat opacity) {
     CGFloat size = MAX(1, ZeroNativePacketNumber(text[@"size"], 12));
     NSFont *font = [NSFont systemFontOfSize:size];
     NSPoint origin = ZeroNativePacketPoint(text[@"origin"]);
-    [value drawAtPoint:origin withAttributes:@{
+    NSDictionary *baseAttributes = @{
         NSFontAttributeName: font,
         NSForegroundColorAttributeName: color,
-    }];
+    };
+    NSDictionary *layout = ZeroNativePacketDictionary(text[@"layout"]);
+    if (!layout) {
+        [value drawAtPoint:origin withAttributes:baseAttributes];
+        return YES;
+    }
+
+    NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
+    NSString *wrap = [layout[@"wrap"] isKindOfClass:[NSString class]] ? layout[@"wrap"] : @"word";
+    NSString *align = [layout[@"align"] isKindOfClass:[NSString class]] ? layout[@"align"] : @"start";
+    paragraph.lineBreakMode = ZeroNativePacketTextLineBreakMode(wrap);
+    paragraph.alignment = ZeroNativePacketTextAlignment(align);
+    CGFloat lineHeight = ZeroNativePacketNumber(layout[@"lineHeight"], 0);
+    if (lineHeight > 0) {
+        paragraph.minimumLineHeight = lineHeight;
+        paragraph.maximumLineHeight = lineHeight;
+    }
+
+    NSMutableDictionary *attributes = [baseAttributes mutableCopy];
+    attributes[NSParagraphStyleAttributeName] = paragraph;
+    CGFloat maxWidth = ZeroNativePacketNumber(layout[@"maxWidth"], 0);
+    CGFloat measuredWidth = ceil([value sizeWithAttributes:attributes].width + size);
+    CGFloat textWidth = maxWidth > 0 ? maxWidth : MAX(size, measuredWidth);
+    CGFloat textHeight = MAX(lineHeight > 0 ? lineHeight : size * 1.25, size * 1.25);
+    NSRect measuredRect = [value boundingRectWithSize:NSMakeSize(textWidth, CGFLOAT_MAX)
+                                             options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                          attributes:attributes];
+    textHeight = MAX(textHeight, ceil(measuredRect.size.height + 1));
+    [value drawWithRect:NSMakeRect(origin.x, origin.y - size, textWidth, textHeight)
+                options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+             attributes:attributes];
     return YES;
 }
 

@@ -333,6 +333,13 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "ZeroNativePacketTransformRect(transformValue, ZeroNativePacketRect(effect[@\"rect\"]))" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return ZeroNativePacketApplyBlur(effect, opacity, context, scale, transformValue, hasClip, clipRect)" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-text-layout", "Verify AppKit GPU packet presenter honors text layout metadata", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSMutableParagraphStyle" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "ZeroNativePacketTextLineBreakMode" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "ZeroNativePacketTextAlignment" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "ZeroNativePacketNumber(layout[@\"maxWidth\"], 0)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[value drawWithRect:NSMakeRect(origin.x, origin.y - size, textWidth, textHeight)" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-widget-cursor-bridge", "Verify AppKit GPU widgets apply retained cursor intent", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "zero_native_appkit_set_view_cursor" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "resetCursorRects" },
