@@ -1232,7 +1232,10 @@ test "gpu components app registers component lab on first gpu frame" {
     try std.testing.expect(componentSnapshotWidget(snapshot, 130).?.scroll.present);
     try std.testing.expectEqual(@as(f32, 28), componentSnapshotWidget(snapshot, 130).?.scroll.viewport_extent);
     try std.testing.expect(componentSnapshotWidget(snapshot, 130).?.scroll.content_extent > 28);
-    try std.testing.expectEqualStrings("menuitem", componentSnapshotWidget(snapshot, 142).?.role);
+    const menu_item = componentSnapshotWidget(snapshot, 142).?;
+    try std.testing.expectEqualStrings("menuitem", menu_item.role);
+    try std.testing.expect(menu_item.bounds.width > 0);
+    try std.testing.expect(menu_item.bounds.height >= 28);
     try std.testing.expectEqual(@as(?usize, 5), componentSnapshotWidget(snapshot, 150).?.grid_row_count);
     try std.testing.expectEqual(@as(?usize, 2), componentSnapshotWidget(snapshot, 150).?.grid_column_count);
     try std.testing.expectEqualStrings("gridcell", componentSnapshotWidget(snapshot, 156).?.role);

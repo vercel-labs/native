@@ -3474,6 +3474,7 @@ pub const Widget = struct {
 pub const max_widget_depth: usize = 32;
 pub const max_widget_text_range_rects: usize = 4;
 const max_widget_text_layout_lines: usize = 16;
+const default_widget_row_extent: f32 = 28;
 
 pub const WidgetLayoutNode = struct {
     widget: Widget,
@@ -7733,7 +7734,7 @@ fn preferredMainExtent(widget: Widget, axis: LayoutAxis) f32 {
         .horizontal => widget.frame.width,
         .vertical => widget.frame.height,
     };
-    return @max(minMainExtent(widget, axis), nonNegative(value));
+    return @max(minMainExtent(widget, axis), @max(defaultMainExtent(widget, axis), nonNegative(value)));
 }
 
 fn preferredCrossExtent(widget: Widget, axis: LayoutAxis, available: f32) f32 {
@@ -7752,6 +7753,14 @@ fn minMainExtent(widget: Widget, axis: LayoutAxis) f32 {
     return switch (axis) {
         .horizontal => nonNegative(widget.layout.min_size.width),
         .vertical => nonNegative(widget.layout.min_size.height),
+    };
+}
+
+fn defaultMainExtent(widget: Widget, axis: LayoutAxis) f32 {
+    if (axis != .vertical) return 0;
+    return switch (widget.kind) {
+        .menu_item, .list_item, .data_row, .data_cell => default_widget_row_extent,
+        else => 0,
     };
 }
 
@@ -13877,14 +13886,12 @@ test "widget menu surface groups menu items semantically" {
         .{
             .id = 2,
             .kind = .menu_item,
-            .frame = geometry.RectF.init(0, 0, 0, 28),
             .text = "Rename",
             .state = .{ .selected = true },
         },
         .{
             .id = 3,
             .kind = .menu_item,
-            .frame = geometry.RectF.init(0, 0, 0, 28),
             .text = "Archive",
         },
     };
@@ -14010,6 +14017,10 @@ test "widget data grids expose row and column semantics" {
 
     var nodes: [8]WidgetLayoutNode = undefined;
     const layout = try layoutWidgetTree(grid, geometry.RectF.init(0, 0, 320, 180), &nodes);
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(0, 0, 320, 28));
+    try expectLayoutFrame(layout, 3, geometry.RectF.init(0, 0, 160, 28));
+    try expectLayoutFrame(layout, 5, geometry.RectF.init(0, 30, 320, 28));
+    try expectLayoutFrame(layout, 6, geometry.RectF.init(0, 30, 160, 28));
     var semantics_buffer: [8]WidgetSemanticsNode = undefined;
     const semantics = try layout.collectSemantics(&semantics_buffer);
 
@@ -14046,14 +14057,12 @@ test "widget list layout groups list items semantically" {
         .{
             .id = 2,
             .kind = .list_item,
-            .frame = geometry.RectF.init(0, 0, 0, 32),
             .text = "Inbox",
             .state = .{ .selected = true },
         },
         .{
             .id = 3,
             .kind = .list_item,
-            .frame = geometry.RectF.init(0, 0, 0, 32),
             .text = "Archive",
         },
     };
@@ -14069,8 +14078,8 @@ test "widget list layout groups list items semantically" {
     const layout = try layoutWidgetTree(list, geometry.RectF.init(0, 0, 220, 88), &nodes);
     try std.testing.expectEqual(@as(usize, 3), layout.nodeCount());
     try expectLayoutFrame(layout, 1, geometry.RectF.init(0, 0, 220, 88));
-    try expectLayoutFrame(layout, 2, geometry.RectF.init(8, 8, 204, 32));
-    try expectLayoutFrame(layout, 3, geometry.RectF.init(8, 44, 204, 32));
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(8, 8, 204, 28));
+    try expectLayoutFrame(layout, 3, geometry.RectF.init(8, 40, 204, 28));
 
     var commands: [4]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
