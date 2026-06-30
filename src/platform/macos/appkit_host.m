@@ -224,7 +224,8 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 @property(nonatomic, strong) CAMetalLayer *metalLayer;
 @property(nonatomic, strong) id<MTLBuffer> sampleBuffer;
 @property(nonatomic, strong) id<MTLTexture> canvasTexture;
-@property(nonatomic, strong) NSMutableData *canvasUploadData;
+@property(nonatomic, strong) id<MTLRenderPipelineState> canvasRenderPipeline;
+@property(nonatomic, strong) id<MTLSamplerState> canvasSampler;
 @property(nonatomic, strong) NSTimer *displayTimer;
 @property(nonatomic, assign) ZeroNativeAppKitHost *host;
 @property(nonatomic, assign) uint64_t windowId;
@@ -248,6 +249,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (BOOL)isAvailable;
 - (void)updateDrawableSize;
 - (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
+- (BOOL)ensureCanvasPresenter;
 - (void)updateWidgetAccessibilityWithNodes:(const zero_native_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count;
 - (void)stopDisplayTimer;
 - (void)requestRetainedCanvasFrame;
@@ -640,21 +642,10 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
     if (![self isAvailable] || !rgba8 || width == 0 || height == 0) return NO;
     if (byteLength != width * height * 4) return NO;
-
-    const NSUInteger uploadLength = width * height * 4;
-    if (!self.canvasUploadData || self.canvasUploadData.length != uploadLength) {
-        self.canvasUploadData = [NSMutableData dataWithLength:uploadLength];
-    }
-    uint8_t *bgra = (uint8_t *)self.canvasUploadData.mutableBytes;
-    for (NSUInteger index = 0; index < uploadLength; index += 4) {
-        bgra[index + 0] = rgba8[index + 2];
-        bgra[index + 1] = rgba8[index + 1];
-        bgra[index + 2] = rgba8[index + 0];
-        bgra[index + 3] = rgba8[index + 3];
-    }
+    if (![self ensureCanvasPresenter]) return NO;
 
     if (!self.canvasTexture || self.canvasTextureWidth != width || self.canvasTextureHeight != height) {
-        MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
+        MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
         descriptor.usage = MTLTextureUsageShaderRead;
         descriptor.storageMode = MTLStorageModeShared;
         self.canvasTexture = [self.device newTextureWithDescriptor:descriptor];
@@ -665,12 +656,63 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 
     [self.canvasTexture replaceRegion:MTLRegionMake2D(0, 0, width, height)
                           mipmapLevel:0
-                            withBytes:bgra
+                            withBytes:rgba8
                           bytesPerRow:width * 4];
     self.hasCanvasTexture = YES;
     (void)scale;
     [self stopDisplayTimer];
     [self renderFrame];
+    return YES;
+}
+
+- (BOOL)ensureCanvasPresenter {
+    if (self.canvasRenderPipeline && self.canvasSampler) return YES;
+    if (!self.device || !self.metalLayer) return NO;
+
+    static NSString *shaderSource =
+        @"#include <metal_stdlib>\n"
+        @"using namespace metal;\n"
+        @"struct ZeroNativeCanvasVertexOut { float4 position [[position]]; float2 uv; };\n"
+        @"vertex ZeroNativeCanvasVertexOut zero_native_canvas_vertex(uint vertex_id [[vertex_id]]) {\n"
+        @"  constexpr float2 positions[4] = { float2(-1.0, -1.0), float2(1.0, -1.0), float2(-1.0, 1.0), float2(1.0, 1.0) };\n"
+        @"  constexpr float2 uvs[4] = { float2(0.0, 1.0), float2(1.0, 1.0), float2(0.0, 0.0), float2(1.0, 0.0) };\n"
+        @"  ZeroNativeCanvasVertexOut out;\n"
+        @"  out.position = float4(positions[vertex_id], 0.0, 1.0);\n"
+        @"  out.uv = uvs[vertex_id];\n"
+        @"  return out;\n"
+        @"}\n"
+        @"fragment float4 zero_native_canvas_fragment(ZeroNativeCanvasVertexOut in [[stage_in]], texture2d<float> canvas_texture [[texture(0)]], sampler texture_sampler [[sampler(0)]]) {\n"
+        @"  return canvas_texture.sample(texture_sampler, in.uv);\n"
+        @"}\n";
+
+    NSError *libraryError = nil;
+    id<MTLLibrary> library = [self.device newLibraryWithSource:shaderSource options:nil error:&libraryError];
+    if (!library) return NO;
+    id<MTLFunction> vertexFunction = [library newFunctionWithName:@"zero_native_canvas_vertex"];
+    id<MTLFunction> fragmentFunction = [library newFunctionWithName:@"zero_native_canvas_fragment"];
+    if (!vertexFunction || !fragmentFunction) return NO;
+
+    MTLRenderPipelineDescriptor *pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    pipelineDescriptor.label = @"zero-native canvas presenter";
+    pipelineDescriptor.vertexFunction = vertexFunction;
+    pipelineDescriptor.fragmentFunction = fragmentFunction;
+    pipelineDescriptor.colorAttachments[0].pixelFormat = self.metalLayer.pixelFormat;
+
+    NSError *pipelineError = nil;
+    id<MTLRenderPipelineState> pipeline = [self.device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&pipelineError];
+    if (!pipeline) return NO;
+
+    MTLSamplerDescriptor *samplerDescriptor = [[MTLSamplerDescriptor alloc] init];
+    samplerDescriptor.minFilter = MTLSamplerMinMagFilterLinear;
+    samplerDescriptor.magFilter = MTLSamplerMinMagFilterLinear;
+    samplerDescriptor.mipFilter = MTLSamplerMipFilterNotMipmapped;
+    samplerDescriptor.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    samplerDescriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    id<MTLSamplerState> sampler = [self.device newSamplerStateWithDescriptor:samplerDescriptor];
+    if (!sampler) return NO;
+
+    self.canvasRenderPipeline = pipeline;
+    self.canvasSampler = sampler;
     return YES;
 }
 
@@ -784,25 +826,13 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
     id<MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
     if (!commandBuffer) return;
     id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:descriptor];
-    [encoder endEncoding];
-
-    if (self.hasCanvasTexture && self.canvasTexture) {
-        const NSUInteger copyWidth = MIN((NSUInteger)drawable.texture.width, self.canvasTexture.width);
-        const NSUInteger copyHeight = MIN((NSUInteger)drawable.texture.height, self.canvasTexture.height);
-        if (copyWidth > 0 && copyHeight > 0) {
-            id<MTLBlitCommandEncoder> canvasBlit = [commandBuffer blitCommandEncoder];
-            [canvasBlit copyFromTexture:self.canvasTexture
-                            sourceSlice:0
-                            sourceLevel:0
-                           sourceOrigin:MTLOriginMake(0, 0, 0)
-                             sourceSize:MTLSizeMake(copyWidth, copyHeight, 1)
-                              toTexture:drawable.texture
-                       destinationSlice:0
-                       destinationLevel:0
-                      destinationOrigin:MTLOriginMake(0, 0, 0)];
-            [canvasBlit endEncoding];
-        }
+    if (self.hasCanvasTexture && self.canvasTexture && self.canvasRenderPipeline && self.canvasSampler) {
+        [encoder setRenderPipelineState:self.canvasRenderPipeline];
+        [encoder setFragmentTexture:self.canvasTexture atIndex:0];
+        [encoder setFragmentSamplerState:self.canvasSampler atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
     }
+    [encoder endEncoding];
 
     const BOOL shouldSample = !self.verifiedNonblankFrame;
     if (shouldSample && !self.sampleBuffer) {
