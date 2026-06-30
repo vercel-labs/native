@@ -714,6 +714,56 @@ pub fn build(b: *std.Build) void {
     gpu_surface_smoke_run.step.dependOn(&cli_exe.step);
     gpu_surface_smoke_step.dependOn(&gpu_surface_smoke_run.step);
 
+    const gpu_components_smoke_step = b.step("test-gpu-components-smoke", "Run macOS GPU components automation smoke test");
+    const gpu_components_smoke_build = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true" });
+    gpu_components_smoke_build.setCwd(b.path("examples/gpu-components"));
+    const gpu_components_smoke_run = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\set -eu
+        \\cd examples/gpu-components
+        \\app="zig-out/bin/gpu-components"
+        \\cli="$1"
+        \\case "$cli" in /*) ;; *) cli="../../$cli" ;; esac
+        \\automation_dir=".zig-cache/zero-native-automation"
+        \\mkdir -p "$automation_dir"
+        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir/command.txt"
+        \\"$app" > .zig-cache/zero-native-gpu-components-smoke.log 2>&1 &
+        \\pid=$!
+        \\trap 'kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true' EXIT
+        \\ready="$("$cli" automate wait 2>&1)"
+        \\case "$ready" in *"ready=true"*) ;; *) echo "gpu-components automation snapshot was not ready" >&2; exit 1 ;; esac
+        \\snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\case "$snapshot" in *'window @w1 "zero-native GPU Components"'*) ;; *) echo "gpu-components window was missing from snapshot" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'gpu_nonblank=true'*) ;; *) echo "components GPU surface was not ready and nonblank" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'widget @w1/components-canvas#113 role=checkbox'*'value=1'*'actions=[focus,toggle]'*) ;; *) echo "checkbox widget was not initially selected" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'widget @w1/components-canvas#114 role=switch'*'value=1'*'actions=[focus,toggle]'*) ;; *) echo "switch widget was not initially selected" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-action components-canvas 113 toggle >/dev/null 2>&1
+        \\attempts=0
+        \\while [ "$attempts" -lt 50 ]; do
+        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\  case "$snapshot" in *'Keyed checkbox #113: off.'*'widget @w1/components-canvas#113 role=checkbox'*'value=0'*) break ;; esac
+        \\  attempts=$((attempts + 1))
+        \\  sleep 0.1
+        \\done
+        \\case "$snapshot" in *'Keyed checkbox #113: off.'*'widget @w1/components-canvas#113 role=checkbox'*'value=0'*) ;; *) echo "checkbox automation toggle did not update the retained widget snapshot" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-action components-canvas 114 toggle >/dev/null 2>&1
+        \\attempts=0
+        \\while [ "$attempts" -lt 50 ]; do
+        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\  case "$snapshot" in *'Keyed toggle #114: off.'*'widget @w1/components-canvas#114 role=switch'*'value=0'*) break ;; esac
+        \\  attempts=$((attempts + 1))
+        \\  sleep 0.1
+        \\done
+        \\case "$snapshot" in *'Keyed toggle #114: off.'*'widget @w1/components-canvas#114 role=switch'*'value=0'*) ;; *) echo "switch automation toggle did not wake the idle app" >&2; exit 1 ;; esac
+        \\echo "gpu-components smoke ok"
+        ,
+        "sh",
+    });
+    gpu_components_smoke_run.addFileArg(cli_exe.getEmittedBin());
+    gpu_components_smoke_run.step.dependOn(&gpu_components_smoke_build.step);
+    gpu_components_smoke_run.step.dependOn(&cli_exe.step);
+    gpu_components_smoke_step.dependOn(&gpu_components_smoke_run.step);
+
     const webview_cef_smoke_step = b.step("test-webview-cef-smoke", "Run macOS Chromium WebView automation smoke test");
     const webview_cef_smoke_build = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=chromium", b.fmt("-Dcef-dir={s}", .{cef_dir}), "-Dautomation=true", "-Djs-bridge=true" });
     webview_cef_smoke_build.setCwd(b.path("examples/webview"));

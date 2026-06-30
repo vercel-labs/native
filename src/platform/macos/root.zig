@@ -95,6 +95,7 @@ extern fn zero_native_appkit_emit_window_event(host: *AppKitHost, window_id: u64
 extern fn zero_native_appkit_set_security_policy(host: *AppKitHost, allowed_origins: [*]const u8, allowed_origins_len: usize, external_urls: [*]const u8, external_urls_len: usize, external_action: c_int) void;
 extern fn zero_native_appkit_set_menus(host: *AppKitHost, menu_titles: [*]const [*]const u8, menu_title_lens: [*]const usize, menu_count: usize, item_menu_indices: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_commands: [*]const [*]const u8, item_command_lens: [*]const usize, item_keys: [*]const [*]const u8, item_key_lens: [*]const usize, item_modifiers: [*]const u32, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_checked: [*]const c_int, item_count: usize) void;
 extern fn zero_native_appkit_set_shortcuts(host: *AppKitHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
+extern fn zero_native_appkit_set_automation_frame_polling(host: *AppKitHost, enabled: c_int) void;
 extern fn zero_native_appkit_create_window(host: *AppKitHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int) c_int;
 extern fn zero_native_appkit_focus_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn zero_native_appkit_close_window(host: *AppKitHost, window_id: u64) c_int;
@@ -321,6 +322,7 @@ pub const MacPlatform = struct {
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
+                .configure_automation_frame_polling_fn = configureAutomationFramePolling,
                 .emit_window_event_fn = emitWindowEvent,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
                 .present_gpu_surface_packet_fn = presentGpuSurfacePacket,
@@ -583,6 +585,11 @@ fn completeWebViewBridge(context: ?*anyopaque, window_id: platform_mod.WindowId,
 fn emitWindowEvent(context: ?*anyopaque, window_id: platform_mod.WindowId, name: []const u8, detail_json: []const u8) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     zero_native_appkit_emit_window_event(self.host, window_id, name.ptr, name.len, detail_json.ptr, detail_json.len);
+}
+
+fn configureAutomationFramePolling(context: ?*anyopaque, enabled: bool) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    zero_native_appkit_set_automation_frame_polling(self.host, if (enabled) 1 else 0);
 }
 
 fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyerror!platform_mod.WindowInfo {

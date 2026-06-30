@@ -1322,6 +1322,7 @@ pub const PlatformServices = struct {
     configure_security_policy_fn: ?*const fn (context: ?*anyopaque, policy: security.Policy) anyerror!void = null,
     configure_menus_fn: ?*const fn (context: ?*anyopaque, menus: []const Menu) anyerror!void = null,
     configure_shortcuts_fn: ?*const fn (context: ?*anyopaque, shortcuts: []const Shortcut) anyerror!void = null,
+    configure_automation_frame_polling_fn: ?*const fn (context: ?*anyopaque, enabled: bool) anyerror!void = null,
     emit_window_event_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void = null,
     present_gpu_surface_pixels_fn: ?*const fn (context: ?*anyopaque, pixels: GpuSurfacePixels) anyerror!void = null,
     present_gpu_surface_packet_fn: ?*const fn (context: ?*anyopaque, packet: GpuSurfacePacket) anyerror!void = null,
@@ -1553,6 +1554,11 @@ pub const PlatformServices = struct {
             return error.UnsupportedService;
         };
         return configure_fn(self.context, shortcuts);
+    }
+
+    pub fn configureAutomationFramePolling(self: PlatformServices, enabled: bool) anyerror!void {
+        const configure_fn = self.configure_automation_frame_polling_fn orelse return;
+        return configure_fn(self.context, enabled);
     }
 
     pub fn emitWindowEvent(self: PlatformServices, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void {

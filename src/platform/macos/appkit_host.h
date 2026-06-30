@@ -222,6 +222,7 @@ void zero_native_appkit_emit_window_event(zero_native_appkit_host_t *host, uint6
 void zero_native_appkit_set_security_policy(zero_native_appkit_host_t *host, const char *allowed_origins, size_t allowed_origins_len, const char *external_urls, size_t external_urls_len, int external_action);
 void zero_native_appkit_set_menus(zero_native_appkit_host_t *host, const char *const *menu_titles, const size_t *menu_title_lens, size_t menu_count, const uint32_t *item_menu_indices, const char *const *item_labels, const size_t *item_label_lens, const char *const *item_commands, const size_t *item_command_lens, const char *const *item_keys, const size_t *item_key_lens, const uint32_t *item_modifiers, const int *item_separators, const int *item_enabled, const int *item_checked, size_t item_count);
 void zero_native_appkit_set_shortcuts(zero_native_appkit_host_t *host, const char *const *ids, const size_t *id_lens, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count);
+void zero_native_appkit_set_automation_frame_polling(zero_native_appkit_host_t *host, int enabled);
 int zero_native_appkit_create_window(zero_native_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame);
 int zero_native_appkit_focus_window(zero_native_appkit_host_t *host, uint64_t window_id);
 int zero_native_appkit_close_window(zero_native_appkit_host_t *host, uint64_t window_id);

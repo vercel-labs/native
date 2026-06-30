@@ -16,6 +16,7 @@
 static const NSUInteger ZeroNativeMaxChildWebViews = 16;
 static const NSUInteger ZeroNativeMaxNativeViews = 32;
 static const NSInteger ZeroNativeBridgeFrameKeepaliveFrames = 600;
+static const NSTimeInterval ZeroNativeAutomationFramePollInterval = 0.05;
 static const uint32_t ZeroNativeShortcutModifierPrimary = 1u << 0;
 static const uint32_t ZeroNativeShortcutModifierCommand = 1u << 1;
 static const uint32_t ZeroNativeShortcutModifierControl = 1u << 2;
@@ -296,6 +297,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 @property(nonatomic, strong) NSMutableSet<NSString *> *nativeViewExplicitTextKeys;
 @property(nonatomic, strong) NSMutableSet<NSString *> *bridgeEnabledChildWebViewKeys;
 @property(nonatomic, strong) NSTimer *timer;
+@property(nonatomic, strong) NSTimer *automationFrameTimer;
 @property(nonatomic, strong) NSString *appName;
 @property(nonatomic, strong) NSString *bundleIdentifier;
 @property(nonatomic, strong) NSString *iconPath;
@@ -377,6 +379,8 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (void)emitWindowFrame:(BOOL)open;
 - (void)emitWindowFrameForWindowId:(uint64_t)windowId open:(BOOL)open;
 - (void)scheduleFrame;
+- (void)setAutomationFramePolling:(BOOL)enabled;
+- (void)emitAutomationFramePoll;
 - (void)scheduleBridgeFrames;
 - (void)emitFrame;
 - (void)emitShutdown;
@@ -1737,6 +1741,8 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command) {
 }
 
 - (void)dealloc {
+    [self.automationFrameTimer invalidate];
+    self.automationFrameTimer = nil;
     if (self.shortcutEventMonitor) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
@@ -2856,6 +2862,8 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
 - (void)stop {
     [self.timer invalidate];
     self.timer = nil;
+    [self.automationFrameTimer invalidate];
+    self.automationFrameTimer = nil;
     if (self.shortcutEventMonitor) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
@@ -2967,6 +2975,24 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
                                                selector:@selector(emitFrame)
                                                userInfo:nil
                                                 repeats:NO];
+}
+
+- (void)setAutomationFramePolling:(BOOL)enabled {
+    if (!enabled) {
+        [self.automationFrameTimer invalidate];
+        self.automationFrameTimer = nil;
+        return;
+    }
+    if (self.automationFrameTimer) return;
+    self.automationFrameTimer = [NSTimer scheduledTimerWithTimeInterval:ZeroNativeAutomationFramePollInterval
+                                                                 target:self
+                                                               selector:@selector(emitAutomationFramePoll)
+                                                               userInfo:nil
+                                                                repeats:YES];
+}
+
+- (void)emitAutomationFramePoll {
+    [self scheduleFrame];
 }
 
 - (void)scheduleBridgeFrames {
@@ -3424,6 +3450,11 @@ void zero_native_appkit_destroy(zero_native_appkit_host_t *host) {
 void zero_native_appkit_run(zero_native_appkit_host_t *host, zero_native_appkit_event_callback_t callback, void *context) {
     ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
     [object runWithCallback:callback context:context];
+}
+
+void zero_native_appkit_set_automation_frame_polling(zero_native_appkit_host_t *host, int enabled) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    [object setAutomationFramePolling:(enabled != 0)];
 }
 
 void zero_native_appkit_stop(zero_native_appkit_host_t *host) {

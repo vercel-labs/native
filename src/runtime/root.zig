@@ -351,6 +351,12 @@ pub const Runtime = struct {
         try self.options.platform.services.configureSecurityPolicy(self.options.security);
         try self.options.platform.services.configureMenus(self.options.menus);
         try self.options.platform.services.configureShortcuts(self.options.shortcuts);
+        if (self.options.automation != null) {
+            try self.options.platform.services.configureAutomationFramePolling(true);
+        }
+        defer if (self.options.automation != null) {
+            self.options.platform.services.configureAutomationFramePolling(false) catch {};
+        };
 
         var context: RunContext = .{ .runtime = self, .app = app };
         try self.options.platform.run(handlePlatformEvent, &context);
