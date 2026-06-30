@@ -11017,7 +11017,7 @@ fn writeCanvasGpuPacketJson(packet: CanvasGpuPacket, writer: anytype) !void {
     try writer.writeAll(",\"images\":[");
     for (packet.images, 0..) |image, index| {
         if (index > 0) try writer.writeByte(',');
-        try writeRenderImageJson(image, writer);
+        try writeRenderImagePacketJson(image, packetImageNeedsUploadPayload(packet.image_actions, index), writer);
     }
     try writer.writeAll("],\"imageActions\":[");
     for (packet.image_actions, 0..) |action, index| {
@@ -11282,9 +11282,27 @@ fn writeRenderImageJson(image: RenderImage, writer: anytype) !void {
     try writeOptionalObjectIdJson(image.id, writer);
     try writer.print(",\"drawCount\":{d},\"bounds\":", .{image.draw_count});
     try writeRectJson(image.bounds, writer);
-    try writer.print(",\"width\":{d},\"height\":{d},\"pixels\":", .{ image.width, image.height });
-    try writeByteArrayJson(image.pixels, writer);
+    try writer.print(",\"width\":{d},\"height\":{d},\"pixelByteLength\":{d},\"fingerprint\":{d}}}", .{ image.width, image.height, image.pixels.len, image.fingerprint });
+}
+
+fn writeRenderImagePacketJson(image: RenderImage, include_pixels: bool, writer: anytype) !void {
+    try writer.print("{{\"imageId\":{d},\"commandIndex\":{d},\"id\":", .{ image.image_id, image.command_index });
+    try writeOptionalObjectIdJson(image.id, writer);
+    try writer.print(",\"drawCount\":{d},\"bounds\":", .{image.draw_count});
+    try writeRectJson(image.bounds, writer);
+    try writer.print(",\"width\":{d},\"height\":{d}", .{ image.width, image.height });
+    if (include_pixels) {
+        try writer.writeAll(",\"pixels\":");
+        try writeByteArrayJson(image.pixels, writer);
+    }
     try writer.print(",\"fingerprint\":{d}}}", .{image.fingerprint});
+}
+
+fn packetImageNeedsUploadPayload(actions: []const RenderImageCacheAction, image_index: usize) bool {
+    for (actions) |action| {
+        if (action.kind == .upload and action.image_index != null and action.image_index.? == image_index) return true;
+    }
+    return false;
 }
 
 fn writeRenderImageCacheActionJson(action: RenderImageCacheAction, writer: anytype) !void {
@@ -17269,6 +17287,47 @@ test "canvas gpu packet serializes image upload payloads" {
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"width\":1,\"height\":1,\"pixels\":[11,22,33,255]") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"imageActions\":[{\"kind\":\"upload\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"image\":{\"image\":42") != null);
+
+    var retained_render_commands: [1]RenderCommand = undefined;
+    var retained_render_batches: [1]RenderBatch = undefined;
+    var retained_images: [1]RenderImage = undefined;
+    var retained_image_cache_entries: [1]RenderImageCacheEntry = undefined;
+    var retained_image_cache_actions: [1]RenderImageCacheAction = undefined;
+    var retained_resources: [1]RenderResource = undefined;
+    var retained_resource_cache_entries: [1]RenderResourceCacheEntry = undefined;
+    var retained_resource_cache_actions: [1]RenderResourceCacheAction = undefined;
+    var retained_glyph_atlas_entries: [0]GlyphAtlasEntry = .{};
+    var retained_changes: [1]DiffChange = undefined;
+    const retained_frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .frame_index = 13,
+        .surface_size = geometry.SizeF.init(8, 8),
+        .full_repaint = true,
+        .previous_image_cache = frame.image_cache_plan.entries,
+        .image_resources = &image_resources,
+    }, .{
+        .render_commands = &retained_render_commands,
+        .render_batches = &retained_render_batches,
+        .images = &retained_images,
+        .image_cache_entries = &retained_image_cache_entries,
+        .image_cache_actions = &retained_image_cache_actions,
+        .resources = &retained_resources,
+        .resource_cache_entries = &retained_resource_cache_entries,
+        .resource_cache_actions = &retained_resource_cache_actions,
+        .glyph_atlas_entries = &retained_glyph_atlas_entries,
+        .changes = &retained_changes,
+    });
+    try std.testing.expectEqual(@as(usize, 0), retained_frame.image_cache_plan.uploadCount());
+    try std.testing.expectEqual(@as(usize, 1), retained_frame.image_cache_plan.retainCount());
+
+    var retained_gpu_commands: [1]CanvasGpuCommand = undefined;
+    const retained_packet = try retained_frame.gpuPacket(&retained_gpu_commands);
+    var retained_packet_json_buffer: [2048]u8 = undefined;
+    var retained_packet_json_writer = std.Io.Writer.fixed(&retained_packet_json_buffer);
+    try retained_packet.writeJson(&retained_packet_json_writer);
+    const retained_packet_json = retained_packet_json_writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, retained_packet_json, "\"imageActions\":[{\"kind\":\"retain\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, retained_packet_json, "\"width\":1,\"height\":1,\"fingerprint\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, retained_packet_json, "\"pixels\"") == null);
 }
 
 test "canvas frame plan carries path geometry cache actions" {
