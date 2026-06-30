@@ -3848,6 +3848,7 @@ pub const WidgetKind = enum {
     avatar,
     badge,
     button,
+    toggle_button,
     icon_button,
     select,
     text_field,
@@ -4127,7 +4128,7 @@ pub fn builtinComponentDescriptor(kind: BuiltinComponentKind) BuiltinComponentDe
         .table => builtinComponent(.table, .data_grid, .grid, true),
         .tabs => builtinComponent(.tabs, .tabs, .group, true),
         .textarea => builtinComponent(.textarea, .textarea, .textbox, false),
-        .toggle => builtinComponent(.toggle, .button, .button, false),
+        .toggle => builtinComponent(.toggle, .toggle_button, .button, false),
         .toggle_group => builtinComponent(.toggle_group, .toggle_group, .group, true),
         .tooltip => builtinComponent(.tooltip, .tooltip, .tooltip, false),
     };
@@ -7278,7 +7279,7 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         .image => try emitImageWidget(builder, paint_widget),
         .avatar => try emitAvatarWidget(builder, paint_widget, tokens),
         .badge => try emitBadgeWidget(builder, paint_widget, tokens),
-        .button => try emitButtonWidget(builder, paint_widget, tokens),
+        .button, .toggle_button => try emitButtonWidget(builder, paint_widget, tokens),
         .icon_button => try emitIconButtonWidget(builder, paint_widget, tokens),
         .select => try emitSelectWidget(builder, paint_widget, tokens),
         .text_field, .textarea => try emitTextFieldWidget(builder, paint_widget, tokens),
@@ -7383,7 +7384,7 @@ fn emitWidgetLayoutNodeContent(
         .image => try emitImageWidget(builder, paint_widget),
         .avatar => try emitAvatarWidget(builder, paint_widget, tokens),
         .badge => try emitBadgeWidget(builder, paint_widget, tokens),
-        .button => try emitButtonWidget(builder, paint_widget, tokens),
+        .button, .toggle_button => try emitButtonWidget(builder, paint_widget, tokens),
         .icon_button => try emitIconButtonWidget(builder, paint_widget, tokens),
         .select => try emitSelectWidget(builder, paint_widget, tokens),
         .text_field, .textarea => try emitTextFieldWidget(builder, paint_widget, tokens),
@@ -9450,7 +9451,7 @@ fn layoutWidgetDepth(
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len, tokens);
             }
         },
-        .text, .icon, .image, .avatar, .badge, .button, .icon_button, .select, .text_field, .search_field, .textarea, .tooltip, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner => {},
+        .text, .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .text_field, .search_field, .textarea, .tooltip, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner => {},
     }
 
     return index;
@@ -9687,7 +9688,7 @@ pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF 
         .icon => geometry.SizeF.init(intrinsicIconExtent(widget, tokens), intrinsicIconExtent(widget, tokens)),
         .avatar => intrinsicAvatarWidgetSize(widget, tokens),
         .badge => intrinsicBadgeWidgetSize(widget, tokens),
-        .button => intrinsicButtonWidgetSize(widget, tokens),
+        .button, .toggle_button => intrinsicButtonWidgetSize(widget, tokens),
         .icon_button => intrinsicSquareControlSize(widget, tokens),
         .select => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 200), widgetControlHeight(widget, tokens)),
         .text_field => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 160), widgetControlHeight(widget, tokens)),
@@ -9941,6 +9942,7 @@ pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor 
     return switch (kind) {
         .text_field, .search_field, .textarea => .text,
         .button,
+        .toggle_button,
         .icon_button,
         .select,
         .menu_item,
@@ -10029,7 +10031,7 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
             .{ .kind = .press, .actions = .{ .press = true } }
         else
             null,
-        .checkbox, .switch_control, .toggle => if (isWidgetActivationKey(keyboard.key))
+        .checkbox, .switch_control, .toggle, .toggle_button => if (isWidgetActivationKey(keyboard.key))
             .{ .kind = .toggle, .actions = .{ .toggle = true } }
         else
             null,
@@ -10599,7 +10601,7 @@ fn semanticRole(widget: Widget) WidgetRole {
         .text => .text,
         .icon, .image, .avatar => .image,
         .badge => .text,
-        .button => .button,
+        .button, .toggle_button => .button,
         .icon_button, .select => .button,
         .text_field, .search_field, .textarea => .textbox,
         .tooltip => .tooltip,
@@ -10626,7 +10628,7 @@ fn semanticValue(widget: Widget) ?f32 {
     if (widget.semantics.value) |value| return value;
     return switch (widget.kind) {
         .radio, .list_item, .menu_item, .data_cell, .segmented_control => if (widget.state.selected or widget.value >= 0.5) 1 else 0,
-        .checkbox, .switch_control, .toggle => if (booleanControlSelected(widget)) 1 else 0,
+        .checkbox, .switch_control, .toggle, .toggle_button => if (booleanControlSelected(widget)) 1 else 0,
         .slider, .progress => std.math.clamp(widget.value, 0, 1),
         .spinner => null,
         else => null,
@@ -10916,7 +10918,7 @@ fn defaultSemanticActions(widget: Widget) WidgetActions {
             actions.press = true;
             actions.select = true;
         },
-        .checkbox, .switch_control, .toggle => actions.toggle = true,
+        .checkbox, .switch_control, .toggle, .toggle_button => actions.toggle = true,
         .radio => {
             actions.select = true;
             if (widget.command.len > 0) actions.press = true;
@@ -10940,7 +10942,7 @@ fn defaultSemanticActions(widget: Widget) WidgetActions {
 
 fn defaultFocusable(widget: Widget) bool {
     return switch (widget.kind) {
-        .scroll_view, .button, .icon_button, .select, .text_field, .search_field, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider => !widget.state.disabled,
+        .scroll_view, .button, .toggle_button, .icon_button, .select, .text_field, .search_field, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider => !widget.state.disabled,
         else => false,
     };
 }
@@ -10968,7 +10970,7 @@ fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     return switch (widget.kind) {
         .row, .column, .grid, .data_grid, .data_row, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner => false,
-        .scroll_view, .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface, .text, .button, .icon_button, .select, .text_field, .search_field, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress => true,
+        .scroll_view, .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface, .text, .button, .toggle_button, .icon_button, .select, .text_field, .search_field, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress => true,
     };
 }
 
@@ -11300,7 +11302,7 @@ fn widgetFocusPaintBounds(widget: Widget, tokens: DesignTokens) ?geometry.RectF 
 fn widgetFrameStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
     return switch (widget.kind) {
         .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface => controlStrokeWidth(widget, surfaceControlVisualTokens(widget, tokens), tokens.stroke.hairline),
-        .button, .icon_button => if (widget.state.focused) tokens.stroke.focus else buttonStrokeWidth(widget, tokens),
+        .button, .toggle_button, .icon_button => if (widget.state.focused) tokens.stroke.focus else buttonStrokeWidth(widget, tokens),
         .select => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectControlVisualTokens(tokens), tokens.stroke.regular),
         .text_field, .search_field, .textarea => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, textInputControlVisualTokens(widget, tokens), tokens.stroke.regular),
         .segmented_control => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectionControlVisualTokens(widget, tokens), tokens.stroke.regular),
@@ -11315,6 +11317,7 @@ fn widgetFrameStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
 fn widgetFocusStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
     return switch (widget.kind) {
         .button,
+        .toggle_button,
         .icon_button,
         .select,
         .text_field,
@@ -15662,6 +15665,7 @@ test "built-in component catalog maps to retained widget foundations" {
     try std.testing.expectEqual(WidgetKind.sheet, builtinComponentDescriptor(.sheet).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.tabs, builtinComponentDescriptor(.tabs).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.textarea, builtinComponentDescriptor(.textarea).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.toggle_button, builtinComponentDescriptor(.toggle).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.toggle_group, builtinComponentDescriptor(.toggle_group).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.tooltip, builtinComponentDescriptor(.tooltip).root_widget_kind);
 
@@ -15693,6 +15697,7 @@ test "built-in component factory creates shadcn widget foundations" {
 
     try std.testing.expectEqual(WidgetVariant.primary, builtinComponentWidget(.button, .{}).variant);
     try std.testing.expectEqual(WidgetVariant.outline, builtinComponentWidget(.select, .{}).variant);
+    try std.testing.expectEqual(WidgetKind.toggle_button, builtinComponentWidget(.toggle, .{}).kind);
     try std.testing.expectEqual(WidgetVariant.ghost, builtinComponentWidget(.toggle, .{}).variant);
     try std.testing.expectEqual(WidgetSize.sm, builtinComponentWidget(.spinner, .{}).size);
 }
@@ -15990,6 +15995,12 @@ test "built-in component widgets expose shadcn semantics and render tokens" {
             .text = "Live",
             .value = 1,
         }),
+        builtinComponentWidget(.toggle, .{
+            .id = 6,
+            .frame = geometry.RectF.init(150, 104, 72, 30),
+            .text = "Bold",
+            .state = .{ .selected = true },
+        }),
         builtinComponentWidget(.table, .{
             .id = 5,
             .frame = geometry.RectF.init(16, 144, 180, 72),
@@ -16008,7 +16019,7 @@ test "built-in component widgets expose shadcn semantics and render tokens" {
 
     var semantics_buffer: [8]WidgetSemanticsNode = undefined;
     const semantics = try layout.collectSemantics(&semantics_buffer);
-    try std.testing.expectEqual(@as(usize, 5), semantics.len);
+    try std.testing.expectEqual(@as(usize, 6), semantics.len);
     try std.testing.expectEqual(WidgetRole.group, semantics[0].role);
     try std.testing.expectEqualStrings("Settings", semantics[0].label);
     try std.testing.expectEqual(WidgetRole.button, semantics[1].role);
@@ -16020,8 +16031,12 @@ test "built-in component widgets expose shadcn semantics and render tokens" {
     try std.testing.expectEqual(WidgetRole.switch_control, semantics[3].role);
     try std.testing.expectEqual(@as(?f32, 1), semantics[3].value);
     try std.testing.expect(semantics[3].actions.toggle);
-    try std.testing.expectEqual(WidgetRole.grid, semantics[4].role);
-    try std.testing.expectEqualStrings("Deployments", semantics[4].label);
+    try std.testing.expectEqual(WidgetRole.button, semantics[4].role);
+    try std.testing.expectEqual(@as(?f32, 1), semantics[4].value);
+    try std.testing.expect(semantics[4].actions.toggle);
+    try std.testing.expect(!semantics[4].actions.press);
+    try std.testing.expectEqual(WidgetRole.grid, semantics[5].role);
+    try std.testing.expectEqualStrings("Deployments", semantics[5].label);
 
     const button = builtinComponentWidget(.button, .{
         .id = 10,

@@ -251,7 +251,7 @@ const GpuComponentsApp = struct {
         const widget = node.widget;
         var status_buffer: [192]u8 = undefined;
         const status = switch (widget.kind) {
-            .checkbox, .radio, .switch_control, .toggle => try std.fmt.bufPrint(
+            .checkbox, .radio, .switch_control, .toggle, .toggle_button => try std.fmt.bufPrint(
                 &status_buffer,
                 "{s} {s} #{d}: {s}.",
                 .{ action, @tagName(widget.kind), id, if (widget.state.selected or widget.value >= 0.5) "on" else "off" },
@@ -755,6 +755,7 @@ fn buildComponentsWidgetLayoutWithScrollAndSize(nodes: []canvas.WidgetLayoutNode
         .{ .id = 112, .kind = .search_field, .frame = rect(166, 0, 172, 34), .text = "components", .semantics = .{ .label = "Component search" } },
         .{ .id = 113, .kind = .checkbox, .frame = rect(0, 52, 132, 30), .text = "Selected", .state = .{ .selected = true }, .semantics = .{ .label = "Selected checkbox" } },
         .{ .id = 114, .kind = .switch_control, .frame = rect(166, 52, 116, 30), .text = "Live", .value = 1, .state = .{ .selected = true }, .semantics = .{ .label = "Live switch" } },
+        .{ .id = 215, .kind = .toggle_button, .frame = rect(292, 52, 60, 30), .text = "Bold", .state = .{ .selected = true }, .semantics = .{ .label = "Bold toggle" } },
         .{ .id = 115, .kind = .slider, .frame = rect(0, 108, 176, 28), .value = 0.62, .semantics = .{ .label = "Density slider" } },
         .{ .id = 116, .kind = .progress, .frame = rect(202, 118, 134, 8), .value = 1, .semantics = .{ .label = "Build progress" } },
         .{ .id = 167, .kind = .radio_group, .frame = rect(0, 148, 160, 28), .layout = .{ .gap = 10, .cross_alignment = .center }, .semantics = .{ .label = "Layout radio group" }, .children = &radio_controls },
@@ -1178,6 +1179,7 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetFrame(layout, 112, rect(230, 124, 172, 34));
     try expectComponentWidgetFrame(layout, 113, rect(64, 176, 132, 30));
     try expectComponentWidgetFrame(layout, 114, rect(230, 176, 116, 30));
+    try expectComponentWidgetFrame(layout, 215, rect(356, 176, 60, 30));
     try expectComponentWidgetFrame(layout, 115, rect(64, 232, 176, 28));
     try expectComponentWidgetFrame(layout, 116, rect(266, 242, 134, 8));
     try expectComponentWidgetFrame(layout, 167, rect(64, 272, 160, 28));
@@ -1202,6 +1204,7 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetFrame(layout, 140, rect(456, 248, 174, 88));
     try expectComponentWidgetsDoNotOverlap(layout, 111, 112);
     try expectComponentWidgetsDoNotOverlap(layout, 113, 114);
+    try expectComponentWidgetsDoNotOverlap(layout, 114, 215);
     try expectComponentWidgetsDoNotOverlap(layout, 115, 116);
     try expectComponentWidgetsDoNotOverlap(layout, 167, 118);
     try expectComponentWidgetsDoNotOverlap(layout, 168, 118);
@@ -1379,7 +1382,7 @@ test "gpu components display list renders stable reference snapshot" {
     const surface = (try canvas.ReferenceRenderSurface.initWithScratch(@intFromFloat(canvas_width), @intFromFloat(canvas_height), pixels, scratch)).withImages(&preview_images);
     try surface.renderPass(frame.renderPass(), color(247, 249, 252));
 
-    try std.testing.expectEqual(@as(u64, 17925554458023128078), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 5785905844824738462), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -1430,6 +1433,7 @@ test "gpu components semantics cover retained widget families" {
     try expectSemanticRole(semantics, 112, .textbox);
     try expectSemanticRole(semantics, 113, .checkbox);
     try expectSemanticRole(semantics, 114, .switch_control);
+    try expectSemanticRole(semantics, 215, .button);
     try expectSemanticRole(semantics, 115, .slider);
     try expectSemanticRole(semantics, 116, .progressbar);
     try expectSemanticRole(semantics, 117, .tab);
@@ -1632,6 +1636,11 @@ test "gpu components app registers component lab on first gpu frame" {
     try std.testing.expect(component_search.actions.set_selection);
     try std.testing.expect(componentSnapshotWidget(snapshot, 113).?.actions.toggle);
     try std.testing.expect(componentSnapshotWidget(snapshot, 114).?.selected);
+    const bold_toggle = componentSnapshotWidget(snapshot, 215).?;
+    try std.testing.expectEqualStrings("button", bold_toggle.role);
+    try std.testing.expect(bold_toggle.selected);
+    try std.testing.expect(bold_toggle.actions.toggle);
+    try std.testing.expect(!bold_toggle.actions.press);
     try std.testing.expect(componentSnapshotWidget(snapshot, 115).?.actions.increment);
     try std.testing.expectEqualStrings("progressbar", componentSnapshotWidget(snapshot, 116).?.role);
     try std.testing.expectApproxEqAbs(@as(f32, 1), componentSnapshotWidget(snapshot, 116).?.value.?, 0.001);
