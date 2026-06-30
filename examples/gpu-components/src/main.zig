@@ -1006,6 +1006,47 @@ test "gpu components display list covers finished live controls" {
     try std.testing.expect(bounds.height >= 616);
 }
 
+test "gpu components layout keeps finished controls visually separated" {
+    var nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
+    const layout = try buildComponentsWidgetLayoutWithScroll(&nodes, .{});
+
+    try expectComponentWidgetFrame(layout, 111, rect(80, 178, 132, 30));
+    try expectComponentWidgetFrame(layout, 112, rect(222, 178, 148, 30));
+    try expectComponentWidgetFrame(layout, 113, rect(80, 222, 116, 28));
+    try expectComponentWidgetFrame(layout, 114, rect(214, 222, 100, 28));
+    try expectComponentWidgetFrame(layout, 115, rect(80, 268, 156, 26));
+    try expectComponentWidgetFrame(layout, 116, rect(252, 277, 116, 10));
+    try expectComponentWidgetFrame(layout, 168, rect(80, 310, 132, 30));
+    try expectComponentWidgetFrame(layout, 118, rect(262, 306, 106, 34));
+    try expectComponentWidgetsDoNotOverlap(layout, 111, 112);
+    try expectComponentWidgetsDoNotOverlap(layout, 113, 114);
+    try expectComponentWidgetsDoNotOverlap(layout, 115, 116);
+    try expectComponentWidgetsDoNotOverlap(layout, 168, 118);
+
+    try std.testing.expect(layout.findById(151) == null);
+    try expectComponentWidgetFrame(layout, 150, rect(80, 444, 304, 28));
+    try expectComponentWidgetFrame(layout, 152, rect(80, 444, 304, 28));
+    try expectComponentWidgetFrame(layout, 156, rect(80, 444, 152, 28));
+    try expectComponentWidgetFrame(layout, 157, rect(232, 444, 152, 28));
+    try expectComponentWidgetFrame(layout, 160, rect(86, 554, 176, 32));
+    try expectComponentWidgetsDoNotOverlap(layout, 150, 160);
+
+    var scrolled_nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
+    const scrolled_layout = try buildComponentsWidgetLayoutWithScroll(&scrolled_nodes, .{
+        .nav = 28,
+        .behavior = 56,
+        .data = 56,
+    });
+    try std.testing.expect(scrolled_layout.findById(121) == null);
+    try expectComponentWidgetFrame(scrolled_layout, 122, rect(424, 142, 152, 28));
+    try std.testing.expect(scrolled_layout.findById(132) == null);
+    try expectComponentWidgetFrame(scrolled_layout, 133, rect(604, 142, 164, 28));
+    try std.testing.expect(scrolled_layout.findById(152) == null);
+    try expectComponentWidgetFrame(scrolled_layout, 153, rect(80, 444, 304, 28));
+    try expectComponentWidgetFrame(scrolled_layout, 158, rect(80, 444, 152, 28));
+    try expectComponentWidgetFrame(scrolled_layout, 159, rect(232, 444, 152, 28));
+}
+
 test "gpu components combined virtual scroll state stays within display budget" {
     var commands: [max_component_commands]canvas.CanvasCommand = undefined;
     var nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
@@ -1727,6 +1768,24 @@ fn expectSemantic(semantics: []const canvas.WidgetSemanticsNode, id: canvas.Obje
         if (semantic.id == id) return semantic;
     }
     @panic("missing semantic node");
+}
+
+fn expectComponentWidgetFrame(layout: canvas.WidgetLayoutTree, id: canvas.ObjectId, expected: geometry.RectF) !void {
+    const node = layout.findById(id) orelse return error.TestUnexpectedResult;
+    try expectComponentRect(node.frame, expected);
+}
+
+fn expectComponentWidgetsDoNotOverlap(layout: canvas.WidgetLayoutTree, a_id: canvas.ObjectId, b_id: canvas.ObjectId) !void {
+    const a = layout.findById(a_id) orelse return error.TestUnexpectedResult;
+    const b = layout.findById(b_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(geometry.RectF.intersection(a.frame.normalized(), b.frame.normalized()).isEmpty());
+}
+
+fn expectComponentRect(actual: geometry.RectF, expected: geometry.RectF) !void {
+    try std.testing.expectApproxEqAbs(expected.x, actual.x, 0.001);
+    try std.testing.expectApproxEqAbs(expected.y, actual.y, 0.001);
+    try std.testing.expectApproxEqAbs(expected.width, actual.width, 0.001);
+    try std.testing.expectApproxEqAbs(expected.height, actual.height, 0.001);
 }
 
 fn expectVisiblePixel(pixel: [4]u8) !void {
