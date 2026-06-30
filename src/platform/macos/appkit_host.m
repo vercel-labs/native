@@ -586,10 +586,11 @@ static BOOL ZeroNativePacketReadPoint(id value, NSPoint *point) {
     return YES;
 }
 
-static CGFloat ZeroNativePacketRadius(id value) {
+static CGFloat ZeroNativePacketRadiusAt(id value, NSUInteger index, CGFloat maximum) {
     NSArray *array = ZeroNativePacketArray(value, 1);
     if (!array) return 0;
-    return MAX(0, ZeroNativePacketNumber(array[0], 0));
+    id radiusValue = index < array.count ? array[index] : array[0];
+    return fmax(0.0, fmin(maximum, ZeroNativePacketNumber(radiusValue, 0)));
 }
 
 static NSColor *ZeroNativePacketColor(id value, CGFloat opacity) {
@@ -600,6 +601,60 @@ static NSColor *ZeroNativePacketColor(id value, CGFloat opacity) {
     CGFloat blue = fmax(0.0, fmin(1.0, ZeroNativePacketNumber(array[2], 0)));
     CGFloat alpha = fmax(0.0, fmin(1.0, ZeroNativePacketNumber(array[3], 1) * opacity));
     return [NSColor colorWithDeviceRed:red green:green blue:blue alpha:alpha];
+}
+
+static NSBezierPath *ZeroNativePacketRoundedRectPath(NSRect rect, id radiusValue) {
+    rect = NSStandardizeRect(rect);
+    CGFloat maxRadius = fmax(0.0, fmin(rect.size.width, rect.size.height) * 0.5);
+    CGFloat topLeft = ZeroNativePacketRadiusAt(radiusValue, 0, maxRadius);
+    CGFloat topRight = ZeroNativePacketRadiusAt(radiusValue, 1, maxRadius);
+    CGFloat bottomRight = ZeroNativePacketRadiusAt(radiusValue, 2, maxRadius);
+    CGFloat bottomLeft = ZeroNativePacketRadiusAt(radiusValue, 3, maxRadius);
+    CGFloat minX = NSMinX(rect);
+    CGFloat minY = NSMinY(rect);
+    CGFloat maxX = NSMaxX(rect);
+    CGFloat maxY = NSMaxY(rect);
+    const CGFloat kappa = 0.5522847498307936;
+    NSBezierPath *path = [NSBezierPath bezierPath];
+
+    [path moveToPoint:NSMakePoint(minX + topLeft, minY)];
+    [path lineToPoint:NSMakePoint(maxX - topRight, minY)];
+    if (topRight > 0) {
+        [path curveToPoint:NSMakePoint(maxX, minY + topRight)
+             controlPoint1:NSMakePoint(maxX - topRight + topRight * kappa, minY)
+             controlPoint2:NSMakePoint(maxX, minY + topRight - topRight * kappa)];
+    } else {
+        [path lineToPoint:NSMakePoint(maxX, minY)];
+    }
+
+    [path lineToPoint:NSMakePoint(maxX, maxY - bottomRight)];
+    if (bottomRight > 0) {
+        [path curveToPoint:NSMakePoint(maxX - bottomRight, maxY)
+             controlPoint1:NSMakePoint(maxX, maxY - bottomRight + bottomRight * kappa)
+             controlPoint2:NSMakePoint(maxX - bottomRight + bottomRight * kappa, maxY)];
+    } else {
+        [path lineToPoint:NSMakePoint(maxX, maxY)];
+    }
+
+    [path lineToPoint:NSMakePoint(minX + bottomLeft, maxY)];
+    if (bottomLeft > 0) {
+        [path curveToPoint:NSMakePoint(minX, maxY - bottomLeft)
+             controlPoint1:NSMakePoint(minX + bottomLeft - bottomLeft * kappa, maxY)
+             controlPoint2:NSMakePoint(minX, maxY - bottomLeft + bottomLeft * kappa)];
+    } else {
+        [path lineToPoint:NSMakePoint(minX, maxY)];
+    }
+
+    [path lineToPoint:NSMakePoint(minX, minY + topLeft)];
+    if (topLeft > 0) {
+        [path curveToPoint:NSMakePoint(minX + topLeft, minY)
+             controlPoint1:NSMakePoint(minX, minY + topLeft - topLeft * kappa)
+             controlPoint2:NSMakePoint(minX + topLeft - topLeft * kappa, minY)];
+    } else {
+        [path lineToPoint:NSMakePoint(minX, minY)];
+    }
+    [path closePath];
+    return path;
 }
 
 static NSBezierPath *ZeroNativePacketShapePath(NSDictionary *shape) {
@@ -660,8 +715,7 @@ static NSBezierPath *ZeroNativePacketShapePath(NSDictionary *shape) {
     }
     if ([kind isEqualToString:@"rounded_rect"] || [kind isEqualToString:@"stroke_rect"]) {
         NSRect rect = ZeroNativePacketRect(shape[@"rect"]);
-        CGFloat radius = ZeroNativePacketRadius(shape[@"radius"]);
-        return [NSBezierPath bezierPathWithRoundedRect:rect xRadius:radius yRadius:radius];
+        return ZeroNativePacketRoundedRectPath(rect, shape[@"radius"]);
     }
     if ([kind isEqualToString:@"line"]) {
         NSBezierPath *path = [NSBezierPath bezierPath];
@@ -743,14 +797,13 @@ static BOOL ZeroNativePacketDrawEffect(NSDictionary *effect, CGFloat opacity) {
         NSColor *color = ZeroNativePacketColor(effect[@"color"], opacity);
         if (!color) return NO;
         NSRect rect = ZeroNativePacketRect(effect[@"rect"]);
-        CGFloat radius = ZeroNativePacketRadius(effect[@"radius"]);
         NSArray *offset = ZeroNativePacketArray(effect[@"offset"], 2);
         NSSize shadowOffset = offset ? NSMakeSize(ZeroNativePacketNumber(offset[0], 0), ZeroNativePacketNumber(offset[1], 0)) : NSZeroSize;
         NSShadow *shadow = [[NSShadow alloc] init];
         shadow.shadowColor = color;
         shadow.shadowOffset = shadowOffset;
         shadow.shadowBlurRadius = MAX(0, ZeroNativePacketNumber(effect[@"blur"], 0));
-        NSBezierPath *path = [NSBezierPath bezierPathWithRoundedRect:rect xRadius:radius yRadius:radius];
+        NSBezierPath *path = ZeroNativePacketRoundedRectPath(rect, effect[@"radius"]);
         [NSGraphicsContext saveGraphicsState];
         [shadow set];
         [[color colorWithAlphaComponent:0.01] setFill];

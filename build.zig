@@ -314,6 +314,12 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[kind isEqualToString:@\"fill_path\"]" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[kind isEqualToString:@\"stroke_path\"]" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-corner-radii", "Verify AppKit GPU packet presenter honors per-corner radii", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "ZeroNativePacketRoundedRectPath" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "CGFloat topRight = ZeroNativePacketRadiusAt(radiusValue, 1, maxRadius)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "CGFloat bottomLeft = ZeroNativePacketRadiusAt(radiusValue, 3, maxRadius)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return ZeroNativePacketRoundedRectPath(rect, shape[@\"radius\"])" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-load-frames", "Verify AppKit GPU packet presenter handles retained load frames", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "canvasPacketPixels" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[loadAction isEqualToString:@\"load\"]" },

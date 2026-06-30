@@ -16851,7 +16851,7 @@ test "canvas render pass builds gpu packet for backend handoff" {
     };
     const commands = [_]CanvasCommand{
         .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 12, 12), .fill = .{ .color = Color.rgb8(255, 255, 255) } } },
-        .{ .fill_rounded_rect = .{ .id = 2, .rect = geometry.RectF.init(16, 0, 24, 12), .radius = Radius.all(4), .fill = .{ .linear_gradient = .{
+        .{ .fill_rounded_rect = .{ .id = 2, .rect = geometry.RectF.init(16, 0, 24, 12), .radius = .{ .top_left = 3, .top_right = 5, .bottom_right = 6, .bottom_left = 2 }, .fill = .{ .linear_gradient = .{
             .start = geometry.PointF.init(16, 0),
             .end = geometry.PointF.init(40, 12),
             .stops = &stops,
@@ -16981,7 +16981,7 @@ test "canvas render pass builds gpu packet for backend handoff" {
     switch (packet.commands[1].shape) {
         .rounded_rect => |rounded_rect| {
             try std.testing.expectEqualDeep(geometry.RectF.init(16, 0, 24, 12), rounded_rect.rect);
-            try std.testing.expectEqualDeep(Radius.all(4), rounded_rect.radius);
+            try std.testing.expectEqualDeep(Radius{ .top_left = 3, .top_right = 5, .bottom_right = 6, .bottom_left = 2 }, rounded_rect.radius);
         },
         else => return error.TestExpectedEqual,
     }
@@ -17085,7 +17085,7 @@ test "canvas render pass builds gpu packet for backend handoff" {
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"loadAction\":\"clear\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"commandCount\":9") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"kind\":\"fill_rounded_rect_gradient\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"shape\":{\"kind\":\"rounded_rect\",\"rect\":[16,0,24,12],\"radius\":[4,4,4,4]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"shape\":{\"kind\":\"rounded_rect\",\"rect\":[16,0,24,12],\"radius\":[3,5,6,2]}") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"paint\":{\"kind\":\"linear_gradient\",\"start\":[16,0],\"end\":[40,12]") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"shape\":{\"kind\":\"path\",\"path\":[{\"verb\":\"move_to\",\"points\":[[0,0]]},{\"verb\":\"line_to\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"image\":{\"image\":42,\"src\":[4,8,32,24],\"dst\":[44,0,16,16],\"opacity\":0.75,\"fit\":\"cover\",\"sampling\":\"nearest\"}") != null);
