@@ -900,6 +900,7 @@ pub fn build(b: *std.Build) void {
         \\}
         \\case "$snapshot" in *'widget @w1/components-canvas#113 role=checkbox'*'value=1'*'actions=[focus,toggle]'*) ;; *) echo "checkbox widget was not initially selected" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'widget @w1/components-canvas#114 role=switch'*'value=1'*'actions=[focus,toggle]'*) ;; *) echo "switch widget was not initially selected" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'widget @w1/components-canvas#116 role=progressbar'*'value=1'*) ;; *) echo "progress widget was missing from the initial snapshot" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'widget @w1/components-canvas#117 role=tab'*'value=1'*'actions=[focus,select]'*) ;; *) echo "small segmented control was not initially selected" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'widget @w1/components-canvas#119 role=tab'*'value=0'*'actions=[focus,select]'*) ;; *) echo "large segmented control was not initially available" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'widget @w1/components-canvas#142 role=menuitem'*'actions=[focus,press,select]'*) ;; *) echo "menu item widget was not initially actionable" >&2; exit 1 ;; esac

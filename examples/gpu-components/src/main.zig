@@ -594,7 +594,8 @@ fn buildComponentsWidgetLayoutWithScroll(nodes: []canvas.WidgetLayoutNode, virtu
         .{ .id = 113, .kind = .checkbox, .frame = rect(16, 92, 116, 28), .text = "Selected", .state = .{ .selected = true }, .semantics = .{ .label = "Selected checkbox" } },
         .{ .id = 114, .kind = .toggle, .frame = rect(150, 92, 100, 28), .text = "Live", .value = 1, .state = .{ .selected = true }, .semantics = .{ .label = "Live toggle" } },
         .{ .id = 115, .kind = .slider, .frame = rect(16, 138, 156, 26), .value = 0.62, .semantics = .{ .label = "Density slider" } },
-        .{ .id = 116, .kind = .row, .frame = rect(16, 180, 132, 30), .layout = .{ .gap = 4 }, .semantics = .{ .label = "Density segments" }, .children = &segment_controls },
+        .{ .id = 116, .kind = .progress, .frame = rect(188, 147, 116, 10), .value = 1, .semantics = .{ .label = "Build progress" } },
+        .{ .id = 168, .kind = .row, .frame = rect(16, 180, 132, 30), .layout = .{ .gap = 4 }, .semantics = .{ .label = "Density segments" }, .children = &segment_controls },
         .{ .id = 118, .kind = .image, .frame = rect(198, 176, 106, 34), .image_id = preview_image_id, .image_src = rect(0, 0, 4, 4), .image_fit = .cover, .image_sampling = .nearest, .image_opacity = 0.94, .semantics = .{ .label = "GPU image preview" } },
     };
     const menu_items = [_]canvas.Widget{
@@ -640,7 +641,6 @@ fn buildComponentsWidgetLayoutWithScroll(nodes: []canvas.WidgetLayoutNode, virtu
         .{ .id = 160, .kind = .tooltip, .frame = rect(22, 124, 176, 32), .text = "Tooltip rendered on GPU", .semantics = .{ .label = "GPU tooltip" } },
     };
     const top_widgets = [_]canvas.Widget{
-        .{ .id = 101, .kind = .text, .frame = rect(64, 56, 240, 26), .text = "Finished Components" },
         .{ .id = 104, .kind = .button, .frame = rect(574, 54, 118, 34), .text = "Primary", .state = .{ .selected = true }, .command = refresh_command, .semantics = .{ .label = "Primary action" } },
         .{ .id = 105, .kind = .icon_button, .frame = rect(706, 54, 34, 34), .text = "+", .semantics = .{ .label = "Add component" } },
         .{ .id = 106, .kind = .column, .frame = rect(64, 130, 328, 246), .semantics = .{ .label = "Input controls" }, .children = &form_controls },
@@ -1095,7 +1095,7 @@ test "gpu components display list renders stable reference snapshot" {
     const surface = (try canvas.ReferenceRenderSurface.initWithScratch(@intFromFloat(canvas_width), @intFromFloat(canvas_height), pixels, scratch)).withImages(&preview_images);
     try surface.renderPass(frame.renderPass(), color(247, 249, 252));
 
-    try std.testing.expectEqual(@as(u64, 11909946235935191872), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 13212317062719302072), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -1147,7 +1147,7 @@ test "gpu components semantics cover retained widget families" {
     try expectSemanticRole(semantics, 113, .checkbox);
     try expectSemanticRole(semantics, 114, .switch_control);
     try expectSemanticRole(semantics, 115, .slider);
-    try expectSemanticRole(semantics, 116, .group);
+    try expectSemanticRole(semantics, 116, .progressbar);
     try expectSemanticRole(semantics, 117, .tab);
     try expectSemanticRole(semantics, 118, .image);
     try expectSemanticRole(semantics, 119, .tab);
@@ -1162,6 +1162,7 @@ test "gpu components semantics cover retained widget families" {
     try expectSemanticRole(semantics, 152, .row);
     try expectSemanticRole(semantics, 156, .gridcell);
     try expectSemanticRole(semantics, 160, .tooltip);
+    try expectSemanticRole(semantics, 168, .group);
 
     const slider = expectSemantic(semantics, 115);
     try std.testing.expectEqual(@as(?f32, 0.62), slider.value);
@@ -1300,7 +1301,8 @@ test "gpu components app registers component lab on first gpu frame" {
     try std.testing.expect(componentSnapshotWidget(snapshot, 113).?.actions.toggle);
     try std.testing.expect(componentSnapshotWidget(snapshot, 114).?.selected);
     try std.testing.expect(componentSnapshotWidget(snapshot, 115).?.actions.increment);
-    try std.testing.expectEqualStrings("group", componentSnapshotWidget(snapshot, 116).?.role);
+    try std.testing.expectEqualStrings("progressbar", componentSnapshotWidget(snapshot, 116).?.role);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), componentSnapshotWidget(snapshot, 116).?.value.?, 0.001);
     try std.testing.expectEqualStrings("tab", componentSnapshotWidget(snapshot, 117).?.role);
     const snapshot_nav_list = componentSnapshotWidget(snapshot, 120).?;
     try std.testing.expect(snapshot_nav_list.scroll.present);

@@ -7170,18 +7170,23 @@ fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
 
 fn emitProgressWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const radius = Radius.all(@min(tokens.radius.md, widget.frame.height * 0.5));
-    try builder.fillRoundedRect(.{
-        .id = widgetPartId(widget.id, 1),
-        .rect = widget.frame,
-        .radius = radius,
-        .fill = .{ .color = tokens.colors.surface_pressed },
-    });
-    try builder.fillRoundedRect(.{
-        .id = widgetPartId(widget.id, 2),
-        .rect = geometry.RectF.init(widget.frame.x, widget.frame.y, widget.frame.width * std.math.clamp(widget.value, 0, 1), widget.frame.height),
-        .radius = radius,
-        .fill = .{ .color = tokens.colors.accent },
-    });
+    const progress = std.math.clamp(widget.value, 0, 1);
+    if (progress < 1) {
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = widget.frame,
+            .radius = radius,
+            .fill = .{ .color = tokens.colors.surface_pressed },
+        });
+    }
+    if (progress > 0) {
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, 2),
+            .rect = geometry.RectF.init(widget.frame.x, widget.frame.y, widget.frame.width * progress, widget.frame.height),
+            .radius = radius,
+            .fill = .{ .color = tokens.colors.accent },
+        });
+    }
 }
 
 fn emitWidgetFocusRing(builder: *Builder, widget: Widget, tokens: DesignTokens, slot: ObjectId) Error!void {
