@@ -796,6 +796,26 @@ pub fn build(b: *std.Build) void {
         \\gpu_frame_from_snapshot() {
         \\  printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/dashboard-canvas kind=gpu_surface.* gpu_frame=\([0-9][0-9]*\).*/\1/p'
         \\}
+        \\canvas_revision_from_snapshot() {
+        \\  printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/dashboard-canvas kind=gpu_surface.* canvas_revision=\([0-9][0-9]*\).*/\1/p'
+        \\}
+        \\canvas_revision_before_resize="$(canvas_revision_from_snapshot)"
+        \\case "$canvas_revision_before_resize" in ''|*[!0-9]*) echo "dashboard canvas revision was missing before resize" >&2; exit 1 ;; esac
+        \\"$cli" automate resize 1120 700 >/dev/null 2>&1
+        \\attempts=0
+        \\while [ "$attempts" -lt 50 ]; do
+        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\  case "$snapshot" in *'window @w1 "zero-native GPU Dashboard" bounds=('*' 1120x700)'*'view @w1/dashboard-canvas kind=gpu_surface'*'bounds=(196,0 720x612)'*'gpu_nonblank=true'*'canvas_commands=64'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
+        \\  attempts=$((attempts + 1))
+        \\  sleep 0.1
+        \\done
+        \\case "$snapshot" in *'window @w1 "zero-native GPU Dashboard" bounds=('*' 1120x700)'*) ;; *) echo "dashboard window resize was not reflected in snapshot" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'bounds=(196,0 720x612)'*) ;; *) echo "dashboard GPU canvas did not relayout after resize" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/inspector kind=webview'*'bounds=(916,54 204x612)'*) ;; *) echo "dashboard inspector WebView did not relayout after resize" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_commands=64'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "dashboard GPU canvas did not remain packet-renderable after resize" >&2; exit 1 ;; esac
+        \\canvas_revision_after_resize="$(canvas_revision_from_snapshot)"
+        \\case "$canvas_revision_after_resize" in ''|*[!0-9]*) echo "dashboard canvas revision was missing after resize" >&2; exit 1 ;; esac
+        \\if [ "$canvas_revision_after_resize" -ne "$canvas_revision_before_resize" ]; then echo "dashboard resize rebuilt the retained display list: $canvas_revision_before_resize -> $canvas_revision_after_resize" >&2; exit 1; fi
         \\gpu_frame_before="$(gpu_frame_from_snapshot)"
         \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
         \\gpu_frame_after="$gpu_frame_before"
