@@ -4620,7 +4620,11 @@ pub const CanvasGpuPacketPlanner = struct {
             };
         }
 
+        const scissor_bounds = pass.scissorBounds();
         for (pass.commands, 0..) |command, index| {
+            if (scissor_bounds) |scissor| {
+                if (!renderCommandIntersectsDirtyBounds(command, scissor)) continue;
+            }
             try self.append(canvasGpuCommandFromRenderCommand(command, index));
         }
 
@@ -4662,6 +4666,13 @@ pub const CanvasGpuPacketPlanner = struct {
         self.len += 1;
     }
 };
+
+fn renderCommandIntersectsDirtyBounds(command: RenderCommand, dirty_bounds: geometry.RectF) bool {
+    const command_bounds = command.bounds.normalized();
+    const dirty = dirty_bounds.normalized();
+    if (command_bounds.isEmpty() or dirty.isEmpty()) return false;
+    return command_bounds.intersects(dirty);
+}
 
 fn canvasGpuCommandFromRenderCommand(command: RenderCommand, command_index: usize) CanvasGpuCommand {
     var packet_command = CanvasGpuCommand{
@@ -17958,6 +17969,8 @@ test "canvas frame plan clips incremental dirty bounds to surface" {
     try std.testing.expect(packet.requiresRender());
     try std.testing.expect(packet.fullyRepresentable());
     try std.testing.expectEqual(CanvasRenderPassLoadAction.load, packet.load_action);
+    try std.testing.expectEqual(@as(usize, 1), packet.commandCount());
+    try std.testing.expectEqual(@as(?ObjectId, 1), packet.commands[0].id);
     try expectRect(geometry.RectF.init(0, 0, 50, 40), packet.scissor.?);
     var packet_json_buffer: [2048]u8 = undefined;
     var packet_json_writer = std.Io.Writer.fixed(&packet_json_buffer);

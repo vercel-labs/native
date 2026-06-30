@@ -235,6 +235,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 @property(nonatomic, strong) id<MTLTexture> canvasTexture;
 @property(nonatomic, strong) id<MTLRenderPipelineState> canvasRenderPipeline;
 @property(nonatomic, strong) id<MTLSamplerState> canvasSampler;
+@property(nonatomic, assign) CGColorSpaceRef canvasColorSpace;
 @property(nonatomic, strong) NSTimer *displayTimer;
 @property(nonatomic, assign) ZeroNativeAppKitHost *host;
 @property(nonatomic, assign) uint64_t windowId;
@@ -1340,6 +1341,10 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
 
 - (void)dealloc {
     [self stopDisplayTimer];
+    if (self.canvasColorSpace) {
+        CGColorSpaceRelease(self.canvasColorSpace);
+        self.canvasColorSpace = NULL;
+    }
 }
 
 - (NSArray *)accessibilityChildren {
@@ -1499,10 +1504,9 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
         pixels = directRetainedDirtyUpdate ? self.canvasPacketPixels : [self.canvasPacketPixels mutableCopy];
     }
     if (!pixels || pixels.length != byteLengthRequired) return -1;
-    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-    if (!colorSpace) return -1;
-    CGContextRef context = CGBitmapContextCreate(pixels.mutableBytes, pixelWidth, pixelHeight, 8, pixelWidth * 4, colorSpace, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
-    CGColorSpaceRelease(colorSpace);
+    if (!self.canvasColorSpace) self.canvasColorSpace = CGColorSpaceCreateDeviceRGB();
+    if (!self.canvasColorSpace) return -1;
+    CGContextRef context = CGBitmapContextCreate(pixels.mutableBytes, pixelWidth, pixelHeight, 8, pixelWidth * 4, self.canvasColorSpace, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
     if (!context) return -1;
 
     CGContextSetAllowsAntialiasing(context, true);
