@@ -3440,6 +3440,8 @@ pub const ControlVisualTokens = struct {
     active_background: ?Color = null,
     foreground: ?Color = null,
     border: ?Color = null,
+    radius: ?f32 = null,
+    stroke_width: ?f32 = null,
 };
 
 pub const ControlTokens = struct {
@@ -3639,6 +3641,8 @@ pub const ControlVisualTokenOverrides = struct {
     active_background: ?Color = null,
     foreground: ?Color = null,
     border: ?Color = null,
+    radius: ?f32 = null,
+    stroke_width: ?f32 = null,
 
     pub fn apply(self: ControlVisualTokenOverrides, base: ControlVisualTokens) ControlVisualTokens {
         return applyFlatTokenOverrides(ControlVisualTokens, base, self);
@@ -7166,9 +7170,9 @@ fn emitWidgetLayoutClippedChildren(
 }
 
 fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = widgetRadius(widget, tokens.radius.lg);
-    const shadow_token = tokens.shadow.sm;
     const visual = surfaceControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.lg);
+    const shadow_token = tokens.shadow.sm;
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
         try builder.shadow(.{
             .id = widgetPartId(widget.id, 1),
@@ -7193,15 +7197,15 @@ fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens
         .radius = radius,
         .stroke = .{
             .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
-            .width = widgetStrokeWidth(widget, tokens.stroke.hairline),
+            .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
         },
     });
 }
 
 fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = widgetRadius(widget, tokens.radius.xl);
-    const shadow_token = tokens.shadow.md;
     const visual = surfaceControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.xl);
+    const shadow_token = tokens.shadow.md;
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
         try builder.shadow(.{
             .id = widgetPartId(widget.id, 1),
@@ -7226,15 +7230,15 @@ fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignToke
         .radius = radius,
         .stroke = .{
             .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
-            .width = widgetStrokeWidth(widget, tokens.stroke.hairline),
+            .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
         },
     });
 }
 
 fn emitMenuSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = widgetRadius(widget, tokens.radius.lg);
-    const shadow_token = tokens.shadow.md;
     const visual = surfaceControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.lg);
+    const shadow_token = tokens.shadow.md;
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
         try builder.shadow(.{
             .id = widgetPartId(widget.id, 1),
@@ -7259,7 +7263,7 @@ fn emitMenuSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: Design
         .radius = radius,
         .stroke = .{
             .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
-            .width = widgetStrokeWidth(widget, tokens.stroke.hairline),
+            .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
         },
     });
 }
@@ -7309,7 +7313,8 @@ fn emitImageWidget(builder: *Builder, widget: Widget) Error!void {
 }
 
 fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = widgetRadius(widget, tokens.radius.md);
+    const visual = buttonControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
     const text_size = widgetButtonTextSize(widget, tokens);
     const text_inset = widgetButtonInset(widget, tokens);
     try builder.fillRoundedRect(.{
@@ -7350,7 +7355,8 @@ fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
 }
 
 fn emitIconButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = widgetRadius(widget, tokens.radius.md);
+    const visual = buttonControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = widget.frame,
@@ -7380,12 +7386,12 @@ fn emitIconButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
 }
 
 fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = widgetRadius(widget, tokens.radius.md);
+    const visual = textInputControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
     const text_size = widgetTextInputSize(widget, tokens);
     const text_inset = widgetTextInputInset(widget, tokens);
     const layout_options = widgetTextInputLayoutOptions(widget, text_size, text_inset);
     const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
-    const visual = textInputControlVisualTokens(widget, tokens);
     const text_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
     const draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, text_color, layout_options);
     const selection_range = widgetTextSelectionRange(widget);
@@ -7404,7 +7410,7 @@ fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
         .radius = radius,
         .stroke = .{
             .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else textInputBorderFill(widget, visual, tokens.colors.border),
-            .width = if (widget.state.focused) tokens.stroke.focus else widgetStrokeWidth(widget, tokens.stroke.regular),
+            .width = if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
     });
     if (selection_range) |range| {
@@ -7432,7 +7438,8 @@ fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
 }
 
 fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = widgetRadius(widget, tokens.radius.md);
+    const visual = textInputControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
     const text_size = widgetTextInputSize(widget, tokens);
     const icon_size = @max(8, text_size - 2);
     const text_inset = widgetTextInputInset(widget, tokens);
@@ -7440,7 +7447,6 @@ fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens
     const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
     const selection_range = widgetTextSelectionRange(widget);
     const composition_range = widgetTextCompositionRange(widget);
-    const visual = textInputControlVisualTokens(widget, tokens);
     const text_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
     const draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, text_color, layout_options);
 
@@ -7456,7 +7462,7 @@ fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens
         .radius = radius,
         .stroke = .{
             .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else textInputBorderFill(widget, visual, tokens.colors.border),
-            .width = if (widget.state.focused) tokens.stroke.focus else widgetStrokeWidth(widget, tokens.stroke.regular),
+            .width = if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
     });
     try emitSearchFieldIcon(builder, widget, tokens, icon_size);
@@ -7507,9 +7513,9 @@ fn emitSearchFieldIcon(builder: *Builder, widget: Widget, tokens: DesignTokens, 
 }
 
 fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = widgetRadius(widget, tokens.radius.md);
-    const shadow_token = tokens.shadow.sm;
     const visual = surfaceControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
+    const shadow_token = tokens.shadow.sm;
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
         try builder.shadow(.{
             .id = widgetPartId(widget.id, 1),
@@ -7547,8 +7553,8 @@ fn emitMenuItemWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
 }
 
 fn emitListItemWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = widgetRadius(widget, tokens.radius.md);
     const visual = listItemControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
     const fill = listItemFillColor(widget, tokens, widget.state);
     if (fill.a > 0) {
         try builder.fillRoundedRect(.{
@@ -7587,7 +7593,7 @@ fn emitDataCellWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
         .rect = widget.frame,
         .stroke = .{
             .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
-            .width = widgetStrokeWidth(widget, tokens.stroke.hairline),
+            .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
         },
     });
     if (widget.state.focused) try emitWidgetFocusRing(builder, widget, tokens, 3);
@@ -7609,7 +7615,7 @@ fn emitDataCellWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
 fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const selected = widget.state.selected or widget.value >= 0.5;
     const visual = selectionControlVisualTokens(widget, tokens);
-    const radius = widgetRadius(widget, tokens.radius.md);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
     const text_size = widgetLabelTextSize(widget, tokens);
     const text_inset = widgetControlInset(widget, tokens, tokens.spacing.md);
     try builder.fillRoundedRect(.{
@@ -7627,7 +7633,7 @@ fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: DesignT
         .radius = radius,
         .stroke = .{
             .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else widgetBorderFill(widget, visual.border orelse tokens.colors.border),
-            .width = if (widget.state.focused) tokens.stroke.focus else widgetStrokeWidth(widget, tokens.stroke.regular),
+            .width = if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
     });
     try builder.drawText(.{
@@ -7651,7 +7657,7 @@ fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
         box_size,
     ));
     const selected = booleanControlSelected(widget);
-    const radius = widgetRadius(widget, tokens.radius.sm);
+    const radius = controlRadius(widget, visual, tokens.radius.sm);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = box,
@@ -7667,7 +7673,7 @@ fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
         .radius = radius,
         .stroke = .{
             .fill = if (selected) widgetAccentFill(widget, visual.border orelse visual.active_background orelse tokens.colors.accent) else widgetBorderFill(widget, visual.border orelse tokens.colors.border),
-            .width = widgetStrokeWidth(widget, tokens.stroke.regular),
+            .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
     });
     if (widget.state.focused) try emitWidgetFocusRing(builder, widget, tokens, 3);
@@ -7703,7 +7709,7 @@ fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
         track_width,
         track_height,
     ));
-    const track_radius = Radius.all(track.height * 0.5);
+    const track_radius = controlRadius(widget, visual, track.height * 0.5);
     const knob_size = @max(0, track.height - knob_inset * 2);
     const knob_x = if (selected)
         track.x + track.width - knob_size - knob_inset
@@ -7726,13 +7732,13 @@ fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
         .radius = track_radius,
         .stroke = .{
             .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
-            .width = widgetStrokeWidth(widget, tokens.stroke.regular),
+            .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
     });
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 3),
         .rect = knob,
-        .radius = Radius.all(knob.height * 0.5),
+        .radius = controlRadius(widget, visual, knob.height * 0.5),
         .fill = colorFill(if (selected) widgetAccentForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.accent_text) else widgetBackgroundColor(widget, visual.foreground orelse tokens.colors.surface)),
     });
     if (widget.state.focused) try emitWidgetFocusRing(builder, widget, tokens, 4);
@@ -7762,40 +7768,42 @@ fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
         knob_size,
         knob_size,
     ));
+    const track_radius = controlRadius(widget, visual, track.height * 0.5);
+    const knob_radius = controlRadius(widget, visual, knob.height * 0.5);
 
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = track,
-        .radius = Radius.all(track.height * 0.5),
+        .radius = track_radius,
         .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_pressed)),
     });
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 2),
         .rect = active,
-        .radius = Radius.all(active.height * 0.5),
+        .radius = track_radius,
         .fill = colorFill(widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent)),
     });
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 3),
         .rect = knob,
-        .radius = Radius.all(knob.height * 0.5),
+        .radius = knob_radius,
         .fill = colorFill(if (widget.state.disabled) tokens.colors.disabled else widgetBackgroundColor(widget, visual.foreground orelse tokens.colors.surface)),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 4),
         .rect = knob,
-        .radius = Radius.all(knob.height * 0.5),
+        .radius = knob_radius,
         .stroke = .{
             .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else widgetBorderFill(widget, visual.border orelse tokens.colors.border),
-            .width = if (widget.state.focused) tokens.stroke.focus else widgetStrokeWidth(widget, tokens.stroke.regular),
+            .width = if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
     });
 }
 
 fn emitProgressWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = widgetRadius(widget, @min(tokens.radius.md, widget.frame.height * 0.5));
     const progress = std.math.clamp(widget.value, 0, 1);
     const visual = selectionControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, @min(tokens.radius.md, widget.frame.height * 0.5));
     if (progress < 1) {
         try builder.fillRoundedRect(.{
             .id = widgetPartId(widget.id, 1),
@@ -8153,6 +8161,11 @@ fn widgetRadius(widget: Widget, fallback: f32) Radius {
     return Radius.all(nonNegative(widgetSizedRadiusValue(widget, fallback)));
 }
 
+fn controlRadius(widget: Widget, visual: ControlVisualTokens, fallback: f32) Radius {
+    if (widget.style.radius) |radius| return Radius.all(nonNegative(radius));
+    return Radius.all(nonNegative(widgetSizedRadiusValue(widget, visual.radius orelse fallback)));
+}
+
 fn widgetSizedRadiusValue(widget: Widget, fallback: f32) f32 {
     return switch (widget.size) {
         .sm => @max(0, fallback - 2),
@@ -8163,6 +8176,10 @@ fn widgetSizedRadiusValue(widget: Widget, fallback: f32) f32 {
 
 fn widgetStrokeWidth(widget: Widget, fallback: f32) f32 {
     return nonNegative(widget.style.stroke_width orelse fallback);
+}
+
+fn controlStrokeWidth(widget: Widget, visual: ControlVisualTokens, fallback: f32) f32 {
+    return nonNegative(widget.style.stroke_width orelse visual.stroke_width orelse fallback);
 }
 
 fn emitWidgetTextSelectionRects(
@@ -8347,6 +8364,8 @@ fn surfaceControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisua
 
 fn buttonStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
     if (widget.style.stroke_width) |width| return nonNegative(width);
+    const visual = buttonControlVisualTokens(widget, tokens);
+    if (visual.stroke_width) |width| return nonNegative(width);
     return switch (widget.variant) {
         .ghost => 0,
         else => tokens.stroke.regular,
@@ -10183,12 +10202,13 @@ fn widgetFocusPaintBounds(widget: Widget, tokens: DesignTokens) ?geometry.RectF 
 
 fn widgetFrameStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
     return switch (widget.kind) {
-        .panel, .popover, .menu_surface => widgetStrokeWidth(widget, tokens.stroke.hairline),
+        .panel, .popover, .menu_surface => controlStrokeWidth(widget, surfaceControlVisualTokens(widget, tokens), tokens.stroke.hairline),
         .button, .icon_button => if (widget.state.focused) tokens.stroke.focus else buttonStrokeWidth(widget, tokens),
-        .text_field, .search_field, .segmented_control => if (widget.state.focused) tokens.stroke.focus else widgetStrokeWidth(widget, tokens.stroke.regular),
-        .data_cell => if (widget.state.focused) tokens.stroke.focus else widgetStrokeWidth(widget, tokens.stroke.hairline),
-        .slider => if (widget.state.focused) tokens.stroke.focus else widgetStrokeWidth(widget, tokens.stroke.regular),
-        .list_item, .menu_item, .checkbox, .toggle => if (widget.state.focused) tokens.stroke.focus else 0,
+        .text_field, .search_field => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, textInputControlVisualTokens(widget, tokens), tokens.stroke.regular),
+        .segmented_control => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectionControlVisualTokens(widget, tokens), tokens.stroke.regular),
+        .data_cell => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, listItemControlVisualTokens(widget, tokens), tokens.stroke.hairline),
+        .checkbox, .toggle, .slider => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectionControlVisualTokens(widget, tokens), tokens.stroke.regular),
+        .list_item, .menu_item => if (widget.state.focused) tokens.stroke.focus else 0,
         else => 0,
     };
 }
@@ -10220,7 +10240,7 @@ fn widgetShadowPaintBounds(widget: Widget, tokens: DesignTokens) ?geometry.RectF
     if (token.y == 0 and token.blur == 0 and token.spread == 0) return null;
     return shadowBounds(.{
         .rect = widget.frame,
-        .radius = widgetShadowRadius(widget),
+        .radius = widgetShadowRadius(widget, tokens),
         .offset = .{ .dx = 0, .dy = token.y },
         .blur = token.blur,
         .spread = token.spread,
@@ -10234,12 +10254,11 @@ fn widgetBackdropBlurPaintBounds(widget: Widget, tokens: DesignTokens) ?geometry
     return widget.frame.normalized().inflate(geometry.InsetsF.all(radius));
 }
 
-fn widgetShadowRadius(widget: Widget) Radius {
-    const tokens: DesignTokens = .{};
+fn widgetShadowRadius(widget: Widget, tokens: DesignTokens) Radius {
     return switch (widget.kind) {
-        .popover => Radius.all(tokens.radius.xl),
-        .panel, .menu_surface => Radius.all(tokens.radius.lg),
-        .tooltip => Radius.all(tokens.radius.md),
+        .popover => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl),
+        .panel, .menu_surface => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
+        .tooltip => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.md),
         else => Radius.all(0),
     };
 }
@@ -14487,6 +14506,8 @@ test "design token overrides compose with built-in themes" {
                 .background = Color.rgb8(11, 47, 91),
                 .foreground = Color.rgb8(245, 250, 255),
                 .border = Color.rgb8(9, 36, 72),
+                .radius = 9,
+                .stroke_width = 2,
             },
             .button_secondary = .{
                 .hover_background = Color.rgb8(36, 42, 48),
@@ -14496,6 +14517,8 @@ test "design token overrides compose with built-in themes" {
                 .background = Color.rgb8(15, 20, 25),
                 .foreground = Color.rgb8(225, 232, 240),
                 .border = Color.rgb8(65, 75, 85),
+                .radius = 5,
+                .stroke_width = 1.5,
             },
             .search_field = .{
                 .background = Color.rgb8(18, 24, 30),
@@ -14532,6 +14555,8 @@ test "design token overrides compose with built-in themes" {
             .panel = .{
                 .background = Color.rgb8(16, 22, 28),
                 .border = Color.rgb8(58, 68, 78),
+                .radius = 16,
+                .stroke_width = 2.5,
             },
             .popover = .{
                 .background = Color.rgb8(18, 24, 32),
@@ -14578,12 +14603,16 @@ test "design token overrides compose with built-in themes" {
     try std.testing.expectEqualDeep(Color.rgb8(11, 47, 91), tokens.controls.button_primary.background.?);
     try std.testing.expectEqualDeep(Color.rgb8(245, 250, 255), tokens.controls.button_primary.foreground.?);
     try std.testing.expectEqualDeep(Color.rgb8(9, 36, 72), tokens.controls.button_primary.border.?);
+    try std.testing.expectEqual(@as(f32, 9), tokens.controls.button_primary.radius.?);
+    try std.testing.expectEqual(@as(f32, 2), tokens.controls.button_primary.stroke_width.?);
     try std.testing.expect(tokens.controls.button_secondary.background == null);
     try std.testing.expectEqualDeep(Color.rgb8(36, 42, 48), tokens.controls.button_secondary.hover_background.?);
     try std.testing.expectEqualDeep(Color.rgb8(48, 56, 64), tokens.controls.button_secondary.active_background.?);
     try std.testing.expectEqualDeep(Color.rgb8(15, 20, 25), tokens.controls.text_field.background.?);
     try std.testing.expectEqualDeep(Color.rgb8(225, 232, 240), tokens.controls.text_field.foreground.?);
     try std.testing.expectEqualDeep(Color.rgb8(65, 75, 85), tokens.controls.text_field.border.?);
+    try std.testing.expectEqual(@as(f32, 5), tokens.controls.text_field.radius.?);
+    try std.testing.expectEqual(@as(f32, 1.5), tokens.controls.text_field.stroke_width.?);
     try std.testing.expectEqualDeep(Color.rgb8(18, 24, 30), tokens.controls.search_field.background.?);
     try std.testing.expectEqualDeep(Color.rgb8(210, 220, 230), tokens.controls.search_field.foreground.?);
     try std.testing.expectEqualDeep(Color.rgb8(28, 34, 40), tokens.controls.list_item.hover_background.?);
@@ -14604,6 +14633,8 @@ test "design token overrides compose with built-in themes" {
     try std.testing.expectEqualDeep(Color.rgb8(66, 84, 102), tokens.controls.progress.active_background.?);
     try std.testing.expectEqualDeep(Color.rgb8(16, 22, 28), tokens.controls.panel.background.?);
     try std.testing.expectEqualDeep(Color.rgb8(58, 68, 78), tokens.controls.panel.border.?);
+    try std.testing.expectEqual(@as(f32, 16), tokens.controls.panel.radius.?);
+    try std.testing.expectEqual(@as(f32, 2.5), tokens.controls.panel.stroke_width.?);
     try std.testing.expectEqualDeep(Color.rgb8(18, 24, 32), tokens.controls.popover.background.?);
     try std.testing.expectEqualDeep(Color.rgb8(62, 72, 84), tokens.controls.popover.border.?);
     try std.testing.expectEqualDeep(Color.rgb8(20, 26, 34), tokens.controls.menu_surface.background.?);
@@ -17244,6 +17275,91 @@ test "widget emitter applies surface control tokens" {
     }
     switch (display_list.commands[11]) {
         .draw_text => |text| try std.testing.expectEqualDeep(Color.rgb8(18, 24, 30), text.color),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "widget emitter applies control radius and stroke tokens" {
+    const tokens = DesignTokens{
+        .controls = .{
+            .button_primary = .{
+                .border = Color.rgb8(20, 70, 120),
+                .radius = 10,
+                .stroke_width = 3,
+            },
+            .text_field = .{
+                .border = Color.rgb8(80, 90, 100),
+                .radius = 4,
+                .stroke_width = 2,
+            },
+            .checkbox = .{
+                .border = Color.rgb8(88, 104, 120),
+                .radius = 1,
+                .stroke_width = 5,
+            },
+            .panel = .{
+                .border = Color.rgb8(72, 82, 92),
+                .radius = 14,
+                .stroke_width = 2.5,
+            },
+        },
+    };
+
+    var commands: [11]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, .{ .id = 80, .kind = .button, .variant = .primary, .frame = geometry.RectF.init(0, 0, 120, 32), .text = "Save" }, tokens);
+    try emitWidgetTree(&builder, .{ .id = 81, .kind = .text_field, .frame = geometry.RectF.init(0, 40, 160, 34), .text = "Name" }, tokens);
+    try emitWidgetTree(&builder, .{ .id = 82, .kind = .checkbox, .frame = geometry.RectF.init(0, 86, 40, 24) }, tokens);
+    try emitWidgetTree(&builder, .{ .id = 83, .kind = .panel, .frame = geometry.RectF.init(0, 120, 180, 90), .style = .{ .radius = 6, .stroke_width = 1 } }, tokens);
+
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 11), display_list.commandCount());
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius.all(10), fill.radius),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[1]) {
+        .stroke_rect => |stroke| {
+            try std.testing.expectEqualDeep(Radius.all(10), stroke.radius);
+            try std.testing.expectEqual(@as(f32, 3), stroke.stroke.width);
+            try expectFillColor(Color.rgb8(20, 70, 120), stroke.stroke.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[3]) {
+        .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius.all(4), fill.radius),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[4]) {
+        .stroke_rect => |stroke| {
+            try std.testing.expectEqualDeep(Radius.all(4), stroke.radius);
+            try std.testing.expectEqual(@as(f32, 2), stroke.stroke.width);
+            try expectFillColor(Color.rgb8(80, 90, 100), stroke.stroke.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[6]) {
+        .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius.all(1), fill.radius),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[7]) {
+        .stroke_rect => |stroke| {
+            try std.testing.expectEqualDeep(Radius.all(1), stroke.radius);
+            try std.testing.expectEqual(@as(f32, 5), stroke.stroke.width);
+            try expectFillColor(Color.rgb8(88, 104, 120), stroke.stroke.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[9]) {
+        .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius.all(6), fill.radius),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[10]) {
+        .stroke_rect => |stroke| {
+            try std.testing.expectEqualDeep(Radius.all(6), stroke.radius);
+            try std.testing.expectEqual(@as(f32, 1), stroke.stroke.width);
+            try expectFillColor(Color.rgb8(72, 82, 92), stroke.stroke.fill);
+        },
         else => return error.TestUnexpectedResult,
     }
 }
