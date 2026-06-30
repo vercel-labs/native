@@ -1135,6 +1135,55 @@ test "gpu dashboard render overrides animate without rebuilding commands" {
     try std.testing.expect(found_transformed_live_button);
 }
 
+test "gpu dashboard scheduled animations render without display list rebuild" {
+    var harness: zero_native.TestHarness() = undefined;
+    harness.init(.{ .size = geometry.SizeF.init(window_width, window_height) });
+    harness.null_platform.gpu_surfaces = true;
+
+    var app = GpuDashboardApp{};
+    defer app.deinit();
+    try harness.start(app.app());
+
+    const start_ns: u64 = 1_000_000_000;
+    try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_frame = .{
+        .label = "dashboard-canvas",
+        .size = geometry.SizeF.init(720, 520),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = start_ns,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app.canvas_installed);
+    const initial_frame = try harness.runtime.gpuSurfaceFrame(1, "dashboard-canvas");
+    try std.testing.expect(initial_frame.canvas_revision > 0);
+    try std.testing.expectEqual(@as(usize, 64), initial_frame.canvas_command_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_packet_present_count);
+
+    const animation_frame = try harness.runtime.nextCanvasFrame(1, "dashboard-canvas", .{
+        .frame_index = 2,
+        .timestamp_ns = start_ns + 450_000_000,
+        .surface_size = geometry.SizeF.init(720, 520),
+        .scale = 2,
+    }, app.frameStorage());
+    const animation_view_frame = try harness.runtime.gpuSurfaceFrame(1, "dashboard-canvas");
+    try std.testing.expectEqual(initial_frame.canvas_revision, animation_view_frame.canvas_revision);
+    try std.testing.expectEqual(@as(usize, 64), animation_frame.display_list.commandCount());
+    try std.testing.expect(animation_frame.requiresRender());
+    try std.testing.expect(!animation_frame.full_repaint);
+    try std.testing.expectEqual(@as(usize, 0), animation_frame.changes.len);
+    try std.testing.expect(animation_frame.dirty_bounds != null);
+    try std.testing.expect(animation_frame.layer_plan.opacityLayerCount() > 0);
+    try std.testing.expect(animation_frame.layer_plan.transformLayerCount() > 0);
+    try std.testing.expect(animation_frame.layer_cache_plan.uploadCount() > 0);
+    try std.testing.expectEqual(@as(usize, 0), animation_frame.pipeline_cache_plan.uploadCount());
+
+    var gpu_commands: [max_dashboard_commands]canvas.CanvasGpuCommand = undefined;
+    const packet = try animation_frame.gpuPacket(&gpu_commands);
+    try std.testing.expect(packet.requiresRender());
+    try std.testing.expectEqual(@as(usize, 0), packet.unsupported_command_count);
+    try std.testing.expect(packet.fullyRepresentable());
+}
+
 test "gpu dashboard app registers canvas display list on first gpu frame" {
     var harness: zero_native.TestHarness() = undefined;
     harness.init(.{ .size = geometry.SizeF.init(window_width, window_height) });
