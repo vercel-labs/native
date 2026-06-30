@@ -687,6 +687,7 @@ pub const Runtime = struct {
         self.views[index].canvas_widget_display_list_suffix_count = 0;
         self.views[index].canvas_widget_display_list_reserved_count = 0;
         self.invalidateForCanvasChanges(self.views[index].frame, changes);
+        if (changes.len > 0) try self.requestCanvasFrameForView(index);
         return self.views[index].info();
     }
 
@@ -706,6 +707,7 @@ pub const Runtime = struct {
         try validateCanvasRenderAnimations(animations);
         try self.views[index].copyCanvasRenderAnimations(animations);
         self.invalidateFor(.state, self.views[index].frame);
+        try self.requestCanvasFrameForView(index);
         return self.views[index].info();
     }
 
@@ -717,6 +719,7 @@ pub const Runtime = struct {
         if (self.views[index].canvas_render_animation_count == 0 and self.views[index].canvas_frame_render_override_count == 0) return self.views[index].info();
         self.views[index].canvas_render_animation_count = 0;
         self.invalidateFor(.state, self.views[index].frame);
+        try self.requestCanvasFrameForView(index);
         return self.views[index].info();
     }
 
@@ -1412,6 +1415,18 @@ pub const Runtime = struct {
         try self.refreshCanvasWidgetDisplayList(view_index);
     }
 
+    fn requestCanvasFrameForView(self: *Runtime, view_index: usize) anyerror!void {
+        if (view_index >= self.view_count) return;
+        if (self.views[view_index].kind != .gpu_surface) return;
+        self.options.platform.services.requestGpuSurfaceFrame(
+            self.views[view_index].window_id,
+            self.views[view_index].label,
+        ) catch |err| switch (err) {
+            error.UnsupportedService => return,
+            else => return err,
+        };
+    }
+
     fn publishCanvasWidgetAccessibility(self: *Runtime, view_index: usize) anyerror!void {
         if (view_index >= self.view_count) return;
         const view = &self.views[view_index];
@@ -1479,6 +1494,7 @@ pub const Runtime = struct {
         const changes = try canvas.DisplayList.diff(self.views[view_index].canvasDisplayList(), display_list, &canvas_changes);
         try self.views[view_index].copyCanvasDisplayList(display_list);
         self.invalidateForCanvasChanges(self.views[view_index].frame, changes);
+        if (changes.len > 0) try self.requestCanvasFrameForView(view_index);
     }
 
     pub fn routeCanvasWidgetPointerInput(self: *const Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetPointerEvent {
@@ -11202,6 +11218,54 @@ test "runtime invalidates canvas display list dirty regions" {
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDirtyRegions().len);
 }
 
+test "runtime requests gpu surface frames for retained canvas changes" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-frame-request", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(50, 70, 320, 240),
+    });
+
+    var initial_commands: [1]canvas.CanvasCommand = undefined;
+    var initial_builder = canvas.Builder.init(&initial_commands);
+    try initial_builder.fillRect(.{
+        .id = 1,
+        .rect = geometry.RectF.init(0, 0, 40, 40),
+        .fill = .{ .color = canvas.Color.rgb8(255, 255, 255) },
+    });
+
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", initial_builder.displayList());
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_frame_request_count);
+    try std.testing.expectEqual(@as(platform.WindowId, 1), harness.null_platform.gpu_surface_frame_request_window_id);
+    try std.testing.expectEqualStrings("canvas", harness.null_platform.gpu_surface_frame_request_label_storage[0..harness.null_platform.gpu_surface_frame_request_label_len]);
+
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", initial_builder.displayList());
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_frame_request_count);
+
+    var moved_commands: [1]canvas.CanvasCommand = undefined;
+    var moved_builder = canvas.Builder.init(&moved_commands);
+    try moved_builder.fillRect(.{
+        .id = 1,
+        .rect = geometry.RectF.init(8, 0, 40, 40),
+        .fill = .{ .color = canvas.Color.rgb8(255, 255, 255) },
+    });
+
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", moved_builder.displayList());
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.gpu_surface_frame_request_count);
+}
+
 test "runtime rejects duplicate canvas ids before replacing retained scene" {
     const TestApp = struct {
         fn app(self: *@This()) App {
@@ -13948,9 +14012,14 @@ test "runtime automation widget click dispatches pointer input" {
     var nodes: [3]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &controls }, geometry.RectF.init(0, 0, 220, 100), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+    harness.null_platform.gpu_surface_frame_request_count = 0;
 
     try harness.runtime.dispatchAutomationCommand(app, "widget-click canvas 2");
     try harness.runtime.dispatchAutomationCommand(app, "widget-click canvas 3");
+    try std.testing.expect(harness.null_platform.gpu_surface_frame_request_count > 0);
+    try std.testing.expectEqual(@as(platform.WindowId, 1), harness.null_platform.gpu_surface_frame_request_window_id);
+    try std.testing.expectEqualStrings("canvas", harness.null_platform.gpu_surface_frame_request_label_storage[0..harness.null_platform.gpu_surface_frame_request_label_len]);
 
     const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expect(retained.nodes[1].widget.state.selected);

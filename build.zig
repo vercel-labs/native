@@ -772,6 +772,10 @@ pub fn build(b: *std.Build) void {
         \\snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
         \\case "$snapshot" in *'window @w1 "zero-native GPU Components"'*) ;; *) echo "gpu-components window was missing from snapshot" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'gpu_nonblank=true'*) ;; *) echo "components GPU surface was not ready and nonblank" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "components GPU frame was not packet-representable" >&2; exit 1 ;; esac
+        \\gpu_frame_from_snapshot() {
+        \\  printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/components-canvas kind=gpu_surface.* gpu_frame=\([0-9][0-9]*\).*/\1/p'
+        \\}
         \\case "$snapshot" in *'widget @w1/components-canvas#113 role=checkbox'*'value=1'*'actions=[focus,toggle]'*) ;; *) echo "checkbox widget was not initially selected" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'widget @w1/components-canvas#114 role=switch'*'value=1'*'actions=[focus,toggle]'*) ;; *) echo "switch widget was not initially selected" >&2; exit 1 ;; esac
         \\"$cli" automate widget-action components-canvas 113 toggle >/dev/null 2>&1
@@ -783,15 +787,27 @@ pub fn build(b: *std.Build) void {
         \\  sleep 0.1
         \\done
         \\case "$snapshot" in *'Keyed checkbox #113: off.'*'widget @w1/components-canvas#113 role=checkbox'*'value=0'*) ;; *) echo "checkbox automation toggle did not update the retained widget snapshot" >&2; exit 1 ;; esac
+        \\gpu_frame_before="$(gpu_frame_from_snapshot)"
+        \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
+        \\gpu_frame_after="$gpu_frame_before"
         \\"$cli" automate widget-click components-canvas 113 >/dev/null 2>&1
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
         \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  case "$snapshot" in *'Clicked checkbox #113: on.'*'widget @w1/components-canvas#113 role=checkbox'*'value=1'*) break ;; esac
+        \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
+        \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
+        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
+        \\    case "$snapshot" in *'Clicked checkbox #113: on.'*'widget @w1/components-canvas#113 role=checkbox'*'value=1'*)
+        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
+        \\      ;;
+        \\    esac
+        \\  fi
         \\  attempts=$((attempts + 1))
         \\  sleep 0.1
         \\done
+        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "checkbox automation click did not request a GPU frame" >&2; exit 1; fi
         \\case "$snapshot" in *'Clicked checkbox #113: on.'*'widget @w1/components-canvas#113 role=checkbox'*'value=1'*) ;; *) echo "checkbox automation click did not route through pointer input" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "checkbox automation click did not present an incremental GPU packet" >&2; exit 1 ;; esac
         \\"$cli" automate widget-action components-canvas 114 toggle >/dev/null 2>&1
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
@@ -801,15 +817,27 @@ pub fn build(b: *std.Build) void {
         \\  sleep 0.1
         \\done
         \\case "$snapshot" in *'Keyed toggle #114: off.'*'widget @w1/components-canvas#114 role=switch'*'value=0'*) ;; *) echo "switch automation toggle did not wake the idle app" >&2; exit 1 ;; esac
+        \\gpu_frame_before="$(gpu_frame_from_snapshot)"
+        \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
+        \\gpu_frame_after="$gpu_frame_before"
         \\"$cli" automate widget-click components-canvas 114 >/dev/null 2>&1
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
         \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  case "$snapshot" in *'Clicked toggle #114: on.'*'widget @w1/components-canvas#114 role=switch'*'value=1'*) break ;; esac
+        \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
+        \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
+        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
+        \\    case "$snapshot" in *'Clicked toggle #114: on.'*'widget @w1/components-canvas#114 role=switch'*'value=1'*)
+        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
+        \\      ;;
+        \\    esac
+        \\  fi
         \\  attempts=$((attempts + 1))
         \\  sleep 0.1
         \\done
+        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "switch automation click did not request a GPU frame" >&2; exit 1; fi
         \\case "$snapshot" in *'Clicked toggle #114: on.'*'widget @w1/components-canvas#114 role=switch'*'value=1'*) ;; *) echo "switch automation click did not route through pointer input" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "switch automation click did not present an incremental GPU packet" >&2; exit 1 ;; esac
         \\echo "gpu-components smoke ok"
         ,
         "sh",

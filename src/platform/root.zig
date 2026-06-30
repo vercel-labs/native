@@ -1324,6 +1324,7 @@ pub const PlatformServices = struct {
     configure_shortcuts_fn: ?*const fn (context: ?*anyopaque, shortcuts: []const Shortcut) anyerror!void = null,
     configure_automation_frame_polling_fn: ?*const fn (context: ?*anyopaque, enabled: bool) anyerror!void = null,
     emit_window_event_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void = null,
+    request_gpu_surface_frame_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8) anyerror!void = null,
     present_gpu_surface_pixels_fn: ?*const fn (context: ?*anyopaque, pixels: GpuSurfacePixels) anyerror!void = null,
     present_gpu_surface_packet_fn: ?*const fn (context: ?*anyopaque, packet: GpuSurfacePacket) anyerror!void = null,
     update_widget_accessibility_fn: ?*const fn (context: ?*anyopaque, snapshot: WidgetAccessibilitySnapshot) anyerror!void = null,
@@ -1566,6 +1567,12 @@ pub const PlatformServices = struct {
         return emit_fn(self.context, window_id, name, detail_json);
     }
 
+    pub fn requestGpuSurfaceFrame(self: PlatformServices, window_id: WindowId, label: []const u8) anyerror!void {
+        if (label.len == 0 or label.len > max_view_label_bytes) return error.InvalidViewOptions;
+        const request_fn = self.request_gpu_surface_frame_fn orelse return;
+        return request_fn(self.context, window_id, label);
+    }
+
     pub fn presentGpuSurfacePixels(self: PlatformServices, pixels: GpuSurfacePixels) anyerror!void {
         const expected = pixels.expectedByteLen() orelse return error.InvalidGpuSurfacePixels;
         if (pixels.rgba8.len != expected) return error.InvalidGpuSurfacePixels;
@@ -1740,6 +1747,10 @@ pub const NullPlatform = struct {
     gpu_surface_packet_present_representable: bool = true,
     gpu_surface_packet_present_json_len: usize = 0,
     gpu_surface_packet_present_count: usize = 0,
+    gpu_surface_frame_request_window_id: WindowId = 0,
+    gpu_surface_frame_request_label_storage: [max_view_label_bytes]u8 = undefined,
+    gpu_surface_frame_request_label_len: usize = 0,
+    gpu_surface_frame_request_count: usize = 0,
     view_cursor_window_id: WindowId = 0,
     view_cursor_label_storage: [max_view_label_bytes]u8 = undefined,
     view_cursor_label_len: usize = 0,
@@ -1810,6 +1821,7 @@ pub const NullPlatform = struct {
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
                 .emit_window_event_fn = emitWindowEvent,
+                .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
                 .present_gpu_surface_packet_fn = presentGpuSurfacePacket,
             },
@@ -2344,6 +2356,18 @@ pub const NullPlatform = struct {
         else
             .{ 0, 0, 0, 0 };
         self.gpu_surface_present_count += 1;
+    }
+
+    fn requestGpuSurfaceFrame(context: ?*anyopaque, window_id: WindowId, label: []const u8) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (!self.gpu_surfaces) return error.UnsupportedService;
+        const view_index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
+
+        self.gpu_surface_frame_request_window_id = window_id;
+        self.gpu_surface_frame_request_label_storage = undefined;
+        self.gpu_surface_frame_request_label_len = (try copyInto(&self.gpu_surface_frame_request_label_storage, label)).len;
+        self.gpu_surface_frame_request_count += 1;
     }
 
     fn presentGpuSurfacePacket(context: ?*anyopaque, packet: GpuSurfacePacket) anyerror!void {
