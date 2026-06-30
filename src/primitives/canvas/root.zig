@@ -3829,6 +3829,7 @@ pub const WidgetKind = enum {
     column,
     grid,
     data_grid,
+    table,
     scroll_view,
     list,
     breadcrumb,
@@ -4133,7 +4134,7 @@ pub fn builtinComponentDescriptor(kind: BuiltinComponentKind) BuiltinComponentDe
         .slider => builtinComponent(.slider, .slider, .slider, false),
         .spinner => builtinComponent(.spinner, .spinner, .progressbar, false),
         .switch_control => builtinComponent(.switch_control, .switch_control, .switch_control, false),
-        .table => builtinComponent(.table, .data_grid, .grid, true),
+        .table => builtinComponent(.table, .table, .grid, true),
         .tabs => builtinComponent(.tabs, .tabs, .group, true),
         .textarea => builtinComponent(.textarea, .textarea, .textbox, false),
         .toggle => builtinComponent(.toggle, .toggle_button, .button, false),
@@ -7272,7 +7273,7 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
-        .stack, .row, .column, .grid, .data_grid, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .data_row => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
+        .stack, .row, .column, .grid, .data_grid, .table, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .data_row => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
         .scroll_view => try emitScrollViewWidget(builder, paint_widget, tokens, depth),
         .alert => try emitAlertWidget(builder, paint_widget, tokens, depth),
         .card => try emitCardWidget(builder, paint_widget, tokens, depth),
@@ -7371,7 +7372,7 @@ fn emitWidgetLayoutNodeContent(
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
-        .stack, .row, .column, .grid, .data_grid, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .data_row => {},
+        .stack, .row, .column, .grid, .data_grid, .table, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .data_row => {},
         .scroll_view => {
             try builder.pushClip(.{ .id = widgetPartId(paint_widget.id, 1), .rect = paint_widget.frame });
             try emitWidgetLayoutChildren(builder, layout, node_index, tokens, state);
@@ -9468,7 +9469,7 @@ fn layoutWidgetDepth(
         .row, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
         .column => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
         .grid => try layoutGridChildren(widget.children, content, index, depth, output, len, widget.layout.gap, widget.layout.columns, tokens),
-        .data_grid => if (widget.layout.virtualized)
+        .data_grid, .table => if (widget.layout.virtualized)
             try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens)
         else
             try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
@@ -9745,7 +9746,7 @@ pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF 
         .alert => intrinsicAlertWidgetSize(widget, tokens),
         .card => intrinsicCardWidgetSize(widget, tokens),
         .dialog, .drawer, .sheet => intrinsicModalSurfaceWidgetSize(widget, tokens),
-        .stack, .row, .column, .grid, .data_grid, .scroll_view, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .accordion, .bubble, .resizable, .panel, .popover, .menu_surface, .dropdown_menu, .image => geometry.SizeF.zero(),
+        .stack, .row, .column, .grid, .data_grid, .table, .scroll_view, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .accordion, .bubble, .resizable, .panel, .popover, .menu_surface, .dropdown_menu, .image => geometry.SizeF.zero(),
     };
 }
 
@@ -10092,7 +10093,7 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
             }
         else
             null,
-        .scroll_view, .list, .data_grid => widgetScrollKeyboardIntent(widget, keyboard),
+        .scroll_view, .list, .data_grid, .table => widgetScrollKeyboardIntent(widget, keyboard),
         else => null,
     };
 }
@@ -10213,7 +10214,7 @@ fn widgetSemanticStepControlIntent(widget: Widget, direction: WidgetSemanticStep
             .actions = intent_actions,
             .value = std.math.clamp(widget.value + if (increment) @as(f32, 0.05) else @as(f32, -0.05), 0, 1),
         },
-        .scroll_view, .list, .data_grid => .{
+        .scroll_view, .list, .data_grid, .table => .{
             .kind = .scroll_by,
             .actions = intent_actions,
             .delta = widgetSemanticScrollDelta(widget, direction),
@@ -10629,7 +10630,7 @@ fn semanticRole(widget: Widget) WidgetRole {
     if (widget.semantics.role != .none) return widget.semantics.role;
     return switch (widget.kind) {
         .stack, .row, .column, .grid, .scroll_view, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .accordion, .bubble, .resizable, .alert, .card, .panel => .group,
-        .data_grid => .grid,
+        .data_grid, .table => .grid,
         .data_row => .row,
         .dialog, .drawer, .sheet, .popover => .dialog,
         .menu_surface, .dropdown_menu => .menu,
@@ -10689,7 +10690,7 @@ fn widgetGridSemantics(layout: WidgetLayoutTree, node_index: usize) WidgetGridSe
     if (node_index >= layout.nodes.len) return .{};
     const node = layout.nodes[node_index];
     return switch (node.widget.kind) {
-        .data_grid => .{
+        .data_grid, .table => .{
             .row_count = dataGridRowCount(layout, node_index),
             .column_count = maxDataGridColumnCount(layout, node_index),
         },
@@ -10701,15 +10702,13 @@ fn widgetGridSemantics(layout: WidgetLayoutTree, node_index: usize) WidgetGridSe
 
 fn widgetDataRowGridSemantics(layout: WidgetLayoutTree, row_index: usize) WidgetGridSemantics {
     const grid_index = layout.nodes[row_index].parent_index orelse return .{};
-    if (grid_index >= layout.nodes.len or layout.nodes[grid_index].widget.kind != .data_grid) return .{};
-    const grid = layout.nodes[grid_index].widget;
+    if (grid_index >= layout.nodes.len or !widgetTableContainerKind(layout.nodes[grid_index].widget.kind)) return .{};
     const row = layout.nodes[row_index].widget;
     return .{
         .row_index = if (row.semantics.list_item_index) |source_index|
             @as(usize, @intCast(source_index))
         else
-            widgetChildOrdinalByKind(grid, row.id, .data_row) orelse
-                directChildOrdinalByKind(layout, grid_index, row_index, .data_row),
+            directChildOrdinalByKind(layout, grid_index, row_index, .data_row),
         .row_count = dataGridRowCount(layout, grid_index),
         .column_count = dataRowColumnCount(layout, row_index),
     };
@@ -10719,51 +10718,29 @@ fn widgetDataCellGridSemantics(layout: WidgetLayoutTree, cell_index: usize) Widg
     const row_index = layout.nodes[cell_index].parent_index orelse return .{};
     if (row_index >= layout.nodes.len or layout.nodes[row_index].widget.kind != .data_row) return .{};
     const grid_index = layout.nodes[row_index].parent_index orelse return .{};
-    if (grid_index >= layout.nodes.len or layout.nodes[grid_index].widget.kind != .data_grid) return .{};
-    const grid = layout.nodes[grid_index].widget;
+    if (grid_index >= layout.nodes.len or !widgetTableContainerKind(layout.nodes[grid_index].widget.kind)) return .{};
     const row = layout.nodes[row_index].widget;
-    const cell = layout.nodes[cell_index].widget;
     return .{
         .row_index = if (row.semantics.list_item_index) |source_index|
             @as(usize, @intCast(source_index))
         else
-            widgetChildOrdinalByKind(grid, row.id, .data_row) orelse
-                directChildOrdinalByKind(layout, grid_index, row_index, .data_row),
-        .column_index = widgetChildOrdinalByKind(row, cell.id, .data_cell) orelse directChildOrdinalByKind(layout, row_index, cell_index, .data_cell),
+            directChildOrdinalByKind(layout, grid_index, row_index, .data_row),
+        .column_index = directChildOrdinalByKind(layout, row_index, cell_index, .data_cell),
         .row_count = dataGridRowCount(layout, grid_index),
         .column_count = dataRowColumnCount(layout, row_index),
     };
 }
 
-fn widgetChildCountByKind(widget: Widget, kind: WidgetKind) usize {
-    var count: usize = 0;
-    for (widget.children) |child| {
-        if (child.kind == kind) count += 1;
-    }
-    return count;
-}
-
-fn widgetChildOrdinalByKind(widget: Widget, child_id: ObjectId, kind: WidgetKind) ?usize {
-    if (child_id == 0) return null;
-    var ordinal: usize = 0;
-    for (widget.children) |child| {
-        if (child.kind != kind) continue;
-        if (child.id == child_id) return ordinal;
-        ordinal += 1;
-    }
-    return null;
+fn widgetTableContainerKind(kind: WidgetKind) bool {
+    return kind == .data_grid or kind == .table;
 }
 
 fn dataGridRowCount(layout: WidgetLayoutTree, grid_index: usize) usize {
     if (layout.nodes[grid_index].widget.semantics.list_item_count) |virtual_count| return @intCast(virtual_count);
-    const source_count = widgetChildCountByKind(layout.nodes[grid_index].widget, .data_row);
-    if (source_count > 0) return source_count;
     return directChildCountByKind(layout, grid_index, .data_row);
 }
 
 fn dataRowColumnCount(layout: WidgetLayoutTree, row_index: usize) usize {
-    const source_count = widgetChildCountByKind(layout.nodes[row_index].widget, .data_cell);
-    if (source_count > 0) return source_count;
     return directChildCountByKind(layout, row_index, .data_cell);
 }
 
@@ -10787,13 +10764,6 @@ fn directChildOrdinalByKind(layout: WidgetLayoutTree, parent_index: usize, child
 
 fn maxDataGridColumnCount(layout: WidgetLayoutTree, grid_index: usize) usize {
     var max_columns: usize = 0;
-    if (layout.nodes[grid_index].widget.children.len > 0) {
-        for (layout.nodes[grid_index].widget.children) |row| {
-            if (row.kind != .data_row) continue;
-            max_columns = @max(max_columns, widgetChildCountByKind(row, .data_cell));
-        }
-        return max_columns;
-    }
     for (layout.nodes, 0..) |node, index| {
         if (node.parent_index != grid_index or node.widget.kind != .data_row) continue;
         max_columns = @max(max_columns, dataRowColumnCount(layout, index));
@@ -10823,13 +10793,10 @@ fn widgetListSemantics(layout: WidgetLayoutTree, node_index: usize) WidgetListSe
         }
     }
 
-    const list = layout.nodes[list_index].widget;
-    const source_count = widgetChildCountByKind(list, .list_item);
-    const item_count = if (source_count > 0) source_count else directChildCountByKind(layout, list_index, .list_item);
+    const item_count = directChildCountByKind(layout, list_index, .list_item);
     if (item_count == 0) return .{};
 
-    const item_index = widgetChildOrdinalByKind(list, node.widget.id, .list_item) orelse
-        directChildOrdinalByKind(layout, list_index, node_index, .list_item) orelse return .{};
+    const item_index = directChildOrdinalByKind(layout, list_index, node_index, .list_item) orelse return .{};
     return .{ .metrics = .{
         .present = true,
         .item_index = saturatingU32(item_index),
@@ -10873,7 +10840,7 @@ fn widgetScrollSemantics(layout: WidgetLayoutTree, node_index: usize) WidgetScro
 fn widgetExposesScrollSemantics(widget: Widget) bool {
     return switch (widget.kind) {
         .scroll_view => true,
-        .list, .data_grid => widget.layout.virtualized,
+        .list, .data_grid, .table => widget.layout.virtualized,
         else => false,
     };
 }
@@ -11005,7 +10972,7 @@ fn isDragSource(widget: Widget) bool {
 fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     return switch (widget.kind) {
-        .row, .column, .grid, .data_grid, .data_row, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner => false,
+        .row, .column, .grid, .data_grid, .table, .data_row, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner => false,
         .scroll_view, .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface, .dropdown_menu, .text, .button, .toggle_button, .icon_button, .select, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress => true,
     };
 }
@@ -15701,7 +15668,7 @@ test "built-in component catalog maps to retained widget foundations" {
     try std.testing.expectEqual(WidgetKind.skeleton, builtinComponentDescriptor(.skeleton).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.spinner, builtinComponentDescriptor(.spinner).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.switch_control, builtinComponentDescriptor(.switch_control).root_widget_kind);
-    try std.testing.expectEqual(WidgetKind.data_grid, builtinComponentDescriptor(.table).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.table, builtinComponentDescriptor(.table).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.select, builtinComponentDescriptor(.select).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.sheet, builtinComponentDescriptor(.sheet).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.tabs, builtinComponentDescriptor(.tabs).root_widget_kind);
@@ -17854,6 +17821,71 @@ test "widget data grids expose row and column semantics" {
     try std.testing.expectEqual(@as(?usize, 0), semantics[5].grid_column_index);
     try std.testing.expectEqual(@as(?usize, 2), semantics[5].grid_row_count);
     try std.testing.expectEqual(@as(?usize, 2), semantics[5].grid_column_count);
+}
+
+test "widget tables expose grid semantics and scroll intents" {
+    const header_cells = [_]Widget{
+        .{ .id = 23, .kind = .data_cell, .text = "Component", .layout = .{ .grow = 1 } },
+        .{ .id = 24, .kind = .data_cell, .text = "State", .layout = .{ .grow = 1 } },
+    };
+    const row_cells = [_]Widget{
+        .{ .id = 26, .kind = .data_cell, .text = "Dropdown Menu", .layout = .{ .grow = 1 } },
+        .{ .id = 27, .kind = .data_cell, .text = "Finished", .layout = .{ .grow = 1 } },
+    };
+    const rows = [_]Widget{
+        .{ .id = 22, .kind = .data_row, .children = &header_cells },
+        .{ .id = 25, .kind = .data_row, .children = &row_cells },
+    };
+    const table = Widget{
+        .id = 21,
+        .kind = .table,
+        .frame = geometry.RectF.init(0, 0, 320, 72),
+        .text = "Built-in components",
+        .layout = .{ .gap = 2 },
+        .children = &rows,
+    };
+
+    var nodes: [8]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(table, table.frame, &nodes);
+    try expectLayoutFrame(layout, 22, geometry.RectF.init(0, 0, 320, 28));
+    try expectLayoutFrame(layout, 23, geometry.RectF.init(0, 0, 160, 28));
+    try expectLayoutFrame(layout, 25, geometry.RectF.init(0, 30, 320, 28));
+    try expectLayoutFrame(layout, 26, geometry.RectF.init(0, 30, 160, 28));
+
+    var semantics_buffer: [8]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+    try std.testing.expectEqual(@as(usize, 7), semantics.len);
+    try std.testing.expectEqual(WidgetRole.grid, semantics[0].role);
+    try std.testing.expectEqualStrings("Built-in components", semantics[0].label);
+    try std.testing.expectEqual(@as(?usize, 2), semantics[0].grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), semantics[0].grid_column_count);
+    try std.testing.expectEqual(WidgetRole.row, semantics[1].role);
+    try std.testing.expectEqual(@as(?usize, 0), semantics[1].grid_row_index);
+    try std.testing.expectEqual(WidgetRole.gridcell, semantics[2].role);
+    try std.testing.expectEqualStrings("Component", semantics[2].label);
+    try std.testing.expectEqual(@as(?usize, 0), semantics[2].grid_column_index);
+    try std.testing.expectEqual(WidgetRole.gridcell, semantics[5].role);
+    try std.testing.expectEqualStrings("Dropdown Menu", semantics[5].label);
+    try std.testing.expectEqual(@as(?usize, 1), semantics[5].grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 0), semantics[5].grid_column_index);
+
+    const virtual_table = Widget{
+        .id = 31,
+        .kind = .table,
+        .frame = geometry.RectF.init(0, 0, 320, 64),
+        .value = 28,
+        .layout = .{ .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 },
+        .semantics = .{ .label = "Virtual table" },
+        .children = &rows,
+    };
+    try std.testing.expectEqual(@as(f32, 56), virtualWidgetScrollContentExtent(virtual_table, 64));
+    const page_down = WidgetKeyboardEvent{ .phase = .key_down, .key = "pagedown" };
+    const keyboard_intent = widgetKeyboardControlIntent(virtual_table, page_down).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, keyboard_intent.kind);
+    try std.testing.expect(keyboard_intent.actions.increment);
+    const semantic_intent = widgetSemanticControlIntentWithActions(virtual_table, .increment, .{ .increment = true }).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, semantic_intent.kind);
+    try std.testing.expect(semantic_intent.actions.increment);
 }
 
 test "widget list layout groups list items semantically" {

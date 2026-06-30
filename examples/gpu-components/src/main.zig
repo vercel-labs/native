@@ -261,7 +261,7 @@ const GpuComponentsApp = struct {
                 "{s} {s} #{d}: value {d:.2}.",
                 .{ action, @tagName(widget.kind), id, widget.value },
             ),
-            .scroll_view, .list, .data_grid => try std.fmt.bufPrint(
+            .scroll_view, .list, .data_grid, .table => try std.fmt.bufPrint(
                 &status_buffer,
                 "{s} {s} #{d}: offset {d}.",
                 .{ action, @tagName(widget.kind), id, widget.value },
@@ -803,7 +803,7 @@ fn buildComponentsWidgetLayoutWithScrollAndSize(nodes: []canvas.WidgetLayoutNode
         .{ .id = 166, .kind = .data_row, .frame = rect(0, 0, 0, 28), .children = &row4_cells },
     };
     const data_panel_children = [_]canvas.Widget{
-        .{ .id = 150, .kind = .data_grid, .frame = rect(0, 0, 360, 28), .text = "Finished component behavior", .value = virtual_scroll.data, .layout = .{ .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .children = &data_rows },
+        .{ .id = 150, .kind = .table, .frame = rect(0, 0, 360, 28), .text = "Finished component behavior", .value = virtual_scroll.data, .layout = .{ .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .children = &data_rows },
         .{ .id = 160, .kind = .tooltip, .frame = rect(392, 0, 176, 32), .text = "Tooltip rendered on GPU", .semantics = .{ .label = "GPU tooltip" } },
     };
     const accordion_children = [_]canvas.Widget{
@@ -1843,7 +1843,7 @@ test "gpu components app registers component lab on first gpu frame" {
     try std.testing.expectApproxEqAbs(@as(f32, 56), keyed_grid.scroll.offset, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 56), app.virtual_scroll.data, 0.001);
     const grid_status_view = componentViewByLabel(&harness.runtime, "status-label").?;
-    try std.testing.expect(std.mem.indexOf(u8, grid_status_view.text, "Keyed data_grid #150: offset 56") != null);
+    try std.testing.expect(std.mem.indexOf(u8, grid_status_view.text, "Keyed table #150: offset 56") != null);
 
     resetComponentDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 142 select");
