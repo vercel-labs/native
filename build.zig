@@ -1052,6 +1052,48 @@ pub fn build(b: *std.Build) void {
         \\gpu_frame_before="$(gpu_frame_from_snapshot)"
         \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
         \\gpu_frame_after="$gpu_frame_before"
+        \\"$cli" automate widget-action components-canvas 120 increment >/dev/null 2>&1
+        \\attempts=0
+        \\while [ "$attempts" -lt 50 ]; do
+        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
+        \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
+        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
+        \\    case "$snapshot" in *'Keyed list #120: offset 24.'*'widget @w1/components-canvas#120 role=list'*'scroll=[offset=24,viewport=28,content=208]'*)
+        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
+        \\      ;;
+        \\    esac
+        \\  fi
+        \\  attempts=$((attempts + 1))
+        \\  sleep 0.1
+        \\done
+        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "list automation increment did not request a GPU frame" >&2; exit 1; fi
+        \\case "$snapshot" in *'Keyed list #120: offset 24.'*'widget @w1/components-canvas#120 role=list'*'scroll=[offset=24,viewport=28,content=208]'*) ;; *) echo "list automation increment did not update retained scroll semantics" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "list automation increment did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
+        \\gpu_frame_before="$(gpu_frame_from_snapshot)"
+        \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
+        \\gpu_frame_after="$gpu_frame_before"
+        \\"$cli" automate widget-action components-canvas 150 increment >/dev/null 2>&1
+        \\attempts=0
+        \\while [ "$attempts" -lt 50 ]; do
+        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
+        \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
+        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
+        \\    case "$snapshot" in *'Keyed data_grid #150: offset 54.'*'widget @w1/components-canvas#150 role=grid'*'scroll=[offset=54,viewport=28,content=148]'*)
+        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
+        \\      ;;
+        \\    esac
+        \\  fi
+        \\  attempts=$((attempts + 1))
+        \\  sleep 0.1
+        \\done
+        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "data grid automation increment did not request a GPU frame" >&2; exit 1; fi
+        \\case "$snapshot" in *'Keyed data_grid #150: offset 54.'*'widget @w1/components-canvas#150 role=grid'*'scroll=[offset=54,viewport=28,content=148]'*) ;; *) echo "data grid automation increment did not update retained scroll semantics" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "data grid automation increment did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
+        \\gpu_frame_before="$(gpu_frame_from_snapshot)"
+        \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
+        \\gpu_frame_after="$gpu_frame_before"
         \\"$cli" automate widget-wheel components-canvas 130 20 >/dev/null 2>&1
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do

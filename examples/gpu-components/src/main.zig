@@ -646,17 +646,16 @@ fn buildComponentsWidgetLayoutWithScroll(nodes: []canvas.WidgetLayoutNode, virtu
         .{ .id = 166, .kind = .data_row, .frame = rect(0, 0, 0, 28), .children = &row4_cells },
     };
     const data_panel_children = [_]canvas.Widget{
-        .{ .id = 150, .kind = .data_grid, .frame = rect(16, 48, 304, 28), .text = "Finished component behavior", .value = virtual_scroll.data, .layout = .{ .gap = 2, .virtualized = true, .virtual_item_extent = 28 }, .children = &data_rows },
+        .{ .id = 150, .kind = .data_grid, .frame = rect(16, 48, 304, 28), .text = "Finished component behavior", .value = virtual_scroll.data, .layout = .{ .gap = 2, .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .children = &data_rows },
         .{ .id = 160, .kind = .tooltip, .frame = rect(22, 124, 176, 32), .text = "Tooltip rendered on GPU", .semantics = .{ .label = "GPU tooltip" } },
     };
     const top_widgets = [_]canvas.Widget{
         .{ .id = 101, .kind = .text, .frame = rect(64, 56, 240, 26), .text = "Finished Components" },
-        .{ .id = 102, .kind = .text, .frame = rect(64, 88, 360, 18), .text = "Retained widgets, semantics, and GPU display-list output." },
         .{ .id = 104, .kind = .button, .frame = rect(574, 54, 118, 34), .text = "Primary", .state = .{ .selected = true }, .command = refresh_command, .semantics = .{ .label = "Primary action" } },
         .{ .id = 105, .kind = .icon_button, .frame = rect(706, 54, 34, 34), .text = "+", .semantics = .{ .label = "Add component" } },
         .{ .id = 106, .kind = .column, .frame = rect(64, 130, 328, 246), .semantics = .{ .label = "Input controls" }, .children = &form_controls },
-        .{ .id = 120, .kind = .list, .frame = rect(424, 142, 152, 28), .value = virtual_scroll.nav, .layout = .{ .gap = 8, .virtualized = true, .virtual_item_extent = 28 }, .semantics = .{ .label = "Component navigation" }, .children = &nav_items },
-        .{ .id = 130, .kind = .scroll_view, .frame = rect(604, 142, 164, 28), .value = virtual_scroll.behavior, .layout = .{ .gap = 8, .virtualized = true, .virtual_item_extent = 28 }, .semantics = .{ .label = "Scrollable behavior list" }, .children = &scroll_items },
+        .{ .id = 120, .kind = .list, .frame = rect(424, 142, 152, 28), .value = virtual_scroll.nav, .layout = .{ .gap = 8, .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .semantics = .{ .label = "Component navigation" }, .children = &nav_items },
+        .{ .id = 130, .kind = .scroll_view, .frame = rect(604, 142, 164, 28), .value = virtual_scroll.behavior, .layout = .{ .gap = 8, .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .semantics = .{ .label = "Scrollable behavior list" }, .children = &scroll_items },
         .{ .id = 140, .kind = .popover, .frame = rect(424, 286, 174, 88), .backdrop_blur = 5, .semantics = .{ .label = "Actions popover" }, .children = &popover_children },
         .{ .id = 149, .kind = .column, .frame = rect(64, 408, 344, 174), .semantics = .{ .label = "Data controls" }, .children = &data_panel_children },
     };
@@ -992,6 +991,26 @@ test "gpu components display list covers finished live controls" {
     try std.testing.expect(bounds.y <= 0);
     try std.testing.expect(bounds.width >= canvas_width);
     try std.testing.expect(bounds.height >= canvas_height);
+}
+
+test "gpu components combined virtual scroll state stays within display budget" {
+    var commands: [max_component_commands]canvas.CanvasCommand = undefined;
+    var nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
+    var builder = canvas.Builder.init(&commands);
+    const layout = try buildComponentsWidgetLayoutWithScroll(&nodes, .{
+        .nav = 24,
+        .behavior = 58,
+        .data = 54,
+    });
+    try buildComponentsDisplayList(&builder, layout);
+    const display_list = builder.displayList();
+
+    try std.testing.expect(display_list.commandCount() <= max_component_commands);
+    try std.testing.expect(display_list.findCommandById(scroll_track_id) != null);
+    try std.testing.expect(display_list.findCommandById(scroll_thumb_id) != null);
+    try std.testing.expect(layout.findById(120).?.widget.value == 24);
+    try std.testing.expect(layout.findById(130).?.widget.value == 58);
+    try std.testing.expect(layout.findById(150).?.widget.value == 54);
 }
 
 test "gpu components frame plan stays within runtime budgets" {
