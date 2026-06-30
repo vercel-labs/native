@@ -3463,6 +3463,11 @@ pub const ControlTokens = struct {
     popover: ControlVisualTokens = .{},
     menu_surface: ControlVisualTokens = .{},
     tooltip: ControlVisualTokens = .{},
+    avatar: ControlVisualTokens = .{},
+    badge: ControlVisualTokens = .{},
+    separator: ControlVisualTokens = .{},
+    skeleton: ControlVisualTokens = .{},
+    spinner: ControlVisualTokens = .{},
 };
 
 pub const ColorTokenOverrides = struct {
@@ -3668,6 +3673,11 @@ pub const ControlTokenOverrides = struct {
     popover: ControlVisualTokenOverrides = .{},
     menu_surface: ControlVisualTokenOverrides = .{},
     tooltip: ControlVisualTokenOverrides = .{},
+    avatar: ControlVisualTokenOverrides = .{},
+    badge: ControlVisualTokenOverrides = .{},
+    separator: ControlVisualTokenOverrides = .{},
+    skeleton: ControlVisualTokenOverrides = .{},
+    spinner: ControlVisualTokenOverrides = .{},
 
     pub fn apply(self: ControlTokenOverrides, base: ControlTokens) ControlTokens {
         var next = base;
@@ -3689,6 +3699,11 @@ pub const ControlTokenOverrides = struct {
         next.popover = self.popover.apply(next.popover);
         next.menu_surface = self.menu_surface.apply(next.menu_surface);
         next.tooltip = self.tooltip.apply(next.tooltip);
+        next.avatar = self.avatar.apply(next.avatar);
+        next.badge = self.badge.apply(next.badge);
+        next.separator = self.separator.apply(next.separator);
+        next.skeleton = self.skeleton.apply(next.skeleton);
+        next.spinner = self.spinner.apply(next.spinner);
         return next;
     }
 };
@@ -3783,6 +3798,8 @@ pub const WidgetKind = enum {
     text,
     icon,
     image,
+    avatar,
+    badge,
     button,
     icon_button,
     text_field,
@@ -3797,6 +3814,9 @@ pub const WidgetKind = enum {
     toggle,
     slider,
     progress,
+    separator,
+    skeleton,
+    spinner,
 };
 
 pub const WidgetCursor = enum {
@@ -3989,8 +4009,8 @@ pub fn builtinComponentDescriptor(kind: BuiltinComponentKind) BuiltinComponentDe
     return switch (kind) {
         .accordion => builtinComponent(.accordion, "Accordion", .panel, .group, true),
         .alert => builtinComponent(.alert, "Alert", .panel, .group, true),
-        .avatar => builtinComponent(.avatar, "Avatar", .image, .image, false),
-        .badge => builtinComponent(.badge, "Badge", .text, .text, false),
+        .avatar => builtinComponent(.avatar, "Avatar", .avatar, .image, false),
+        .badge => builtinComponent(.badge, "Badge", .badge, .text, false),
         .breadcrumb => builtinComponent(.breadcrumb, "Breadcrumb", .row, .group, true),
         .bubble => builtinComponent(.bubble, "Bubble", .panel, .group, true),
         .button => builtinComponent(.button, "Button", .button, .button, false),
@@ -4007,11 +4027,11 @@ pub fn builtinComponentDescriptor(kind: BuiltinComponentKind) BuiltinComponentDe
         .radio_group => builtinComponent(.radio_group, "Radio Group", .row, .group, true),
         .resizable => builtinComponent(.resizable, "Resizable", .panel, .group, true),
         .select => builtinComponent(.select, "Select", .button, .button, true),
-        .separator => builtinComponent(.separator, "Separator", .panel, .none, false),
+        .separator => builtinComponent(.separator, "Separator", .separator, .none, false),
         .sheet => builtinComponent(.sheet, "Sheet", .popover, .dialog, true),
-        .skeleton => builtinComponent(.skeleton, "Skeleton", .panel, .none, false),
+        .skeleton => builtinComponent(.skeleton, "Skeleton", .skeleton, .none, false),
         .slider => builtinComponent(.slider, "Slider", .slider, .slider, false),
-        .spinner => builtinComponent(.spinner, "Spinner", .progress, .progressbar, false),
+        .spinner => builtinComponent(.spinner, "Spinner", .spinner, .progressbar, false),
         .switch_control => builtinComponent(.switch_control, "Switch", .toggle, .switch_control, false),
         .table => builtinComponent(.table, "Table", .data_grid, .grid, true),
         .tabs => builtinComponent(.tabs, "Tabs", .row, .group, true),
@@ -4242,7 +4262,6 @@ fn builtinComponentLayout(kind: BuiltinComponentKind, layout: WidgetLayoutStyle)
         },
         .skeleton => .{
             .min_size = geometry.SizeF.init(120, 20),
-            .clip_content = true,
         },
         else => layout,
     };
@@ -4270,6 +4289,17 @@ pub const max_widget_depth: usize = 32;
 pub const max_widget_text_range_rects: usize = 4;
 const max_widget_text_layout_lines: usize = 16;
 const default_widget_row_extent: f32 = 28;
+const SpinnerSegment = struct { x: f32, y: f32 };
+const spinner_segments = [_]SpinnerSegment{
+    .{ .x = 0, .y = -1 },
+    .{ .x = 0.707, .y = -0.707 },
+    .{ .x = 1, .y = 0 },
+    .{ .x = 0.707, .y = 0.707 },
+    .{ .x = 0, .y = 1 },
+    .{ .x = -0.707, .y = 0.707 },
+    .{ .x = -1, .y = 0 },
+    .{ .x = -0.707, .y = -0.707 },
+};
 
 pub const WidgetLayoutNode = struct {
     widget: Widget,
@@ -7151,6 +7181,8 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         .text => try emitTextWidget(builder, paint_widget, tokens),
         .icon => try emitIconWidget(builder, paint_widget, tokens),
         .image => try emitImageWidget(builder, paint_widget),
+        .avatar => try emitAvatarWidget(builder, paint_widget, tokens),
+        .badge => try emitBadgeWidget(builder, paint_widget, tokens),
         .button => try emitButtonWidget(builder, paint_widget, tokens),
         .icon_button => try emitIconButtonWidget(builder, paint_widget, tokens),
         .text_field => try emitTextFieldWidget(builder, paint_widget, tokens),
@@ -7164,6 +7196,9 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         .toggle => try emitToggleWidget(builder, paint_widget, tokens),
         .slider => try emitSliderWidget(builder, paint_widget, tokens),
         .progress => try emitProgressWidget(builder, paint_widget, tokens),
+        .separator => try emitSeparatorWidget(builder, paint_widget, tokens),
+        .skeleton => try emitSkeletonWidget(builder, paint_widget, tokens),
+        .spinner => try emitSpinnerWidget(builder, paint_widget, tokens),
     }
 }
 
@@ -7244,6 +7279,8 @@ fn emitWidgetLayoutNodeContent(
         .text => try emitTextWidget(builder, paint_widget, tokens),
         .icon => try emitIconWidget(builder, paint_widget, tokens),
         .image => try emitImageWidget(builder, paint_widget),
+        .avatar => try emitAvatarWidget(builder, paint_widget, tokens),
+        .badge => try emitBadgeWidget(builder, paint_widget, tokens),
         .button => try emitButtonWidget(builder, paint_widget, tokens),
         .icon_button => try emitIconButtonWidget(builder, paint_widget, tokens),
         .text_field => try emitTextFieldWidget(builder, paint_widget, tokens),
@@ -7257,6 +7294,9 @@ fn emitWidgetLayoutNodeContent(
         .toggle => try emitToggleWidget(builder, paint_widget, tokens),
         .slider => try emitSliderWidget(builder, paint_widget, tokens),
         .progress => try emitProgressWidget(builder, paint_widget, tokens),
+        .separator => try emitSeparatorWidget(builder, paint_widget, tokens),
+        .skeleton => try emitSkeletonWidget(builder, paint_widget, tokens),
+        .spinner => try emitSpinnerWidget(builder, paint_widget, tokens),
     }
 
     try emitWidgetLayoutClippedChildren(builder, layout, node_index, tokens, state, paint_widget);
@@ -7612,6 +7652,145 @@ fn emitImageWidget(builder: *Builder, widget: Widget) Error!void {
         .fit = widget.image_fit,
         .sampling = widget.image_sampling,
     });
+}
+
+fn emitAvatarWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = componentControlVisualTokens(widget, tokens);
+    const radius = componentPillRadius(widget, visual, widget.frame.height * 0.5);
+    const background = widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle);
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 1),
+        .rect = widget.frame,
+        .radius = radius,
+        .fill = colorFill(background),
+    });
+
+    if (widget.image_id != 0) {
+        try builder.pushClip(.{
+            .id = widgetPartId(widget.id, 2),
+            .rect = widget.frame,
+            .radius = radius,
+        });
+        try builder.drawImage(.{
+            .id = widgetPartId(widget.id, 3),
+            .image_id = widget.image_id,
+            .src = widget.image_src,
+            .dst = widget.frame,
+            .opacity = widget.image_opacity,
+            .fit = widget.image_fit,
+            .sampling = widget.image_sampling,
+        });
+        try builder.popClip();
+    } else if (widget.text.len > 0) {
+        const text_size = widgetLabelTextSize(widget, tokens);
+        try builder.drawText(.{
+            .id = widgetPartId(widget.id, 3),
+            .font_id = tokens.typography.font_id,
+            .size = text_size,
+            .origin = pixelSnapTextPoint(tokens, centeredTextOrigin(widget.frame, widget.text, text_size)),
+            .color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted),
+            .text = widget.text,
+            .text_layout = boundedTextLayout(widget.frame, text_size, 0, .center, .none),
+        });
+    }
+
+    try builder.strokeRect(.{
+        .id = widgetPartId(widget.id, 4),
+        .rect = widget.frame,
+        .radius = radius,
+        .stroke = .{
+            .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+            .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
+        },
+    });
+}
+
+fn emitBadgeWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = componentControlVisualTokens(widget, tokens);
+    const radius = componentPillRadius(widget, visual, widget.frame.height * 0.5);
+    const text_size = widgetLabelTextSize(widget, tokens);
+    const text_inset = widgetControlInset(widget, tokens, tokens.spacing.sm);
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 1),
+        .rect = widget.frame,
+        .radius = radius,
+        .fill = colorFill(badgeBackgroundColor(widget, tokens, visual)),
+    });
+    try builder.strokeRect(.{
+        .id = widgetPartId(widget.id, 2),
+        .rect = widget.frame,
+        .radius = radius,
+        .stroke = .{
+            .fill = widgetBorderFill(widget, badgeBorderColor(widget, tokens, visual)),
+            .width = badgeStrokeWidth(widget, tokens, visual),
+        },
+    });
+    if (widget.text.len > 0) {
+        try builder.drawText(.{
+            .id = widgetPartId(widget.id, 3),
+            .font_id = tokens.typography.font_id,
+            .size = text_size,
+            .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset)),
+            .color = badgeTextColor(widget, tokens, visual),
+            .text = widget.text,
+            .text_layout = boundedTextLayout(widget.frame, text_size, text_inset, .center, .none),
+        });
+    }
+}
+
+fn emitSeparatorWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = componentControlVisualTokens(widget, tokens);
+    const normalized = widget.frame.normalized();
+    if (normalized.isEmpty()) return;
+    const thickness = controlStrokeWidth(widget, visual, tokens.stroke.hairline);
+    const line_rect = if (normalized.width >= normalized.height)
+        geometry.RectF.init(normalized.x, normalized.y + (normalized.height - thickness) * 0.5, normalized.width, thickness)
+    else
+        geometry.RectF.init(normalized.x + (normalized.width - thickness) * 0.5, normalized.y, thickness, normalized.height);
+    try builder.fillRect(.{
+        .id = widgetPartId(widget.id, 1),
+        .rect = pixelSnapGeometryRect(tokens, line_rect),
+        .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse visual.border orelse tokens.colors.border)),
+    });
+}
+
+fn emitSkeletonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = componentControlVisualTokens(widget, tokens);
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 1),
+        .rect = widget.frame,
+        .radius = controlRadius(widget, visual, tokens.radius.md),
+        .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle)),
+    });
+}
+
+fn emitSpinnerWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = componentControlVisualTokens(widget, tokens);
+    const normalized = widget.frame.normalized();
+    if (normalized.isEmpty()) return;
+    const size = @min(normalized.width, normalized.height);
+    if (size <= 0) return;
+
+    const center = geometry.PointF.init(normalized.x + normalized.width * 0.5, normalized.y + normalized.height * 0.5);
+    const radius = size * 0.42;
+    const inner = radius * 0.58;
+    const stroke_width = controlStrokeWidth(widget, visual, @max(1, size * 0.09));
+    const color = widgetForegroundColor(widget, tokens, visual.foreground orelse visual.active_background orelse tokens.colors.accent);
+    const phase = @as(usize, @intFromFloat(@floor(std.math.clamp(widget.value, 0, 1) * 8))) % spinner_segments.len;
+
+    for (spinner_segments, 0..) |segment, index| {
+        const segment_index = (index + phase) % spinner_segments.len;
+        const alpha = 0.28 + @as(f32, @floatFromInt(segment_index)) * 0.09;
+        try builder.drawLine(.{
+            .id = widgetPartId(widget.id, @as(ObjectId, @intCast(index + 1))),
+            .from = pixelSnapGeometryPoint(tokens, geometry.PointF.init(center.x + segment.x * inner, center.y + segment.y * inner)),
+            .to = pixelSnapGeometryPoint(tokens, geometry.PointF.init(center.x + segment.x * radius, center.y + segment.y * radius)),
+            .stroke = .{
+                .fill = colorFill(colorWithAlpha(color, alpha)),
+                .width = stroke_width,
+            },
+        });
+    }
 }
 
 fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
@@ -8664,6 +8843,59 @@ fn surfaceControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisua
     };
 }
 
+fn componentControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    return switch (widget.kind) {
+        .avatar => tokens.controls.avatar,
+        .badge => tokens.controls.badge,
+        .separator => tokens.controls.separator,
+        .skeleton => tokens.controls.skeleton,
+        .spinner => tokens.controls.spinner,
+        else => .{},
+    };
+}
+
+fn componentPillRadius(widget: Widget, visual: ControlVisualTokens, fallback: f32) Radius {
+    if (widget.style.radius) |radius| return Radius.all(nonNegative(radius));
+    if (visual.radius) |radius| return Radius.all(nonNegative(radius));
+    return Radius.all(nonNegative(fallback));
+}
+
+fn badgeBackgroundColor(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Color {
+    if (widget.state.disabled) return tokens.colors.disabled;
+    return switch (widget.variant) {
+        .default, .primary => widgetAccentColor(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, widget.state.hovered, tokens.colors.accent)),
+        .secondary => widgetBackgroundColor(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, widget.state.hovered, tokens.colors.surface_subtle)),
+        .outline, .ghost => widgetBackgroundColor(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, widget.state.hovered, if (widget.state.hovered or widget.state.pressed) tokens.colors.surface_subtle else transparentColor())),
+        .destructive => widgetAccentColor(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, widget.state.hovered, tokens.colors.destructive)),
+    };
+}
+
+fn badgeBorderColor(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Color {
+    return switch (widget.variant) {
+        .default, .primary => widgetAccentColor(widget, visual.border orelse tokens.colors.accent),
+        .destructive => widgetAccentColor(widget, visual.border orelse tokens.colors.destructive),
+        else => widgetBorderColor(widget, visual.border orelse tokens.colors.border),
+    };
+}
+
+fn badgeTextColor(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Color {
+    if (widget.state.disabled) return tokens.colors.text_muted;
+    return switch (widget.variant) {
+        .default, .primary => widgetAccentForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.accent_text),
+        .destructive => widgetAccentForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.destructive_text),
+        else => widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text),
+    };
+}
+
+fn badgeStrokeWidth(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) f32 {
+    if (widget.style.stroke_width) |width| return nonNegative(width);
+    if (visual.stroke_width) |width| return nonNegative(width);
+    return switch (widget.variant) {
+        .ghost => 0,
+        else => tokens.stroke.hairline,
+    };
+}
+
 fn buttonStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
     if (widget.style.stroke_width) |width| return nonNegative(width);
     const visual = buttonControlVisualTokens(widget, tokens);
@@ -8734,7 +8966,7 @@ fn layoutWidgetDepth(
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len, tokens);
             }
         },
-        .text, .icon, .image, .button, .icon_button, .text_field, .search_field, .tooltip, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .toggle, .slider, .progress => {},
+        .text, .icon, .image, .avatar, .badge, .button, .icon_button, .text_field, .search_field, .tooltip, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .toggle, .slider, .progress, .separator, .skeleton, .spinner => {},
     }
 
     return index;
@@ -8969,6 +9201,8 @@ pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF 
     return switch (widget.kind) {
         .text => intrinsicTextWidgetSize(widget, tokens, widgetBodyTextSize(widget, tokens)),
         .icon => geometry.SizeF.init(intrinsicIconExtent(widget, tokens), intrinsicIconExtent(widget, tokens)),
+        .avatar => intrinsicAvatarWidgetSize(widget, tokens),
+        .badge => intrinsicBadgeWidgetSize(widget, tokens),
         .button => intrinsicButtonWidgetSize(widget, tokens),
         .icon_button => intrinsicSquareControlSize(widget, tokens),
         .text_field => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 160), widgetControlHeight(widget, tokens)),
@@ -8981,6 +9215,9 @@ pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF 
         .toggle => intrinsicToggleWidgetSize(widget, tokens),
         .slider => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 160), @max(widgetSizedDensityValue(widget, tokens, 28), widgetSizedDensityValue(widget, tokens, 20))),
         .progress => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 160), widgetSizedDensityValue(widget, tokens, 8)),
+        .separator => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 160), controlStrokeWidth(widget, componentControlVisualTokens(widget, tokens), tokens.stroke.hairline)),
+        .skeleton => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 120), widgetSizedDensityValue(widget, tokens, 20)),
+        .spinner => intrinsicSquareControlSize(widget, tokens),
         .stack, .row, .column, .grid, .data_grid, .scroll_view, .list, .panel, .popover, .menu_surface, .image => geometry.SizeF.zero(),
     };
 }
@@ -9003,6 +9240,17 @@ fn intrinsicButtonWidgetSize(widget: Widget, tokens: DesignTokens) geometry.Size
     const text_width = estimateTextWidthForFont(tokens.typography.font_id, widget.text, widgetButtonTextSize(widget, tokens));
     const width = @max(widgetSizedDensityValue(widget, tokens, 44), text_width + widgetButtonInset(widget, tokens) * 2);
     return geometry.SizeF.init(width, height);
+}
+
+fn intrinsicAvatarWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
+    const size = widgetSizedDensityValue(widget, tokens, 40);
+    return geometry.SizeF.init(size, size);
+}
+
+fn intrinsicBadgeWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
+    const text_width = estimateTextWidthForFont(tokens.typography.font_id, widget.text, widgetLabelTextSize(widget, tokens));
+    const inset = widgetControlInset(widget, tokens, tokens.spacing.sm);
+    return geometry.SizeF.init(@max(widgetSizedDensityValue(widget, tokens, 24), text_width + inset * 2), widgetSizedDensityValue(widget, tokens, 22));
 }
 
 fn intrinsicSquareControlSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
@@ -9811,7 +10059,8 @@ fn semanticRole(widget: Widget) WidgetRole {
         .menu_surface => .menu,
         .list => .list,
         .text => .text,
-        .icon, .image => .image,
+        .icon, .image, .avatar => .image,
+        .badge => .text,
         .button => .button,
         .icon_button => .button,
         .text_field, .search_field => .textbox,
@@ -9824,6 +10073,8 @@ fn semanticRole(widget: Widget) WidgetRole {
         .toggle => .switch_control,
         .slider => .slider,
         .progress => .progressbar,
+        .separator, .skeleton => .none,
+        .spinner => .progressbar,
     };
 }
 
@@ -9838,6 +10089,7 @@ fn semanticValue(widget: Widget) ?f32 {
         .list_item, .menu_item, .data_cell, .segmented_control => if (widget.state.selected or widget.value >= 0.5) 1 else 0,
         .checkbox, .toggle => if (booleanControlSelected(widget)) 1 else 0,
         .slider, .progress => std.math.clamp(widget.value, 0, 1),
+        .spinner => null,
         else => null,
     };
 }
@@ -10172,7 +10424,7 @@ fn isDragSource(widget: Widget) bool {
 fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     return switch (widget.kind) {
-        .row, .column, .grid, .data_grid, .data_row, .list, .stack, .tooltip, .icon, .image => false,
+        .row, .column, .grid, .data_grid, .data_row, .list, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner => false,
         .scroll_view, .panel, .popover, .menu_surface, .text, .button, .icon_button, .text_field, .search_field, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .toggle, .slider, .progress => true,
     };
 }
@@ -10510,6 +10762,7 @@ fn widgetFrameStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
         .segmented_control => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectionControlVisualTokens(widget, tokens), tokens.stroke.regular),
         .data_cell => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, listItemControlVisualTokens(widget, tokens), tokens.stroke.hairline),
         .checkbox, .toggle, .slider => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectionControlVisualTokens(widget, tokens), tokens.stroke.regular),
+        .avatar, .badge => controlStrokeWidth(widget, componentControlVisualTokens(widget, tokens), tokens.stroke.hairline),
         .list_item, .menu_item => if (widget.state.focused) tokens.stroke.focus else 0,
         else => 0,
     };
@@ -14830,8 +15083,8 @@ test "built-in component catalog covers shadcn component set" {
 test "built-in component catalog maps to retained widget foundations" {
     try std.testing.expectEqual(WidgetKind.panel, builtinComponentDescriptor(.accordion).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.panel, builtinComponentDescriptor(.alert).root_widget_kind);
-    try std.testing.expectEqual(WidgetKind.image, builtinComponentDescriptor(.avatar).root_widget_kind);
-    try std.testing.expectEqual(WidgetKind.text, builtinComponentDescriptor(.badge).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.avatar, builtinComponentDescriptor(.avatar).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.badge, builtinComponentDescriptor(.badge).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.row, builtinComponentDescriptor(.button_group).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.panel, builtinComponentDescriptor(.card).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.search_field, builtinComponentDescriptor(.combobox).root_widget_kind);
@@ -14839,7 +15092,9 @@ test "built-in component catalog maps to retained widget foundations" {
     try std.testing.expectEqual(WidgetKind.popover, builtinComponentDescriptor(.drawer).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.menu_surface, builtinComponentDescriptor(.dropdown_menu).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.text_field, builtinComponentDescriptor(.input).root_widget_kind);
-    try std.testing.expectEqual(WidgetKind.progress, builtinComponentDescriptor(.spinner).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.separator, builtinComponentDescriptor(.separator).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.skeleton, builtinComponentDescriptor(.skeleton).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.spinner, builtinComponentDescriptor(.spinner).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.toggle, builtinComponentDescriptor(.switch_control).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.data_grid, builtinComponentDescriptor(.table).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.text_field, builtinComponentDescriptor(.textarea).root_widget_kind);
@@ -14982,6 +15237,96 @@ test "built-in component widgets expose shadcn semantics and render tokens" {
     }
 }
 
+test "built-in component primitive widgets render distinct shadcn chrome" {
+    const widgets = [_]Widget{
+        builtinComponentWidget(.avatar, .{
+            .id = 20,
+            .frame = geometry.RectF.init(0, 0, 40, 40),
+            .text = "ZN",
+            .semantics = .{ .label = "Zero Native" },
+        }),
+        builtinComponentWidget(.badge, .{
+            .id = 21,
+            .frame = geometry.RectF.init(48, 8, 72, 24),
+            .text = "Beta",
+        }),
+        builtinComponentWidget(.separator, .{
+            .id = 22,
+            .frame = geometry.RectF.init(0, 52, 160, 1),
+        }),
+        builtinComponentWidget(.skeleton, .{
+            .id = 23,
+            .frame = geometry.RectF.init(0, 64, 120, 20),
+        }),
+        builtinComponentWidget(.spinner, .{
+            .id = 24,
+            .frame = geometry.RectF.init(132, 60, 28, 28),
+            .value = 0.25,
+        }),
+    };
+
+    const root = Widget{ .kind = .stack, .children = &widgets };
+    var nodes: [8]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 180, 100), &nodes);
+
+    var semantics_buffer: [4]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+    try std.testing.expectEqual(@as(usize, 3), semantics.len);
+    try std.testing.expectEqual(WidgetRole.image, semantics[0].role);
+    try std.testing.expectEqualStrings("Zero Native", semantics[0].label);
+    try std.testing.expectEqual(WidgetRole.text, semantics[1].role);
+    try std.testing.expectEqualStrings("Beta", semantics[1].label);
+    try std.testing.expectEqual(WidgetRole.progressbar, semantics[2].role);
+
+    var commands: [20]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 16), display_list.commandCount());
+    try std.testing.expect(display_list.commands[0] == .fill_rounded_rect);
+    switch (display_list.commands[1]) {
+        .draw_text => |text| try std.testing.expectEqualStrings("ZN", text.text),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(display_list.commands[2] == .stroke_rect);
+    switch (display_list.commands[3]) {
+        .fill_rounded_rect => |fill| try expectFillColor(ColorTokens.light().accent, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[5]) {
+        .draw_text => |text| try std.testing.expectEqualStrings("Beta", text.text),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(display_list.commands[6] == .fill_rect);
+    try std.testing.expect(display_list.commands[7] == .fill_rounded_rect);
+    for (display_list.commands[8..16]) |command| {
+        try std.testing.expect(command == .draw_line);
+    }
+
+    const image_avatar = builtinComponentWidget(.avatar, .{
+        .id = 30,
+        .frame = geometry.RectF.init(0, 0, 40, 40),
+        .image_id = 42,
+    });
+    var image_commands: [5]CanvasCommand = undefined;
+    var image_builder = Builder.init(&image_commands);
+    try emitWidgetTree(&image_builder, image_avatar, .{});
+    const image_display_list = image_builder.displayList();
+    try std.testing.expectEqual(@as(usize, 5), image_display_list.commandCount());
+    try std.testing.expect(image_display_list.commands[0] == .fill_rounded_rect);
+    try std.testing.expect(image_display_list.commands[1] == .push_clip);
+    switch (image_display_list.commands[2]) {
+        .draw_image => |image| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(30, 3)), image.id);
+            try std.testing.expectEqual(@as(ImageId, 42), image.image_id);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(image_display_list.commands[3] == .pop_clip);
+    try std.testing.expect(image_display_list.commands[4] == .stroke_rect);
+}
+
 test "design token overrides compose with built-in themes" {
     const overrides = DesignTokenOverrides{
         .colors = .{
@@ -15078,6 +15423,27 @@ test "design token overrides compose with built-in themes" {
                 .background = Color.rgb8(238, 242, 246),
                 .foreground = Color.rgb8(18, 24, 30),
             },
+            .avatar = .{
+                .background = Color.rgb8(32, 38, 44),
+                .foreground = Color.rgb8(235, 240, 245),
+                .border = Color.rgb8(72, 82, 92),
+            },
+            .badge = .{
+                .background = Color.rgb8(24, 48, 96),
+                .foreground = Color.rgb8(244, 248, 255),
+                .border = Color.rgb8(28, 56, 112),
+            },
+            .separator = .{
+                .background = Color.rgb8(70, 78, 86),
+            },
+            .skeleton = .{
+                .background = Color.rgb8(34, 40, 46),
+                .radius = 7,
+            },
+            .spinner = .{
+                .foreground = Color.rgb8(238, 242, 246),
+                .stroke_width = 2,
+            },
         },
         .density = .spacious,
     };
@@ -15149,6 +15515,17 @@ test "design token overrides compose with built-in themes" {
     try std.testing.expectEqualDeep(Color.rgb8(66, 76, 88), tokens.controls.menu_surface.border.?);
     try std.testing.expectEqualDeep(Color.rgb8(238, 242, 246), tokens.controls.tooltip.background.?);
     try std.testing.expectEqualDeep(Color.rgb8(18, 24, 30), tokens.controls.tooltip.foreground.?);
+    try std.testing.expectEqualDeep(Color.rgb8(32, 38, 44), tokens.controls.avatar.background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(235, 240, 245), tokens.controls.avatar.foreground.?);
+    try std.testing.expectEqualDeep(Color.rgb8(72, 82, 92), tokens.controls.avatar.border.?);
+    try std.testing.expectEqualDeep(Color.rgb8(24, 48, 96), tokens.controls.badge.background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(244, 248, 255), tokens.controls.badge.foreground.?);
+    try std.testing.expectEqualDeep(Color.rgb8(28, 56, 112), tokens.controls.badge.border.?);
+    try std.testing.expectEqualDeep(Color.rgb8(70, 78, 86), tokens.controls.separator.background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(34, 40, 46), tokens.controls.skeleton.background.?);
+    try std.testing.expectEqual(@as(f32, 7), tokens.controls.skeleton.radius.?);
+    try std.testing.expectEqualDeep(Color.rgb8(238, 242, 246), tokens.controls.spinner.foreground.?);
+    try std.testing.expectEqual(@as(f32, 2), tokens.controls.spinner.stroke_width.?);
     try std.testing.expectEqual(Density.spacious, tokens.density);
 
     const rebuilt = DesignTokens.themeWithOverrides(.{ .color_scheme = .dark, .reduce_motion = true }, overrides);
