@@ -15517,8 +15517,15 @@ test "runtime dispatches canvas widget commands from pointer and keyboard activa
             .frame = geometry.RectF.init(12, 56, 140, 32),
             .text = "Q",
         },
+        .{
+            .id = 4,
+            .kind = .menu_item,
+            .frame = geometry.RectF.init(128, 12, 96, 32),
+            .text = "Archive",
+            .command = "widget.archive",
+        },
     };
-    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &widgets }, geometry.RectF.init(0, 0, 240, 120), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
 
@@ -15571,6 +15578,38 @@ test "runtime dispatches canvas widget commands from pointer and keyboard activa
         .modifiers = .{ .option = true },
     } });
     try std.testing.expectEqual(@as(u32, 2), app_state.command_count);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 140,
+        .y = 20,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_up,
+        .x = 140,
+        .y = 20,
+    } });
+    try std.testing.expectEqual(@as(u32, 3), app_state.command_count);
+    try std.testing.expectEqualStrings("widget.archive", app_state.last_name);
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(4).?.widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 1), retained.findById(4).?.widget.value);
+
+    harness.runtime.views[0].canvas_widget_focused_id = 4;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    try std.testing.expectEqual(@as(u32, 4), app_state.command_count);
+    try std.testing.expectEqualStrings("widget.archive", app_state.last_name);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(4).?.widget.state.selected);
 }
 
 test "runtime automation snapshot exposes canvas list roles" {
