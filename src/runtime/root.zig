@@ -1282,8 +1282,8 @@ pub const Runtime = struct {
             .focus => try self.focusAutomationCanvasWidget(index, action.id),
             .press => try self.dispatchAutomationWidgetKey(app, index, action.id, "enter"),
             .toggle => try self.dispatchAutomationWidgetKey(app, index, action.id, "space"),
-            .increment => try self.dispatchAutomationWidgetKey(app, index, action.id, "arrowright"),
-            .decrement => try self.dispatchAutomationWidgetKey(app, index, action.id, "arrowleft"),
+            .increment => try self.dispatchAutomationWidgetKey(app, index, action.id, self.views[index].canvasWidgetStepKey(action.id, .increment)),
+            .decrement => try self.dispatchAutomationWidgetKey(app, index, action.id, self.views[index].canvasWidgetStepKey(action.id, .decrement)),
             .set_text => try self.setAutomationCanvasWidgetText(index, action.id, action.text),
             .set_selection => try self.editAutomationCanvasWidgetText(index, action.id, .{ .set_selection = action.selection orelse return error.InvalidCommand }),
             .set_composition => try self.editAutomationCanvasWidgetText(index, action.id, .{ .set_composition = .{ .text = action.text } }),
@@ -2828,8 +2828,8 @@ pub const Runtime = struct {
             .focus => try self.focusAutomationCanvasWidget(view_index, action.id),
             .press => try self.dispatchAutomationWidgetKey(app, view_index, action.id, "enter"),
             .toggle => try self.dispatchAutomationWidgetKey(app, view_index, action.id, "space"),
-            .increment => try self.dispatchAutomationWidgetKey(app, view_index, action.id, "arrowright"),
-            .decrement => try self.dispatchAutomationWidgetKey(app, view_index, action.id, "arrowleft"),
+            .increment => try self.dispatchAutomationWidgetKey(app, view_index, action.id, self.views[view_index].canvasWidgetStepKey(action.id, .increment)),
+            .decrement => try self.dispatchAutomationWidgetKey(app, view_index, action.id, self.views[view_index].canvasWidgetStepKey(action.id, .decrement)),
             .set_text => try self.setAutomationCanvasWidgetText(view_index, action.id, action.value),
             .set_selection => try self.editAutomationCanvasWidgetText(view_index, action.id, .{ .set_selection = try parseAutomationTextSelection(action.value) }),
             .set_composition => try self.editAutomationCanvasWidgetText(view_index, action.id, .{ .set_composition = .{ .text = action.value } }),
@@ -5466,6 +5466,11 @@ const CanvasWidgetScrollKeyboardTarget = enum {
     end,
 };
 
+const CanvasWidgetStepDirection = enum {
+    increment,
+    decrement,
+};
+
 fn canvasWidgetScrollKeyboardTarget(keyboard: canvas.WidgetKeyboardEvent) ?CanvasWidgetScrollKeyboardTarget {
     if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return .start;
     if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return .end;
@@ -6536,6 +6541,23 @@ const RuntimeView = struct {
         const widget = self.widget_layout_nodes[index].widget;
         if (widget.command.len == 0) return null;
         return widget.command;
+    }
+
+    fn canvasWidgetStepKey(self: *const RuntimeView, id: canvas.ObjectId, direction: CanvasWidgetStepDirection) []const u8 {
+        const index = self.canvasWidgetNodeIndexById(id) orelse return switch (direction) {
+            .increment => "arrowright",
+            .decrement => "arrowleft",
+        };
+        return switch (self.widget_layout_nodes[index].widget.kind) {
+            .scroll_view => switch (direction) {
+                .increment => "pagedown",
+                .decrement => "pageup",
+            },
+            else => switch (direction) {
+                .increment => "arrowright",
+                .decrement => "arrowleft",
+            },
+        };
     }
 
     fn rewriteCanvasWidgetTextStorage(self: *RuntimeView, edited_index: usize, next_state: canvas.TextEditState) anyerror!void {
@@ -18773,6 +18795,7 @@ test "runtime dispatches automation canvas widget actions" {
         raw_input_count: u32 = 0,
         last_command: []const u8 = "",
         last_keyboard_target_id: canvas.ObjectId = 0,
+        last_keyboard_key: []const u8 = "",
         last_drag_source_id: canvas.ObjectId = 0,
         last_drag_dx: f32 = 0,
         last_drop_target_id: canvas.ObjectId = 0,
@@ -18795,6 +18818,7 @@ test "runtime dispatches automation canvas widget actions" {
                 .canvas_widget_keyboard => |keyboard_event| {
                     self.widget_keyboard_count += 1;
                     if (keyboard_event.target) |target| self.last_keyboard_target_id = target.id;
+                    self.last_keyboard_key = keyboard_event.keyboard.key;
                 },
                 .canvas_widget_drag => |drag_event| {
                     self.widget_drag_count += 1;
@@ -18879,17 +18903,32 @@ test "runtime dispatches automation canvas widget actions" {
 
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 4, .action = .increment });
     try std.testing.expectApproxEqAbs(@as(f32, 0.55), harness.runtime.views[0].widgetSemantics()[3].value.?, 0.001);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 4), app_state.last_keyboard_target_id);
+    try std.testing.expectEqualStrings("arrowright", app_state.last_keyboard_key);
 
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 6, .action = .select });
     try std.testing.expectEqual(@as(?f32, 1), harness.runtime.views[0].widgetSemantics()[5].value);
 
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 7, .action = .increment });
     var scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
-    try std.testing.expectEqual(@as(f32, 24.0), scrolled_layout.findById(7).?.widget.value);
+    try std.testing.expectApproxEqAbs(@as(f32, 40.8), scrolled_layout.findById(7).?.widget.value, 0.001);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 7), app_state.last_keyboard_target_id);
+    try std.testing.expectEqualStrings("pagedown", app_state.last_keyboard_key);
 
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 7, .action = .decrement });
     scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqual(@as(f32, 0.0), scrolled_layout.findById(7).?.widget.value);
+    try std.testing.expectEqualStrings("pageup", app_state.last_keyboard_key);
+
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 7, .action = .increment });
+    scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectApproxEqAbs(@as(f32, 40.8), scrolled_layout.findById(7).?.widget.value, 0.001);
+    try std.testing.expectEqualStrings("pagedown", app_state.last_keyboard_key);
+
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 7, .action = .decrement });
+    scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 0.0), scrolled_layout.findById(7).?.widget.value);
+    try std.testing.expectEqualStrings("pageup", app_state.last_keyboard_key);
 
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 11, .action = .drop_files, .value = "/tmp/report.csv /tmp/chart.png" });
     try std.testing.expectEqual(@as(u32, 1), app_state.widget_file_drop_count);
