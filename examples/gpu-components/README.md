@@ -4,6 +4,7 @@ This example is a retained GPU widget lab for trying the finished native-first c
 
 - Native toolbar, sidebar, statusbar, and GPU surface shell views.
 - Buttons, icon buttons, text, icons, fields, checkbox, toggle, slider, progress, segmented control, lists, scroll views, popovers, menus, tooltips, and data grids.
+- Built-in shadcn-style component catalog: Accordion, Alert, Avatar, Badge, Breadcrumb, Bubble, Button, Button Group, Card, Checkbox, Combobox, Dialog, Drawer, Dropdown Menu, Input, Pagination, Progress, Radio Group, Resizable, Select, Separator, Sheet, Skeleton, Slider, Spinner, Switch, Table, Tabs, Textarea, Toggle, Toggle Group, and Tooltip.
 - Retained widget semantics for focus, press, toggle, select, text editing, scrolling, and data-grid roles.
 - Token-driven rounded corners, shadows, blur, typography, color, and scroll physics.
 

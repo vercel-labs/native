@@ -4005,6 +4005,41 @@ pub const builtin_component_kinds = [_]BuiltinComponentKind{
     .tooltip,
 };
 
+pub const builtin_component_names = [_][]const u8{
+    "Accordion",
+    "Alert",
+    "Avatar",
+    "Badge",
+    "Breadcrumb",
+    "Bubble",
+    "Button",
+    "Button Group",
+    "Card",
+    "Checkbox",
+    "Combobox",
+    "Dialog",
+    "Drawer",
+    "Dropdown Menu",
+    "Input",
+    "Pagination",
+    "Progress",
+    "Radio Group",
+    "Resizable",
+    "Select",
+    "Separator",
+    "Sheet",
+    "Skeleton",
+    "Slider",
+    "Spinner",
+    "Switch",
+    "Table",
+    "Tabs",
+    "Textarea",
+    "Toggle",
+    "Toggle Group",
+    "Tooltip",
+};
+
 pub const BuiltinComponentDescriptor = struct {
     kind: BuiltinComponentKind,
     name: []const u8,
@@ -4018,53 +4053,56 @@ pub fn builtinComponentCount() usize {
     return builtin_component_kinds.len;
 }
 
+pub fn builtinComponentName(kind: BuiltinComponentKind) []const u8 {
+    return builtin_component_names[@intFromEnum(kind)];
+}
+
 pub fn builtinComponentDescriptor(kind: BuiltinComponentKind) BuiltinComponentDescriptor {
     return switch (kind) {
-        .accordion => builtinComponent(.accordion, "Accordion", .panel, .group, true),
-        .alert => builtinComponent(.alert, "Alert", .panel, .group, true),
-        .avatar => builtinComponent(.avatar, "Avatar", .avatar, .image, false),
-        .badge => builtinComponent(.badge, "Badge", .badge, .text, false),
-        .breadcrumb => builtinComponent(.breadcrumb, "Breadcrumb", .row, .group, true),
-        .bubble => builtinComponent(.bubble, "Bubble", .panel, .group, true),
-        .button => builtinComponent(.button, "Button", .button, .button, false),
-        .button_group => builtinComponent(.button_group, "Button Group", .row, .group, true),
-        .card => builtinComponent(.card, "Card", .panel, .group, true),
-        .checkbox => builtinComponent(.checkbox, "Checkbox", .checkbox, .checkbox, false),
-        .combobox => builtinComponent(.combobox, "Combobox", .search_field, .textbox, true),
-        .dialog => builtinComponent(.dialog, "Dialog", .popover, .dialog, true),
-        .drawer => builtinComponent(.drawer, "Drawer", .popover, .dialog, true),
-        .dropdown_menu => builtinComponent(.dropdown_menu, "Dropdown Menu", .menu_surface, .menu, true),
-        .input => builtinComponent(.input, "Input", .text_field, .textbox, false),
-        .pagination => builtinComponent(.pagination, "Pagination", .row, .group, true),
-        .progress => builtinComponent(.progress, "Progress", .progress, .progressbar, false),
-        .radio_group => builtinComponent(.radio_group, "Radio Group", .row, .group, true),
-        .resizable => builtinComponent(.resizable, "Resizable", .panel, .group, true),
-        .select => builtinComponent(.select, "Select", .select, .button, true),
-        .separator => builtinComponent(.separator, "Separator", .separator, .none, false),
-        .sheet => builtinComponent(.sheet, "Sheet", .popover, .dialog, true),
-        .skeleton => builtinComponent(.skeleton, "Skeleton", .skeleton, .none, false),
-        .slider => builtinComponent(.slider, "Slider", .slider, .slider, false),
-        .spinner => builtinComponent(.spinner, "Spinner", .spinner, .progressbar, false),
-        .switch_control => builtinComponent(.switch_control, "Switch", .toggle, .switch_control, false),
-        .table => builtinComponent(.table, "Table", .data_grid, .grid, true),
-        .tabs => builtinComponent(.tabs, "Tabs", .row, .group, true),
-        .textarea => builtinComponent(.textarea, "Textarea", .textarea, .textbox, false),
-        .toggle => builtinComponent(.toggle, "Toggle", .button, .button, false),
-        .toggle_group => builtinComponent(.toggle_group, "Toggle Group", .row, .group, true),
-        .tooltip => builtinComponent(.tooltip, "Tooltip", .tooltip, .tooltip, false),
+        .accordion => builtinComponent(.accordion, .panel, .group, true),
+        .alert => builtinComponent(.alert, .panel, .group, true),
+        .avatar => builtinComponent(.avatar, .avatar, .image, false),
+        .badge => builtinComponent(.badge, .badge, .text, false),
+        .breadcrumb => builtinComponent(.breadcrumb, .row, .group, true),
+        .bubble => builtinComponent(.bubble, .panel, .group, true),
+        .button => builtinComponent(.button, .button, .button, false),
+        .button_group => builtinComponent(.button_group, .row, .group, true),
+        .card => builtinComponent(.card, .panel, .group, true),
+        .checkbox => builtinComponent(.checkbox, .checkbox, .checkbox, false),
+        .combobox => builtinComponent(.combobox, .search_field, .textbox, true),
+        .dialog => builtinComponent(.dialog, .popover, .dialog, true),
+        .drawer => builtinComponent(.drawer, .popover, .dialog, true),
+        .dropdown_menu => builtinComponent(.dropdown_menu, .menu_surface, .menu, true),
+        .input => builtinComponent(.input, .text_field, .textbox, false),
+        .pagination => builtinComponent(.pagination, .row, .group, true),
+        .progress => builtinComponent(.progress, .progress, .progressbar, false),
+        .radio_group => builtinComponent(.radio_group, .row, .group, true),
+        .resizable => builtinComponent(.resizable, .panel, .group, true),
+        .select => builtinComponent(.select, .select, .button, true),
+        .separator => builtinComponent(.separator, .separator, .none, false),
+        .sheet => builtinComponent(.sheet, .popover, .dialog, true),
+        .skeleton => builtinComponent(.skeleton, .skeleton, .none, false),
+        .slider => builtinComponent(.slider, .slider, .slider, false),
+        .spinner => builtinComponent(.spinner, .spinner, .progressbar, false),
+        .switch_control => builtinComponent(.switch_control, .toggle, .switch_control, false),
+        .table => builtinComponent(.table, .data_grid, .grid, true),
+        .tabs => builtinComponent(.tabs, .row, .group, true),
+        .textarea => builtinComponent(.textarea, .textarea, .textbox, false),
+        .toggle => builtinComponent(.toggle, .button, .button, false),
+        .toggle_group => builtinComponent(.toggle_group, .row, .group, true),
+        .tooltip => builtinComponent(.tooltip, .tooltip, .tooltip, false),
     };
 }
 
 fn builtinComponent(
     kind: BuiltinComponentKind,
-    name: []const u8,
     root_widget_kind: WidgetKind,
     role: WidgetRole,
     composite: bool,
 ) BuiltinComponentDescriptor {
     return .{
         .kind = kind,
-        .name = name,
+        .name = builtinComponentName(kind),
         .root_widget_kind = root_widget_kind,
         .role = role,
         .style = .shadcn,
@@ -15204,50 +15242,19 @@ test "design tokens provide theme and contrast palettes" {
 }
 
 test "built-in component catalog covers shadcn component set" {
-    const expected_names = [_][]const u8{
-        "Accordion",
-        "Alert",
-        "Avatar",
-        "Badge",
-        "Breadcrumb",
-        "Bubble",
-        "Button",
-        "Button Group",
-        "Card",
-        "Checkbox",
-        "Combobox",
-        "Dialog",
-        "Drawer",
-        "Dropdown Menu",
-        "Input",
-        "Pagination",
-        "Progress",
-        "Radio Group",
-        "Resizable",
-        "Select",
-        "Separator",
-        "Sheet",
-        "Skeleton",
-        "Slider",
-        "Spinner",
-        "Switch",
-        "Table",
-        "Tabs",
-        "Textarea",
-        "Toggle",
-        "Toggle Group",
-        "Tooltip",
-    };
-    try std.testing.expectEqual(expected_names.len, builtinComponentCount());
-
     const enum_len = @typeInfo(BuiltinComponentKind).@"enum".fields.len;
+    try std.testing.expectEqual(enum_len, builtinComponentCount());
+    try std.testing.expectEqual(enum_len, builtin_component_names.len);
+
     var seen = [_]bool{false} ** enum_len;
     for (builtin_component_kinds, 0..) |kind, index| {
         const descriptor = builtinComponentDescriptor(kind);
         try std.testing.expectEqual(kind, descriptor.kind);
-        try std.testing.expectEqualStrings(expected_names[index], descriptor.name);
+        try std.testing.expectEqualStrings(builtin_component_names[index], descriptor.name);
+        try std.testing.expectEqualStrings(builtin_component_names[index], builtinComponentName(kind));
         try std.testing.expectEqual(BuiltinComponentStyle.shadcn, descriptor.style);
         const ordinal = @intFromEnum(kind);
+        try std.testing.expectEqual(index, ordinal);
         try std.testing.expect(!seen[ordinal]);
         seen[ordinal] = true;
     }

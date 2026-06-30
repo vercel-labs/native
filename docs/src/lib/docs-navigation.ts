@@ -32,6 +32,7 @@ export const navSections: NavSection[] = [
       { name: "Dialogs", href: "/dialogs" },
       { name: "Menus", href: "/menus" },
       { name: "Native Controls", href: "/native-controls" },
+      { name: "Built-in Components", href: "/built-in-components" },
       { name: "Capabilities", href: "/capabilities" },
       { name: "Platform Support", href: "/platform-support" },
       { name: "System Tray", href: "/tray" },

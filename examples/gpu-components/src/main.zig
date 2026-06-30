@@ -18,7 +18,7 @@ const default_canvas_size = geometry.SizeF.init(canvas_width, canvas_height);
 const max_component_pipelines: usize = 8;
 const max_component_commands: usize = zero_native.runtime.max_canvas_commands_per_view;
 const max_component_glyphs: usize = zero_native.runtime.max_canvas_glyphs_per_view;
-const max_component_widgets: usize = 48;
+const max_component_widgets: usize = zero_native.runtime.max_canvas_widget_nodes_per_view;
 const component_chrome_prefix_commands: usize = 1;
 const component_chrome_suffix_commands: usize = 0;
 const refresh_command = "components.refresh";
@@ -44,6 +44,7 @@ const ComponentVirtualScroll = struct {
     nav: f32 = 0,
     behavior: f32 = 28,
     data: f32 = 28,
+    catalog: f32 = 0,
 };
 
 const ComponentThemeMode = enum {
@@ -521,6 +522,7 @@ const GpuComponentsApp = struct {
             120 => self.virtual_scroll.nav,
             130 => self.virtual_scroll.behavior,
             150 => self.virtual_scroll.data,
+            180 => self.virtual_scroll.catalog,
             else => null,
         };
     }
@@ -530,6 +532,7 @@ const GpuComponentsApp = struct {
             120 => self.virtual_scroll.nav = value,
             130 => self.virtual_scroll.behavior = value,
             150 => self.virtual_scroll.data = value,
+            180 => self.virtual_scroll.catalog = value,
             else => return error.InvalidCommand,
         }
     }
@@ -578,7 +581,7 @@ fn componentSurfaceSize(size: geometry.SizeF) geometry.SizeF {
 fn componentVirtualScrollTarget(route: []const canvas.WidgetEventRouteEntry) ?canvas.ObjectId {
     for (route) |entry| {
         switch (entry.id) {
-            120, 130, 150 => return entry.id,
+            120, 130, 150, 180 => return entry.id,
             else => {},
         }
     }
@@ -709,6 +712,19 @@ fn buildComponentsWidgetLayoutWithScroll(nodes: []canvas.WidgetLayoutNode, virtu
     return buildComponentsWidgetLayoutWithScrollAndSize(nodes, virtual_scroll, default_canvas_size);
 }
 
+fn componentCatalogItems() [canvas.builtin_component_names.len]canvas.Widget {
+    var items: [canvas.builtin_component_names.len]canvas.Widget = undefined;
+    for (&items, 0..) |*item, index| {
+        item.* = .{
+            .id = @as(canvas.ObjectId, @intCast(181 + index)),
+            .kind = .list_item,
+            .text = canvas.builtin_component_names[index],
+            .state = .{ .selected = index == 0 },
+        };
+    }
+    return items;
+}
+
 fn buildComponentsWidgetLayoutWithScrollAndSize(nodes: []canvas.WidgetLayoutNode, virtual_scroll: ComponentVirtualScroll, surface_size: geometry.SizeF) canvas.Error!canvas.WidgetLayoutTree {
     const nav_items = [_]canvas.Widget{
         .{ .id = 121, .kind = .list_item, .text = "Controls", .state = .{ .selected = true } },
@@ -725,6 +741,7 @@ fn buildComponentsWidgetLayoutWithScrollAndSize(nodes: []canvas.WidgetLayoutNode
         .{ .id = 134, .kind = .list_item, .text = "Logical ranges" },
         .{ .id = 135, .kind = .list_item, .text = "Dirty bounds" },
     };
+    const component_catalog_items = componentCatalogItems();
     const segment_controls = [_]canvas.Widget{
         .{ .id = 117, .kind = .segmented_control, .text = "Small", .size = .sm, .state = .{ .selected = true }, .semantics = .{ .label = "Small density" } },
         .{ .id = 119, .kind = .segmented_control, .text = "Large", .size = .lg, .semantics = .{ .label = "Large density" } },
@@ -795,6 +812,8 @@ fn buildComponentsWidgetLayoutWithScrollAndSize(nodes: []canvas.WidgetLayoutNode
         .{ .id = 106, .kind = .stack, .frame = rect(64, 124, 352, 374), .semantics = .{ .label = "Input controls" }, .children = &form_controls },
         .{ .id = 120, .kind = .list, .frame = rect(456, 124, 170, 56), .value = virtual_scroll.nav, .layout = .{ .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .semantics = .{ .label = "Component navigation" }, .children = &nav_items },
         .{ .id = 130, .kind = .scroll_view, .frame = rect(652, 124, 186, 56), .value = virtual_scroll.behavior, .layout = .{ .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .semantics = .{ .label = "Scrollable behavior list" }, .children = &scroll_items },
+        .{ .id = 179, .kind = .text, .frame = rect(652, 210, 186, 22), .text = "Built-in components", .size = .sm },
+        .{ .id = 180, .kind = .list, .frame = rect(652, 238, 186, 112), .value = virtual_scroll.catalog, .layout = .{ .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .semantics = .{ .label = "Shadcn-style built-in component catalog" }, .children = &component_catalog_items },
         .{ .id = 140, .kind = .popover, .frame = rect(456, 248, 174, 88), .backdrop_blur_token = .sm, .semantics = .{ .label = "Actions popover" }, .children = &popover_children },
         .{ .id = 149, .kind = .stack, .frame = rect(64, 540, 620, 60), .semantics = .{ .label = "Data controls" }, .children = &data_panel_children },
     };
@@ -1151,6 +1170,10 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetFrame(layout, 172, rect(64, 454, 180, 34));
     try expectComponentWidgetFrame(layout, 120, rect(456, 124, 170, 56));
     try expectComponentWidgetFrame(layout, 130, rect(652, 124, 186, 56));
+    try expectComponentWidgetFrame(layout, 179, rect(652, 210, 186, 22));
+    try expectComponentWidgetFrame(layout, 180, rect(652, 238, 186, 112));
+    try expectComponentWidgetFrame(layout, 181, rect(652, 238, 186, 28));
+    try expectComponentWidgetFrame(layout, 184, rect(652, 322, 186, 28));
     try expectComponentWidgetFrame(layout, 140, rect(456, 248, 174, 88));
     try expectComponentWidgetsDoNotOverlap(layout, 111, 112);
     try expectComponentWidgetsDoNotOverlap(layout, 113, 114);
@@ -1163,6 +1186,8 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetsDoNotOverlap(layout, 106, 120);
     try expectComponentWidgetsDoNotOverlap(layout, 120, 130);
     try expectComponentWidgetsDoNotOverlap(layout, 130, 140);
+    try expectComponentWidgetsDoNotOverlap(layout, 130, 180);
+    try expectComponentWidgetsDoNotOverlap(layout, 140, 180);
 
     try std.testing.expect(layout.findById(151) == null);
     try expectComponentWidgetFrame(layout, 150, rect(64, 540, 360, 28));
@@ -1178,6 +1203,7 @@ test "gpu components layout keeps finished controls visually separated" {
         .nav = 28,
         .behavior = 56,
         .data = 56,
+        .catalog = 84,
     });
     try std.testing.expect(scrolled_layout.findById(121) == null);
     try expectComponentWidgetFrame(scrolled_layout, 122, rect(456, 124, 170, 28));
@@ -1189,6 +1215,9 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetFrame(scrolled_layout, 153, rect(64, 540, 360, 28));
     try expectComponentWidgetFrame(scrolled_layout, 158, rect(64, 540, 180, 28));
     try expectComponentWidgetFrame(scrolled_layout, 159, rect(244, 540, 180, 28));
+    try std.testing.expect(scrolled_layout.findById(181) == null);
+    try expectComponentWidgetFrame(scrolled_layout, 184, rect(652, 238, 186, 28));
+    try expectComponentWidgetFrame(scrolled_layout, 187, rect(652, 322, 186, 28));
 
     var smooth_scrolled_nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
     const smooth_scrolled_layout = try buildComponentsWidgetLayoutWithScroll(&smooth_scrolled_nodes, .{
@@ -1207,6 +1236,7 @@ test "gpu components combined virtual scroll state stays within display budget" 
         .nav = 28,
         .behavior = 56,
         .data = 56,
+        .catalog = 84,
     });
     try buildComponentsDisplayList(&builder, layout, componentTokens());
     const display_list = builder.displayList();
@@ -1217,6 +1247,7 @@ test "gpu components combined virtual scroll state stays within display budget" 
     try std.testing.expect(layout.findById(120).?.widget.value == 28);
     try std.testing.expect(layout.findById(130).?.widget.value == 56);
     try std.testing.expect(layout.findById(150).?.widget.value == 56);
+    try std.testing.expect(layout.findById(180).?.widget.value == 84);
 }
 
 test "gpu components frame plan stays within runtime budgets" {
@@ -1311,7 +1342,7 @@ test "gpu components display list renders stable reference snapshot" {
     const surface = (try canvas.ReferenceRenderSurface.initWithScratch(@intFromFloat(canvas_width), @intFromFloat(canvas_height), pixels, scratch)).withImages(&preview_images);
     try surface.renderPass(frame.renderPass(), color(247, 249, 252));
 
-    try std.testing.expectEqual(@as(u64, 4044020419698402391), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 5674415884419601371), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -1384,6 +1415,8 @@ test "gpu components semantics cover retained widget families" {
     try expectSemanticRole(semantics, 170, .radio);
     try expectSemanticRole(semantics, 171, .textbox);
     try expectSemanticRole(semantics, 172, .button);
+    try expectSemanticRole(semantics, 180, .list);
+    try expectSemanticRole(semantics, 181, .listitem);
 
     const slider = expectSemantic(semantics, 115);
     try std.testing.expectEqual(@as(?f32, 0.62), slider.value);
@@ -1408,6 +1441,14 @@ test "gpu components semantics cover retained widget families" {
     try std.testing.expectEqual(@as(?usize, 5), data_grid.grid_row_count);
     try std.testing.expectEqual(@as(?usize, 2), data_grid.grid_column_count);
     try std.testing.expectEqual(@as(?usize, 1), expectSemantic(semantics, 156).grid_row_index);
+    const catalog = expectSemantic(semantics, 180);
+    try std.testing.expect(catalog.scroll.present);
+    try std.testing.expect(catalog.actions.increment);
+    try std.testing.expect(catalog.actions.decrement);
+    const first_catalog_item = expectSemantic(semantics, 181);
+    try std.testing.expect(first_catalog_item.state.selected);
+    try std.testing.expectEqual(@as(u32, canvas.builtin_component_names.len), first_catalog_item.list.item_count);
+    try std.testing.expectEqualStrings(canvas.builtin_component_names[0], first_catalog_item.label);
     try std.testing.expectEqual(@as(?usize, 0), expectSemantic(semantics, 156).grid_column_index);
 }
 

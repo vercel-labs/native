@@ -13,6 +13,7 @@ export const PAGE_TITLES: Record<string, string> = {
   dialogs: "Dialogs",
   menus: "Menus",
   "native-controls": "Native Controls",
+  "built-in-components": "Built-in Components",
   capabilities: "Capabilities",
   "platform-support": "Platform Support",
   tray: "System Tray",
