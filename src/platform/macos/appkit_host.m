@@ -576,6 +576,13 @@ static NSPoint ZeroNativePacketPoint(id value) {
     return NSMakePoint(ZeroNativePacketNumber(array[0], 0), ZeroNativePacketNumber(array[1], 0));
 }
 
+static BOOL ZeroNativePacketReadPoint(id value, NSPoint *point) {
+    NSArray *array = ZeroNativePacketArray(value, 2);
+    if (!array || !point) return NO;
+    *point = NSMakePoint(ZeroNativePacketNumber(array[0], 0), ZeroNativePacketNumber(array[1], 0));
+    return YES;
+}
+
 static CGFloat ZeroNativePacketRadius(id value) {
     NSArray *array = ZeroNativePacketArray(value, 1);
     if (!array) return 0;
@@ -595,6 +602,56 @@ static NSColor *ZeroNativePacketColor(id value, CGFloat opacity) {
 static NSBezierPath *ZeroNativePacketShapePath(NSDictionary *shape) {
     if (!shape) return nil;
     NSString *kind = [shape[@"kind"] isKindOfClass:[NSString class]] ? shape[@"kind"] : @"";
+    if ([kind isEqualToString:@"path"]) {
+        NSArray *elements = ZeroNativePacketArray(shape[@"path"], 0);
+        if (!elements) return nil;
+        NSBezierPath *path = [NSBezierPath bezierPath];
+        BOOL hasCurrentPoint = NO;
+        NSPoint currentPoint = NSZeroPoint;
+        NSPoint subpathStart = NSZeroPoint;
+        for (id elementObject in elements) {
+            NSDictionary *element = ZeroNativePacketDictionary(elementObject);
+            if (!element) return nil;
+            NSString *verb = [element[@"verb"] isKindOfClass:[NSString class]] ? element[@"verb"] : @"";
+            NSArray *points = ZeroNativePacketArray(element[@"points"], 0);
+            if (!points) return nil;
+            if ([verb isEqualToString:@"move_to"]) {
+                NSPoint point = NSZeroPoint;
+                if (points.count < 1 || !ZeroNativePacketReadPoint(points[0], &point)) return nil;
+                [path moveToPoint:point];
+                currentPoint = point;
+                subpathStart = point;
+                hasCurrentPoint = YES;
+            } else if ([verb isEqualToString:@"line_to"]) {
+                NSPoint point = NSZeroPoint;
+                if (!hasCurrentPoint || points.count < 1 || !ZeroNativePacketReadPoint(points[0], &point)) return nil;
+                [path lineToPoint:point];
+                currentPoint = point;
+            } else if ([verb isEqualToString:@"quad_to"]) {
+                NSPoint control = NSZeroPoint;
+                NSPoint end = NSZeroPoint;
+                if (!hasCurrentPoint || points.count < 2 || !ZeroNativePacketReadPoint(points[0], &control) || !ZeroNativePacketReadPoint(points[1], &end)) return nil;
+                NSPoint control1 = NSMakePoint(currentPoint.x + (control.x - currentPoint.x) * 2.0 / 3.0, currentPoint.y + (control.y - currentPoint.y) * 2.0 / 3.0);
+                NSPoint control2 = NSMakePoint(end.x + (control.x - end.x) * 2.0 / 3.0, end.y + (control.y - end.y) * 2.0 / 3.0);
+                [path curveToPoint:end controlPoint1:control1 controlPoint2:control2];
+                currentPoint = end;
+            } else if ([verb isEqualToString:@"cubic_to"]) {
+                NSPoint control1 = NSZeroPoint;
+                NSPoint control2 = NSZeroPoint;
+                NSPoint end = NSZeroPoint;
+                if (!hasCurrentPoint || points.count < 3 || !ZeroNativePacketReadPoint(points[0], &control1) || !ZeroNativePacketReadPoint(points[1], &control2) || !ZeroNativePacketReadPoint(points[2], &end)) return nil;
+                [path curveToPoint:end controlPoint1:control1 controlPoint2:control2];
+                currentPoint = end;
+            } else if ([verb isEqualToString:@"close"]) {
+                if (!hasCurrentPoint) return nil;
+                [path closePath];
+                currentPoint = subpathStart;
+            } else {
+                return nil;
+            }
+        }
+        return path;
+    }
     if ([kind isEqualToString:@"rect"]) {
         return [NSBezierPath bezierPathWithRect:ZeroNativePacketRect(shape[@"rect"])];
     }
@@ -743,6 +800,12 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command) {
         ok = ZeroNativePacketDrawPaintedPath(path, ZeroNativePacketDictionary(command[@"paint"]), opacity, YES);
     } else if ([kind hasPrefix:@"draw_line"]) {
         ok = ZeroNativePacketDrawPaintedPath(ZeroNativePacketShapePath(ZeroNativePacketDictionary(command[@"shape"])), ZeroNativePacketDictionary(command[@"paint"]), opacity, YES);
+    } else if ([kind isEqualToString:@"fill_path"]) {
+        ok = ZeroNativePacketDrawPaintedPath(ZeroNativePacketShapePath(ZeroNativePacketDictionary(command[@"shape"])), ZeroNativePacketDictionary(command[@"paint"]), opacity, NO);
+    } else if ([kind isEqualToString:@"stroke_path"]) {
+        NSBezierPath *path = ZeroNativePacketShapePath(ZeroNativePacketDictionary(command[@"shape"]));
+        path.lineWidth = MAX(1, ZeroNativePacketNumber(command[@"strokeWidth"], path.lineWidth));
+        ok = ZeroNativePacketDrawPaintedPath(path, ZeroNativePacketDictionary(command[@"paint"]), opacity, YES);
     } else if ([kind isEqualToString:@"draw_text"]) {
         ok = ZeroNativePacketDrawText(ZeroNativePacketDictionary(command[@"text"]), opacity);
     } else if ([kind isEqualToString:@"shadow"] || [kind isEqualToString:@"blur"]) {

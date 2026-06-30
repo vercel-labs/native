@@ -1931,6 +1931,7 @@ pub const CanvasGpuShape = union(enum) {
     rounded_rect: CanvasGpuRoundedRect,
     stroke_rect: CanvasGpuStrokeRect,
     line: CanvasGpuLine,
+    path: []const PathElement,
 };
 
 pub const CanvasGpuPaint = union(enum) {
@@ -4669,6 +4670,7 @@ fn canvasGpuCommandFromRenderCommand(command: RenderCommand, command_index: usiz
         .fill_path => |value| {
             packet_command.kind = .fill_path;
             packet_command.pipeline = .path;
+            packet_command.shape = .{ .path = value.elements };
             packet_command.paint = canvasGpuPaint(value.fill);
             packet_command.uses_path_geometry = true;
             packet_command.uses_resource = canvasGpuFillUsesResource(value.fill);
@@ -4676,6 +4678,7 @@ fn canvasGpuCommandFromRenderCommand(command: RenderCommand, command_index: usiz
         .stroke_path => |value| {
             packet_command.kind = .stroke_path;
             packet_command.pipeline = .path;
+            packet_command.shape = .{ .path = value.elements };
             packet_command.paint = canvasGpuPaint(value.stroke.fill);
             packet_command.stroke_width = value.stroke.width;
             packet_command.uses_path_geometry = true;
@@ -11058,6 +11061,11 @@ fn writeCanvasGpuShapeJson(shape: CanvasGpuShape, writer: anytype) !void {
             try writePointJson(line.to, writer);
             try writer.print(",\"width\":{d}}}", .{line.width});
         },
+        .path => |path| {
+            try writer.writeAll("{\"kind\":\"path\",\"path\":");
+            try writePathJson(path, writer);
+            try writer.writeByte('}');
+        },
     }
 }
 
@@ -17015,6 +17023,15 @@ test "canvas render pass builds gpu packet for backend handoff" {
     }
     try std.testing.expectEqual(CanvasGpuCommandKind.fill_path, packet.commands[4].kind);
     try std.testing.expect(packet.commands[4].uses_path_geometry);
+    switch (packet.commands[4].shape) {
+        .path => |elements| {
+            try std.testing.expectEqual(@as(usize, 4), elements.len);
+            try std.testing.expectEqual(PathVerb.move_to, elements[0].verb);
+            try std.testing.expectEqual(PathVerb.line_to, elements[1].verb);
+            try std.testing.expectEqual(PathVerb.close, elements[3].verb);
+        },
+        else => return error.TestExpectedEqual,
+    }
     try expectGpuPaintColor(Color.rgb8(15, 23, 42), packet.commands[4].paint);
     try std.testing.expectEqual(CanvasGpuCommandKind.draw_image, packet.commands[5].kind);
     try std.testing.expect(packet.commands[5].uses_image);
@@ -17070,6 +17087,7 @@ test "canvas render pass builds gpu packet for backend handoff" {
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"kind\":\"fill_rounded_rect_gradient\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"shape\":{\"kind\":\"rounded_rect\",\"rect\":[16,0,24,12],\"radius\":[4,4,4,4]}") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"paint\":{\"kind\":\"linear_gradient\",\"start\":[16,0],\"end\":[40,12]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"shape\":{\"kind\":\"path\",\"path\":[{\"verb\":\"move_to\",\"points\":[[0,0]]},{\"verb\":\"line_to\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"image\":{\"image\":42,\"src\":[4,8,32,24],\"dst\":[44,0,16,16],\"opacity\":0.75,\"fit\":\"cover\",\"sampling\":\"nearest\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"text\":{\"font\":7,\"size\":12,\"origin\":[0,32]") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"effect\":{\"kind\":\"shadow\",\"rect\":[0,36,40,20],\"radius\":[6,6,6,6],\"offset\":[2,3],\"blur\":8,\"spread\":1") != null);
