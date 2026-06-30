@@ -1640,6 +1640,7 @@ pub const NullPlatform = struct {
     web_engine: WebEngine = .system,
     app_info: AppInfo = .{},
     gpu_surfaces: bool = false,
+    gpu_surface_packets: bool = true,
     requested_frames: u32 = 1,
     loaded_source: ?WebViewSource = null,
     security_policy: security.Policy = .{},
@@ -2340,6 +2341,7 @@ pub const NullPlatform = struct {
     fn presentGpuSurfacePacket(context: ?*anyopaque, packet: GpuSurfacePacket) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         if (!self.gpu_surfaces) return error.UnsupportedService;
+        if (!self.gpu_surface_packets) return error.UnsupportedService;
         const view_index = self.findViewIndex(packet.window_id, packet.label) orelse return error.ViewNotFound;
         if (self.views[view_index].kind != .gpu_surface) return error.InvalidGpuSurfacePacket;
         if (packet.json.len == 0 or packet.json.len > max_gpu_surface_packet_json_bytes) return error.InvalidGpuSurfacePacket;

@@ -163,6 +163,8 @@ const GpuDashboardApp = struct {
     reported_planned_frame: bool = false,
     pixels: ?[]u8 = null,
     scratch: ?[]u8 = null,
+    gpu_commands: [max_dashboard_commands]canvas.CanvasGpuCommand = undefined,
+    packet_json: [zero_native.platform.max_gpu_surface_packet_json_bytes]u8 = undefined,
     render_commands: [max_dashboard_commands]canvas.RenderCommand = undefined,
     render_batches: [max_dashboard_commands]canvas.RenderBatch = undefined,
     pipeline_cache_entries: [max_dashboard_pipelines]canvas.RenderPipelineCacheEntry = undefined,
@@ -346,7 +348,9 @@ const GpuDashboardApp = struct {
     fn presentDashboardCanvas(self: *@This(), runtime: *zero_native.Runtime, frame_event: zero_native.GpuSurfaceFrameEvent, full_repaint: bool) anyerror!canvas.CanvasFrame {
         const surface_size = if (frame_event.size.isEmpty()) geometry.SizeF.init(canvas_width, window_height - toolbar_height - statusbar_height) else frame_event.size;
         const scale_factor = if (frame_event.scale_factor > 0) frame_event.scale_factor else 1;
-        const canvas_frame = try runtime.nextCanvasFrame(
+        const present_scale = referencePresentScale(scale_factor);
+        try self.ensurePixelBuffers(surface_size, present_scale);
+        const result = try runtime.presentNextCanvasFrame(
             frame_event.window_id,
             "dashboard-canvas",
             .{
@@ -357,22 +361,14 @@ const GpuDashboardApp = struct {
                 .full_repaint = full_repaint,
             },
             self.frameStorage(),
+            &self.gpu_commands,
+            &self.packet_json,
+            self.pixels.?,
+            self.scratch.?,
+            color(246, 248, 252),
+            present_scale,
         );
-        if (canvas_frame.requiresRender()) {
-            const present_scale = referencePresentScale(scale_factor);
-            try self.ensurePixelBuffers(surface_size, present_scale);
-            var present_frame = canvas_frame;
-            present_frame.scale = present_scale;
-            try runtime.presentCanvasFramePixels(
-                frame_event.window_id,
-                "dashboard-canvas",
-                present_frame,
-                self.pixels.?,
-                self.scratch.?,
-                color(246, 248, 252),
-            );
-        }
-        return canvas_frame;
+        return result.frame;
     }
 
     fn referencePresentScale(scale_factor: f32) f32 {
@@ -1112,10 +1108,11 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     try std.testing.expect(display_list.findCommandById(activity_scroll_thumb_command_id) != null);
     try std.testing.expect(display_list.findCommandById(overview_fill_command_id) != null);
     try std.testing.expect(display_list.findCommandById(customers_fill_command_id) == null);
-    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_present_count);
-    try std.testing.expectEqual(@as(usize, 720), harness.null_platform.gpu_surface_present_width);
-    try std.testing.expectEqual(@as(usize, 520), harness.null_platform.gpu_surface_present_height);
-    try std.testing.expectEqual(@as(f32, 1), harness.null_platform.gpu_surface_present_scale_factor);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_packet_present_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_present_count);
+    try std.testing.expectEqualDeep(geometry.SizeF.init(720, 520), harness.null_platform.gpu_surface_packet_present_surface_size);
+    try std.testing.expectEqual(@as(f32, 2), harness.null_platform.gpu_surface_packet_present_scale_factor);
+    try std.testing.expect(harness.null_platform.gpu_surface_packet_present_representable);
     const animations = try harness.runtime.canvasRenderAnimations(1, "dashboard-canvas");
     try std.testing.expectEqual(@as(usize, 2), animations.len);
     try std.testing.expectEqual(live_button_fill_command_id, animations[0].id);
