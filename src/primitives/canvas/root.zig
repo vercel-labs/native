@@ -8516,7 +8516,7 @@ pub fn widgetSemanticControlIntentWithActions(widget: Widget, action: WidgetSema
     if (widget.state.disabled or widget.semantics.hidden) return null;
     return switch (action) {
         .press => if (actions.press)
-            .{ .kind = .press, .actions = .{ .press = true } }
+            widgetSemanticPressControlIntent(widget, actions)
         else
             null,
         .toggle => if (actions.toggle)
@@ -8535,6 +8535,22 @@ pub fn widgetSemanticControlIntentWithActions(widget: Widget, action: WidgetSema
             null,
         .increment => widgetSemanticStepControlIntent(widget, .increment, actions),
         .decrement => widgetSemanticStepControlIntent(widget, .decrement, actions),
+    };
+}
+
+fn widgetSemanticPressControlIntent(widget: Widget, actions: WidgetActions) WidgetControlIntent {
+    return switch (widget.kind) {
+        .list_item, .menu_item, .data_cell, .segmented_control => if (actions.select)
+            .{
+                .kind = .select,
+                .actions = .{
+                    .press = true,
+                    .select = true,
+                },
+            }
+        else
+            .{ .kind = .press, .actions = .{ .press = true } },
+        else => .{ .kind = .press, .actions = .{ .press = true } },
     };
 }
 
@@ -20393,6 +20409,11 @@ test "widget semantic control intents map built-in actions" {
     try std.testing.expectEqual(WidgetControlIntentKind.select, selected.kind);
     try std.testing.expect(selected.actions.select);
     try std.testing.expect(selected.actions.press);
+
+    const pressed_menu_item = widgetSemanticControlIntent(.{ .kind = .menu_item, .text = "Archive", .command = "archive" }, .press).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.select, pressed_menu_item.kind);
+    try std.testing.expect(pressed_menu_item.actions.select);
+    try std.testing.expect(pressed_menu_item.actions.press);
 
     try std.testing.expect(widgetSemanticControlIntent(.{ .kind = .button, .text = "Save" }, .toggle) == null);
     try std.testing.expect(widgetSemanticControlIntent(.{ .kind = .button, .text = "Save", .state = .{ .disabled = true } }, .press) == null);

@@ -1299,6 +1299,12 @@ pub const Runtime = struct {
         const actions = self.canvasWidgetActionsForId(index, action.id) orelse return error.InvalidCommand;
         if (!canvasWidgetAccessibilityActionSupported(actions, action.action)) return error.InvalidCommand;
 
+        if (canvasWidgetAccessibilitySemanticAction(action.action)) |semantic_action| {
+            if (try self.dispatchCanvasWidgetSemanticControlAction(app, index, action.id, semantic_action, actions)) {
+                return self.views[index].info();
+            }
+        }
+
         switch (action.action) {
             .focus => try self.focusAutomationCanvasWidget(index, action.id),
             .press => try self.dispatchAutomationWidgetKey(app, index, action.id, "enter"),
@@ -1933,6 +1939,20 @@ pub const Runtime = struct {
         try self.refreshCanvasWidgetDisplayListIfOwned(index);
     }
 
+    fn dispatchCanvasWidgetCommandForId(self: *Runtime, app: App, view_index: usize, id: canvas.ObjectId) anyerror!void {
+        if (view_index >= self.view_count) return error.ViewNotFound;
+        const node_index = self.views[view_index].canvasWidgetNodeIndexById(id) orelse return;
+        const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+        if (!canvasWidgetCommandable(widget.kind)) return;
+        const command = self.views[view_index].canvasWidgetCommand(id) orelse return;
+        try self.dispatchCommand(app, .{
+            .name = command,
+            .source = .native_view,
+            .window_id = self.views[view_index].window_id,
+            .view_label = self.views[view_index].label,
+        });
+    }
+
     fn dispatchCanvasWidgetCommandFromPointer(self: *Runtime, app: App, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
         if (pointer_event.pointer.phase != .up) return;
         const index = self.findViewIndex(pointer_event.window_id, pointer_event.view_label) orelse return;
@@ -1941,14 +1961,7 @@ pub const Runtime = struct {
         const pressed_id = if (pointer_event.pointer.captured_id != 0) pointer_event.pointer.captured_id else self.views[index].canvas_widget_pressed_id;
         if (pressed_id != target.id) return;
         if (!target.bounds.normalized().containsPoint(pointer_event.pointer.point)) return;
-        if (!canvasWidgetCommandable(target.kind)) return;
-        const command = self.views[index].canvasWidgetCommand(target.id) orelse return;
-        try self.dispatchCommand(app, .{
-            .name = command,
-            .source = .native_view,
-            .window_id = pointer_event.window_id,
-            .view_label = pointer_event.view_label,
-        });
+        try self.dispatchCanvasWidgetCommandForId(app, index, target.id);
     }
 
     fn dispatchCanvasWidgetCommandFromKeyboard(self: *Runtime, app: App, keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
@@ -1957,14 +1970,7 @@ pub const Runtime = struct {
         const index = self.findViewIndex(keyboard_event.window_id, keyboard_event.view_label) orelse return;
         if (self.views[index].kind != .gpu_surface) return;
         const target = keyboard_event.target orelse return;
-        if (!canvasWidgetCommandable(target.kind)) return;
-        const command = self.views[index].canvasWidgetCommand(target.id) orelse return;
-        try self.dispatchCommand(app, .{
-            .name = command,
-            .source = .native_view,
-            .window_id = keyboard_event.window_id,
-            .view_label = keyboard_event.view_label,
-        });
+        try self.dispatchCanvasWidgetCommandForId(app, index, target.id);
     }
 
     fn updateCanvasWidgetFocusFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent) anyerror!void {
@@ -2996,6 +3002,50 @@ pub const Runtime = struct {
             .drag => try self.dispatchAutomationCanvasWidgetDrag(app, view_index, action.id, action.value),
             .drop_files => try self.dispatchAutomationCanvasWidgetFileDrop(app, view_index, action.id, action.value),
         }
+    }
+
+    fn dispatchCanvasWidgetSemanticControlAction(
+        self: *Runtime,
+        app: App,
+        view_index: usize,
+        id: canvas.ObjectId,
+        action: canvas.WidgetSemanticAction,
+        actions: canvas.WidgetActions,
+    ) anyerror!bool {
+        if (view_index >= self.view_count) return error.ViewNotFound;
+        const node_index = self.views[view_index].canvasWidgetNodeIndexById(id) orelse return false;
+        const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+        const intent = canvas.widgetSemanticControlIntentWithActions(widget, action, actions) orelse return false;
+
+        self.views[view_index].recordGpuSurfaceInputTimestamp(automationInputTimestampNs());
+        self.beginCanvasWidgetDisplayListRefreshBatch();
+        var batch_active = true;
+        errdefer if (batch_active) self.cancelCanvasWidgetDisplayListRefreshBatch();
+
+        if (self.views[view_index].widgetLayoutTree().focusTargetById(id) != null) {
+            try self.focusAutomationCanvasWidget(view_index, id);
+        }
+
+        const toggle_animation = if (intent.kind == .toggle) self.views[view_index].canvasWidgetToggleAnimation(id) else null;
+        const dirty = try self.views[view_index].applyCanvasWidgetControlIntent(node_index, intent);
+        if (toggle_animation) |animation| try self.scheduleCanvasWidgetToggleAnimation(view_index, animation);
+        if (dirty) |bounds| {
+            const previous_cursor = self.views[view_index].canvas_widget_cursor;
+            switch (intent.kind) {
+                .scroll_by, .scroll_to_start, .scroll_to_end => self.views[view_index].reconcileCanvasWidgetRenderStateAfterScroll(null),
+                else => {},
+            }
+            if (previous_cursor != self.views[view_index].canvas_widget_cursor) try self.syncCanvasWidgetCursorForView(view_index);
+            try self.invalidateForCanvasWidgetDirty(view_index, bounds);
+        }
+
+        try self.endCanvasWidgetDisplayListRefreshBatch();
+        batch_active = false;
+
+        if (action == .press and intent.actions.press) {
+            try self.dispatchCanvasWidgetCommandForId(app, view_index, id);
+        }
+        return true;
     }
 
     fn dispatchAutomationWidgetClick(self: *Runtime, app: App, target: AutomationWidgetTarget) anyerror!void {
@@ -8831,6 +8881,17 @@ fn canvasWidgetAccessibilityActionSupported(actions: canvas.WidgetActions, actio
         .select => actions.select,
         .drag => actions.drag,
         .drop_files => actions.drop_files,
+    };
+}
+
+fn canvasWidgetAccessibilitySemanticAction(action: CanvasWidgetAccessibilityActionKind) ?canvas.WidgetSemanticAction {
+    return switch (action) {
+        .press => .press,
+        .toggle => .toggle,
+        .select => .select,
+        .increment => .increment,
+        .decrement => .decrement,
+        else => null,
     };
 }
 
@@ -20142,6 +20203,13 @@ test "runtime dispatches automation canvas widget actions" {
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_keyboard_target_id);
 
+    const keyboard_count_after_automation_press = app_state.widget_keyboard_count;
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 2, .action = .press });
+    try std.testing.expectEqual(@as(u32, 2), app_state.command_count);
+    try std.testing.expectEqualStrings("widget.run", app_state.last_command);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(keyboard_count_after_automation_press, app_state.widget_keyboard_count);
+
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 2, .action = .drag, .value = "18 2" });
     try std.testing.expectEqual(@as(u32, 1), app_state.widget_drag_count);
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_drag_source_id);
@@ -20193,12 +20261,12 @@ test "runtime dispatches automation canvas widget actions" {
     _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 7, .action = .increment });
     scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectApproxEqAbs(@as(f32, 40.8), scrolled_layout.findById(7).?.widget.value, 0.001);
-    try std.testing.expectEqualStrings("pagedown", app_state.last_keyboard_key);
+    try std.testing.expectEqual(@as(u32, 5), app_state.widget_keyboard_count);
 
     _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 7, .action = .decrement });
     scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqual(@as(f32, 0.0), scrolled_layout.findById(7).?.widget.value);
-    try std.testing.expectEqualStrings("pageup", app_state.last_keyboard_key);
+    try std.testing.expectEqual(@as(u32, 5), app_state.widget_keyboard_count);
 
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 11, .action = .drop_files, .value = "/tmp/report.csv /tmp/chart.png" });
     try std.testing.expectEqual(@as(u32, 1), app_state.widget_file_drop_count);

@@ -1264,8 +1264,8 @@ test "mobile C ABI dispatches GPU widget accessibility actions" {
     try std.testing.expectEqual(@as(usize, 1), zero_native_app_last_command_count(app));
     try std.testing.expectEqualStrings("widget.run", std.mem.span(zero_native_app_last_command_name(app)));
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), self.embedded.runtime.views[0].canvas_widget_focused_id);
-    try std.testing.expectEqual(platform.GpuSurfaceInputKind.key_down, self.last_input_kind);
-    try std.testing.expectEqualStrings("enter", self.last_input_key[0..self.last_input_key_len]);
+    try std.testing.expectEqual(platform.GpuSurfaceInputKind.pointer_up, self.last_input_kind);
+    try std.testing.expectEqual(@as(usize, 0), self.last_input_key_len);
 
     action = .{ .id = 3, .action = @intFromEnum(MobileWidgetActionKind.toggle) };
     try std.testing.expectEqual(@as(c_int, 1), zero_native_app_widget_action(app, &action));
