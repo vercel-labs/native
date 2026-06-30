@@ -143,6 +143,10 @@ pub export fn zero_native_app_viewport(
     embed.zero_native_app_viewport(app, width, height, scale, surface, safe_top, safe_right, safe_bottom, safe_left, keyboard_top, keyboard_right, keyboard_bottom, keyboard_left);
 }
 
+pub export fn zero_native_app_viewport_state(app: ?*anyopaque, out: ?*embed.MobileViewportState) c_int {
+    return embed.zero_native_app_viewport_state(app, out);
+}
+
 pub export fn zero_native_app_touch(app: ?*anyopaque, id: u64, phase: c_int, x: f32, y: f32, pressure: f32) void {
     embed.zero_native_app_touch(app, id, phase, x, y, pressure);
 }
@@ -193,6 +197,14 @@ pub export fn zero_native_app_widget_semantics_count(app: ?*anyopaque) usize {
 
 pub export fn zero_native_app_widget_semantics_at(app: ?*anyopaque, index: usize, out: ?*embed.MobileWidgetSemantics) c_int {
     return embed.zero_native_app_widget_semantics_at(app, index, out);
+}
+
+pub export fn zero_native_app_widget_semantics_by_id(app: ?*anyopaque, id: u64, out: ?*embed.MobileWidgetSemantics) c_int {
+    return embed.zero_native_app_widget_semantics_by_id(app, id, out);
+}
+
+pub export fn zero_native_app_widget_text_geometry(app: ?*anyopaque, id: u64, out: ?*embed.MobileWidgetTextGeometry) c_int {
+    return embed.zero_native_app_widget_text_geometry(app, id, out);
 }
 
 pub export fn zero_native_app_widget_action(app: ?*anyopaque, action: ?*const embed.MobileWidgetActionRequest) c_int {

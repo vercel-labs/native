@@ -134,6 +134,25 @@ pub const MobileWidgetActionRequest = extern struct {
     has_selection: c_int = 0,
 };
 
+pub const MobileViewportState = extern struct {
+    width: f32 = 0,
+    height: f32 = 0,
+    scale: f32 = 1,
+    has_surface: c_int = 0,
+    safe_top: f32 = 0,
+    safe_right: f32 = 0,
+    safe_bottom: f32 = 0,
+    safe_left: f32 = 0,
+    keyboard_top: f32 = 0,
+    keyboard_right: f32 = 0,
+    keyboard_bottom: f32 = 0,
+    keyboard_left: f32 = 0,
+    content_x: f32 = 0,
+    content_y: f32 = 0,
+    content_width: f32 = 0,
+    content_height: f32 = 0,
+};
+
 pub const EmbeddedApp = struct {
     app: runtime.App,
     runtime: runtime.Runtime,
@@ -469,6 +488,48 @@ pub fn zero_native_app_viewport(
         geometry.InsetsF.init(safe_top, safe_right, safe_bottom, safe_left),
         geometry.InsetsF.init(keyboard_top, keyboard_right, keyboard_bottom, keyboard_left),
     )) catch |err| recordError(self, err);
+}
+
+pub fn zero_native_app_viewport_state(app: ?*anyopaque, out: ?*MobileViewportState) c_int {
+    const self = mobileApp(app) orelse return 0;
+    const output = out orelse {
+        recordError(self, error.InvalidCommand);
+        return 0;
+    };
+    output.* = mobileViewportStateFromSurface(self.embedded.runtime.surface);
+    self.last_error = null;
+    return 1;
+}
+
+fn mobileViewportStateFromSurface(surface: platform.Surface) MobileViewportState {
+    const content = geometry.RectF.fromSize(surface.size).deflate(combinedMobileViewportInsets(surface));
+    return .{
+        .width = surface.size.width,
+        .height = surface.size.height,
+        .scale = surface.scale_factor,
+        .has_surface = if (surface.native_handle != null) 1 else 0,
+        .safe_top = surface.safe_area_insets.top,
+        .safe_right = surface.safe_area_insets.right,
+        .safe_bottom = surface.safe_area_insets.bottom,
+        .safe_left = surface.safe_area_insets.left,
+        .keyboard_top = surface.keyboard_insets.top,
+        .keyboard_right = surface.keyboard_insets.right,
+        .keyboard_bottom = surface.keyboard_insets.bottom,
+        .keyboard_left = surface.keyboard_insets.left,
+        .content_x = content.x,
+        .content_y = content.y,
+        .content_width = content.width,
+        .content_height = content.height,
+    };
+}
+
+fn combinedMobileViewportInsets(surface: platform.Surface) geometry.InsetsF {
+    return .{
+        .top = @max(surface.safe_area_insets.top, surface.keyboard_insets.top),
+        .right = @max(surface.safe_area_insets.right, surface.keyboard_insets.right),
+        .bottom = @max(surface.safe_area_insets.bottom, surface.keyboard_insets.bottom),
+        .left = @max(surface.safe_area_insets.left, surface.keyboard_insets.left),
+    };
 }
 
 fn mobileSurface(width: f32, height: f32, scale: f32, surface: ?*anyopaque, safe_area_insets: geometry.InsetsF, keyboard_insets: geometry.InsetsF) platform.Surface {
@@ -1052,6 +1113,24 @@ test "mobile C ABI forwards surface resize and touch input" {
     try std.testing.expectEqual(@as(f32, 47), self.embedded.runtime.surface.safe_area_insets.top);
     try std.testing.expectEqual(@as(f32, 34), self.embedded.runtime.surface.safe_area_insets.bottom);
     try std.testing.expectEqual(@as(f32, 144), self.embedded.runtime.surface.keyboard_insets.bottom);
+
+    var viewport: MobileViewportState = .{};
+    try std.testing.expectEqual(@as(c_int, 1), zero_native_app_viewport_state(app, &viewport));
+    try std.testing.expectEqual(@as(f32, 390), viewport.width);
+    try std.testing.expectEqual(@as(f32, 700), viewport.height);
+    try std.testing.expectEqual(@as(f32, 3), viewport.scale);
+    try std.testing.expectEqual(@as(c_int, 1), viewport.has_surface);
+    try std.testing.expectEqual(@as(f32, 47), viewport.safe_top);
+    try std.testing.expectEqual(@as(f32, 34), viewport.safe_bottom);
+    try std.testing.expectEqual(@as(f32, 144), viewport.keyboard_bottom);
+    try std.testing.expectEqual(@as(f32, 0), viewport.content_x);
+    try std.testing.expectEqual(@as(f32, 47), viewport.content_y);
+    try std.testing.expectEqual(@as(f32, 390), viewport.content_width);
+    try std.testing.expectEqual(@as(f32, 509), viewport.content_height);
+    try std.testing.expectEqualStrings("", std.mem.span(zero_native_app_last_error_name(app)));
+
+    try std.testing.expectEqual(@as(c_int, 0), zero_native_app_viewport_state(app, null));
+    try std.testing.expectEqualStrings("InvalidCommand", std.mem.span(zero_native_app_last_error_name(app)));
 
     zero_native_app_touch(app, 42, 0, 11, 22, 0.5);
     try std.testing.expectEqual(@as(usize, 1), self.touch_count);

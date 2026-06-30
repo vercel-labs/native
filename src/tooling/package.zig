@@ -496,6 +496,24 @@ fn embedHeader() []const u8 {
     \\  uintptr_t selection_focus;
     \\  int has_selection;
     \\} zero_native_widget_action_t;
+    \\typedef struct zero_native_viewport_state {
+    \\  float width;
+    \\  float height;
+    \\  float scale;
+    \\  int has_surface;
+    \\  float safe_top;
+    \\  float safe_right;
+    \\  float safe_bottom;
+    \\  float safe_left;
+    \\  float keyboard_top;
+    \\  float keyboard_right;
+    \\  float keyboard_bottom;
+    \\  float keyboard_left;
+    \\  float content_x;
+    \\  float content_y;
+    \\  float content_width;
+    \\  float content_height;
+    \\} zero_native_viewport_state_t;
     \\void *zero_native_app_create(void);
     \\void zero_native_app_destroy(void *app);
     \\void zero_native_app_start(void *app);
@@ -504,6 +522,7 @@ fn embedHeader() []const u8 {
     \\void zero_native_app_stop(void *app);
     \\void zero_native_app_resize(void *app, float width, float height, float scale, void *surface);
     \\void zero_native_app_viewport(void *app, float width, float height, float scale, void *surface, float safe_top, float safe_right, float safe_bottom, float safe_left, float keyboard_top, float keyboard_right, float keyboard_bottom, float keyboard_left);
+    \\int zero_native_app_viewport_state(void *app, zero_native_viewport_state_t *out);
     \\void zero_native_app_touch(void *app, uint64_t id, int phase, float x, float y, float pressure);
     \\void zero_native_app_key(void *app, int phase, const char *key, uintptr_t key_len, const char *text, uintptr_t text_len, uint32_t modifiers_mask);
     \\void zero_native_app_text(void *app, const char *text, uintptr_t len);
@@ -517,6 +536,7 @@ fn embedHeader() []const u8 {
     \\const char *zero_native_app_last_error_name(void *app);
     \\uintptr_t zero_native_app_widget_semantics_count(void *app);
     \\int zero_native_app_widget_semantics_at(void *app, uintptr_t index, zero_native_widget_semantics_t *out);
+    \\int zero_native_app_widget_semantics_by_id(void *app, uint64_t id, zero_native_widget_semantics_t *out);
     \\int zero_native_app_widget_text_geometry(void *app, uint64_t id, zero_native_widget_text_geometry_t *out);
     \\int zero_native_app_widget_action(void *app, const zero_native_widget_action_t *action);
     \\
@@ -2851,11 +2871,14 @@ test "mobile package templates include native command shells" {
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_widget_semantics_t") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_widget_text_geometry_t") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_widget_action_t") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_viewport_state_t") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_ROLE_TEXTBOX") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_ACTION_SET_SELECTION") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_ACTION_KIND_SET_TEXT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_app_viewport_state") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_app_widget_semantics_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_app_widget_semantics_at") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_app_widget_semantics_by_id") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_app_widget_text_geometry") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_app_widget_action") != null);
 
