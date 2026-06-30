@@ -266,7 +266,7 @@ const GpuComponentsApp = struct {
                 "{s} {s} #{d}: offset {d}.",
                 .{ action, @tagName(widget.kind), id, widget.value },
             ),
-            .text_field, .search_field, .combobox, .textarea => try std.fmt.bufPrint(
+            .input, .text_field, .search_field, .combobox, .textarea => try std.fmt.bufPrint(
                 &status_buffer,
                 "{s} {s} #{d}: {d} bytes.",
                 .{ action, @tagName(widget.kind), id, widget.text.len },
@@ -751,7 +751,7 @@ fn buildComponentsWidgetLayoutWithScrollAndSize(nodes: []canvas.WidgetLayoutNode
         .{ .id = 170, .kind = .radio, .text = "List", .semantics = .{ .label = "List layout" } },
     };
     const form_controls = [_]canvas.Widget{
-        .{ .id = 111, .kind = .text_field, .frame = rect(0, 0, 148, 34), .text = "zero-native", .semantics = .{ .label = "Project name" } },
+        .{ .id = 111, .kind = .input, .frame = rect(0, 0, 148, 34), .text = "zero-native", .semantics = .{ .label = "Project name" } },
         .{ .id = 112, .kind = .combobox, .frame = rect(166, 0, 172, 34), .text = "components", .semantics = .{ .label = "Component combobox" } },
         .{ .id = 113, .kind = .checkbox, .frame = rect(0, 52, 132, 30), .text = "Selected", .state = .{ .selected = true }, .semantics = .{ .label = "Selected checkbox" } },
         .{ .id = 114, .kind = .switch_control, .frame = rect(166, 52, 116, 30), .text = "Live", .value = 1, .state = .{ .selected = true }, .semantics = .{ .label = "Live switch" } },
