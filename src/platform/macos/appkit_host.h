@@ -197,6 +197,7 @@ typedef struct {
     size_t drop_paths_len;
     uint64_t frame_index;
     uint64_t timestamp_ns;
+    uint64_t frame_interval_ns;
     int nonblank;
     uint32_t sample_color;
     int input_kind;

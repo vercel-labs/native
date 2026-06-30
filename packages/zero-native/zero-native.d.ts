@@ -194,6 +194,7 @@ export interface ZeroNativeViewInfo {
   gpuScale: number;
   gpuFrame: number;
   gpuTimestampNs: number;
+  gpuFrameIntervalNs: number;
   gpuInputTimestampNs: number;
   gpuInputLatencyNs: number;
   gpuInputLatencyBudgetNs: number;

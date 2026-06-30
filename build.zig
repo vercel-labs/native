@@ -308,6 +308,12 @@ pub fn build(b: *std.Build) void {
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-input-paces-retained-canvas", "Verify GPU input frame requests are paced to the display interval", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "ZeroNativeRetainedFrameIntervalNanoseconds" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "retainedFrameLastEmitNs" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "queuePointerMotionInputEvent:(NSEvent *)event" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "pendingPointerMotionKind = kind" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "emitQueuedPointerMotionInputEvent" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "queueScrollInputEvent:(NSEvent *)event" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "pendingScrollDeltaY += deltaY" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "emitQueuedScrollInputEvent" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "dispatch_after(dispatch_time(DISPATCH_TIME_NOW" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)emitRetainedCanvasFrameRequest" },
     });

@@ -261,6 +261,20 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 @property(nonatomic, assign) BOOL hasCanvasTexture;
 @property(nonatomic, assign) BOOL retainedFrameRequestPending;
 @property(nonatomic, assign) uint64_t retainedFrameLastEmitNs;
+@property(nonatomic, assign) BOOL pointerMotionInputPending;
+@property(nonatomic, assign) NSInteger pendingPointerMotionKind;
+@property(nonatomic, assign) NSPoint pendingPointerMotionPoint;
+@property(nonatomic, assign) NSInteger pendingPointerMotionButton;
+@property(nonatomic, assign) uint32_t pendingPointerMotionModifiers;
+@property(nonatomic, assign) uint64_t pendingPointerMotionTimestampNs;
+@property(nonatomic, assign) uint64_t pointerMotionInputLastEmitNs;
+@property(nonatomic, assign) BOOL scrollInputPending;
+@property(nonatomic, assign) NSPoint pendingScrollPoint;
+@property(nonatomic, assign) double pendingScrollDeltaX;
+@property(nonatomic, assign) double pendingScrollDeltaY;
+@property(nonatomic, assign) uint32_t pendingScrollModifiers;
+@property(nonatomic, assign) uint64_t pendingScrollTimestampNs;
+@property(nonatomic, assign) uint64_t scrollInputLastEmitNs;
 @property(nonatomic, strong) NSMutableData *canvasPacketPixels;
 @property(nonatomic, assign) NSUInteger canvasPacketPixelWidth;
 @property(nonatomic, assign) NSUInteger canvasPacketPixelHeight;
@@ -285,6 +299,11 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (void)emitFrameEventWithFrameIndex:(NSUInteger)frameIndex sampleColor:(uint32_t)sampleColor nonblank:(BOOL)nonblank;
 - (void)emitResizeEvent;
 - (void)emitInputEventWithKind:(NSInteger)kind event:(NSEvent *)event button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY;
+- (void)queuePointerMotionInputEvent:(NSEvent *)event kind:(NSInteger)kind button:(NSInteger)button;
+- (void)emitQueuedPointerMotionInputEvent;
+- (void)queueScrollInputEvent:(NSEvent *)event deltaX:(double)deltaX deltaY:(double)deltaY;
+- (void)emitQueuedScrollInputEvent;
+- (void)emitInputEventWithKind:(NSInteger)kind point:(NSPoint)point timestampNs:(uint64_t)timestampNs modifiers:(uint32_t)modifiers keyText:(NSString *)keyText inputText:(NSString *)inputText button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY;
 - (void)emitSyntheticKeyDownWithKey:(NSString *)key modifiers:(uint32_t)modifiers;
 - (void)emitTextInputEventWithKind:(NSInteger)kind text:(NSString *)text compositionCursor:(NSInteger)compositionCursor;
 - (NSAccessibilityElement *)focusedTextAccessibilityElement;
@@ -1820,50 +1839,56 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
 }
 
 - (void)mouseDown:(NSEvent *)event {
+    [self emitQueuedPointerMotionInputEvent];
     [self.window makeFirstResponder:self];
     [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DOWN event:event button:0 deltaX:0 deltaY:0];
 }
 
 - (void)mouseUp:(NSEvent *)event {
+    [self emitQueuedPointerMotionInputEvent];
     [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_UP event:event button:0 deltaX:0 deltaY:0];
 }
 
 - (void)mouseMoved:(NSEvent *)event {
-    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_MOVE event:event button:0 deltaX:0 deltaY:0];
+    [self queuePointerMotionInputEvent:event kind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_MOVE button:0];
 }
 
 - (void)mouseDragged:(NSEvent *)event {
-    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DRAG event:event button:0 deltaX:0 deltaY:0];
+    [self queuePointerMotionInputEvent:event kind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DRAG button:0];
 }
 
 - (void)rightMouseDown:(NSEvent *)event {
+    [self emitQueuedPointerMotionInputEvent];
     [self.window makeFirstResponder:self];
     [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DOWN event:event button:1 deltaX:0 deltaY:0];
 }
 
 - (void)rightMouseUp:(NSEvent *)event {
+    [self emitQueuedPointerMotionInputEvent];
     [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_UP event:event button:1 deltaX:0 deltaY:0];
 }
 
 - (void)rightMouseDragged:(NSEvent *)event {
-    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DRAG event:event button:1 deltaX:0 deltaY:0];
+    [self queuePointerMotionInputEvent:event kind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DRAG button:1];
 }
 
 - (void)otherMouseDown:(NSEvent *)event {
+    [self emitQueuedPointerMotionInputEvent];
     [self.window makeFirstResponder:self];
     [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DOWN event:event button:(NSInteger)event.buttonNumber deltaX:0 deltaY:0];
 }
 
 - (void)otherMouseUp:(NSEvent *)event {
+    [self emitQueuedPointerMotionInputEvent];
     [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_UP event:event button:(NSInteger)event.buttonNumber deltaX:0 deltaY:0];
 }
 
 - (void)otherMouseDragged:(NSEvent *)event {
-    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DRAG event:event button:(NSInteger)event.buttonNumber deltaX:0 deltaY:0];
+    [self queuePointerMotionInputEvent:event kind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DRAG button:(NSInteger)event.buttonNumber];
 }
 
 - (void)scrollWheel:(NSEvent *)event {
-    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_SCROLL event:event button:0 deltaX:-event.scrollingDeltaX deltaY:-event.scrollingDeltaY];
+    [self queueScrollInputEvent:event deltaX:-event.scrollingDeltaX deltaY:-event.scrollingDeltaY];
 }
 
 - (void)keyDown:(NSEvent *)event {
@@ -1897,6 +1922,7 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
         .view_label_len = [self.surfaceLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
         .frame_index = frameIndex,
         .timestamp_ns = ZeroNativeTimestampNanoseconds(),
+        .frame_interval_ns = ZeroNativeRetainedFrameIntervalNanoseconds(self.window.screen ?: NSScreen.mainScreen),
         .nonblank = nonblank ? 1 : 0,
         .sample_color = sampleColor,
     }];
@@ -1923,26 +1949,138 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
 - (void)emitInputEventWithKind:(NSInteger)kind event:(NSEvent *)event button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY {
     if (!self.host || self.surfaceLabel.length == 0) return;
     NSPoint point = event ? [self convertPoint:event.locationInWindow fromView:nil] : NSMakePoint(0, 0);
-    CGFloat y = self.bounds.size.height - point.y;
-    const char *labelBytes = self.surfaceLabel.UTF8String ?: "";
     BOOL keyEvent = kind == ZERO_NATIVE_APPKIT_GPU_INPUT_KEY_DOWN || kind == ZERO_NATIVE_APPKIT_GPU_INPUT_KEY_UP;
     NSString *keyText = keyEvent && event ? ZeroNativeShortcutKeyForEvent(event) : @"";
-    NSString *inputText = @"";
-    const char *keyBytes = keyText.UTF8String ?: "";
-    const char *inputBytes = inputText.UTF8String ?: "";
+    [self emitInputEventWithKind:kind
+                           point:point
+                     timestampNs:ZeroNativeTimestampNanoseconds()
+                       modifiers:event ? ZeroNativeModifierFlagsForEvent(event) : 0
+                         keyText:keyText
+                       inputText:@""
+                          button:button
+                          deltaX:deltaX
+                          deltaY:deltaY];
+}
+
+- (void)queuePointerMotionInputEvent:(NSEvent *)event kind:(NSInteger)kind button:(NSInteger)button {
+    if (!self.host || self.surfaceLabel.length == 0 || !event) return;
+    self.pendingPointerMotionKind = kind;
+    self.pendingPointerMotionPoint = [self convertPoint:event.locationInWindow fromView:nil];
+    self.pendingPointerMotionButton = button;
+    self.pendingPointerMotionModifiers = ZeroNativeModifierFlagsForEvent(event);
+    self.pendingPointerMotionTimestampNs = ZeroNativeTimestampNanoseconds();
+    if (self.pointerMotionInputPending) return;
+    self.pointerMotionInputPending = YES;
+
+    const uint64_t now = self.pendingPointerMotionTimestampNs;
+    const uint64_t frameIntervalNs = ZeroNativeRetainedFrameIntervalNanoseconds(self.window.screen ?: NSScreen.mainScreen);
+    uint64_t delayNs = 0;
+    if (self.pointerMotionInputLastEmitNs > 0 && now < self.pointerMotionInputLastEmitNs + frameIntervalNs) {
+        delayNs = self.pointerMotionInputLastEmitNs + frameIntervalNs - now;
+    }
+    __weak ZeroNativeMetalSurfaceView *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delayNs), dispatch_get_main_queue(), ^{
+        ZeroNativeMetalSurfaceView *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf emitQueuedPointerMotionInputEvent];
+    });
+}
+
+- (void)emitQueuedPointerMotionInputEvent {
+    if (!self.pointerMotionInputPending) return;
+    const NSInteger kind = self.pendingPointerMotionKind;
+    const NSPoint point = self.pendingPointerMotionPoint;
+    const NSInteger button = self.pendingPointerMotionButton;
+    const uint32_t modifiers = self.pendingPointerMotionModifiers;
+    const uint64_t timestampNs = self.pendingPointerMotionTimestampNs > 0 ? self.pendingPointerMotionTimestampNs : ZeroNativeTimestampNanoseconds();
+    self.pointerMotionInputPending = NO;
+    self.pendingPointerMotionKind = 0;
+    self.pendingPointerMotionButton = 0;
+    self.pendingPointerMotionModifiers = 0;
+    self.pendingPointerMotionTimestampNs = 0;
+    self.pointerMotionInputLastEmitNs = ZeroNativeTimestampNanoseconds();
+    [self emitInputEventWithKind:kind
+                           point:point
+                     timestampNs:timestampNs
+                       modifiers:modifiers
+                         keyText:@""
+                       inputText:@""
+                          button:button
+                          deltaX:0
+                          deltaY:0];
+}
+
+- (void)queueScrollInputEvent:(NSEvent *)event deltaX:(double)deltaX deltaY:(double)deltaY {
+    if (!self.host || self.surfaceLabel.length == 0 || !event) return;
+    if (deltaX == 0 && deltaY == 0) return;
+    self.pendingScrollPoint = [self convertPoint:event.locationInWindow fromView:nil];
+    self.pendingScrollDeltaX += deltaX;
+    self.pendingScrollDeltaY += deltaY;
+    self.pendingScrollModifiers = ZeroNativeModifierFlagsForEvent(event);
+    self.pendingScrollTimestampNs = ZeroNativeTimestampNanoseconds();
+    if (self.scrollInputPending) return;
+    self.scrollInputPending = YES;
+
+    const uint64_t now = self.pendingScrollTimestampNs;
+    const uint64_t frameIntervalNs = ZeroNativeRetainedFrameIntervalNanoseconds(self.window.screen ?: NSScreen.mainScreen);
+    uint64_t delayNs = 0;
+    if (self.scrollInputLastEmitNs > 0 && now < self.scrollInputLastEmitNs + frameIntervalNs) {
+        delayNs = self.scrollInputLastEmitNs + frameIntervalNs - now;
+    }
+    __weak ZeroNativeMetalSurfaceView *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delayNs), dispatch_get_main_queue(), ^{
+        ZeroNativeMetalSurfaceView *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf emitQueuedScrollInputEvent];
+    });
+}
+
+- (void)emitQueuedScrollInputEvent {
+    if (!self.scrollInputPending) return;
+    const NSPoint point = self.pendingScrollPoint;
+    const double deltaX = self.pendingScrollDeltaX;
+    const double deltaY = self.pendingScrollDeltaY;
+    const uint32_t modifiers = self.pendingScrollModifiers;
+    const uint64_t timestampNs = self.pendingScrollTimestampNs > 0 ? self.pendingScrollTimestampNs : ZeroNativeTimestampNanoseconds();
+    self.scrollInputPending = NO;
+    self.pendingScrollDeltaX = 0;
+    self.pendingScrollDeltaY = 0;
+    self.pendingScrollModifiers = 0;
+    self.pendingScrollTimestampNs = 0;
+    if (deltaX == 0 && deltaY == 0) return;
+    self.scrollInputLastEmitNs = ZeroNativeTimestampNanoseconds();
+    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_SCROLL
+                           point:point
+                     timestampNs:timestampNs
+                       modifiers:modifiers
+                         keyText:@""
+                       inputText:@""
+                          button:0
+                          deltaX:deltaX
+                          deltaY:deltaY];
+}
+
+- (void)emitInputEventWithKind:(NSInteger)kind point:(NSPoint)point timestampNs:(uint64_t)timestampNs modifiers:(uint32_t)modifiers keyText:(NSString *)keyText inputText:(NSString *)inputText button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY {
+    if (!self.host || self.surfaceLabel.length == 0) return;
+    CGFloat y = self.bounds.size.height - point.y;
+    const char *labelBytes = self.surfaceLabel.UTF8String ?: "";
+    NSString *safeKeyText = keyText ?: @"";
+    NSString *safeInputText = inputText ?: @"";
+    const char *keyBytes = safeKeyText.UTF8String ?: "";
+    const char *inputBytes = safeInputText.UTF8String ?: "";
     [self.host emitEvent:(zero_native_appkit_event_t){
         .kind = ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_INPUT,
         .window_id = self.windowId,
-        .timestamp_ns = ZeroNativeTimestampNanoseconds(),
+        .timestamp_ns = timestampNs,
         .x = point.x,
         .y = y,
         .view_label = labelBytes,
         .view_label_len = [self.surfaceLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
         .key_text = keyBytes,
-        .key_text_len = [keyText lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+        .key_text_len = [safeKeyText lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
         .input_text = inputBytes,
-        .input_text_len = [inputText lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
-        .shortcut_modifiers = event ? ZeroNativeModifierFlagsForEvent(event) : 0,
+        .input_text_len = [safeInputText lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+        .shortcut_modifiers = modifiers,
         .input_kind = (int)kind,
         .button = (int)button,
         .delta_x = deltaX,

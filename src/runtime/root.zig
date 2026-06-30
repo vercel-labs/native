@@ -1222,6 +1222,7 @@ pub const Runtime = struct {
         const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
         if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
         self.views[index].gpu_input_latency_budget_ns = budget_ns;
+        self.views[index].gpu_input_latency_budget_custom = true;
         self.views[index].refreshGpuSurfaceInputLatencyBudgetStatus();
         return self.views[index].info();
     }
@@ -2228,6 +2229,7 @@ pub const Runtime = struct {
                     self.views[index].gpu_scale_factor = frame_event.scale_factor;
                     self.views[index].gpu_frame_index = frame_event.frame_index;
                     self.views[index].gpu_timestamp_ns = frame_event.timestamp_ns;
+                    self.views[index].recordGpuSurfaceFrameInterval(frame_event.frame_interval_ns);
                     self.views[index].recordGpuSurfaceFirstFrameLatency(frame_event.timestamp_ns);
                     self.views[index].recordGpuSurfaceInputLatencyForFrame(frame_event.timestamp_ns);
                     self.views[index].gpu_frame_nonblank = frame_event.nonblank;
@@ -2250,6 +2252,7 @@ pub const Runtime = struct {
                         const preview_gpu_packet_summary = preview_frame.gpuPacketSummary();
                         const preview_budget_status = preview_frame.budgetStatus();
                         enriched_frame_event.canvas_revision = self.views[index].canvas_revision;
+                        enriched_frame_event.frame_interval_ns = self.views[index].gpu_frame_interval_ns;
                         enriched_frame_event.input_timestamp_ns = self.views[index].gpu_input_timestamp_ns;
                         enriched_frame_event.input_latency_ns = self.views[index].gpu_input_latency_ns;
                         enriched_frame_event.input_latency_budget_ns = self.views[index].gpu_input_latency_budget_ns;
@@ -5654,15 +5657,17 @@ const RuntimeView = struct {
     gpu_scale_factor: f32 = 1,
     gpu_frame_index: u64 = 0,
     gpu_timestamp_ns: u64 = 0,
+    gpu_frame_interval_ns: u64 = platform.default_gpu_frame_interval_ns,
     gpu_pending_input_timestamp_ns: u64 = 0,
     gpu_input_timestamp_ns: u64 = 0,
     gpu_input_latency_ns: u64 = 0,
-    gpu_input_latency_budget_ns: u64 = 16_666_667,
+    gpu_input_latency_budget_ns: u64 = platform.default_gpu_frame_interval_ns,
+    gpu_input_latency_budget_custom: bool = false,
     gpu_input_latency_budget_exceeded_count: usize = 0,
     gpu_input_latency_budget_ok: bool = true,
     gpu_surface_created_timestamp_ns: u64 = 0,
     gpu_first_frame_latency_ns: u64 = 0,
-    gpu_first_frame_latency_budget_ns: u64 = 150_000_000,
+    gpu_first_frame_latency_budget_ns: u64 = platform.default_gpu_first_frame_latency_budget_ns,
     gpu_first_frame_latency_budget_exceeded_count: usize = 0,
     gpu_first_frame_latency_budget_ok: bool = true,
     gpu_first_frame_latency_recorded: bool = false,
@@ -5822,6 +5827,7 @@ const RuntimeView = struct {
             .gpu_scale_factor = self.gpu_scale_factor,
             .gpu_frame_index = self.gpu_frame_index,
             .gpu_timestamp_ns = self.gpu_timestamp_ns,
+            .gpu_frame_interval_ns = self.gpu_frame_interval_ns,
             .gpu_input_timestamp_ns = self.gpu_input_timestamp_ns,
             .gpu_input_latency_ns = self.gpu_input_latency_ns,
             .gpu_input_latency_budget_ns = self.gpu_input_latency_budget_ns,
@@ -5930,6 +5936,15 @@ const RuntimeView = struct {
     fn refreshGpuSurfaceInputLatencyBudgetStatus(self: *RuntimeView) void {
         self.gpu_input_latency_budget_exceeded_count = if (self.gpu_input_latency_budget_ns > 0 and self.gpu_input_latency_ns > self.gpu_input_latency_budget_ns) 1 else 0;
         self.gpu_input_latency_budget_ok = self.gpu_input_latency_budget_exceeded_count == 0;
+    }
+
+    fn recordGpuSurfaceFrameInterval(self: *RuntimeView, frame_interval_ns: u64) void {
+        const normalized = if (frame_interval_ns > 0) frame_interval_ns else platform.default_gpu_frame_interval_ns;
+        self.gpu_frame_interval_ns = normalized;
+        if (!self.gpu_input_latency_budget_custom) {
+            self.gpu_input_latency_budget_ns = normalized;
+            self.refreshGpuSurfaceInputLatencyBudgetStatus();
+        }
     }
 
     fn recordGpuSurfaceFirstFrameLatency(self: *RuntimeView, timestamp_ns: u64) void {
@@ -7761,6 +7776,7 @@ fn gpuSurfaceFrameEventFromGpuFrame(frame: platform.GpuFrame) platform.GpuSurfac
         .scale_factor = frame.scale_factor,
         .frame_index = frame.frame_index,
         .timestamp_ns = frame.timestamp_ns,
+        .frame_interval_ns = frame.frame_interval_ns,
         .input_timestamp_ns = frame.input_timestamp_ns,
         .input_latency_ns = frame.input_latency_ns,
         .input_latency_budget_ns = frame.input_latency_budget_ns,
@@ -8057,7 +8073,7 @@ fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
     try json.writeString(writer, view.command);
     try writer.writeAll(",\"url\":");
     try json.writeString(writer, view.url);
-    try writer.print(",\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"layer\":{d},\"visible\":{},\"enabled\":{},\"transparent\":{},\"bridge\":{},\"gpuWidth\":{d},\"gpuHeight\":{d},\"gpuScale\":{d},\"gpuFrame\":{d},\"gpuTimestampNs\":{d},\"gpuInputTimestampNs\":{d},\"gpuInputLatencyNs\":{d},\"gpuInputLatencyBudgetNs\":{d},\"gpuInputLatencyBudgetExceededCount\":{d},\"gpuInputLatencyBudgetOk\":{},\"gpuFirstFrameLatencyNs\":{d},\"gpuFirstFrameLatencyBudgetNs\":{d},\"gpuFirstFrameLatencyBudgetExceededCount\":{d},\"gpuFirstFrameLatencyBudgetOk\":{},\"gpuNonblank\":{},\"gpuSampleColor\":{d},\"gpuBackend\":", .{
+    try writer.print(",\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"layer\":{d},\"visible\":{},\"enabled\":{},\"transparent\":{},\"bridge\":{},\"gpuWidth\":{d},\"gpuHeight\":{d},\"gpuScale\":{d},\"gpuFrame\":{d},\"gpuTimestampNs\":{d},\"gpuFrameIntervalNs\":{d},\"gpuInputTimestampNs\":{d},\"gpuInputLatencyNs\":{d},\"gpuInputLatencyBudgetNs\":{d},\"gpuInputLatencyBudgetExceededCount\":{d},\"gpuInputLatencyBudgetOk\":{},\"gpuFirstFrameLatencyNs\":{d},\"gpuFirstFrameLatencyBudgetNs\":{d},\"gpuFirstFrameLatencyBudgetExceededCount\":{d},\"gpuFirstFrameLatencyBudgetOk\":{},\"gpuNonblank\":{},\"gpuSampleColor\":{d},\"gpuBackend\":", .{
         view.frame.x,
         view.frame.y,
         view.frame.width,
@@ -8072,6 +8088,7 @@ fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
         view.gpu_scale_factor,
         view.gpu_frame_index,
         view.gpu_timestamp_ns,
+        view.gpu_frame_interval_ns,
         view.gpu_input_timestamp_ns,
         view.gpu_input_latency_ns,
         view.gpu_input_latency_budget_ns,
@@ -18383,6 +18400,7 @@ test "runtime dispatches GPU surface events" {
         last_gpu_color_space: platform.GpuSurfaceColorSpace = .none,
         last_gpu_vsync: bool = false,
         last_gpu_status: platform.GpuSurfaceStatus = .unavailable,
+        last_frame_interval_ns: u64 = 0,
         last_canvas_revision: u64 = 0,
         last_canvas_command_count: usize = 0,
         last_canvas_frame_requires_render: bool = false,
@@ -18442,6 +18460,7 @@ test "runtime dispatches GPU surface events" {
                     self.last_gpu_color_space = frame_event.color_space;
                     self.last_gpu_vsync = frame_event.vsync;
                     self.last_gpu_status = frame_event.status;
+                    self.last_frame_interval_ns = frame_event.frame_interval_ns;
                     self.last_canvas_revision = frame_event.canvas_revision;
                     self.last_canvas_command_count = frame_event.canvas_command_count;
                     self.last_canvas_frame_requires_render = frame_event.canvas_frame_requires_render;
@@ -18529,9 +18548,10 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(@as(f32, 640), initial_frame.size.width);
     try std.testing.expectEqual(@as(f32, 360), initial_frame.size.height);
     try std.testing.expectEqual(@as(u64, 0), initial_frame.frame_index);
+    try std.testing.expectEqual(platform.default_gpu_frame_interval_ns, initial_frame.frame_interval_ns);
     try std.testing.expectEqual(@as(u64, 0), initial_frame.input_timestamp_ns);
     try std.testing.expectEqual(@as(u64, 0), initial_frame.input_latency_ns);
-    try std.testing.expectEqual(@as(u64, 16_666_667), initial_frame.input_latency_budget_ns);
+    try std.testing.expectEqual(platform.default_gpu_frame_interval_ns, initial_frame.input_latency_budget_ns);
     try std.testing.expectEqual(@as(usize, 0), initial_frame.input_latency_budget_exceeded_count);
     try std.testing.expect(initial_frame.input_latency_budget_ok);
     try std.testing.expectEqual(@as(u64, 0), initial_frame.first_frame_latency_ns);
@@ -18592,6 +18612,7 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(platform.GpuSurfaceColorSpace.srgb, app_state.last_gpu_color_space);
     try std.testing.expect(app_state.last_gpu_vsync);
     try std.testing.expectEqual(platform.GpuSurfaceStatus.ready, app_state.last_gpu_status);
+    try std.testing.expectEqual(platform.default_gpu_frame_interval_ns, app_state.last_frame_interval_ns);
     try std.testing.expectEqual(@as(u64, 1), app_state.last_canvas_revision);
     try std.testing.expectEqual(@as(usize, 2), app_state.last_canvas_command_count);
     try std.testing.expect(app_state.last_canvas_frame_requires_render);
@@ -18644,9 +18665,10 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(platform.GpuSurfaceStatus.ready, frame.status);
     try std.testing.expectEqual(@as(u64, 7), frame.frame_index);
     try std.testing.expectEqual(@as(u64, 42), frame.timestamp_ns);
+    try std.testing.expectEqual(platform.default_gpu_frame_interval_ns, frame.frame_interval_ns);
     try std.testing.expectEqual(@as(u64, 0), frame.input_timestamp_ns);
     try std.testing.expectEqual(@as(u64, 0), frame.input_latency_ns);
-    try std.testing.expectEqual(@as(u64, 16_666_667), frame.input_latency_budget_ns);
+    try std.testing.expectEqual(platform.default_gpu_frame_interval_ns, frame.input_latency_budget_ns);
     try std.testing.expectEqual(@as(usize, 0), frame.input_latency_budget_exceeded_count);
     try std.testing.expect(frame.input_latency_budget_ok);
     try std.testing.expectEqual(@as(u64, 22), frame.first_frame_latency_ns);
@@ -18693,6 +18715,7 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuScale\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuFrame\":7") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuTimestampNs\":42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuFrameIntervalNs\":16666667") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuInputTimestampNs\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuInputLatencyNs\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuInputLatencyBudgetNs\":16666667") != null);
@@ -18782,6 +18805,7 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(platform.GpuSurfaceColorSpace.srgb, preview_frame.color_space);
     try std.testing.expect(preview_frame.vsync);
     try std.testing.expectEqual(platform.GpuSurfaceStatus.ready, preview_frame.status);
+    try std.testing.expectEqual(platform.default_gpu_frame_interval_ns, preview_frame.frame_interval_ns);
     try std.testing.expect(preview_frame.canvas_frame_requires_render);
     try std.testing.expect(preview_frame.canvas_frame_full_repaint);
     try std.testing.expectEqual(@as(usize, 6), preview_frame.canvas_frame_encoder_command_count);
@@ -18839,28 +18863,32 @@ test "runtime dispatches GPU surface events" {
         .scale_factor = 2,
         .frame_index = 9,
         .timestamp_ns = 70_000_000,
+        .frame_interval_ns = 8_333_333,
         .nonblank = true,
         .sample_color = 0xff336699,
     } });
     try std.testing.expectEqual(@as(u32, 3), app_state.frame_count);
     try std.testing.expectEqual(@as(u64, 50_000_000), app_state.last_input_timestamp_ns);
     try std.testing.expectEqual(@as(u64, 20_000_000), app_state.last_input_latency_ns);
-    try std.testing.expectEqual(@as(u64, 16_666_667), app_state.last_input_latency_budget_ns);
+    try std.testing.expectEqual(@as(u64, 8_333_333), app_state.last_input_latency_budget_ns);
     try std.testing.expectEqual(@as(usize, 1), app_state.last_input_latency_budget_exceeded_count);
     try std.testing.expect(!app_state.last_input_latency_budget_ok);
+    try std.testing.expectEqual(@as(u64, 8_333_333), app_state.last_frame_interval_ns);
 
     const latency_frame = try harness.runtime.gpuSurfaceFrame(1, "canvas");
+    try std.testing.expectEqual(@as(u64, 8_333_333), latency_frame.frame_interval_ns);
     try std.testing.expectEqual(@as(u64, 50_000_000), latency_frame.input_timestamp_ns);
     try std.testing.expectEqual(@as(u64, 20_000_000), latency_frame.input_latency_ns);
-    try std.testing.expectEqual(@as(u64, 16_666_667), latency_frame.input_latency_budget_ns);
+    try std.testing.expectEqual(@as(u64, 8_333_333), latency_frame.input_latency_budget_ns);
     try std.testing.expectEqual(@as(usize, 1), latency_frame.input_latency_budget_exceeded_count);
     try std.testing.expect(!latency_frame.input_latency_budget_ok);
 
     const latency_snapshot = harness.runtime.automationSnapshot("GPU");
     const latency_view = testViewByLabel(latency_snapshot.views, "canvas").?;
+    try std.testing.expectEqual(@as(u64, 8_333_333), latency_view.gpu_frame_interval_ns);
     try std.testing.expectEqual(@as(u64, 50_000_000), latency_view.gpu_input_timestamp_ns);
     try std.testing.expectEqual(@as(u64, 20_000_000), latency_view.gpu_input_latency_ns);
-    try std.testing.expectEqual(@as(u64, 16_666_667), latency_view.gpu_input_latency_budget_ns);
+    try std.testing.expectEqual(@as(u64, 8_333_333), latency_view.gpu_input_latency_budget_ns);
     try std.testing.expectEqual(@as(usize, 1), latency_view.gpu_input_latency_budget_exceeded_count);
     try std.testing.expect(!latency_view.gpu_input_latency_budget_ok);
     try std.testing.expectEqual(@as(u64, 22), latency_view.gpu_first_frame_latency_ns);
@@ -18870,6 +18898,7 @@ test "runtime dispatches GPU surface events" {
 
     var latency_json_buffer: [8192]u8 = undefined;
     const latency_json = try writeViewJson(latency_view, &latency_json_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, latency_json, "\"gpuFrameIntervalNs\":8333333") != null);
     try std.testing.expect(std.mem.indexOf(u8, latency_json, "\"gpuInputTimestampNs\":50000000") != null);
     try std.testing.expect(std.mem.indexOf(u8, latency_json, "\"gpuInputLatencyNs\":20000000") != null);
     try std.testing.expect(std.mem.indexOf(u8, latency_json, "\"gpuInputLatencyBudgetExceededCount\":1") != null);

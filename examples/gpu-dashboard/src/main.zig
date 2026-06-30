@@ -792,6 +792,7 @@ fn gpuFrameEvent(frame: zero_native.platform.GpuFrame) zero_native.GpuSurfaceFra
         .scale_factor = frame.scale_factor,
         .frame_index = frame.frame_index,
         .timestamp_ns = frame.timestamp_ns,
+        .frame_interval_ns = frame.frame_interval_ns,
         .input_timestamp_ns = frame.input_timestamp_ns,
         .input_latency_ns = frame.input_latency_ns,
         .input_latency_budget_ns = frame.input_latency_budget_ns,
