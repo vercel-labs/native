@@ -970,6 +970,17 @@ fn iosViewController() []const u8 {
     \\        guard let nativeApp else { return nil }
     \\        var node = zero_native_widget_semantics_t()
     \\        guard zero_native_app_widget_semantics_at(nativeApp, UInt(index), &node) != 0 else { return nil }
+    \\        return widgetSemantics(from: node)
+    \\    }
+    \\
+    \\    private func widgetSemantics(id: UInt64) -> WidgetSemantics? {
+    \\        guard let nativeApp else { return nil }
+    \\        var node = zero_native_widget_semantics_t()
+    \\        guard zero_native_app_widget_semantics_by_id(nativeApp, id, &node) != 0 else { return nil }
+    \\        return widgetSemantics(from: node)
+    \\    }
+    \\
+    \\    private func widgetSemantics(from node: zero_native_widget_semantics_t) -> WidgetSemantics {
     \\        return WidgetSemantics(
     \\            id: node.id,
     \\            parentId: node.parent_id,
@@ -1076,26 +1087,29 @@ fn iosViewController() []const u8 {
     \\    }
     \\
     \\    private func activateWidgetAccessibilityNode(_ node: WidgetSemantics) -> Bool {
-    \\        if widgetSupportsAction(node, UInt32(ZERO_NATIVE_WIDGET_ACTION_TOGGLE)) {
-    \\            return dispatchWidgetAction(id: node.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_TOGGLE))
+    \\        let current = widgetSemantics(id: node.id) ?? node
+    \\        if widgetSupportsAction(current, UInt32(ZERO_NATIVE_WIDGET_ACTION_TOGGLE)) {
+    \\            return dispatchWidgetAction(id: current.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_TOGGLE))
     \\        }
-    \\        if widgetSupportsAction(node, UInt32(ZERO_NATIVE_WIDGET_ACTION_PRESS)) {
-    \\            return dispatchWidgetAction(id: node.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_PRESS))
+    \\        if widgetSupportsAction(current, UInt32(ZERO_NATIVE_WIDGET_ACTION_PRESS)) {
+    \\            return dispatchWidgetAction(id: current.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_PRESS))
     \\        }
-    \\        if widgetSupportsAction(node, UInt32(ZERO_NATIVE_WIDGET_ACTION_SELECT)) {
-    \\            return dispatchWidgetAction(id: node.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_SELECT))
+    \\        if widgetSupportsAction(current, UInt32(ZERO_NATIVE_WIDGET_ACTION_SELECT)) {
+    \\            return dispatchWidgetAction(id: current.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_SELECT))
     \\        }
     \\        return false
     \\    }
     \\
     \\    private func incrementWidgetAccessibilityNode(_ node: WidgetSemantics) -> Bool {
-    \\        guard widgetSupportsAction(node, UInt32(ZERO_NATIVE_WIDGET_ACTION_INCREMENT)) else { return false }
-    \\        return dispatchWidgetAction(id: node.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_INCREMENT))
+    \\        let current = widgetSemantics(id: node.id) ?? node
+    \\        guard widgetSupportsAction(current, UInt32(ZERO_NATIVE_WIDGET_ACTION_INCREMENT)) else { return false }
+    \\        return dispatchWidgetAction(id: current.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_INCREMENT))
     \\    }
     \\
     \\    private func decrementWidgetAccessibilityNode(_ node: WidgetSemantics) -> Bool {
-    \\        guard widgetSupportsAction(node, UInt32(ZERO_NATIVE_WIDGET_ACTION_DECREMENT)) else { return false }
-    \\        return dispatchWidgetAction(id: node.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_DECREMENT))
+    \\        let current = widgetSemantics(id: node.id) ?? node
+    \\        guard widgetSupportsAction(current, UInt32(ZERO_NATIVE_WIDGET_ACTION_DECREMENT)) else { return false }
+    \\        return dispatchWidgetAction(id: current.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_DECREMENT))
     \\    }
     \\
     \\    private func widgetSupportsAction(_ node: WidgetSemantics, _ action: UInt32) -> Bool {
@@ -1462,13 +1476,13 @@ fn androidActivity() []const u8 {
     \\            return if (virtualViewId == View.NO_ID) {
     \\                createHostNode(nodes)
     \\            } else {
-    \\                nodes.firstOrNull { it.id.toInt() == virtualViewId }?.let { createWidgetNode(it, nodes) }
+    \\                (widgetSemanticsById(virtualViewId.toLong()) ?: nodes.firstOrNull { it.id.toInt() == virtualViewId })?.let { createWidgetNode(it, nodes) }
     \\            }
     \\        }
     \\
     \\        override fun performAction(virtualViewId: Int, action: Int, arguments: Bundle?): Boolean {
     \\            if (virtualViewId == View.NO_ID) return false
-    \\            val node = widgetSemanticsSnapshot().firstOrNull { it.id.toInt() == virtualViewId } ?: return false
+    \\            val node = widgetSemanticsById(virtualViewId.toLong()) ?: return false
     \\            val id = node.id
     \\            val handled = when (action) {
     \\                AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS -> {
@@ -1590,7 +1604,7 @@ fn androidActivity() []const u8 {
     \\        }
     \\
     \\        private fun performWidgetClick(id: Long): Boolean {
-    \\            val node = widgetSemanticsSnapshot().firstOrNull { it.id == id } ?: return false
+    \\            val node = widgetSemanticsById(id) ?: return false
     \\            return when {
     \\                widgetSupportsAction(node, WIDGET_ACTION_TOGGLE) -> dispatchWidgetAction(id, WIDGET_ACTION_KIND_TOGGLE)
     \\                widgetSupportsAction(node, WIDGET_ACTION_PRESS) -> dispatchWidgetAction(id, WIDGET_ACTION_KIND_PRESS)
@@ -1822,6 +1836,30 @@ fn androidActivity() []const u8 {
     \\        val ints = IntArray(5)
     \\        val floats = FloatArray(8)
     \\        if (!nativeWidgetSemanticsFields(nativeApp, index, ids, ints, floats)) return null
+    \\        return widgetSemanticsFromNative(
+    \\            ids,
+    \\            ints,
+    \\            floats,
+    \\            String(nativeWidgetSemanticsLabel(nativeApp, index), Charsets.UTF_8),
+    \\            String(nativeWidgetSemanticsText(nativeApp, index), Charsets.UTF_8),
+    \\        )
+    \\    }
+    \\
+    \\    private fun widgetSemanticsById(id: Long): WidgetSemantics? {
+    \\        val ids = LongArray(12)
+    \\        val ints = IntArray(5)
+    \\        val floats = FloatArray(8)
+    \\        if (!nativeWidgetSemanticsByIdFields(nativeApp, id, ids, ints, floats)) return null
+    \\        return widgetSemanticsFromNative(
+    \\            ids,
+    \\            ints,
+    \\            floats,
+    \\            String(nativeWidgetSemanticsByIdLabel(nativeApp, id), Charsets.UTF_8),
+    \\            String(nativeWidgetSemanticsByIdText(nativeApp, id), Charsets.UTF_8),
+    \\        )
+    \\    }
+    \\
+    \\    private fun widgetSemanticsFromNative(ids: LongArray, ints: IntArray, floats: FloatArray, label: String, text: String): WidgetSemantics {
     \\        return WidgetSemantics(
     \\            id = ids[0],
     \\            parentId = ids[1],
@@ -1833,8 +1871,8 @@ fn androidActivity() []const u8 {
     \\            width = floats[2],
     \\            height = floats[3],
     \\            value = if (ints[3] != 0) floats[4] else null,
-    \\            label = String(nativeWidgetSemanticsLabel(nativeApp, index), Charsets.UTF_8),
-    \\            text = String(nativeWidgetSemanticsText(nativeApp, index), Charsets.UTF_8),
+    \\            label = label,
+    \\            text = text,
     \\            textSelectionStart = ids[2],
     \\            textSelectionEnd = ids[3],
     \\            textCompositionStart = ids[4],
@@ -1963,6 +2001,9 @@ fn androidActivity() []const u8 {
     \\    external fun nativeWidgetSemanticsFields(app: Long, index: Int, ids: LongArray, ints: IntArray, floats: FloatArray): Boolean
     \\    external fun nativeWidgetSemanticsLabel(app: Long, index: Int): ByteArray
     \\    external fun nativeWidgetSemanticsText(app: Long, index: Int): ByteArray
+    \\    external fun nativeWidgetSemanticsByIdFields(app: Long, id: Long, ids: LongArray, ints: IntArray, floats: FloatArray): Boolean
+    \\    external fun nativeWidgetSemanticsByIdLabel(app: Long, id: Long): ByteArray
+    \\    external fun nativeWidgetSemanticsByIdText(app: Long, id: Long): ByteArray
     \\    external fun nativeWidgetTextGeometry(app: Long, id: Long, ints: IntArray, floats: FloatArray): Boolean
     \\    external fun nativeWidgetAction(app: Long, id: Long, action: Int, text: String?, selectionAnchor: Long, selectionFocus: Long, hasSelection: Boolean): Boolean
     \\
@@ -2041,6 +2082,9 @@ fn androidJni() []const u8 {
     \\JNIEXPORT jboolean JNICALL Java_dev_zero_1native_MainActivity_nativeWidgetSemanticsFields(JNIEnv *env, jobject self, jlong app, jint index, jlongArray ids, jintArray ints, jfloatArray floats) { (void)self; if (!ids || !ints || !floats) return JNI_FALSE; if ((*env)->GetArrayLength(env, ids) < 12 || (*env)->GetArrayLength(env, ints) < 5 || (*env)->GetArrayLength(env, floats) < 8) return JNI_FALSE; zero_native_widget_semantics_t node; memset(&node, 0, sizeof(node)); if (!zero_native_app_widget_semantics_at((void*)app, (uintptr_t)index, &node)) return JNI_FALSE; const jlong id_values[12] = { (jlong)node.id, (jlong)node.parent_id, (jlong)node.text_selection_start, (jlong)node.text_selection_end, (jlong)node.text_composition_start, (jlong)node.text_composition_end, (jlong)node.grid_row_index, (jlong)node.grid_column_index, (jlong)node.grid_row_count, (jlong)node.grid_column_count, (jlong)node.list_item_index, (jlong)node.list_item_count }; const jint int_values[5] = { (jint)node.role, (jint)node.flags, (jint)node.actions, (jint)node.has_value, (jint)node.has_scroll }; const jfloat float_values[8] = { (jfloat)node.x, (jfloat)node.y, (jfloat)node.width, (jfloat)node.height, (jfloat)node.value, (jfloat)node.scroll_offset, (jfloat)node.scroll_viewport_extent, (jfloat)node.scroll_content_extent }; (*env)->SetLongArrayRegion(env, ids, 0, 12, id_values); (*env)->SetIntArrayRegion(env, ints, 0, 5, int_values); (*env)->SetFloatArrayRegion(env, floats, 0, 8, float_values); return JNI_TRUE; }
     \\JNIEXPORT jbyteArray JNICALL Java_dev_zero_1native_MainActivity_nativeWidgetSemanticsLabel(JNIEnv *env, jobject self, jlong app, jint index) { (void)self; zero_native_widget_semantics_t node; memset(&node, 0, sizeof(node)); if (!zero_native_app_widget_semantics_at((void*)app, (uintptr_t)index, &node)) return zero_native_jni_bytes(env, "", 0); return zero_native_jni_bytes(env, node.label, node.label_len); }
     \\JNIEXPORT jbyteArray JNICALL Java_dev_zero_1native_MainActivity_nativeWidgetSemanticsText(JNIEnv *env, jobject self, jlong app, jint index) { (void)self; zero_native_widget_semantics_t node; memset(&node, 0, sizeof(node)); if (!zero_native_app_widget_semantics_at((void*)app, (uintptr_t)index, &node)) return zero_native_jni_bytes(env, "", 0); return zero_native_jni_bytes(env, node.text, node.text_len); }
+    \\JNIEXPORT jboolean JNICALL Java_dev_zero_1native_MainActivity_nativeWidgetSemanticsByIdFields(JNIEnv *env, jobject self, jlong app, jlong id, jlongArray ids, jintArray ints, jfloatArray floats) { (void)self; if (!ids || !ints || !floats) return JNI_FALSE; if ((*env)->GetArrayLength(env, ids) < 12 || (*env)->GetArrayLength(env, ints) < 5 || (*env)->GetArrayLength(env, floats) < 8) return JNI_FALSE; zero_native_widget_semantics_t node; memset(&node, 0, sizeof(node)); if (!zero_native_app_widget_semantics_by_id((void*)app, (uint64_t)id, &node)) return JNI_FALSE; const jlong id_values[12] = { (jlong)node.id, (jlong)node.parent_id, (jlong)node.text_selection_start, (jlong)node.text_selection_end, (jlong)node.text_composition_start, (jlong)node.text_composition_end, (jlong)node.grid_row_index, (jlong)node.grid_column_index, (jlong)node.grid_row_count, (jlong)node.grid_column_count, (jlong)node.list_item_index, (jlong)node.list_item_count }; const jint int_values[5] = { (jint)node.role, (jint)node.flags, (jint)node.actions, (jint)node.has_value, (jint)node.has_scroll }; const jfloat float_values[8] = { (jfloat)node.x, (jfloat)node.y, (jfloat)node.width, (jfloat)node.height, (jfloat)node.value, (jfloat)node.scroll_offset, (jfloat)node.scroll_viewport_extent, (jfloat)node.scroll_content_extent }; (*env)->SetLongArrayRegion(env, ids, 0, 12, id_values); (*env)->SetIntArrayRegion(env, ints, 0, 5, int_values); (*env)->SetFloatArrayRegion(env, floats, 0, 8, float_values); return JNI_TRUE; }
+    \\JNIEXPORT jbyteArray JNICALL Java_dev_zero_1native_MainActivity_nativeWidgetSemanticsByIdLabel(JNIEnv *env, jobject self, jlong app, jlong id) { (void)self; zero_native_widget_semantics_t node; memset(&node, 0, sizeof(node)); if (!zero_native_app_widget_semantics_by_id((void*)app, (uint64_t)id, &node)) return zero_native_jni_bytes(env, "", 0); return zero_native_jni_bytes(env, node.label, node.label_len); }
+    \\JNIEXPORT jbyteArray JNICALL Java_dev_zero_1native_MainActivity_nativeWidgetSemanticsByIdText(JNIEnv *env, jobject self, jlong app, jlong id) { (void)self; zero_native_widget_semantics_t node; memset(&node, 0, sizeof(node)); if (!zero_native_app_widget_semantics_by_id((void*)app, (uint64_t)id, &node)) return zero_native_jni_bytes(env, "", 0); return zero_native_jni_bytes(env, node.text, node.text_len); }
     \\JNIEXPORT jboolean JNICALL Java_dev_zero_1native_MainActivity_nativeWidgetTextGeometry(JNIEnv *env, jobject self, jlong app, jlong id, jintArray ints, jfloatArray floats) { (void)self; if (!ints || !floats) return JNI_FALSE; if ((*env)->GetArrayLength(env, ints) < 5 || (*env)->GetArrayLength(env, floats) < 12) return JNI_FALSE; zero_native_widget_text_geometry_t geometry; memset(&geometry, 0, sizeof(geometry)); if (!zero_native_app_widget_text_geometry((void*)app, (uint64_t)id, &geometry)) return JNI_FALSE; const jint int_values[5] = { (jint)geometry.has_caret_bounds, (jint)geometry.has_selection_bounds, (jint)geometry.selection_rect_count, (jint)geometry.has_composition_bounds, (jint)geometry.composition_rect_count }; const jfloat float_values[12] = { (jfloat)geometry.caret_x, (jfloat)geometry.caret_y, (jfloat)geometry.caret_width, (jfloat)geometry.caret_height, (jfloat)geometry.selection_x, (jfloat)geometry.selection_y, (jfloat)geometry.selection_width, (jfloat)geometry.selection_height, (jfloat)geometry.composition_x, (jfloat)geometry.composition_y, (jfloat)geometry.composition_width, (jfloat)geometry.composition_height }; (*env)->SetIntArrayRegion(env, ints, 0, 5, int_values); (*env)->SetFloatArrayRegion(env, floats, 0, 12, float_values); return JNI_TRUE; }
     \\JNIEXPORT jboolean JNICALL Java_dev_zero_1native_MainActivity_nativeWidgetAction(JNIEnv *env, jobject self, jlong app, jlong id, jint action, jstring text, jlong selection_anchor, jlong selection_focus, jboolean has_selection) { (void)self; const char *chars = text ? (*env)->GetStringUTFChars(env, text, NULL) : NULL; zero_native_widget_action_t request; memset(&request, 0, sizeof(request)); request.id = (uint64_t)id; request.action = (int)action; request.text = chars; request.text_len = chars ? strlen(chars) : 0; request.selection_anchor = (uintptr_t)selection_anchor; request.selection_focus = (uintptr_t)selection_focus; request.has_selection = has_selection ? 1 : 0; const int ok = zero_native_app_widget_action((void*)app, &request); if (chars) (*env)->ReleaseStringUTFChars(env, text, chars); return ok ? JNI_TRUE : JNI_FALSE; }
     \\
@@ -2896,6 +2940,7 @@ test "mobile package templates include native command shells" {
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "struct WidgetSemantics") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "struct WidgetTextGeometry") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "zero_native_app_widget_semantics_count") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ios_controller, "zero_native_app_widget_semantics_by_id") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "zero_native_app_widget_text_geometry") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "zero_native_app_widget_action") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "WidgetAccessibilityElement(accessibilityContainer: webView") != null);
@@ -2922,6 +2967,7 @@ test "mobile package templates include native command shells" {
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "data class WidgetSemantics") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "data class WidgetTextGeometry") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "nativeWidgetSemanticsFields") != null);
+    try std.testing.expect(std.mem.indexOf(u8, android_activity, "nativeWidgetSemanticsByIdFields") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "nativeWidgetTextGeometry") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "nativeWidgetAction") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "AccessibilityNodeProvider") != null);
@@ -2947,6 +2993,7 @@ test "mobile package templates include native command shells" {
     try std.testing.expect(std.mem.indexOf(u8, android_jni, "zero_native_app_ime") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_jni, "zero_native_app_widget_semantics_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_jni, "zero_native_app_widget_semantics_at") != null);
+    try std.testing.expect(std.mem.indexOf(u8, android_jni, "zero_native_app_widget_semantics_by_id") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_jni, "zero_native_app_widget_text_geometry") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_jni, "zero_native_app_widget_action") != null);
 }
