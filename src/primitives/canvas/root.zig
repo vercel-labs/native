@@ -3009,11 +3009,11 @@ pub const ColorTokens = struct {
     text: Color = Color.rgb8(9, 9, 11),
     text_muted: Color = Color.rgb8(113, 113, 122),
     border: Color = Color.rgb8(228, 228, 231),
-    accent: Color = Color.rgb8(47, 70, 220),
+    accent: Color = Color.rgb8(24, 24, 27),
     accent_text: Color = Color.rgb8(250, 250, 250),
     destructive: Color = Color.rgb8(220, 38, 38),
     destructive_text: Color = Color.rgb8(250, 250, 250),
-    focus_ring: Color = Color.rgb8(47, 70, 220),
+    focus_ring: Color = Color.rgb8(24, 24, 27),
     shadow: Color = Color.rgba8(0, 0, 0, 26),
     disabled: Color = Color.rgb8(244, 244, 245),
 
@@ -3043,11 +3043,11 @@ pub const ColorTokens = struct {
             .text = Color.rgb8(250, 250, 250),
             .text_muted = Color.rgb8(161, 161, 170),
             .border = Color.rgb8(39, 39, 42),
-            .accent = Color.rgb8(47, 70, 220),
-            .accent_text = Color.rgb8(250, 250, 250),
+            .accent = Color.rgb8(250, 250, 250),
+            .accent_text = Color.rgb8(9, 9, 11),
             .destructive = Color.rgb8(239, 68, 68),
             .destructive_text = Color.rgb8(250, 250, 250),
-            .focus_ring = Color.rgb8(96, 120, 255),
+            .focus_ring = Color.rgb8(212, 212, 216),
             .shadow = Color.rgba8(0, 0, 0, 150),
             .disabled = Color.rgb8(39, 39, 42),
         };
@@ -14013,7 +14013,8 @@ test "design tokens provide theme and contrast palettes" {
     try std.testing.expectEqualStrings("Geist", light.typography.bodyFamilyName());
     try std.testing.expectEqualStrings("Geist Mono", light.typography.monoFamilyName());
     try std.testing.expectEqualDeep(Color.rgb8(9, 9, 11), light.colors.text);
-    try std.testing.expectEqualDeep(Color.rgb8(47, 70, 220), light.colors.accent);
+    try std.testing.expectEqualDeep(Color.rgb8(24, 24, 27), light.colors.accent);
+    try std.testing.expectEqualDeep(Color.rgb8(24, 24, 27), light.colors.focus_ring);
 
     const dark = DesignTokens.theme(.{ .color_scheme = .dark, .density = .compact });
     try std.testing.expectEqual(Density.compact, dark.density);
@@ -14021,6 +14022,9 @@ test "design tokens provide theme and contrast palettes" {
     try std.testing.expectEqualDeep(Color.rgb8(9, 9, 11), dark.colors.background);
     try std.testing.expectEqualDeep(Color.rgb8(250, 250, 250), dark.colors.text);
     try std.testing.expectEqualDeep(Color.rgb8(39, 39, 42), dark.colors.border);
+    try std.testing.expectEqualDeep(Color.rgb8(250, 250, 250), dark.colors.accent);
+    try std.testing.expectEqualDeep(Color.rgb8(9, 9, 11), dark.colors.accent_text);
+    try std.testing.expectEqualDeep(Color.rgb8(212, 212, 216), dark.colors.focus_ring);
 
     const high_contrast = DesignTokens.theme(.{ .color_scheme = .dark, .contrast = .high, .density = .spacious });
     try std.testing.expectEqual(Density.spacious, high_contrast.density);
@@ -16232,7 +16236,7 @@ test "widget display list renders through reference surface" {
     try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
 
     try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 220, 20);
-    try expectPixelRgba8(.{ 47, 70, 220, 255 }, surface, 20, 100);
+    try expectPixelRgba8(.{ 24, 24, 27, 255 }, surface, 20, 100);
 }
 
 test "widget emitter applies button state tokens" {
