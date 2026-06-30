@@ -4031,7 +4031,7 @@ pub fn layoutTextRunPlan(text: DrawText, options: TextLayoutOptions, output: []T
 
     var start: usize = 0;
     while (start < text.text.len) {
-        const end = nextTextLineEnd(text.text, start, text.size, options);
+        const end = nextTextLineEnd(text.text, start, text.font_id, text.size, options);
         try appendTextLine(output, &len, text, start, end - start, start, end - start, lineHeight(text, options), options, &bounds);
         start = end;
         if (start < text.text.len and text.text[start] == '\n') start += 1;
@@ -10246,7 +10246,7 @@ fn textBounds(value: DrawText) ?geometry.RectF {
             max_y = @max(max_y, glyph_y + value.size * 0.25);
         }
     } else {
-        max_x = value.origin.x + estimateTextWidth(value.text, value.size);
+        max_x = value.origin.x + estimateTextWidthForFont(value.font_id, value.text, value.size);
     }
 
     return geometry.RectF.init(
@@ -10285,7 +10285,7 @@ fn subpixelBucket(value: f32) u8 {
     return @intFromFloat(std.math.clamp(scaled, 0, 3));
 }
 
-fn nextTextLineEnd(text: []const u8, start: usize, size: f32, options: TextLayoutOptions) usize {
+fn nextTextLineEnd(text: []const u8, start: usize, font_id: FontId, size: f32, options: TextLayoutOptions) usize {
     const max_width = if (options.max_width > 0) options.max_width else std.math.inf(f32);
     if (options.wrap == .none or max_width == std.math.inf(f32)) {
         return nextExplicitLineEnd(text, start);
@@ -10296,7 +10296,7 @@ fn nextTextLineEnd(text: []const u8, start: usize, size: f32, options: TextLayou
     while (index < text.len) {
         if (text[index] == '\n') return index;
         const next_index = nextTextOffset(text, index);
-        const next_width = estimateTextWidth(text[start..next_index], size);
+        const next_width = estimateTextWidthForFont(font_id, text[start..next_index], size);
         if (isTextBreakByte(text[index])) last_break = next_index;
         if (next_width > max_width) {
             if (index == start) return next_index;
@@ -10449,7 +10449,7 @@ fn textLineCaretX(text: DrawText, line: TextLine, offset: usize) f32 {
     if (line.glyph_len > 0 and line.glyph_start < text.glyphs.len) {
         return textLineGlyphCaretX(text, line, range, snapped);
     }
-    return line.bounds.x + estimateTextWidth(text.text[range.start..snapped], text.size);
+    return line.bounds.x + estimateTextWidthForFont(text.font_id, text.text[range.start..snapped], text.size);
 }
 
 fn textLineGlyphCaretX(text: DrawText, line: TextLine, range: TextRange, offset: usize) f32 {
@@ -10477,13 +10477,14 @@ fn textLineOffsetForX(text: DrawText, line: TextLine, x: f32) usize {
         return textLineGlyphOffsetForX(text, line, range, x);
     }
 
-    const advance = @max(1, text.size * 0.5);
     var cursor = range.start;
     var caret_x = line.bounds.x;
     while (cursor < range.end) {
+        const next_cursor = nextTextOffset(text.text, cursor);
+        const advance = @max(1, estimateTextAdvanceForBytes(text.font_id, text.text[cursor..next_cursor], text.size));
         if (x < caret_x + advance * 0.5) return cursor;
         caret_x += advance;
-        cursor = nextTextOffset(text.text, cursor);
+        cursor = next_cursor;
     }
     return range.end;
 }
@@ -10545,13 +10546,132 @@ fn textLineBounds(text: DrawText, text_start: usize, text_len: usize, glyph_star
     return geometry.RectF.init(
         text.origin.x,
         baseline - text.size,
-        estimateTextWidth(text.text[text_start..@min(text.text.len, text_start + text_len)], text.size),
+        estimateTextWidthForFont(text.font_id, text.text[text_start..@min(text.text.len, text_start + text_len)], text.size),
         line_height,
     );
 }
 
 fn estimateTextWidth(text: []const u8, size: f32) f32 {
-    return @as(f32, @floatFromInt(utf8ScalarCount(text))) * size * 0.5;
+    return estimateTextWidthForFont(default_sans_font_id, text, size);
+}
+
+fn estimateTextWidthForFont(font_id: FontId, text: []const u8, size: f32) f32 {
+    var width: f32 = 0;
+    var index: usize = 0;
+    while (index < text.len) {
+        const next = @min(text.len, index + utf8SequenceLength(text[index]));
+        width += estimateTextAdvanceForBytes(font_id, text[index..next], size);
+        index = next;
+    }
+    return width;
+}
+
+fn estimateTextAdvanceForBytes(font_id: FontId, bytes: []const u8, size: f32) f32 {
+    if (bytes.len == 0) return 0;
+    if (font_id == default_mono_font_id) return size * 0.6;
+    if (bytes.len > 1) return size * 0.65;
+    return size * geistSansAdvanceFactor(bytes[0]);
+}
+
+fn geistSansAdvanceFactor(byte: u8) f32 {
+    return switch (byte) {
+        ' ' => 0.25,
+        '!' => 0.268,
+        '"' => 0.408,
+        '#' => 0.654,
+        '$' => 0.647,
+        '%' => 0.844,
+        '&' => 0.718,
+        '\'' => 0.213,
+        '(' => 0.365,
+        ')' => 0.365,
+        '*' => 0.469,
+        '+' => 0.633,
+        ',' => 0.214,
+        '-' => 0.424,
+        '.' => 0.2,
+        '/' => 0.458,
+        '0' => 0.66,
+        '1' => 0.348,
+        '2' => 0.596,
+        '3' => 0.622,
+        '4' => 0.584,
+        '5' => 0.602,
+        '6' => 0.601,
+        '7' => 0.553,
+        '8' => 0.621,
+        '9' => 0.601,
+        ':' => 0.237,
+        ';' => 0.237,
+        '<' => 0.605,
+        '=' => 0.606,
+        '>' => 0.605,
+        '?' => 0.498,
+        '@' => 0.899,
+        'A' => 0.668,
+        'B' => 0.678,
+        'C' => 0.7,
+        'D' => 0.701,
+        'E' => 0.602,
+        'F' => 0.589,
+        'G' => 0.707,
+        'H' => 0.702,
+        'I' => 0.269,
+        'J' => 0.596,
+        'K' => 0.651,
+        'L' => 0.579,
+        'M' => 0.876,
+        'N' => 0.737,
+        'O' => 0.74,
+        'P' => 0.649,
+        'Q' => 0.74,
+        'R' => 0.67,
+        'S' => 0.647,
+        'T' => 0.578,
+        'U' => 0.688,
+        'V' => 0.668,
+        'W' => 0.91,
+        'X' => 0.628,
+        'Y' => 0.628,
+        'Z' => 0.542,
+        '[' => 0.349,
+        '\\' => 0.458,
+        ']' => 0.349,
+        '^' => 0.537,
+        '_' => 0.562,
+        '`' => 0.35,
+        'a' => 0.574,
+        'b' => 0.602,
+        'c' => 0.551,
+        'd' => 0.602,
+        'e' => 0.567,
+        'f' => 0.401,
+        'g' => 0.601,
+        'h' => 0.584,
+        'i' => 0.252,
+        'j' => 0.258,
+        'k' => 0.594,
+        'l' => 0.288,
+        'm' => 0.879,
+        'n' => 0.584,
+        'o' => 0.578,
+        'p' => 0.602,
+        'q' => 0.602,
+        'r' => 0.385,
+        's' => 0.529,
+        't' => 0.399,
+        'u' => 0.586,
+        'v' => 0.534,
+        'w' => 0.817,
+        'x' => 0.584,
+        'y' => 0.535,
+        'z' => 0.549,
+        '{' => 0.365,
+        '|' => 0.256,
+        '}' => 0.365,
+        '~' => 0.633,
+        else => 0.58,
+    };
 }
 
 fn isTextBreakByte(byte: u8) bool {
@@ -13858,7 +13978,7 @@ test "widget search fields expose textbox semantics and render search chrome" {
     try std.testing.expect(semantics[0].focusable);
     try std.testing.expectEqualDeep(TextRange.init(9, 9), semantics[0].text_selection.?);
     const search_geometry = layout.textGeometry(10, .{}).?;
-    try expectRect(geometry.RectF.init(105, 21.25, 1, 17.5), search_geometry.caret_bounds.?);
+    try expectRectApprox(geometry.RectF.init(112.042, 21.25, 1, 17.5), search_geometry.caret_bounds.?);
     try std.testing.expectEqual(@as(usize, 0), search_geometry.selection_rect_count);
 
     const tokens = DesignTokens{
@@ -13912,9 +14032,9 @@ test "widget text fields render selection caret and composition ranges" {
     const text_geometry = layout.textGeometry(9, .{}).?;
     try std.testing.expect(text_geometry.caret_bounds == null);
     try std.testing.expectEqual(@as(usize, 1), text_geometry.selection_rect_count);
-    try expectRect(geometry.RectF.init(27, 19.25, 21, 17.5), text_geometry.selection_bounds.?);
+    try expectRectApprox(geometry.RectF.init(28.036, 19.25, 24.57, 17.5), text_geometry.selection_bounds.?);
     try std.testing.expectEqual(@as(usize, 1), text_geometry.composition_rect_count);
-    try expectRect(geometry.RectF.init(34, 19.25, 14, 17.5), text_geometry.composition_bounds.?);
+    try expectRectApprox(geometry.RectF.init(36.464, 19.25, 16.142, 17.5), text_geometry.composition_bounds.?);
 
     var commands: [6]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
@@ -13983,21 +14103,21 @@ test "widget text fields render wrapped selection geometry" {
     const layout = try layoutWidgetTree(field, field.frame, &nodes);
     const text_geometry = layout.textGeometry(11, tokens).?;
     try std.testing.expectEqual(@as(usize, 2), text_geometry.selection_rect_count);
-    try expectRect(geometry.RectF.init(8, 10, 10, 25), text_geometry.selection_bounds.?);
+    try expectRectApprox(geometry.RectF.init(8, 10, 14.01, 25), text_geometry.selection_bounds.?);
 
     const display_list = builder.displayList();
     try std.testing.expectEqual(@as(usize, 5), display_list.commandCount());
     switch (display_list.commands[2]) {
         .fill_rounded_rect => |selection| {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(11, 3)), selection.id);
-            try expectRect(geometry.RectF.init(13, 10, 5, 12.5), selection.rect);
+            try expectRectApprox(geometry.RectF.init(14.68, 10, 6.78, 12.5), selection.rect);
         },
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[3]) {
         .fill_rounded_rect => |selection| {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(11, 13)), selection.id);
-            try expectRect(geometry.RectF.init(8, 22.5, 10, 12.5), selection.rect);
+            try expectRectApprox(geometry.RectF.init(8, 22.5, 14.01, 12.5), selection.rect);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -14021,10 +14141,10 @@ test "widget text fields map pointer positions to caret selections" {
         .text = "AéB",
     };
     try std.testing.expectEqual(@as(usize, 0), textOffsetForWidgetPoint(field, geometry.PointF.init(18, 24), tokens).?);
-    try std.testing.expectEqual(@as(usize, 1), textOffsetForWidgetPoint(field, geometry.PointF.init(26, 24), tokens).?);
-    try std.testing.expectEqual(@as(usize, 3), textOffsetForWidgetPoint(field, geometry.PointF.init(34, 24), tokens).?);
+    try std.testing.expectEqual(@as(usize, 1), textOffsetForWidgetPoint(field, geometry.PointF.init(27, 24), tokens).?);
+    try std.testing.expectEqual(@as(usize, 3), textOffsetForWidgetPoint(field, geometry.PointF.init(37, 24), tokens).?);
     try std.testing.expectEqual(@as(usize, 4), textOffsetForWidgetPoint(field, geometry.PointF.init(80, 24), tokens).?);
-    try std.testing.expectEqualDeep(TextSelection.collapsed(3), textSelectionForWidgetPoint(field, geometry.PointF.init(34, 24), null, tokens).?);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(3), textSelectionForWidgetPoint(field, geometry.PointF.init(37, 24), null, tokens).?);
     try std.testing.expectEqualDeep(TextSelection{ .anchor = 1, .focus = 4 }, textSelectionForWidgetPoint(field, geometry.PointF.init(80, 24), 1, tokens).?);
 
     const search = Widget{
@@ -16049,7 +16169,7 @@ test "render batch plan groups adjacent commands by pipeline and state" {
     try std.testing.expectEqual(@as(usize, 2), batch_plan.batches[1].command_start);
     try std.testing.expectEqual(RenderPipelineKind.glyph_run, batch_plan.batches[2].pipeline);
     try std.testing.expectEqual(@as(usize, 3), batch_plan.batches[2].command_start);
-    try expectRect(geometry.RectF.init(0, 0, 84, 21), batch_plan.bounds);
+    try expectRectApprox(geometry.RectF.init(0, 0, 83.448, 21), batch_plan.bounds);
 }
 
 test "render batch plan respects clip opacity and output limits" {
@@ -19456,7 +19576,7 @@ test "text edit state tracks ime composition ranges" {
 }
 
 test "text bounds follow utf8 scalar fallback and shaped y offsets" {
-    try expectRect(geometry.RectF.init(2, 8, 15, 12.5), textBounds(.{
+    try expectRectApprox(geometry.RectF.init(2, 8, 15.78, 12.5), textBounds(.{
         .font_id = 1,
         .size = 10,
         .origin = geometry.PointF.init(2, 18),
@@ -19486,13 +19606,13 @@ test "text bounds and reference renderer honor per-run wrapping" {
         .text = "ABCD",
         .text_layout = .{ .max_width = 10, .line_height = 12, .wrap = .character },
     };
-    try expectRect(geometry.RectF.init(0, 0, 10, 24), textBounds(text));
+    try expectRectApprox(geometry.RectF.init(0, 0, 7.01, 48), textBounds(text));
 
     const commands = [_]CanvasCommand{.{ .draw_text = text }};
     var render_commands: [1]RenderCommand = undefined;
     const render_plan = try (DisplayList{ .commands = &commands }).renderPlan(&render_commands);
     try std.testing.expectEqual(@as(usize, 1), render_plan.commandCount());
-    try expectRect(geometry.RectF.init(0, 0, 10, 24), render_plan.commands[0].bounds);
+    try expectRectApprox(geometry.RectF.init(0, 0, 7.01, 48), render_plan.commands[0].bounds);
 
     var pixels: [16 * 32 * 4]u8 = [_]u8{0} ** (16 * 32 * 4);
     const surface = try ReferenceRenderSurface.init(16, 32, &pixels);
@@ -19529,7 +19649,7 @@ test "text layout wraps words into deterministic line boxes" {
     try std.testing.expectEqual(@as(usize, 4), layout.lineCount());
     try std.testing.expectEqual(@as(usize, 0), layout.lines[0].text_start);
     try std.testing.expectEqual(@as(usize, 5), layout.lines[0].text_len);
-    try expectRect(geometry.RectF.init(4, 10, 25, 14), layout.lines[0].bounds);
+    try expectRectApprox(geometry.RectF.init(4, 10, 24.23, 14), layout.lines[0].bounds);
     try std.testing.expectEqual(@as(usize, 6), layout.lines[1].text_start);
     try std.testing.expectEqual(@as(usize, 5), layout.lines[1].text_len);
     try std.testing.expectEqual(@as(f32, 34), layout.lines[1].baseline);
@@ -19537,7 +19657,7 @@ test "text layout wraps words into deterministic line boxes" {
     try std.testing.expectEqual(@as(usize, 4), layout.lines[2].text_len);
     try std.testing.expectEqual(@as(usize, 17), layout.lines[3].text_start);
     try std.testing.expectEqual(@as(usize, 4), layout.lines[3].text_len);
-    try expectRect(geometry.RectF.init(4, 10, 25, 56), layout.bounds);
+    try expectRectApprox(geometry.RectF.init(4, 10, 26.7, 56), layout.bounds);
 }
 
 test "text layout aligns fallback and shaped line boxes" {
@@ -19552,12 +19672,12 @@ test "text layout aligns fallback and shaped line boxes" {
     var center_lines: [1]TextLine = undefined;
     const centered = try layoutTextRunPlan(text, .{ .max_width = 30, .line_height = 14, .alignment = .center }, &center_lines);
     try std.testing.expectEqual(TextAlign.center, centered.key.alignment);
-    try expectRect(geometry.RectF.init(14, 10, 10, 14), centered.layout.lines[0].bounds);
-    try expectRect(geometry.RectF.init(14, 10, 10, 14), centered.layout.bounds);
+    try expectRectApprox(geometry.RectF.init(14.23, 10, 9.54, 14), centered.layout.lines[0].bounds);
+    try expectRectApprox(geometry.RectF.init(14.23, 10, 9.54, 14), centered.layout.bounds);
 
     var end_lines: [1]TextLine = undefined;
     const end = try layoutTextRun(text, .{ .max_width = 30, .line_height = 14, .alignment = .end }, &end_lines);
-    try expectRect(geometry.RectF.init(24, 10, 10, 14), end.lines[0].bounds);
+    try expectRectApprox(geometry.RectF.init(24.46, 10, 9.54, 14), end.lines[0].bounds);
 
     const glyphs = [_]Glyph{
         .{ .id = 1, .x = 0, .y = 0, .advance = 8 },
@@ -19588,16 +19708,29 @@ test "text layout maps caret selection and points across wrapped fallback lines"
     const options = TextLayoutOptions{ .max_width = 30, .line_height = 14, .wrap = .word };
 
     var caret_lines: [2]TextLine = undefined;
-    try expectRect(geometry.RectF.init(29, 10, 1, 14), try layoutTextCaretRect(text, options, 5, &caret_lines));
+    try expectRectApprox(geometry.RectF.init(28.23, 10, 1, 14), try layoutTextCaretRect(text, options, 5, &caret_lines));
 
     var selection_lines: [2]TextLine = undefined;
     var selection_rects: [2]TextSelectionRect = undefined;
     const rects = try layoutTextSelectionRects(text, options, TextRange.init(3, 8), &selection_lines, &selection_rects);
     try std.testing.expectEqual(@as(usize, 2), rects.len);
     try std.testing.expectEqualDeep(TextRange.init(3, 5), rects[0].range);
-    try expectRect(geometry.RectF.init(19, 10, 10, 14), rects[0].rect);
+    try expectRectApprox(geometry.RectF.init(19.57, 10, 8.66, 14), rects[0].rect);
     try std.testing.expectEqualDeep(TextRange.init(6, 8), rects[1].range);
-    try expectRect(geometry.RectF.init(4, 24, 10, 14), rects[1].rect);
+    try expectRectApprox(geometry.RectF.init(4, 24, 13.95, 14), rects[1].rect);
+
+    const dashboard_value = DrawText{
+        .font_id = default_sans_font_id,
+        .size = 17,
+        .origin = geometry.PointF.init(0, 17),
+        .color = Color.rgb8(0, 0, 0),
+        .text = "$13.4M",
+    };
+    var dashboard_value_lines: [1]TextLine = undefined;
+    try expectRectApprox(
+        geometry.RectF.init(55.709, 0, 1, 21.25),
+        try layoutTextCaretRect(dashboard_value, .{ .line_height = 21.25 }, dashboard_value.text.len, &dashboard_value_lines),
+    );
 
     var point_lines: [2]TextLine = undefined;
     const offset = (try layoutTextOffsetForPoint(text, options, geometry.PointF.init(16, 25), &point_lines)).?;
@@ -19668,14 +19801,17 @@ test "text layout measures utf8 scalars for fallback wrapping" {
 
     var lines: [3]TextLine = undefined;
     const layout = try layoutTextRun(text, .{ .max_width = 20, .line_height = 12, .wrap = .word }, &lines);
-    try std.testing.expectEqual(@as(usize, 2), layout.lineCount());
+    try std.testing.expectEqual(@as(usize, 3), layout.lineCount());
     try std.testing.expectEqual(@as(usize, 0), layout.lines[0].text_start);
-    try std.testing.expectEqual(@as(usize, 8), layout.lines[0].text_len);
-    try expectRect(geometry.RectF.init(2, 8, 20, 12), layout.lines[0].bounds);
-    try std.testing.expectEqual(@as(usize, 9), layout.lines[1].text_start);
-    try std.testing.expectEqual(@as(usize, 4), layout.lines[1].text_len);
-    try expectRect(geometry.RectF.init(2, 20, 10, 12), layout.lines[1].bounds);
-    try expectRect(geometry.RectF.init(2, 8, 20, 24), layout.bounds);
+    try std.testing.expectEqual(@as(usize, 6), layout.lines[0].text_len);
+    try expectRectApprox(geometry.RectF.init(2, 8, 19.5, 12), layout.lines[0].bounds);
+    try std.testing.expectEqual(@as(usize, 6), layout.lines[1].text_start);
+    try std.testing.expectEqual(@as(usize, 2), layout.lines[1].text_len);
+    try expectRectApprox(geometry.RectF.init(2, 20, 6.5, 12), layout.lines[1].bounds);
+    try std.testing.expectEqual(@as(usize, 9), layout.lines[2].text_start);
+    try std.testing.expectEqual(@as(usize, 4), layout.lines[2].text_len);
+    try expectRectApprox(geometry.RectF.init(2, 32, 13, 12), layout.lines[2].bounds);
+    try expectRectApprox(geometry.RectF.init(2, 8, 19.5, 36), layout.bounds);
 
     var character_lines: [3]TextLine = undefined;
     const character_layout = try layoutTextRun(.{
@@ -19685,11 +19821,13 @@ test "text layout measures utf8 scalars for fallback wrapping" {
         .color = Color.rgb8(0, 0, 0),
         .text = "ééé",
     }, .{ .max_width = 10, .line_height = 12, .wrap = .character }, &character_lines);
-    try std.testing.expectEqual(@as(usize, 2), character_layout.lineCount());
+    try std.testing.expectEqual(@as(usize, 3), character_layout.lineCount());
     try std.testing.expectEqual(@as(usize, 0), character_layout.lines[0].text_start);
-    try std.testing.expectEqual(@as(usize, 4), character_layout.lines[0].text_len);
-    try std.testing.expectEqual(@as(usize, 4), character_layout.lines[1].text_start);
+    try std.testing.expectEqual(@as(usize, 2), character_layout.lines[0].text_len);
+    try std.testing.expectEqual(@as(usize, 2), character_layout.lines[1].text_start);
     try std.testing.expectEqual(@as(usize, 2), character_layout.lines[1].text_len);
+    try std.testing.expectEqual(@as(usize, 4), character_layout.lines[2].text_start);
+    try std.testing.expectEqual(@as(usize, 2), character_layout.lines[2].text_len);
 }
 
 test "text layout cache plans upload retain and evict work" {
@@ -19712,7 +19850,7 @@ test "text layout cache plans upload retain and evict work" {
     try std.testing.expectEqual(@as(usize, 0), first.evictCount());
     try std.testing.expectEqual(@as(usize, 4), first.entries[0].line_count);
     try std.testing.expectEqual(@as(u64, 1), first.entries[0].last_used_frame);
-    try expectRect(geometry.RectF.init(4, 10, 25, 56), first.entries[0].bounds);
+    try expectRectApprox(geometry.RectF.init(4, 10, 26.7, 56), first.entries[0].bounds);
     try std.testing.expectEqual(TextLayoutCacheActionKind.upload, first.actions[0].kind);
 
     var retained_entries: [1]TextLayoutCacheEntry = undefined;
@@ -20182,6 +20320,14 @@ test "display list serializes per-run text layout options" {
 fn expectRect(expected: geometry.RectF, actual: ?geometry.RectF) !void {
     try std.testing.expect(actual != null);
     try std.testing.expectEqualDeep(expected, actual.?);
+}
+
+fn expectRectApprox(expected: geometry.RectF, actual: ?geometry.RectF) !void {
+    try std.testing.expect(actual != null);
+    try std.testing.expectApproxEqAbs(expected.x, actual.?.x, 0.001);
+    try std.testing.expectApproxEqAbs(expected.y, actual.?.y, 0.001);
+    try std.testing.expectApproxEqAbs(expected.width, actual.?.width, 0.001);
+    try std.testing.expectApproxEqAbs(expected.height, actual.?.height, 0.001);
 }
 
 fn expectPixelRgba8(expected: [4]u8, surface: ReferenceRenderSurface, x: usize, y: usize) !void {

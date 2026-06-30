@@ -14750,7 +14750,7 @@ test "runtime applies pointer selection to canvas text fields" {
         .window_id = 1,
         .label = "canvas",
         .kind = .pointer_drag,
-        .x = 46,
+        .x = 47,
         .y = 24,
     } });
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
@@ -14824,7 +14824,7 @@ test "runtime maps canvas text pointer selection with stored design tokens" {
     };
     _ = try harness.runtime.setCanvasWidgetDesignTokens(1, "canvas", tokens);
 
-    const point = geometry.PointF.init(46, 24);
+    const point = geometry.PointF.init(47, 24);
     const expected = canvas.textSelectionForWidgetPoint(text_field, point, null, tokens).?;
     const default_selection = canvas.textSelectionForWidgetPoint(text_field, point, null, .{}).?;
     try std.testing.expect(expected.focus != default_selection.focus);
