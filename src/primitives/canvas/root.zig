@@ -3816,6 +3816,12 @@ pub const WidgetKind = enum {
     data_grid,
     scroll_view,
     list,
+    breadcrumb,
+    button_group,
+    pagination,
+    radio_group,
+    tabs,
+    toggle_group,
     alert,
     card,
     dialog,
@@ -4083,10 +4089,10 @@ pub fn builtinComponentDescriptor(kind: BuiltinComponentKind) BuiltinComponentDe
         .alert => builtinComponent(.alert, .alert, .group, true),
         .avatar => builtinComponent(.avatar, .avatar, .image, false),
         .badge => builtinComponent(.badge, .badge, .text, false),
-        .breadcrumb => builtinComponent(.breadcrumb, .row, .group, true),
+        .breadcrumb => builtinComponent(.breadcrumb, .breadcrumb, .group, true),
         .bubble => builtinComponent(.bubble, .panel, .group, true),
         .button => builtinComponent(.button, .button, .button, false),
-        .button_group => builtinComponent(.button_group, .row, .group, true),
+        .button_group => builtinComponent(.button_group, .button_group, .group, true),
         .card => builtinComponent(.card, .card, .group, true),
         .checkbox => builtinComponent(.checkbox, .checkbox, .checkbox, false),
         .combobox => builtinComponent(.combobox, .search_field, .textbox, true),
@@ -4094,9 +4100,9 @@ pub fn builtinComponentDescriptor(kind: BuiltinComponentKind) BuiltinComponentDe
         .drawer => builtinComponent(.drawer, .drawer, .dialog, true),
         .dropdown_menu => builtinComponent(.dropdown_menu, .menu_surface, .menu, true),
         .input => builtinComponent(.input, .text_field, .textbox, false),
-        .pagination => builtinComponent(.pagination, .row, .group, true),
+        .pagination => builtinComponent(.pagination, .pagination, .group, true),
         .progress => builtinComponent(.progress, .progress, .progressbar, false),
-        .radio_group => builtinComponent(.radio_group, .row, .group, true),
+        .radio_group => builtinComponent(.radio_group, .radio_group, .group, true),
         .resizable => builtinComponent(.resizable, .panel, .group, true),
         .select => builtinComponent(.select, .select, .button, true),
         .separator => builtinComponent(.separator, .separator, .none, false),
@@ -4106,10 +4112,10 @@ pub fn builtinComponentDescriptor(kind: BuiltinComponentKind) BuiltinComponentDe
         .spinner => builtinComponent(.spinner, .spinner, .progressbar, false),
         .switch_control => builtinComponent(.switch_control, .toggle, .switch_control, false),
         .table => builtinComponent(.table, .data_grid, .grid, true),
-        .tabs => builtinComponent(.tabs, .row, .group, true),
+        .tabs => builtinComponent(.tabs, .tabs, .group, true),
         .textarea => builtinComponent(.textarea, .textarea, .textbox, false),
         .toggle => builtinComponent(.toggle, .button, .button, false),
-        .toggle_group => builtinComponent(.toggle_group, .row, .group, true),
+        .toggle_group => builtinComponent(.toggle_group, .toggle_group, .group, true),
         .tooltip => builtinComponent(.tooltip, .tooltip, .tooltip, false),
     };
 }
@@ -7244,7 +7250,7 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
-        .stack, .row, .column, .grid, .data_grid, .list, .data_row => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
+        .stack, .row, .column, .grid, .data_grid, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .data_row => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
         .scroll_view => try emitScrollViewWidget(builder, paint_widget, tokens, depth),
         .alert => try emitAlertWidget(builder, paint_widget, tokens, depth),
         .card => try emitCardWidget(builder, paint_widget, tokens, depth),
@@ -7343,7 +7349,7 @@ fn emitWidgetLayoutNodeContent(
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
-        .stack, .row, .column, .grid, .data_grid, .list, .data_row => {},
+        .stack, .row, .column, .grid, .data_grid, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .data_row => {},
         .scroll_view => {
             try builder.pushClip(.{ .id = widgetPartId(paint_widget.id, 1), .rect = paint_widget.frame });
             try emitWidgetLayoutChildren(builder, layout, node_index, tokens, state);
@@ -9390,7 +9396,7 @@ fn layoutWidgetDepth(
 
     const content = frame.inset(widget.layout.padding);
     switch (widget.kind) {
-        .row => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
+        .row, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
         .column => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
         .grid => try layoutGridChildren(widget.children, content, index, depth, output, len, widget.layout.gap, widget.layout.columns, tokens),
         .data_grid => if (widget.layout.virtualized)
@@ -9670,7 +9676,7 @@ pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF 
         .alert => intrinsicAlertWidgetSize(widget, tokens),
         .card => intrinsicCardWidgetSize(widget, tokens),
         .dialog, .drawer, .sheet => intrinsicModalSurfaceWidgetSize(widget, tokens),
-        .stack, .row, .column, .grid, .data_grid, .scroll_view, .list, .panel, .popover, .menu_surface, .image => geometry.SizeF.zero(),
+        .stack, .row, .column, .grid, .data_grid, .scroll_view, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .panel, .popover, .menu_surface, .image => geometry.SizeF.zero(),
     };
 }
 
@@ -10551,7 +10557,7 @@ fn nearestSemanticParent(stack: []const ?usize) ?usize {
 fn semanticRole(widget: Widget) WidgetRole {
     if (widget.semantics.role != .none) return widget.semantics.role;
     return switch (widget.kind) {
-        .stack, .row, .column, .grid, .scroll_view, .alert, .card, .panel => .group,
+        .stack, .row, .column, .grid, .scroll_view, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .alert, .card, .panel => .group,
         .data_grid => .grid,
         .data_row => .row,
         .dialog, .drawer, .sheet, .popover => .dialog,
@@ -10928,7 +10934,7 @@ fn isDragSource(widget: Widget) bool {
 fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     return switch (widget.kind) {
-        .row, .column, .grid, .data_grid, .data_row, .list, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner => false,
+        .row, .column, .grid, .data_grid, .data_row, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner => false,
         .scroll_view, .alert, .card, .dialog, .drawer, .sheet, .panel, .popover, .menu_surface, .text, .button, .icon_button, .select, .text_field, .search_field, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .toggle, .slider, .progress => true,
     };
 }
@@ -15601,13 +15607,16 @@ test "built-in component catalog maps to retained widget foundations" {
     try std.testing.expectEqual(WidgetKind.alert, builtinComponentDescriptor(.alert).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.avatar, builtinComponentDescriptor(.avatar).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.badge, builtinComponentDescriptor(.badge).root_widget_kind);
-    try std.testing.expectEqual(WidgetKind.row, builtinComponentDescriptor(.button_group).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.breadcrumb, builtinComponentDescriptor(.breadcrumb).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.button_group, builtinComponentDescriptor(.button_group).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.card, builtinComponentDescriptor(.card).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.search_field, builtinComponentDescriptor(.combobox).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.dialog, builtinComponentDescriptor(.dialog).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.drawer, builtinComponentDescriptor(.drawer).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.menu_surface, builtinComponentDescriptor(.dropdown_menu).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.text_field, builtinComponentDescriptor(.input).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.pagination, builtinComponentDescriptor(.pagination).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.radio_group, builtinComponentDescriptor(.radio_group).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.separator, builtinComponentDescriptor(.separator).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.skeleton, builtinComponentDescriptor(.skeleton).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.spinner, builtinComponentDescriptor(.spinner).root_widget_kind);
@@ -15615,7 +15624,9 @@ test "built-in component catalog maps to retained widget foundations" {
     try std.testing.expectEqual(WidgetKind.data_grid, builtinComponentDescriptor(.table).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.select, builtinComponentDescriptor(.select).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.sheet, builtinComponentDescriptor(.sheet).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.tabs, builtinComponentDescriptor(.tabs).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.textarea, builtinComponentDescriptor(.textarea).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.toggle_group, builtinComponentDescriptor(.toggle_group).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.tooltip, builtinComponentDescriptor(.tooltip).root_widget_kind);
 
     try std.testing.expectEqual(WidgetRole.dialog, builtinComponentDescriptor(.sheet).role);
@@ -15670,9 +15681,19 @@ test "built-in component factory applies shadcn composite defaults" {
     try std.testing.expectEqual(@as(usize, 2), card.children.len);
 
     const button_group = builtinComponentWidget(.button_group, .{});
-    try std.testing.expectEqual(WidgetKind.row, button_group.kind);
+    try std.testing.expectEqual(WidgetKind.button_group, button_group.kind);
     try std.testing.expectEqual(@as(f32, 4), button_group.layout.gap);
     try std.testing.expectEqual(WidgetCrossAlignment.center, button_group.layout.cross_alignment);
+
+    const row_components = [_]BuiltinComponentKind{ .breadcrumb, .pagination, .radio_group, .tabs, .toggle_group };
+    const row_kinds = [_]WidgetKind{ .breadcrumb, .pagination, .radio_group, .tabs, .toggle_group };
+    for (row_components, row_kinds) |kind, widget_kind| {
+        const component = builtinComponentWidget(kind, .{});
+        try std.testing.expectEqual(widget_kind, component.kind);
+        try std.testing.expectEqual(@as(f32, 4), component.layout.gap);
+        try std.testing.expectEqual(WidgetCrossAlignment.center, component.layout.cross_alignment);
+        try std.testing.expectEqual(WidgetRole.group, component.semantics.role);
+    }
 
     const custom_card = builtinComponentWidget(.card, .{
         .layout = .{ .gap = 24 },
