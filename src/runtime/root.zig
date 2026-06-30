@@ -756,6 +756,7 @@ pub const Runtime = struct {
         label: []const u8,
         options: canvas.CanvasFrameOptions,
         storage: canvas.CanvasFrameStorage,
+        clear_color: canvas.Color,
         output: []canvas.CanvasGpuCommand,
         packet_json_buffer: []u8,
     ) anyerror!canvas.CanvasGpuPacket {
@@ -770,6 +771,7 @@ pub const Runtime = struct {
             .timestamp_ns = packet.timestamp_ns,
             .surface_size = packet.surface_size,
             .scale_factor = packet.scale,
+            .clear_color_rgba8 = canvasColorToRgba8(clear_color),
             .requires_render = packet.requiresRender(),
             .command_count = packet.commandCount(),
             .cache_action_count = packet.cacheActionCount(),
@@ -824,6 +826,7 @@ pub const Runtime = struct {
                         .timestamp_ns = packet.timestamp_ns,
                         .surface_size = packet.surface_size,
                         .scale_factor = packet.scale,
+                        .clear_color_rgba8 = canvasColorToRgba8(clear_color),
                         .requires_render = packet.requiresRender(),
                         .command_count = packet.commandCount(),
                         .cache_action_count = packet.cacheActionCount(),
@@ -6660,6 +6663,20 @@ pub fn canvasFramePixelSize(frame: canvas.CanvasFrame) !CanvasPixelSize {
     return canvasSurfacePixelSize(frame.surface_size, frame.scale);
 }
 
+fn canvasColorToRgba8(color: canvas.Color) [4]u8 {
+    return .{
+        normalizedChannelToU8(color.r),
+        normalizedChannelToU8(color.g),
+        normalizedChannelToU8(color.b),
+        normalizedChannelToU8(color.a),
+    };
+}
+
+fn normalizedChannelToU8(value: f32) u8 {
+    const clamped = std.math.clamp(value, 0, 1);
+    return @intFromFloat((clamped * 255.0) + 0.5);
+}
+
 fn clippedCanvasDirtyBounds(bounds: ?geometry.RectF, surface_size: geometry.SizeF) ?geometry.RectF {
     const dirty = bounds orelse return null;
     const normalized = dirty.normalized();
@@ -9912,7 +9929,7 @@ test "runtime presents next canvas GPU packet" {
         .timestamp_ns = 44_000,
         .surface_size = geometry.SizeF.init(96, 48),
         .scale = 2,
-    }, harness.runtime.canvasFrameScratchStorage(), &gpu_commands, &packet_json_buffer);
+    }, harness.runtime.canvasFrameScratchStorage(), canvas.Color.rgb8(247, 249, 252), &gpu_commands, &packet_json_buffer);
 
     try std.testing.expect(packet.requiresRender());
     try std.testing.expectEqual(@as(usize, 1), packet.commandCount());
@@ -9922,6 +9939,7 @@ test "runtime presents next canvas GPU packet" {
     try std.testing.expectEqual(@as(u64, 44_000), harness.null_platform.gpu_surface_packet_present_timestamp_ns);
     try std.testing.expectEqualDeep(geometry.SizeF.init(96, 48), harness.null_platform.gpu_surface_packet_present_surface_size);
     try std.testing.expectEqual(@as(f32, 2), harness.null_platform.gpu_surface_packet_present_scale_factor);
+    try std.testing.expectEqualDeep([4]u8{ 247, 249, 252, 255 }, harness.null_platform.gpu_surface_packet_present_clear_color_rgba8);
     try std.testing.expect(harness.null_platform.gpu_surface_packet_present_requires_render);
     try std.testing.expectEqual(packet.commandCount(), harness.null_platform.gpu_surface_packet_present_command_count);
     try std.testing.expectEqual(packet.cacheActionCount(), harness.null_platform.gpu_surface_packet_present_cache_action_count);
@@ -9973,7 +9991,7 @@ test "runtime presents next canvas frame through packet presenter when available
         .timestamp_ns = 88_000,
         .surface_size = geometry.SizeF.init(96, 48),
         .scale = 1,
-    }, harness.runtime.canvasFrameScratchStorage(), &gpu_commands, &packet_json_buffer, &pixels, &scratch, canvas.Color.rgb8(0, 0, 0), null);
+    }, harness.runtime.canvasFrameScratchStorage(), &gpu_commands, &packet_json_buffer, &pixels, &scratch, canvas.Color.rgb8(20, 24, 32), null);
 
     try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, result.mode);
     try std.testing.expect(result.frame.requiresRender());
@@ -9981,6 +9999,7 @@ test "runtime presents next canvas frame through packet presenter when available
     try std.testing.expectEqual(@as(usize, 1), result.packet_command_count);
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_packet_present_count);
     try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_present_count);
+    try std.testing.expectEqualDeep([4]u8{ 20, 24, 32, 255 }, harness.null_platform.gpu_surface_packet_present_clear_color_rgba8);
     const presented_frame = try harness.runtime.gpuSurfaceFrame(1, "canvas");
     try std.testing.expect(!presented_frame.canvas_frame_requires_render);
 }

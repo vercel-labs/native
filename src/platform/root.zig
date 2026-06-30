@@ -1106,6 +1106,7 @@ pub const GpuSurfacePacket = struct {
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
     scale_factor: f32 = 1,
+    clear_color_rgba8: [4]u8 = .{ 0, 0, 0, 255 },
     requires_render: bool = false,
     command_count: usize = 0,
     cache_action_count: usize = 0,
@@ -1724,6 +1725,7 @@ pub const NullPlatform = struct {
     gpu_surface_packet_present_timestamp_ns: u64 = 0,
     gpu_surface_packet_present_surface_size: geometry.SizeF = .{},
     gpu_surface_packet_present_scale_factor: f32 = 1,
+    gpu_surface_packet_present_clear_color_rgba8: [4]u8 = .{ 0, 0, 0, 255 },
     gpu_surface_packet_present_requires_render: bool = false,
     gpu_surface_packet_present_command_count: usize = 0,
     gpu_surface_packet_present_cache_action_count: usize = 0,
@@ -2353,6 +2355,7 @@ pub const NullPlatform = struct {
         self.gpu_surface_packet_present_timestamp_ns = packet.timestamp_ns;
         self.gpu_surface_packet_present_surface_size = packet.surface_size;
         self.gpu_surface_packet_present_scale_factor = packet.scale_factor;
+        self.gpu_surface_packet_present_clear_color_rgba8 = packet.clear_color_rgba8;
         self.gpu_surface_packet_present_requires_render = packet.requires_render;
         self.gpu_surface_packet_present_command_count = packet.command_count;
         self.gpu_surface_packet_present_cache_action_count = packet.cache_action_count;
@@ -3030,6 +3033,7 @@ test "null platform records gpu surface packet presentation" {
         .timestamp_ns = 42_000,
         .surface_size = geometry.SizeF.init(320, 180),
         .scale_factor = 2,
+        .clear_color_rgba8 = .{ 247, 249, 252, 255 },
         .requires_render = true,
         .command_count = 1,
         .cache_action_count = 2,
@@ -3045,6 +3049,7 @@ test "null platform records gpu surface packet presentation" {
     try std.testing.expectEqual(@as(u64, 42_000), null_platform.gpu_surface_packet_present_timestamp_ns);
     try std.testing.expectEqualDeep(geometry.SizeF.init(320, 180), null_platform.gpu_surface_packet_present_surface_size);
     try std.testing.expectEqual(@as(f32, 2), null_platform.gpu_surface_packet_present_scale_factor);
+    try std.testing.expectEqualDeep([4]u8{ 247, 249, 252, 255 }, null_platform.gpu_surface_packet_present_clear_color_rgba8);
     try std.testing.expect(null_platform.gpu_surface_packet_present_requires_render);
     try std.testing.expectEqual(@as(usize, 1), null_platform.gpu_surface_packet_present_command_count);
     try std.testing.expectEqual(@as(usize, 2), null_platform.gpu_surface_packet_present_cache_action_count);
