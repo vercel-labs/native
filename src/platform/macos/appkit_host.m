@@ -51,6 +51,7 @@ static NSString *ZeroNativeSubstringForRange(NSString *value, NSRange range);
 static NSString *ZeroNativeStringFromTextInput(id value);
 static int ZeroNativeAppKitColorSchemeForAppearance(NSAppearance *appearance);
 static BOOL ZeroNativeAppKitReduceMotionEnabled(void);
+static BOOL ZeroNativeAppKitHighContrastEnabled(void);
 
 static size_t ZeroNativeOverflowSize(size_t buffer_len) {
     return buffer_len == SIZE_MAX ? SIZE_MAX : buffer_len + 1;
@@ -76,6 +77,10 @@ static int ZeroNativeAppKitColorSchemeForAppearance(NSAppearance *appearance) {
 
 static BOOL ZeroNativeAppKitReduceMotionEnabled(void) {
     return [NSWorkspace sharedWorkspace].accessibilityDisplayShouldReduceMotion;
+}
+
+static BOOL ZeroNativeAppKitHighContrastEnabled(void) {
+    return [NSWorkspace sharedWorkspace].accessibilityDisplayShouldIncreaseContrast;
 }
 
 static uint64_t ZeroNativeTimestampNanoseconds(void) {
@@ -3888,6 +3893,7 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
         .kind = ZERO_NATIVE_APPKIT_EVENT_APPEARANCE_CHANGED,
         .color_scheme = ZeroNativeAppKitColorSchemeForAppearance(NSApp.effectiveAppearance),
         .reduce_motion = ZeroNativeAppKitReduceMotionEnabled() ? 1 : 0,
+        .high_contrast = ZeroNativeAppKitHighContrastEnabled() ? 1 : 0,
     }];
 }
 

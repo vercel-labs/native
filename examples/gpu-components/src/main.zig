@@ -122,6 +122,7 @@ const GpuComponentsApp = struct {
     theme_mode: ComponentThemeMode = .light,
     theme_overridden: bool = false,
     reduce_motion: bool = false,
+    high_contrast: bool = false,
     canvas_installed: bool = false,
     reported_planned_frame: bool = false,
     virtual_scroll: ComponentVirtualScroll = .{},
@@ -360,11 +361,13 @@ const GpuComponentsApp = struct {
 
     fn applySystemAppearance(self: *@This(), runtime: *zero_native.Runtime, appearance: zero_native.Appearance) anyerror!void {
         const motion_changed = self.reduce_motion != appearance.reduce_motion;
+        const contrast_changed = self.high_contrast != appearance.high_contrast;
         self.reduce_motion = appearance.reduce_motion;
+        self.high_contrast = appearance.high_contrast;
         const next = componentThemeModeForAppearance(appearance);
         const theme_changed = !self.theme_overridden and self.theme_mode != next;
         if (theme_changed) self.theme_mode = next;
-        if (!theme_changed and !motion_changed) return;
+        if (!theme_changed and !motion_changed and !contrast_changed) return;
         if (!self.canvas_installed) return;
 
         const gpu_frame = runtime.gpuSurfaceFrame(1, canvas_label) catch |err| switch (err) {
@@ -497,7 +500,7 @@ const GpuComponentsApp = struct {
     }
 
     fn componentTokens(self: @This()) canvas.DesignTokens {
-        return componentTokensForScaleAndMotion(self.theme_mode, self.pixel_snap_scale, self.reduce_motion);
+        return componentTokensForScaleMotionAndContrast(self.theme_mode, self.pixel_snap_scale, self.reduce_motion, self.high_contrast);
     }
 
     fn updatePixelSnapScale(self: *@This(), scale_factor: f32) bool {
@@ -664,12 +667,18 @@ fn componentTokensForScale(mode: ComponentThemeMode, pixel_snap_scale: f32) canv
 }
 
 fn componentTokensForScaleAndMotion(mode: ComponentThemeMode, pixel_snap_scale: f32, reduce_motion: bool) canvas.DesignTokens {
-    const theme_options: canvas.ThemeOptions = switch (mode) {
-        .light => .{ .reduce_motion = reduce_motion },
-        .dark => .{ .color_scheme = .dark, .reduce_motion = reduce_motion },
-        .high => .{ .color_scheme = .dark, .contrast = .high, .reduce_motion = reduce_motion },
-    };
-    var tokens = canvas.DesignTokens.theme(theme_options);
+    return componentTokensForScaleMotionAndContrast(mode, pixel_snap_scale, reduce_motion, false);
+}
+
+fn componentTokensForScaleMotionAndContrast(mode: ComponentThemeMode, pixel_snap_scale: f32, reduce_motion: bool, high_contrast: bool) canvas.DesignTokens {
+    var tokens = canvas.DesignTokens.theme(.{
+        .color_scheme = switch (mode) {
+            .light => .light,
+            .dark, .high => .dark,
+        },
+        .contrast = if (mode == .high or high_contrast) .high else .standard,
+        .reduce_motion = reduce_motion,
+    });
     tokens.blur = .{
         .sm = 5,
         .md = 12,
@@ -1785,9 +1794,10 @@ test "gpu components follow system appearance until toolbar theme override" {
     const app_handle = app.app();
     try harness.start(app_handle);
 
-    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .appearance_changed = .{ .color_scheme = .dark, .reduce_motion = true } });
+    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .appearance_changed = .{ .color_scheme = .dark, .reduce_motion = true, .high_contrast = true } });
     try std.testing.expectEqual(ComponentThemeMode.dark, app.theme_mode);
     try std.testing.expect(app.reduce_motion);
+    try std.testing.expect(app.high_contrast);
 
     try harness.runtime.dispatchPlatformEvent(app_handle, .{ .gpu_surface_frame = .{
         .label = canvas_label,
@@ -1797,12 +1807,13 @@ test "gpu components follow system appearance until toolbar theme override" {
         .timestamp_ns = 1_000_000_000,
         .nonblank = true,
     } });
-    try std.testing.expectEqualDeep(componentTokensForScaleAndMotion(.dark, 2, true), try harness.runtime.canvasWidgetDesignTokens(1, canvas_label));
+    try std.testing.expectEqualDeep(componentTokensForScaleMotionAndContrast(.dark, 2, true, true), try harness.runtime.canvasWidgetDesignTokens(1, canvas_label));
 
     const packet_count_before_light = harness.null_platform.gpu_surface_packet_present_count;
     try harness.runtime.dispatchPlatformEvent(app_handle, .{ .appearance_changed = .{ .color_scheme = .light } });
     try std.testing.expectEqual(ComponentThemeMode.light, app.theme_mode);
     try std.testing.expect(!app.reduce_motion);
+    try std.testing.expect(!app.high_contrast);
     try std.testing.expectEqualDeep(componentTokensForScale(.light, 2), try harness.runtime.canvasWidgetDesignTokens(1, canvas_label));
     try std.testing.expect(harness.null_platform.gpu_surface_packet_present_count > packet_count_before_light);
     const status_view = componentViewByLabel(&harness.runtime, "status-label").?;
@@ -1816,10 +1827,11 @@ test "gpu components follow system appearance until toolbar theme override" {
     try std.testing.expect(app.theme_overridden);
     try std.testing.expectEqual(ComponentThemeMode.dark, app.theme_mode);
 
-    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .appearance_changed = .{ .color_scheme = .light, .reduce_motion = true } });
+    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .appearance_changed = .{ .color_scheme = .light, .reduce_motion = true, .high_contrast = true } });
     try std.testing.expectEqual(ComponentThemeMode.dark, app.theme_mode);
     try std.testing.expect(app.reduce_motion);
-    try std.testing.expectEqualDeep(componentTokensForScaleAndMotion(.dark, 2, true), try harness.runtime.canvasWidgetDesignTokens(1, canvas_label));
+    try std.testing.expect(app.high_contrast);
+    try std.testing.expectEqualDeep(componentTokensForScaleMotionAndContrast(.dark, 2, true, true), try harness.runtime.canvasWidgetDesignTokens(1, canvas_label));
 }
 
 test "gpu components pointer clicks update retained controls" {

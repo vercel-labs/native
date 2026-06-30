@@ -18729,12 +18729,14 @@ test "runtime stores and dispatches appearance preferences" {
     const app = app_state.app();
     try harness.start(app);
 
-    try harness.runtime.dispatchPlatformEvent(app, .{ .appearance_changed = .{ .color_scheme = .dark, .reduce_motion = true } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .appearance_changed = .{ .color_scheme = .dark, .reduce_motion = true, .high_contrast = true } });
     try std.testing.expectEqual(@as(u32, 1), app_state.appearance_count);
     try std.testing.expectEqual(platform.ColorScheme.dark, app_state.last_appearance.color_scheme);
     try std.testing.expect(app_state.last_appearance.reduce_motion);
+    try std.testing.expect(app_state.last_appearance.high_contrast);
     try std.testing.expectEqual(platform.ColorScheme.dark, harness.runtime.appearance.color_scheme);
     try std.testing.expect(harness.runtime.appearance.reduce_motion);
+    try std.testing.expect(harness.runtime.appearance.high_contrast);
 }
 
 test "runtime dispatches GPU surface events" {

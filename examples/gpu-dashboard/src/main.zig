@@ -166,6 +166,7 @@ const GpuDashboardApp = struct {
     mode_count: u32 = 0,
     color_scheme: zero_native.ColorScheme = .light,
     reduce_motion: bool = false,
+    high_contrast: bool = false,
     canvas_installed: bool = false,
     reported_planned_frame: bool = false,
     canvas_size: geometry.SizeF = default_canvas_size,
@@ -330,7 +331,7 @@ const GpuDashboardApp = struct {
     }
 
     fn dashboardTokens(self: @This()) canvas.DesignTokens {
-        return dashboardWidgetTokensForSchemeScaleAndMotion(self.color_scheme, self.pixel_snap_scale, self.reduce_motion);
+        return dashboardWidgetTokensForSchemeScaleMotionAndContrast(self.color_scheme, self.pixel_snap_scale, self.reduce_motion, self.high_contrast);
     }
 
     fn updatePixelSnapScale(self: *@This(), scale_factor: f32) bool {
@@ -375,9 +376,11 @@ const GpuDashboardApp = struct {
     fn applySystemAppearance(self: *@This(), runtime: *zero_native.Runtime, appearance: zero_native.Appearance) anyerror!void {
         const scheme_changed = self.color_scheme != appearance.color_scheme;
         const motion_changed = self.reduce_motion != appearance.reduce_motion;
-        if (!scheme_changed and !motion_changed) return;
+        const contrast_changed = self.high_contrast != appearance.high_contrast;
+        if (!scheme_changed and !motion_changed and !contrast_changed) return;
         self.color_scheme = appearance.color_scheme;
         self.reduce_motion = appearance.reduce_motion;
+        self.high_contrast = appearance.high_contrast;
         if (!self.canvas_installed) return;
 
         const gpu_frame = runtime.gpuSurfaceFrame(1, "dashboard-canvas") catch |err| switch (err) {
@@ -605,10 +608,14 @@ fn dashboardWidgetTokensForSchemeAndScale(color_scheme: zero_native.ColorScheme,
 }
 
 fn dashboardWidgetTokensForSchemeScaleAndMotion(color_scheme: zero_native.ColorScheme, pixel_snap_scale: f32, reduce_motion: bool) canvas.DesignTokens {
+    return dashboardWidgetTokensForSchemeScaleMotionAndContrast(color_scheme, pixel_snap_scale, reduce_motion, false);
+}
+
+fn dashboardWidgetTokensForSchemeScaleMotionAndContrast(color_scheme: zero_native.ColorScheme, pixel_snap_scale: f32, reduce_motion: bool, high_contrast: bool) canvas.DesignTokens {
     var tokens = canvas.DesignTokens.theme(.{ .color_scheme = switch (color_scheme) {
         .light => .light,
         .dark => .dark,
-    }, .reduce_motion = reduce_motion });
+    }, .contrast = if (high_contrast) .high else .standard, .reduce_motion = reduce_motion });
     tokens.blur = .{
         .sm = 8,
         .md = dashboard_glass_blur,
@@ -1686,14 +1693,15 @@ test "gpu dashboard follows system appearance tokens" {
     try expectDashboardRoundedRectColor(display_list, 3, dashboardWidgetTokensForSchemeAndScale(.light, 2).colors.surface);
 
     const packet_count_before_dark = harness.null_platform.gpu_surface_packet_present_count;
-    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .appearance_changed = .{ .color_scheme = .dark, .reduce_motion = true } });
+    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .appearance_changed = .{ .color_scheme = .dark, .reduce_motion = true, .high_contrast = true } });
     try std.testing.expectEqual(zero_native.ColorScheme.dark, app.color_scheme);
     try std.testing.expect(app.reduce_motion);
-    try std.testing.expectEqualDeep(dashboardWidgetTokensForSchemeScaleAndMotion(.dark, 2, true), try harness.runtime.canvasWidgetDesignTokens(1, "dashboard-canvas"));
+    try std.testing.expect(app.high_contrast);
+    try std.testing.expectEqualDeep(dashboardWidgetTokensForSchemeScaleMotionAndContrast(.dark, 2, true, true), try harness.runtime.canvasWidgetDesignTokens(1, "dashboard-canvas"));
     try std.testing.expect(harness.null_platform.gpu_surface_packet_present_count > packet_count_before_dark);
     display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    try expectDashboardFillRectColor(display_list, 1, dashboardWidgetTokensForSchemeScaleAndMotion(.dark, 2, true).colors.background);
-    try expectDashboardRoundedRectColor(display_list, 3, dashboardWidgetTokensForSchemeScaleAndMotion(.dark, 2, true).colors.surface);
+    try expectDashboardFillRectColor(display_list, 1, dashboardWidgetTokensForSchemeScaleMotionAndContrast(.dark, 2, true, true).colors.background);
+    try expectDashboardRoundedRectColor(display_list, 3, dashboardWidgetTokensForSchemeScaleMotionAndContrast(.dark, 2, true, true).colors.surface);
     const status_view = dashboardViewByLabel(&harness.runtime, "status-label").?;
     try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Dashboard theme: dark from system appearance.") != null);
 }

@@ -1249,6 +1249,7 @@ pub const ColorScheme = enum {
 pub const Appearance = struct {
     color_scheme: ColorScheme = .light,
     reduce_motion: bool = false,
+    high_contrast: bool = false,
 };
 
 pub const Event = union(enum) {
