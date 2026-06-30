@@ -1176,6 +1176,10 @@ test "gpu dashboard scheduled animations render without display list rebuild" {
     try std.testing.expect(animation_frame.layer_plan.transformLayerCount() > 0);
     try std.testing.expect(animation_frame.layer_cache_plan.uploadCount() > 0);
     try std.testing.expectEqual(@as(usize, 0), animation_frame.pipeline_cache_plan.uploadCount());
+    try std.testing.expect(animation_frame.text_layout_plan.planCount() >= 10);
+    try std.testing.expectEqual(@as(usize, 0), animation_frame.text_layout_cache_plan.uploadCount());
+    try std.testing.expect(animation_frame.text_layout_cache_plan.retainCount() >= 10);
+    try std.testing.expectEqual(@as(usize, 0), animation_frame.text_layout_cache_plan.evictCount());
 
     var gpu_commands: [max_dashboard_commands]canvas.CanvasGpuCommand = undefined;
     const packet = try animation_frame.gpuPacket(&gpu_commands);
