@@ -283,6 +283,9 @@ pub const Runtime = struct {
     automation_views: [automation.snapshot.max_views]platform.ViewInfo = undefined,
     automation_widgets: [automation.snapshot.max_widgets]automation.snapshot.Widget = undefined,
     widget_event_route_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined,
+    canvas_widget_display_list_refresh_batch_depth: usize = 0,
+    canvas_widget_display_list_refresh_pending: [platform.max_views]bool = [_]bool{false} ** platform.max_views,
+    canvas_widget_accessibility_publish_pending: [platform.max_views]bool = [_]bool{false} ** platform.max_views,
     canvas_frame_render_commands: [max_canvas_commands_per_view]canvas.RenderCommand = undefined,
     canvas_frame_render_batches: [max_canvas_commands_per_view]canvas.RenderBatch = undefined,
     canvas_frame_pipeline_cache_entries: [max_canvas_pipelines_per_view]canvas.RenderPipelineCacheEntry = undefined,
@@ -1419,11 +1422,50 @@ pub const Runtime = struct {
     }
 
     fn refreshCanvasWidgetDisplayListIfOwnedWithAccessibility(self: *Runtime, view_index: usize, publish_accessibility: bool) anyerror!void {
+        if (self.canvas_widget_display_list_refresh_batch_depth > 0) {
+            if (view_index >= self.canvas_widget_display_list_refresh_pending.len) return;
+            self.canvas_widget_display_list_refresh_pending[view_index] = true;
+            self.canvas_widget_accessibility_publish_pending[view_index] = self.canvas_widget_accessibility_publish_pending[view_index] or publish_accessibility;
+            return;
+        }
+        try self.refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate(view_index, publish_accessibility);
+    }
+
+    fn refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate(self: *Runtime, view_index: usize, publish_accessibility: bool) anyerror!void {
         if (view_index >= self.view_count) return;
         if (self.views[view_index].kind != .gpu_surface) return;
         if (publish_accessibility) try self.publishCanvasWidgetAccessibility(view_index);
         if (!self.views[view_index].canvas_display_list_widget_owned) return;
         try self.refreshCanvasWidgetDisplayList(view_index);
+    }
+
+    fn beginCanvasWidgetDisplayListRefreshBatch(self: *Runtime) void {
+        self.canvas_widget_display_list_refresh_batch_depth += 1;
+    }
+
+    fn cancelCanvasWidgetDisplayListRefreshBatch(self: *Runtime) void {
+        if (self.canvas_widget_display_list_refresh_batch_depth == 0) return;
+        self.canvas_widget_display_list_refresh_batch_depth -= 1;
+        if (self.canvas_widget_display_list_refresh_batch_depth != 0) return;
+        for (0..self.canvas_widget_display_list_refresh_pending.len) |index| {
+            self.canvas_widget_display_list_refresh_pending[index] = false;
+            self.canvas_widget_accessibility_publish_pending[index] = false;
+        }
+    }
+
+    fn endCanvasWidgetDisplayListRefreshBatch(self: *Runtime) anyerror!void {
+        if (self.canvas_widget_display_list_refresh_batch_depth == 0) return;
+        self.canvas_widget_display_list_refresh_batch_depth -= 1;
+        if (self.canvas_widget_display_list_refresh_batch_depth != 0) return;
+
+        const count = @min(self.view_count, self.canvas_widget_display_list_refresh_pending.len);
+        for (0..count) |index| {
+            if (!self.canvas_widget_display_list_refresh_pending[index]) continue;
+            const publish_accessibility = self.canvas_widget_accessibility_publish_pending[index];
+            self.canvas_widget_display_list_refresh_pending[index] = false;
+            self.canvas_widget_accessibility_publish_pending[index] = false;
+            try self.refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate(index, publish_accessibility);
+        }
     }
 
     fn requestCanvasFrameForView(self: *Runtime, view_index: usize) anyerror!void {
@@ -1827,7 +1869,8 @@ pub const Runtime = struct {
         const index = self.findViewIndex(pointer_event.window_id, pointer_event.view_label) orelse return;
         if (self.views[index].kind != .gpu_surface) return;
         const target = pointer_event.target orelse return;
-        if (self.views[index].canvas_widget_pressed_id != target.id) return;
+        const pressed_id = if (pointer_event.pointer.captured_id != 0) pointer_event.pointer.captured_id else self.views[index].canvas_widget_pressed_id;
+        if (pressed_id != target.id) return;
         if (!target.bounds.normalized().containsPoint(pointer_event.pointer.point)) return;
         if (!canvasWidgetCommandable(target.kind)) return;
         const command = self.views[index].canvasWidgetCommand(target.id) orelse return;
@@ -2298,6 +2341,12 @@ pub const Runtime = struct {
                 });
             },
             .gpu_surface_input => |input_event| {
+                var canvas_widget_refresh_batch_active = canvasWidgetInputBatchesDisplayListRefresh(input_event.kind);
+                if (canvas_widget_refresh_batch_active) self.beginCanvasWidgetDisplayListRefreshBatch();
+                errdefer {
+                    if (canvas_widget_refresh_batch_active) self.cancelCanvasWidgetDisplayListRefreshBatch();
+                }
+
                 if (self.findViewIndex(input_event.window_id, input_event.label)) |index| {
                     self.views[index].recordGpuSurfaceInputTimestamp(input_event.timestamp_ns);
                 }
@@ -2319,11 +2368,17 @@ pub const Runtime = struct {
                 };
                 if (widget_pointer_event) |pointer_event| {
                     try self.updateCanvasWidgetControlFromPointer(pointer_event);
-                    try self.dispatchCanvasWidgetCommandFromPointer(app, pointer_event);
                     try self.updateCanvasWidgetInteractionFromPointer(pointer_event);
                     try self.updateCanvasWidgetTextFromPointer(pointer_event);
                     try self.updateCanvasWidgetScrollFromPointer(pointer_event);
                     try self.updateCanvasWidgetFocusFromPointer(pointer_event);
+                }
+                if (canvas_widget_refresh_batch_active) {
+                    try self.endCanvasWidgetDisplayListRefreshBatch();
+                    canvas_widget_refresh_batch_active = false;
+                }
+                if (widget_pointer_event) |pointer_event| {
+                    try self.dispatchCanvasWidgetCommandFromPointer(app, pointer_event);
                     try self.dispatchEvent(app, .{ .canvas_widget_pointer = pointer_event });
                 }
                 const widget_drag_event = self.routeCanvasWidgetDragInput(input_event, &self.widget_event_route_entries) catch |err| switch (err) {
@@ -7506,6 +7561,25 @@ fn canvasWidgetPointerEventFromGpuInput(input_event: GpuSurfaceInputEvent) ?canv
         .phase = phase,
         .point = geometry.PointF.init(input_event.x, input_event.y),
         .delta = geometry.OffsetF.init(input_event.delta_x, input_event.delta_y),
+    };
+}
+
+fn canvasWidgetInputBatchesDisplayListRefresh(kind: platform.GpuSurfaceInputKind) bool {
+    return switch (kind) {
+        .pointer_down,
+        .pointer_up,
+        .pointer_cancel,
+        .pointer_move,
+        .pointer_drag,
+        .scroll,
+        => true,
+        .key_down,
+        .key_up,
+        .text_input,
+        .ime_set_composition,
+        .ime_commit_composition,
+        .ime_cancel_composition,
+        => false,
     };
 }
 
@@ -14646,6 +14720,67 @@ test "runtime automation widget click dispatches pointer input" {
     try std.testing.expect(!snapshot.widgets[1].selected);
     try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationCommand(app, "widget-click canvas 0"));
     try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationCommand(app, "widget-click canvas 9"));
+}
+
+test "runtime batches pointer widget display list refreshes" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-pointer-refresh-batch", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 220, 100),
+    });
+
+    const controls = [_]canvas.Widget{.{
+        .id = 4,
+        .kind = .toggle,
+        .frame = geometry.RectF.init(10, 20, 112, 32),
+        .text = "Live",
+    }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &controls }, geometry.RectF.init(0, 0, 220, 100), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+    harness.null_platform.gpu_surface_frame_request_count = 0;
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .timestamp_ns = 100,
+        .x = 66,
+        .y = 36,
+    } });
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_frame_request_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 4), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 4), harness.runtime.views[0].canvas_widget_pressed_id);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_up,
+        .timestamp_ns = 110,
+        .x = 66,
+        .y = 36,
+    } });
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.gpu_surface_frame_request_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_pressed_id);
+
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.nodes[1].widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 1), retained.nodes[1].widget.value);
 }
 
 test "runtime automation widget drag dispatches pointer input" {
