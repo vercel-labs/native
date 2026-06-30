@@ -1411,9 +1411,17 @@ pub const Runtime = struct {
     }
 
     fn refreshCanvasWidgetDisplayListIfOwned(self: *Runtime, view_index: usize) anyerror!void {
+        return self.refreshCanvasWidgetDisplayListIfOwnedWithAccessibility(view_index, true);
+    }
+
+    fn refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility(self: *Runtime, view_index: usize) anyerror!void {
+        return self.refreshCanvasWidgetDisplayListIfOwnedWithAccessibility(view_index, false);
+    }
+
+    fn refreshCanvasWidgetDisplayListIfOwnedWithAccessibility(self: *Runtime, view_index: usize, publish_accessibility: bool) anyerror!void {
         if (view_index >= self.view_count) return;
         if (self.views[view_index].kind != .gpu_surface) return;
-        try self.publishCanvasWidgetAccessibility(view_index);
+        if (publish_accessibility) try self.publishCanvasWidgetAccessibility(view_index);
         if (!self.views[view_index].canvas_display_list_widget_owned) return;
         try self.refreshCanvasWidgetDisplayList(view_index);
     }
@@ -1737,7 +1745,7 @@ pub const Runtime = struct {
         } else {
             self.invalidateFor(.state, self.views[index].frame);
         }
-        try self.refreshCanvasWidgetDisplayListIfOwned(index);
+        try self.refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility(index);
     }
 
     fn updateCanvasWidgetTextFromKeyboard(self: *Runtime, keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
@@ -16446,6 +16454,36 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
         .selection = .{ .start = 3, .end = 11 },
     } });
     try std.testing.expectEqualDeep(platform.WidgetAccessibilityTextRange{ .start = 3, .end = 11 }, platform_state.nodes[3].text_selection.?);
+
+    const scroll_items = [_]canvas.Widget{
+        .{ .id = 22, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "One" },
+        .{ .id = 23, .kind = .list_item, .frame = geometry.RectF.init(0, 44, 0, 28), .text = "Two" },
+        .{ .id = 24, .kind = .list_item, .frame = geometry.RectF.init(0, 88, 0, 28), .text = "Three" },
+    };
+    const scroll_children = [_]canvas.Widget{
+        .{ .id = 21, .kind = .scroll_view, .frame = geometry.RectF.init(16, 16, 140, 56), .children = &scroll_items },
+    };
+    var scroll_nodes: [6]canvas.WidgetLayoutNode = undefined;
+    const scroll_layout = try canvas.layoutWidgetTree(.{
+        .id = 20,
+        .kind = .panel,
+        .children = &scroll_children,
+    }, geometry.RectF.init(0, 0, 320, 160), &scroll_nodes);
+    _ = try runtime.setCanvasWidgetLayout(1, "canvas", scroll_layout);
+    _ = try runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+    const published_count = platform_state.update_count;
+
+    try runtime.dispatchPlatformEvent(app_state.app(), .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .scroll,
+        .x = 32,
+        .y = 32,
+        .delta_y = 20,
+    } });
+    const scrolled_layout = try runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(scrolled_layout.findById(21).?.widget.value > 0);
+    try std.testing.expectEqual(published_count, platform_state.update_count);
 }
 
 test "runtime automation snapshot exposes canvas icon roles" {

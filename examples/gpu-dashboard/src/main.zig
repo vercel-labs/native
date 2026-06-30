@@ -11,7 +11,8 @@ const window_width: f32 = 1240;
 const window_height: f32 = 780;
 const toolbar_height: f32 = 54;
 const sidebar_width: f32 = 196;
-const canvas_width: f32 = 720;
+const canvas_pixel_width: usize = 860;
+const canvas_width: f32 = @floatFromInt(canvas_pixel_width);
 const statusbar_height: f32 = 34;
 const reference_present_scale_limit: f32 = 1;
 const max_dashboard_pipelines: usize = 8;
@@ -141,7 +142,7 @@ const shell_views = [_]zero_native.ShellView{
     .{ .label = "nav-customers", .kind = .list_item, .parent = "sidebar", .x = 14, .y = 102, .width = 166, .height = 32, .layer = 11, .text = "Customers" },
     .{ .label = "nav-latency", .kind = .list_item, .parent = "sidebar", .x = 14, .y = 140, .width = 166, .height = 32, .layer = 11, .text = "Latency" },
     .{ .label = "sidebar-status", .kind = .label, .parent = "sidebar", .x = 18, .y = 690, .width = 150, .height = 20, .layer = 11, .text = "Native shell" },
-    .{ .label = "dashboard-canvas", .kind = .gpu_surface, .parent = "body", .width = canvas_width, .min_width = 560, .layer = 12, .role = "Native-rendered dashboard canvas", .accessibility_label = "Native-rendered product dashboard canvas", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
+    .{ .label = "dashboard-canvas", .kind = .gpu_surface, .parent = "body", .width = canvas_width, .min_width = 720, .layer = 12, .role = "Native-rendered dashboard canvas", .accessibility_label = "Native-rendered product dashboard canvas", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
     .{ .label = "inspector", .kind = .webview, .parent = "body", .url = "zero://inline", .fill = true },
     .{ .label = "statusbar", .kind = .statusbar, .edge = .bottom, .height = statusbar_height, .layer = 30, .role = "Status" },
     .{ .label = "status-label", .kind = .label, .parent = "statusbar", .x = 14, .y = 8, .width = 840, .height = 18, .layer = 31, .text = "Canvas scene waiting for the first GPU frame." },
@@ -256,7 +257,6 @@ const GpuDashboardApp = struct {
         const target = pointer_event.target orelse return;
         const action = switch (pointer_event.pointer.phase) {
             .up => "Clicked",
-            .wheel => "Scrolled",
             else => return,
         };
         try self.reportWidgetInteraction(runtime, pointer_event.window_id, action, target.id);
@@ -497,10 +497,10 @@ fn buildDashboardDisplayListFromWidgets(builder: *canvas.Builder) canvas.Error!v
 }
 
 fn buildDashboardDisplayList(builder: *canvas.Builder, layout: canvas.WidgetLayoutTree) canvas.Error!void {
-    try builder.fillRect(.{ .id = 1, .rect = rect(0, 0, 720, 520), .fill = .{ .linear_gradient = .{ .start = pt(0, 0), .end = pt(720, 520), .stops = &bg_stops } } });
-    try builder.shadow(.{ .id = 2, .rect = rect(24, 24, 672, 472), .radius = canvas.Radius.all(22), .offset = .{ .dx = 0, .dy = 16 }, .blur = 22, .spread = -10, .color = canvas.Color.rgba8(16, 24, 40, 34) });
-    try builder.fillRoundedRect(.{ .id = 3, .rect = rect(24, 24, 672, 472), .radius = canvas.Radius.all(22), .fill = .{ .color = color(255, 255, 255) } });
-    try builder.fillRoundedRect(.{ .id = 4, .rect = rect(38, 38, 158, 444), .radius = canvas.Radius.all(16), .fill = .{ .linear_gradient = .{ .start = pt(38, 38), .end = pt(196, 482), .stops = &hero_stops } } });
+    try builder.fillRect(.{ .id = 1, .rect = rect(0, 0, canvas_width, 520), .fill = .{ .linear_gradient = .{ .start = pt(0, 0), .end = pt(canvas_width, 520), .stops = &bg_stops } } });
+    try builder.shadow(.{ .id = 2, .rect = rect(24, 24, 812, 472), .radius = canvas.Radius.all(22), .offset = .{ .dx = 0, .dy = 16 }, .blur = 22, .spread = -10, .color = canvas.Color.rgba8(16, 24, 40, 34) });
+    try builder.fillRoundedRect(.{ .id = 3, .rect = rect(24, 24, 812, 472), .radius = canvas.Radius.all(22), .fill = .{ .color = color(255, 255, 255) } });
+    try builder.fillRoundedRect(.{ .id = 4, .rect = rect(38, 38, 168, 444), .radius = canvas.Radius.all(16), .fill = .{ .linear_gradient = .{ .start = pt(38, 38), .end = pt(206, 482), .stops = &hero_stops } } });
 
     try layout.emitDisplayList(builder, dashboardWidgetTokens());
 }
@@ -591,7 +591,7 @@ fn buildDashboardWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!can
         .{
             .id = 134,
             .kind = .slider,
-            .frame = rect(392, 19, 40, 24),
+            .frame = rect(446, 19, 78, 24),
             .value = 0.62,
             .semantics = .{ .label = "Confidence threshold" },
         },
@@ -604,7 +604,7 @@ fn buildDashboardWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!can
     const filter_menu = [_]canvas.Widget{.{
         .id = 141,
         .kind = .menu_surface,
-        .frame = rect(12, 12, 154, 92),
+        .frame = rect(12, 12, 172, 92),
         .layout = .{ .gap = 2 },
         .semantics = .{ .label = "Filter options" },
         .children = &filter_items,
@@ -625,7 +625,7 @@ fn buildDashboardWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!can
         .{
             .id = 150,
             .kind = .data_grid,
-            .frame = rect(24, 58, 204, 28),
+            .frame = rect(24, 58, 284, 28),
             .text = "Deployment latency",
             .children = &deployment_rows,
         },
@@ -634,19 +634,19 @@ fn buildDashboardWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!can
         .{
             .id = 101,
             .kind = .text,
-            .frame = rect(226, 54, 220, 28),
+            .frame = rect(236, 54, 240, 28),
             .text = "Revenue pulse",
         },
         .{
             .id = 102,
             .kind = .text,
-            .frame = rect(226, 88, 260, 18),
+            .frame = rect(236, 88, 280, 18),
             .text = "Retained canvas dashboard",
         },
         .{
             .id = 103,
             .kind = .button,
-            .frame = rect(528, 50, 122, 34),
+            .frame = rect(688, 50, 122, 34),
             .text = "Live render",
             .command = mode_command,
             .semantics = .{ .label = "Live render status" },
@@ -654,29 +654,29 @@ fn buildDashboardWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!can
         .{
             .id = 104,
             .kind = .grid,
-            .frame = rect(226, 128, 248, 76),
-            .layout = .{ .columns = 1, .gap = 8 },
+            .frame = rect(236, 128, 332, 76),
+            .layout = .{ .columns = 2, .gap = 8 },
             .semantics = .{ .role = .list, .label = "Dashboard metrics" },
             .children = &metric_items,
         },
         .{
             .id = 108,
             .kind = .panel,
-            .frame = rect(226, 238, 252, 174),
+            .frame = rect(236, 248, 332, 164),
             .semantics = .{ .label = "Conversion trend" },
             .children = &trend_widgets,
         },
         .{
             .id = 109,
             .kind = .progress,
-            .frame = rect(226, 216, 250, 10),
+            .frame = rect(236, 216, 332, 10),
             .value = 0.68,
             .semantics = .{ .label = "Conversion progress" },
         },
         .{
             .id = 110,
             .kind = .list,
-            .frame = rect(54, 136, 126, 120),
+            .frame = rect(54, 136, 136, 120),
             .layout = .{ .gap = 8 },
             .semantics = .{ .label = "Dashboard navigation" },
             .children = &nav_items,
@@ -684,7 +684,7 @@ fn buildDashboardWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!can
         .{
             .id = 120,
             .kind = .scroll_view,
-            .frame = rect(500, 238, 170, 100),
+            .frame = rect(596, 238, 196, 112),
             .value = 18,
             .semantics = .{ .label = "Recent activity" },
             .children = &activity_items,
@@ -692,14 +692,14 @@ fn buildDashboardWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!can
         .{
             .id = 130,
             .kind = .panel,
-            .frame = rect(226, 426, 444, 64),
+            .frame = rect(236, 426, 556, 64),
             .semantics = .{ .label = "Forecast form" },
             .children = &form_fields,
         },
         .{
             .id = 140,
             .kind = .popover,
-            .frame = rect(500, 92, 168, 118),
+            .frame = rect(596, 92, 196, 118),
             .backdrop_blur_token = .md,
             .semantics = .{ .label = "Revenue filter popover" },
             .children = &filter_menu,
@@ -1014,7 +1014,7 @@ test "gpu dashboard display list builds a complete canvas scene" {
     const bounds = display_list.bounds().?;
     try std.testing.expect(bounds.x <= 0);
     try std.testing.expect(bounds.y <= 0);
-    try std.testing.expect(bounds.width >= 720);
+    try std.testing.expect(bounds.width >= canvas_width);
     try std.testing.expect(bounds.height >= 520);
 }
 
@@ -1022,18 +1022,18 @@ test "gpu dashboard layout keeps controls visually separated" {
     var nodes: [max_dashboard_widgets]canvas.WidgetLayoutNode = undefined;
     const layout = try buildDashboardWidgetLayout(&nodes);
 
-    try expectDashboardWidgetFrame(layout, 103, rect(528, 50, 122, 34));
-    try expectDashboardWidgetFrame(layout, 104, rect(226, 128, 248, 76));
-    try expectDashboardWidgetFrame(layout, 108, rect(226, 238, 252, 174));
-    try expectDashboardWidgetFrame(layout, 109, rect(226, 216, 250, 10));
-    try expectDashboardWidgetFrame(layout, 120, rect(500, 238, 170, 100));
-    try expectDashboardWidgetFrame(layout, 130, rect(226, 426, 444, 64));
-    try expectDashboardWidgetFrame(layout, 140, rect(500, 92, 168, 118));
-    try expectDashboardWidgetFrame(layout, 150, rect(250, 296, 204, 28));
-    try expectDashboardWidgetFrame(layout, 131, rect(240, 442, 116, 30));
-    try expectDashboardWidgetFrame(layout, 132, rect(370, 442, 128, 30));
-    try expectDashboardWidgetFrame(layout, 133, rect(512, 443, 94, 28));
-    try expectDashboardWidgetFrame(layout, 134, rect(618, 445, 40, 24));
+    try expectDashboardWidgetFrame(layout, 103, rect(688, 50, 122, 34));
+    try expectDashboardWidgetFrame(layout, 104, rect(236, 128, 332, 76));
+    try expectDashboardWidgetFrame(layout, 108, rect(236, 248, 332, 164));
+    try expectDashboardWidgetFrame(layout, 109, rect(236, 216, 332, 10));
+    try expectDashboardWidgetFrame(layout, 120, rect(596, 238, 196, 112));
+    try expectDashboardWidgetFrame(layout, 130, rect(236, 426, 556, 64));
+    try expectDashboardWidgetFrame(layout, 140, rect(596, 92, 196, 118));
+    try expectDashboardWidgetFrame(layout, 150, rect(260, 306, 284, 28));
+    try expectDashboardWidgetFrame(layout, 131, rect(250, 442, 116, 30));
+    try expectDashboardWidgetFrame(layout, 132, rect(380, 442, 128, 30));
+    try expectDashboardWidgetFrame(layout, 133, rect(522, 443, 94, 28));
+    try expectDashboardWidgetFrame(layout, 134, rect(682, 445, 78, 24));
 
     try expectDashboardWidgetsDoNotOverlap(layout, 103, 140);
     try expectDashboardWidgetsDoNotOverlap(layout, 104, 140);
@@ -1075,7 +1075,7 @@ test "gpu dashboard display list renders through the reference surface" {
     var text_layout_cache_actions: [max_dashboard_commands * 2]canvas.TextLayoutCacheAction = undefined;
     var changes: [max_dashboard_commands * 2 + 1]canvas.DiffChange = undefined;
     const frame = try dashboardFrame(display_list, null, .{
-        .surface_size = geometry.SizeF.init(720, 520),
+        .surface_size = geometry.SizeF.init(canvas_width, 520),
         .full_repaint = true,
     }, dashboardFrameStorage(&render_commands, &render_batches, &pipeline_cache_entries, &pipeline_cache_actions, &layers, &layer_cache_entries, &layer_cache_actions, &resources, &cache_entries, &cache_actions, &visual_effects, &visual_effect_cache_entries, &visual_effect_cache_actions, &glyphs, &glyph_cache_entries, &glyph_cache_actions, &text_layout_plans, &text_layout_lines, &text_layout_cache_entries, &text_layout_cache_actions, &changes));
 
@@ -1096,16 +1096,16 @@ test "gpu dashboard display list renders through the reference surface" {
     try std.testing.expectEqual(frame.batch_plan.batchCount(), encoder_plan.drawBatchCount());
     try std.testing.expect(encoder_plan.cacheActionCount() >= frame.pipeline_cache_plan.actionCount());
 
-    const pixel_count = 720 * 520 * 4;
+    const pixel_count = canvas_pixel_width * 520 * 4;
     const pixels = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(pixels);
     const scratch = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(scratch);
     @memset(pixels, 0);
-    const surface = try canvas.ReferenceRenderSurface.initWithScratch(720, 520, pixels, scratch);
+    const surface = try canvas.ReferenceRenderSurface.initWithScratch(canvas_pixel_width, 520, pixels, scratch);
     try surface.renderPass(frame.renderPass(), color(0, 0, 0));
 
-    try std.testing.expectEqual(@as(u64, 7853848246633773880), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 17457816620034739986), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(8, 8));
     try expectVisiblePixel(surface.pixelRgba8(64, 64));
     try expectVisiblePixel(surface.pixelRgba8(240, 140));
@@ -1158,7 +1158,7 @@ test "gpu dashboard render overrides animate without rebuilding commands" {
     var gpu_commands: [max_dashboard_commands]canvas.CanvasGpuCommand = undefined;
 
     const frame = try dashboardFrame(display_list, display_list, .{
-        .surface_size = geometry.SizeF.init(720, 520),
+        .surface_size = geometry.SizeF.init(canvas_width, 520),
         .render_overrides = sampled,
     }, dashboardFrameStorage(&render_commands, &render_batches, &pipeline_cache_entries, &pipeline_cache_actions, &layers, &layer_cache_entries, &layer_cache_actions, &resources, &cache_entries, &cache_actions, &visual_effects, &visual_effect_cache_entries, &visual_effect_cache_actions, &glyphs, &glyph_cache_entries, &glyph_cache_actions, &text_layout_plans, &text_layout_lines, &text_layout_cache_entries, &text_layout_cache_actions, &changes));
 
@@ -1198,7 +1198,7 @@ test "gpu dashboard scheduled animations render without display list rebuild" {
     const start_ns: u64 = 1_000_000_000;
     try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_frame = .{
         .label = "dashboard-canvas",
-        .size = geometry.SizeF.init(720, 520),
+        .size = geometry.SizeF.init(canvas_width, 520),
         .scale_factor = 2,
         .frame_index = 1,
         .timestamp_ns = start_ns,
@@ -1213,7 +1213,7 @@ test "gpu dashboard scheduled animations render without display list rebuild" {
     const animation_frame = try harness.runtime.nextCanvasFrame(1, "dashboard-canvas", .{
         .frame_index = 2,
         .timestamp_ns = start_ns + 450_000_000,
-        .surface_size = geometry.SizeF.init(720, 520),
+        .surface_size = geometry.SizeF.init(canvas_width, 520),
         .scale = 2,
     }, app.frameStorage());
     const animation_view_frame = try harness.runtime.gpuSurfaceFrame(1, "dashboard-canvas");
@@ -1250,7 +1250,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_frame = .{
         .label = "dashboard-canvas",
-        .size = geometry.SizeF.init(720, 520),
+        .size = geometry.SizeF.init(canvas_width, 520),
         .scale_factor = 2,
         .frame_index = 1,
         .timestamp_ns = 1_000_000_000,
@@ -1268,7 +1268,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     try std.testing.expect(display_list.findCommandById(customers_fill_command_id) == null);
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_packet_present_count);
     try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_present_count);
-    try std.testing.expectEqualDeep(geometry.SizeF.init(720, 520), harness.null_platform.gpu_surface_packet_present_surface_size);
+    try std.testing.expectEqualDeep(geometry.SizeF.init(canvas_width, 520), harness.null_platform.gpu_surface_packet_present_surface_size);
     try std.testing.expectEqual(@as(f32, 1), harness.null_platform.gpu_surface_packet_present_scale_factor);
     try std.testing.expect(harness.null_platform.gpu_surface_packet_present_representable);
     try std.testing.expect(app.pixels == null);
@@ -1484,15 +1484,15 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     const updated_confidence = dashboardSnapshotWidget(snapshot, 134).?;
     try std.testing.expectApproxEqAbs(@as(f32, 0.67), updated_confidence.value.?, 0.001);
     display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    try std.testing.expectApproxEqAbs(@as(f32, 26.8), try dashboardRoundedRectCommandWidth(display_list, confidence_active_command_id), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 52.26), try dashboardRoundedRectCommandWidth(display_list, confidence_active_command_id), 0.001);
 
     resetDashboardDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 120 increment");
     try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
     var scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "dashboard-canvas");
-    try std.testing.expectEqual(@as(f32, 40), scrolled_layout.findById(120).?.widget.value);
+    try std.testing.expectEqual(@as(f32, 28), scrolled_layout.findById(120).?.widget.value);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
-    try std.testing.expectEqual(@as(f32, 40), dashboardSnapshotWidget(snapshot, 120).?.scroll.offset);
+    try std.testing.expectEqual(@as(f32, 28), dashboardSnapshotWidget(snapshot, 120).?.scroll.offset);
     display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
     const activity_y_after_increment = try dashboardTextCommandOriginY(display_list, activity_first_text_command_id);
     try std.testing.expect(activity_y_after_increment < activity_y_before_scroll);
@@ -1510,7 +1510,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_frame = .{
         .label = "dashboard-canvas",
-        .size = geometry.SizeF.init(720, 520),
+        .size = geometry.SizeF.init(canvas_width, 520),
         .scale_factor = 2,
         .frame_index = 2,
         .timestamp_ns = 1_016_000_000,
@@ -1543,7 +1543,7 @@ test "gpu dashboard frame event adapter preserves renderer diagnostics" {
     const frame = zero_native.platform.GpuFrame{
         .window_id = 7,
         .label = "dashboard-canvas",
-        .size = geometry.SizeF.init(720, 520),
+        .size = geometry.SizeF.init(canvas_width, 520),
         .scale_factor = 2,
         .frame_index = 42,
         .timestamp_ns = 1234,

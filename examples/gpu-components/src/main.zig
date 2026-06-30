@@ -224,8 +224,7 @@ const GpuComponentsApp = struct {
         switch (pointer_event.pointer.phase) {
             .up => try self.reportWidgetInteraction(runtime, pointer_event.window_id, "Clicked", target.id),
             .wheel => {
-                const scrolled_id = try self.scrollVirtualWidget(runtime, pointer_event) orelse target.id;
-                try self.reportWidgetInteraction(runtime, pointer_event.window_id, "Scrolled", scrolled_id);
+                _ = try self.scrollVirtualWidget(runtime, pointer_event);
             },
             else => {},
         }
@@ -1793,7 +1792,8 @@ test "gpu components pointer clicks update retained controls" {
     try std.testing.expectApproxEqAbs(@as(f32, 28), scrolled_layout.findById(120).?.widget.value, 0.001);
     try std.testing.expect(harness.runtime.invalidated);
     status_view = componentViewByLabel(&harness.runtime, "status-label").?;
-    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Scrolled list #120: offset 28") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Clicked slider #115") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Scrolled") == null);
 
     resetComponentDirty(&harness.runtime);
     try dispatchComponentPointerWheel(&harness.runtime, app_handle, 130, 20);
@@ -1801,7 +1801,8 @@ test "gpu components pointer clicks update retained controls" {
     try std.testing.expectApproxEqAbs(@as(f32, 56), scrolled_layout.findById(130).?.widget.value, 0.001);
     try std.testing.expect(harness.runtime.invalidated);
     status_view = componentViewByLabel(&harness.runtime, "status-label").?;
-    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Scrolled scroll_view #130: offset 56") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Clicked slider #115") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Scrolled") == null);
 
     resetComponentDirty(&harness.runtime);
     try dispatchComponentPointerWheel(&harness.runtime, app_handle, 150, 20);
@@ -1809,7 +1810,8 @@ test "gpu components pointer clicks update retained controls" {
     try std.testing.expectApproxEqAbs(@as(f32, 56), scrolled_layout.findById(150).?.widget.value, 0.001);
     try std.testing.expect(harness.runtime.invalidated);
     status_view = componentViewByLabel(&harness.runtime, "status-label").?;
-    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Scrolled data_grid #150: offset 56") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Clicked slider #115") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Scrolled") == null);
 
     resetComponentDirty(&harness.runtime);
     try dispatchComponentPointerClick(&harness.runtime, app_handle, 158);

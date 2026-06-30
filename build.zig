@@ -813,13 +813,13 @@ pub fn build(b: *std.Build) void {
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
         \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  case "$snapshot" in *'window @w1 "zero-native GPU Dashboard" bounds=('*' 1120x700)'*'view @w1/dashboard-canvas kind=gpu_surface'*'bounds=(196,0 720x612)'*'gpu_nonblank=true'*'canvas_commands=64'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
+        \\  case "$snapshot" in *'window @w1 "zero-native GPU Dashboard" bounds=('*' 1120x700)'*'view @w1/dashboard-canvas kind=gpu_surface'*'bounds=(196,0 860x612)'*'gpu_nonblank=true'*'canvas_commands=64'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
         \\  attempts=$((attempts + 1))
         \\  sleep 0.1
         \\done
         \\case "$snapshot" in *'window @w1 "zero-native GPU Dashboard" bounds=('*' 1120x700)'*) ;; *) echo "dashboard window resize was not reflected in snapshot" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'bounds=(196,0 720x612)'*) ;; *) echo "dashboard GPU canvas did not relayout after resize" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'view @w1/inspector kind=webview'*'bounds=(916,54 204x612)'*) ;; *) echo "dashboard inspector WebView did not relayout after resize" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'bounds=(196,0 860x612)'*) ;; *) echo "dashboard GPU canvas did not relayout after resize" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/inspector kind=webview'*'bounds=(1056,54 64x612)'*) ;; *) echo "dashboard inspector WebView did not relayout after resize" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_commands=64'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "dashboard GPU canvas did not remain packet-renderable after resize" >&2; exit 1 ;; esac
         \\canvas_revision_after_resize="$(canvas_revision_from_snapshot)"
         \\case "$canvas_revision_after_resize" in ''|*[!0-9]*) echo "dashboard canvas revision was missing after resize" >&2; exit 1 ;; esac
@@ -1173,7 +1173,7 @@ pub fn build(b: *std.Build) void {
         \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
         \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
         \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
-        \\    case "$snapshot" in *'Scrolled scroll_view #130: offset 56.'*'widget @w1/components-canvas#130 role=group'*'scroll=[offset=56,viewport=56,content=140]'*)
+        \\    case "$snapshot" in *'widget @w1/components-canvas#130 role=group'*'scroll=[offset=56,viewport=56,content=140]'*)
         \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
         \\      ;;
         \\    esac
@@ -1182,7 +1182,7 @@ pub fn build(b: *std.Build) void {
         \\  sleep 0.1
         \\done
         \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "scroll automation wheel did not request a GPU frame" >&2; exit 1; fi
-        \\case "$snapshot" in *'Scrolled scroll_view #130: offset 56.'*'widget @w1/components-canvas#130 role=group'*'scroll=[offset=56,viewport=56,content=140]'*) ;; *) echo "scroll automation wheel did not update retained scroll semantics" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'widget @w1/components-canvas#130 role=group'*'scroll=[offset=56,viewport=56,content=140]'*) ;; *) echo "scroll automation wheel did not update retained scroll semantics" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "scroll automation wheel did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
         \\input_timestamp="$(printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/components-canvas kind=gpu_surface.* gpu_input_timestamp_ns=\([0-9][0-9]*\).*/\1/p')"
         \\case "$input_timestamp" in ''|*[!0-9]*) echo "components GPU input timestamp was missing after widget interaction" >&2; exit 1 ;; esac

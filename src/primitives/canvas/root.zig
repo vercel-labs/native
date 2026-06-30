@@ -6779,9 +6779,10 @@ fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
         .id = widgetPartId(widget.id, 4),
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.button_size,
-        .origin = alignedTextOrigin(widget.frame, widget.text, tokens.typography.button_size, densityValue(tokens, tokens.spacing.md), .center),
+        .origin = boundedTextOrigin(widget.frame, tokens.typography.button_size, densityValue(tokens, tokens.spacing.md)),
         .color = buttonTextColor(tokens, widget.state),
         .text = widget.text,
+        .text_layout = boundedTextLayout(widget.frame, tokens.typography.button_size, densityValue(tokens, tokens.spacing.md), .center, .none),
     });
 }
 
@@ -6963,9 +6964,10 @@ fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Er
             .id = widgetPartId(widget.id, 3),
             .font_id = tokens.typography.font_id,
             .size = tokens.typography.label_size,
-            .origin = textOrigin(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.sm)),
+            .origin = boundedTextOrigin(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.sm)),
             .color = tokens.colors.accent_text,
             .text = widget.text,
+            .text_layout = boundedTextLayout(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.sm), .start, .none),
         });
     }
 }
@@ -6990,9 +6992,10 @@ fn emitListItemWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
         .id = widgetPartId(widget.id, 3),
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.body_size,
-        .origin = textOrigin(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md)),
+        .origin = boundedTextOrigin(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md)),
         .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
         .text = widget.text,
+        .text_layout = boundedTextLayout(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md), .start, .none),
     });
 }
 
@@ -7017,9 +7020,10 @@ fn emitDataCellWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
             .id = widgetPartId(widget.id, 4),
             .font_id = tokens.typography.font_id,
             .size = tokens.typography.body_size,
-            .origin = textOrigin(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md)),
+            .origin = boundedTextOrigin(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md)),
             .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
             .text = widget.text,
+            .text_layout = boundedTextLayout(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md), .start, .none),
         });
     }
 }
@@ -7046,9 +7050,10 @@ fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: DesignT
         .id = widgetPartId(widget.id, 3),
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.label_size,
-        .origin = alignedTextOrigin(widget.frame, widget.text, tokens.typography.label_size, densityValue(tokens, tokens.spacing.md), .center),
+        .origin = boundedTextOrigin(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.md)),
         .color = if (selected) tokens.colors.accent_text else tokens.colors.text,
         .text = widget.text,
+        .text_layout = boundedTextLayout(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.md), .center, .none),
     });
 }
 
@@ -7233,9 +7238,10 @@ fn emitControlLabel(builder: *Builder, widget: Widget, tokens: DesignTokens, x: 
         .id = widgetPartId(widget.id, slot),
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.label_size,
-        .origin = geometry.PointF.init(x, textOrigin(widget.frame, tokens.typography.label_size, 0).y),
+        .origin = boundedTextOrigin(labelFrameForControl(widget.frame, x), tokens.typography.label_size, 0),
         .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
         .text = widget.text,
+        .text_layout = boundedTextLayout(labelFrameForControl(widget.frame, x), tokens.typography.label_size, 0, .start, .none),
     });
 }
 
@@ -7256,6 +7262,23 @@ fn textOrigin(frame: geometry.RectF, size: f32, inset: f32) geometry.PointF {
         frame.x + inset,
         frame.y + @max(size, (frame.height - line_height) * 0.5 + size),
     );
+}
+
+fn boundedTextOrigin(frame: geometry.RectF, size: f32, inset: f32) geometry.PointF {
+    return geometry.PointF.init(frame.x + inset, textOrigin(frame, size, 0).y);
+}
+
+fn boundedTextLayout(frame: geometry.RectF, size: f32, inset: f32, alignment: TextAlign, wrap: TextWrap) TextLayoutOptions {
+    return .{
+        .max_width = @max(1, frame.width - inset * 2),
+        .line_height = size * 1.25,
+        .wrap = wrap,
+        .alignment = alignment,
+    };
+}
+
+fn labelFrameForControl(frame: geometry.RectF, x: f32) geometry.RectF {
+    return geometry.RectF.init(x, frame.y, @max(1, frame.x + frame.width - x), frame.height);
 }
 
 fn centeredTextOrigin(frame: geometry.RectF, text: []const u8, size: f32) geometry.PointF {
@@ -15240,7 +15263,12 @@ test "widget emitter applies density tokens to spacing and affordances" {
     var compact_button_builder = Builder.init(&compact_button_commands);
     try emitWidgetTree(&compact_button_builder, button, .{ .density = .compact });
     switch (compact_button_builder.displayList().commands[2]) {
-        .draw_text => |text| try std.testing.expectApproxEqAbs(@as(f32, 45.5), text.origin.x, 0.001),
+        .draw_text => |text| {
+            try std.testing.expectApproxEqAbs(@as(f32, 10.5), text.origin.x, 0.001);
+            try std.testing.expect(text.text_layout != null);
+            try std.testing.expectApproxEqAbs(@as(f32, 119), text.text_layout.?.max_width, 0.001);
+            try std.testing.expectEqual(TextAlign.center, text.text_layout.?.alignment);
+        },
         else => return error.TestUnexpectedResult,
     }
 
@@ -15248,7 +15276,12 @@ test "widget emitter applies density tokens to spacing and affordances" {
     var regular_button_builder = Builder.init(&regular_button_commands);
     try emitWidgetTree(&regular_button_builder, button, .{ .density = .regular });
     switch (regular_button_builder.displayList().commands[2]) {
-        .draw_text => |text| try std.testing.expectApproxEqAbs(@as(f32, 45.5), text.origin.x, 0.001),
+        .draw_text => |text| {
+            try std.testing.expectApproxEqAbs(@as(f32, 12), text.origin.x, 0.001);
+            try std.testing.expect(text.text_layout != null);
+            try std.testing.expectApproxEqAbs(@as(f32, 116), text.text_layout.?.max_width, 0.001);
+            try std.testing.expectEqual(TextAlign.center, text.text_layout.?.alignment);
+        },
         else => return error.TestUnexpectedResult,
     }
 
@@ -15256,7 +15289,12 @@ test "widget emitter applies density tokens to spacing and affordances" {
     var spacious_button_builder = Builder.init(&spacious_button_commands);
     try emitWidgetTree(&spacious_button_builder, button, .{ .density = .spacious });
     switch (spacious_button_builder.displayList().commands[2]) {
-        .draw_text => |text| try std.testing.expectApproxEqAbs(@as(f32, 45.5), text.origin.x, 0.001),
+        .draw_text => |text| {
+            try std.testing.expectApproxEqAbs(@as(f32, 13.5), text.origin.x, 0.001);
+            try std.testing.expect(text.text_layout != null);
+            try std.testing.expectApproxEqAbs(@as(f32, 113), text.text_layout.?.max_width, 0.001);
+            try std.testing.expectEqual(TextAlign.center, text.text_layout.?.alignment);
+        },
         else => return error.TestUnexpectedResult,
     }
 
