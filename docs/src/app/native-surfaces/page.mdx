@@ -139,7 +139,7 @@ if (runtime.supports(.gpu_surfaces)) {
 const hasNativeViews = await window.zero.platform.supports("native_views");
 ```
 
-`gpu_surface` views report GPU presentation state through `ViewInfo` and `GpuSurfaceFrameEvent`, including the selected backend, pixel format, present mode, alpha mode, color space, vsync flag, status, frame size, frame index, timestamp, nonblank sample status, input latency budget, retained canvas frame counters, widget revision, widget node count, and current cursor intent.
+`gpu_surface` views report GPU presentation state through `ViewInfo` and `GpuSurfaceFrameEvent`, including the selected backend, pixel format, present mode, alpha mode, color space, vsync flag, status, frame size, frame index, timestamp, nonblank sample status, input latency budget, first-frame latency budget, retained canvas frame counters, widget revision, widget node count, and current cursor intent.
 
 See [Platform Support](/platform-support) for the current host matrix.
 

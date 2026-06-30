@@ -246,6 +246,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "\"appActivationEvents\"" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "\"gpu_surfaces\"" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "\"gpuSurfaces\"" },
+        .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "gpuFirstFrameLatencyNs: number" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-bridge-view-selector-helpers", "Verify injected view helpers accept string selectors", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "viewSelectorPayload(options)" },
@@ -268,6 +269,7 @@ pub fn build(b: *std.Build) void {
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-native-view-contracts", "Verify native surface docs describe view identity", &.{
         .{ .path = "docs/src/app/native-surfaces/page.mdx", .pattern = "ViewInfo.id" },
         .{ .path = "docs/src/app/native-surfaces/page.mdx", .pattern = "window.zero.views.update(\"status\"" },
+        .{ .path = "docs/src/app/native-surfaces/page.mdx", .pattern = "first-frame latency budget" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-shell-manifest-contracts", "Verify app.zon docs describe shell compatibility window labels", &.{
         .{ .path = "docs/src/app/app-zon/page.mdx", .pattern = "labels must stay unique across both lists" },
@@ -722,6 +724,9 @@ pub fn build(b: *std.Build) void {
         \\done
         \\case "$snapshot" in *'view @w1/status-label kind=label'*'GPU frame 1 from canvas.'*) ;; *) echo "gpu-surface frame event did not reach the runtime" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'view @w1/canvas kind=gpu_surface'*'gpu_nonblank=true'*) ;; *) echo "gpu-surface frame was not verified as nonblank" >&2; exit 1 ;; esac
+        \\first_frame_latency="$(printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/canvas kind=gpu_surface.* gpu_first_frame_latency_ns=\([0-9][0-9]*\).*/\1/p')"
+        \\case "$first_frame_latency" in ''|*[!0-9]*) echo "gpu-surface first frame latency was missing" >&2; exit 1 ;; esac
+        \\if [ "$first_frame_latency" -le 0 ] || [ "$first_frame_latency" -gt 5000000000 ]; then echo "gpu-surface first frame latency was out of bounds: $first_frame_latency ns" >&2; exit 1; fi
         \\"$cli" automate native-command gpu.refresh refresh >/dev/null 2>&1
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
@@ -773,6 +778,9 @@ pub fn build(b: *std.Build) void {
         \\case "$snapshot" in *'window @w1 "zero-native GPU Components"'*) ;; *) echo "gpu-components window was missing from snapshot" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'gpu_nonblank=true'*) ;; *) echo "components GPU surface was not ready and nonblank" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "components GPU frame was not packet-representable" >&2; exit 1 ;; esac
+        \\first_frame_latency="$(printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/components-canvas kind=gpu_surface.* gpu_first_frame_latency_ns=\([0-9][0-9]*\).*/\1/p')"
+        \\case "$first_frame_latency" in ''|*[!0-9]*) echo "components GPU first frame latency was missing" >&2; exit 1 ;; esac
+        \\if [ "$first_frame_latency" -le 0 ] || [ "$first_frame_latency" -gt 5000000000 ]; then echo "components GPU first frame latency was out of bounds: $first_frame_latency ns" >&2; exit 1; fi
         \\gpu_frame_from_snapshot() {
         \\  printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/components-canvas kind=gpu_surface.* gpu_frame=\([0-9][0-9]*\).*/\1/p'
         \\}

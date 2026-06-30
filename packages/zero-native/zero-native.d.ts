@@ -199,6 +199,10 @@ export interface ZeroNativeViewInfo {
   gpuInputLatencyBudgetNs: number;
   gpuInputLatencyBudgetExceededCount: number;
   gpuInputLatencyBudgetOk: boolean;
+  gpuFirstFrameLatencyNs: number;
+  gpuFirstFrameLatencyBudgetNs: number;
+  gpuFirstFrameLatencyBudgetExceededCount: number;
+  gpuFirstFrameLatencyBudgetOk: boolean;
   gpuNonblank: boolean;
   gpuSampleColor: number;
   gpuBackend: ZeroNativeGpuSurfaceBackend;
