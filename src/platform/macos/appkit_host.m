@@ -50,6 +50,7 @@ static NSRange ZeroNativeClampedRange(NSUInteger start, NSUInteger end, NSUInteg
 static NSString *ZeroNativeSubstringForRange(NSString *value, NSRange range);
 static NSString *ZeroNativeStringFromTextInput(id value);
 static int ZeroNativeAppKitColorSchemeForAppearance(NSAppearance *appearance);
+static BOOL ZeroNativeAppKitReduceMotionEnabled(void);
 
 static size_t ZeroNativeOverflowSize(size_t buffer_len) {
     return buffer_len == SIZE_MAX ? SIZE_MAX : buffer_len + 1;
@@ -71,6 +72,10 @@ static int ZeroNativeAppKitColorSchemeForAppearance(NSAppearance *appearance) {
     NSAppearance *effective = appearance ?: NSApp.effectiveAppearance;
     NSString *bestMatch = [effective bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
     return [bestMatch isEqualToString:NSAppearanceNameDarkAqua] ? ZERO_NATIVE_APPKIT_COLOR_SCHEME_DARK : ZERO_NATIVE_APPKIT_COLOR_SCHEME_LIGHT;
+}
+
+static BOOL ZeroNativeAppKitReduceMotionEnabled(void) {
+    return [NSWorkspace sharedWorkspace].accessibilityDisplayShouldReduceMotion;
 }
 
 static uint64_t ZeroNativeTimestampNanoseconds(void) {
@@ -3844,6 +3849,10 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
         return;
     }
     [NSApp addObserver:self forKeyPath:@"effectiveAppearance" options:NSKeyValueObservingOptionNew context:ZeroNativeAppKitAppearanceObservationContext];
+    [[[NSWorkspace sharedWorkspace] notificationCenter] addObserver:self
+                                                           selector:@selector(accessibilityDisplayOptionsDidChange:)
+                                                               name:NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification
+                                                             object:nil];
     self.observesAppearanceChanges = YES;
 }
 
@@ -3852,7 +3861,15 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
         return;
     }
     [NSApp removeObserver:self forKeyPath:@"effectiveAppearance" context:ZeroNativeAppKitAppearanceObservationContext];
+    [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self
+                                                                  name:NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification
+                                                                object:nil];
     self.observesAppearanceChanges = NO;
+}
+
+- (void)accessibilityDisplayOptionsDidChange:(NSNotification *)notification {
+    (void)notification;
+    [self emitAppearanceChanged];
 }
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context {
@@ -3870,6 +3887,7 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     [self emitEvent:(zero_native_appkit_event_t){
         .kind = ZERO_NATIVE_APPKIT_EVENT_APPEARANCE_CHANGED,
         .color_scheme = ZeroNativeAppKitColorSchemeForAppearance(NSApp.effectiveAppearance),
+        .reduce_motion = ZeroNativeAppKitReduceMotionEnabled() ? 1 : 0,
     }];
 }
 

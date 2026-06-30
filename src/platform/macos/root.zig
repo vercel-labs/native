@@ -78,6 +78,7 @@ const AppKitEvent = extern struct {
     has_composition_cursor: c_int,
     composition_cursor: usize,
     color_scheme: c_int,
+    reduce_motion: c_int,
 };
 
 const AppKitCallback = *const fn (context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) void;
@@ -419,6 +420,7 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
         .app_deactivated => state.emit(.app_deactivated),
         .appearance_changed => state.emit(.{ .appearance_changed = .{
             .color_scheme = appKitColorScheme(event.color_scheme),
+            .reduce_motion = event.reduce_motion != 0,
         } }),
         .resize => {
             const surface: platform_mod.Surface = .{
@@ -1485,4 +1487,13 @@ test "mac appearance event maps color scheme" {
     try std.testing.expectEqual(platform_mod.ColorScheme.light, appKitColorScheme(0));
     try std.testing.expectEqual(platform_mod.ColorScheme.dark, appKitColorScheme(1));
     try std.testing.expectEqual(platform_mod.ColorScheme.light, appKitColorScheme(42));
+}
+
+test "mac appearance event carries reduced motion" {
+    var event = std.mem.zeroes(AppKitEvent);
+    event.color_scheme = 1;
+    event.reduce_motion = 1;
+
+    try std.testing.expectEqual(platform_mod.ColorScheme.dark, appKitColorScheme(event.color_scheme));
+    try std.testing.expect(event.reduce_motion != 0);
 }

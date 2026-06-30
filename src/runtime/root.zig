@@ -18701,6 +18701,42 @@ test "runtime dispatches app activation lifecycle events" {
     try std.testing.expectEqual(LifecycleEvent.deactivate, app_state.events[3]);
 }
 
+test "runtime stores and dispatches appearance preferences" {
+    const TestApp = struct {
+        appearance_count: u32 = 0,
+        last_appearance: platform.Appearance = .{},
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "appearance-preferences", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .appearance_changed => |appearance| {
+                    self.appearance_count += 1;
+                    self.last_appearance = appearance;
+                },
+                else => {},
+            }
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .appearance_changed = .{ .color_scheme = .dark, .reduce_motion = true } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.appearance_count);
+    try std.testing.expectEqual(platform.ColorScheme.dark, app_state.last_appearance.color_scheme);
+    try std.testing.expect(app_state.last_appearance.reduce_motion);
+    try std.testing.expectEqual(platform.ColorScheme.dark, harness.runtime.appearance.color_scheme);
+    try std.testing.expect(harness.runtime.appearance.reduce_motion);
+}
+
 test "runtime dispatches GPU surface events" {
     const TestApp = struct {
         frame_count: u32 = 0,

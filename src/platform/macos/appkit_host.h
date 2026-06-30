@@ -221,6 +221,7 @@ typedef struct {
     int has_composition_cursor;
     size_t composition_cursor;
     int color_scheme;
+    int reduce_motion;
 } zero_native_appkit_event_t;
 
 typedef void (*zero_native_appkit_event_callback_t)(void *context, const zero_native_appkit_event_t *event);
