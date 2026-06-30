@@ -7889,7 +7889,70 @@ fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens
             .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
         },
     });
+    if (widget.kind == .accordion) {
+        try emitAccordionWidgetHeader(builder, widget, tokens, visual);
+        if (widget.state.focused) try emitWidgetFocusRing(builder, widget, tokens, 7);
+    }
     if (widget.kind == .resizable) try emitResizableWidgetHandle(builder, widget, tokens, visual);
+}
+
+fn emitAccordionWidgetHeader(builder: *Builder, widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Error!void {
+    const frame = widget.frame.normalized();
+    if (frame.isEmpty()) return;
+
+    const inset = widgetControlInset(widget, tokens, tokens.spacing.md);
+    const text_size = widgetBodyTextSize(widget, tokens);
+    const chevron_size = @max(widgetSizedDensityValue(widget, tokens, 10), text_size - 2);
+    const chevron_center = geometry.PointF.init(frame.maxX() - inset - chevron_size * 0.5, frame.y + @min(frame.height * 0.5, inset + text_size * 0.45));
+    const color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+    if (widget.text.len > 0) {
+        try builder.drawText(.{
+            .id = widgetPartId(widget.id, 6),
+            .font_id = tokens.typography.font_id,
+            .size = text_size,
+            .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(frame.x + inset, frame.y + inset + text_size)),
+            .color = color,
+            .text = widget.text,
+            .text_layout = .{
+                .max_width = @max(1, frame.width - inset * 3 - chevron_size),
+                .line_height = widgetLineHeight(text_size),
+                .wrap = .none,
+                .alignment = widget.text_alignment,
+            },
+        });
+    }
+    try emitAccordionChevron(builder, widget, tokens, chevron_center, chevron_size, color);
+}
+
+fn emitAccordionChevron(builder: *Builder, widget: Widget, tokens: DesignTokens, center: geometry.PointF, size: f32, color: Color) Error!void {
+    const half = size * 0.28;
+    const rise = size * 0.24;
+    const stroke = Stroke{ .fill = colorFill(color), .width = tokens.stroke.regular };
+    const selected = booleanControlSelected(widget);
+    const first_from = if (selected)
+        geometry.PointF.init(center.x - half, center.y - rise)
+    else
+        geometry.PointF.init(center.x - rise, center.y - half);
+    const first_to = if (selected)
+        geometry.PointF.init(center.x, center.y + rise)
+    else
+        geometry.PointF.init(center.x + rise, center.y);
+    const second_to = if (selected)
+        geometry.PointF.init(center.x + half, center.y - rise)
+    else
+        geometry.PointF.init(center.x - rise, center.y + half);
+    try builder.drawLine(.{
+        .id = widgetPartId(widget.id, 4),
+        .from = pixelSnapGeometryPoint(tokens, first_from),
+        .to = pixelSnapGeometryPoint(tokens, first_to),
+        .stroke = stroke,
+    });
+    try builder.drawLine(.{
+        .id = widgetPartId(widget.id, 5),
+        .from = pixelSnapGeometryPoint(tokens, first_to),
+        .to = pixelSnapGeometryPoint(tokens, second_to),
+        .stroke = stroke,
+    });
 }
 
 fn emitResizableWidgetHandle(builder: *Builder, widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Error!void {
@@ -10050,6 +10113,7 @@ pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor 
         .input, .text_field, .search_field, .combobox, .textarea => .text,
         .button,
         .toggle_button,
+        .accordion,
         .icon_button,
         .select,
         .menu_item,
@@ -10138,7 +10202,7 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
             .{ .kind = .press, .actions = .{ .press = true } }
         else
             null,
-        .checkbox, .switch_control, .toggle, .toggle_button => if (isWidgetActivationKey(keyboard.key))
+        .accordion, .checkbox, .switch_control, .toggle, .toggle_button => if (isWidgetActivationKey(keyboard.key))
             .{ .kind = .toggle, .actions = .{ .toggle = true } }
         else
             null,
@@ -10735,7 +10799,7 @@ fn semanticValue(widget: Widget) ?f32 {
     if (widget.semantics.value) |value| return value;
     return switch (widget.kind) {
         .radio, .list_item, .menu_item, .data_cell, .segmented_control => if (widget.state.selected or widget.value >= 0.5) 1 else 0,
-        .checkbox, .switch_control, .toggle, .toggle_button => if (booleanControlSelected(widget)) 1 else 0,
+        .accordion, .checkbox, .switch_control, .toggle, .toggle_button => if (booleanControlSelected(widget)) 1 else 0,
         .slider, .progress => std.math.clamp(widget.value, 0, 1),
         .spinner => null,
         else => null,
@@ -11011,7 +11075,7 @@ fn defaultSemanticActions(widget: Widget) WidgetActions {
             actions.press = true;
             actions.select = true;
         },
-        .checkbox, .switch_control, .toggle, .toggle_button => actions.toggle = true,
+        .accordion, .checkbox, .switch_control, .toggle, .toggle_button => actions.toggle = true,
         .radio => {
             actions.select = true;
             if (widget.command.len > 0) actions.press = true;
@@ -11036,7 +11100,7 @@ fn defaultSemanticActions(widget: Widget) WidgetActions {
 
 fn defaultFocusable(widget: Widget) bool {
     return switch (widget.kind) {
-        .scroll_view, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider => !widget.state.disabled,
+        .scroll_view, .accordion, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider => !widget.state.disabled,
         else => false,
     };
 }
@@ -15945,6 +16009,68 @@ test "built-in component factory applies shadcn composite defaults" {
     });
     try std.testing.expectEqual(@as(f32, 0), custom_card.layout.padding.top);
     try std.testing.expectEqual(@as(f32, 24), custom_card.layout.gap);
+}
+
+test "built-in accordion renders shadcn disclosure chrome and toggle semantics" {
+    const accordion = builtinComponentWidget(.accordion, .{
+        .id = 45,
+        .frame = geometry.RectF.init(0, 0, 220, 64),
+        .text = "Advanced options",
+        .state = .{ .selected = true, .focused = true },
+        .semantics = .{ .label = "Advanced options" },
+    });
+
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(accordion, accordion.frame, &nodes);
+    try std.testing.expectEqual(WidgetCursor.pointing_hand, layout.cursorForHit(layout.hitTest(geometry.PointF.init(12, 12))));
+    try std.testing.expectEqual(WidgetCursor.pointing_hand, cursorForWidgetTarget(.accordion, .{}));
+    try std.testing.expectEqual(@as(ObjectId, 45), layout.focusTargetById(45).?.id);
+
+    var semantics_buffer: [1]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+    try std.testing.expectEqual(@as(usize, 1), semantics.len);
+    try std.testing.expectEqual(WidgetRole.group, semantics[0].role);
+    try std.testing.expectEqualStrings("Advanced options", semantics[0].label);
+    try std.testing.expectEqual(@as(?f32, 1), semantics[0].value);
+    try std.testing.expect(semantics[0].focusable);
+    try std.testing.expect(semantics[0].actions.toggle);
+
+    const tokens = DesignTokens{
+        .shadow = .{ .sm = .{ .y = 0, .blur = 0, .spread = 0 } },
+        .controls = .{
+            .accordion = .{
+                .background = Color.rgb8(14, 20, 26),
+                .foreground = Color.rgb8(230, 236, 242),
+                .border = Color.rgb8(64, 74, 84),
+                .stroke_width = 1.25,
+            },
+        },
+    };
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, accordion, tokens);
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 8), display_list.commandCount());
+    switch (display_list.findCommandById(widgetPartId(45, 2)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(14, 20, 26), fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.findCommandById(widgetPartId(45, 4)).?.command) {
+        .draw_line => |line| {
+            try std.testing.expect(line.to.y > line.from.y);
+            try expectFillColor(Color.rgb8(230, 236, 242), line.stroke.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.findCommandById(widgetPartId(45, 5)).?.command) {
+        .draw_line => |line| try std.testing.expect(line.to.y < line.from.y),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.findCommandById(widgetPartId(45, 6)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualStrings("Advanced options", text.text),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(display_list.findCommandById(widgetPartId(45, 7)) != null);
 }
 
 test "built-in resizable renders shadcn resize grip and drag semantics" {
@@ -24206,6 +24332,10 @@ test "widget keyboard control intents map activation keys" {
     try std.testing.expectEqual(WidgetControlIntentKind.toggle, toggle.kind);
     try std.testing.expect(toggle.actions.toggle);
 
+    const accordion = widgetKeyboardControlIntent(.{ .kind = .accordion, .text = "Details" }, .{ .phase = .key_down, .key = "enter" }).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.toggle, accordion.kind);
+    try std.testing.expect(accordion.actions.toggle);
+
     const selected = widgetKeyboardControlIntent(.{ .kind = .segmented_control, .text = "Revenue", .command = "mode.change" }, .{ .phase = .key_down, .key = "enter" }).?;
     try std.testing.expectEqual(WidgetControlIntentKind.select, selected.kind);
     try std.testing.expect(selected.actions.select);
@@ -24266,6 +24396,10 @@ test "widget semantic control intents map built-in actions" {
     const toggle = widgetSemanticControlIntent(.{ .kind = .checkbox, .text = "Selected" }, .toggle).?;
     try std.testing.expectEqual(WidgetControlIntentKind.toggle, toggle.kind);
     try std.testing.expect(toggle.actions.toggle);
+
+    const accordion = widgetSemanticControlIntent(.{ .kind = .accordion, .text = "Details" }, .toggle).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.toggle, accordion.kind);
+    try std.testing.expect(accordion.actions.toggle);
 
     const selected = widgetSemanticControlIntent(.{ .kind = .segmented_control, .text = "Revenue", .command = "mode.change" }, .select).?;
     try std.testing.expectEqual(WidgetControlIntentKind.select, selected.kind);

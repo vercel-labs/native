@@ -1457,7 +1457,7 @@ test "gpu components display list renders stable reference snapshot" {
     const surface = (try canvas.ReferenceRenderSurface.initWithScratch(@intFromFloat(canvas_width), @intFromFloat(canvas_height), pixels, scratch)).withImages(&preview_images);
     try surface.renderPass(frame.renderPass(), color(247, 249, 252));
 
-    try std.testing.expectEqual(@as(u64, 11038681032884093065), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 9559768891348669277), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -1779,6 +1779,9 @@ test "gpu components app registers component lab on first gpu frame" {
     try std.testing.expectEqual(@as(?usize, 1), componentSnapshotWidget(snapshot, 156).?.grid_row_index);
     try std.testing.expectEqual(@as(?usize, 0), componentSnapshotWidget(snapshot, 156).?.grid_column_index);
     try std.testing.expectEqualStrings("tooltip", componentSnapshotWidget(snapshot, 160).?.role);
+    const accordion = componentSnapshotWidget(snapshot, 178).?;
+    try std.testing.expectEqualStrings("group", accordion.role);
+    try std.testing.expect(accordion.actions.toggle);
     const resizable = componentSnapshotWidget(snapshot, 214).?;
     try std.testing.expectEqualStrings("group", resizable.role);
     try std.testing.expect(resizable.actions.drag);
