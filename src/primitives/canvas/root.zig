@@ -8308,7 +8308,7 @@ fn semanticLabel(widget: Widget) []const u8 {
 fn semanticValue(widget: Widget) ?f32 {
     if (widget.semantics.value) |value| return value;
     return switch (widget.kind) {
-        .list_item, .data_cell, .segmented_control => if (widget.state.selected or widget.value >= 0.5) 1 else 0,
+        .list_item, .menu_item, .data_cell, .segmented_control => if (widget.state.selected or widget.value >= 0.5) 1 else 0,
         .checkbox, .toggle => if (booleanControlSelected(widget)) 1 else 0,
         .slider, .progress => std.math.clamp(widget.value, 0, 1),
         else => null,
@@ -8581,7 +8581,11 @@ fn defaultSemanticActions(widget: Widget) WidgetActions {
         .focus = widget.semantics.focusable or defaultFocusable(widget),
     };
     switch (widget.kind) {
-        .button, .icon_button, .menu_item => actions.press = true,
+        .button, .icon_button => actions.press = true,
+        .menu_item => {
+            actions.press = true;
+            actions.select = true;
+        },
         .checkbox, .toggle => actions.toggle = true,
         .text_field, .search_field => {
             actions.set_text = true;
@@ -13919,10 +13923,18 @@ test "widget menu surface groups menu items semantically" {
     try std.testing.expectEqual(WidgetRole.menuitem, semantics[1].role);
     try std.testing.expectEqualStrings("Rename", semantics[1].label);
     try std.testing.expectEqual(@as(?usize, 0), semantics[1].parent_index);
+    try std.testing.expectEqual(@as(?f32, 1), semantics[1].value);
+    try std.testing.expect(semantics[1].state.selected);
     try std.testing.expect(semantics[1].focusable);
+    try std.testing.expect(semantics[1].actions.press);
+    try std.testing.expect(semantics[1].actions.select);
     try std.testing.expectEqual(WidgetRole.menuitem, semantics[2].role);
     try std.testing.expectEqualStrings("Archive", semantics[2].label);
     try std.testing.expectEqual(@as(?usize, 0), semantics[2].parent_index);
+    try std.testing.expectEqual(@as(?f32, 0), semantics[2].value);
+    try std.testing.expect(!semantics[2].state.selected);
+    try std.testing.expect(semantics[2].actions.press);
+    try std.testing.expect(semantics[2].actions.select);
 }
 
 test "widget list item and segmented controls expose selectable semantics" {

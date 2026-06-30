@@ -5428,7 +5428,7 @@ fn canvasWidgetSelectableSelected(widget: canvas.Widget) bool {
 
 fn canvasWidgetSelectionClearsSiblings(kind: canvas.WidgetKind) bool {
     return switch (kind) {
-        .list_item, .data_cell, .segmented_control => true,
+        .list_item, .menu_item, .data_cell, .segmented_control => true,
         else => false,
     };
 }
@@ -6678,7 +6678,7 @@ const RuntimeView = struct {
                 try self.setCanvasWidgetValue(index, next_value)
             else
                 null,
-            .list_item, .data_cell, .segmented_control => if (isCanvasWidgetActivationKey(keyboard.key))
+            .list_item, .menu_item, .data_cell, .segmented_control => if (isCanvasWidgetActivationKey(keyboard.key))
                 try self.setCanvasWidgetSelected(id, true)
             else
                 null,
@@ -6719,7 +6719,7 @@ const RuntimeView = struct {
         const widget = self.widget_layout_nodes[index].widget;
         if (widget.state.disabled) return null;
         switch (widget.kind) {
-            .list_item, .data_cell, .segmented_control => {},
+            .list_item, .menu_item, .data_cell, .segmented_control => {},
             else => return null,
         }
 
@@ -15177,6 +15177,21 @@ test "runtime clears sibling canvas selections in retained groups" {
             .text = "Grid",
         },
     };
+    const menu_items = [_]canvas.Widget{
+        .{
+            .id = 6,
+            .kind = .menu_item,
+            .frame = geometry.RectF.init(0, 0, 0, 28),
+            .text = "Rename",
+            .state = .{ .selected = true },
+        },
+        .{
+            .id = 7,
+            .kind = .menu_item,
+            .frame = geometry.RectF.init(0, 0, 0, 28),
+            .text = "Archive",
+        },
+    };
     const groups = [_]canvas.Widget{
         .{
             .id = 10,
@@ -15192,8 +15207,15 @@ test "runtime clears sibling canvas selections in retained groups" {
             .layout = .{ .gap = 8 },
             .children = &mode_items,
         },
+        .{
+            .id = 11,
+            .kind = .menu_surface,
+            .frame = geometry.RectF.init(160, 10, 90, 68),
+            .layout = .{ .gap = 4 },
+            .children = &menu_items,
+        },
     };
-    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    var nodes: [10]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &groups }, geometry.RectF.init(0, 0, 260, 180), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
 
@@ -15245,12 +15267,38 @@ test "runtime clears sibling canvas selections in retained groups" {
     try std.testing.expectEqual(@as(?f32, 1), semantics[2].value);
     try std.testing.expectEqual(@as(?f32, 0), semantics[3].value);
     try std.testing.expectEqual(@as(?f32, 1), semantics[4].value);
+    try std.testing.expect(semantics[6].actions.press);
+    try std.testing.expect(semantics[6].actions.select);
+    try std.testing.expect(semantics[7].actions.press);
+    try std.testing.expect(semantics[7].actions.select);
+
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    harness.runtime.views[0].canvas_widget_focused_id = 7;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "space",
+    } });
+
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(!retained.findById(6).?.widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(6).?.widget.value);
+    try std.testing.expect(retained.findById(7).?.widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 1), retained.findById(7).?.widget.value);
+
+    const menu_semantics = harness.runtime.views[0].widgetSemantics();
+    try std.testing.expectEqual(@as(?f32, 0), menu_semantics[6].value);
+    try std.testing.expectEqual(@as(?f32, 1), menu_semantics[7].value);
 
     const snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expect(!snapshot.widgets[1].selected);
     try std.testing.expect(snapshot.widgets[2].selected);
     try std.testing.expect(!snapshot.widgets[3].selected);
     try std.testing.expect(snapshot.widgets[4].selected);
+    try std.testing.expect(!snapshot.widgets[6].selected);
+    try std.testing.expect(snapshot.widgets[7].selected);
 }
 
 test "runtime applies keyboard values to focused canvas controls" {
@@ -19117,6 +19165,7 @@ test "runtime dispatches automation canvas widget actions" {
         .{ .id = 6, .kind = .list_item, .frame = geometry.RectF.init(170, 10, 120, 32), .text = "Inbox" },
         .{ .id = 7, .kind = .scroll_view, .frame = geometry.RectF.init(170, 52, 120, 48), .children = &scroll_items },
         .{ .id = 11, .kind = .button, .frame = geometry.RectF.init(170, 110, 120, 32), .text = "Upload", .semantics = .{ .actions = .{ .drop_files = true } } },
+        .{ .id = 12, .kind = .menu_item, .frame = geometry.RectF.init(170, 146, 120, 28), .text = "Archive" },
     };
     var nodes: [13]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &children }, geometry.RectF.init(0, 0, 320, 180), &nodes);
@@ -19161,6 +19210,11 @@ test "runtime dispatches automation canvas widget actions" {
 
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 6, .action = .select });
     try std.testing.expectEqual(@as(?f32, 1), harness.runtime.views[0].widgetSemantics()[5].value);
+
+    try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 12, .action = .select });
+    const selected_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(selected_layout.findById(12).?.widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 1), selected_layout.findById(12).?.widget.value);
 
     try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 7, .action = .increment });
     var scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
