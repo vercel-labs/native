@@ -7889,6 +7889,39 @@ fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens
             .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
         },
     });
+    if (widget.kind == .resizable) try emitResizableWidgetHandle(builder, widget, tokens, visual);
+}
+
+fn emitResizableWidgetHandle(builder: *Builder, widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Error!void {
+    const frame = widget.frame.normalized();
+    if (frame.isEmpty()) return;
+
+    const inset = widgetSizedDensityValue(widget, tokens, 6);
+    const gap = widgetSizedDensityValue(widget, tokens, 4);
+    const handle_height = @min(@max(widgetSizedDensityValue(widget, tokens, 10), frame.height * 0.48), @max(0, frame.height - inset * 2));
+    if (handle_height <= 0) return;
+
+    const right_x = @max(frame.x + inset, frame.maxX() - inset);
+    const left_x = @max(frame.x + inset, right_x - gap);
+    const y0 = frame.y + (frame.height - handle_height) * 0.5;
+    const y1 = y0 + handle_height;
+    const stroke = Stroke{
+        .fill = colorFill(widgetForegroundColor(widget, tokens, visual.foreground orelse visual.border orelse tokens.colors.text_muted)),
+        .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
+    };
+
+    try builder.drawLine(.{
+        .id = widgetPartId(widget.id, 4),
+        .from = pixelSnapGeometryPoint(tokens, geometry.PointF.init(left_x, y0)),
+        .to = pixelSnapGeometryPoint(tokens, geometry.PointF.init(left_x, y1)),
+        .stroke = stroke,
+    });
+    try builder.drawLine(.{
+        .id = widgetPartId(widget.id, 5),
+        .from = pixelSnapGeometryPoint(tokens, geometry.PointF.init(right_x, y0)),
+        .to = pixelSnapGeometryPoint(tokens, geometry.PointF.init(right_x, y1)),
+        .stroke = stroke,
+    });
 }
 
 fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
@@ -10028,7 +10061,7 @@ pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor 
         .switch_control,
         .toggle,
         => .pointing_hand,
-        .slider => .resize_horizontal,
+        .slider, .resizable => .resize_horizontal,
         else => .arrow,
     };
 }
@@ -10991,6 +11024,7 @@ fn defaultSemanticActions(widget: Widget) WidgetActions {
             actions.increment = true;
             actions.decrement = true;
         },
+        .resizable => actions.drag = true,
         .list_item, .segmented_control, .data_cell => {
             actions.select = true;
             if (widget.command.len > 0) actions.press = true;
@@ -11023,7 +11057,7 @@ fn isDragSource(widget: Widget) bool {
     return widget.id != 0 and
         !widget.state.disabled and
         !widget.semantics.hidden and
-        widget.semantics.actions.drag;
+        (widget.semantics.actions.drag or defaultSemanticActions(widget).drag);
 }
 
 fn isHitTarget(widget: Widget) bool {
@@ -14568,6 +14602,7 @@ test "widget layout resolves cursor intent from hit targets" {
         .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(8, 8, 90, 32), .text = "Run" },
         .{ .id = 3, .kind = .text_field, .frame = geometry.RectF.init(8, 48, 120, 32), .text = "Query" },
         .{ .id = 4, .kind = .slider, .frame = geometry.RectF.init(8, 88, 120, 32), .value = 0.5 },
+        .{ .id = 5, .kind = .resizable, .frame = geometry.RectF.init(8, 128, 120, 40) },
     };
     const root = Widget{
         .id = 1,
@@ -14575,12 +14610,13 @@ test "widget layout resolves cursor intent from hit targets" {
         .children = &children,
     };
 
-    var nodes: [5]WidgetLayoutNode = undefined;
-    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 160, 140), &nodes);
+    var nodes: [6]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 160, 180), &nodes);
     try std.testing.expectEqual(WidgetCursor.pointing_hand, layout.cursorForHit(layout.hitTest(geometry.PointF.init(16, 16))));
     try std.testing.expectEqual(WidgetCursor.text, layout.cursorForHit(layout.hitTest(geometry.PointF.init(16, 56))));
     try std.testing.expectEqual(WidgetCursor.resize_horizontal, layout.cursorForHit(layout.hitTest(geometry.PointF.init(16, 96))));
-    try std.testing.expectEqual(WidgetCursor.arrow, layout.cursorForHit(layout.hitTest(geometry.PointF.init(150, 130))));
+    try std.testing.expectEqual(WidgetCursor.resize_horizontal, layout.cursorForHit(layout.hitTest(geometry.PointF.init(120, 140))));
+    try std.testing.expectEqual(WidgetCursor.arrow, layout.cursorForHit(layout.hitTest(geometry.PointF.init(150, 170))));
     try std.testing.expectEqual(WidgetCursor.arrow, cursorForWidgetTarget(.button, .{ .disabled = true }));
 }
 
@@ -15909,6 +15945,70 @@ test "built-in component factory applies shadcn composite defaults" {
     });
     try std.testing.expectEqual(@as(f32, 0), custom_card.layout.padding.top);
     try std.testing.expectEqual(@as(f32, 24), custom_card.layout.gap);
+}
+
+test "built-in resizable renders shadcn resize grip and drag semantics" {
+    const resizable = builtinComponentWidget(.resizable, .{
+        .id = 46,
+        .frame = geometry.RectF.init(0, 0, 180, 80),
+        .semantics = .{ .label = "Resizable panel" },
+    });
+
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(resizable, resizable.frame, &nodes);
+    try std.testing.expectEqual(WidgetCursor.resize_horizontal, layout.cursorForHit(layout.hitTest(geometry.PointF.init(174, 40))));
+
+    var semantics_buffer: [1]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+    try std.testing.expectEqual(@as(usize, 1), semantics.len);
+    try std.testing.expectEqual(WidgetRole.group, semantics[0].role);
+    try std.testing.expectEqualStrings("Resizable panel", semantics[0].label);
+    try std.testing.expect(semantics[0].actions.drag);
+
+    var route_buffer: [1]WidgetEventRouteEntry = undefined;
+    const route = try layout.routeDragEvent(.{
+        .source_id = 46,
+        .point = geometry.PointF.init(174, 40),
+        .delta = geometry.OffsetF.init(18, 0),
+    }, &route_buffer);
+    try std.testing.expect(route.target != null);
+    try std.testing.expectEqual(@as(ObjectId, 46), route.target.?.id);
+    try std.testing.expectEqual(@as(usize, 1), route.entries.len);
+
+    const tokens = DesignTokens{
+        .shadow = .{ .sm = .{ .y = 0, .blur = 0, .spread = 0 } },
+        .controls = .{
+            .resizable = .{
+                .background = Color.rgb8(14, 20, 26),
+                .foreground = Color.rgb8(230, 236, 242),
+                .border = Color.rgb8(64, 74, 84),
+                .stroke_width = 1.5,
+            },
+        },
+    };
+    var commands: [6]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, resizable, tokens);
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 6), display_list.commandCount());
+    switch (display_list.findCommandById(widgetPartId(46, 2)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(14, 20, 26), fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.findCommandById(widgetPartId(46, 4)).?.command) {
+        .draw_line => |line| {
+            try std.testing.expect(line.from.x > 160);
+            try expectFillColor(Color.rgb8(230, 236, 242), line.stroke.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.findCommandById(widgetPartId(46, 5)).?.command) {
+        .draw_line => |line| {
+            try std.testing.expect(line.from.x > 170);
+            try expectFillColor(Color.rgb8(230, 236, 242), line.stroke.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "built-in alert renders shadcn surface chrome and text" {
