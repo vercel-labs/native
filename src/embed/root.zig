@@ -206,6 +206,20 @@ pub const EmbeddedApp = struct {
         } });
     }
 
+    pub fn scroll(self: *EmbeddedApp, id: u64, x: f32, y: f32, delta_x: f32, delta_y: f32) anyerror!void {
+        try self.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = mobile_gpu_surface_label,
+            .kind = .scroll,
+            .timestamp_ns = nowNanoseconds(),
+            .pointer_id = id,
+            .x = x,
+            .y = y,
+            .delta_x = delta_x,
+            .delta_y = delta_y,
+        } });
+    }
+
     pub fn key(self: *EmbeddedApp, phase: c_int, key_value: []const u8, text_value: []const u8, modifiers_mask: u32) anyerror!void {
         try self.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
             .window_id = 1,
@@ -287,6 +301,8 @@ const MobileHostApp = struct {
     last_touch_timestamp_ns: u64 = 0,
     last_touch_x: f32 = 0,
     last_touch_y: f32 = 0,
+    last_touch_delta_x: f32 = 0,
+    last_touch_delta_y: f32 = 0,
     last_touch_pressure: f32 = 0,
     last_input_kind: platform.GpuSurfaceInputKind = .pointer_up,
     last_input_timestamp_ns: u64 = 0,
@@ -321,6 +337,8 @@ const MobileHostApp = struct {
         self.last_touch_timestamp_ns = 0;
         self.last_touch_x = 0;
         self.last_touch_y = 0;
+        self.last_touch_delta_x = 0;
+        self.last_touch_delta_y = 0;
         self.last_touch_pressure = 0;
         self.last_input_kind = .pointer_up;
         self.last_input_timestamp_ns = 0;
@@ -395,6 +413,8 @@ const MobileHostApp = struct {
                         self.last_touch_timestamp_ns = input.timestamp_ns;
                         self.last_touch_x = input.x;
                         self.last_touch_y = input.y;
+                        self.last_touch_delta_x = input.delta_x;
+                        self.last_touch_delta_y = input.delta_y;
                         self.last_touch_pressure = input.pressure;
                     },
                     else => {},
@@ -545,6 +565,15 @@ fn mobileSurface(width: f32, height: f32, scale: f32, surface: ?*anyopaque, safe
 pub fn zero_native_app_touch(app: ?*anyopaque, id: u64, phase: c_int, x: f32, y: f32, pressure: f32) void {
     const self = mobileApp(app) orelse return;
     self.embedded.touch(id, phase, x, y, pressure) catch |err| {
+        recordError(self, err);
+        return;
+    };
+    self.last_error = null;
+}
+
+pub fn zero_native_app_scroll(app: ?*anyopaque, id: u64, x: f32, y: f32, delta_x: f32, delta_y: f32) void {
+    const self = mobileApp(app) orelse return;
+    self.embedded.scroll(id, x, y, delta_x, delta_y) catch |err| {
         recordError(self, err);
         return;
     };
@@ -1153,8 +1182,21 @@ test "mobile C ABI forwards surface resize and touch input" {
     try std.testing.expectEqual(@as(usize, 3), self.touch_count);
     try std.testing.expectEqual(platform.GpuSurfaceInputKind.pointer_cancel, self.last_touch_kind);
 
+    zero_native_app_scroll(app, 42, 15, 26, -2, 18);
+    try std.testing.expectEqual(@as(usize, 4), self.touch_count);
+    try std.testing.expectEqual(@as(usize, 4), self.input_count);
+    try std.testing.expectEqual(platform.GpuSurfaceInputKind.scroll, self.last_touch_kind);
+    try std.testing.expectEqual(platform.GpuSurfaceInputKind.scroll, self.last_input_kind);
+    try std.testing.expectEqual(@as(u64, 42), self.last_touch_id);
+    try std.testing.expectEqual(@as(f32, 15), self.last_touch_x);
+    try std.testing.expectEqual(@as(f32, 26), self.last_touch_y);
+    try std.testing.expectEqual(@as(f32, -2), self.last_touch_delta_x);
+    try std.testing.expectEqual(@as(f32, 18), self.last_touch_delta_y);
+    try std.testing.expectEqual(@as(f32, 0), self.last_touch_pressure);
+    try std.testing.expectEqualStrings("", std.mem.span(zero_native_app_last_error_name(app)));
+
     zero_native_app_touch(app, 42, 99, 13, 25, 0);
-    try std.testing.expectEqual(@as(usize, 3), self.touch_count);
+    try std.testing.expectEqual(@as(usize, 4), self.touch_count);
     try std.testing.expectEqualStrings("InvalidTouchPhase", std.mem.span(zero_native_app_last_error_name(app)));
 }
 
@@ -1351,6 +1393,15 @@ test "mobile C ABI exposes GPU widget accessibility semantics" {
     try std.testing.expectEqual(@as(f32, 116), scroll_node.scroll_content_extent);
     try std.testing.expect((scroll_node.actions & @intFromEnum(MobileWidgetAction.increment)) != 0);
     try std.testing.expect((scroll_node.actions & @intFromEnum(MobileWidgetAction.decrement)) != 0);
+
+    zero_native_app_scroll(app, 11, 24, 112, 0, 14);
+    const scrolled_node = try mobileWidgetSemanticsByIdForTest(app, 4);
+    try std.testing.expectEqual(platform.GpuSurfaceInputKind.scroll, self.last_input_kind);
+    try std.testing.expectEqual(@as(u64, 11), self.last_touch_id);
+    try std.testing.expectEqual(@as(f32, 14), self.last_touch_delta_y);
+    try std.testing.expectEqual(@as(f32, 34), scrolled_node.scroll_offset);
+    try std.testing.expectEqual(@as(f32, 48), scrolled_node.scroll_viewport_extent);
+    try std.testing.expectEqual(@as(f32, 116), scrolled_node.scroll_content_extent);
 
     const list_node = try mobileWidgetSemanticsByIdForTest(app, 7);
     try std.testing.expectEqual(@intFromEnum(MobileWidgetRole.list), list_node.role);

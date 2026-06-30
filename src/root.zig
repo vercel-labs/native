@@ -151,6 +151,10 @@ pub export fn zero_native_app_touch(app: ?*anyopaque, id: u64, phase: c_int, x: 
     embed.zero_native_app_touch(app, id, phase, x, y, pressure);
 }
 
+pub export fn zero_native_app_scroll(app: ?*anyopaque, id: u64, x: f32, y: f32, delta_x: f32, delta_y: f32) void {
+    embed.zero_native_app_scroll(app, id, x, y, delta_x, delta_y);
+}
+
 pub export fn zero_native_app_key(app: ?*anyopaque, phase: c_int, key: ?[*]const u8, key_len: usize, text: ?[*]const u8, text_len: usize, modifiers_mask: u32) void {
     embed.zero_native_app_key(app, phase, key, key_len, text, text_len, modifiers_mask);
 }

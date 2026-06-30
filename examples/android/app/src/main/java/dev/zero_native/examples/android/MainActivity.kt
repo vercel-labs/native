@@ -30,6 +30,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var statusLabel: TextView
     private lateinit var widgetSurface: WidgetSurfaceView
     private var currentSurfaceHolder: SurfaceHolder? = null
+    private var lastTouchX: Float = 0f
+    private var lastTouchY: Float = 0f
+    private var lastTouchActive: Boolean = false
 
     data class WidgetSemantics(
         val id: Long,
@@ -633,12 +636,30 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private fun handleWidgetTouch(event: MotionEvent): Boolean {
         if (nativeApp == 0L || event.pointerCount == 0) return false
         val pointerIndex = event.actionIndex.coerceIn(0, event.pointerCount - 1)
+        val pointerId = event.getPointerId(pointerIndex).toLong()
+        val x = event.getX(pointerIndex)
+        val y = event.getY(pointerIndex)
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                lastTouchX = x
+                lastTouchY = y
+                lastTouchActive = true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (lastTouchActive) nativeScroll(nativeApp, pointerId, x, y, lastTouchX - x, lastTouchY - y)
+                lastTouchX = x
+                lastTouchY = y
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                lastTouchActive = false
+            }
+        }
         nativeTouch(
             nativeApp,
-            event.getPointerId(pointerIndex).toLong(),
+            pointerId,
             event.actionMasked,
-            event.getX(pointerIndex),
-            event.getY(pointerIndex),
+            x,
+            y,
             event.getPressure(pointerIndex),
         )
         nativeFrame(nativeApp)
@@ -716,6 +737,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     external fun nativeResize(app: Long, width: Float, height: Float, scale: Float, surface: Any)
     external fun nativeViewport(app: Long, width: Float, height: Float, scale: Float, surface: Any, safeTop: Float, safeRight: Float, safeBottom: Float, safeLeft: Float, keyboardTop: Float, keyboardRight: Float, keyboardBottom: Float, keyboardLeft: Float)
     external fun nativeTouch(app: Long, id: Long, phase: Int, x: Float, y: Float, pressure: Float)
+    external fun nativeScroll(app: Long, id: Long, x: Float, y: Float, deltaX: Float, deltaY: Float)
     external fun nativeKey(app: Long, phase: Int, key: String, text: String, modifiers: Int)
     external fun nativeText(app: Long, text: String)
     external fun nativeIme(app: Long, kind: Int, text: String, cursor: Long)

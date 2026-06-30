@@ -156,6 +156,7 @@ void zero_native_app_resize(void *app, float width, float height, float scale, v
 void zero_native_app_viewport(void *app, float width, float height, float scale, void *surface, float safe_top, float safe_right, float safe_bottom, float safe_left, float keyboard_top, float keyboard_right, float keyboard_bottom, float keyboard_left);
 int zero_native_app_viewport_state(void *app, zero_native_viewport_state_t *out);
 void zero_native_app_touch(void *app, uint64_t id, int phase, float x, float y, float pressure);
+void zero_native_app_scroll(void *app, uint64_t id, float x, float y, float delta_x, float delta_y);
 void zero_native_app_key(void *app, int phase, const char *key, uintptr_t key_len, const char *text, uintptr_t text_len, uint32_t modifiers_mask);
 void zero_native_app_text(void *app, const char *text, uintptr_t len);
 void zero_native_app_ime(void *app, int kind, const char *text, uintptr_t len, intptr_t cursor);

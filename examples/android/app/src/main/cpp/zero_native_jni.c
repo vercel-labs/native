@@ -67,6 +67,12 @@ JNIEXPORT void JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativ
     zero_native_app_touch((void *)app, (uint64_t)id, phase, x, y, pressure);
 }
 
+JNIEXPORT void JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativeScroll(JNIEnv *env, jobject self, jlong app, jlong id, jfloat x, jfloat y, jfloat delta_x, jfloat delta_y) {
+    (void)env;
+    (void)self;
+    zero_native_app_scroll((void *)app, (uint64_t)id, x, y, delta_x, delta_y);
+}
+
 JNIEXPORT void JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativeKey(JNIEnv *env, jobject self, jlong app, jint phase, jstring key, jstring text, jint modifiers) {
     (void)self;
     const char *key_chars = key ? (*env)->GetStringUTFChars(env, key, NULL) : NULL;
