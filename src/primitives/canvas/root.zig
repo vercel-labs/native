@@ -3434,6 +3434,23 @@ pub const PixelSnapTokens = struct {
     scale: f32 = 1,
 };
 
+pub const ControlVisualTokens = struct {
+    background: ?Color = null,
+    hover_background: ?Color = null,
+    active_background: ?Color = null,
+    foreground: ?Color = null,
+    border: ?Color = null,
+};
+
+pub const ControlTokens = struct {
+    button_default: ControlVisualTokens = .{},
+    button_primary: ControlVisualTokens = .{},
+    button_secondary: ControlVisualTokens = .{},
+    button_outline: ControlVisualTokens = .{},
+    button_ghost: ControlVisualTokens = .{},
+    button_destructive: ControlVisualTokens = .{},
+};
+
 pub const ColorTokenOverrides = struct {
     background: ?Color = null,
     surface: ?Color = null,
@@ -3604,6 +3621,38 @@ pub const PixelSnapTokenOverrides = struct {
     }
 };
 
+pub const ControlVisualTokenOverrides = struct {
+    background: ?Color = null,
+    hover_background: ?Color = null,
+    active_background: ?Color = null,
+    foreground: ?Color = null,
+    border: ?Color = null,
+
+    pub fn apply(self: ControlVisualTokenOverrides, base: ControlVisualTokens) ControlVisualTokens {
+        return applyFlatTokenOverrides(ControlVisualTokens, base, self);
+    }
+};
+
+pub const ControlTokenOverrides = struct {
+    button_default: ControlVisualTokenOverrides = .{},
+    button_primary: ControlVisualTokenOverrides = .{},
+    button_secondary: ControlVisualTokenOverrides = .{},
+    button_outline: ControlVisualTokenOverrides = .{},
+    button_ghost: ControlVisualTokenOverrides = .{},
+    button_destructive: ControlVisualTokenOverrides = .{},
+
+    pub fn apply(self: ControlTokenOverrides, base: ControlTokens) ControlTokens {
+        var next = base;
+        next.button_default = self.button_default.apply(next.button_default);
+        next.button_primary = self.button_primary.apply(next.button_primary);
+        next.button_secondary = self.button_secondary.apply(next.button_secondary);
+        next.button_outline = self.button_outline.apply(next.button_outline);
+        next.button_ghost = self.button_ghost.apply(next.button_ghost);
+        next.button_destructive = self.button_destructive.apply(next.button_destructive);
+        return next;
+    }
+};
+
 pub const DesignTokenOverrides = struct {
     colors: ColorTokenOverrides = .{},
     typography: TypographyTokenOverrides = .{},
@@ -3616,6 +3665,7 @@ pub const DesignTokenOverrides = struct {
     scroll: ScrollPhysicsOverrides = .{},
     layer: LayerTokenOverrides = .{},
     pixel_snap: PixelSnapTokenOverrides = .{},
+    controls: ControlTokenOverrides = .{},
     density: ?Density = null,
 
     pub fn apply(self: DesignTokenOverrides, base: DesignTokens) DesignTokens {
@@ -3635,6 +3685,7 @@ pub const DesignTokens = struct {
     scroll: ScrollPhysics = .{},
     layer: LayerTokens = .{},
     pixel_snap: PixelSnapTokens = .{},
+    controls: ControlTokens = .{},
     density: Density = .regular,
 
     pub fn theme(options: ThemeOptions) DesignTokens {
@@ -3662,6 +3713,7 @@ pub const DesignTokens = struct {
         next.scroll = overrides.scroll.apply(next.scroll);
         next.layer = overrides.layer.apply(next.layer);
         next.pixel_snap = overrides.pixel_snap.apply(next.pixel_snap);
+        next.controls = overrides.controls.apply(next.controls);
         if (overrides.density) |density| next.density = density;
         return next;
     }
@@ -8011,6 +8063,18 @@ fn widgetFocusRingFill(widget: Widget, tokens: DesignTokens) Fill {
     return colorFill(widget.style.focus_ring orelse tokens.colors.focus_ring);
 }
 
+fn widgetBackgroundColor(widget: Widget, fallback: Color) Color {
+    return widget.style.background orelse fallback;
+}
+
+fn widgetAccentColor(widget: Widget, fallback: Color) Color {
+    return widget.style.accent orelse fallback;
+}
+
+fn widgetBorderColor(widget: Widget, fallback: Color) Color {
+    return widget.style.border orelse fallback;
+}
+
 fn widgetForegroundColor(widget: Widget, tokens: DesignTokens, fallback: Color) Color {
     if (widget.state.disabled) return tokens.colors.text_muted;
     return widget.style.foreground orelse fallback;
@@ -8115,43 +8179,63 @@ fn emitWidgetTextCaret(
 fn buttonFill(widget: Widget, tokens: DesignTokens) Fill {
     if (widget.state.disabled) return colorFill(tokens.colors.disabled);
     const active = widget.state.pressed or widget.state.selected;
+    const visual = buttonControlVisualTokens(widget, tokens);
     return switch (widget.variant) {
         .default => if (active)
-            widgetAccentFill(widget, tokens.colors.accent)
+            colorFill(widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent))
         else if (widget.state.hovered)
-            widgetBackgroundFill(widget, tokens.colors.surface_subtle)
+            colorFill(widgetBackgroundColor(widget, visual.hover_background orelse tokens.colors.surface_subtle))
         else
-            widgetBackgroundFill(widget, tokens.colors.surface),
-        .primary => widgetAccentFill(widget, tokens.colors.accent),
-        .secondary => widgetBackgroundFill(widget, if (active or widget.state.hovered) tokens.colors.surface_pressed else tokens.colors.surface_subtle),
-        .outline => widgetBackgroundFill(widget, if (active or widget.state.hovered) tokens.colors.surface_subtle else transparentColor()),
-        .ghost => widgetBackgroundFill(widget, if (active or widget.state.hovered) tokens.colors.surface_subtle else transparentColor()),
-        .destructive => widgetAccentFill(widget, tokens.colors.destructive),
+            colorFill(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface)),
+        .primary => colorFill(widgetAccentColor(widget, buttonStateBackground(visual, active, widget.state.hovered, tokens.colors.accent))),
+        .secondary => colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, active, widget.state.hovered, if (active or widget.state.hovered) tokens.colors.surface_pressed else tokens.colors.surface_subtle))),
+        .outline => colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, active, widget.state.hovered, if (active or widget.state.hovered) tokens.colors.surface_subtle else transparentColor()))),
+        .ghost => colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, active, widget.state.hovered, if (active or widget.state.hovered) tokens.colors.surface_subtle else transparentColor()))),
+        .destructive => colorFill(widgetAccentColor(widget, buttonStateBackground(visual, active, widget.state.hovered, tokens.colors.destructive))),
     };
 }
 
 fn buttonTextColorForWidget(widget: Widget, tokens: DesignTokens) Color {
     if (widget.state.disabled) return tokens.colors.text_muted;
     const active = widget.state.pressed or widget.state.selected;
+    const visual = buttonControlVisualTokens(widget, tokens);
     return switch (widget.variant) {
         .default => if (active)
-            widgetAccentForegroundColor(widget, tokens, tokens.colors.accent_text)
+            widgetAccentForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.accent_text)
         else
-            widgetForegroundColor(widget, tokens, tokens.colors.text),
-        .primary => widgetAccentForegroundColor(widget, tokens, tokens.colors.accent_text),
-        .secondary, .outline, .ghost => widgetForegroundColor(widget, tokens, tokens.colors.text),
-        .destructive => widgetAccentForegroundColor(widget, tokens, tokens.colors.destructive_text),
+            widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text),
+        .primary => widgetAccentForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.accent_text),
+        .secondary, .outline, .ghost => widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text),
+        .destructive => widgetAccentForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.destructive_text),
     };
 }
 
 fn buttonBorderFill(widget: Widget, tokens: DesignTokens) Fill {
     if (widget.style.border) |border| return colorFill(border);
+    const visual = buttonControlVisualTokens(widget, tokens);
     return switch (widget.variant) {
-        .primary => widgetAccentFill(widget, tokens.colors.accent),
-        .destructive => widgetAccentFill(widget, tokens.colors.destructive),
-        .ghost => colorFill(transparentColor()),
-        else => colorFill(tokens.colors.border),
+        .primary => colorFill(widgetAccentColor(widget, visual.border orelse tokens.colors.accent)),
+        .destructive => colorFill(widgetAccentColor(widget, visual.border orelse tokens.colors.destructive)),
+        .ghost => colorFill(widgetBorderColor(widget, visual.border orelse transparentColor())),
+        else => colorFill(widgetBorderColor(widget, visual.border orelse tokens.colors.border)),
     };
+}
+
+fn buttonControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    return switch (widget.variant) {
+        .default => tokens.controls.button_default,
+        .primary => tokens.controls.button_primary,
+        .secondary => tokens.controls.button_secondary,
+        .outline => tokens.controls.button_outline,
+        .ghost => tokens.controls.button_ghost,
+        .destructive => tokens.controls.button_destructive,
+    };
+}
+
+fn buttonStateBackground(visual: ControlVisualTokens, active: bool, hovered: bool, fallback: Color) Color {
+    if (active) return visual.active_background orelse visual.hover_background orelse visual.background orelse fallback;
+    if (hovered) return visual.hover_background orelse visual.background orelse fallback;
+    return visual.background orelse fallback;
 }
 
 fn buttonStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
@@ -14286,6 +14370,17 @@ test "design token overrides compose with built-in themes" {
         },
         .layer = .{ .overlay = 240 },
         .pixel_snap = .{ .geometry = true, .text = true, .scale = 2 },
+        .controls = .{
+            .button_primary = .{
+                .background = Color.rgb8(11, 47, 91),
+                .foreground = Color.rgb8(245, 250, 255),
+                .border = Color.rgb8(9, 36, 72),
+            },
+            .button_secondary = .{
+                .hover_background = Color.rgb8(36, 42, 48),
+                .active_background = Color.rgb8(48, 56, 64),
+            },
+        },
         .density = .spacious,
     };
     const base = DesignTokens.theme(.{ .color_scheme = .dark, .reduce_motion = true });
@@ -14315,6 +14410,12 @@ test "design token overrides compose with built-in themes" {
     try std.testing.expect(tokens.pixel_snap.geometry);
     try std.testing.expect(tokens.pixel_snap.text);
     try std.testing.expectEqual(@as(f32, 2), tokens.pixel_snap.scale);
+    try std.testing.expectEqualDeep(Color.rgb8(11, 47, 91), tokens.controls.button_primary.background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(245, 250, 255), tokens.controls.button_primary.foreground.?);
+    try std.testing.expectEqualDeep(Color.rgb8(9, 36, 72), tokens.controls.button_primary.border.?);
+    try std.testing.expect(tokens.controls.button_secondary.background == null);
+    try std.testing.expectEqualDeep(Color.rgb8(36, 42, 48), tokens.controls.button_secondary.hover_background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(48, 56, 64), tokens.controls.button_secondary.active_background.?);
     try std.testing.expectEqual(Density.spacious, tokens.density);
 
     const rebuilt = DesignTokens.themeWithOverrides(.{ .color_scheme = .dark, .reduce_motion = true }, overrides);
@@ -16660,6 +16761,68 @@ test "widget emitter applies button variants" {
     }
     switch (display_list.commands[14]) {
         .draw_text => |text| try std.testing.expectEqualDeep(tokens.colors.destructive_text, text.color),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "widget emitter applies button variant control tokens" {
+    const tokens = DesignTokens{
+        .controls = .{
+            .button_primary = .{
+                .background = Color.rgb8(12, 44, 88),
+                .hover_background = Color.rgb8(14, 54, 108),
+                .active_background = Color.rgb8(8, 32, 72),
+                .foreground = Color.rgb8(244, 248, 255),
+                .border = Color.rgb8(20, 70, 120),
+            },
+            .button_secondary = .{
+                .background = Color.rgb8(230, 235, 240),
+                .hover_background = Color.rgb8(210, 220, 230),
+                .active_background = Color.rgb8(190, 205, 220),
+                .foreground = Color.rgb8(10, 20, 30),
+                .border = Color.rgb8(120, 140, 160),
+            },
+        },
+    };
+
+    var commands: [9]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, .{ .id = 30, .kind = .button, .frame = geometry.RectF.init(0, 0, 120, 32), .text = "Primary", .variant = .primary, .state = .{ .hovered = true } }, tokens);
+    try emitWidgetTree(&builder, .{ .id = 31, .kind = .button, .frame = geometry.RectF.init(0, 40, 120, 32), .text = "Secondary", .variant = .secondary, .state = .{ .pressed = true } }, tokens);
+    try emitWidgetTree(&builder, .{ .id = 32, .kind = .button, .frame = geometry.RectF.init(0, 80, 120, 32), .text = "Local", .variant = .primary, .style = .{ .accent = Color.rgb8(1, 2, 3), .accent_foreground = Color.rgb8(4, 5, 6), .border = Color.rgb8(7, 8, 9) } }, tokens);
+
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 9), display_list.commandCount());
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(14, 54, 108), fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[1]) {
+        .stroke_rect => |stroke| try expectFillColor(Color.rgb8(20, 70, 120), stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .draw_text => |text| try std.testing.expectEqualDeep(Color.rgb8(244, 248, 255), text.color),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[3]) {
+        .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(190, 205, 220), fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[5]) {
+        .draw_text => |text| try std.testing.expectEqualDeep(Color.rgb8(10, 20, 30), text.color),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[6]) {
+        .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(1, 2, 3), fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[7]) {
+        .stroke_rect => |stroke| try expectFillColor(Color.rgb8(7, 8, 9), stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[8]) {
+        .draw_text => |text| try std.testing.expectEqualDeep(Color.rgb8(4, 5, 6), text.color),
         else => return error.TestUnexpectedResult,
     }
 }
