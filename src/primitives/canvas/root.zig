@@ -3466,6 +3466,7 @@ pub const ControlTokens = struct {
     combobox: ControlVisualTokens = .{},
     textarea: ControlVisualTokens = .{},
     list_item: ControlVisualTokens = .{},
+    data_cell: ControlVisualTokens = .{},
     segmented_control: ControlVisualTokens = .{},
     checkbox: ControlVisualTokens = .{},
     radio: ControlVisualTokens = .{},
@@ -3691,6 +3692,7 @@ pub const ControlTokenOverrides = struct {
     combobox: ControlVisualTokenOverrides = .{},
     textarea: ControlVisualTokenOverrides = .{},
     list_item: ControlVisualTokenOverrides = .{},
+    data_cell: ControlVisualTokenOverrides = .{},
     segmented_control: ControlVisualTokenOverrides = .{},
     checkbox: ControlVisualTokenOverrides = .{},
     radio: ControlVisualTokenOverrides = .{},
@@ -3732,6 +3734,7 @@ pub const ControlTokenOverrides = struct {
         next.combobox = self.combobox.apply(next.combobox);
         next.textarea = self.textarea.apply(next.textarea);
         next.list_item = self.list_item.apply(next.list_item);
+        next.data_cell = self.data_cell.apply(next.data_cell);
         next.segmented_control = self.segmented_control.apply(next.segmented_control);
         next.checkbox = self.checkbox.apply(next.checkbox);
         next.radio = self.radio.apply(next.radio);
@@ -9335,7 +9338,8 @@ fn sheetControlVisualTokens(tokens: DesignTokens) ControlVisualTokens {
 
 fn listItemControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
     return switch (widget.kind) {
-        .list_item, .menu_item, .data_cell => tokens.controls.list_item,
+        .data_cell => controlVisualTokensWithFallback(tokens.controls.data_cell, tokens.controls.list_item),
+        .list_item, .menu_item => tokens.controls.list_item,
         else => .{},
     };
 }
@@ -16315,6 +16319,12 @@ test "design token overrides compose with built-in themes" {
                 .active_background = Color.rgb8(38, 46, 54),
                 .foreground = Color.rgb8(235, 240, 245),
             },
+            .data_cell = .{
+                .background = Color.rgb8(17, 23, 29),
+                .active_background = Color.rgb8(35, 43, 51),
+                .foreground = Color.rgb8(232, 238, 244),
+                .border = Color.rgb8(61, 71, 81),
+            },
             .segmented_control = .{
                 .active_background = Color.rgb8(42, 50, 58),
                 .foreground = Color.rgb8(250, 252, 255),
@@ -16494,6 +16504,10 @@ test "design token overrides compose with built-in themes" {
     try std.testing.expectEqualDeep(Color.rgb8(28, 34, 40), tokens.controls.list_item.hover_background.?);
     try std.testing.expectEqualDeep(Color.rgb8(38, 46, 54), tokens.controls.list_item.active_background.?);
     try std.testing.expectEqualDeep(Color.rgb8(235, 240, 245), tokens.controls.list_item.foreground.?);
+    try std.testing.expectEqualDeep(Color.rgb8(17, 23, 29), tokens.controls.data_cell.background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(35, 43, 51), tokens.controls.data_cell.active_background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(232, 238, 244), tokens.controls.data_cell.foreground.?);
+    try std.testing.expectEqualDeep(Color.rgb8(61, 71, 81), tokens.controls.data_cell.border.?);
     try std.testing.expectEqualDeep(Color.rgb8(42, 50, 58), tokens.controls.segmented_control.active_background.?);
     try std.testing.expectEqualDeep(Color.rgb8(250, 252, 255), tokens.controls.segmented_control.foreground.?);
     try std.testing.expectEqualDeep(Color.rgb8(44, 54, 64), tokens.controls.checkbox.active_background.?);
@@ -19469,6 +19483,55 @@ test "widget emitter applies input and list control tokens" {
     }
     switch (display_list.commands[15]) {
         .draw_text => |text| try std.testing.expectEqualDeep(Color.rgb8(244, 248, 252), text.color),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "widget emitter applies data cell control tokens" {
+    const tokens = DesignTokens{
+        .controls = .{
+            .list_item = .{
+                .active_background = Color.rgb8(12, 18, 24),
+                .foreground = Color.rgb8(200, 210, 220),
+                .border = Color.rgb8(40, 50, 60),
+            },
+            .data_cell = .{
+                .active_background = Color.rgb8(32, 42, 52),
+                .foreground = Color.rgb8(236, 242, 248),
+                .border = Color.rgb8(70, 82, 94),
+                .stroke_width = 1.5,
+            },
+        },
+    };
+
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, .{
+        .id = 54,
+        .kind = .data_cell,
+        .frame = geometry.RectF.init(0, 0, 180, 30),
+        .text = "Revenue",
+        .state = .{ .selected = true },
+    }, tokens);
+
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
+    switch (display_list.commands[0]) {
+        .fill_rect => |fill| try expectFillColor(Color.rgb8(32, 42, 52), fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[1]) {
+        .stroke_rect => |stroke| {
+            try expectFillColor(Color.rgb8(70, 82, 94), stroke.stroke.fill);
+            try std.testing.expectEqual(@as(f32, 1.5), stroke.stroke.width);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .draw_text => |text| {
+            try std.testing.expectEqualStrings("Revenue", text.text);
+            try std.testing.expectEqualDeep(Color.rgb8(236, 242, 248), text.color);
+        },
         else => return error.TestUnexpectedResult,
     }
 }
