@@ -14,6 +14,7 @@ const sidebar_width: f32 = 208;
 const statusbar_height: f32 = 32;
 const canvas_width: f32 = window_width - sidebar_width;
 const canvas_height: f32 = window_height - toolbar_height - statusbar_height;
+const default_canvas_size = geometry.SizeF.init(canvas_width, canvas_height);
 const max_component_pipelines: usize = 8;
 const max_component_commands: usize = zero_native.runtime.max_canvas_commands_per_view;
 const max_component_glyphs: usize = zero_native.runtime.max_canvas_glyphs_per_view;
@@ -122,6 +123,7 @@ const GpuComponentsApp = struct {
     canvas_installed: bool = false,
     reported_planned_frame: bool = false,
     virtual_scroll: ComponentVirtualScroll = .{},
+    canvas_size: geometry.SizeF = default_canvas_size,
     pixel_snap_scale: f32 = 1,
     pixels: ?[]u8 = null,
     scratch: ?[]u8 = null,
@@ -202,8 +204,9 @@ const GpuComponentsApp = struct {
         if (!std.mem.eql(u8, frame_event.label, canvas_label)) return;
         const first_install = !self.canvas_installed;
         const scale_changed = self.updatePixelSnapScale(frame_event.scale_factor);
-        if (first_install or scale_changed) {
-            try installComponentsCanvasModel(runtime, frame_event.window_id, self.virtual_scroll, self.componentTokens());
+        const size_changed = self.updateCanvasSize(componentSurfaceSize(frame_event.size));
+        if (first_install or scale_changed or size_changed) {
+            try installComponentsCanvasModel(runtime, frame_event.window_id, self.virtual_scroll, self.componentTokens(), self.canvas_size);
             _ = try self.presentComponentsCanvas(runtime, frame_event, true);
             if (first_install) {
                 try self.updateStatus(runtime, frame_event.window_id, "Component lab display list presented on the GPU surface.");
@@ -324,8 +327,9 @@ const GpuComponentsApp = struct {
     fn refresh(self: *@This(), runtime: *zero_native.Runtime, command: zero_native.CommandEvent) anyerror!void {
         self.refresh_count += 1;
         self.virtual_scroll = .{};
-        try installComponentsCanvasModel(runtime, command.window_id, self.virtual_scroll, self.componentTokens());
         const gpu_frame = try runtime.gpuSurfaceFrame(command.window_id, canvas_label);
+        _ = self.updateCanvasSize(componentSurfaceSize(gpu_frame.size));
+        try installComponentsCanvasModel(runtime, command.window_id, self.virtual_scroll, self.componentTokens(), self.canvas_size);
         _ = try self.presentComponentsCanvas(runtime, gpuFrameEvent(gpu_frame), true);
 
         var status_buffer: [160]u8 = undefined;
@@ -336,8 +340,9 @@ const GpuComponentsApp = struct {
     fn changeTheme(self: *@This(), runtime: *zero_native.Runtime, command: zero_native.CommandEvent) anyerror!void {
         self.theme_count += 1;
         self.theme_mode = self.theme_mode.next();
-        try installComponentsCanvasModel(runtime, command.window_id, self.virtual_scroll, self.componentTokens());
         const gpu_frame = try runtime.gpuSurfaceFrame(command.window_id, canvas_label);
+        _ = self.updateCanvasSize(componentSurfaceSize(gpu_frame.size));
+        try installComponentsCanvasModel(runtime, command.window_id, self.virtual_scroll, self.componentTokens(), self.canvas_size);
         _ = try self.presentComponentsCanvas(runtime, gpuFrameEvent(gpu_frame), true);
 
         var status_buffer: [160]u8 = undefined;
@@ -350,7 +355,7 @@ const GpuComponentsApp = struct {
     }
 
     fn presentComponentsCanvas(self: *@This(), runtime: *zero_native.Runtime, frame_event: zero_native.GpuSurfaceFrameEvent, full_repaint: bool) anyerror!void {
-        const surface_size = if (frame_event.size.isEmpty()) geometry.SizeF.init(canvas_width, canvas_height) else frame_event.size;
+        const surface_size = componentSurfaceSize(frame_event.size);
         const scale_factor = if (frame_event.scale_factor > 0) frame_event.scale_factor else 1;
         const present_scale = referencePresentScale(scale_factor);
         const packet = runtime.presentNextCanvasGpuPacketWithScale(
@@ -461,7 +466,7 @@ const GpuComponentsApp = struct {
 
     fn updateComponentsCanvasModel(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId) anyerror!void {
         var nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
-        const layout = try buildComponentsWidgetLayoutWithScroll(&nodes, self.virtual_scroll);
+        const layout = try buildComponentsWidgetLayoutWithScrollAndSize(&nodes, self.virtual_scroll, self.canvas_size);
         _ = try runtime.setCanvasWidgetLayout(window_id, canvas_label, layout);
     }
 
@@ -473,6 +478,12 @@ const GpuComponentsApp = struct {
         const next = normalizedPixelSnapScale(scale_factor);
         if (@abs(self.pixel_snap_scale - next) < 0.001) return false;
         self.pixel_snap_scale = next;
+        return true;
+    }
+
+    fn updateCanvasSize(self: *@This(), size: geometry.SizeF) bool {
+        if (componentSizesEqual(self.canvas_size, size)) return false;
+        self.canvas_size = size;
         return true;
     }
 
@@ -507,12 +518,12 @@ const GpuComponentsApp = struct {
     }
 };
 
-fn installComponentsCanvasModel(runtime: *zero_native.Runtime, window_id: zero_native.WindowId, virtual_scroll: ComponentVirtualScroll, tokens: canvas.DesignTokens) anyerror!void {
+fn installComponentsCanvasModel(runtime: *zero_native.Runtime, window_id: zero_native.WindowId, virtual_scroll: ComponentVirtualScroll, tokens: canvas.DesignTokens, surface_size: geometry.SizeF) anyerror!void {
     var commands: [max_component_commands]canvas.CanvasCommand = undefined;
     var nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
     var builder = canvas.Builder.init(&commands);
-    const layout = try buildComponentsWidgetLayoutWithScroll(&nodes, virtual_scroll);
-    try buildComponentsDisplayList(&builder, layout, tokens);
+    const layout = try buildComponentsWidgetLayoutWithScrollAndSize(&nodes, virtual_scroll, surface_size);
+    try buildComponentsDisplayListForSize(&builder, layout, tokens, surface_size);
     _ = try runtime.setCanvasDisplayList(window_id, canvas_label, builder.displayList());
     _ = try runtime.setCanvasWidgetLayout(window_id, canvas_label, layout);
     _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, canvas_label, tokens, .{
@@ -525,6 +536,14 @@ fn buildComponentsDisplayListFromWidgets(builder: *canvas.Builder) canvas.Error!
     var nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
     const layout = try buildComponentsWidgetLayout(&nodes);
     try buildComponentsDisplayList(builder, layout, componentTokens());
+}
+
+fn componentSurfaceSize(size: geometry.SizeF) geometry.SizeF {
+    if (size.isEmpty()) return default_canvas_size;
+    return .{
+        .width = @max(1, size.width),
+        .height = @max(1, size.height),
+    };
 }
 
 fn componentVirtualScrollTarget(route: []const canvas.WidgetEventRouteEntry) ?canvas.ObjectId {
@@ -588,8 +607,21 @@ fn componentVirtualScrollStep(widget: canvas.Widget) ?f32 {
     return if (step > 0) step else null;
 }
 
+fn componentSurfaceCardRect(surface_size: geometry.SizeF) geometry.RectF {
+    const size = componentSurfaceSize(surface_size);
+    return rect(28, 26, @max(916, size.width - 56), @max(616, size.height - 60));
+}
+
+fn componentSizesEqual(a: geometry.SizeF, b: geometry.SizeF) bool {
+    return a.width == b.width and a.height == b.height;
+}
+
 fn buildComponentsDisplayList(builder: *canvas.Builder, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens) canvas.Error!void {
-    try builder.fillRoundedRect(.{ .id = 3, .rect = rect(28, 26, 916, 616), .radius = canvas.Radius.all(tokens.radius.xl), .fill = .{ .color = tokens.colors.surface } });
+    return buildComponentsDisplayListForSize(builder, layout, tokens, default_canvas_size);
+}
+
+fn buildComponentsDisplayListForSize(builder: *canvas.Builder, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens, surface_size: geometry.SizeF) canvas.Error!void {
+    try builder.fillRoundedRect(.{ .id = 3, .rect = componentSurfaceCardRect(surface_size), .radius = canvas.Radius.all(tokens.radius.xl), .fill = .{ .color = tokens.colors.surface } });
     try layout.emitDisplayList(builder, tokens);
 }
 
@@ -628,6 +660,10 @@ fn buildComponentsWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!ca
 }
 
 fn buildComponentsWidgetLayoutWithScroll(nodes: []canvas.WidgetLayoutNode, virtual_scroll: ComponentVirtualScroll) canvas.Error!canvas.WidgetLayoutTree {
+    return buildComponentsWidgetLayoutWithScrollAndSize(nodes, virtual_scroll, default_canvas_size);
+}
+
+fn buildComponentsWidgetLayoutWithScrollAndSize(nodes: []canvas.WidgetLayoutNode, virtual_scroll: ComponentVirtualScroll, surface_size: geometry.SizeF) canvas.Error!canvas.WidgetLayoutTree {
     const nav_items = [_]canvas.Widget{
         .{ .id = 121, .kind = .list_item, .text = "Controls", .state = .{ .selected = true } },
         .{ .id = 122, .kind = .list_item, .text = "Inputs" },
@@ -709,7 +745,8 @@ fn buildComponentsWidgetLayoutWithScroll(nodes: []canvas.WidgetLayoutNode, virtu
         .{ .id = 140, .kind = .popover, .frame = rect(456, 248, 174, 88), .backdrop_blur_token = .sm, .semantics = .{ .label = "Actions popover" }, .children = &popover_children },
         .{ .id = 149, .kind = .stack, .frame = rect(64, 410, 620, 60), .semantics = .{ .label = "Data controls" }, .children = &data_panel_children },
     };
-    return canvas.layoutWidgetTree(.{ .kind = .stack, .children = &top_widgets }, rect(0, 0, canvas_width, canvas_height), nodes);
+    const size = componentSurfaceSize(surface_size);
+    return canvas.layoutWidgetTree(.{ .kind = .stack, .children = &top_widgets }, rect(0, 0, size.width, size.height), nodes);
 }
 
 fn componentFrame(display_list: canvas.DisplayList, previous: ?canvas.DisplayList, options: canvas.CanvasFrameOptions, storage: canvas.CanvasFrameStorage) canvas.Error!canvas.CanvasFrame {
@@ -1419,6 +1456,8 @@ test "gpu components app registers component lab on first gpu frame" {
     try std.testing.expect(!resized_frame.canvas_frame_full_repaint);
     try std.testing.expectEqual(@as(f32, canvas_width + 320), resized_frame.size.width);
     try std.testing.expectEqual(@as(f32, canvas_height), resized_frame.size.height);
+    display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try expectComponentRoundedRectFrame(display_list, 3, componentSurfaceCardRect(geometry.SizeF.init(canvas_width + 320, canvas_height)));
 
     const widget_layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
     try std.testing.expect(widget_layout.nodeCount() >= 26);
@@ -1904,6 +1943,14 @@ fn expectComponentTextCommand(display_list: canvas.DisplayList, id: canvas.Objec
     const command_ref = display_list.findCommandById(id) orelse return error.TestUnexpectedResult;
     switch (command_ref.command) {
         .draw_text => |draw| try std.testing.expectEqualStrings(text, draw.text),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+fn expectComponentRoundedRectFrame(display_list: canvas.DisplayList, id: canvas.ObjectId, expected: geometry.RectF) !void {
+    const command_ref = display_list.findCommandById(id) orelse return error.TestUnexpectedResult;
+    switch (command_ref.command) {
+        .fill_rounded_rect => |rounded| try expectComponentRect(rounded.rect, expected),
         else => return error.TestUnexpectedResult,
     }
 }
