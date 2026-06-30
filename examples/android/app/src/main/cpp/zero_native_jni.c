@@ -174,6 +174,68 @@ JNIEXPORT jbyteArray JNICALL Java_dev_zero_1native_examples_android_MainActivity
     return zero_native_jni_bytes(env, node.text, node.text_len);
 }
 
+JNIEXPORT jboolean JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativeWidgetSemanticsByIdFields(JNIEnv *env, jobject self, jlong app, jlong id, jlongArray ids, jintArray ints, jfloatArray floats) {
+    (void)self;
+    if (!ids || !ints || !floats) return JNI_FALSE;
+    if ((*env)->GetArrayLength(env, ids) < 12 || (*env)->GetArrayLength(env, ints) < 5 || (*env)->GetArrayLength(env, floats) < 8) return JNI_FALSE;
+
+    zero_native_widget_semantics_t node;
+    memset(&node, 0, sizeof(node));
+    if (!zero_native_app_widget_semantics_by_id((void *)app, (uint64_t)id, &node)) return JNI_FALSE;
+
+    const jlong id_values[12] = {
+        (jlong)node.id,
+        (jlong)node.parent_id,
+        (jlong)node.text_selection_start,
+        (jlong)node.text_selection_end,
+        (jlong)node.text_composition_start,
+        (jlong)node.text_composition_end,
+        (jlong)node.grid_row_index,
+        (jlong)node.grid_column_index,
+        (jlong)node.grid_row_count,
+        (jlong)node.grid_column_count,
+        (jlong)node.list_item_index,
+        (jlong)node.list_item_count,
+    };
+    const jint int_values[5] = {
+        (jint)node.role,
+        (jint)node.flags,
+        (jint)node.actions,
+        (jint)node.has_value,
+        (jint)node.has_scroll,
+    };
+    const jfloat float_values[8] = {
+        (jfloat)node.x,
+        (jfloat)node.y,
+        (jfloat)node.width,
+        (jfloat)node.height,
+        (jfloat)node.value,
+        (jfloat)node.scroll_offset,
+        (jfloat)node.scroll_viewport_extent,
+        (jfloat)node.scroll_content_extent,
+    };
+    (*env)->SetLongArrayRegion(env, ids, 0, 12, id_values);
+    (*env)->SetIntArrayRegion(env, ints, 0, 5, int_values);
+    (*env)->SetFloatArrayRegion(env, floats, 0, 8, float_values);
+    return JNI_TRUE;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativeWidgetSemanticsByIdLabel(JNIEnv *env, jobject self, jlong app, jlong id) {
+    (void)self;
+    zero_native_widget_semantics_t node;
+    memset(&node, 0, sizeof(node));
+    if (!zero_native_app_widget_semantics_by_id((void *)app, (uint64_t)id, &node)) return zero_native_jni_bytes(env, "", 0);
+    return zero_native_jni_bytes(env, node.label, node.label_len);
+}
+
+JNIEXPORT jbyteArray JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativeWidgetSemanticsByIdText(JNIEnv *env, jobject self, jlong app, jlong id) {
+    (void)self;
+    zero_native_widget_semantics_t node;
+    memset(&node, 0, sizeof(node));
+    if (!zero_native_app_widget_semantics_by_id((void *)app, (uint64_t)id, &node)) return zero_native_jni_bytes(env, "", 0);
+    return zero_native_jni_bytes(env, node.text, node.text_len);
+}
+
 JNIEXPORT jboolean JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativeWidgetTextGeometry(JNIEnv *env, jobject self, jlong app, jlong id, jintArray ints, jfloatArray floats) {
     (void)self;
     if (!ints || !floats) return JNI_FALSE;

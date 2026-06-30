@@ -269,6 +269,17 @@ final class ZeroNativeHostViewController: UIViewController {
         guard let nativeApp else { return nil }
         var node = zero_native_widget_semantics_t()
         guard zero_native_app_widget_semantics_at(nativeApp, UInt(index), &node) != 0 else { return nil }
+        return widgetSemantics(from: node)
+    }
+
+    private func widgetSemantics(id: UInt64) -> WidgetSemantics? {
+        guard let nativeApp else { return nil }
+        var node = zero_native_widget_semantics_t()
+        guard zero_native_app_widget_semantics_by_id(nativeApp, id, &node) != 0 else { return nil }
+        return widgetSemantics(from: node)
+    }
+
+    private func widgetSemantics(from node: zero_native_widget_semantics_t) -> WidgetSemantics {
         return WidgetSemantics(
             id: node.id,
             parentId: node.parent_id,
@@ -375,26 +386,29 @@ final class ZeroNativeHostViewController: UIViewController {
     }
 
     private func activateWidgetAccessibilityNode(_ node: WidgetSemantics) -> Bool {
-        if widgetSupportsAction(node, UInt32(ZERO_NATIVE_WIDGET_ACTION_TOGGLE)) {
-            return dispatchWidgetAction(id: node.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_TOGGLE))
+        let current = widgetSemantics(id: node.id) ?? node
+        if widgetSupportsAction(current, UInt32(ZERO_NATIVE_WIDGET_ACTION_TOGGLE)) {
+            return dispatchWidgetAction(id: current.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_TOGGLE))
         }
-        if widgetSupportsAction(node, UInt32(ZERO_NATIVE_WIDGET_ACTION_PRESS)) {
-            return dispatchWidgetAction(id: node.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_PRESS))
+        if widgetSupportsAction(current, UInt32(ZERO_NATIVE_WIDGET_ACTION_PRESS)) {
+            return dispatchWidgetAction(id: current.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_PRESS))
         }
-        if widgetSupportsAction(node, UInt32(ZERO_NATIVE_WIDGET_ACTION_SELECT)) {
-            return dispatchWidgetAction(id: node.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_SELECT))
+        if widgetSupportsAction(current, UInt32(ZERO_NATIVE_WIDGET_ACTION_SELECT)) {
+            return dispatchWidgetAction(id: current.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_SELECT))
         }
         return false
     }
 
     private func incrementWidgetAccessibilityNode(_ node: WidgetSemantics) -> Bool {
-        guard widgetSupportsAction(node, UInt32(ZERO_NATIVE_WIDGET_ACTION_INCREMENT)) else { return false }
-        return dispatchWidgetAction(id: node.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_INCREMENT))
+        let current = widgetSemantics(id: node.id) ?? node
+        guard widgetSupportsAction(current, UInt32(ZERO_NATIVE_WIDGET_ACTION_INCREMENT)) else { return false }
+        return dispatchWidgetAction(id: current.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_INCREMENT))
     }
 
     private func decrementWidgetAccessibilityNode(_ node: WidgetSemantics) -> Bool {
-        guard widgetSupportsAction(node, UInt32(ZERO_NATIVE_WIDGET_ACTION_DECREMENT)) else { return false }
-        return dispatchWidgetAction(id: node.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_DECREMENT))
+        let current = widgetSemantics(id: node.id) ?? node
+        guard widgetSupportsAction(current, UInt32(ZERO_NATIVE_WIDGET_ACTION_DECREMENT)) else { return false }
+        return dispatchWidgetAction(id: current.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_DECREMENT))
     }
 
     private func widgetSupportsAction(_ node: WidgetSemantics, _ action: UInt32) -> Bool {

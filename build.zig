@@ -534,6 +534,13 @@ pub fn build(b: *std.Build) void {
         .{ .path = "examples/android/app/src/main/java/dev/zero_native/examples/android/MainActivity.kt", .pattern = "WIDGET_ACTION_DRAG = 1 shl 8" },
         .{ .path = "examples/android/app/src/main/java/dev/zero_native/examples/android/MainActivity.kt", .pattern = "WIDGET_ACTION_DROP_FILES = 1 shl 9" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, mobile_examples_step, "test-example-mobile-widget-abi", "Verify mobile examples use stable widget ABI lookups", &.{
+        .{ .path = "examples/ios/ZeroNativeIOSExample/zero_native.h", .pattern = "zero_native_viewport_state_t" },
+        .{ .path = "examples/ios/ZeroNativeIOSExample/ZeroNativeHostViewController.swift", .pattern = "zero_native_app_widget_semantics_by_id" },
+        .{ .path = "examples/android/app/src/main/cpp/zero_native.h", .pattern = "zero_native_app_widget_semantics_by_id" },
+        .{ .path = "examples/android/app/src/main/java/dev/zero_native/examples/android/MainActivity.kt", .pattern = "nativeWidgetSemanticsByIdFields" },
+        .{ .path = "examples/android/app/src/main/cpp/zero_native_jni.c", .pattern = "zero_native_app_widget_semantics_by_id" },
+    });
 
     const examples_step = b.step("test-examples", "Run all example tests and layout checks");
     examples_step.dependOn(frontend_examples_step);

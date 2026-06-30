@@ -143,13 +143,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             return if (virtualViewId == View.NO_ID) {
                 createHostNode(nodes)
             } else {
-                nodes.firstOrNull { it.id.toInt() == virtualViewId }?.let { createWidgetNode(it, nodes) }
+                (widgetSemanticsById(virtualViewId.toLong()) ?: nodes.firstOrNull { it.id.toInt() == virtualViewId })?.let { createWidgetNode(it, nodes) }
             }
         }
 
         override fun performAction(virtualViewId: Int, action: Int, arguments: Bundle?): Boolean {
             if (virtualViewId == View.NO_ID) return false
-            val node = widgetSemanticsSnapshot().firstOrNull { it.id.toInt() == virtualViewId } ?: return false
+            val node = widgetSemanticsById(virtualViewId.toLong()) ?: return false
             val id = node.id
             val handled = when (action) {
                 AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS -> {
@@ -272,7 +272,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
 
         private fun performWidgetClick(id: Long): Boolean {
-            val node = widgetSemanticsSnapshot().firstOrNull { it.id == id } ?: return false
+            val node = widgetSemanticsById(id) ?: return false
             return when {
                 widgetSupportsAction(node, WIDGET_ACTION_TOGGLE) -> dispatchWidgetAction(id, WIDGET_ACTION_KIND_TOGGLE)
                 widgetSupportsAction(node, WIDGET_ACTION_PRESS) -> dispatchWidgetAction(id, WIDGET_ACTION_KIND_PRESS)
@@ -491,6 +491,30 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         val ints = IntArray(5)
         val floats = FloatArray(8)
         if (!nativeWidgetSemanticsFields(nativeApp, index, ids, ints, floats)) return null
+        return widgetSemanticsFromNative(
+            ids,
+            ints,
+            floats,
+            String(nativeWidgetSemanticsLabel(nativeApp, index), Charsets.UTF_8),
+            String(nativeWidgetSemanticsText(nativeApp, index), Charsets.UTF_8),
+        )
+    }
+
+    private fun widgetSemanticsById(id: Long): WidgetSemantics? {
+        val ids = LongArray(12)
+        val ints = IntArray(5)
+        val floats = FloatArray(8)
+        if (!nativeWidgetSemanticsByIdFields(nativeApp, id, ids, ints, floats)) return null
+        return widgetSemanticsFromNative(
+            ids,
+            ints,
+            floats,
+            String(nativeWidgetSemanticsByIdLabel(nativeApp, id), Charsets.UTF_8),
+            String(nativeWidgetSemanticsByIdText(nativeApp, id), Charsets.UTF_8),
+        )
+    }
+
+    private fun widgetSemanticsFromNative(ids: LongArray, ints: IntArray, floats: FloatArray, label: String, text: String): WidgetSemantics {
         return WidgetSemantics(
             id = ids[0],
             parentId = ids[1],
@@ -502,8 +526,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             width = floats[2],
             height = floats[3],
             value = if (ints[3] != 0) floats[4] else null,
-            label = String(nativeWidgetSemanticsLabel(nativeApp, index), Charsets.UTF_8),
-            text = String(nativeWidgetSemanticsText(nativeApp, index), Charsets.UTF_8),
+            label = label,
+            text = text,
             textSelectionStart = ids[2],
             textSelectionEnd = ids[3],
             textCompositionStart = ids[4],
@@ -701,6 +725,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     external fun nativeWidgetSemanticsFields(app: Long, index: Int, ids: LongArray, ints: IntArray, floats: FloatArray): Boolean
     external fun nativeWidgetSemanticsLabel(app: Long, index: Int): ByteArray
     external fun nativeWidgetSemanticsText(app: Long, index: Int): ByteArray
+    external fun nativeWidgetSemanticsByIdFields(app: Long, id: Long, ids: LongArray, ints: IntArray, floats: FloatArray): Boolean
+    external fun nativeWidgetSemanticsByIdLabel(app: Long, id: Long): ByteArray
+    external fun nativeWidgetSemanticsByIdText(app: Long, id: Long): ByteArray
     external fun nativeWidgetTextGeometry(app: Long, id: Long, ints: IntArray, floats: FloatArray): Boolean
     external fun nativeWidgetAction(app: Long, id: Long, action: Int, text: String?, selectionAnchor: Long, selectionFocus: Long, hasSelection: Boolean): Boolean
 
