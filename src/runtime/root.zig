@@ -876,10 +876,11 @@ pub const Runtime = struct {
     ) anyerror!void {
         if (!canvas_frame.requiresRender()) return;
         const pixel_size = try canvasFramePixelSize(canvas_frame);
-        const surface = if (scratch.len >= pixel_size.byte_len)
+        var surface = if (scratch.len >= pixel_size.byte_len)
             try canvas.ReferenceRenderSurface.initWithScratch(pixel_size.width, pixel_size.height, pixels, scratch)
         else
             try canvas.ReferenceRenderSurface.init(pixel_size.width, pixel_size.height, pixels);
+        surface = surface.withImages(canvas_frame.image_resources);
         try surface.renderPass(canvas_frame.renderPass(), clear_color);
         try self.options.platform.services.presentGpuSurfacePixels(.{
             .window_id = window_id,
@@ -957,6 +958,7 @@ pub const Runtime = struct {
                 .surface_size = frame_options.surface_size,
                 .scale = frame_options.scale,
                 .display_list = display_list,
+                .image_resources = frame_options.image_resources,
                 .changes = storage.changes[0..0],
                 .budget = frame_options.budget,
             };
@@ -993,7 +995,7 @@ pub const Runtime = struct {
         const image_plan = if (storage.images.len == 0)
             canvas.RenderImagePlan{}
         else
-            try render_plan.imagePlan(storage.images);
+            try render_plan.imagePlanWithResources(frame_options.image_resources, storage.images);
         const image_cache_plan = if (storage.image_cache_entries.len == 0 and storage.image_cache_actions.len == 0)
             canvas.RenderImageCachePlan{}
         else
@@ -1093,6 +1095,7 @@ pub const Runtime = struct {
             .glyph_atlas_cache_plan = glyph_atlas_cache_plan,
             .text_layout_plan = text_layout_plan,
             .text_layout_cache_plan = text_layout_cache_plan,
+            .image_resources = frame_options.image_resources,
             .changes = changes,
             .dirty_bounds = dirty_bounds,
             .budget = frame_options.budget,
@@ -10055,6 +10058,64 @@ test "runtime falls back to pixel presentation when packet presenter is unavaila
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_present_count);
     const presented_frame = try harness.runtime.gpuSurfaceFrame(1, "canvas");
     try std.testing.expect(!presented_frame.canvas_frame_requires_render);
+}
+
+test "runtime pixel fallback renders provided canvas image resources" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-image-pixels", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_packets = false;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 2, 2),
+    });
+
+    const commands = [_]canvas.CanvasCommand{.{ .draw_image = .{
+        .id = 1,
+        .image_id = 42,
+        .dst = geometry.RectF.init(0, 0, 1, 1),
+        .sampling = .nearest,
+    } }};
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &commands });
+
+    const image_pixels = [_]u8{ 11, 22, 33, 255 };
+    const image_resources = [_]canvas.ReferenceImage{.{
+        .id = 42,
+        .width = 1,
+        .height = 1,
+        .pixels = &image_pixels,
+    }};
+    var gpu_commands: [max_canvas_commands_per_view]canvas.CanvasGpuCommand = undefined;
+    var packet_json_buffer: [16 * 1024]u8 = undefined;
+    var pixels: [2 * 2 * 4]u8 = undefined;
+    var scratch: [2 * 2 * 4]u8 = undefined;
+    const result = try harness.runtime.presentNextCanvasFrame(1, "canvas", .{
+        .frame_index = 23,
+        .timestamp_ns = 90_000,
+        .surface_size = geometry.SizeF.init(2, 2),
+        .scale = 1,
+        .image_resources = &image_resources,
+    }, harness.runtime.canvasFrameScratchStorage(), &gpu_commands, &packet_json_buffer, &pixels, &scratch, canvas.Color.rgb8(0, 0, 0), null);
+
+    try std.testing.expectEqual(CanvasPresentationMode.pixels, result.mode);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_packet_present_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_present_count);
+    try std.testing.expectEqualDeep([4]u8{ 11, 22, 33, 255 }, harness.null_platform.gpu_surface_present_sample_rgba);
+    try std.testing.expectEqual(@as(usize, 1), result.frame.image_cache_plan.uploadCount());
+    try std.testing.expectEqual(@as(usize, 1), result.frame.image_plan.images[0].width);
+    try std.testing.expectEqual(@as(usize, 1), result.frame.image_plan.images[0].height);
+    try std.testing.expectEqualSlices(u8, &image_pixels, result.frame.image_plan.images[0].pixels);
 }
 
 test "runtime next canvas frame retains and evicts glyph atlas cache" {

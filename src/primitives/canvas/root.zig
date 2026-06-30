@@ -739,7 +739,12 @@ pub const RenderPlan = struct {
     }
 
     pub fn imagePlan(self: RenderPlan, output: []RenderImage) Error!RenderImagePlan {
+        return self.imagePlanWithResources(&.{}, output);
+    }
+
+    pub fn imagePlanWithResources(self: RenderPlan, image_resources: []const ReferenceImage, output: []RenderImage) Error!RenderImagePlan {
         var planner = RenderImagePlanner.init(output);
+        planner.image_resources = image_resources;
         return planner.build(self);
     }
 
@@ -944,6 +949,9 @@ pub const RenderImage = struct {
     id: ?ObjectId = null,
     draw_count: usize = 0,
     bounds: geometry.RectF = .{},
+    width: usize = 0,
+    height: usize = 0,
+    pixels: []const u8 = &.{},
     fingerprint: u64 = 0,
 };
 
@@ -1340,6 +1348,7 @@ pub const CanvasFrameOptions = struct {
     previous_visual_effect_cache: []const VisualEffectCacheEntry = &.{},
     previous_glyph_atlas_cache: []const GlyphAtlasCacheEntry = &.{},
     previous_text_layout_cache: []const TextLayoutCacheEntry = &.{},
+    image_resources: []const ReferenceImage = &.{},
     glyph_atlas_cache_retention_frames: u64 = default_glyph_atlas_cache_retention_frames,
     text_layout_cache_retention_frames: u64 = default_text_layout_cache_retention_frames,
     text_layout_options: TextLayoutOptions = .{},
@@ -2308,6 +2317,7 @@ pub const CanvasFrame = struct {
     glyph_atlas_cache_plan: GlyphAtlasCachePlan = .{},
     text_layout_plan: TextLayoutPlanSet = .{},
     text_layout_cache_plan: TextLayoutCachePlan = .{},
+    image_resources: []const ReferenceImage = &.{},
     changes: []const DiffChange = &.{},
     dirty_bounds: ?geometry.RectF = null,
     budget: CanvasFrameBudget = .{},
@@ -2814,10 +2824,7 @@ pub const ReferenceRenderSurface = struct {
     }
 
     fn findImage(self: ReferenceRenderSurface, id: ImageId) ?ReferenceImage {
-        for (self.images) |image| {
-            if (image.id == id) return image;
-        }
-        return null;
+        return findReferenceImage(self.images, id);
     }
 };
 
@@ -4040,7 +4047,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const image_plan = if (storage.images.len == 0)
         RenderImagePlan{}
     else
-        try render_plan.imagePlan(storage.images);
+        try render_plan.imagePlanWithResources(options.image_resources, storage.images);
     const image_cache_plan = if (storage.image_cache_entries.len == 0 and storage.image_cache_actions.len == 0)
         RenderImageCachePlan{}
     else
@@ -4138,6 +4145,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         .glyph_atlas_cache_plan = glyph_atlas_cache_plan,
         .text_layout_plan = text_layout_plan,
         .text_layout_cache_plan = text_layout_cache_plan,
+        .image_resources = options.image_resources,
         .changes = changes,
         .dirty_bounds = dirty_bounds,
         .budget = options.budget,
@@ -4795,6 +4803,7 @@ fn canvasGpuLineKind(fill: Fill) CanvasGpuCommandKind {
 
 pub const RenderImagePlanner = struct {
     images: []RenderImage,
+    image_resources: []const ReferenceImage = &.{},
     len: usize = 0,
 
     pub fn init(images: []RenderImage) RenderImagePlanner {
@@ -4821,7 +4830,8 @@ pub const RenderImagePlanner = struct {
     }
 
     fn appendOrExtend(self: *RenderImagePlanner, image: DrawImage, command: RenderCommand, index: usize) Error!void {
-        const fingerprint = renderImageFingerprint(image.image_id);
+        const resource = findReferenceImage(self.image_resources, image.image_id);
+        const fingerprint = renderImageFingerprintForResource(image.image_id, resource);
         if (findRenderImage(self.images[0..self.len], image.image_id, fingerprint)) |existing_index| {
             const existing = &self.images[existing_index];
             existing.draw_count += 1;
@@ -4837,6 +4847,9 @@ pub const RenderImagePlanner = struct {
             .id = command.id,
             .draw_count = 1,
             .bounds = command.bounds,
+            .width = if (resource) |value| value.width else 0,
+            .height = if (resource) |value| value.height else 0,
+            .pixels = if (resource) |value| value.pixels else &.{},
             .fingerprint = fingerprint,
         };
         self.len += 1;
@@ -5618,6 +5631,15 @@ fn drawImageFingerprint(image: DrawImage) u64 {
 
 fn renderImageFingerprint(image_id: ImageId) u64 {
     return resourceHashU64(resourceHashTag("image_texture"), image_id);
+}
+
+fn renderImageFingerprintForResource(image_id: ImageId, image: ?ReferenceImage) u64 {
+    const value = image orelse return renderImageFingerprint(image_id);
+    var hash = renderImageFingerprint(image_id);
+    hash = resourceHashUsize(hash, value.width);
+    hash = resourceHashUsize(hash, value.height);
+    hash = resourceHashBytes(hash, value.pixels);
+    return hash;
 }
 
 fn drawTextFingerprint(text: DrawText) u64 {
@@ -9559,6 +9581,13 @@ fn referencePixelRect(rect: geometry.RectF, width: usize, height: usize) ?Refere
 fn referenceImagePixelLen(width: usize, height: usize) ?usize {
     const pixel_count = std.math.mul(usize, width, height) catch return null;
     return std.math.mul(usize, pixel_count, 4) catch return null;
+}
+
+fn findReferenceImage(images: []const ReferenceImage, id: ImageId) ?ReferenceImage {
+    for (images) |image| {
+        if (image.id == id) return image;
+    }
+    return null;
 }
 
 fn referenceImageSourceRect(image: ReferenceImage, src: ?geometry.RectF) ?geometry.RectF {
@@ -15887,6 +15916,39 @@ test "render image plan deduplicates texture cache inputs" {
     try std.testing.expectEqual(renderImageFingerprint(42), image_plan.images[0].fingerprint);
     try std.testing.expectEqual(@as(ImageId, 77), image_plan.images[1].image_id);
     try std.testing.expectEqual(@as(?ObjectId, 3), image_plan.images[1].id);
+}
+
+test "render image plan carries provided image resources" {
+    const image_pixels = [_]u8{
+        255, 0,   0,   255,
+        0,   255, 0,   255,
+        0,   0,   255, 255,
+        255, 255, 255, 255,
+    };
+    const image_resources = [_]ReferenceImage{.{
+        .id = 42,
+        .width = 2,
+        .height = 2,
+        .pixels = &image_pixels,
+    }};
+    const commands = [_]CanvasCommand{.{ .draw_image = .{
+        .id = 1,
+        .image_id = 42,
+        .dst = geometry.RectF.init(0, 0, 20, 20),
+    } }};
+
+    var render_commands: [1]RenderCommand = undefined;
+    const render_plan = try (DisplayList{ .commands = &commands }).renderPlan(&render_commands);
+    var images: [1]RenderImage = undefined;
+    const image_plan = try render_plan.imagePlanWithResources(&image_resources, &images);
+
+    try std.testing.expectEqual(@as(usize, 1), image_plan.imageCount());
+    try std.testing.expectEqual(@as(ImageId, 42), image_plan.images[0].image_id);
+    try std.testing.expectEqual(@as(usize, 2), image_plan.images[0].width);
+    try std.testing.expectEqual(@as(usize, 2), image_plan.images[0].height);
+    try std.testing.expectEqualSlices(u8, &image_pixels, image_plan.images[0].pixels);
+    try std.testing.expect(image_plan.images[0].fingerprint != renderImageFingerprint(42));
+    try std.testing.expectEqual(renderImageFingerprintForResource(42, image_resources[0]), image_plan.images[0].fingerprint);
 }
 
 test "render image cache plan uploads retains and evicts textures" {
