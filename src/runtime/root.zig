@@ -1702,7 +1702,8 @@ pub const Runtime = struct {
         if (self.views[view_index].kind != .gpu_surface) return;
         const local_dirty = self.views[view_index].widgetLayoutTree().renderStateDirtyBounds(previous, next);
         self.invalidateForCanvasWidgetRenderStateDirty(view_index, local_dirty);
-        try self.refreshCanvasWidgetDisplayListIfOwned(view_index);
+        const publish_accessibility = previous.focused_id != next.focused_id;
+        try self.refreshCanvasWidgetDisplayListIfOwnedWithAccessibility(view_index, publish_accessibility);
     }
 
     fn invalidateForCanvasWidgetRenderStateDirty(self: *Runtime, view_index: usize, local_dirty: ?geometry.RectF) void {
@@ -16444,8 +16445,21 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     try std.testing.expectEqual(@as(f32, 12), platform_state.nodes[1].bounds.x);
     try std.testing.expectEqual(@as(f32, 14), platform_state.nodes[1].bounds.y);
 
+    const published_after_layout = platform_state.update_count;
+    try runtime.dispatchPlatformEvent(app_state.app(), .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_move,
+        .x = 20,
+        .y = 24,
+    } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), runtime.views[0].canvas_widget_hovered_id);
+    try std.testing.expectEqual(published_after_layout, platform_state.update_count);
+
+    const published_before_focus = platform_state.update_count;
     _ = try runtime.dispatchCanvasWidgetAccessibilityAction(app_state.app(), 1, "canvas", .{ .id = 2, .action = .focus });
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expect(platform_state.update_count > published_before_focus);
     try std.testing.expect(platform_state.nodes[1].focused);
 
     try runtime.dispatchPlatformEvent(app_state.app(), .{ .widget_accessibility_action = .{

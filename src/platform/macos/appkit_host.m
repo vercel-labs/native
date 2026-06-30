@@ -248,6 +248,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 @property(nonatomic, assign) NSUInteger canvasTextureWidth;
 @property(nonatomic, assign) NSUInteger canvasTextureHeight;
 @property(nonatomic, assign) BOOL hasCanvasTexture;
+@property(nonatomic, assign) BOOL retainedFrameRequestPending;
 @property(nonatomic, strong) NSMutableData *canvasPacketPixels;
 @property(nonatomic, assign) NSUInteger canvasPacketPixelWidth;
 @property(nonatomic, assign) NSUInteger canvasPacketPixelHeight;
@@ -1662,9 +1663,21 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
 }
 
 - (void)requestRetainedCanvasFrame {
-    if (self.hasCanvasTexture) {
-        [self renderFrame];
-    }
+    if (!self.hasCanvasTexture || self.retainedFrameRequestPending) return;
+    self.retainedFrameRequestPending = YES;
+    __weak ZeroNativeMetalSurfaceView *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ZeroNativeMetalSurfaceView *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf.retainedFrameRequestPending = NO;
+        if (![strongSelf isAvailable] || strongSelf.hidden || !strongSelf.hasCanvasTexture || strongSelf.bounds.size.width <= 0 || strongSelf.bounds.size.height <= 0) return;
+        [strongSelf updateDrawableSize];
+        const NSUInteger requestedFrameIndex = strongSelf.frameIndex;
+        strongSelf.frameIndex += 1;
+        const BOOL nonblank = strongSelf.verifiedNonblankFrame || strongSelf.hasCanvasTexture;
+        const uint32_t sampleColor = strongSelf.verifiedNonblankFrame ? strongSelf.lastSampleColor : 0;
+        [strongSelf emitFrameEventWithFrameIndex:requestedFrameIndex sampleColor:sampleColor nonblank:nonblank];
+    });
 }
 
 - (void)renderFrame {
