@@ -3451,6 +3451,7 @@ pub const ControlTokens = struct {
     button_outline: ControlVisualTokens = .{},
     button_ghost: ControlVisualTokens = .{},
     button_destructive: ControlVisualTokens = .{},
+    select: ControlVisualTokens = .{},
     text_field: ControlVisualTokens = .{},
     search_field: ControlVisualTokens = .{},
     textarea: ControlVisualTokens = .{},
@@ -3663,6 +3664,7 @@ pub const ControlTokenOverrides = struct {
     button_outline: ControlVisualTokenOverrides = .{},
     button_ghost: ControlVisualTokenOverrides = .{},
     button_destructive: ControlVisualTokenOverrides = .{},
+    select: ControlVisualTokenOverrides = .{},
     text_field: ControlVisualTokenOverrides = .{},
     search_field: ControlVisualTokenOverrides = .{},
     textarea: ControlVisualTokenOverrides = .{},
@@ -3691,6 +3693,7 @@ pub const ControlTokenOverrides = struct {
         next.button_outline = self.button_outline.apply(next.button_outline);
         next.button_ghost = self.button_ghost.apply(next.button_ghost);
         next.button_destructive = self.button_destructive.apply(next.button_destructive);
+        next.select = self.select.apply(next.select);
         next.text_field = self.text_field.apply(next.text_field);
         next.search_field = self.search_field.apply(next.search_field);
         next.textarea = self.textarea.apply(next.textarea);
@@ -3808,6 +3811,7 @@ pub const WidgetKind = enum {
     badge,
     button,
     icon_button,
+    select,
     text_field,
     search_field,
     textarea,
@@ -4035,7 +4039,7 @@ pub fn builtinComponentDescriptor(kind: BuiltinComponentKind) BuiltinComponentDe
         .progress => builtinComponent(.progress, "Progress", .progress, .progressbar, false),
         .radio_group => builtinComponent(.radio_group, "Radio Group", .row, .group, true),
         .resizable => builtinComponent(.resizable, "Resizable", .panel, .group, true),
-        .select => builtinComponent(.select, "Select", .button, .button, true),
+        .select => builtinComponent(.select, "Select", .select, .button, true),
         .separator => builtinComponent(.separator, "Separator", .separator, .none, false),
         .sheet => builtinComponent(.sheet, "Sheet", .popover, .dialog, true),
         .skeleton => builtinComponent(.skeleton, "Skeleton", .skeleton, .none, false),
@@ -7194,6 +7198,7 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         .badge => try emitBadgeWidget(builder, paint_widget, tokens),
         .button => try emitButtonWidget(builder, paint_widget, tokens),
         .icon_button => try emitIconButtonWidget(builder, paint_widget, tokens),
+        .select => try emitSelectWidget(builder, paint_widget, tokens),
         .text_field, .textarea => try emitTextFieldWidget(builder, paint_widget, tokens),
         .search_field => try emitSearchFieldWidget(builder, paint_widget, tokens),
         .tooltip => try emitTooltipWidget(builder, paint_widget, tokens),
@@ -7293,6 +7298,7 @@ fn emitWidgetLayoutNodeContent(
         .badge => try emitBadgeWidget(builder, paint_widget, tokens),
         .button => try emitButtonWidget(builder, paint_widget, tokens),
         .icon_button => try emitIconButtonWidget(builder, paint_widget, tokens),
+        .select => try emitSelectWidget(builder, paint_widget, tokens),
         .text_field, .textarea => try emitTextFieldWidget(builder, paint_widget, tokens),
         .search_field => try emitSearchFieldWidget(builder, paint_widget, tokens),
         .tooltip => try emitTooltipWidget(builder, paint_widget, tokens),
@@ -7875,6 +7881,70 @@ fn emitIconButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
             .text = widget.text,
         });
     }
+}
+
+fn emitSelectWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = selectControlVisualTokens(tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
+    const text_size = widgetBodyTextSize(widget, tokens);
+    const inset = widgetControlInset(widget, tokens, tokens.spacing.md);
+    const chevron_size = @max(widgetSizedDensityValue(widget, tokens, 8), text_size - 4);
+    const chevron_extent = chevron_size + inset;
+    const text_frame = geometry.RectF.init(
+        widget.frame.x + inset,
+        widget.frame.y,
+        @max(1, widget.frame.width - inset * 2 - chevron_extent),
+        widget.frame.height,
+    );
+    const visible_text = if (widget.text.len > 0) widget.text else widget.semantics.label;
+    const is_placeholder = widget.text.len == 0;
+
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 1),
+        .rect = widget.frame,
+        .radius = radius,
+        .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, widget.state.pressed, widget.state.hovered, tokens.colors.surface))),
+    });
+    try builder.strokeRect(.{
+        .id = widgetPartId(widget.id, 2),
+        .rect = widget.frame,
+        .radius = radius,
+        .stroke = .{
+            .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+            .width = if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, visual, tokens.stroke.regular),
+        },
+    });
+    if (visible_text.len > 0) {
+        const text_color = if (is_placeholder)
+            widgetForegroundColor(widget, tokens, tokens.colors.text_muted)
+        else
+            widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+        try builder.drawText(.{
+            .id = widgetPartId(widget.id, 3),
+            .font_id = tokens.typography.font_id,
+            .size = text_size,
+            .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, 0)),
+            .color = text_color,
+            .text = visible_text,
+            .text_layout = boundedTextLayout(text_frame, text_size, 0, .start, .none),
+        });
+    }
+    try emitSelectChevron(builder, widget, tokens, visual, inset, chevron_size);
+}
+
+fn emitSelectChevron(builder: *Builder, widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens, inset: f32, chevron_size: f32) Error!void {
+    const center = geometry.PointF.init(widget.frame.x + widget.frame.width - inset - chevron_size * 0.5, widget.frame.y + widget.frame.height * 0.5);
+    const half = chevron_size * 0.36;
+    const drop = chevron_size * 0.28;
+    const left = pixelSnapGeometryPoint(tokens, geometry.PointF.init(center.x - half, center.y - drop * 0.5));
+    const mid = pixelSnapGeometryPoint(tokens, geometry.PointF.init(center.x, center.y + drop * 0.5));
+    const right = pixelSnapGeometryPoint(tokens, geometry.PointF.init(center.x + half, center.y - drop * 0.5));
+    const stroke = Stroke{
+        .fill = colorFill(widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted)),
+        .width = tokens.stroke.regular,
+    };
+    try builder.drawLine(.{ .id = widgetPartId(widget.id, 4), .from = left, .to = mid, .stroke = stroke });
+    try builder.drawLine(.{ .id = widgetPartId(widget.id, 5), .from = mid, .to = right, .stroke = stroke });
 }
 
 fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
@@ -8857,6 +8927,22 @@ fn buttonControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisual
     };
 }
 
+fn selectControlVisualTokens(tokens: DesignTokens) ControlVisualTokens {
+    return controlVisualTokensWithFallback(tokens.controls.select, tokens.controls.button_outline);
+}
+
+fn controlVisualTokensWithFallback(primary: ControlVisualTokens, fallback: ControlVisualTokens) ControlVisualTokens {
+    return .{
+        .background = primary.background orelse fallback.background,
+        .hover_background = primary.hover_background orelse fallback.hover_background,
+        .active_background = primary.active_background orelse fallback.active_background,
+        .foreground = primary.foreground orelse fallback.foreground,
+        .border = primary.border orelse fallback.border,
+        .radius = primary.radius orelse fallback.radius,
+        .stroke_width = primary.stroke_width orelse fallback.stroke_width,
+    };
+}
+
 fn buttonStateBackground(visual: ControlVisualTokens, active: bool, hovered: bool, fallback: Color) Color {
     if (active) return visual.active_background orelse visual.hover_background orelse visual.background orelse fallback;
     if (hovered) return visual.hover_background orelse visual.background orelse fallback;
@@ -9032,7 +9118,7 @@ fn layoutWidgetDepth(
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len, tokens);
             }
         },
-        .text, .icon, .image, .avatar, .badge, .button, .icon_button, .text_field, .search_field, .textarea, .tooltip, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .toggle, .slider, .progress, .separator, .skeleton, .spinner => {},
+        .text, .icon, .image, .avatar, .badge, .button, .icon_button, .select, .text_field, .search_field, .textarea, .tooltip, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .toggle, .slider, .progress, .separator, .skeleton, .spinner => {},
     }
 
     return index;
@@ -9271,6 +9357,7 @@ pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF 
         .badge => intrinsicBadgeWidgetSize(widget, tokens),
         .button => intrinsicButtonWidgetSize(widget, tokens),
         .icon_button => intrinsicSquareControlSize(widget, tokens),
+        .select => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 200), widgetControlHeight(widget, tokens)),
         .text_field => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 160), widgetControlHeight(widget, tokens)),
         .search_field => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 200), widgetControlHeight(widget, tokens)),
         .textarea => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 200), widgetSizedDensityValue(widget, tokens, 80)),
@@ -9483,6 +9570,7 @@ pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor 
         .text_field, .search_field, .textarea => .text,
         .button,
         .icon_button,
+        .select,
         .menu_item,
         .list_item,
         .data_cell,
@@ -9564,7 +9652,7 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
     if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
     if (widget.state.disabled) return null;
     return switch (widget.kind) {
-        .button, .icon_button => if (isWidgetActivationKey(keyboard.key))
+        .button, .icon_button, .select => if (isWidgetActivationKey(keyboard.key))
             .{ .kind = .press, .actions = .{ .press = true } }
         else
             null,
@@ -10139,7 +10227,7 @@ fn semanticRole(widget: Widget) WidgetRole {
         .icon, .image, .avatar => .image,
         .badge => .text,
         .button => .button,
-        .icon_button => .button,
+        .icon_button, .select => .button,
         .text_field, .search_field, .textarea => .textbox,
         .tooltip => .tooltip,
         .menu_item => .menuitem,
@@ -10450,7 +10538,7 @@ fn defaultSemanticActions(widget: Widget) WidgetActions {
         .focus = widget.semantics.focusable or defaultFocusable(widget),
     };
     switch (widget.kind) {
-        .button, .icon_button => actions.press = true,
+        .button, .icon_button, .select => actions.press = true,
         .menu_item => {
             actions.press = true;
             actions.select = true;
@@ -10479,7 +10567,7 @@ fn defaultSemanticActions(widget: Widget) WidgetActions {
 
 fn defaultFocusable(widget: Widget) bool {
     return switch (widget.kind) {
-        .scroll_view, .button, .icon_button, .text_field, .search_field, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .toggle, .slider => !widget.state.disabled,
+        .scroll_view, .button, .icon_button, .select, .text_field, .search_field, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .toggle, .slider => !widget.state.disabled,
         else => false,
     };
 }
@@ -10507,7 +10595,7 @@ fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     return switch (widget.kind) {
         .row, .column, .grid, .data_grid, .data_row, .list, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner => false,
-        .scroll_view, .panel, .popover, .menu_surface, .text, .button, .icon_button, .text_field, .search_field, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .toggle, .slider, .progress => true,
+        .scroll_view, .panel, .popover, .menu_surface, .text, .button, .icon_button, .select, .text_field, .search_field, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .toggle, .slider, .progress => true,
     };
 }
 
@@ -10840,6 +10928,7 @@ fn widgetFrameStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
     return switch (widget.kind) {
         .panel, .popover, .menu_surface => controlStrokeWidth(widget, surfaceControlVisualTokens(widget, tokens), tokens.stroke.hairline),
         .button, .icon_button => if (widget.state.focused) tokens.stroke.focus else buttonStrokeWidth(widget, tokens),
+        .select => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectControlVisualTokens(tokens), tokens.stroke.regular),
         .text_field, .search_field, .textarea => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, textInputControlVisualTokens(widget, tokens), tokens.stroke.regular),
         .segmented_control => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectionControlVisualTokens(widget, tokens), tokens.stroke.regular),
         .data_cell => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, listItemControlVisualTokens(widget, tokens), tokens.stroke.hairline),
@@ -10854,6 +10943,7 @@ fn widgetFocusStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
     return switch (widget.kind) {
         .button,
         .icon_button,
+        .select,
         .text_field,
         .search_field,
         .textarea,
@@ -15181,6 +15271,7 @@ test "built-in component catalog maps to retained widget foundations" {
     try std.testing.expectEqual(WidgetKind.spinner, builtinComponentDescriptor(.spinner).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.toggle, builtinComponentDescriptor(.switch_control).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.data_grid, builtinComponentDescriptor(.table).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.select, builtinComponentDescriptor(.select).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.textarea, builtinComponentDescriptor(.textarea).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.tooltip, builtinComponentDescriptor(.tooltip).root_widget_kind);
 
@@ -15450,6 +15541,11 @@ test "design token overrides compose with built-in themes" {
                 .hover_background = Color.rgb8(36, 42, 48),
                 .active_background = Color.rgb8(48, 56, 64),
             },
+            .select = .{
+                .background = Color.rgb8(17, 23, 29),
+                .foreground = Color.rgb8(226, 234, 242),
+                .border = Color.rgb8(68, 78, 88),
+            },
             .text_field = .{
                 .background = Color.rgb8(15, 20, 25),
                 .foreground = Color.rgb8(225, 232, 240),
@@ -15576,6 +15672,9 @@ test "design token overrides compose with built-in themes" {
     try std.testing.expect(tokens.controls.button_secondary.background == null);
     try std.testing.expectEqualDeep(Color.rgb8(36, 42, 48), tokens.controls.button_secondary.hover_background.?);
     try std.testing.expectEqualDeep(Color.rgb8(48, 56, 64), tokens.controls.button_secondary.active_background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(17, 23, 29), tokens.controls.select.background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(226, 234, 242), tokens.controls.select.foreground.?);
+    try std.testing.expectEqualDeep(Color.rgb8(68, 78, 88), tokens.controls.select.border.?);
     try std.testing.expectEqualDeep(Color.rgb8(15, 20, 25), tokens.controls.text_field.background.?);
     try std.testing.expectEqualDeep(Color.rgb8(225, 232, 240), tokens.controls.text_field.foreground.?);
     try std.testing.expectEqualDeep(Color.rgb8(65, 75, 85), tokens.controls.text_field.border.?);
@@ -16218,6 +16317,99 @@ test "widget text fields expose textbox semantics and render focused chrome" {
     }
     switch (display_list.commands[2]) {
         .draw_text => |text| try std.testing.expectEqualStrings("search terms", text.text),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "widget selects expose trigger semantics and render chevron chrome" {
+    const select = Widget{
+        .id = 9,
+        .kind = .select,
+        .frame = geometry.RectF.init(10, 12, 180, 36),
+        .text = "Production",
+        .command = "environment.open",
+        .state = .{ .focused = true },
+        .semantics = .{ .label = "Environment" },
+    };
+
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(select, select.frame, &nodes);
+    try std.testing.expectEqual(@as(ObjectId, 9), layout.focusTarget(null, .forward).?.id);
+    try std.testing.expectEqual(WidgetKind.select, layout.hitTest(geometry.PointF.init(20, 24)).?.kind);
+
+    var semantics_buffer: [1]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+    try std.testing.expectEqual(@as(usize, 1), semantics.len);
+    try std.testing.expectEqual(WidgetRole.button, semantics[0].role);
+    try std.testing.expectEqualStrings("Environment", semantics[0].label);
+    try std.testing.expect(semantics[0].focusable);
+    try std.testing.expect(semantics[0].actions.press);
+    try std.testing.expect(!semantics[0].actions.set_text);
+
+    const tokens = DesignTokens{
+        .colors = .{ .focus_ring = Color.rgb8(1, 2, 3), .text_muted = Color.rgb8(90, 91, 92) },
+        .stroke = .{ .focus = 3 },
+        .controls = .{
+            .select = .{
+                .background = Color.rgb8(20, 24, 28),
+                .foreground = Color.rgb8(238, 242, 246),
+                .border = Color.rgb8(80, 90, 100),
+                .radius = 5,
+                .stroke_width = 2,
+            },
+        },
+    };
+    var commands: [5]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, select, tokens);
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 5), display_list.commandCount());
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| {
+            try expectFillColor(Color.rgb8(20, 24, 28), fill.fill);
+            try std.testing.expectEqualDeep(Radius.all(5), fill.radius);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[1]) {
+        .stroke_rect => |stroke| {
+            try std.testing.expectEqual(@as(f32, 3), stroke.stroke.width);
+            try expectFillColor(tokens.colors.focus_ring, stroke.stroke.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .draw_text => |text| {
+            try std.testing.expectEqualStrings("Production", text.text);
+            try std.testing.expectEqualDeep(Color.rgb8(238, 242, 246), text.color);
+            try std.testing.expect(text.text_layout != null);
+            try std.testing.expect(text.text_layout.?.max_width < select.frame.width);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[3]) {
+        .draw_line => |line| try expectFillColor(Color.rgb8(238, 242, 246), line.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[4]) {
+        .draw_line => |line| try expectFillColor(Color.rgb8(238, 242, 246), line.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var placeholder_commands: [5]CanvasCommand = undefined;
+    var placeholder_builder = Builder.init(&placeholder_commands);
+    try emitWidgetTree(&placeholder_builder, .{
+        .id = 10,
+        .kind = .select,
+        .frame = geometry.RectF.init(0, 0, 180, 36),
+        .semantics = .{ .label = "Choose item" },
+    }, tokens);
+    const placeholder_list = placeholder_builder.displayList();
+    switch (placeholder_list.commands[2]) {
+        .draw_text => |text| {
+            try std.testing.expectEqualStrings("Choose item", text.text);
+            try std.testing.expectEqualDeep(Color.rgb8(90, 91, 92), text.color);
+        },
         else => return error.TestUnexpectedResult,
     }
 }
@@ -22554,6 +22746,10 @@ test "widget keyboard control intents map activation keys" {
     try std.testing.expectEqual(WidgetControlIntentKind.press, press.kind);
     try std.testing.expect(press.actions.press);
 
+    const select = widgetKeyboardControlIntent(.{ .kind = .select, .text = "Environment" }, .{ .phase = .key_down, .key = "space" }).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.press, select.kind);
+    try std.testing.expect(select.actions.press);
+
     const toggle = widgetKeyboardControlIntent(.{ .kind = .toggle, .text = "Live" }, .{ .phase = .key_down, .key = "space" }).?;
     try std.testing.expectEqual(WidgetControlIntentKind.toggle, toggle.kind);
     try std.testing.expect(toggle.actions.toggle);
@@ -22610,6 +22806,10 @@ test "widget semantic control intents map built-in actions" {
     const press = widgetSemanticControlIntent(.{ .kind = .button, .text = "Save" }, .press).?;
     try std.testing.expectEqual(WidgetControlIntentKind.press, press.kind);
     try std.testing.expect(press.actions.press);
+
+    const select = widgetSemanticControlIntent(.{ .kind = .select, .text = "Environment" }, .press).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.press, select.kind);
+    try std.testing.expect(select.actions.press);
 
     const toggle = widgetSemanticControlIntent(.{ .kind = .checkbox, .text = "Selected" }, .toggle).?;
     try std.testing.expectEqual(WidgetControlIntentKind.toggle, toggle.kind);
