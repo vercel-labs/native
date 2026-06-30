@@ -2373,14 +2373,6 @@ pub const Runtime = struct {
                     try self.updateCanvasWidgetScrollFromPointer(pointer_event);
                     try self.updateCanvasWidgetFocusFromPointer(pointer_event);
                 }
-                if (canvas_widget_refresh_batch_active) {
-                    try self.endCanvasWidgetDisplayListRefreshBatch();
-                    canvas_widget_refresh_batch_active = false;
-                }
-                if (widget_pointer_event) |pointer_event| {
-                    try self.dispatchCanvasWidgetCommandFromPointer(app, pointer_event);
-                    try self.dispatchEvent(app, .{ .canvas_widget_pointer = pointer_event });
-                }
                 const widget_drag_event = self.routeCanvasWidgetDragInput(input_event, &self.widget_event_route_entries) catch |err| switch (err) {
                     error.WindowNotFound,
                     error.ViewNotFound,
@@ -2388,9 +2380,6 @@ pub const Runtime = struct {
                     => null,
                     else => return err,
                 };
-                if (widget_drag_event) |drag_event| {
-                    try self.dispatchEvent(app, .{ .canvas_widget_drag = drag_event });
-                }
                 try self.updateCanvasWidgetFocusFromKeyboardInput(input_event);
                 const widget_keyboard_event = self.routeCanvasWidgetKeyboardInput(input_event, &self.widget_event_route_entries) catch |err| switch (err) {
                     error.WindowNotFound,
@@ -2402,8 +2391,6 @@ pub const Runtime = struct {
                 if (widget_keyboard_event) |keyboard_event| {
                     try self.updateCanvasWidgetControlFromKeyboard(keyboard_event);
                     try self.updateCanvasWidgetTextFromKeyboard(keyboard_event);
-                    try self.dispatchCanvasWidgetCommandFromKeyboard(app, keyboard_event);
-                    try self.dispatchEvent(app, .{ .canvas_widget_keyboard = keyboard_event });
                 }
                 const widget_text_input_event = self.routeCanvasWidgetTextInput(input_event, &self.widget_event_route_entries) catch |err| switch (err) {
                     error.WindowNotFound,
@@ -2414,6 +2401,23 @@ pub const Runtime = struct {
                 };
                 if (widget_text_input_event) |text_input_event| {
                     try self.updateCanvasWidgetTextFromKeyboard(text_input_event);
+                }
+                if (canvas_widget_refresh_batch_active) {
+                    try self.endCanvasWidgetDisplayListRefreshBatch();
+                    canvas_widget_refresh_batch_active = false;
+                }
+                if (widget_pointer_event) |pointer_event| {
+                    try self.dispatchCanvasWidgetCommandFromPointer(app, pointer_event);
+                    try self.dispatchEvent(app, .{ .canvas_widget_pointer = pointer_event });
+                }
+                if (widget_drag_event) |drag_event| {
+                    try self.dispatchEvent(app, .{ .canvas_widget_drag = drag_event });
+                }
+                if (widget_keyboard_event) |keyboard_event| {
+                    try self.dispatchCanvasWidgetCommandFromKeyboard(app, keyboard_event);
+                    try self.dispatchEvent(app, .{ .canvas_widget_keyboard = keyboard_event });
+                }
+                if (widget_text_input_event) |text_input_event| {
                     try self.dispatchEvent(app, .{ .canvas_widget_keyboard = text_input_event });
                 }
                 try self.dispatchEvent(app, .{ .gpu_surface_input = input_event });
@@ -7572,14 +7576,13 @@ fn canvasWidgetInputBatchesDisplayListRefresh(kind: platform.GpuSurfaceInputKind
         .pointer_move,
         .pointer_drag,
         .scroll,
-        => true,
         .key_down,
         .key_up,
         .text_input,
         .ime_set_composition,
         .ime_commit_composition,
         .ime_cancel_composition,
-        => false,
+        => true,
     };
 }
 
@@ -14781,6 +14784,61 @@ test "runtime batches pointer widget display list refreshes" {
     const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expect(retained.nodes[1].widget.state.selected);
     try std.testing.expectEqual(@as(f32, 1), retained.nodes[1].widget.value);
+}
+
+test "runtime batches keyboard widget display list refreshes" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-keyboard-refresh-batch", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 100),
+    });
+
+    const controls = [_]canvas.Widget{
+        .{
+            .id = 2,
+            .kind = .button,
+            .frame = geometry.RectF.init(10, 20, 96, 32),
+            .text = "One",
+        },
+        .{
+            .id = 3,
+            .kind = .button,
+            .frame = geometry.RectF.init(118, 20, 96, 32),
+            .text = "Two",
+        },
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &controls }, geometry.RectF.init(0, 0, 240, 100), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+    harness.runtime.views[0].focused = false;
+    harness.runtime.views[0].canvas_widget_focused_id = 2;
+    harness.null_platform.gpu_surface_frame_request_count = 0;
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .timestamp_ns = 100,
+        .key = "tab",
+    } });
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_frame_request_count);
+    try std.testing.expect(harness.runtime.views[0].focused);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_widget_focused_id);
 }
 
 test "runtime automation widget drag dispatches pointer input" {
