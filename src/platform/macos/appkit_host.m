@@ -249,6 +249,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (BOOL)isAvailable;
 - (void)updateDrawableSize;
 - (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
+- (NSInteger)presentGpuPacketWithSurfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable json:(const uint8_t *)json byteLength:(NSUInteger)byteLength;
 - (BOOL)ensureCanvasPresenter;
 - (void)updateWidgetAccessibilityWithNodes:(const zero_native_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count;
 - (void)stopDisplayTimer;
@@ -335,6 +336,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (BOOL)setNativeViewVisibleInWindow:(uint64_t)windowId label:(NSString *)label visible:(BOOL)visible;
 - (BOOL)focusNativeViewInWindow:(uint64_t)windowId label:(NSString *)label;
 - (BOOL)presentGpuSurfacePixelsInWindow:(uint64_t)windowId label:(NSString *)label width:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
+- (NSInteger)presentGpuSurfacePacketInWindow:(uint64_t)windowId label:(NSString *)label surfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable json:(const uint8_t *)json byteLength:(NSUInteger)byteLength;
 - (BOOL)updateWidgetAccessibilityInWindow:(uint64_t)windowId label:(NSString *)label nodes:(const zero_native_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count;
 - (BOOL)nativeView:(NSView *)candidate isInSubtreeRootedAt:(NSView *)root;
 - (NSArray<NSString *> *)nativeViewKeysInSubtreeForWindow:(uint64_t)windowId rootKey:(NSString *)rootKey;
@@ -539,6 +541,212 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 
 @end
 
+static CGFloat ZeroNativePacketNumber(id value, CGFloat fallback) {
+    return [value respondsToSelector:@selector(doubleValue)] ? (CGFloat)[value doubleValue] : fallback;
+}
+
+static NSArray *ZeroNativePacketArray(id value, NSUInteger minCount) {
+    if (![value isKindOfClass:[NSArray class]]) return nil;
+    NSArray *array = (NSArray *)value;
+    return array.count >= minCount ? array : nil;
+}
+
+static NSDictionary *ZeroNativePacketDictionary(id value) {
+    return [value isKindOfClass:[NSDictionary class]] ? (NSDictionary *)value : nil;
+}
+
+static NSRect ZeroNativePacketRect(id value) {
+    NSArray *array = ZeroNativePacketArray(value, 4);
+    if (!array) return NSZeroRect;
+    return NSMakeRect(
+        ZeroNativePacketNumber(array[0], 0),
+        ZeroNativePacketNumber(array[1], 0),
+        ZeroNativePacketNumber(array[2], 0),
+        ZeroNativePacketNumber(array[3], 0)
+    );
+}
+
+static NSPoint ZeroNativePacketPoint(id value) {
+    NSArray *array = ZeroNativePacketArray(value, 2);
+    if (!array) return NSZeroPoint;
+    return NSMakePoint(ZeroNativePacketNumber(array[0], 0), ZeroNativePacketNumber(array[1], 0));
+}
+
+static CGFloat ZeroNativePacketRadius(id value) {
+    NSArray *array = ZeroNativePacketArray(value, 1);
+    if (!array) return 0;
+    return MAX(0, ZeroNativePacketNumber(array[0], 0));
+}
+
+static NSColor *ZeroNativePacketColor(id value, CGFloat opacity) {
+    NSArray *array = ZeroNativePacketArray(value, 4);
+    if (!array) return nil;
+    CGFloat red = fmax(0.0, fmin(1.0, ZeroNativePacketNumber(array[0], 0)));
+    CGFloat green = fmax(0.0, fmin(1.0, ZeroNativePacketNumber(array[1], 0)));
+    CGFloat blue = fmax(0.0, fmin(1.0, ZeroNativePacketNumber(array[2], 0)));
+    CGFloat alpha = fmax(0.0, fmin(1.0, ZeroNativePacketNumber(array[3], 1) * opacity));
+    return [NSColor colorWithDeviceRed:red green:green blue:blue alpha:alpha];
+}
+
+static NSBezierPath *ZeroNativePacketShapePath(NSDictionary *shape) {
+    if (!shape) return nil;
+    NSString *kind = [shape[@"kind"] isKindOfClass:[NSString class]] ? shape[@"kind"] : @"";
+    if ([kind isEqualToString:@"rect"]) {
+        return [NSBezierPath bezierPathWithRect:ZeroNativePacketRect(shape[@"rect"])];
+    }
+    if ([kind isEqualToString:@"rounded_rect"] || [kind isEqualToString:@"stroke_rect"]) {
+        NSRect rect = ZeroNativePacketRect(shape[@"rect"]);
+        CGFloat radius = ZeroNativePacketRadius(shape[@"radius"]);
+        return [NSBezierPath bezierPathWithRoundedRect:rect xRadius:radius yRadius:radius];
+    }
+    if ([kind isEqualToString:@"line"]) {
+        NSBezierPath *path = [NSBezierPath bezierPath];
+        [path moveToPoint:ZeroNativePacketPoint(shape[@"from"])];
+        [path lineToPoint:ZeroNativePacketPoint(shape[@"to"])];
+        path.lineWidth = MAX(1, ZeroNativePacketNumber(shape[@"width"], 1));
+        return path;
+    }
+    return nil;
+}
+
+static BOOL ZeroNativePacketDrawPaintedPath(NSBezierPath *path, NSDictionary *paint, CGFloat opacity, BOOL stroke) {
+    if (!path || !paint) return NO;
+    NSString *kind = [paint[@"kind"] isKindOfClass:[NSString class]] ? paint[@"kind"] : @"";
+    if ([kind isEqualToString:@"color"]) {
+        NSColor *color = ZeroNativePacketColor(paint[@"color"], opacity);
+        if (!color) return NO;
+        if (stroke) {
+            [color setStroke];
+            [path stroke];
+        } else {
+            [color setFill];
+            [path fill];
+        }
+        return YES;
+    }
+    if ([kind isEqualToString:@"linear_gradient"]) {
+        NSArray *stops = ZeroNativePacketArray(paint[@"stops"], 1);
+        if (!stops) return NO;
+        NSUInteger count = MIN(stops.count, 16);
+        NSMutableArray<NSColor *> *colors = [NSMutableArray arrayWithCapacity:count];
+        CGFloat locations[16] = {0};
+        for (NSUInteger index = 0; index < count; index++) {
+            NSDictionary *stop = ZeroNativePacketDictionary(stops[index]);
+            if (!stop) return NO;
+            NSColor *color = ZeroNativePacketColor(stop[@"color"], opacity);
+            if (!color) return NO;
+            [colors addObject:color];
+            locations[index] = fmax(0.0, fmin(1.0, ZeroNativePacketNumber(stop[@"offset"], (CGFloat)index / (CGFloat)MAX(1, count - 1))));
+        }
+        if (stroke) {
+            [colors.firstObject setStroke];
+            [path stroke];
+            return YES;
+        }
+        NSGradient *gradient = [[NSGradient alloc] initWithColors:colors atLocations:locations colorSpace:NSColorSpace.deviceRGBColorSpace];
+        if (!gradient) return NO;
+        [NSGraphicsContext saveGraphicsState];
+        [path addClip];
+        [gradient drawFromPoint:ZeroNativePacketPoint(paint[@"start"]) toPoint:ZeroNativePacketPoint(paint[@"end"]) options:0];
+        [NSGraphicsContext restoreGraphicsState];
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL ZeroNativePacketDrawText(NSDictionary *text, CGFloat opacity) {
+    if (!text) return NO;
+    NSString *value = [text[@"text"] isKindOfClass:[NSString class]] ? text[@"text"] : @"";
+    NSColor *color = ZeroNativePacketColor(text[@"color"], opacity);
+    if (!color) return NO;
+    CGFloat size = MAX(1, ZeroNativePacketNumber(text[@"size"], 12));
+    NSFont *font = [NSFont systemFontOfSize:size];
+    NSPoint origin = ZeroNativePacketPoint(text[@"origin"]);
+    [value drawAtPoint:origin withAttributes:@{
+        NSFontAttributeName: font,
+        NSForegroundColorAttributeName: color,
+    }];
+    return YES;
+}
+
+static BOOL ZeroNativePacketDrawEffect(NSDictionary *effect, CGFloat opacity) {
+    if (!effect) return NO;
+    NSString *kind = [effect[@"kind"] isKindOfClass:[NSString class]] ? effect[@"kind"] : @"";
+    if ([kind isEqualToString:@"blur"]) {
+        return YES;
+    }
+    if ([kind isEqualToString:@"shadow"]) {
+        NSColor *color = ZeroNativePacketColor(effect[@"color"], opacity);
+        if (!color) return NO;
+        NSRect rect = ZeroNativePacketRect(effect[@"rect"]);
+        CGFloat radius = ZeroNativePacketRadius(effect[@"radius"]);
+        NSArray *offset = ZeroNativePacketArray(effect[@"offset"], 2);
+        NSSize shadowOffset = offset ? NSMakeSize(ZeroNativePacketNumber(offset[0], 0), ZeroNativePacketNumber(offset[1], 0)) : NSZeroSize;
+        NSShadow *shadow = [[NSShadow alloc] init];
+        shadow.shadowColor = color;
+        shadow.shadowOffset = shadowOffset;
+        shadow.shadowBlurRadius = MAX(0, ZeroNativePacketNumber(effect[@"blur"], 0));
+        NSBezierPath *path = [NSBezierPath bezierPathWithRoundedRect:rect xRadius:radius yRadius:radius];
+        [NSGraphicsContext saveGraphicsState];
+        [shadow set];
+        [[color colorWithAlphaComponent:0.01] setFill];
+        [path fill];
+        [NSGraphicsContext restoreGraphicsState];
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL ZeroNativePacketTransformIsIdentity(id value) {
+    NSArray *array = ZeroNativePacketArray(value, 6);
+    if (!array) return YES;
+    return fabs(ZeroNativePacketNumber(array[0], 1) - 1) < 0.0001 &&
+        fabs(ZeroNativePacketNumber(array[1], 0)) < 0.0001 &&
+        fabs(ZeroNativePacketNumber(array[2], 0)) < 0.0001 &&
+        fabs(ZeroNativePacketNumber(array[3], 1) - 1) < 0.0001 &&
+        fabs(ZeroNativePacketNumber(array[4], 0)) < 0.0001 &&
+        fabs(ZeroNativePacketNumber(array[5], 0)) < 0.0001;
+}
+
+static BOOL ZeroNativePacketDrawCommand(NSDictionary *command) {
+    if (!command) return NO;
+    if (!ZeroNativePacketTransformIsIdentity(command[@"transform"])) return NO;
+
+    NSString *kind = [command[@"kind"] isKindOfClass:[NSString class]] ? command[@"kind"] : @"";
+    CGFloat opacity = fmax(0.0, fmin(1.0, ZeroNativePacketNumber(command[@"opacity"], 1)));
+    id clip = command[@"clip"];
+
+    [NSGraphicsContext saveGraphicsState];
+    if ([clip isKindOfClass:[NSArray class]]) {
+        [NSBezierPath clipRect:ZeroNativePacketRect(clip)];
+    }
+
+    BOOL ok = YES;
+    if ([kind hasPrefix:@"fill_rect"] || [kind hasPrefix:@"fill_rounded_rect"]) {
+        ok = ZeroNativePacketDrawPaintedPath(ZeroNativePacketShapePath(ZeroNativePacketDictionary(command[@"shape"])), ZeroNativePacketDictionary(command[@"paint"]), opacity, NO);
+    } else if ([kind hasPrefix:@"stroke_rect"]) {
+        NSBezierPath *path = ZeroNativePacketShapePath(ZeroNativePacketDictionary(command[@"shape"]));
+        path.lineWidth = MAX(1, ZeroNativePacketNumber(command[@"strokeWidth"], path.lineWidth));
+        ok = ZeroNativePacketDrawPaintedPath(path, ZeroNativePacketDictionary(command[@"paint"]), opacity, YES);
+    } else if ([kind hasPrefix:@"draw_line"]) {
+        ok = ZeroNativePacketDrawPaintedPath(ZeroNativePacketShapePath(ZeroNativePacketDictionary(command[@"shape"])), ZeroNativePacketDictionary(command[@"paint"]), opacity, YES);
+    } else if ([kind isEqualToString:@"draw_text"]) {
+        ok = ZeroNativePacketDrawText(ZeroNativePacketDictionary(command[@"text"]), opacity);
+    } else if ([kind isEqualToString:@"shadow"] || [kind isEqualToString:@"blur"]) {
+        ok = ZeroNativePacketDrawEffect(ZeroNativePacketDictionary(command[@"effect"]), opacity);
+    } else if ([kind isEqualToString:@"draw_image"]) {
+        NSDictionary *image = ZeroNativePacketDictionary(command[@"image"]);
+        NSBezierPath *path = [NSBezierPath bezierPathWithRoundedRect:ZeroNativePacketRect(image[@"dst"]) xRadius:8 yRadius:8];
+        [[NSColor colorWithDeviceRed:0.86 green:0.90 blue:0.95 alpha:opacity] setFill];
+        [path fill];
+    } else {
+        ok = NO;
+    }
+
+    [NSGraphicsContext restoreGraphicsState];
+    return ok;
+}
+
 @implementation ZeroNativeMetalSurfaceView
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
@@ -687,6 +895,62 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
     [self stopDisplayTimer];
     [self renderFrame];
     return YES;
+}
+
+- (NSInteger)presentGpuPacketWithSurfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable json:(const uint8_t *)json byteLength:(NSUInteger)byteLength {
+    if (![self isAvailable]) return -1;
+    if (!requiresRender) return 1;
+    if (!representable || unsupportedCommandCount != 0 || !json || byteLength == 0 || surfaceWidth <= 0 || surfaceHeight <= 0) return 0;
+    CGFloat normalizedScale = scale > 0 ? scale : 1;
+    NSUInteger pixelWidth = (NSUInteger)ceil(surfaceWidth * normalizedScale);
+    NSUInteger pixelHeight = (NSUInteger)ceil(surfaceHeight * normalizedScale);
+    if (pixelWidth == 0 || pixelHeight == 0) return 0;
+    if (pixelWidth > 8192 || pixelHeight > 8192) return 0;
+
+    NSData *packetData = [NSData dataWithBytes:json length:byteLength];
+    NSError *jsonError = nil;
+    id packetObject = [NSJSONSerialization JSONObjectWithData:packetData options:0 error:&jsonError];
+    NSDictionary *packet = ZeroNativePacketDictionary(packetObject);
+    if (!packet || jsonError) return 0;
+    NSString *loadAction = [packet[@"loadAction"] isKindOfClass:[NSString class]] ? packet[@"loadAction"] : @"";
+    if (![loadAction isEqualToString:@"clear"]) return 0;
+    NSArray *commands = ZeroNativePacketArray(packet[@"commands"], 0);
+    if (!commands) return 0;
+    if (commandCount != 0 && commands.count != commandCount) return 0;
+
+    NSUInteger byteLengthRequired = pixelWidth * pixelHeight * 4;
+    NSMutableData *pixels = [NSMutableData dataWithLength:byteLengthRequired];
+    if (!pixels) return -1;
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    if (!colorSpace) return -1;
+    CGContextRef context = CGBitmapContextCreate(pixels.mutableBytes, pixelWidth, pixelHeight, 8, pixelWidth * 4, colorSpace, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(colorSpace);
+    if (!context) return -1;
+
+    CGContextSetAllowsAntialiasing(context, true);
+    CGContextSetShouldAntialias(context, true);
+    CGContextTranslateCTM(context, 0, (CGFloat)pixelHeight);
+    CGContextScaleCTM(context, normalizedScale, -normalizedScale);
+
+    NSGraphicsContext *graphics = [NSGraphicsContext graphicsContextWithCGContext:context flipped:NO];
+    [NSGraphicsContext saveGraphicsState];
+    [NSGraphicsContext setCurrentContext:graphics];
+    [[NSColor colorWithDeviceRed:(CGFloat)clearR / 255.0 green:(CGFloat)clearG / 255.0 blue:(CGFloat)clearB / 255.0 alpha:(CGFloat)clearA / 255.0] setFill];
+    NSRectFill(NSMakeRect(0, 0, surfaceWidth, surfaceHeight));
+
+    BOOL supported = YES;
+    for (id commandObject in commands) {
+        NSDictionary *command = ZeroNativePacketDictionary(commandObject);
+        if (!ZeroNativePacketDrawCommand(command)) {
+            supported = NO;
+            break;
+        }
+    }
+    [NSGraphicsContext restoreGraphicsState];
+    CGContextRelease(context);
+    if (!supported) return 0;
+
+    return [self presentPixelsWithWidth:pixelWidth height:pixelHeight scale:normalizedScale hasDirtyRect:NO dirtyX:0 dirtyY:0 dirtyWidth:0 dirtyHeight:0 rgba8:(const uint8_t *)pixels.bytes byteLength:pixels.length] ? 1 : -1;
 }
 
 - (BOOL)ensureCanvasPresenter {
@@ -1847,6 +2111,13 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
     NSView *view = self.nativeViews[key];
     if (![view isKindOfClass:[ZeroNativeMetalSurfaceView class]]) return NO;
     return [(ZeroNativeMetalSurfaceView *)view presentPixelsWithWidth:width height:height scale:scale hasDirtyRect:hasDirtyRect dirtyX:dirtyX dirtyY:dirtyY dirtyWidth:dirtyWidth dirtyHeight:dirtyHeight rgba8:rgba8 byteLength:byteLength];
+}
+
+- (NSInteger)presentGpuSurfacePacketInWindow:(uint64_t)windowId label:(NSString *)label surfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable json:(const uint8_t *)json byteLength:(NSUInteger)byteLength {
+    NSString *key = [self nativeViewKeyForWindow:windowId label:label];
+    NSView *view = self.nativeViews[key];
+    if (![view isKindOfClass:[ZeroNativeMetalSurfaceView class]]) return -1;
+    return [(ZeroNativeMetalSurfaceView *)view presentGpuPacketWithSurfaceWidth:surfaceWidth height:surfaceHeight scale:scale clearR:clearR clearG:clearG clearB:clearB clearA:clearA requiresRender:requiresRender commandCount:commandCount unsupportedCommandCount:unsupportedCommandCount representable:representable json:json byteLength:byteLength];
 }
 
 - (BOOL)setNativeViewCursorInWindow:(uint64_t)windowId label:(NSString *)label cursor:(NSInteger)cursor {
@@ -3303,6 +3574,12 @@ int zero_native_appkit_present_gpu_surface_pixels(zero_native_appkit_host_t *hos
     ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     return [object presentGpuSurfacePixelsInWindow:window_id label:labelString ?: @"" width:width height:height scale:scale hasDirtyRect:(has_dirty_rect != 0) dirtyX:dirty_x dirtyY:dirty_y dirtyWidth:dirty_width dirtyHeight:dirty_height rgba8:rgba8 byteLength:rgba8_len] ? 1 : 0;
+}
+
+int zero_native_appkit_present_gpu_surface_packet(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double surface_width, double surface_height, double scale, uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a, int requires_render, size_t command_count, size_t unsupported_command_count, int representable, const uint8_t *json, size_t json_len) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    return (int)[object presentGpuSurfacePacketInWindow:window_id label:labelString ?: @"" surfaceWidth:surface_width height:surface_height scale:scale clearR:clear_r clearG:clear_g clearB:clear_b clearA:clear_a requiresRender:(requires_render != 0) commandCount:command_count unsupportedCommandCount:unsupported_command_count representable:(representable != 0) json:json byteLength:json_len];
 }
 
 int zero_native_appkit_update_widget_accessibility(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const zero_native_appkit_widget_accessibility_node_t *nodes, size_t node_count) {
