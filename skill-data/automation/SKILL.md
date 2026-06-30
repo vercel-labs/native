@@ -60,6 +60,7 @@ zero-native automate list
 zero-native automate snapshot
 zero-native automate reload
 zero-native automate widget-action canvas 2 press
+zero-native automate widget-click canvas 3
 zero-native automate bridge '{"id":"smoke","command":"native.ping","payload":{"source":"automation"}}'
 ```
 
@@ -78,7 +79,8 @@ zig-out/bin/zero-native automate snapshot
 4. Run `zero-native automate list` to inspect window summaries.
 5. Run `zero-native automate bridge '...'` for bridge round-trip checks.
 6. Use `zero-native automate widget-action <view-label> <widget-id> <action> [value]` to exercise retained canvas widget actions.
-7. Use `zero-native automate reload` to request a WebView reload.
+7. Use `zero-native automate widget-click <view-label> <widget-id>` to exercise pointer-style retained widget routing.
+8. Use `zero-native automate reload` to request a WebView reload.
 
 ## Bridge smoke test pattern
 

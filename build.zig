@@ -783,6 +783,15 @@ pub fn build(b: *std.Build) void {
         \\  sleep 0.1
         \\done
         \\case "$snapshot" in *'Keyed checkbox #113: off.'*'widget @w1/components-canvas#113 role=checkbox'*'value=0'*) ;; *) echo "checkbox automation toggle did not update the retained widget snapshot" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-click components-canvas 113 >/dev/null 2>&1
+        \\attempts=0
+        \\while [ "$attempts" -lt 50 ]; do
+        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\  case "$snapshot" in *'Clicked checkbox #113: on.'*'widget @w1/components-canvas#113 role=checkbox'*'value=1'*) break ;; esac
+        \\  attempts=$((attempts + 1))
+        \\  sleep 0.1
+        \\done
+        \\case "$snapshot" in *'Clicked checkbox #113: on.'*'widget @w1/components-canvas#113 role=checkbox'*'value=1'*) ;; *) echo "checkbox automation click did not route through pointer input" >&2; exit 1 ;; esac
         \\"$cli" automate widget-action components-canvas 114 toggle >/dev/null 2>&1
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
@@ -792,6 +801,15 @@ pub fn build(b: *std.Build) void {
         \\  sleep 0.1
         \\done
         \\case "$snapshot" in *'Keyed toggle #114: off.'*'widget @w1/components-canvas#114 role=switch'*'value=0'*) ;; *) echo "switch automation toggle did not wake the idle app" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-click components-canvas 114 >/dev/null 2>&1
+        \\attempts=0
+        \\while [ "$attempts" -lt 50 ]; do
+        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\  case "$snapshot" in *'Clicked toggle #114: on.'*'widget @w1/components-canvas#114 role=switch'*'value=1'*) break ;; esac
+        \\  attempts=$((attempts + 1))
+        \\  sleep 0.1
+        \\done
+        \\case "$snapshot" in *'Clicked toggle #114: on.'*'widget @w1/components-canvas#114 role=switch'*'value=1'*) ;; *) echo "switch automation click did not route through pointer input" >&2; exit 1 ;; esac
         \\echo "gpu-components smoke ok"
         ,
         "sh",

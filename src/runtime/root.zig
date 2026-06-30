@@ -2749,6 +2749,9 @@ pub const Runtime = struct {
             .widget_action => {
                 try self.dispatchAutomationWidgetAction(app, try parseAutomationWidgetAction(command.value));
             },
+            .widget_click => {
+                try self.dispatchAutomationWidgetClick(app, try parseAutomationWidgetTarget(command.value));
+            },
             .menu_command => {
                 try self.dispatchPlatformEvent(app, .{ .menu_command = .{
                     .name = try parseAutomationCommandName(command.value),
@@ -2794,6 +2797,35 @@ pub const Runtime = struct {
         }
     }
 
+    fn dispatchAutomationWidgetClick(self: *Runtime, app: App, target: AutomationWidgetTarget) anyerror!void {
+        const view_index = try self.automationWidgetTargetViewIndex(target);
+        const layout = self.views[view_index].widgetLayoutTree();
+        if (!canvasWidgetInteractionTargetExists(layout, target.id)) return error.InvalidCommand;
+        const node = layout.findById(target.id) orelse return error.InvalidCommand;
+        const bounds = node.frame.normalized();
+        if (bounds.isEmpty()) return error.InvalidCommand;
+        const point = bounds.center();
+        const window_id = self.views[view_index].window_id;
+        const label = self.views[view_index].label;
+
+        try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = window_id,
+            .label = label,
+            .kind = .pointer_down,
+            .x = point.x,
+            .y = point.y,
+            .button = 0,
+        } });
+        try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = window_id,
+            .label = label,
+            .kind = .pointer_up,
+            .x = point.x,
+            .y = point.y,
+            .button = 0,
+        } });
+    }
+
     fn automationWidgetActionViewIndex(self: *Runtime, action: AutomationWidgetAction) anyerror!usize {
         try self.validateViewParent(1);
         try validateViewLabel(action.view_label);
@@ -2801,6 +2833,14 @@ pub const Runtime = struct {
         if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
         const actions = self.canvasWidgetActionsForId(view_index, action.id) orelse return error.InvalidCommand;
         if (!automationWidgetActionSupported(actions, action.action)) return error.InvalidCommand;
+        return view_index;
+    }
+
+    fn automationWidgetTargetViewIndex(self: *Runtime, target: AutomationWidgetTarget) anyerror!usize {
+        try self.validateViewParent(1);
+        try validateViewLabel(target.view_label);
+        const view_index = self.findViewIndex(1, target.view_label) orelse return error.ViewNotFound;
+        if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
         return view_index;
     }
 
@@ -7923,6 +7963,11 @@ const AutomationWidgetAction = struct {
     value: []const u8 = "",
 };
 
+const AutomationWidgetTarget = struct {
+    view_label: []const u8,
+    id: canvas.ObjectId,
+};
+
 const AutomationToken = struct {
     token: []const u8,
     rest: []const u8 = "",
@@ -7980,6 +8025,15 @@ fn parseAutomationWidgetAction(value: []const u8) !AutomationWidgetAction {
         .action = action,
         .value = action_value,
     };
+}
+
+fn parseAutomationWidgetTarget(value: []const u8) !AutomationWidgetTarget {
+    const view = takeAutomationToken(value) orelse return error.InvalidCommand;
+    const id_part = takeAutomationToken(view.rest) orelse return error.InvalidCommand;
+    if (takeAutomationToken(id_part.rest) != null) return error.InvalidCommand;
+    const id = std.fmt.parseInt(canvas.ObjectId, id_part.token, 10) catch return error.InvalidCommand;
+    if (id == 0) return error.InvalidCommand;
+    return .{ .view_label = view.token, .id = id };
 }
 
 fn takeAutomationToken(value: []const u8) ?AutomationToken {
@@ -8228,6 +8282,18 @@ test "runtime parses automation widget actions" {
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 42 commit-composition extra"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 42 drop-files"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 42 unknown"));
+}
+
+test "runtime parses automation widget click targets" {
+    const target = try parseAutomationWidgetTarget("canvas 42");
+    try std.testing.expectEqualStrings("canvas", target.view_label);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 42), target.id);
+
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetTarget(""));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetTarget("canvas"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetTarget("canvas 0"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetTarget("canvas nope"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetTarget("canvas 42 extra"));
 }
 
 fn validateCommandName(name: []const u8) !void {
@@ -13841,6 +13907,62 @@ test "runtime applies pointer values to canvas controls" {
     }
     try std.testing.expect(saw_checkbox_check);
     try std.testing.expect(saw_empty_slider_active);
+}
+
+test "runtime automation widget click dispatches pointer input" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-click-automation", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 220, 100),
+    });
+
+    const controls = [_]canvas.Widget{
+        .{
+            .id = 2,
+            .kind = .checkbox,
+            .frame = geometry.RectF.init(10, 10, 120, 28),
+            .text = "Live",
+        },
+        .{
+            .id = 3,
+            .kind = .toggle,
+            .frame = geometry.RectF.init(10, 48, 120, 28),
+            .text = "Alerts",
+            .state = .{ .selected = true },
+        },
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &controls }, geometry.RectF.init(0, 0, 220, 100), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try harness.runtime.dispatchAutomationCommand(app, "widget-click canvas 2");
+    try harness.runtime.dispatchAutomationCommand(app, "widget-click canvas 3");
+
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.nodes[1].widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 1), retained.nodes[1].widget.value);
+    try std.testing.expect(!retained.nodes[2].widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 0), retained.nodes[2].widget.value);
+
+    const snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expect(snapshot.widgets[0].selected);
+    try std.testing.expect(!snapshot.widgets[1].selected);
+    try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationCommand(app, "widget-click canvas 0"));
+    try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationCommand(app, "widget-click canvas 9"));
 }
 
 test "runtime reconciles canvas control state across layout replacement" {

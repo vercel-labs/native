@@ -98,6 +98,14 @@ The runtime polls `command.txt` and processes these actions:
       <td>Dispatch a native view command event for the main window</td>
     </tr>
     <tr>
+      <td><code>widget-action &lt;view-label&gt; &lt;widget-id&gt; &lt;action&gt; [&lt;value&gt;]</code></td>
+      <td>Invoke a retained canvas widget action</td>
+    </tr>
+    <tr>
+      <td><code>widget-click &lt;view-label&gt; &lt;widget-id&gt;</code></td>
+      <td>Dispatch pointer down/up at a retained canvas widget</td>
+    </tr>
+    <tr>
       <td><code>shortcut &lt;id&gt;</code></td>
       <td>Dispatch a shortcut command event for the main window</td>
     </tr>
@@ -141,6 +149,10 @@ zero-native automate resize 900 640
 zero-native automate menu-command app.refresh
 zero-native automate native-command app.refresh refresh-button
 zero-native automate shortcut app.refresh
+
+# Drive retained canvas widgets
+zero-native automate widget-action canvas 2 press
+zero-native automate widget-click canvas 3
 
 # Drive focus between native controls and WebViews
 zero-native automate focus refresh-button
