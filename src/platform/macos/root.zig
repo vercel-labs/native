@@ -1124,6 +1124,7 @@ fn gpuSurfaceInputKindFromInt(value: c_int) platform_mod.GpuSurfaceInputKind {
         8 => .ime_set_composition,
         9 => .ime_commit_composition,
         10 => .ime_cancel_composition,
+        11 => .pointer_cancel,
         else => .pointer_move,
     };
 }
@@ -1470,6 +1471,14 @@ test "mac gpu surface input preserves ime composition cursor" {
     try std.testing.expectEqual(platform_mod.GpuSurfaceInputKind.ime_set_composition, input.kind);
     try std.testing.expectEqualStrings("compose", input.text);
     try std.testing.expectEqual(@as(?usize, 4), input.composition_cursor);
+}
+
+test "mac gpu surface input maps pointer cancel" {
+    var event = std.mem.zeroes(AppKitEvent);
+    event.input_kind = 11;
+
+    const input = gpuSurfaceInputEventFromAppKitEvent(&event);
+    try std.testing.expectEqual(platform_mod.GpuSurfaceInputKind.pointer_cancel, input.kind);
 }
 
 test "mac appearance event maps color scheme" {

@@ -290,6 +290,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 @property(nonatomic, assign) NSUInteger canvasPacketPixelHeight;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSImage *> *canvasImageCache;
 @property(nonatomic, strong) NSCursor *surfaceCursor;
+@property(nonatomic, strong) NSTrackingArea *surfaceTrackingArea;
 @property(nonatomic, copy) NSString *markedText;
 @property(nonatomic, assign) NSRange markedTextRange;
 @property(nonatomic, assign) NSRange selectedTextRange;
@@ -315,6 +316,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (void)emitQueuedScrollInputEvent;
 - (void)emitInputEventWithKind:(NSInteger)kind point:(NSPoint)point timestampNs:(uint64_t)timestampNs modifiers:(uint32_t)modifiers keyText:(NSString *)keyText inputText:(NSString *)inputText button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY;
 - (void)emitSyntheticKeyDownWithKey:(NSString *)key modifiers:(uint32_t)modifiers;
+- (void)updateSurfaceTrackingArea;
 - (void)emitSelectAllTextInputCommand;
 - (void)emitTextInputEventWithKind:(NSInteger)kind text:(NSString *)text compositionCursor:(NSInteger)compositionCursor;
 - (NSAccessibilityElement *)focusedTextAccessibilityElement;
@@ -1432,7 +1434,9 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
 
 - (void)viewDidMoveToWindow {
     [super viewDidMoveToWindow];
+    self.window.acceptsMouseMovedEvents = YES;
     [self updateDrawableSize];
+    [self updateSurfaceTrackingArea];
 }
 
 - (void)viewDidChangeBackingProperties {
@@ -1448,6 +1452,29 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
 - (void)setBounds:(NSRect)bounds {
     [super setBounds:bounds];
     [self updateDrawableSize];
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    [self updateSurfaceTrackingArea];
+}
+
+- (void)updateSurfaceTrackingArea {
+    if (self.surfaceTrackingArea) {
+        [self removeTrackingArea:self.surfaceTrackingArea];
+        self.surfaceTrackingArea = nil;
+    }
+    if (!self.window) return;
+
+    NSTrackingAreaOptions options = NSTrackingMouseEnteredAndExited |
+                                    NSTrackingMouseMoved |
+                                    NSTrackingActiveInKeyWindow |
+                                    NSTrackingInVisibleRect;
+    self.surfaceTrackingArea = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+                                                            options:options
+                                                              owner:self
+                                                           userInfo:nil];
+    [self addTrackingArea:self.surfaceTrackingArea];
 }
 
 - (void)updateDrawableSize {
@@ -1896,6 +1923,11 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
 
 - (void)mouseMoved:(NSEvent *)event {
     [self queuePointerMotionInputEvent:event kind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_MOVE button:0];
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    [self emitQueuedPointerMotionInputEvent];
+    [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_CANCEL event:event button:0 deltaX:0 deltaY:0];
 }
 
 - (void)mouseDragged:(NSEvent *)event {

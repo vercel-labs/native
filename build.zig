@@ -376,6 +376,8 @@ pub fn build(b: *std.Build) void {
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-widget-cursor-bridge", "Verify AppKit GPU widgets apply retained cursor intent", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "zero_native_appkit_set_view_cursor" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "resetCursorRects" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSTrackingMouseMoved" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_CANCEL" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "_surfaceCursor = cursor ?: [NSCursor arrowCursor]" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSCursor pointingHandCursor" },
     });
