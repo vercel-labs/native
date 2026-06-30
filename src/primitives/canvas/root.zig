@@ -4627,6 +4627,19 @@ pub const WidgetLayoutTree = struct {
         return null;
     }
 
+    pub fn virtualRangeById(self: WidgetLayoutTree, id: ObjectId) ?VirtualListRange {
+        if (id == 0) return null;
+        for (self.nodes) |node| {
+            if (node.widget.id == id) return widgetVirtualRangeForLayoutNode(node);
+        }
+        return null;
+    }
+
+    pub fn virtualRangeAt(self: WidgetLayoutTree, index: usize) ?VirtualListRange {
+        if (index >= self.nodes.len) return null;
+        return widgetVirtualRangeForLayoutNode(self.nodes[index]);
+    }
+
     pub fn hitTest(self: WidgetLayoutTree, point: geometry.PointF) ?WidgetHit {
         return hitTestWidgetLayout(self, point, .{});
     }
@@ -10832,6 +10845,25 @@ fn saturatingU32(value: usize) u32 {
     return if (value > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(value);
 }
 
+fn widgetVirtualRangeForLayoutNode(node: WidgetLayoutNode) ?VirtualListRange {
+    if (!node.widget.layout.virtualized) return null;
+    const item_count = if (node.widget.semantics.list_item_count) |count|
+        @as(usize, @intCast(count))
+    else
+        return null;
+    if (item_count == 0 or node.widget.layout.virtual_item_extent <= 0) return null;
+    const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+    if (viewport.isEmpty()) return null;
+    return virtualListRange(.{
+        .item_count = item_count,
+        .item_extent = node.widget.layout.virtual_item_extent,
+        .item_gap = node.widget.layout.gap,
+        .viewport_extent = viewport.height,
+        .scroll_offset = node.widget.value,
+        .overscan = node.widget.layout.virtual_overscan,
+    });
+}
+
 const WidgetScrollSemantics = struct {
     metrics: WidgetScrollMetrics = .{},
     value: ?f32 = null,
@@ -14677,6 +14709,11 @@ test "widget virtualized data grid lays out visible rows" {
     try std.testing.expectEqual(@as(usize, 3), layout.nodeCount());
     try std.testing.expectEqual(@as(?u32, 4), layout.nodes[0].widget.semantics.list_item_count);
     try std.testing.expectEqual(@as(f32, 20), layout.nodes[0].widget.layout.virtual_item_extent);
+    const grid_range = layout.virtualRangeById(1).?;
+    try std.testing.expectEqual(@as(usize, 1), grid_range.start_index);
+    try std.testing.expectEqual(@as(usize, 3), grid_range.end_index);
+    try std.testing.expectEqual(@as(usize, 1), grid_range.first_visible_index);
+    try std.testing.expectEqual(@as(usize, 2), grid_range.last_visible_index);
     try std.testing.expectEqual(@as(?u32, 1), layout.nodes[1].widget.semantics.list_item_index);
     try std.testing.expectEqual(@as(?u32, 2), layout.nodes[2].widget.semantics.list_item_index);
     try expectLayoutFrame(layout, 1, geometry.RectF.init(0, 0, 160, 45));
@@ -14954,6 +14991,11 @@ test "widget virtualized scroll view lays out only visible overscan children" {
     try std.testing.expectEqual(@as(usize, 6), layout.nodeCount());
     try std.testing.expectEqual(@as(?u32, 10), layout.nodes[0].widget.semantics.list_item_count);
     try std.testing.expectEqual(@as(f32, 20), layout.nodes[0].widget.layout.virtual_item_extent);
+    const scroll_range = layout.virtualRangeById(1).?;
+    try std.testing.expectEqual(@as(usize, 0), scroll_range.start_index);
+    try std.testing.expectEqual(@as(usize, 5), scroll_range.end_index);
+    try std.testing.expectEqual(@as(usize, 1), scroll_range.first_visible_index);
+    try std.testing.expectEqual(@as(usize, 3), scroll_range.last_visible_index);
     try expectLayoutFrame(layout, 1, geometry.RectF.init(0, 0, 120, 50));
     try expectLayoutFrame(layout, 2, geometry.RectF.init(0, -45, 120, 20));
     try expectLayoutFrame(layout, 3, geometry.RectF.init(0, -20, 120, 20));

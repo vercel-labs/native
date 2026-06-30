@@ -58,6 +58,15 @@ pub const WidgetScroll = struct {
     content_extent: f32 = 0,
 };
 
+pub const WidgetVirtualRange = struct {
+    present: bool = false,
+    start_index: u32 = 0,
+    end_index: u32 = 0,
+    first_visible_index: u32 = 0,
+    last_visible_index: u32 = 0,
+    rendered_count: u32 = 0,
+};
+
 pub const WidgetList = struct {
     present: bool = false,
     item_index: u32 = 0,
@@ -79,6 +88,7 @@ pub const Widget = struct {
     grid_column_count: ?usize = null,
     list: WidgetList = .{},
     scroll: WidgetScroll = .{},
+    virtual_range: WidgetVirtualRange = .{},
     bounds: geometry.RectF = .{},
     focused: bool = false,
     enabled: bool = true,
@@ -279,6 +289,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
         try writeWidgetGrid(widget, writer);
         try writeWidgetList(widget, writer);
         try writeWidgetScroll(widget, writer);
+        try writeWidgetVirtualRange(widget, writer);
         try writeWidgetState(widget, writer);
         try writeWidgetActions(widget.actions, writer);
         try writeWidgetTextRanges(widget, writer);
@@ -333,6 +344,7 @@ pub fn writeA11yText(input: Input, writer: anytype) !void {
         try writeWidgetGrid(widget, writer);
         try writeWidgetList(widget, writer);
         try writeWidgetScroll(widget, writer);
+        try writeWidgetVirtualRange(widget, writer);
         try writeWidgetState(widget, writer);
         try writeWidgetActions(widget.actions, writer);
         try writeWidgetTextRanges(widget, writer);
@@ -382,6 +394,17 @@ fn writeWidgetScroll(widget: Widget, writer: anytype) !void {
         widget.scroll.offset,
         widget.scroll.viewport_extent,
         widget.scroll.content_extent,
+    });
+}
+
+fn writeWidgetVirtualRange(widget: Widget, writer: anytype) !void {
+    if (!widget.virtual_range.present) return;
+    try writer.print(" virtual=[start={d},end={d},first={d},last={d},rendered={d}]", .{
+        widget.virtual_range.start_index,
+        widget.virtual_range.end_index,
+        widget.virtual_range.first_visible_index,
+        widget.virtual_range.last_visible_index,
+        widget.virtual_range.rendered_count,
     });
 }
 
@@ -685,6 +708,14 @@ test "snapshot emits widget semantics" {
                 .viewport_extent = 80.0,
                 .content_extent = 180.0,
             },
+            .virtual_range = .{
+                .present = true,
+                .start_index = 2,
+                .end_index = 7,
+                .first_visible_index = 3,
+                .last_visible_index = 5,
+                .rendered_count = 5,
+            },
             .bounds = geometry.RectF.init(10, 12, 80, 32),
             .focused = true,
             .hovered = true,
@@ -715,6 +746,7 @@ test "snapshot emits widget semantics" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "grid=[row_index=1,column_index=2,row_count=4,column_count=5]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "list=[index=3,count=9]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "scroll=[offset=12,viewport=80,content=180]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "virtual=[start=2,end=7,first=3,last=5,rendered=5]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "state=[focused,hovered,pressed,selected]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "@w1/canvas#43 role=button name=\"Disabled\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "state=[disabled]") != null);

@@ -2660,6 +2660,7 @@ pub const Runtime = struct {
     fn appendAutomationWidgets(self: *Runtime, window_id: platform.WindowId, widget_count: *usize) void {
         for (self.views[0..self.view_count]) |view| {
             if (!view.open or view.window_id != window_id or view.kind != .gpu_surface) continue;
+            const layout = view.widgetLayoutTree();
             const semantics = view.widgetSemantics();
             for (semantics) |node| {
                 if (widget_count.* >= self.automation_widgets.len) return;
@@ -2687,6 +2688,7 @@ pub const Runtime = struct {
                         .viewport_extent = node.scroll.viewport_extent,
                         .content_extent = node.scroll.content_extent,
                     },
+                    .virtual_range = canvasVirtualRange(layout.virtualRangeById(node.id)),
                     .bounds = node.bounds.translate(geometry.OffsetF.init(view.frame.x, view.frame.y)),
                     .focused = node.state.focused or (view.focused and node.id == view.canvas_widget_focused_id),
                     .enabled = !node.state.disabled,
@@ -8236,6 +8238,22 @@ fn platformCursorFromCanvas(cursor: canvas.WidgetCursor) platform.Cursor {
 fn canvasTextRange(range: ?canvas.TextRange) ?automation.snapshot.TextRange {
     if (range) |value| return .{ .start = value.start, .end = value.end };
     return null;
+}
+
+fn canvasVirtualRange(range: ?canvas.VirtualListRange) automation.snapshot.WidgetVirtualRange {
+    const value = range orelse return .{};
+    return .{
+        .present = true,
+        .start_index = saturatingU32(value.start_index),
+        .end_index = saturatingU32(value.end_index),
+        .first_visible_index = saturatingU32(value.first_visible_index),
+        .last_visible_index = saturatingU32(value.last_visible_index),
+        .rendered_count = saturatingU32(value.itemCount()),
+    };
+}
+
+fn saturatingU32(value: usize) u32 {
+    return if (value > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(value);
 }
 
 fn writeWindowJson(window: platform.WindowInfo, output: []u8) ![]const u8 {
@@ -16698,6 +16716,12 @@ test "runtime preserves virtualized list item semantics" {
 
     const snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expectEqual(@as(usize, 6), snapshot.widgets.len);
+    try std.testing.expect(snapshot.widgets[0].virtual_range.present);
+    try std.testing.expectEqual(@as(u32, 0), snapshot.widgets[0].virtual_range.start_index);
+    try std.testing.expectEqual(@as(u32, 5), snapshot.widgets[0].virtual_range.end_index);
+    try std.testing.expectEqual(@as(u32, 1), snapshot.widgets[0].virtual_range.first_visible_index);
+    try std.testing.expectEqual(@as(u32, 3), snapshot.widgets[0].virtual_range.last_visible_index);
+    try std.testing.expectEqual(@as(u32, 5), snapshot.widgets[0].virtual_range.rendered_count);
     try std.testing.expectEqual(@as(u64, 4), snapshot.widgets[3].id);
     try std.testing.expect(snapshot.widgets[3].list.present);
     try std.testing.expectEqual(@as(u32, 2), snapshot.widgets[3].list.item_index);
@@ -16711,6 +16735,7 @@ test "runtime preserves virtualized list item semantics" {
     var a11y_writer = std.Io.Writer.fixed(&a11y_buffer);
     try automation.snapshot.writeA11yText(snapshot, &a11y_writer);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#4 role=listitem name=\"Two\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "virtual=[start=0,end=5,first=1,last=3,rendered=5]") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "list=[index=2,count=10]") != null);
 }
 
