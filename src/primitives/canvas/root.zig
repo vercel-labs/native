@@ -48,6 +48,8 @@ pub const FontId = u64;
 
 pub const default_sans_font_id: FontId = 1;
 pub const default_mono_font_id: FontId = 2;
+pub const default_sans_font_family = FontFamily.geist;
+pub const default_mono_font_family = FontFamily.geist_mono;
 
 pub const default_glyph_atlas_cache_retention_frames: u64 = 120;
 pub const default_text_layout_cache_retention_frames: u64 = 120;
@@ -3090,13 +3092,39 @@ pub const ColorTokens = struct {
     }
 };
 
+pub const FontFamily = enum {
+    geist,
+    geist_mono,
+    system_sans,
+    system_mono,
+
+    pub fn cssName(self: FontFamily) []const u8 {
+        return switch (self) {
+            .geist => "Geist",
+            .geist_mono => "Geist Mono",
+            .system_sans => "system-ui",
+            .system_mono => "ui-monospace",
+        };
+    }
+};
+
 pub const TypographyTokens = struct {
     font_id: FontId = default_sans_font_id,
     mono_font_id: FontId = default_mono_font_id,
+    font_family: FontFamily = default_sans_font_family,
+    mono_font_family: FontFamily = default_mono_font_family,
     body_size: f32 = 14,
     label_size: f32 = 13,
     title_size: f32 = 20,
     button_size: f32 = 14,
+
+    pub fn bodyFamilyName(self: TypographyTokens) []const u8 {
+        return self.font_family.cssName();
+    }
+
+    pub fn monoFamilyName(self: TypographyTokens) []const u8 {
+        return self.mono_font_family.cssName();
+    }
 };
 
 pub const SpacingTokens = struct {
@@ -13980,6 +14008,10 @@ test "design tokens provide theme and contrast palettes" {
     try std.testing.expectEqualDeep(ColorTokens.light(), light.colors);
     try std.testing.expectEqual(default_sans_font_id, light.typography.font_id);
     try std.testing.expectEqual(default_mono_font_id, light.typography.mono_font_id);
+    try std.testing.expectEqual(default_sans_font_family, light.typography.font_family);
+    try std.testing.expectEqual(default_mono_font_family, light.typography.mono_font_family);
+    try std.testing.expectEqualStrings("Geist", light.typography.bodyFamilyName());
+    try std.testing.expectEqualStrings("Geist Mono", light.typography.monoFamilyName());
     try std.testing.expectEqualDeep(Color.rgb8(9, 9, 11), light.colors.text);
     try std.testing.expectEqualDeep(Color.rgb8(47, 70, 220), light.colors.accent);
 
@@ -14001,6 +14033,19 @@ test "design tokens provide theme and contrast palettes" {
     try std.testing.expectEqual(@as(u32, 0), reduced_motion.motion.durationMs(.normal));
     try std.testing.expectEqual(@as(u32, 0), reduced_motion.motion.durationMs(.slow));
     try std.testing.expectEqual(Easing.linear, reduced_motion.motion.easing);
+}
+
+test "typography tokens expose customizable font family metadata" {
+    const tokens = TypographyTokens{
+        .font_id = 7,
+        .mono_font_id = 8,
+        .font_family = .system_sans,
+        .mono_font_family = .system_mono,
+    };
+    try std.testing.expectEqual(@as(FontId, 7), tokens.font_id);
+    try std.testing.expectEqual(@as(FontId, 8), tokens.mono_font_id);
+    try std.testing.expectEqualStrings("system-ui", tokens.bodyFamilyName());
+    try std.testing.expectEqualStrings("ui-monospace", tokens.monoFamilyName());
 }
 
 test "themed design tokens flow into widget display lists" {
