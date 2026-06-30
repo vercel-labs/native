@@ -3299,6 +3299,12 @@ pub const LayerTokens = struct {
     modal: i32 = 300,
 };
 
+pub const PixelSnapTokens = struct {
+    geometry: bool = false,
+    text: bool = false,
+    scale: f32 = 1,
+};
+
 pub const DesignTokens = struct {
     colors: ColorTokens = .{},
     typography: TypographyTokens = .{},
@@ -3310,6 +3316,7 @@ pub const DesignTokens = struct {
     motion: MotionTokens = .{},
     scroll: ScrollPhysics = .{},
     layer: LayerTokens = .{},
+    pixel_snap: PixelSnapTokens = .{},
     density: Density = .regular,
 
     pub fn theme(options: ThemeOptions) DesignTokens {
@@ -6320,29 +6327,30 @@ fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, dept
 }
 
 fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
-    try emitWidgetBackdropBlur(builder, widget, tokens);
-    switch (widget.kind) {
-        .stack, .row, .column, .grid, .data_grid, .list, .data_row => try emitWidgetClippedChildren(builder, widget, tokens, depth),
-        .scroll_view => try emitScrollViewWidget(builder, widget, tokens, depth),
-        .panel => try emitPanelWidget(builder, widget, tokens, depth),
-        .popover => try emitPopoverWidget(builder, widget, tokens, depth),
-        .menu_surface => try emitMenuSurfaceWidget(builder, widget, tokens, depth),
-        .text => try emitTextWidget(builder, widget, tokens),
-        .icon => try emitIconWidget(builder, widget, tokens),
-        .image => try emitImageWidget(builder, widget),
-        .button => try emitButtonWidget(builder, widget, tokens),
-        .icon_button => try emitIconButtonWidget(builder, widget, tokens),
-        .text_field => try emitTextFieldWidget(builder, widget, tokens),
-        .search_field => try emitSearchFieldWidget(builder, widget, tokens),
-        .tooltip => try emitTooltipWidget(builder, widget, tokens),
-        .menu_item => try emitMenuItemWidget(builder, widget, tokens),
-        .list_item => try emitListItemWidget(builder, widget, tokens),
-        .data_cell => try emitDataCellWidget(builder, widget, tokens),
-        .segmented_control => try emitSegmentedControlWidget(builder, widget, tokens),
-        .checkbox => try emitCheckboxWidget(builder, widget, tokens),
-        .toggle => try emitToggleWidget(builder, widget, tokens),
-        .slider => try emitSliderWidget(builder, widget, tokens),
-        .progress => try emitProgressWidget(builder, widget, tokens),
+    const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
+    try emitWidgetBackdropBlur(builder, paint_widget, tokens);
+    switch (paint_widget.kind) {
+        .stack, .row, .column, .grid, .data_grid, .list, .data_row => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
+        .scroll_view => try emitScrollViewWidget(builder, paint_widget, tokens, depth),
+        .panel => try emitPanelWidget(builder, paint_widget, tokens, depth),
+        .popover => try emitPopoverWidget(builder, paint_widget, tokens, depth),
+        .menu_surface => try emitMenuSurfaceWidget(builder, paint_widget, tokens, depth),
+        .text => try emitTextWidget(builder, paint_widget, tokens),
+        .icon => try emitIconWidget(builder, paint_widget, tokens),
+        .image => try emitImageWidget(builder, paint_widget),
+        .button => try emitButtonWidget(builder, paint_widget, tokens),
+        .icon_button => try emitIconButtonWidget(builder, paint_widget, tokens),
+        .text_field => try emitTextFieldWidget(builder, paint_widget, tokens),
+        .search_field => try emitSearchFieldWidget(builder, paint_widget, tokens),
+        .tooltip => try emitTooltipWidget(builder, paint_widget, tokens),
+        .menu_item => try emitMenuItemWidget(builder, paint_widget, tokens),
+        .list_item => try emitListItemWidget(builder, paint_widget, tokens),
+        .data_cell => try emitDataCellWidget(builder, paint_widget, tokens),
+        .segmented_control => try emitSegmentedControlWidget(builder, paint_widget, tokens),
+        .checkbox => try emitCheckboxWidget(builder, paint_widget, tokens),
+        .toggle => try emitToggleWidget(builder, paint_widget, tokens),
+        .slider => try emitSliderWidget(builder, paint_widget, tokens),
+        .progress => try emitProgressWidget(builder, paint_widget, tokens),
     }
 }
 
@@ -6406,38 +6414,39 @@ fn emitWidgetLayoutNodeContent(
     state: WidgetRenderState,
     widget: Widget,
 ) Error!void {
-    try emitWidgetBackdropBlur(builder, widget, tokens);
-    switch (widget.kind) {
+    const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
+    try emitWidgetBackdropBlur(builder, paint_widget, tokens);
+    switch (paint_widget.kind) {
         .stack, .row, .column, .grid, .data_grid, .list, .data_row => {},
         .scroll_view => {
-            try builder.pushClip(.{ .id = widgetPartId(widget.id, 1), .rect = widget.frame });
+            try builder.pushClip(.{ .id = widgetPartId(paint_widget.id, 1), .rect = paint_widget.frame });
             try emitWidgetLayoutChildren(builder, layout, node_index, tokens, state);
             try builder.popClip();
-            try emitScrollViewScrollbar(builder, widget.frame, widgetScrollSemantics(layout, node_index).metrics, tokens, widget.id);
+            try emitScrollViewScrollbar(builder, paint_widget.frame, widgetScrollSemantics(layout, node_index).metrics, tokens, paint_widget.id);
             return;
         },
-        .panel => try emitPanelWidgetChrome(builder, widget, tokens),
-        .popover => try emitPopoverWidgetChrome(builder, widget, tokens),
-        .menu_surface => try emitMenuSurfaceWidgetChrome(builder, widget, tokens),
-        .text => try emitTextWidget(builder, widget, tokens),
-        .icon => try emitIconWidget(builder, widget, tokens),
-        .image => try emitImageWidget(builder, widget),
-        .button => try emitButtonWidget(builder, widget, tokens),
-        .icon_button => try emitIconButtonWidget(builder, widget, tokens),
-        .text_field => try emitTextFieldWidget(builder, widget, tokens),
-        .search_field => try emitSearchFieldWidget(builder, widget, tokens),
-        .tooltip => try emitTooltipWidget(builder, widget, tokens),
-        .menu_item => try emitMenuItemWidget(builder, widget, tokens),
-        .list_item => try emitListItemWidget(builder, widget, tokens),
-        .data_cell => try emitDataCellWidget(builder, widget, tokens),
-        .segmented_control => try emitSegmentedControlWidget(builder, widget, tokens),
-        .checkbox => try emitCheckboxWidget(builder, widget, tokens),
-        .toggle => try emitToggleWidget(builder, widget, tokens),
-        .slider => try emitSliderWidget(builder, widget, tokens),
-        .progress => try emitProgressWidget(builder, widget, tokens),
+        .panel => try emitPanelWidgetChrome(builder, paint_widget, tokens),
+        .popover => try emitPopoverWidgetChrome(builder, paint_widget, tokens),
+        .menu_surface => try emitMenuSurfaceWidgetChrome(builder, paint_widget, tokens),
+        .text => try emitTextWidget(builder, paint_widget, tokens),
+        .icon => try emitIconWidget(builder, paint_widget, tokens),
+        .image => try emitImageWidget(builder, paint_widget),
+        .button => try emitButtonWidget(builder, paint_widget, tokens),
+        .icon_button => try emitIconButtonWidget(builder, paint_widget, tokens),
+        .text_field => try emitTextFieldWidget(builder, paint_widget, tokens),
+        .search_field => try emitSearchFieldWidget(builder, paint_widget, tokens),
+        .tooltip => try emitTooltipWidget(builder, paint_widget, tokens),
+        .menu_item => try emitMenuItemWidget(builder, paint_widget, tokens),
+        .list_item => try emitListItemWidget(builder, paint_widget, tokens),
+        .data_cell => try emitDataCellWidget(builder, paint_widget, tokens),
+        .segmented_control => try emitSegmentedControlWidget(builder, paint_widget, tokens),
+        .checkbox => try emitCheckboxWidget(builder, paint_widget, tokens),
+        .toggle => try emitToggleWidget(builder, paint_widget, tokens),
+        .slider => try emitSliderWidget(builder, paint_widget, tokens),
+        .progress => try emitProgressWidget(builder, paint_widget, tokens),
     }
 
-    try emitWidgetLayoutClippedChildren(builder, layout, node_index, tokens, state, widget);
+    try emitWidgetLayoutClippedChildren(builder, layout, node_index, tokens, state, paint_widget);
 }
 
 fn widgetOpacity(widget: Widget) f32 {
@@ -6446,6 +6455,45 @@ fn widgetOpacity(widget: Widget) f32 {
 
 fn widgetTransform(widget: Widget) Affine {
     return widget.transform;
+}
+
+fn pixelSnapScale(tokens: DesignTokens) ?f32 {
+    const scale = tokens.pixel_snap.scale;
+    if (!std.math.isFinite(scale) or scale <= 0) return null;
+    return scale;
+}
+
+fn pixelSnapValueWithScale(value: f32, scale: f32) f32 {
+    return @round(value * scale) / scale;
+}
+
+fn pixelSnapGeometryRect(tokens: DesignTokens, rect: geometry.RectF) geometry.RectF {
+    if (!tokens.pixel_snap.geometry) return rect;
+    const scale = pixelSnapScale(tokens) orelse return rect;
+    const normalized = rect.normalized();
+    const x0 = pixelSnapValueWithScale(normalized.x, scale);
+    const y0 = pixelSnapValueWithScale(normalized.y, scale);
+    const x1 = pixelSnapValueWithScale(normalized.maxX(), scale);
+    const y1 = pixelSnapValueWithScale(normalized.maxY(), scale);
+    return geometry.RectF.init(x0, y0, @max(0, x1 - x0), @max(0, y1 - y0));
+}
+
+fn pixelSnapGeometryPoint(tokens: DesignTokens, point: geometry.PointF) geometry.PointF {
+    if (!tokens.pixel_snap.geometry) return point;
+    const scale = pixelSnapScale(tokens) orelse return point;
+    return geometry.PointF.init(
+        pixelSnapValueWithScale(point.x, scale),
+        pixelSnapValueWithScale(point.y, scale),
+    );
+}
+
+fn pixelSnapTextPoint(tokens: DesignTokens, point: geometry.PointF) geometry.PointF {
+    if (!tokens.pixel_snap.text) return point;
+    const scale = pixelSnapScale(tokens) orelse return point;
+    return geometry.PointF.init(
+        pixelSnapValueWithScale(point.x, scale),
+        pixelSnapValueWithScale(point.y, scale),
+    );
 }
 
 fn emitWidgetBackdropBlur(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
@@ -6522,16 +6570,18 @@ const ScrollbarGeometry = struct {
 
 fn emitScrollViewScrollbar(builder: *Builder, frame: geometry.RectF, metrics: WidgetScrollMetrics, tokens: DesignTokens, id: ObjectId) Error!void {
     const scrollbar = scrollViewScrollbarGeometry(frame, metrics, tokens) orelse return;
-    const radius = Radius.all(scrollbar.track.width * 0.5);
+    const track = pixelSnapGeometryRect(tokens, scrollbar.track);
+    const thumb = pixelSnapGeometryRect(tokens, scrollbar.thumb);
+    const radius = Radius.all(track.width * 0.5);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(id, 2),
-        .rect = scrollbar.track,
+        .rect = track,
         .radius = radius,
         .fill = .{ .color = colorWithAlpha(tokens.colors.border, @min(tokens.colors.border.a, 0.22)) },
     });
     try builder.fillRoundedRect(.{
         .id = widgetPartId(id, 3),
-        .rect = scrollbar.thumb,
+        .rect = thumb,
         .radius = radius,
         .fill = .{ .color = colorWithAlpha(tokens.colors.text_muted, 0.55) },
     });
@@ -6709,7 +6759,7 @@ fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
         .id = widgetPartId(widget.id, 1),
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.body_size,
-        .origin = textOrigin(widget.frame, tokens.typography.body_size, 0),
+        .origin = pixelSnapTextPoint(tokens, textOrigin(widget.frame, tokens.typography.body_size, 0)),
         .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
         .text = widget.text,
         .text_layout = .{
@@ -6728,7 +6778,7 @@ fn emitIconWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
         .id = widgetPartId(widget.id, 1),
         .font_id = tokens.typography.font_id,
         .size = size,
-        .origin = centeredTextOrigin(widget.frame, widget.text, size),
+        .origin = pixelSnapTextPoint(tokens, centeredTextOrigin(widget.frame, widget.text, size)),
         .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
         .text = widget.text,
     });
@@ -6779,7 +6829,7 @@ fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
         .id = widgetPartId(widget.id, 4),
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.button_size,
-        .origin = boundedTextOrigin(widget.frame, tokens.typography.button_size, densityValue(tokens, tokens.spacing.md)),
+        .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, tokens.typography.button_size, densityValue(tokens, tokens.spacing.md))),
         .color = buttonTextColor(tokens, widget.state),
         .text = widget.text,
         .text_layout = boundedTextLayout(widget.frame, tokens.typography.button_size, densityValue(tokens, tokens.spacing.md), .center, .none),
@@ -6809,7 +6859,7 @@ fn emitIconButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
             .id = widgetPartId(widget.id, 3),
             .font_id = tokens.typography.font_id,
             .size = size,
-            .origin = centeredTextOrigin(widget.frame, widget.text, size),
+            .origin = pixelSnapTextPoint(tokens, centeredTextOrigin(widget.frame, widget.text, size)),
             .color = buttonTextColor(tokens, widget.state),
             .text = widget.text,
         });
@@ -6926,17 +6976,18 @@ fn emitSearchFieldIcon(builder: *Builder, widget: Widget, tokens: DesignTokens, 
     const left = widget.frame.x + densityValue(tokens, tokens.spacing.md);
     const top = widget.frame.y + @max(0, (widget.frame.height - icon_size) * 0.5);
     const box = icon_size * 0.58;
-    const x0 = left;
-    const y0 = top;
-    const x1 = left + box;
-    const y1 = top + box;
+    const p0 = pixelSnapGeometryPoint(tokens, geometry.PointF.init(left, top));
+    const p1 = pixelSnapGeometryPoint(tokens, geometry.PointF.init(left + box, top));
+    const p2 = pixelSnapGeometryPoint(tokens, geometry.PointF.init(left + box, top + box));
+    const p3 = pixelSnapGeometryPoint(tokens, geometry.PointF.init(left, top + box));
+    const tail = pixelSnapGeometryPoint(tokens, geometry.PointF.init(left + icon_size, top + icon_size));
     const stroke = Stroke{ .fill = .{ .color = tokens.colors.text_muted }, .width = tokens.stroke.regular };
 
-    try builder.drawLine(.{ .id = widgetPartId(widget.id, 3), .from = geometry.PointF.init(x0, y0), .to = geometry.PointF.init(x1, y0), .stroke = stroke });
-    try builder.drawLine(.{ .id = widgetPartId(widget.id, 4), .from = geometry.PointF.init(x1, y0), .to = geometry.PointF.init(x1, y1), .stroke = stroke });
-    try builder.drawLine(.{ .id = widgetPartId(widget.id, 5), .from = geometry.PointF.init(x1, y1), .to = geometry.PointF.init(x0, y1), .stroke = stroke });
-    try builder.drawLine(.{ .id = widgetPartId(widget.id, 6), .from = geometry.PointF.init(x0, y1), .to = geometry.PointF.init(x0, y0), .stroke = stroke });
-    try builder.drawLine(.{ .id = widgetPartId(widget.id, 7), .from = geometry.PointF.init(x1, y1), .to = geometry.PointF.init(left + icon_size, top + icon_size), .stroke = stroke });
+    try builder.drawLine(.{ .id = widgetPartId(widget.id, 3), .from = p0, .to = p1, .stroke = stroke });
+    try builder.drawLine(.{ .id = widgetPartId(widget.id, 4), .from = p1, .to = p2, .stroke = stroke });
+    try builder.drawLine(.{ .id = widgetPartId(widget.id, 5), .from = p2, .to = p3, .stroke = stroke });
+    try builder.drawLine(.{ .id = widgetPartId(widget.id, 6), .from = p3, .to = p0, .stroke = stroke });
+    try builder.drawLine(.{ .id = widgetPartId(widget.id, 7), .from = p2, .to = tail, .stroke = stroke });
 }
 
 fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
@@ -6964,7 +7015,7 @@ fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Er
             .id = widgetPartId(widget.id, 3),
             .font_id = tokens.typography.font_id,
             .size = tokens.typography.label_size,
-            .origin = boundedTextOrigin(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.sm)),
+            .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.sm))),
             .color = tokens.colors.accent_text,
             .text = widget.text,
             .text_layout = boundedTextLayout(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.sm), .start, .none),
@@ -6992,7 +7043,7 @@ fn emitListItemWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
         .id = widgetPartId(widget.id, 3),
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.body_size,
-        .origin = boundedTextOrigin(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md)),
+        .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md))),
         .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
         .text = widget.text,
         .text_layout = boundedTextLayout(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md), .start, .none),
@@ -7020,7 +7071,7 @@ fn emitDataCellWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
             .id = widgetPartId(widget.id, 4),
             .font_id = tokens.typography.font_id,
             .size = tokens.typography.body_size,
-            .origin = boundedTextOrigin(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md)),
+            .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md))),
             .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
             .text = widget.text,
             .text_layout = boundedTextLayout(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md), .start, .none),
@@ -7050,7 +7101,7 @@ fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: DesignT
         .id = widgetPartId(widget.id, 3),
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.label_size,
-        .origin = boundedTextOrigin(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.md)),
+        .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.md))),
         .color = if (selected) tokens.colors.accent_text else tokens.colors.text,
         .text = widget.text,
         .text_layout = boundedTextLayout(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.md), .center, .none),
@@ -7059,12 +7110,12 @@ fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: DesignT
 
 fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const box_size = @min(@max(densityValue(tokens, 14), widget.frame.height * 0.55), densityValue(tokens, 20));
-    const box = geometry.RectF.init(
+    const box = pixelSnapGeometryRect(tokens, geometry.RectF.init(
         widget.frame.x,
         widget.frame.y + (widget.frame.height - box_size) * 0.5,
         box_size,
         box_size,
-    );
+    ));
     const selected = booleanControlSelected(widget);
     const radius = Radius.all(tokens.radius.sm);
     try builder.fillRoundedRect(.{
@@ -7084,9 +7135,9 @@ fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
     });
     if (widget.state.focused) try emitWidgetFocusRing(builder, widget, tokens, 3);
     if (selected) {
-        const left = geometry.PointF.init(box.x + box.width * 0.26, box.y + box.height * 0.54);
-        const mid = geometry.PointF.init(box.x + box.width * 0.43, box.y + box.height * 0.70);
-        const right = geometry.PointF.init(box.x + box.width * 0.76, box.y + box.height * 0.32);
+        const left = pixelSnapGeometryPoint(tokens, geometry.PointF.init(box.x + box.width * 0.26, box.y + box.height * 0.54));
+        const mid = pixelSnapGeometryPoint(tokens, geometry.PointF.init(box.x + box.width * 0.43, box.y + box.height * 0.70));
+        const right = pixelSnapGeometryPoint(tokens, geometry.PointF.init(box.x + box.width * 0.76, box.y + box.height * 0.32));
         try builder.drawLine(.{
             .id = widgetPartId(widget.id, 4),
             .from = left,
@@ -7108,19 +7159,19 @@ fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
     const knob_inset = densityValue(tokens, 2);
     const track_width = @min(widget.frame.width, @max(densityValue(tokens, 36), widget.frame.height * 1.75));
     const track_height = @min(widget.frame.height, densityValue(tokens, 24));
-    const track = geometry.RectF.init(
+    const track = pixelSnapGeometryRect(tokens, geometry.RectF.init(
         widget.frame.x,
         widget.frame.y + (widget.frame.height - track_height) * 0.5,
         track_width,
         track_height,
-    );
+    ));
     const track_radius = Radius.all(track.height * 0.5);
     const knob_size = @max(0, track.height - knob_inset * 2);
     const knob_x = if (selected)
         track.x + track.width - knob_size - knob_inset
     else
         track.x + knob_inset;
-    const knob = geometry.RectF.init(knob_x, track.y + knob_inset, knob_size, knob_size);
+    const knob = pixelSnapGeometryRect(tokens, geometry.RectF.init(knob_x, track.y + knob_inset, knob_size, knob_size));
 
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
@@ -7150,25 +7201,25 @@ fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
 fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const value = std.math.clamp(widget.value, 0, 1);
     const track_height: f32 = densityValue(tokens, 4);
-    const track = geometry.RectF.init(
+    const track = pixelSnapGeometryRect(tokens, geometry.RectF.init(
         widget.frame.x,
         widget.frame.y + (widget.frame.height - track_height) * 0.5,
         widget.frame.width,
         track_height,
-    );
-    const active = geometry.RectF.init(track.x, track.y, track.width * value, track.height);
+    ));
+    const active = pixelSnapGeometryRect(tokens, geometry.RectF.init(track.x, track.y, track.width * value, track.height));
     const knob_size = @min(@max(densityValue(tokens, 14), widget.frame.height * 0.55), densityValue(tokens, 20));
     const knob_x = std.math.clamp(
         widget.frame.x + widget.frame.width * value - knob_size * 0.5,
         widget.frame.x,
         widget.frame.x + @max(0, widget.frame.width - knob_size),
     );
-    const knob = geometry.RectF.init(
+    const knob = pixelSnapGeometryRect(tokens, geometry.RectF.init(
         knob_x,
         widget.frame.y + (widget.frame.height - knob_size) * 0.5,
         knob_size,
         knob_size,
-    );
+    ));
 
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
@@ -7213,7 +7264,7 @@ fn emitProgressWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
     if (progress > 0) {
         try builder.fillRoundedRect(.{
             .id = widgetPartId(widget.id, 2),
-            .rect = geometry.RectF.init(widget.frame.x, widget.frame.y, widget.frame.width * progress, widget.frame.height),
+            .rect = pixelSnapGeometryRect(tokens, geometry.RectF.init(widget.frame.x, widget.frame.y, widget.frame.width * progress, widget.frame.height)),
             .radius = radius,
             .fill = .{ .color = tokens.colors.accent },
         });
@@ -7238,7 +7289,7 @@ fn emitControlLabel(builder: *Builder, widget: Widget, tokens: DesignTokens, x: 
         .id = widgetPartId(widget.id, slot),
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.label_size,
-        .origin = boundedTextOrigin(labelFrameForControl(widget.frame, x), tokens.typography.label_size, 0),
+        .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(labelFrameForControl(widget.frame, x), tokens.typography.label_size, 0)),
         .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
         .text = widget.text,
         .text_layout = boundedTextLayout(labelFrameForControl(widget.frame, x), tokens.typography.label_size, 0, .start, .none),
@@ -7382,7 +7433,7 @@ fn widgetTextInputDrawText(
     return .{
         .font_id = tokens.typography.font_id,
         .size = text_size,
-        .origin = origin,
+        .origin = pixelSnapTextPoint(tokens, origin),
         .color = color,
         .text = widget.text,
         .text_layout = options,
@@ -7439,7 +7490,7 @@ fn emitWidgetTextSelectionRects(
     for (rects, 0..) |selection, index| {
         try builder.fillRoundedRect(.{
             .id = widgetPartId(widget.id, widgetTextRangePart(first_part, overflow_first_part, index)),
-            .rect = selection.rect,
+            .rect = pixelSnapGeometryRect(tokens, selection.rect),
             .radius = Radius.all(tokens.radius.sm),
             .fill = .{ .color = textSelectionFillColor(tokens) },
         });
@@ -7461,11 +7512,11 @@ fn emitWidgetTextCompositionLines(
     var rect_buffer: [max_widget_text_range_rects]TextSelectionRect = undefined;
     const rects = try layoutTextSelectionRects(text, options, range, &lines, rect_buffer[0..@min(max_parts, rect_buffer.len)]);
     for (rects, 0..) |selection, index| {
-        const y = selection.rect.y + selection.rect.height - 1;
+        const y = pixelSnapGeometryRect(tokens, selection.rect).maxY() - tokens.stroke.regular;
         try builder.drawLine(.{
             .id = widgetPartId(widget.id, widgetTextRangePart(first_part, overflow_first_part, index)),
-            .from = geometry.PointF.init(selection.rect.x, y),
-            .to = geometry.PointF.init(selection.rect.x + selection.rect.width, y),
+            .from = pixelSnapGeometryPoint(tokens, geometry.PointF.init(selection.rect.x, y)),
+            .to = pixelSnapGeometryPoint(tokens, geometry.PointF.init(selection.rect.x + selection.rect.width, y)),
             .stroke = .{ .fill = .{ .color = tokens.colors.focus_ring }, .width = 1 },
         });
     }
@@ -7487,10 +7538,11 @@ fn emitWidgetTextCaret(
 ) Error!void {
     var lines: [max_widget_text_layout_lines]TextLine = undefined;
     const rect = (try layoutTextCaretRect(text, options, offset, &lines)) orelse return;
+    const snapped = pixelSnapGeometryRect(tokens, rect);
     try builder.drawLine(.{
         .id = widgetPartId(widget.id, part),
-        .from = geometry.PointF.init(rect.x, rect.y),
-        .to = geometry.PointF.init(rect.x, rect.y + rect.height),
+        .from = geometry.PointF.init(snapped.x, snapped.y),
+        .to = geometry.PointF.init(snapped.x, snapped.y + snapped.height),
         .stroke = .{ .fill = .{ .color = tokens.colors.focus_ring }, .width = tokens.stroke.regular },
     });
 }
@@ -15325,6 +15377,36 @@ test "widget emitter applies density tokens to spacing and affordances" {
     try emitWidgetTree(&spacious_checkbox_builder, checkbox, .{ .density = .spacious });
     switch (spacious_checkbox_builder.displayList().commands[0]) {
         .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(@as(f32, 15.75), fill.rect.width, 0.001),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "widget pixel snap tokens align widget chrome and text origins" {
+    const tokens = DesignTokens{
+        .pixel_snap = .{ .geometry = true, .text = true, .scale = 1 },
+    };
+    const button = Widget{
+        .id = 42,
+        .kind = .button,
+        .frame = geometry.RectF.init(0.26, 0.51, 100.4, 32.4),
+        .text = "Snap",
+    };
+
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, button, tokens);
+
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| try expectRect(geometry.RectF.init(0, 1, 101, 32), fill.rect),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .draw_text => |text| {
+            try std.testing.expectEqual(@round(text.origin.x), text.origin.x);
+            try std.testing.expectEqual(@round(text.origin.y), text.origin.y);
+        },
         else => return error.TestUnexpectedResult,
     }
 }

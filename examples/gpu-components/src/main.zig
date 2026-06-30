@@ -122,6 +122,7 @@ const GpuComponentsApp = struct {
     canvas_installed: bool = false,
     reported_planned_frame: bool = false,
     virtual_scroll: ComponentVirtualScroll = .{},
+    pixel_snap_scale: f32 = 1,
     pixels: ?[]u8 = null,
     scratch: ?[]u8 = null,
     gpu_commands: [max_component_commands]canvas.CanvasGpuCommand = undefined,
@@ -199,10 +200,14 @@ const GpuComponentsApp = struct {
 
     fn handleGpuFrame(self: *@This(), runtime: *zero_native.Runtime, frame_event: zero_native.GpuSurfaceFrameEvent) anyerror!void {
         if (!std.mem.eql(u8, frame_event.label, canvas_label)) return;
-        if (!self.canvas_installed) {
+        const first_install = !self.canvas_installed;
+        const scale_changed = self.updatePixelSnapScale(frame_event.scale_factor);
+        if (first_install or scale_changed) {
             try installComponentsCanvasModel(runtime, frame_event.window_id, self.virtual_scroll, self.componentTokens());
             _ = try self.presentComponentsCanvas(runtime, frame_event, true);
-            try self.updateStatus(runtime, frame_event.window_id, "Component lab display list presented on the GPU surface.");
+            if (first_install) {
+                try self.updateStatus(runtime, frame_event.window_id, "Component lab display list presented on the GPU surface.");
+            }
             self.canvas_installed = true;
             return;
         }
@@ -466,7 +471,14 @@ const GpuComponentsApp = struct {
     }
 
     fn componentTokens(self: @This()) canvas.DesignTokens {
-        return componentTokensFor(self.theme_mode);
+        return componentTokensForScale(self.theme_mode, self.pixel_snap_scale);
+    }
+
+    fn updatePixelSnapScale(self: *@This(), scale_factor: f32) bool {
+        const next = normalizedPixelSnapScale(scale_factor);
+        if (@abs(self.pixel_snap_scale - next) < 0.001) return false;
+        self.pixel_snap_scale = next;
+        return true;
     }
 
     fn componentVirtualScrollValue(self: *@This(), id: canvas.ObjectId) ?f32 {
@@ -587,6 +599,10 @@ fn componentTokens() canvas.DesignTokens {
 }
 
 fn componentTokensFor(mode: ComponentThemeMode) canvas.DesignTokens {
+    return componentTokensForScale(mode, 1);
+}
+
+fn componentTokensForScale(mode: ComponentThemeMode, pixel_snap_scale: f32) canvas.DesignTokens {
     return .{
         .colors = componentThemeColors(mode),
         .typography = .{
@@ -612,7 +628,13 @@ fn componentTokensFor(mode: ComponentThemeMode) canvas.DesignTokens {
         },
         .motion = .{ .normal_ms = 180, .slow_ms = 520, .easing = .emphasized },
         .scroll = .{ .wheel_multiplier = 1.1, .wheel_velocity_scale = 72, .deceleration_per_second = 0.88, .stop_velocity = 4 },
+        .pixel_snap = .{ .geometry = true, .text = true, .scale = normalizedPixelSnapScale(pixel_snap_scale) },
     };
+}
+
+fn normalizedPixelSnapScale(scale_factor: f32) f32 {
+    if (!std.math.isFinite(scale_factor) or scale_factor <= 0) return 1;
+    return scale_factor;
 }
 
 fn componentThemeColors(mode: ComponentThemeMode) canvas.ColorTokens {
@@ -1661,10 +1683,10 @@ test "gpu components native theme command updates retained design tokens" {
         .timestamp_ns = 1_000_000_000,
         .nonblank = true,
     } });
-    try std.testing.expectEqualDeep(componentTokensFor(.light), try harness.runtime.canvasWidgetDesignTokens(1, canvas_label));
+    try std.testing.expectEqualDeep(componentTokensForScale(.light, 2), try harness.runtime.canvasWidgetDesignTokens(1, canvas_label));
     var display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
-    try expectComponentFillRoundedRectColor(display_list, 3, componentTokensFor(.light).colors.surface);
-    try expectComponentFillRoundedRectColor(display_list, primary_button_fill_id, componentTokensFor(.light).colors.accent);
+    try expectComponentFillRoundedRectColor(display_list, 3, componentTokensForScale(.light, 2).colors.surface);
+    try expectComponentFillRoundedRectColor(display_list, primary_button_fill_id, componentTokensForScale(.light, 2).colors.accent);
 
     resetComponentDirty(&harness.runtime);
     const packet_count_before_dark = harness.null_platform.gpu_surface_packet_present_count;
@@ -1676,11 +1698,11 @@ test "gpu components native theme command updates retained design tokens" {
 
     try std.testing.expectEqual(ComponentThemeMode.dark, app.theme_mode);
     try std.testing.expectEqual(@as(u32, 1), app.theme_count);
-    try std.testing.expectEqualDeep(componentTokensFor(.dark), try harness.runtime.canvasWidgetDesignTokens(1, canvas_label));
+    try std.testing.expectEqualDeep(componentTokensForScale(.dark, 2), try harness.runtime.canvasWidgetDesignTokens(1, canvas_label));
     try std.testing.expect(harness.null_platform.gpu_surface_packet_present_count > packet_count_before_dark);
     display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
-    try expectComponentFillRoundedRectColor(display_list, 3, componentTokensFor(.dark).colors.surface);
-    try expectComponentFillRoundedRectColor(display_list, primary_button_fill_id, componentTokensFor(.dark).colors.accent);
+    try expectComponentFillRoundedRectColor(display_list, 3, componentTokensForScale(.dark, 2).colors.surface);
+    try expectComponentFillRoundedRectColor(display_list, primary_button_fill_id, componentTokensForScale(.dark, 2).colors.accent);
     var status_view = componentViewByLabel(&harness.runtime, "status-label").?;
     try std.testing.expect(std.mem.indexOf(u8, status_view.text, "GPU component theme: Dark from toolbar") != null);
 
@@ -1693,11 +1715,11 @@ test "gpu components native theme command updates retained design tokens" {
 
     try std.testing.expectEqual(ComponentThemeMode.high, app.theme_mode);
     try std.testing.expectEqual(@as(u32, 2), app.theme_count);
-    try std.testing.expectEqualDeep(componentTokensFor(.high), try harness.runtime.canvasWidgetDesignTokens(1, canvas_label));
+    try std.testing.expectEqualDeep(componentTokensForScale(.high, 2), try harness.runtime.canvasWidgetDesignTokens(1, canvas_label));
     try std.testing.expect(harness.null_platform.gpu_surface_packet_present_count > packet_count_before_high);
     display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
-    try expectComponentFillRoundedRectColor(display_list, 3, componentTokensFor(.high).colors.surface);
-    try expectComponentFillRoundedRectColor(display_list, primary_button_fill_id, componentTokensFor(.high).colors.accent);
+    try expectComponentFillRoundedRectColor(display_list, 3, componentTokensForScale(.high, 2).colors.surface);
+    try expectComponentFillRoundedRectColor(display_list, primary_button_fill_id, componentTokensForScale(.high, 2).colors.accent);
     status_view = componentViewByLabel(&harness.runtime, "status-label").?;
     try std.testing.expect(std.mem.indexOf(u8, status_view.text, "GPU component theme: High contrast from toolbar") != null);
 
