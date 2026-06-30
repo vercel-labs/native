@@ -3452,6 +3452,7 @@ pub const ControlTokens = struct {
     button_ghost: ControlVisualTokens = .{},
     button_destructive: ControlVisualTokens = .{},
     alert: ControlVisualTokens = .{},
+    card: ControlVisualTokens = .{},
     select: ControlVisualTokens = .{},
     text_field: ControlVisualTokens = .{},
     search_field: ControlVisualTokens = .{},
@@ -3666,6 +3667,7 @@ pub const ControlTokenOverrides = struct {
     button_ghost: ControlVisualTokenOverrides = .{},
     button_destructive: ControlVisualTokenOverrides = .{},
     alert: ControlVisualTokenOverrides = .{},
+    card: ControlVisualTokenOverrides = .{},
     select: ControlVisualTokenOverrides = .{},
     text_field: ControlVisualTokenOverrides = .{},
     search_field: ControlVisualTokenOverrides = .{},
@@ -3696,6 +3698,7 @@ pub const ControlTokenOverrides = struct {
         next.button_ghost = self.button_ghost.apply(next.button_ghost);
         next.button_destructive = self.button_destructive.apply(next.button_destructive);
         next.alert = self.alert.apply(next.alert);
+        next.card = self.card.apply(next.card);
         next.select = self.select.apply(next.select);
         next.text_field = self.text_field.apply(next.text_field);
         next.search_field = self.search_field.apply(next.search_field);
@@ -3805,6 +3808,7 @@ pub const WidgetKind = enum {
     scroll_view,
     list,
     alert,
+    card,
     panel,
     popover,
     menu_surface,
@@ -4071,7 +4075,7 @@ pub fn builtinComponentDescriptor(kind: BuiltinComponentKind) BuiltinComponentDe
         .bubble => builtinComponent(.bubble, .panel, .group, true),
         .button => builtinComponent(.button, .button, .button, false),
         .button_group => builtinComponent(.button_group, .row, .group, true),
-        .card => builtinComponent(.card, .panel, .group, true),
+        .card => builtinComponent(.card, .card, .group, true),
         .checkbox => builtinComponent(.checkbox, .checkbox, .checkbox, false),
         .combobox => builtinComponent(.combobox, .search_field, .textbox, true),
         .dialog => builtinComponent(.dialog, .popover, .dialog, true),
@@ -7231,6 +7235,7 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         .stack, .row, .column, .grid, .data_grid, .list, .data_row => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
         .scroll_view => try emitScrollViewWidget(builder, paint_widget, tokens, depth),
         .alert => try emitAlertWidget(builder, paint_widget, tokens, depth),
+        .card => try emitCardWidget(builder, paint_widget, tokens, depth),
         .panel => try emitPanelWidget(builder, paint_widget, tokens, depth),
         .popover => try emitPopoverWidget(builder, paint_widget, tokens, depth),
         .menu_surface => try emitMenuSurfaceWidget(builder, paint_widget, tokens, depth),
@@ -7332,6 +7337,7 @@ fn emitWidgetLayoutNodeContent(
             return;
         },
         .alert => try emitAlertWidgetChrome(builder, paint_widget, tokens),
+        .card => try emitCardWidgetChrome(builder, paint_widget, tokens),
         .panel => try emitPanelWidgetChrome(builder, paint_widget, tokens),
         .popover => try emitPopoverWidgetChrome(builder, paint_widget, tokens),
         .menu_surface => try emitMenuSurfaceWidgetChrome(builder, paint_widget, tokens),
@@ -7442,7 +7448,7 @@ fn widgetContentClip(widget: Widget, tokens: DesignTokens) Clip {
 fn widgetContentClipRadius(widget: Widget, tokens: DesignTokens) Radius {
     if (!widget.layout.clip_content) return .{};
     return switch (widget.kind) {
-        .alert, .panel, .menu_surface => Radius.all(tokens.radius.lg),
+        .alert, .card, .panel, .menu_surface => Radius.all(tokens.radius.lg),
         .popover => Radius.all(tokens.radius.xl),
         .tooltip => Radius.all(tokens.radius.md),
         else => .{},
@@ -7526,6 +7532,49 @@ fn emitAlertMark(builder: *Builder, widget: Widget, tokens: DesignTokens, frame:
         .rect = pixelSnapGeometryRect(tokens, geometry.RectF.init(center_x - dot_size * 0.5, normalized.y + normalized.height * 0.70, dot_size, dot_size)),
         .radius = Radius.all(dot_size * 0.5),
         .fill = colorFill(color_value),
+    });
+}
+
+fn emitCardWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
+    try emitCardWidgetChrome(builder, widget, tokens);
+    try emitWidgetClippedChildren(builder, widget, tokens, depth);
+}
+
+fn emitCardWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = cardControlVisualTokens(tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.lg);
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 1),
+        .rect = widget.frame,
+        .radius = radius,
+        .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, widget.state.hovered, tokens.colors.surface))),
+    });
+    try builder.strokeRect(.{
+        .id = widgetPartId(widget.id, 2),
+        .rect = widget.frame,
+        .radius = radius,
+        .stroke = .{
+            .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+            .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
+        },
+    });
+    if (widget.text.len == 0) return;
+
+    const title_size = widgetTypographySize(widget, tokens.typography.body_size + 1);
+    const inset = widgetControlInset(widget, tokens, tokens.spacing.lg);
+    try builder.drawText(.{
+        .id = widgetPartId(widget.id, 3),
+        .font_id = tokens.typography.font_id,
+        .size = title_size,
+        .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(widget.frame.x + inset, widget.frame.y + inset + title_size)),
+        .color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text),
+        .text = widget.text,
+        .text_layout = .{
+            .max_width = @max(1, widget.frame.width - inset * 2),
+            .line_height = widgetLineHeight(title_size),
+            .wrap = .word,
+            .alignment = widget.text_alignment,
+        },
     });
 }
 
@@ -9094,6 +9143,10 @@ fn alertControlVisualTokens(tokens: DesignTokens) ControlVisualTokens {
     return controlVisualTokensWithFallback(tokens.controls.alert, tokens.controls.panel);
 }
 
+fn cardControlVisualTokens(tokens: DesignTokens) ControlVisualTokens {
+    return controlVisualTokensWithFallback(tokens.controls.card, tokens.controls.panel);
+}
+
 fn listItemControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
     return switch (widget.kind) {
         .list_item, .menu_item, .data_cell => tokens.controls.list_item,
@@ -9116,6 +9169,7 @@ fn selectionControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVis
 fn surfaceControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
     return switch (widget.kind) {
         .alert => alertControlVisualTokens(tokens),
+        .card => cardControlVisualTokens(tokens),
         .panel => tokens.controls.panel,
         .popover => tokens.controls.popover,
         .menu_surface => tokens.controls.menu_surface,
@@ -9242,7 +9296,7 @@ fn layoutWidgetDepth(
         else
             try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
         .menu_surface => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
-        .stack, .alert, .panel, .popover => {
+        .stack, .alert, .card, .panel, .popover => {
             for (widget.children) |child| {
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len, tokens);
             }
@@ -9503,6 +9557,7 @@ pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF 
         .skeleton => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 120), widgetSizedDensityValue(widget, tokens, 20)),
         .spinner => intrinsicSquareControlSize(widget, tokens),
         .alert => intrinsicAlertWidgetSize(widget, tokens),
+        .card => intrinsicCardWidgetSize(widget, tokens),
         .stack, .row, .column, .grid, .data_grid, .scroll_view, .list, .panel, .popover, .menu_surface, .image => geometry.SizeF.zero(),
     };
 }
@@ -9528,6 +9583,16 @@ fn intrinsicAlertWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF
     return geometry.SizeF.init(
         @max(widgetSizedDensityValue(widget, tokens, 240), text.width + inset * 2 + icon_size + text_gap),
         @max(widgetSizedDensityValue(widget, tokens, 52), widgetLineHeight(text_size) + inset * 2),
+    );
+}
+
+fn intrinsicCardWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
+    const title_size = widgetTypographySize(widget, tokens.typography.body_size + 1);
+    const inset = widgetControlInset(widget, tokens, tokens.spacing.lg);
+    const text = intrinsicTextWidgetSize(widget, tokens, title_size);
+    return geometry.SizeF.init(
+        @max(widgetSizedDensityValue(widget, tokens, 240), text.width + inset * 2),
+        @max(widgetSizedDensityValue(widget, tokens, 120), if (widget.text.len > 0) widgetLineHeight(title_size) + inset * 2 else 0),
     );
 }
 
@@ -10359,7 +10424,7 @@ fn nearestSemanticParent(stack: []const ?usize) ?usize {
 fn semanticRole(widget: Widget) WidgetRole {
     if (widget.semantics.role != .none) return widget.semantics.role;
     return switch (widget.kind) {
-        .stack, .row, .column, .grid, .scroll_view, .alert, .panel => .group,
+        .stack, .row, .column, .grid, .scroll_view, .alert, .card, .panel => .group,
         .data_grid => .grid,
         .data_row => .row,
         .popover => .dialog,
@@ -10737,7 +10802,7 @@ fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     return switch (widget.kind) {
         .row, .column, .grid, .data_grid, .data_row, .list, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner => false,
-        .scroll_view, .alert, .panel, .popover, .menu_surface, .text, .button, .icon_button, .select, .text_field, .search_field, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .toggle, .slider, .progress => true,
+        .scroll_view, .alert, .card, .panel, .popover, .menu_surface, .text, .button, .icon_button, .select, .text_field, .search_field, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .toggle, .slider, .progress => true,
     };
 }
 
@@ -11068,7 +11133,7 @@ fn widgetFocusPaintBounds(widget: Widget, tokens: DesignTokens) ?geometry.RectF 
 
 fn widgetFrameStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
     return switch (widget.kind) {
-        .alert, .panel, .popover, .menu_surface => controlStrokeWidth(widget, surfaceControlVisualTokens(widget, tokens), tokens.stroke.hairline),
+        .alert, .card, .panel, .popover, .menu_surface => controlStrokeWidth(widget, surfaceControlVisualTokens(widget, tokens), tokens.stroke.hairline),
         .button, .icon_button => if (widget.state.focused) tokens.stroke.focus else buttonStrokeWidth(widget, tokens),
         .select => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectControlVisualTokens(tokens), tokens.stroke.regular),
         .text_field, .search_field, .textarea => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, textInputControlVisualTokens(widget, tokens), tokens.stroke.regular),
@@ -11128,7 +11193,7 @@ fn widgetBackdropBlurPaintBounds(widget: Widget, tokens: DesignTokens) ?geometry
 fn widgetShadowRadius(widget: Widget, tokens: DesignTokens) Radius {
     return switch (widget.kind) {
         .popover => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl),
-        .alert, .panel, .menu_surface => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
+        .alert, .card, .panel, .menu_surface => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
         .tooltip => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.md),
         else => Radius.all(0),
     };
@@ -15346,9 +15411,47 @@ test "design tokens provide theme and contrast palettes" {
 }
 
 test "built-in component catalog covers shadcn component set" {
+    const expected_names = [_][]const u8{
+        "Accordion",
+        "Alert",
+        "Avatar",
+        "Badge",
+        "Breadcrumb",
+        "Bubble",
+        "Button",
+        "Button Group",
+        "Card",
+        "Checkbox",
+        "Combobox",
+        "Dialog",
+        "Drawer",
+        "Dropdown Menu",
+        "Input",
+        "Pagination",
+        "Progress",
+        "Radio Group",
+        "Resizable",
+        "Select",
+        "Separator",
+        "Sheet",
+        "Skeleton",
+        "Slider",
+        "Spinner",
+        "Switch",
+        "Table",
+        "Tabs",
+        "Textarea",
+        "Toggle",
+        "Toggle Group",
+        "Tooltip",
+    };
     const enum_len = @typeInfo(BuiltinComponentKind).@"enum".fields.len;
     try std.testing.expectEqual(enum_len, builtinComponentCount());
     try std.testing.expectEqual(enum_len, builtin_component_names.len);
+    try std.testing.expectEqual(expected_names.len, builtin_component_names.len);
+    for (expected_names, builtin_component_names) |expected, actual| {
+        try std.testing.expectEqualStrings(expected, actual);
+    }
 
     var seen = [_]bool{false} ** enum_len;
     for (builtin_component_kinds, 0..) |kind, index| {
@@ -15371,7 +15474,7 @@ test "built-in component catalog maps to retained widget foundations" {
     try std.testing.expectEqual(WidgetKind.avatar, builtinComponentDescriptor(.avatar).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.badge, builtinComponentDescriptor(.badge).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.row, builtinComponentDescriptor(.button_group).root_widget_kind);
-    try std.testing.expectEqual(WidgetKind.panel, builtinComponentDescriptor(.card).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.card, builtinComponentDescriptor(.card).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.search_field, builtinComponentDescriptor(.combobox).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.popover, builtinComponentDescriptor(.dialog).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.popover, builtinComponentDescriptor(.drawer).root_widget_kind);
@@ -15428,7 +15531,7 @@ test "built-in component factory applies shadcn composite defaults" {
         .frame = geometry.RectF.init(0, 0, 240, 120),
         .children = &button_children,
     });
-    try std.testing.expectEqual(WidgetKind.panel, card.kind);
+    try std.testing.expectEqual(WidgetKind.card, card.kind);
     try std.testing.expectEqual(@as(f32, 16), card.layout.padding.top);
     try std.testing.expectEqual(@as(f32, 16), card.layout.padding.right);
     try std.testing.expectEqual(@as(f32, 16), card.layout.padding.bottom);
@@ -15508,6 +15611,66 @@ test "built-in alert renders shadcn surface chrome and text" {
         .draw_text => |text| {
             try std.testing.expectEqualStrings("Heads up: this workflow is native-rendered.", text.text);
             try std.testing.expectEqualDeep(Color.rgb8(235, 240, 245), text.color);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "built-in card renders shadcn surface chrome and title" {
+    const card = builtinComponentWidget(.card, .{
+        .id = 44,
+        .frame = geometry.RectF.init(0, 0, 280, 120),
+        .text = "Revenue pulse",
+    });
+    try std.testing.expectEqual(WidgetKind.card, card.kind);
+    try std.testing.expectEqual(@as(f32, 16), card.layout.padding.top);
+    try std.testing.expectEqual(@as(f32, 12), card.layout.gap);
+    try std.testing.expect(card.layout.clip_content);
+
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(card, card.frame, &nodes);
+    try std.testing.expectEqual(WidgetKind.card, layout.hitTest(geometry.PointF.init(12, 12)).?.kind);
+
+    var semantics_buffer: [2]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+    try std.testing.expectEqual(@as(usize, 1), semantics.len);
+    try std.testing.expectEqual(WidgetRole.group, semantics[0].role);
+    try std.testing.expectEqualStrings("Revenue pulse", semantics[0].label);
+
+    const tokens = DesignTokens{
+        .controls = .{
+            .card = .{
+                .background = Color.rgb8(10, 16, 22),
+                .foreground = Color.rgb8(238, 242, 246),
+                .border = Color.rgb8(52, 62, 72),
+                .radius = 12,
+                .stroke_width = 1.5,
+            },
+        },
+    };
+    var commands: [5]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, card, tokens);
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 5), display_list.commandCount());
+    switch (display_list.findCommandById(widgetPartId(44, 1)).?.command) {
+        .fill_rounded_rect => |fill| {
+            try std.testing.expectEqualDeep(Radius.all(12), fill.radius);
+            try expectFillColor(Color.rgb8(10, 16, 22), fill.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.findCommandById(widgetPartId(44, 2)).?.command) {
+        .stroke_rect => |stroke| {
+            try std.testing.expectEqual(@as(f32, 1.5), stroke.stroke.width);
+            try expectFillColor(Color.rgb8(52, 62, 72), stroke.stroke.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.findCommandById(widgetPartId(44, 3)).?.command) {
+        .draw_text => |text| {
+            try std.testing.expectEqualStrings("Revenue pulse", text.text);
+            try std.testing.expectEqualDeep(Color.rgb8(238, 242, 246), text.color);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -15775,6 +15938,11 @@ test "design token overrides compose with built-in themes" {
                 .foreground = Color.rgb8(236, 242, 248),
                 .border = Color.rgb8(60, 70, 80),
             },
+            .card = .{
+                .background = Color.rgb8(15, 21, 27),
+                .foreground = Color.rgb8(237, 243, 249),
+                .border = Color.rgb8(61, 71, 81),
+            },
             .panel = .{
                 .background = Color.rgb8(16, 22, 28),
                 .border = Color.rgb8(58, 68, 78),
@@ -15887,6 +16055,9 @@ test "design token overrides compose with built-in themes" {
     try std.testing.expectEqualDeep(Color.rgb8(14, 20, 26), tokens.controls.alert.background.?);
     try std.testing.expectEqualDeep(Color.rgb8(236, 242, 248), tokens.controls.alert.foreground.?);
     try std.testing.expectEqualDeep(Color.rgb8(60, 70, 80), tokens.controls.alert.border.?);
+    try std.testing.expectEqualDeep(Color.rgb8(15, 21, 27), tokens.controls.card.background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(237, 243, 249), tokens.controls.card.foreground.?);
+    try std.testing.expectEqualDeep(Color.rgb8(61, 71, 81), tokens.controls.card.border.?);
     try std.testing.expectEqualDeep(Color.rgb8(16, 22, 28), tokens.controls.panel.background.?);
     try std.testing.expectEqualDeep(Color.rgb8(58, 68, 78), tokens.controls.panel.border.?);
     try std.testing.expectEqual(@as(f32, 16), tokens.controls.panel.radius.?);
