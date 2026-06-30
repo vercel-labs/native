@@ -46,6 +46,9 @@ pub const ObjectId = u64;
 pub const ImageId = u64;
 pub const FontId = u64;
 
+pub const default_sans_font_id: FontId = 1;
+pub const default_mono_font_id: FontId = 2;
+
 pub const default_glyph_atlas_cache_retention_frames: u64 = 120;
 pub const default_text_layout_cache_retention_frames: u64 = 120;
 
@@ -2999,16 +3002,16 @@ pub const ThemeOptions = struct {
 pub const ColorTokens = struct {
     background: Color = Color.rgb8(255, 255, 255),
     surface: Color = Color.rgb8(255, 255, 255),
-    surface_subtle: Color = Color.rgb8(248, 250, 252),
-    surface_pressed: Color = Color.rgb8(241, 245, 249),
-    text: Color = Color.rgb8(15, 23, 42),
-    text_muted: Color = Color.rgb8(100, 116, 139),
-    border: Color = Color.rgba8(15, 23, 42, 28),
-    accent: Color = Color.rgb8(24, 24, 27),
-    accent_text: Color = Color.rgb8(255, 255, 255),
-    focus_ring: Color = Color.rgb8(37, 99, 235),
-    shadow: Color = Color.rgba8(15, 23, 42, 38),
-    disabled: Color = Color.rgb8(226, 232, 240),
+    surface_subtle: Color = Color.rgb8(244, 244, 245),
+    surface_pressed: Color = Color.rgb8(228, 228, 231),
+    text: Color = Color.rgb8(9, 9, 11),
+    text_muted: Color = Color.rgb8(113, 113, 122),
+    border: Color = Color.rgb8(228, 228, 231),
+    accent: Color = Color.rgb8(47, 70, 220),
+    accent_text: Color = Color.rgb8(250, 250, 250),
+    focus_ring: Color = Color.rgb8(47, 70, 220),
+    shadow: Color = Color.rgba8(0, 0, 0, 26),
+    disabled: Color = Color.rgb8(244, 244, 245),
 
     pub fn theme(color_scheme: ColorScheme, contrast: ColorContrast) ColorTokens {
         return switch (color_scheme) {
@@ -3029,18 +3032,18 @@ pub const ColorTokens = struct {
 
     pub fn dark() ColorTokens {
         return .{
-            .background = Color.rgb8(9, 11, 17),
-            .surface = Color.rgb8(17, 24, 39),
-            .surface_subtle = Color.rgb8(30, 41, 59),
-            .surface_pressed = Color.rgb8(51, 65, 85),
-            .text = Color.rgb8(248, 250, 252),
-            .text_muted = Color.rgb8(148, 163, 184),
-            .border = Color.rgba8(226, 232, 240, 42),
-            .accent = Color.rgb8(244, 244, 245),
-            .accent_text = Color.rgb8(9, 9, 11),
-            .focus_ring = Color.rgb8(96, 165, 250),
-            .shadow = Color.rgba8(0, 0, 0, 110),
-            .disabled = Color.rgb8(51, 65, 85),
+            .background = Color.rgb8(9, 9, 11),
+            .surface = Color.rgb8(24, 24, 27),
+            .surface_subtle = Color.rgb8(39, 39, 42),
+            .surface_pressed = Color.rgb8(63, 63, 70),
+            .text = Color.rgb8(250, 250, 250),
+            .text_muted = Color.rgb8(161, 161, 170),
+            .border = Color.rgb8(39, 39, 42),
+            .accent = Color.rgb8(47, 70, 220),
+            .accent_text = Color.rgb8(250, 250, 250),
+            .focus_ring = Color.rgb8(96, 120, 255),
+            .shadow = Color.rgba8(0, 0, 0, 150),
+            .disabled = Color.rgb8(39, 39, 42),
         };
     }
 
@@ -3080,9 +3083,10 @@ pub const ColorTokens = struct {
 };
 
 pub const TypographyTokens = struct {
-    font_id: FontId = 0,
+    font_id: FontId = default_sans_font_id,
+    mono_font_id: FontId = default_mono_font_id,
     body_size: f32 = 14,
-    label_size: f32 = 12,
+    label_size: f32 = 13,
     title_size: f32 = 20,
     button_size: f32 = 14,
 };
@@ -3096,10 +3100,10 @@ pub const SpacingTokens = struct {
 };
 
 pub const RadiusTokens = struct {
-    sm: f32 = 4,
-    md: f32 = 6,
-    lg: f32 = 8,
-    xl: f32 = 12,
+    sm: f32 = 6,
+    md: f32 = 8,
+    lg: f32 = 10,
+    xl: f32 = 14,
 };
 
 pub const StrokeTokens = struct {
@@ -3116,8 +3120,8 @@ pub const ShadowToken = struct {
 
 pub const ShadowTokens = struct {
     none: ShadowToken = .{ .y = 0, .blur = 0, .spread = 0 },
-    sm: ShadowToken = .{ .y = 6, .blur = 16, .spread = -8 },
-    md: ShadowToken = .{ .y = 14, .blur = 36, .spread = -16 },
+    sm: ShadowToken = .{ .y = 2, .blur = 8, .spread = -4 },
+    md: ShadowToken = .{ .y = 8, .blur = 24, .spread = -12 },
 };
 
 pub const BlurTokens = struct {
@@ -12442,8 +12446,9 @@ test "widget scroll view offsets children and clips display list" {
     try expectLayoutFrame(layout, 4, geometry.RectF.init(0, 60, 120, 32));
 
     var commands: [16]CanvasCommand = undefined;
+    const tokens: DesignTokens = .{};
     var builder = Builder.init(&commands);
-    try layout.emitDisplayList(&builder, .{});
+    try layout.emitDisplayList(&builder, tokens);
     const display_list = builder.displayList();
     try std.testing.expectEqual(@as(usize, 13), display_list.commandCount());
     switch (display_list.commands[0]) {
@@ -12455,7 +12460,7 @@ test "widget scroll view offsets children and clips display list" {
         .fill_rounded_rect => |track| {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(1, 2)), track.id);
             try expectRect(geometry.RectF.init(114, 3, 3, 54), track.rect);
-            try expectFillColor(Color.rgba8(15, 23, 42, 28), track.fill);
+            try expectFillColor(colorWithAlpha(tokens.colors.border, 0.22), track.fill);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -12464,7 +12469,7 @@ test "widget scroll view offsets children and clips display list" {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(1, 3)), thumb.id);
             try std.testing.expectApproxEqAbs(@as(f32, 12.642), thumb.rect.y, 0.001);
             try std.testing.expectApproxEqAbs(@as(f32, 28.928), thumb.rect.height, 0.001);
-            try expectFillColor(Color.rgba(100.0 / 255.0, 116.0 / 255.0, 139.0 / 255.0, 0.55), thumb.fill);
+            try expectFillColor(colorWithAlpha(tokens.colors.text_muted, 0.55), thumb.fill);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -13284,12 +13289,17 @@ test "design tokens provide theme and contrast palettes" {
     const light = DesignTokens.theme(.{});
     try std.testing.expectEqual(Density.regular, light.density);
     try std.testing.expectEqualDeep(ColorTokens.light(), light.colors);
+    try std.testing.expectEqual(default_sans_font_id, light.typography.font_id);
+    try std.testing.expectEqual(default_mono_font_id, light.typography.mono_font_id);
+    try std.testing.expectEqualDeep(Color.rgb8(9, 9, 11), light.colors.text);
+    try std.testing.expectEqualDeep(Color.rgb8(47, 70, 220), light.colors.accent);
 
     const dark = DesignTokens.theme(.{ .color_scheme = .dark, .density = .compact });
     try std.testing.expectEqual(Density.compact, dark.density);
     try std.testing.expectEqualDeep(ColorTokens.dark(), dark.colors);
-    try std.testing.expectEqualDeep(Color.rgb8(9, 11, 17), dark.colors.background);
-    try std.testing.expectEqualDeep(Color.rgb8(248, 250, 252), dark.colors.text);
+    try std.testing.expectEqualDeep(Color.rgb8(9, 9, 11), dark.colors.background);
+    try std.testing.expectEqualDeep(Color.rgb8(250, 250, 250), dark.colors.text);
+    try std.testing.expectEqualDeep(Color.rgb8(39, 39, 42), dark.colors.border);
 
     const high_contrast = DesignTokens.theme(.{ .color_scheme = .dark, .contrast = .high, .density = .spacious });
     try std.testing.expectEqual(Density.spacious, high_contrast.density);
@@ -14520,7 +14530,7 @@ test "widget layout diff includes paint overdraw in dirty bounds" {
     try std.testing.expectEqual(@as(usize, 1), panel_invalidations.len);
     try std.testing.expectEqual(WidgetInvalidationKind.removed, panel_invalidations[0].kind);
     try std.testing.expectEqual(@as(ObjectId, 2), panel_invalidations[0].id);
-    try expectRect(geometry.RectF.init(-14, -8, 148, 88), panel_invalidations[0].dirty_bounds);
+    try expectRect(geometry.RectF.init(-2, 0, 124, 64), panel_invalidations[0].dirty_bounds);
 
     const hidden_panel_invalidations = try WidgetLayoutTree.diff(previous_panel, hidden_panel, &invalidations_buffer);
     try std.testing.expectEqual(@as(usize, 1), hidden_panel_invalidations.len);
@@ -14529,14 +14539,14 @@ test "widget layout diff includes paint overdraw in dirty bounds" {
     try std.testing.expect(!hidden_panel_invalidations[0].layout_dirty);
     try std.testing.expect(hidden_panel_invalidations[0].paint_dirty);
     try std.testing.expect(hidden_panel_invalidations[0].semantics_dirty);
-    try expectRect(geometry.RectF.init(-14, -8, 148, 88), hidden_panel_invalidations[0].dirty_bounds);
+    try expectRect(geometry.RectF.init(-2, 0, 124, 64), hidden_panel_invalidations[0].dirty_bounds);
 
     const hidden_overflow_panel_invalidations = try WidgetLayoutTree.diff(visible_overflow_panel, hidden_overflow_panel, &invalidations_buffer);
     try std.testing.expectEqual(@as(usize, 1), hidden_overflow_panel_invalidations.len);
     try std.testing.expectEqual(WidgetInvalidationKind.changed, hidden_overflow_panel_invalidations[0].kind);
     try std.testing.expectEqual(@as(ObjectId, 5), hidden_overflow_panel_invalidations[0].id);
     try std.testing.expect(hidden_overflow_panel_invalidations[0].paint_dirty);
-    try expectRect(geometry.RectF.init(-14, -8, 204, 68), hidden_overflow_panel_invalidations[0].dirty_bounds);
+    try expectRect(geometry.RectF.init(-2, 0, 192, 44), hidden_overflow_panel_invalidations[0].dirty_bounds);
 
     var unfocused_nodes: [2]WidgetLayoutNode = undefined;
     var focused_nodes: [2]WidgetLayoutNode = undefined;
@@ -15395,7 +15405,7 @@ test "widget display list renders through reference surface" {
     try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
 
     try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 220, 20);
-    try expectPixelRgba8(.{ 24, 24, 27, 255 }, surface, 20, 100);
+    try expectPixelRgba8(.{ 47, 70, 220, 255 }, surface, 20, 100);
 }
 
 test "widget emitter applies button state tokens" {

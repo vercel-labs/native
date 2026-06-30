@@ -1047,13 +1047,27 @@ static NSTextAlignment ZeroNativePacketTextAlignment(NSString *align) {
     return NSTextAlignmentNatural;
 }
 
+static NSFont *ZeroNativePacketPreferredFont(NSDictionary *text, CGFloat size) {
+    NSNumber *fontId = [text[@"font"] isKindOfClass:[NSNumber class]] ? text[@"font"] : nil;
+    unsigned long long value = fontId ? fontId.unsignedLongLongValue : 1;
+    NSArray<NSString *> *candidates = value == 2
+        ? @[ @"Geist Mono", @"GeistMono-Regular", @"Geist Mono Regular" ]
+        : @[ @"Geist", @"Geist-Regular", @"Geist Sans", @"Geist Sans Regular" ];
+    for (NSString *name in candidates) {
+        NSFont *font = [NSFont fontWithName:name size:size];
+        if (font) return font;
+    }
+    if (value == 2) return [NSFont monospacedSystemFontOfSize:size weight:NSFontWeightRegular];
+    return [NSFont systemFontOfSize:size];
+}
+
 static BOOL ZeroNativePacketDrawText(NSDictionary *text, CGFloat opacity) {
     if (!text) return NO;
     NSString *value = [text[@"text"] isKindOfClass:[NSString class]] ? text[@"text"] : @"";
     NSColor *color = ZeroNativePacketColor(text[@"color"], opacity);
     if (!color) return NO;
     CGFloat size = MAX(1, ZeroNativePacketNumber(text[@"size"], 12));
-    NSFont *font = [NSFont systemFontOfSize:size];
+    NSFont *font = ZeroNativePacketPreferredFont(text, size);
     NSPoint origin = ZeroNativePacketPoint(text[@"origin"]);
     NSDictionary *baseAttributes = @{
         NSFontAttributeName: font,

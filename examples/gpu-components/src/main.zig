@@ -589,7 +589,7 @@ fn componentVirtualScrollStep(widget: canvas.Widget) ?f32 {
 }
 
 fn buildComponentsDisplayList(builder: *canvas.Builder, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens) canvas.Error!void {
-    try builder.fillRoundedRect(.{ .id = 3, .rect = rect(28, 26, 916, 616), .radius = canvas.Radius.all(20), .fill = .{ .color = tokens.colors.surface } });
+    try builder.fillRoundedRect(.{ .id = 3, .rect = rect(28, 26, 916, 616), .radius = canvas.Radius.all(tokens.radius.xl), .fill = .{ .color = tokens.colors.surface } });
     try layout.emitDisplayList(builder, tokens);
 }
 
@@ -602,85 +602,25 @@ fn componentTokensFor(mode: ComponentThemeMode) canvas.DesignTokens {
 }
 
 fn componentTokensForScale(mode: ComponentThemeMode, pixel_snap_scale: f32) canvas.DesignTokens {
-    return .{
-        .colors = componentThemeColors(mode),
-        .typography = .{
-            .font_id = 1,
-            .body_size = 12,
-            .label_size = 11,
-            .title_size = 20,
-            .button_size = 12,
-        },
-        .radius = .{
-            .sm = 4,
-            .md = 8,
-            .lg = 14,
-            .xl = 18,
-        },
-        .shadow = .{
-            .sm = .{ .y = 5, .blur = 12, .spread = -8 },
-            .md = .{ .y = 9, .blur = 18, .spread = -12 },
-        },
-        .blur = .{
-            .sm = 5,
-            .md = 12,
-        },
-        .motion = .{ .normal_ms = 180, .slow_ms = 520, .easing = .emphasized },
-        .scroll = .{ .wheel_multiplier = 1.1, .wheel_velocity_scale = 72, .deceleration_per_second = 0.88, .stop_velocity = 4 },
-        .pixel_snap = .{ .geometry = true, .text = true, .scale = normalizedPixelSnapScale(pixel_snap_scale) },
+    const theme_options: canvas.ThemeOptions = switch (mode) {
+        .light => .{},
+        .dark => .{ .color_scheme = .dark },
+        .high => .{ .color_scheme = .dark, .contrast = .high },
     };
+    var tokens = canvas.DesignTokens.theme(theme_options);
+    tokens.blur = .{
+        .sm = 5,
+        .md = 12,
+    };
+    tokens.motion = .{ .normal_ms = 180, .slow_ms = 520, .easing = .emphasized };
+    tokens.scroll = .{ .wheel_multiplier = 1.1, .wheel_velocity_scale = 72, .deceleration_per_second = 0.88, .stop_velocity = 4 };
+    tokens.pixel_snap = .{ .geometry = true, .text = true, .scale = normalizedPixelSnapScale(pixel_snap_scale) };
+    return tokens;
 }
 
 fn normalizedPixelSnapScale(scale_factor: f32) f32 {
     if (!std.math.isFinite(scale_factor) or scale_factor <= 0) return 1;
     return scale_factor;
-}
-
-fn componentThemeColors(mode: ComponentThemeMode) canvas.ColorTokens {
-    return switch (mode) {
-        .light => .{
-            .background = color(247, 249, 252),
-            .surface = rgba(255, 255, 255, 238),
-            .surface_subtle = color(248, 250, 252),
-            .surface_pressed = rgba(38, 99, 235, 24),
-            .text = color(17, 24, 39),
-            .text_muted = color(97, 111, 126),
-            .border = color(224, 231, 239),
-            .accent = color(38, 99, 235),
-            .accent_text = color(255, 255, 255),
-            .focus_ring = color(20, 184, 166),
-            .shadow = rgba(15, 23, 42, 28),
-            .disabled = color(226, 232, 240),
-        },
-        .dark => .{
-            .background = color(8, 13, 23),
-            .surface = rgba(18, 24, 38, 244),
-            .surface_subtle = color(31, 41, 58),
-            .surface_pressed = rgba(96, 165, 250, 34),
-            .text = color(241, 245, 249),
-            .text_muted = color(148, 163, 184),
-            .border = rgba(148, 163, 184, 72),
-            .accent = color(96, 165, 250),
-            .accent_text = color(7, 12, 20),
-            .focus_ring = color(45, 212, 191),
-            .shadow = rgba(0, 0, 0, 120),
-            .disabled = color(51, 65, 85),
-        },
-        .high => .{
-            .background = color(0, 0, 0),
-            .surface = color(8, 8, 8),
-            .surface_subtle = color(24, 24, 27),
-            .surface_pressed = rgba(255, 255, 255, 48),
-            .text = color(255, 255, 255),
-            .text_muted = color(229, 231, 235),
-            .border = rgba(255, 255, 255, 210),
-            .accent = color(255, 255, 255),
-            .accent_text = color(0, 0, 0),
-            .focus_ring = color(250, 204, 21),
-            .shadow = rgba(0, 0, 0, 220),
-            .disabled = color(82, 82, 91),
-        },
-    };
 }
 
 fn buildComponentsWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!canvas.WidgetLayoutTree {
@@ -1274,7 +1214,7 @@ test "gpu components display list renders stable reference snapshot" {
     const surface = (try canvas.ReferenceRenderSurface.initWithScratch(@intFromFloat(canvas_width), @intFromFloat(canvas_height), pixels, scratch)).withImages(&preview_images);
     try surface.renderPass(frame.renderPass(), color(247, 249, 252));
 
-    try std.testing.expectEqual(@as(u64, 14019114436458432869), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 3664528088411181875), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));

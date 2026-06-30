@@ -22,7 +22,7 @@ const dashboard_chrome_prefix_commands: usize = 4;
 const dashboard_chrome_suffix_commands: usize = 0;
 const expected_dashboard_command_count: usize = 63;
 const expected_dashboard_interaction_command_count: usize = 64;
-const expected_dashboard_reference_signature: u64 = 10588035201567630944;
+const expected_dashboard_reference_signature: u64 = 18238069068770690436;
 const refresh_command = "dashboard.refresh";
 const mode_command = "dashboard.mode";
 const live_button_fill_command_id: canvas.ObjectId = 103 * 16 + 1;
@@ -527,47 +527,17 @@ fn dashboardWidgetTokens() canvas.DesignTokens {
 }
 
 fn dashboardWidgetTokensForScale(pixel_snap_scale: f32) canvas.DesignTokens {
-    return .{
-        .colors = .{
-            .surface = rgba(255, 255, 255, 236),
-            .surface_subtle = color(248, 250, 252),
-            .surface_pressed = rgba(48, 111, 237, 24),
-            .text = color(18, 24, 38),
-            .text_muted = color(100, 112, 132),
-            .border = color(226, 232, 240),
-            .accent = color(48, 111, 237),
-            .accent_text = color(255, 255, 255),
-            .focus_ring = color(37, 99, 235),
-            .shadow = canvas.Color.rgba8(16, 24, 40, 24),
-            .disabled = color(226, 232, 240),
-        },
-        .typography = .{
-            .font_id = 1,
-            .body_size = 12,
-            .label_size = 11,
-            .title_size = 20,
-            .button_size = 12,
-        },
-        .radius = .{
-            .sm = 4,
-            .md = 8,
-            .lg = 16,
-            .xl = 18,
-        },
-        .shadow = .{
-            .sm = .{ .y = 6, .blur = 14, .spread = -8 },
-            .md = .{ .y = 10, .blur = 20, .spread = -12 },
-        },
-        .blur = .{
-            .sm = 8,
-            .md = dashboard_glass_blur,
-        },
-        .motion = .{
-            .slow_ms = 900,
-            .easing = .emphasized,
-        },
-        .pixel_snap = .{ .geometry = true, .text = true, .scale = normalizedPixelSnapScale(pixel_snap_scale) },
+    var tokens = canvas.DesignTokens.theme(.{});
+    tokens.blur = .{
+        .sm = 8,
+        .md = dashboard_glass_blur,
     };
+    tokens.motion = .{
+        .slow_ms = 900,
+        .easing = .emphasized,
+    };
+    tokens.pixel_snap = .{ .geometry = true, .text = true, .scale = normalizedPixelSnapScale(pixel_snap_scale) };
+    return tokens;
 }
 
 fn normalizedPixelSnapScale(scale_factor: f32) f32 {
