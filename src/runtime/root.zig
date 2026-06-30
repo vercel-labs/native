@@ -1953,7 +1953,7 @@ pub const Runtime = struct {
 
     fn dispatchCanvasWidgetCommandFromKeyboard(self: *Runtime, app: App, keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
         if (keyboard_event.keyboard.phase != .key_down or keyboard_event.keyboard.modifiers.hasNavigationModifier()) return;
-        if (!isCanvasWidgetActivationKey(keyboard_event.keyboard.key)) return;
+        if (!canvas.isWidgetActivationKey(keyboard_event.keyboard.key)) return;
         const index = self.findViewIndex(keyboard_event.window_id, keyboard_event.view_label) orelse return;
         if (self.views[index].kind != .gpu_surface) return;
         const target = keyboard_event.target orelse return;
@@ -5599,38 +5599,6 @@ fn canvasWidgetSelectionClearsSiblings(kind: canvas.WidgetKind) bool {
     };
 }
 
-fn isCanvasWidgetActivationKey(key: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(key, "space") or std.ascii.eqlIgnoreCase(key, "enter");
-}
-
-fn canvasWidgetSliderKeyboardValue(current: f32, keyboard: canvas.WidgetKeyboardEvent) ?f32 {
-    const step: f32 = if (keyboard.modifiers.shift) 0.1 else 0.05;
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) {
-        return current - step;
-    }
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) {
-        return current + step;
-    }
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return 0;
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return 1;
-    return null;
-}
-
-fn canvasWidgetScrollKeyboardDelta(widget: canvas.Widget, keyboard: canvas.WidgetKeyboardEvent) ?f32 {
-    const viewport = widget.frame.inset(widget.layout.padding).normalized();
-    const line_step = @max(24, viewport.height * 0.35);
-    const page_step = @max(line_step, viewport.height * 0.85);
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) {
-        return -line_step;
-    }
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) {
-        return line_step;
-    }
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "pageup")) return -page_step;
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "pagedown")) return page_step;
-    return null;
-}
-
 fn canvasWidgetKineticScrollFrameMs(frame_interval_ns: u64) f32 {
     const normalized = if (frame_interval_ns > 0) frame_interval_ns else platform.default_gpu_frame_interval_ns;
     return @as(f32, @floatFromInt(normalized)) / 1_000_000.0;
@@ -5655,12 +5623,6 @@ const CanvasWidgetGroupFocusEdge = enum {
     first,
     last,
 };
-
-fn canvasWidgetScrollKeyboardTarget(keyboard: canvas.WidgetKeyboardEvent) ?CanvasWidgetScrollKeyboardTarget {
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return .start;
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return .end;
-    return null;
-}
 
 fn canvasWidgetGroupFocusEdgeFromInput(input_event: GpuSurfaceInputEvent) ?CanvasWidgetGroupFocusEdge {
     if (input_event.kind != .key_down) return null;
@@ -6983,7 +6945,7 @@ const RuntimeView = struct {
 
     fn canvasWidgetToggleAnimationForKeyboard(self: *const RuntimeView, id: canvas.ObjectId, keyboard: canvas.WidgetKeyboardEvent) ?CanvasWidgetToggleAnimation {
         if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
-        if (!isCanvasWidgetActivationKey(keyboard.key)) return null;
+        if (!canvas.isWidgetActivationKey(keyboard.key)) return null;
         return self.canvasWidgetToggleAnimation(id);
     }
 
@@ -7005,31 +6967,18 @@ const RuntimeView = struct {
     }
 
     fn applyCanvasWidgetControlKeyboard(self: *RuntimeView, id: canvas.ObjectId, keyboard: canvas.WidgetKeyboardEvent) anyerror!?geometry.RectF {
-        if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
         const index = self.canvasWidgetNodeIndexById(id) orelse return null;
         const widget = self.widget_layout_nodes[index].widget;
-        if (widget.state.disabled) return null;
 
-        return switch (widget.kind) {
-            .checkbox, .toggle => if (isCanvasWidgetActivationKey(keyboard.key))
-                try self.toggleCanvasWidgetBooleanControl(id)
-            else
-                null,
-            .slider => if (canvasWidgetSliderKeyboardValue(widget.value, keyboard)) |next_value|
-                try self.setCanvasWidgetValue(index, next_value)
-            else
-                null,
-            .list_item, .menu_item, .data_cell, .segmented_control => if (isCanvasWidgetActivationKey(keyboard.key))
-                try self.setCanvasWidgetSelected(id, true)
-            else
-                null,
-            .scroll_view => if (canvasWidgetScrollKeyboardTarget(keyboard)) |target|
-                try self.applyCanvasWidgetScrollKeyboardTarget(index, target)
-            else if (canvasWidgetScrollKeyboardDelta(widget, keyboard)) |delta|
-                try self.applyCanvasWidgetScroll(index, delta, .discrete, false)
-            else
-                null,
-            else => null,
+        const intent = canvas.widgetKeyboardControlIntent(widget, keyboard) orelse return null;
+        return switch (intent.kind) {
+            .toggle => try self.toggleCanvasWidgetBooleanControl(id),
+            .set_value => if (intent.value) |next_value| try self.setCanvasWidgetValue(index, next_value) else null,
+            .select => try self.setCanvasWidgetSelected(id, true),
+            .scroll_to_start => try self.applyCanvasWidgetScrollKeyboardTarget(index, .start),
+            .scroll_to_end => try self.applyCanvasWidgetScrollKeyboardTarget(index, .end),
+            .scroll_by => try self.applyCanvasWidgetScroll(index, intent.delta, .discrete, false),
+            .press => null,
         };
     }
 

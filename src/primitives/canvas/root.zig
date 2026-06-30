@@ -3696,6 +3696,23 @@ pub const WidgetKeyboardEvent = struct {
     }
 };
 
+pub const WidgetControlIntentKind = enum {
+    press,
+    toggle,
+    select,
+    set_value,
+    scroll_by,
+    scroll_to_start,
+    scroll_to_end,
+};
+
+pub const WidgetControlIntent = struct {
+    kind: WidgetControlIntentKind,
+    actions: WidgetActions = .{},
+    value: ?f32 = null,
+    delta: f32 = 0,
+};
+
 pub const WidgetFileDropEvent = struct {
     point: geometry.PointF,
     paths: []const []const u8 = &.{},
@@ -8443,6 +8460,94 @@ fn routeWidgetKeyboardEvent(layout: WidgetLayoutTree, event: WidgetKeyboardEvent
     const target = focusTargetFromLayoutNode(layout, target_index) orelse return .{ .entries = output[0..0] };
     const entries = try routeWidgetEventPath(layout, target.index, output);
     return .{ .target = target, .entries = entries };
+}
+
+pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent) ?WidgetControlIntent {
+    if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
+    if (widget.state.disabled) return null;
+    return switch (widget.kind) {
+        .button, .icon_button => if (isWidgetActivationKey(keyboard.key))
+            .{ .kind = .press, .actions = .{ .press = true } }
+        else
+            null,
+        .checkbox, .toggle => if (isWidgetActivationKey(keyboard.key))
+            .{ .kind = .toggle, .actions = .{ .toggle = true } }
+        else
+            null,
+        .list_item, .menu_item, .data_cell, .segmented_control => if (isWidgetActivationKey(keyboard.key))
+            .{
+                .kind = .select,
+                .actions = .{
+                    .select = true,
+                    .press = widget.command.len > 0,
+                },
+            }
+        else
+            null,
+        .slider => if (widgetSliderKeyboardValue(widget.value, keyboard)) |next_value|
+            .{
+                .kind = .set_value,
+                .actions = .{
+                    .increment = next_value > widget.value,
+                    .decrement = next_value < widget.value,
+                },
+                .value = std.math.clamp(next_value, 0, 1),
+            }
+        else
+            null,
+        .scroll_view, .list, .data_grid => widgetScrollKeyboardIntent(widget, keyboard),
+        else => null,
+    };
+}
+
+pub fn isWidgetActivationKey(key: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(key, "space") or std.ascii.eqlIgnoreCase(key, "enter");
+}
+
+pub fn widgetSliderKeyboardValue(current: f32, keyboard: WidgetKeyboardEvent) ?f32 {
+    if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
+    const step: f32 = if (keyboard.modifiers.shift) 0.1 else 0.05;
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) {
+        return current - step;
+    }
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) {
+        return current + step;
+    }
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return 0;
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return 1;
+    return null;
+}
+
+pub fn widgetScrollKeyboardIntent(widget: Widget, keyboard: WidgetKeyboardEvent) ?WidgetControlIntent {
+    if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
+    if (widget.state.disabled) return null;
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return .{ .kind = .scroll_to_start, .actions = .{ .decrement = true } };
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return .{ .kind = .scroll_to_end, .actions = .{ .increment = true } };
+    const delta = widgetScrollKeyboardDelta(widget, keyboard) orelse return null;
+    return .{
+        .kind = .scroll_by,
+        .actions = .{
+            .increment = delta > 0,
+            .decrement = delta < 0,
+        },
+        .delta = delta,
+    };
+}
+
+pub fn widgetScrollKeyboardDelta(widget: Widget, keyboard: WidgetKeyboardEvent) ?f32 {
+    if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
+    const viewport = widget.frame.inset(widget.layout.padding).normalized();
+    const line_step = @max(24, viewport.height * 0.35);
+    const page_step = @max(line_step, viewport.height * 0.85);
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) {
+        return -line_step;
+    }
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) {
+        return line_step;
+    }
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "pageup")) return -page_step;
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "pagedown")) return page_step;
+    return null;
 }
 
 fn routeWidgetFileDropEvent(layout: WidgetLayoutTree, event: WidgetFileDropEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
@@ -20148,6 +20253,57 @@ test "text edit state applies utf8-aware caret insert and delete events" {
 
     var small: [1]u8 = undefined;
     try std.testing.expectError(error.TextEditBufferTooSmall, state.apply(.{ .insert_text = "toolong" }, &small));
+}
+
+test "widget keyboard control intents map activation keys" {
+    const press = widgetKeyboardControlIntent(.{ .kind = .button, .text = "Save" }, .{ .phase = .key_down, .key = "enter" }).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.press, press.kind);
+    try std.testing.expect(press.actions.press);
+
+    const toggle = widgetKeyboardControlIntent(.{ .kind = .toggle, .text = "Live" }, .{ .phase = .key_down, .key = "space" }).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.toggle, toggle.kind);
+    try std.testing.expect(toggle.actions.toggle);
+
+    const selected = widgetKeyboardControlIntent(.{ .kind = .segmented_control, .text = "Revenue", .command = "mode.change" }, .{ .phase = .key_down, .key = "enter" }).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.select, selected.kind);
+    try std.testing.expect(selected.actions.select);
+    try std.testing.expect(selected.actions.press);
+
+    try std.testing.expect(widgetKeyboardControlIntent(.{ .kind = .button, .text = "Save" }, .{ .phase = .key_down, .key = "enter", .modifiers = .{ .super = true } }) == null);
+    try std.testing.expect(widgetKeyboardControlIntent(.{ .kind = .button, .text = "Save", .state = .{ .disabled = true } }, .{ .phase = .key_down, .key = "enter" }) == null);
+    try std.testing.expect(widgetKeyboardControlIntent(.{ .kind = .button, .text = "Save" }, .{ .phase = .key_up, .key = "enter" }) == null);
+}
+
+test "widget keyboard control intents map slider and scroll keys" {
+    const slider = Widget{ .kind = .slider, .value = 0.5 };
+    const increment = widgetKeyboardControlIntent(slider, .{ .phase = .key_down, .key = "arrowright" }).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.set_value, increment.kind);
+    try std.testing.expect(increment.actions.increment);
+    try std.testing.expect(!increment.actions.decrement);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.55), increment.value.?, 0.001);
+
+    const decrement = widgetKeyboardControlIntent(slider, .{ .phase = .key_down, .key = "arrowleft", .modifiers = .{ .shift = true } }).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.set_value, decrement.kind);
+    try std.testing.expect(decrement.actions.decrement);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), decrement.value.?, 0.001);
+
+    const end = widgetKeyboardControlIntent(slider, .{ .phase = .key_down, .key = "end" }).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.set_value, end.kind);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), end.value.?, 0.001);
+
+    const scroll = Widget{ .kind = .scroll_view, .frame = geometry.RectF.init(0, 0, 120, 100) };
+    const line_down = widgetKeyboardControlIntent(scroll, .{ .phase = .key_down, .key = "arrowdown" }).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, line_down.kind);
+    try std.testing.expect(line_down.actions.increment);
+    try std.testing.expectApproxEqAbs(@as(f32, 35), line_down.delta, 0.001);
+
+    const page_up = widgetKeyboardControlIntent(scroll, .{ .phase = .key_down, .key = "pageup" }).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, page_up.kind);
+    try std.testing.expect(page_up.actions.decrement);
+    try std.testing.expectApproxEqAbs(@as(f32, -85), page_up.delta, 0.001);
+
+    try std.testing.expectEqual(WidgetControlIntentKind.scroll_to_start, widgetKeyboardControlIntent(scroll, .{ .phase = .key_down, .key = "home" }).?.kind);
+    try std.testing.expectEqual(WidgetControlIntentKind.scroll_to_end, widgetKeyboardControlIntent(scroll, .{ .phase = .key_down, .key = "end" }).?.kind);
 }
 
 test "widget keyboard events map to text edit events" {
