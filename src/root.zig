@@ -147,6 +147,10 @@ pub export fn zero_native_app_viewport_state(app: ?*anyopaque, out: ?*embed.Mobi
     return embed.zero_native_app_viewport_state(app, out);
 }
 
+pub export fn zero_native_app_gpu_frame_state(app: ?*anyopaque, out: ?*embed.MobileGpuFrameState) c_int {
+    return embed.zero_native_app_gpu_frame_state(app, out);
+}
+
 pub export fn zero_native_app_touch(app: ?*anyopaque, id: u64, phase: c_int, x: f32, y: f32, pressure: f32) void {
     embed.zero_native_app_touch(app, id, phase, x, y, pressure);
 }

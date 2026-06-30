@@ -63,6 +63,12 @@ enum {
   ZERO_NATIVE_WIDGET_ACTION_KIND_DRAG = 11,
   ZERO_NATIVE_WIDGET_ACTION_KIND_DROP_FILES = 12,
 };
+enum {
+  ZERO_NATIVE_GPU_SURFACE_STATUS_UNAVAILABLE = 0,
+  ZERO_NATIVE_GPU_SURFACE_STATUS_INITIALIZING = 1,
+  ZERO_NATIVE_GPU_SURFACE_STATUS_READY = 2,
+  ZERO_NATIVE_GPU_SURFACE_STATUS_LOST = 3,
+};
 
 typedef struct zero_native_widget_semantics {
   uint64_t id;
@@ -145,6 +151,39 @@ typedef struct zero_native_viewport_state {
   float content_width;
   float content_height;
 } zero_native_viewport_state_t;
+typedef struct zero_native_gpu_frame_state {
+  uint64_t surface_id;
+  uint64_t window_id;
+  float width;
+  float height;
+  float scale;
+  uint64_t frame_index;
+  uint64_t timestamp_ns;
+  uint64_t frame_interval_ns;
+  uint64_t input_timestamp_ns;
+  uint64_t input_latency_ns;
+  uint64_t input_latency_budget_ns;
+  uintptr_t input_latency_budget_exceeded_count;
+  int input_latency_budget_ok;
+  uint64_t first_frame_latency_ns;
+  uint64_t first_frame_latency_budget_ns;
+  uintptr_t first_frame_latency_budget_exceeded_count;
+  int first_frame_latency_budget_ok;
+  int nonblank;
+  uint32_t sample_color;
+  int status;
+  int vsync;
+  uint64_t canvas_revision;
+  uintptr_t canvas_command_count;
+  int canvas_frame_requires_render;
+  int canvas_frame_full_repaint;
+  uintptr_t canvas_frame_batch_count;
+  uintptr_t canvas_frame_budget_exceeded_count;
+  int canvas_frame_budget_ok;
+  uint64_t widget_revision;
+  uintptr_t widget_node_count;
+  uintptr_t widget_semantics_count;
+} zero_native_gpu_frame_state_t;
 
 void *zero_native_app_create(void);
 void zero_native_app_destroy(void *app);
@@ -155,6 +194,7 @@ void zero_native_app_stop(void *app);
 void zero_native_app_resize(void *app, float width, float height, float scale, void *surface);
 void zero_native_app_viewport(void *app, float width, float height, float scale, void *surface, float safe_top, float safe_right, float safe_bottom, float safe_left, float keyboard_top, float keyboard_right, float keyboard_bottom, float keyboard_left);
 int zero_native_app_viewport_state(void *app, zero_native_viewport_state_t *out);
+int zero_native_app_gpu_frame_state(void *app, zero_native_gpu_frame_state_t *out);
 void zero_native_app_touch(void *app, uint64_t id, int phase, float x, float y, float pressure);
 void zero_native_app_scroll(void *app, uint64_t id, float x, float y, float delta_x, float delta_y);
 void zero_native_app_key(void *app, int phase, const char *key, uintptr_t key_len, const char *text, uintptr_t text_len, uint32_t modifiers_mask);

@@ -153,6 +153,40 @@ pub const MobileViewportState = extern struct {
     content_height: f32 = 0,
 };
 
+pub const MobileGpuFrameState = extern struct {
+    surface_id: u64 = 0,
+    window_id: u64 = 0,
+    width: f32 = 0,
+    height: f32 = 0,
+    scale: f32 = 1,
+    frame_index: u64 = 0,
+    timestamp_ns: u64 = 0,
+    frame_interval_ns: u64 = platform.default_gpu_frame_interval_ns,
+    input_timestamp_ns: u64 = 0,
+    input_latency_ns: u64 = 0,
+    input_latency_budget_ns: u64 = platform.default_gpu_frame_interval_ns,
+    input_latency_budget_exceeded_count: usize = 0,
+    input_latency_budget_ok: c_int = 1,
+    first_frame_latency_ns: u64 = 0,
+    first_frame_latency_budget_ns: u64 = platform.default_gpu_first_frame_latency_budget_ns,
+    first_frame_latency_budget_exceeded_count: usize = 0,
+    first_frame_latency_budget_ok: c_int = 1,
+    nonblank: c_int = 0,
+    sample_color: u32 = 0,
+    status: c_int = @intFromEnum(platform.GpuSurfaceStatus.unavailable),
+    vsync: c_int = 0,
+    canvas_revision: u64 = 0,
+    canvas_command_count: usize = 0,
+    canvas_frame_requires_render: c_int = 0,
+    canvas_frame_full_repaint: c_int = 0,
+    canvas_frame_batch_count: usize = 0,
+    canvas_frame_budget_exceeded_count: usize = 0,
+    canvas_frame_budget_ok: c_int = 1,
+    widget_revision: u64 = 0,
+    widget_node_count: usize = 0,
+    widget_semantics_count: usize = 0,
+};
+
 pub const EmbeddedApp = struct {
     app: runtime.App,
     runtime: runtime.Runtime,
@@ -268,6 +302,10 @@ pub const EmbeddedApp = struct {
 
     pub fn widgetSemantics(self: *const EmbeddedApp) anyerror![]const canvas.WidgetSemanticsNode {
         return self.runtime.canvasWidgetSemantics(1, mobile_gpu_surface_label);
+    }
+
+    pub fn gpuFrameState(self: *const EmbeddedApp) anyerror!platform.GpuFrame {
+        return self.runtime.gpuSurfaceFrame(1, mobile_gpu_surface_label);
     }
 
     pub fn widgetTextGeometry(self: *const EmbeddedApp, id: canvas.ObjectId) anyerror!canvas.WidgetTextGeometry {
@@ -521,6 +559,21 @@ pub fn zero_native_app_viewport_state(app: ?*anyopaque, out: ?*MobileViewportSta
     return 1;
 }
 
+pub fn zero_native_app_gpu_frame_state(app: ?*anyopaque, out: ?*MobileGpuFrameState) c_int {
+    const self = mobileApp(app) orelse return 0;
+    const output = out orelse {
+        recordError(self, error.InvalidCommand);
+        return 0;
+    };
+    const frame = self.embedded.gpuFrameState() catch |err| {
+        recordError(self, err);
+        return 0;
+    };
+    output.* = mobileGpuFrameStateFromFrame(frame);
+    self.last_error = null;
+    return 1;
+}
+
 fn mobileViewportStateFromSurface(surface: platform.Surface) MobileViewportState {
     const content = geometry.RectF.fromSize(surface.size).deflate(combinedMobileViewportInsets(surface));
     return .{
@@ -540,6 +593,42 @@ fn mobileViewportStateFromSurface(surface: platform.Surface) MobileViewportState
         .content_y = content.y,
         .content_width = content.width,
         .content_height = content.height,
+    };
+}
+
+fn mobileGpuFrameStateFromFrame(frame: platform.GpuFrame) MobileGpuFrameState {
+    return .{
+        .surface_id = frame.surface_id,
+        .window_id = frame.window_id,
+        .width = frame.size.width,
+        .height = frame.size.height,
+        .scale = frame.scale_factor,
+        .frame_index = frame.frame_index,
+        .timestamp_ns = frame.timestamp_ns,
+        .frame_interval_ns = frame.frame_interval_ns,
+        .input_timestamp_ns = frame.input_timestamp_ns,
+        .input_latency_ns = frame.input_latency_ns,
+        .input_latency_budget_ns = frame.input_latency_budget_ns,
+        .input_latency_budget_exceeded_count = frame.input_latency_budget_exceeded_count,
+        .input_latency_budget_ok = if (frame.input_latency_budget_ok) 1 else 0,
+        .first_frame_latency_ns = frame.first_frame_latency_ns,
+        .first_frame_latency_budget_ns = frame.first_frame_latency_budget_ns,
+        .first_frame_latency_budget_exceeded_count = frame.first_frame_latency_budget_exceeded_count,
+        .first_frame_latency_budget_ok = if (frame.first_frame_latency_budget_ok) 1 else 0,
+        .nonblank = if (frame.nonblank) 1 else 0,
+        .sample_color = frame.sample_color,
+        .status = @intFromEnum(frame.status),
+        .vsync = if (frame.vsync) 1 else 0,
+        .canvas_revision = frame.canvas_revision,
+        .canvas_command_count = frame.canvas_command_count,
+        .canvas_frame_requires_render = if (frame.canvas_frame_requires_render) 1 else 0,
+        .canvas_frame_full_repaint = if (frame.canvas_frame_full_repaint) 1 else 0,
+        .canvas_frame_batch_count = frame.canvas_frame_batch_count,
+        .canvas_frame_budget_exceeded_count = frame.canvas_frame_budget_exceeded_count,
+        .canvas_frame_budget_ok = if (frame.canvas_frame_budget_ok) 1 else 0,
+        .widget_revision = frame.widget_revision,
+        .widget_node_count = frame.widget_node_count,
+        .widget_semantics_count = frame.widget_semantics_count,
     };
 }
 
@@ -1239,6 +1328,91 @@ test "mobile C ABI forwards key text and IME input" {
     zero_native_app_ime(app, 99, "", 0, -1);
     try std.testing.expectEqual(@as(usize, 5), self.input_count);
     try std.testing.expectEqualStrings("InvalidImeKind", std.mem.span(zero_native_app_last_error_name(app)));
+}
+
+test "mobile C ABI exposes GPU frame state" {
+    const app = zero_native_app_create() orelse return error.TestUnexpectedResult;
+    defer zero_native_app_destroy(app);
+
+    const self = mobileApp(app).?;
+    self.null_platform.gpu_surfaces = true;
+    zero_native_app_start(app);
+    const view = try self.embedded.runtime.createView(.{
+        .window_id = 1,
+        .label = mobile_gpu_surface_label,
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 390, 844),
+    });
+
+    const children = [_]canvas.Widget{
+        .{
+            .id = 2,
+            .kind = .button,
+            .frame = geometry.RectF.init(16, 16, 120, 36),
+            .text = "Continue",
+            .semantics = .{ .label = "Continue" },
+        },
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{
+        .id = 1,
+        .kind = .panel,
+        .children = &children,
+        .semantics = .{ .label = "Mobile GPU frame" },
+    }, geometry.RectF.init(0, 0, 390, 844), &nodes);
+    _ = try self.embedded.runtime.setCanvasWidgetLayout(1, mobile_gpu_surface_label, layout);
+    _ = try self.embedded.runtime.emitCanvasWidgetDisplayList(1, mobile_gpu_surface_label, .{});
+
+    try self.embedded.runtime.dispatchPlatformEvent(self.embedded.app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = mobile_gpu_surface_label,
+        .kind = .pointer_down,
+        .timestamp_ns = 1_000_000,
+        .pointer_id = 9,
+        .x = 22,
+        .y = 28,
+        .pressure = 0.75,
+    } });
+    try self.embedded.runtime.dispatchPlatformEvent(self.embedded.app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = mobile_gpu_surface_label,
+        .size = geometry.SizeF.init(390, 844),
+        .scale_factor = 3,
+        .frame_index = 7,
+        .timestamp_ns = 21_000_000,
+        .frame_interval_ns = 8_333_333,
+        .nonblank = true,
+        .sample_color = 0xff3366ff,
+        .status = .ready,
+        .vsync = true,
+    } });
+
+    var state: MobileGpuFrameState = .{};
+    try std.testing.expectEqual(@as(c_int, 1), zero_native_app_gpu_frame_state(app, &state));
+    try std.testing.expectEqual(view.id, state.surface_id);
+    try std.testing.expectEqual(@as(u64, 1), state.window_id);
+    try std.testing.expectEqual(@as(f32, 390), state.width);
+    try std.testing.expectEqual(@as(f32, 844), state.height);
+    try std.testing.expectEqual(@as(f32, 3), state.scale);
+    try std.testing.expectEqual(@as(u64, 7), state.frame_index);
+    try std.testing.expectEqual(@as(u64, 21_000_000), state.timestamp_ns);
+    try std.testing.expectEqual(@as(u64, 8_333_333), state.frame_interval_ns);
+    try std.testing.expectEqual(@as(u64, 1_000_000), state.input_timestamp_ns);
+    try std.testing.expectEqual(@as(u64, 20_000_000), state.input_latency_ns);
+    try std.testing.expectEqual(@as(u64, 8_333_333), state.input_latency_budget_ns);
+    try std.testing.expectEqual(@as(usize, 1), state.input_latency_budget_exceeded_count);
+    try std.testing.expectEqual(@as(c_int, 0), state.input_latency_budget_ok);
+    try std.testing.expectEqual(@as(c_int, 1), state.nonblank);
+    try std.testing.expectEqual(@as(u32, 0xff3366ff), state.sample_color);
+    try std.testing.expectEqual(@intFromEnum(platform.GpuSurfaceStatus.ready), state.status);
+    try std.testing.expectEqual(@as(c_int, 1), state.vsync);
+    try std.testing.expect(state.canvas_revision > 0);
+    try std.testing.expectEqual(@as(usize, 2), state.widget_node_count);
+    try std.testing.expectEqual(@as(usize, 2), state.widget_semantics_count);
+    try std.testing.expectEqualStrings("", std.mem.span(zero_native_app_last_error_name(app)));
+
+    try std.testing.expectEqual(@as(c_int, 0), zero_native_app_gpu_frame_state(app, null));
+    try std.testing.expectEqualStrings("InvalidCommand", std.mem.span(zero_native_app_last_error_name(app)));
 }
 
 test "mobile C ABI exposes GPU widget accessibility semantics" {

@@ -743,6 +743,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     external fun nativeIme(app: Long, kind: Int, text: String, cursor: Long)
     external fun nativeCommand(app: Long, command: String): Int
     external fun nativeFrame(app: Long)
+    external fun nativeGpuFrameState(app: Long, longs: LongArray, ints: IntArray, floats: FloatArray): Boolean
     external fun nativeWidgetSemanticsCount(app: Long): Int
     external fun nativeWidgetSemanticsFields(app: Long, index: Int, ids: LongArray, ints: IntArray, floats: FloatArray): Boolean
     external fun nativeWidgetSemanticsLabel(app: Long, index: Int): ByteArray

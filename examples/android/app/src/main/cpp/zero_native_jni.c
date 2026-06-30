@@ -112,6 +112,56 @@ JNIEXPORT void JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativ
     zero_native_app_frame((void *)app);
 }
 
+JNIEXPORT jboolean JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativeGpuFrameState(JNIEnv *env, jobject self, jlong app, jlongArray longs, jintArray ints, jfloatArray floats) {
+    (void)self;
+    if (!longs || !ints || !floats) return JNI_FALSE;
+    if ((*env)->GetArrayLength(env, longs) < 19 || (*env)->GetArrayLength(env, ints) < 9 || (*env)->GetArrayLength(env, floats) < 3) return JNI_FALSE;
+    zero_native_gpu_frame_state_t state;
+    memset(&state, 0, sizeof(state));
+    if (!zero_native_app_gpu_frame_state((void *)app, &state)) return JNI_FALSE;
+    const jlong long_values[19] = {
+        (jlong)state.surface_id,
+        (jlong)state.window_id,
+        (jlong)state.frame_index,
+        (jlong)state.timestamp_ns,
+        (jlong)state.frame_interval_ns,
+        (jlong)state.input_timestamp_ns,
+        (jlong)state.input_latency_ns,
+        (jlong)state.input_latency_budget_ns,
+        (jlong)state.input_latency_budget_exceeded_count,
+        (jlong)state.first_frame_latency_ns,
+        (jlong)state.first_frame_latency_budget_ns,
+        (jlong)state.first_frame_latency_budget_exceeded_count,
+        (jlong)state.canvas_revision,
+        (jlong)state.canvas_command_count,
+        (jlong)state.canvas_frame_batch_count,
+        (jlong)state.canvas_frame_budget_exceeded_count,
+        (jlong)state.widget_revision,
+        (jlong)state.widget_node_count,
+        (jlong)state.widget_semantics_count,
+    };
+    const jint int_values[9] = {
+        (jint)state.input_latency_budget_ok,
+        (jint)state.first_frame_latency_budget_ok,
+        (jint)state.nonblank,
+        (jint)state.sample_color,
+        (jint)state.status,
+        (jint)state.vsync,
+        (jint)state.canvas_frame_requires_render,
+        (jint)state.canvas_frame_full_repaint,
+        (jint)state.canvas_frame_budget_ok,
+    };
+    const jfloat float_values[3] = {
+        (jfloat)state.width,
+        (jfloat)state.height,
+        (jfloat)state.scale,
+    };
+    (*env)->SetLongArrayRegion(env, longs, 0, 19, long_values);
+    (*env)->SetIntArrayRegion(env, ints, 0, 9, int_values);
+    (*env)->SetFloatArrayRegion(env, floats, 0, 3, float_values);
+    return JNI_TRUE;
+}
+
 JNIEXPORT jint JNICALL Java_dev_zero_1native_examples_android_MainActivity_nativeWidgetSemanticsCount(JNIEnv *env, jobject self, jlong app) {
     (void)env;
     (void)self;

@@ -436,6 +436,12 @@ fn embedHeader() []const u8 {
     \\  ZERO_NATIVE_WIDGET_ACTION_KIND_DRAG = 11,
     \\  ZERO_NATIVE_WIDGET_ACTION_KIND_DROP_FILES = 12,
     \\};
+    \\enum {
+    \\  ZERO_NATIVE_GPU_SURFACE_STATUS_UNAVAILABLE = 0,
+    \\  ZERO_NATIVE_GPU_SURFACE_STATUS_INITIALIZING = 1,
+    \\  ZERO_NATIVE_GPU_SURFACE_STATUS_READY = 2,
+    \\  ZERO_NATIVE_GPU_SURFACE_STATUS_LOST = 3,
+    \\};
     \\typedef struct zero_native_widget_semantics {
     \\  uint64_t id;
     \\  uint64_t parent_id;
@@ -514,6 +520,39 @@ fn embedHeader() []const u8 {
     \\  float content_width;
     \\  float content_height;
     \\} zero_native_viewport_state_t;
+    \\typedef struct zero_native_gpu_frame_state {
+    \\  uint64_t surface_id;
+    \\  uint64_t window_id;
+    \\  float width;
+    \\  float height;
+    \\  float scale;
+    \\  uint64_t frame_index;
+    \\  uint64_t timestamp_ns;
+    \\  uint64_t frame_interval_ns;
+    \\  uint64_t input_timestamp_ns;
+    \\  uint64_t input_latency_ns;
+    \\  uint64_t input_latency_budget_ns;
+    \\  uintptr_t input_latency_budget_exceeded_count;
+    \\  int input_latency_budget_ok;
+    \\  uint64_t first_frame_latency_ns;
+    \\  uint64_t first_frame_latency_budget_ns;
+    \\  uintptr_t first_frame_latency_budget_exceeded_count;
+    \\  int first_frame_latency_budget_ok;
+    \\  int nonblank;
+    \\  uint32_t sample_color;
+    \\  int status;
+    \\  int vsync;
+    \\  uint64_t canvas_revision;
+    \\  uintptr_t canvas_command_count;
+    \\  int canvas_frame_requires_render;
+    \\  int canvas_frame_full_repaint;
+    \\  uintptr_t canvas_frame_batch_count;
+    \\  uintptr_t canvas_frame_budget_exceeded_count;
+    \\  int canvas_frame_budget_ok;
+    \\  uint64_t widget_revision;
+    \\  uintptr_t widget_node_count;
+    \\  uintptr_t widget_semantics_count;
+    \\} zero_native_gpu_frame_state_t;
     \\void *zero_native_app_create(void);
     \\void zero_native_app_destroy(void *app);
     \\void zero_native_app_start(void *app);
@@ -523,6 +562,7 @@ fn embedHeader() []const u8 {
     \\void zero_native_app_resize(void *app, float width, float height, float scale, void *surface);
     \\void zero_native_app_viewport(void *app, float width, float height, float scale, void *surface, float safe_top, float safe_right, float safe_bottom, float safe_left, float keyboard_top, float keyboard_right, float keyboard_bottom, float keyboard_left);
     \\int zero_native_app_viewport_state(void *app, zero_native_viewport_state_t *out);
+    \\int zero_native_app_gpu_frame_state(void *app, zero_native_gpu_frame_state_t *out);
     \\void zero_native_app_touch(void *app, uint64_t id, int phase, float x, float y, float pressure);
     \\void zero_native_app_scroll(void *app, uint64_t id, float x, float y, float delta_x, float delta_y);
     \\void zero_native_app_key(void *app, int phase, const char *key, uintptr_t key_len, const char *text, uintptr_t text_len, uint32_t modifiers_mask);
@@ -2023,6 +2063,7 @@ fn androidActivity() []const u8 {
     \\    external fun nativeIme(app: Long, kind: Int, text: String, cursor: Long)
     \\    external fun nativeCommand(app: Long, command: String): Int
     \\    external fun nativeFrame(app: Long)
+    \\    external fun nativeGpuFrameState(app: Long, longs: LongArray, ints: IntArray, floats: FloatArray): Boolean
     \\    external fun nativeWidgetSemanticsCount(app: Long): Int
     \\    external fun nativeWidgetSemanticsFields(app: Long, index: Int, ids: LongArray, ints: IntArray, floats: FloatArray): Boolean
     \\    external fun nativeWidgetSemanticsLabel(app: Long, index: Int): ByteArray
@@ -2105,6 +2146,7 @@ fn androidJni() []const u8 {
     \\JNIEXPORT void JNICALL Java_dev_zero_1native_MainActivity_nativeIme(JNIEnv *env, jobject self, jlong app, jint kind, jstring text, jlong cursor) { (void)self; const char *chars = text ? (*env)->GetStringUTFChars(env, text, NULL) : NULL; zero_native_app_ime((void*)app, kind, chars, chars ? strlen(chars) : 0, (intptr_t)cursor); if (chars) (*env)->ReleaseStringUTFChars(env, text, chars); }
     \\JNIEXPORT jint JNICALL Java_dev_zero_1native_MainActivity_nativeCommand(JNIEnv *env, jobject self, jlong app, jstring command) { (void)self; const char *chars = (*env)->GetStringUTFChars(env, command, NULL); if (!chars) return 0; zero_native_app_command((void*)app, chars, strlen(chars)); (*env)->ReleaseStringUTFChars(env, command, chars); return (jint)zero_native_app_last_command_count((void*)app); }
     \\JNIEXPORT void JNICALL Java_dev_zero_1native_MainActivity_nativeFrame(JNIEnv *env, jobject self, jlong app) { (void)env; (void)self; zero_native_app_frame((void*)app); }
+    \\JNIEXPORT jboolean JNICALL Java_dev_zero_1native_MainActivity_nativeGpuFrameState(JNIEnv *env, jobject self, jlong app, jlongArray longs, jintArray ints, jfloatArray floats) { (void)self; if (!longs || !ints || !floats) return JNI_FALSE; if ((*env)->GetArrayLength(env, longs) < 19 || (*env)->GetArrayLength(env, ints) < 9 || (*env)->GetArrayLength(env, floats) < 3) return JNI_FALSE; zero_native_gpu_frame_state_t state; memset(&state, 0, sizeof(state)); if (!zero_native_app_gpu_frame_state((void*)app, &state)) return JNI_FALSE; const jlong long_values[19] = { (jlong)state.surface_id, (jlong)state.window_id, (jlong)state.frame_index, (jlong)state.timestamp_ns, (jlong)state.frame_interval_ns, (jlong)state.input_timestamp_ns, (jlong)state.input_latency_ns, (jlong)state.input_latency_budget_ns, (jlong)state.input_latency_budget_exceeded_count, (jlong)state.first_frame_latency_ns, (jlong)state.first_frame_latency_budget_ns, (jlong)state.first_frame_latency_budget_exceeded_count, (jlong)state.canvas_revision, (jlong)state.canvas_command_count, (jlong)state.canvas_frame_batch_count, (jlong)state.canvas_frame_budget_exceeded_count, (jlong)state.widget_revision, (jlong)state.widget_node_count, (jlong)state.widget_semantics_count }; const jint int_values[9] = { (jint)state.input_latency_budget_ok, (jint)state.first_frame_latency_budget_ok, (jint)state.nonblank, (jint)state.sample_color, (jint)state.status, (jint)state.vsync, (jint)state.canvas_frame_requires_render, (jint)state.canvas_frame_full_repaint, (jint)state.canvas_frame_budget_ok }; const jfloat float_values[3] = { (jfloat)state.width, (jfloat)state.height, (jfloat)state.scale }; (*env)->SetLongArrayRegion(env, longs, 0, 19, long_values); (*env)->SetIntArrayRegion(env, ints, 0, 9, int_values); (*env)->SetFloatArrayRegion(env, floats, 0, 3, float_values); return JNI_TRUE; }
     \\JNIEXPORT jint JNICALL Java_dev_zero_1native_MainActivity_nativeWidgetSemanticsCount(JNIEnv *env, jobject self, jlong app) { (void)env; (void)self; return (jint)zero_native_app_widget_semantics_count((void*)app); }
     \\JNIEXPORT jboolean JNICALL Java_dev_zero_1native_MainActivity_nativeWidgetSemanticsFields(JNIEnv *env, jobject self, jlong app, jint index, jlongArray ids, jintArray ints, jfloatArray floats) { (void)self; if (!ids || !ints || !floats) return JNI_FALSE; if ((*env)->GetArrayLength(env, ids) < 12 || (*env)->GetArrayLength(env, ints) < 5 || (*env)->GetArrayLength(env, floats) < 8) return JNI_FALSE; zero_native_widget_semantics_t node; memset(&node, 0, sizeof(node)); if (!zero_native_app_widget_semantics_at((void*)app, (uintptr_t)index, &node)) return JNI_FALSE; const jlong id_values[12] = { (jlong)node.id, (jlong)node.parent_id, (jlong)node.text_selection_start, (jlong)node.text_selection_end, (jlong)node.text_composition_start, (jlong)node.text_composition_end, (jlong)node.grid_row_index, (jlong)node.grid_column_index, (jlong)node.grid_row_count, (jlong)node.grid_column_count, (jlong)node.list_item_index, (jlong)node.list_item_count }; const jint int_values[5] = { (jint)node.role, (jint)node.flags, (jint)node.actions, (jint)node.has_value, (jint)node.has_scroll }; const jfloat float_values[8] = { (jfloat)node.x, (jfloat)node.y, (jfloat)node.width, (jfloat)node.height, (jfloat)node.value, (jfloat)node.scroll_offset, (jfloat)node.scroll_viewport_extent, (jfloat)node.scroll_content_extent }; (*env)->SetLongArrayRegion(env, ids, 0, 12, id_values); (*env)->SetIntArrayRegion(env, ints, 0, 5, int_values); (*env)->SetFloatArrayRegion(env, floats, 0, 8, float_values); return JNI_TRUE; }
     \\JNIEXPORT jbyteArray JNICALL Java_dev_zero_1native_MainActivity_nativeWidgetSemanticsLabel(JNIEnv *env, jobject self, jlong app, jint index) { (void)self; zero_native_widget_semantics_t node; memset(&node, 0, sizeof(node)); if (!zero_native_app_widget_semantics_at((void*)app, (uintptr_t)index, &node)) return zero_native_jni_bytes(env, "", 0); return zero_native_jni_bytes(env, node.label, node.label_len); }
@@ -2943,10 +2985,13 @@ test "mobile package templates include native command shells" {
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_widget_text_geometry_t") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_widget_action_t") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_viewport_state_t") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_gpu_frame_state_t") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_GPU_SURFACE_STATUS_READY") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_ROLE_TEXTBOX") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_ACTION_SET_SELECTION") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_ACTION_KIND_SET_TEXT") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_app_viewport_state") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_app_gpu_frame_state") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_app_scroll") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_app_widget_semantics_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_app_widget_semantics_at") != null);
@@ -2990,6 +3035,7 @@ test "mobile package templates include native command shells" {
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "WebView(this)") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "nativeViewport(nativeApp") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "nativeScroll(nativeApp") != null);
+    try std.testing.expect(std.mem.indexOf(u8, android_activity, "external fun nativeGpuFrameState") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "external fun nativeKey") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "external fun nativeText") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "external fun nativeIme") != null);
@@ -3017,6 +3063,7 @@ test "mobile package templates include native command shells" {
     try std.testing.expect(std.mem.indexOf(u8, android_jni, "zero_native_app_set_asset_root") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_jni, "zero_native_app_set_asset_entry") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_jni, "zero_native_app_viewport") != null);
+    try std.testing.expect(std.mem.indexOf(u8, android_jni, "zero_native_app_gpu_frame_state") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_jni, "zero_native_app_scroll") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_jni, "zero_native_app_key") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_jni, "zero_native_app_text") != null);
