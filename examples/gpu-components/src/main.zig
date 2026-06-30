@@ -769,7 +769,7 @@ fn buildComponentsWidgetLayoutWithScrollAndSize(nodes: []canvas.WidgetLayoutNode
     };
     const popover_children = [_]canvas.Widget{.{
         .id = 141,
-        .kind = .menu_surface,
+        .kind = .dropdown_menu,
         .frame = rect(12, 12, 150, 64),
         .layout = .{ .gap = 2 },
         .semantics = .{ .label = "Component actions" },

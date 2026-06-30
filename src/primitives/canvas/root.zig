@@ -3474,6 +3474,7 @@ pub const ControlTokens = struct {
     resizable: ControlVisualTokens = .{},
     popover: ControlVisualTokens = .{},
     menu_surface: ControlVisualTokens = .{},
+    dropdown_menu: ControlVisualTokens = .{},
     tooltip: ControlVisualTokens = .{},
     avatar: ControlVisualTokens = .{},
     badge: ControlVisualTokens = .{},
@@ -3696,6 +3697,7 @@ pub const ControlTokenOverrides = struct {
     resizable: ControlVisualTokenOverrides = .{},
     popover: ControlVisualTokenOverrides = .{},
     menu_surface: ControlVisualTokenOverrides = .{},
+    dropdown_menu: ControlVisualTokenOverrides = .{},
     tooltip: ControlVisualTokenOverrides = .{},
     avatar: ControlVisualTokenOverrides = .{},
     badge: ControlVisualTokenOverrides = .{},
@@ -3734,6 +3736,7 @@ pub const ControlTokenOverrides = struct {
         next.resizable = self.resizable.apply(next.resizable);
         next.popover = self.popover.apply(next.popover);
         next.menu_surface = self.menu_surface.apply(next.menu_surface);
+        next.dropdown_menu = self.dropdown_menu.apply(next.dropdown_menu);
         next.tooltip = self.tooltip.apply(next.tooltip);
         next.avatar = self.avatar.apply(next.avatar);
         next.badge = self.badge.apply(next.badge);
@@ -3845,6 +3848,7 @@ pub const WidgetKind = enum {
     panel,
     popover,
     menu_surface,
+    dropdown_menu,
     text,
     icon,
     image,
@@ -4116,7 +4120,7 @@ pub fn builtinComponentDescriptor(kind: BuiltinComponentKind) BuiltinComponentDe
         .combobox => builtinComponent(.combobox, .combobox, .textbox, true),
         .dialog => builtinComponent(.dialog, .dialog, .dialog, true),
         .drawer => builtinComponent(.drawer, .drawer, .dialog, true),
-        .dropdown_menu => builtinComponent(.dropdown_menu, .menu_surface, .menu, true),
+        .dropdown_menu => builtinComponent(.dropdown_menu, .dropdown_menu, .menu, true),
         .input => builtinComponent(.input, .text_field, .textbox, false),
         .pagination => builtinComponent(.pagination, .pagination, .group, true),
         .progress => builtinComponent(.progress, .progress, .progressbar, false),
@@ -7180,7 +7184,7 @@ const WidgetPaintOrder = struct {
 fn widgetPaintLayer(widget: Widget, tokens: DesignTokens) i32 {
     if (widget.layer) |layer| return layer;
     return switch (widget.kind) {
-        .popover, .menu_surface => tokens.layer.overlay,
+        .popover, .menu_surface, .dropdown_menu => tokens.layer.overlay,
         .tooltip => tokens.layer.floating,
         else => tokens.layer.base,
     };
@@ -7277,7 +7281,7 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         .sheet => try emitSheetSurfaceWidget(builder, paint_widget, tokens, depth),
         .accordion, .bubble, .resizable, .panel => try emitPanelWidget(builder, paint_widget, tokens, depth),
         .popover => try emitPopoverWidget(builder, paint_widget, tokens, depth),
-        .menu_surface => try emitMenuSurfaceWidget(builder, paint_widget, tokens, depth),
+        .menu_surface, .dropdown_menu => try emitMenuSurfaceWidget(builder, paint_widget, tokens, depth),
         .text => try emitTextWidget(builder, paint_widget, tokens),
         .icon => try emitIconWidget(builder, paint_widget, tokens),
         .image => try emitImageWidget(builder, paint_widget),
@@ -7382,7 +7386,7 @@ fn emitWidgetLayoutNodeContent(
         .sheet => try emitSheetSurfaceWidgetChrome(builder, paint_widget, tokens),
         .accordion, .bubble, .resizable, .panel => try emitPanelWidgetChrome(builder, paint_widget, tokens),
         .popover => try emitPopoverWidgetChrome(builder, paint_widget, tokens),
-        .menu_surface => try emitMenuSurfaceWidgetChrome(builder, paint_widget, tokens),
+        .menu_surface, .dropdown_menu => try emitMenuSurfaceWidgetChrome(builder, paint_widget, tokens),
         .text => try emitTextWidget(builder, paint_widget, tokens),
         .icon => try emitIconWidget(builder, paint_widget, tokens),
         .image => try emitImageWidget(builder, paint_widget),
@@ -7490,7 +7494,7 @@ fn widgetContentClip(widget: Widget, tokens: DesignTokens) Clip {
 fn widgetContentClipRadius(widget: Widget, tokens: DesignTokens) Radius {
     if (!widget.layout.clip_content) return .{};
     return switch (widget.kind) {
-        .accordion, .alert, .bubble, .card, .resizable, .panel, .menu_surface => Radius.all(tokens.radius.lg),
+        .accordion, .alert, .bubble, .card, .resizable, .panel, .menu_surface, .dropdown_menu => Radius.all(tokens.radius.lg),
         .dialog, .popover => Radius.all(tokens.radius.xl),
         .drawer, .sheet => Radius.all(tokens.radius.lg),
         .tooltip => Radius.all(tokens.radius.md),
@@ -9350,6 +9354,7 @@ fn surfaceControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisua
         .resizable => resizableControlVisualTokens(tokens),
         .popover => tokens.controls.popover,
         .menu_surface => tokens.controls.menu_surface,
+        .dropdown_menu => controlVisualTokensWithFallback(tokens.controls.dropdown_menu, tokens.controls.menu_surface),
         .tooltip => tokens.controls.tooltip,
         else => .{},
     };
@@ -9476,7 +9481,7 @@ fn layoutWidgetDepth(
             try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens)
         else
             try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
-        .menu_surface => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
+        .menu_surface, .dropdown_menu => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
         .stack, .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover => {
             for (widget.children) |child| {
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len, tokens);
@@ -9740,7 +9745,7 @@ pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF 
         .alert => intrinsicAlertWidgetSize(widget, tokens),
         .card => intrinsicCardWidgetSize(widget, tokens),
         .dialog, .drawer, .sheet => intrinsicModalSurfaceWidgetSize(widget, tokens),
-        .stack, .row, .column, .grid, .data_grid, .scroll_view, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .accordion, .bubble, .resizable, .panel, .popover, .menu_surface, .image => geometry.SizeF.zero(),
+        .stack, .row, .column, .grid, .data_grid, .scroll_view, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .accordion, .bubble, .resizable, .panel, .popover, .menu_surface, .dropdown_menu, .image => geometry.SizeF.zero(),
     };
 }
 
@@ -10627,7 +10632,7 @@ fn semanticRole(widget: Widget) WidgetRole {
         .data_grid => .grid,
         .data_row => .row,
         .dialog, .drawer, .sheet, .popover => .dialog,
-        .menu_surface => .menu,
+        .menu_surface, .dropdown_menu => .menu,
         .list => .list,
         .text => .text,
         .icon, .image, .avatar => .image,
@@ -11001,7 +11006,7 @@ fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     return switch (widget.kind) {
         .row, .column, .grid, .data_grid, .data_row, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner => false,
-        .scroll_view, .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface, .text, .button, .toggle_button, .icon_button, .select, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress => true,
+        .scroll_view, .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface, .dropdown_menu, .text, .button, .toggle_button, .icon_button, .select, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress => true,
     };
 }
 
@@ -11332,7 +11337,7 @@ fn widgetFocusPaintBounds(widget: Widget, tokens: DesignTokens) ?geometry.RectF 
 
 fn widgetFrameStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
     return switch (widget.kind) {
-        .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface => controlStrokeWidth(widget, surfaceControlVisualTokens(widget, tokens), tokens.stroke.hairline),
+        .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface, .dropdown_menu => controlStrokeWidth(widget, surfaceControlVisualTokens(widget, tokens), tokens.stroke.hairline),
         .button, .toggle_button, .icon_button => if (widget.state.focused) tokens.stroke.focus else buttonStrokeWidth(widget, tokens),
         .select => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectControlVisualTokens(tokens), tokens.stroke.regular),
         .text_field, .search_field, .combobox, .textarea => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, textInputControlVisualTokens(widget, tokens), tokens.stroke.regular),
@@ -11372,7 +11377,7 @@ fn widgetFocusStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
 fn widgetShadowPaintBounds(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
     const token = switch (widget.kind) {
         .accordion, .bubble, .resizable, .panel, .tooltip => tokens.shadow.sm,
-        .dialog, .drawer, .sheet, .popover, .menu_surface => tokens.shadow.md,
+        .dialog, .drawer, .sheet, .popover, .menu_surface, .dropdown_menu => tokens.shadow.md,
         else => return null,
     };
     if (token.y == 0 and token.blur == 0 and token.spread == 0) return null;
@@ -11396,7 +11401,7 @@ fn widgetShadowRadius(widget: Widget, tokens: DesignTokens) Radius {
     return switch (widget.kind) {
         .dialog, .drawer, .popover => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl),
         .sheet => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
-        .accordion, .alert, .bubble, .card, .resizable, .panel, .menu_surface => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
+        .accordion, .alert, .bubble, .card, .resizable, .panel, .menu_surface, .dropdown_menu => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
         .tooltip => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.md),
         else => Radius.all(0),
     };
@@ -15685,7 +15690,7 @@ test "built-in component catalog maps to retained widget foundations" {
     try std.testing.expectEqual(WidgetKind.combobox, builtinComponentDescriptor(.combobox).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.dialog, builtinComponentDescriptor(.dialog).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.drawer, builtinComponentDescriptor(.drawer).root_widget_kind);
-    try std.testing.expectEqual(WidgetKind.menu_surface, builtinComponentDescriptor(.dropdown_menu).root_widget_kind);
+    try std.testing.expectEqual(WidgetKind.dropdown_menu, builtinComponentDescriptor(.dropdown_menu).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.text_field, builtinComponentDescriptor(.input).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.pagination, builtinComponentDescriptor(.pagination).root_widget_kind);
     try std.testing.expectEqual(WidgetKind.progress, builtinComponentDescriptor(.progress).root_widget_kind);
@@ -16337,6 +16342,11 @@ test "design token overrides compose with built-in themes" {
                 .background = Color.rgb8(20, 26, 34),
                 .border = Color.rgb8(66, 76, 88),
             },
+            .dropdown_menu = .{
+                .background = Color.rgb8(21, 27, 35),
+                .foreground = Color.rgb8(241, 245, 249),
+                .border = Color.rgb8(67, 77, 89),
+            },
             .tooltip = .{
                 .background = Color.rgb8(238, 242, 246),
                 .foreground = Color.rgb8(18, 24, 30),
@@ -16467,6 +16477,9 @@ test "design token overrides compose with built-in themes" {
     try std.testing.expectEqualDeep(Color.rgb8(62, 72, 84), tokens.controls.popover.border.?);
     try std.testing.expectEqualDeep(Color.rgb8(20, 26, 34), tokens.controls.menu_surface.background.?);
     try std.testing.expectEqualDeep(Color.rgb8(66, 76, 88), tokens.controls.menu_surface.border.?);
+    try std.testing.expectEqualDeep(Color.rgb8(21, 27, 35), tokens.controls.dropdown_menu.background.?);
+    try std.testing.expectEqualDeep(Color.rgb8(241, 245, 249), tokens.controls.dropdown_menu.foreground.?);
+    try std.testing.expectEqualDeep(Color.rgb8(67, 77, 89), tokens.controls.dropdown_menu.border.?);
     try std.testing.expectEqualDeep(Color.rgb8(238, 242, 246), tokens.controls.tooltip.background.?);
     try std.testing.expectEqualDeep(Color.rgb8(18, 24, 30), tokens.controls.tooltip.foreground.?);
     try std.testing.expectEqualDeep(Color.rgb8(32, 38, 44), tokens.controls.avatar.background.?);
@@ -17665,6 +17678,87 @@ test "widget menu surface groups menu items semantically" {
     try std.testing.expect(!semantics[2].state.selected);
     try std.testing.expect(semantics[2].actions.press);
     try std.testing.expect(semantics[2].actions.select);
+}
+
+test "widget dropdown menus expose menu semantics with shadcn surface chrome" {
+    const items = [_]Widget{
+        .{
+            .id = 12,
+            .kind = .menu_item,
+            .text = "Profile",
+        },
+        .{
+            .id = 13,
+            .kind = .separator,
+            .frame = geometry.RectF.init(0, 0, 128, 1),
+        },
+        .{
+            .id = 14,
+            .kind = .menu_item,
+            .text = "Sign out",
+            .variant = .destructive,
+        },
+    };
+    const dropdown = Widget{
+        .id = 11,
+        .kind = .dropdown_menu,
+        .frame = geometry.RectF.init(12, 16, 160, 112),
+        .layout = builtinComponentWidget(.dropdown_menu, .{}).layout,
+        .semantics = .{ .label = "Account menu" },
+        .children = &items,
+    };
+    const tokens = DesignTokens{
+        .controls = .{
+            .dropdown_menu = .{
+                .background = Color.rgb8(8, 9, 10),
+                .border = Color.rgb8(60, 70, 80),
+                .stroke_width = 2,
+            },
+        },
+    };
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTreeWithTokens(dropdown, dropdown.frame, tokens, &nodes);
+    try std.testing.expectEqual(@as(usize, 4), layout.nodeCount());
+    try expectLayoutFrame(layout, 11, geometry.RectF.init(12, 16, 160, 112));
+    try expectLayoutFrame(layout, 12, geometry.RectF.init(16, 20, 152, 28));
+    try expectLayoutFrame(layout, 13, geometry.RectF.init(16, 50, 128, 1));
+    try expectLayoutFrame(layout, 14, geometry.RectF.init(16, 53, 152, 28));
+    try std.testing.expectEqual(@as(ObjectId, 12), layout.focusTarget(null, .forward).?.id);
+    try std.testing.expectEqual(@as(ObjectId, 14), layout.focusTarget(12, .forward).?.id);
+    const blank_hit = layout.hitTest(geometry.PointF.init(168, 124)).?;
+    try std.testing.expectEqual(@as(ObjectId, 11), blank_hit.id);
+    try std.testing.expectEqual(WidgetKind.dropdown_menu, blank_hit.kind);
+
+    var semantics_buffer: [4]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+    try std.testing.expectEqual(@as(usize, 3), semantics.len);
+    try std.testing.expectEqual(WidgetRole.menu, semantics[0].role);
+    try std.testing.expectEqualStrings("Account menu", semantics[0].label);
+    try std.testing.expectEqual(WidgetRole.menuitem, semantics[1].role);
+    try std.testing.expectEqualStrings("Profile", semantics[1].label);
+    try std.testing.expect(semantics[1].actions.press);
+    try std.testing.expect(semantics[1].actions.select);
+    try std.testing.expectEqual(WidgetRole.menuitem, semantics[2].role);
+    try std.testing.expectEqualStrings("Sign out", semantics[2].label);
+
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, tokens);
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 8), display_list.commandCount());
+    try std.testing.expect(display_list.commands[0] == .shadow);
+    switch (display_list.commands[1]) {
+        .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(8, 9, 10), fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .stroke_rect => |stroke| {
+            try expectFillColor(Color.rgb8(60, 70, 80), stroke.stroke.fill);
+            try std.testing.expectEqual(@as(f32, 2), stroke.stroke.width);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "widget list item and segmented controls expose selectable semantics" {
