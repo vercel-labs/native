@@ -19389,18 +19389,25 @@ test "text layout reports output overflow" {
     }, .{}, &lines));
 }
 
-test "display list serializes deterministically" {
+test "display list serializes deterministic Phase 2 primitives" {
     const stops = [_]GradientStop{
         .{ .offset = 0, .color = Color.rgb8(255, 255, 255) },
-        .{ .offset = 1, .color = Color.rgb8(59, 130, 246) },
+        .{ .offset = 1, .color = Color.rgb8(0, 0, 0) },
     };
     const glyphs = [_]Glyph{
         .{ .id = 42, .x = 12, .y = 28, .advance = 9 },
         .{ .id = 43, .x = 21, .y = 28, .advance = 8 },
     };
 
-    var commands: [4]CanvasCommand = undefined;
+    var commands: [12]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
+    try builder.pushClip(.{
+        .id = 9,
+        .rect = geometry.RectF.init(4, 5, 320, 160),
+        .radius = Radius.all(12),
+    });
+    try builder.pushOpacity(0.75);
+    try builder.transform(Affine.translate(8, 6));
     try builder.fillRect(.{
         .id = 10,
         .rect = geometry.RectF.init(0, 0, 360, 180),
@@ -19417,7 +19424,28 @@ test "display list serializes deterministically" {
         .offset = .{ .dx = 0, .dy = 18 },
         .blur = 42,
         .spread = -8,
-        .color = Color.rgba8(15, 23, 42, 48),
+        .color = Color.rgba(0, 0, 0, 0.25),
+    });
+    try builder.fillRoundedRect(.{
+        .id = 13,
+        .rect = geometry.RectF.init(24, 80, 128, 48),
+        .radius = .{ .top_left = 8, .top_right = 10, .bottom_right = 12, .bottom_left = 6 },
+        .fill = .{ .color = Color.rgb8(255, 255, 255) },
+    });
+    try builder.strokeRect(.{
+        .id = 14,
+        .rect = geometry.RectF.init(24, 80, 128, 48),
+        .radius = Radius.all(8),
+        .stroke = .{ .fill = .{ .color = Color.rgb8(0, 0, 0) }, .width = 1.5 },
+    });
+    try builder.drawImage(.{
+        .id = 15,
+        .image_id = 3,
+        .src = geometry.RectF.init(0, 0, 48, 32),
+        .dst = geometry.RectF.init(180, 40, 96, 64),
+        .opacity = 0.6,
+        .fit = .cover,
+        .sampling = .nearest,
     });
     try builder.drawText(.{
         .id = 12,
@@ -19428,13 +19456,20 @@ test "display list serializes deterministically" {
         .text = "Hi",
         .glyphs = &glyphs,
     });
+    try builder.blur(.{
+        .id = 16,
+        .rect = geometry.RectF.init(24, 24, 220, 96),
+        .radius = 18,
+    });
+    try builder.popOpacity();
+    try builder.popClip();
 
-    var buffer: [2048]u8 = undefined;
+    var buffer: [4096]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try builder.displayList().writeJson(&writer);
 
     const expected =
-        "{\"commands\":[{\"op\":\"fill_rect\",\"id\":10,\"rect\":[0,0,360,180],\"fill\":{\"kind\":\"linear_gradient\",\"start\":[0,0],\"end\":[360,180],\"stops\":[{\"offset\":0,\"color\":[1,1,1,1]},{\"offset\":1,\"color\":[0.23137255,0.50980395,0.9647059,1]}]}},{\"op\":\"shadow\",\"id\":11,\"rect\":[24,24,220,96],\"radius\":[16,16,16,16],\"offset\":[0,18],\"blur\":42,\"spread\":-8,\"color\":[0.05882353,0.09019608,0.16470589,0.1882353]},{\"op\":\"draw_text\",\"id\":12,\"font\":7,\"size\":17,\"origin\":[32,52],\"color\":[0.05882353,0.09019608,0.16470589,1],\"text\":\"Hi\",\"glyphs\":[{\"id\":42,\"x\":12,\"y\":28,\"advance\":9},{\"id\":43,\"x\":21,\"y\":28,\"advance\":8}]}]}";
+        "{\"commands\":[{\"op\":\"push_clip\",\"id\":9,\"rect\":[4,5,320,160],\"radius\":[12,12,12,12]},{\"op\":\"push_opacity\",\"opacity\":0.75},{\"op\":\"transform\",\"matrix\":[1,0,0,1,8,6]},{\"op\":\"fill_rect\",\"id\":10,\"rect\":[0,0,360,180],\"fill\":{\"kind\":\"linear_gradient\",\"start\":[0,0],\"end\":[360,180],\"stops\":[{\"offset\":0,\"color\":[1,1,1,1]},{\"offset\":1,\"color\":[0,0,0,1]}]}},{\"op\":\"shadow\",\"id\":11,\"rect\":[24,24,220,96],\"radius\":[16,16,16,16],\"offset\":[0,18],\"blur\":42,\"spread\":-8,\"color\":[0,0,0,0.25]},{\"op\":\"fill_rounded_rect\",\"id\":13,\"rect\":[24,80,128,48],\"radius\":[8,10,12,6],\"fill\":{\"kind\":\"color\",\"color\":[1,1,1,1]}},{\"op\":\"stroke_rect\",\"id\":14,\"rect\":[24,80,128,48],\"radius\":[8,8,8,8],\"stroke\":{\"width\":1.5,\"fill\":{\"kind\":\"color\",\"color\":[0,0,0,1]}}},{\"op\":\"draw_image\",\"id\":15,\"image\":3,\"dst\":[180,40,96,64],\"src\":[0,0,48,32],\"opacity\":0.6,\"fit\":\"cover\",\"sampling\":\"nearest\"},{\"op\":\"draw_text\",\"id\":12,\"font\":7,\"size\":17,\"origin\":[32,52],\"color\":[0.05882353,0.09019608,0.16470589,1],\"text\":\"Hi\",\"glyphs\":[{\"id\":42,\"x\":12,\"y\":28,\"advance\":9},{\"id\":43,\"x\":21,\"y\":28,\"advance\":8}]},{\"op\":\"blur\",\"id\":16,\"rect\":[24,24,220,96],\"radius\":18},{\"op\":\"pop_opacity\"},{\"op\":\"pop_clip\"}]}";
     try std.testing.expectEqualStrings(expected, writer.buffered());
 }
 
