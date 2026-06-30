@@ -139,10 +139,14 @@ pub const EmbeddedApp = struct {
     runtime: runtime.Runtime,
 
     pub fn init(app: runtime.App, platform_value: platform.Platform) EmbeddedApp {
-        return .{
-            .app = app,
-            .runtime = runtime.Runtime.init(.{ .platform = platform_value }),
-        };
+        var embedded: EmbeddedApp = undefined;
+        embedded.initInPlace(app, platform_value);
+        return embedded;
+    }
+
+    pub fn initInPlace(self: *EmbeddedApp, app: runtime.App, platform_value: platform.Platform) void {
+        self.app = app;
+        self.runtime = runtime.Runtime.init(.{ .platform = platform_value });
     }
 
     pub fn start(self: *EmbeddedApp) anyerror!void {
@@ -312,7 +316,7 @@ const MobileHostApp = struct {
         self.asset_entry = undefined;
         self.asset_entry_len = 0;
         self.last_command_name = [_]u8{0} ** (max_mobile_command_name_bytes + 1);
-        self.embedded = EmbeddedApp.init(.{
+        self.embedded.initInPlace(.{
             .context = self,
             .name = "zero-native-mobile",
             .source_fn = mobileSource,
@@ -924,7 +928,8 @@ fn nowNanoseconds() u64 {
 test "embedded app starts and loads source" {
     var null_platform = platform.NullPlatform.init(.{});
     var state: u8 = 0;
-    var embedded = EmbeddedApp.init(.{
+    var embedded: EmbeddedApp = undefined;
+    embedded.initInPlace(.{
         .context = &state,
         .name = "embedded",
         .source = platform.WebViewSource.html("<p>Embedded</p>"),

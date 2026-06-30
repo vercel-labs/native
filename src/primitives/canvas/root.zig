@@ -3500,6 +3500,17 @@ pub const WidgetLayoutStyle = struct {
     min_size: geometry.SizeF = .{},
 };
 
+pub const WidgetStyle = struct {
+    background: ?Color = null,
+    foreground: ?Color = null,
+    accent: ?Color = null,
+    accent_foreground: ?Color = null,
+    border: ?Color = null,
+    focus_ring: ?Color = null,
+    radius: ?f32 = null,
+    stroke_width: ?f32 = null,
+};
+
 pub const WidgetRole = enum {
     none,
     group,
@@ -3582,6 +3593,7 @@ pub const Widget = struct {
     layer: ?i32 = null,
     state: WidgetState = .{},
     layout: WidgetLayoutStyle = .{},
+    style: WidgetStyle = .{},
     semantics: WidgetSemantics = .{},
     children: []const Widget = &.{},
 };
@@ -6763,7 +6775,7 @@ fn emitWidgetLayoutClippedChildren(
 }
 
 fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = Radius.all(tokens.radius.lg);
+    const radius = widgetRadius(widget, tokens.radius.lg);
     const shadow_token = tokens.shadow.sm;
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
         try builder.shadow(.{
@@ -6781,21 +6793,21 @@ fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
-        .fill = .{ .color = tokens.colors.surface },
+        .fill = widgetBackgroundFill(widget, tokens.colors.surface),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 3),
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = .{ .color = tokens.colors.border },
-            .width = tokens.stroke.hairline,
+            .fill = widgetBorderFill(widget, tokens.colors.border),
+            .width = widgetStrokeWidth(widget, tokens.stroke.hairline),
         },
     });
 }
 
 fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = Radius.all(tokens.radius.xl);
+    const radius = widgetRadius(widget, tokens.radius.xl);
     const shadow_token = tokens.shadow.md;
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
         try builder.shadow(.{
@@ -6813,21 +6825,21 @@ fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignToke
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
-        .fill = .{ .color = tokens.colors.surface },
+        .fill = widgetBackgroundFill(widget, tokens.colors.surface),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 3),
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = .{ .color = tokens.colors.border },
-            .width = tokens.stroke.hairline,
+            .fill = widgetBorderFill(widget, tokens.colors.border),
+            .width = widgetStrokeWidth(widget, tokens.stroke.hairline),
         },
     });
 }
 
 fn emitMenuSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = Radius.all(tokens.radius.lg);
+    const radius = widgetRadius(widget, tokens.radius.lg);
     const shadow_token = tokens.shadow.md;
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
         try builder.shadow(.{
@@ -6845,15 +6857,15 @@ fn emitMenuSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: Design
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
-        .fill = .{ .color = tokens.colors.surface },
+        .fill = widgetBackgroundFill(widget, tokens.colors.surface),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 3),
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = .{ .color = tokens.colors.border },
-            .width = tokens.stroke.hairline,
+            .fill = widgetBorderFill(widget, tokens.colors.border),
+            .width = widgetStrokeWidth(widget, tokens.stroke.hairline),
         },
     });
 }
@@ -6864,7 +6876,7 @@ fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.body_size,
         .origin = pixelSnapTextPoint(tokens, textOrigin(widget.frame, tokens.typography.body_size, 0)),
-        .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
+        .color = widgetForegroundColor(widget, tokens, tokens.colors.text),
         .text = widget.text,
         .text_layout = .{
             .max_width = widget.frame.width,
@@ -6883,7 +6895,7 @@ fn emitIconWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
         .font_id = tokens.typography.font_id,
         .size = size,
         .origin = pixelSnapTextPoint(tokens, centeredTextOrigin(widget.frame, widget.text, size)),
-        .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
+        .color = widgetForegroundColor(widget, tokens, tokens.colors.text),
         .text = widget.text,
     });
 }
@@ -6902,20 +6914,20 @@ fn emitImageWidget(builder: *Builder, widget: Widget) Error!void {
 }
 
 fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = Radius.all(tokens.radius.md);
+    const radius = widgetRadius(widget, tokens.radius.md);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = widget.frame,
         .radius = radius,
-        .fill = .{ .color = buttonFillColor(tokens, widget.state) },
+        .fill = buttonFill(widget, tokens),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = .{ .color = tokens.colors.border },
-            .width = tokens.stroke.regular,
+            .fill = widgetBorderFill(widget, tokens.colors.border),
+            .width = widgetStrokeWidth(widget, tokens.stroke.regular),
         },
     });
     if (widget.state.focused) {
@@ -6924,7 +6936,7 @@ fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
             .rect = widget.frame,
             .radius = radius,
             .stroke = .{
-                .fill = .{ .color = tokens.colors.focus_ring },
+                .fill = widgetFocusRingFill(widget, tokens),
                 .width = tokens.stroke.focus,
             },
         });
@@ -6934,27 +6946,27 @@ fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.button_size,
         .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, tokens.typography.button_size, densityValue(tokens, tokens.spacing.md))),
-        .color = buttonTextColor(tokens, widget.state),
+        .color = buttonTextColorForWidget(widget, tokens),
         .text = widget.text,
         .text_layout = boundedTextLayout(widget.frame, tokens.typography.button_size, densityValue(tokens, tokens.spacing.md), .center, .none),
     });
 }
 
 fn emitIconButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = Radius.all(tokens.radius.md);
+    const radius = widgetRadius(widget, tokens.radius.md);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = widget.frame,
         .radius = radius,
-        .fill = .{ .color = buttonFillColor(tokens, widget.state) },
+        .fill = buttonFill(widget, tokens),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = .{ .color = if (widget.state.focused) tokens.colors.focus_ring else tokens.colors.border },
-            .width = if (widget.state.focused) tokens.stroke.focus else tokens.stroke.regular,
+            .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else widgetBorderFill(widget, tokens.colors.border),
+            .width = if (widget.state.focused) tokens.stroke.focus else widgetStrokeWidth(widget, tokens.stroke.regular),
         },
     });
     if (widget.text.len > 0) {
@@ -6964,19 +6976,19 @@ fn emitIconButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
             .font_id = tokens.typography.font_id,
             .size = size,
             .origin = pixelSnapTextPoint(tokens, centeredTextOrigin(widget.frame, widget.text, size)),
-            .color = buttonTextColor(tokens, widget.state),
+            .color = buttonTextColorForWidget(widget, tokens),
             .text = widget.text,
         });
     }
 }
 
 fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = Radius.all(tokens.radius.md);
+    const radius = widgetRadius(widget, tokens.radius.md);
     const text_size = widgetTextInputSize(tokens);
     const text_inset = widgetTextInputInset(widget, tokens);
     const layout_options = widgetTextInputLayoutOptions(widget, text_size, text_inset);
     const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
-    const text_color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text;
+    const text_color = widgetForegroundColor(widget, tokens, tokens.colors.text);
     const draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, text_color, layout_options);
     const selection_range = widgetTextSelectionRange(widget);
     const composition_range = widgetTextCompositionRange(widget);
@@ -6986,15 +6998,15 @@ fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
         .id = widgetPartId(widget.id, 1),
         .rect = widget.frame,
         .radius = radius,
-        .fill = .{ .color = if (widget.state.disabled) tokens.colors.disabled else tokens.colors.surface },
+        .fill = widgetBackgroundFill(widget, if (widget.state.disabled) tokens.colors.disabled else tokens.colors.surface),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = .{ .color = if (widget.state.focused) tokens.colors.focus_ring else tokens.colors.border },
-            .width = if (widget.state.focused) tokens.stroke.focus else tokens.stroke.regular,
+            .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else widgetBorderFill(widget, tokens.colors.border),
+            .width = if (widget.state.focused) tokens.stroke.focus else widgetStrokeWidth(widget, tokens.stroke.regular),
         },
     });
     if (selection_range) |range| {
@@ -7022,7 +7034,7 @@ fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
 }
 
 fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = Radius.all(tokens.radius.md);
+    const radius = widgetRadius(widget, tokens.radius.md);
     const text_size = widgetTextInputSize(tokens);
     const icon_size = @max(8, text_size - 2);
     const text_inset = widgetTextInputInset(widget, tokens);
@@ -7030,22 +7042,22 @@ fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens
     const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
     const selection_range = widgetTextSelectionRange(widget);
     const composition_range = widgetTextCompositionRange(widget);
-    const text_color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text;
+    const text_color = widgetForegroundColor(widget, tokens, tokens.colors.text);
     const draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, text_color, layout_options);
 
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = widget.frame,
         .radius = radius,
-        .fill = .{ .color = if (widget.state.disabled) tokens.colors.disabled else tokens.colors.surface },
+        .fill = widgetBackgroundFill(widget, if (widget.state.disabled) tokens.colors.disabled else tokens.colors.surface),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = .{ .color = if (widget.state.focused) tokens.colors.focus_ring else tokens.colors.border },
-            .width = if (widget.state.focused) tokens.stroke.focus else tokens.stroke.regular,
+            .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else widgetBorderFill(widget, tokens.colors.border),
+            .width = if (widget.state.focused) tokens.stroke.focus else widgetStrokeWidth(widget, tokens.stroke.regular),
         },
     });
     try emitSearchFieldIcon(builder, widget, tokens, icon_size);
@@ -7059,7 +7071,7 @@ fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens
         var command = draw_text;
         command.id = widgetPartId(widget.id, 9);
         command.text = visible_text;
-        command.color = if (widget.text.len > 0) text_color else tokens.colors.text_muted;
+        command.color = if (widget.text.len > 0) text_color else widgetForegroundColor(widget, tokens, tokens.colors.text_muted);
         try builder.drawText(command);
     }
     if (composition_range) |range| {
@@ -7085,7 +7097,7 @@ fn emitSearchFieldIcon(builder: *Builder, widget: Widget, tokens: DesignTokens, 
     const p2 = pixelSnapGeometryPoint(tokens, geometry.PointF.init(left + box, top + box));
     const p3 = pixelSnapGeometryPoint(tokens, geometry.PointF.init(left, top + box));
     const tail = pixelSnapGeometryPoint(tokens, geometry.PointF.init(left + icon_size, top + icon_size));
-    const stroke = Stroke{ .fill = .{ .color = tokens.colors.text_muted }, .width = tokens.stroke.regular };
+    const stroke = Stroke{ .fill = colorFill(widgetForegroundColor(widget, tokens, tokens.colors.text_muted)), .width = tokens.stroke.regular };
 
     try builder.drawLine(.{ .id = widgetPartId(widget.id, 3), .from = p0, .to = p1, .stroke = stroke });
     try builder.drawLine(.{ .id = widgetPartId(widget.id, 4), .from = p1, .to = p2, .stroke = stroke });
@@ -7095,7 +7107,7 @@ fn emitSearchFieldIcon(builder: *Builder, widget: Widget, tokens: DesignTokens, 
 }
 
 fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = Radius.all(tokens.radius.md);
+    const radius = widgetRadius(widget, tokens.radius.md);
     const shadow_token = tokens.shadow.sm;
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
         try builder.shadow(.{
@@ -7112,7 +7124,7 @@ fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Er
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
-        .fill = .{ .color = tokens.colors.accent },
+        .fill = widgetAccentFill(widget, tokens.colors.accent),
     });
     if (widget.text.len > 0) {
         try builder.drawText(.{
@@ -7120,7 +7132,7 @@ fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Er
             .font_id = tokens.typography.font_id,
             .size = tokens.typography.label_size,
             .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.sm))),
-            .color = tokens.colors.accent_text,
+            .color = widgetAccentForegroundColor(widget, tokens, tokens.colors.accent_text),
             .text = widget.text,
             .text_layout = boundedTextLayout(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.sm), .start, .none),
         });
@@ -7132,14 +7144,14 @@ fn emitMenuItemWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
 }
 
 fn emitListItemWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = Radius.all(tokens.radius.md);
+    const radius = widgetRadius(widget, tokens.radius.md);
     const fill = listItemFillColor(tokens, widget.state);
     if (fill.a > 0) {
         try builder.fillRoundedRect(.{
             .id = widgetPartId(widget.id, 1),
             .rect = widget.frame,
             .radius = radius,
-            .fill = .{ .color = fill },
+            .fill = widgetBackgroundFill(widget, fill),
         });
     }
     if (widget.state.focused) try emitWidgetFocusRing(builder, widget, tokens, 2);
@@ -7148,7 +7160,7 @@ fn emitListItemWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.body_size,
         .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md))),
-        .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
+        .color = widgetForegroundColor(widget, tokens, tokens.colors.text),
         .text = widget.text,
         .text_layout = boundedTextLayout(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md), .start, .none),
     });
@@ -7160,15 +7172,15 @@ fn emitDataCellWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
         try builder.fillRect(.{
             .id = widgetPartId(widget.id, 1),
             .rect = widget.frame,
-            .fill = .{ .color = state_fill },
+            .fill = widgetBackgroundFill(widget, state_fill),
         });
     }
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .stroke = .{
-            .fill = .{ .color = tokens.colors.border },
-            .width = tokens.stroke.hairline,
+            .fill = widgetBorderFill(widget, tokens.colors.border),
+            .width = widgetStrokeWidth(widget, tokens.stroke.hairline),
         },
     });
     if (widget.state.focused) try emitWidgetFocusRing(builder, widget, tokens, 3);
@@ -7178,7 +7190,7 @@ fn emitDataCellWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
             .font_id = tokens.typography.font_id,
             .size = tokens.typography.body_size,
             .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md))),
-            .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
+            .color = widgetForegroundColor(widget, tokens, tokens.colors.text),
             .text = widget.text,
             .text_layout = boundedTextLayout(widget.frame, tokens.typography.body_size, densityValue(tokens, tokens.spacing.md), .start, .none),
         });
@@ -7187,20 +7199,20 @@ fn emitDataCellWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
 
 fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const selected = widget.state.selected or widget.value >= 0.5;
-    const radius = Radius.all(tokens.radius.md);
+    const radius = widgetRadius(widget, tokens.radius.md);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = widget.frame,
         .radius = radius,
-        .fill = .{ .color = if (selected) tokens.colors.accent else tokens.colors.surface },
+        .fill = if (selected) widgetAccentFill(widget, tokens.colors.accent) else widgetBackgroundFill(widget, tokens.colors.surface),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = .{ .color = if (widget.state.focused) tokens.colors.focus_ring else tokens.colors.border },
-            .width = if (widget.state.focused) tokens.stroke.focus else tokens.stroke.regular,
+            .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else widgetBorderFill(widget, tokens.colors.border),
+            .width = if (widget.state.focused) tokens.stroke.focus else widgetStrokeWidth(widget, tokens.stroke.regular),
         },
     });
     try builder.drawText(.{
@@ -7208,7 +7220,7 @@ fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: DesignT
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.label_size,
         .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.md))),
-        .color = if (selected) tokens.colors.accent_text else tokens.colors.text,
+        .color = if (selected) widgetAccentForegroundColor(widget, tokens, tokens.colors.accent_text) else widgetForegroundColor(widget, tokens, tokens.colors.text),
         .text = widget.text,
         .text_layout = boundedTextLayout(widget.frame, tokens.typography.label_size, densityValue(tokens, tokens.spacing.md), .center, .none),
     });
@@ -7223,20 +7235,20 @@ fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
         box_size,
     ));
     const selected = booleanControlSelected(widget);
-    const radius = Radius.all(tokens.radius.sm);
+    const radius = widgetRadius(widget, tokens.radius.sm);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = box,
         .radius = radius,
-        .fill = .{ .color = if (selected) tokens.colors.accent else tokens.colors.surface },
+        .fill = if (selected) widgetAccentFill(widget, tokens.colors.accent) else widgetBackgroundFill(widget, tokens.colors.surface),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 2),
         .rect = box,
         .radius = radius,
         .stroke = .{
-            .fill = .{ .color = if (selected) tokens.colors.accent else tokens.colors.border },
-            .width = tokens.stroke.regular,
+            .fill = if (selected) widgetAccentFill(widget, tokens.colors.accent) else widgetBorderFill(widget, tokens.colors.border),
+            .width = widgetStrokeWidth(widget, tokens.stroke.regular),
         },
     });
     if (widget.state.focused) try emitWidgetFocusRing(builder, widget, tokens, 3);
@@ -7248,13 +7260,13 @@ fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
             .id = widgetPartId(widget.id, 4),
             .from = left,
             .to = mid,
-            .stroke = .{ .fill = .{ .color = tokens.colors.accent_text }, .width = 2 },
+            .stroke = .{ .fill = colorFill(widgetAccentForegroundColor(widget, tokens, tokens.colors.accent_text)), .width = 2 },
         });
         try builder.drawLine(.{
             .id = widgetPartId(widget.id, 5),
             .from = mid,
             .to = right,
-            .stroke = .{ .fill = .{ .color = tokens.colors.accent_text }, .width = 2 },
+            .stroke = .{ .fill = colorFill(widgetAccentForegroundColor(widget, tokens, tokens.colors.accent_text)), .width = 2 },
         });
     }
     try emitControlLabel(builder, widget, tokens, box.x + box.width + densityValue(tokens, tokens.spacing.sm), 6);
@@ -7283,22 +7295,22 @@ fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
         .id = widgetPartId(widget.id, 1),
         .rect = track,
         .radius = track_radius,
-        .fill = .{ .color = if (selected) tokens.colors.accent else tokens.colors.surface_pressed },
+        .fill = if (selected) widgetAccentFill(widget, tokens.colors.accent) else widgetBackgroundFill(widget, tokens.colors.surface_pressed),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 2),
         .rect = track,
         .radius = track_radius,
         .stroke = .{
-            .fill = .{ .color = tokens.colors.border },
-            .width = tokens.stroke.regular,
+            .fill = widgetBorderFill(widget, tokens.colors.border),
+            .width = widgetStrokeWidth(widget, tokens.stroke.regular),
         },
     });
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 3),
         .rect = knob,
         .radius = Radius.all(knob.height * 0.5),
-        .fill = .{ .color = if (selected) tokens.colors.accent_text else tokens.colors.surface },
+        .fill = colorFill(if (selected) widgetAccentForegroundColor(widget, tokens, tokens.colors.accent_text) else tokens.colors.surface),
     });
     if (widget.state.focused) try emitWidgetFocusRing(builder, widget, tokens, 4);
     try emitControlLabel(builder, widget, tokens, track.x + track.width + densityValue(tokens, tokens.spacing.sm), 5);
@@ -7331,40 +7343,40 @@ fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
         .id = widgetPartId(widget.id, 1),
         .rect = track,
         .radius = Radius.all(track.height * 0.5),
-        .fill = .{ .color = tokens.colors.surface_pressed },
+        .fill = widgetBackgroundFill(widget, tokens.colors.surface_pressed),
     });
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 2),
         .rect = active,
         .radius = Radius.all(active.height * 0.5),
-        .fill = .{ .color = tokens.colors.accent },
+        .fill = widgetAccentFill(widget, tokens.colors.accent),
     });
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 3),
         .rect = knob,
         .radius = Radius.all(knob.height * 0.5),
-        .fill = .{ .color = if (widget.state.disabled) tokens.colors.disabled else tokens.colors.surface },
+        .fill = colorFill(if (widget.state.disabled) tokens.colors.disabled else tokens.colors.surface),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 4),
         .rect = knob,
         .radius = Radius.all(knob.height * 0.5),
         .stroke = .{
-            .fill = .{ .color = if (widget.state.focused) tokens.colors.focus_ring else tokens.colors.border },
-            .width = if (widget.state.focused) tokens.stroke.focus else tokens.stroke.regular,
+            .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else widgetBorderFill(widget, tokens.colors.border),
+            .width = if (widget.state.focused) tokens.stroke.focus else widgetStrokeWidth(widget, tokens.stroke.regular),
         },
     });
 }
 
 fn emitProgressWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const radius = Radius.all(@min(tokens.radius.md, widget.frame.height * 0.5));
+    const radius = widgetRadius(widget, @min(tokens.radius.md, widget.frame.height * 0.5));
     const progress = std.math.clamp(widget.value, 0, 1);
     if (progress < 1) {
         try builder.fillRoundedRect(.{
             .id = widgetPartId(widget.id, 1),
             .rect = widget.frame,
             .radius = radius,
-            .fill = .{ .color = tokens.colors.surface_pressed },
+            .fill = widgetBackgroundFill(widget, tokens.colors.surface_pressed),
         });
     }
     if (progress > 0) {
@@ -7372,7 +7384,7 @@ fn emitProgressWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
             .id = widgetPartId(widget.id, 2),
             .rect = pixelSnapGeometryRect(tokens, geometry.RectF.init(widget.frame.x, widget.frame.y, widget.frame.width * progress, widget.frame.height)),
             .radius = radius,
-            .fill = .{ .color = tokens.colors.accent },
+            .fill = widgetAccentFill(widget, tokens.colors.accent),
         });
     }
 }
@@ -7381,9 +7393,9 @@ fn emitWidgetFocusRing(builder: *Builder, widget: Widget, tokens: DesignTokens, 
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, slot),
         .rect = widget.frame,
-        .radius = Radius.all(tokens.radius.md),
+        .radius = widgetRadius(widget, tokens.radius.md),
         .stroke = .{
-            .fill = .{ .color = tokens.colors.focus_ring },
+            .fill = widgetFocusRingFill(widget, tokens),
             .width = tokens.stroke.focus,
         },
     });
@@ -7396,7 +7408,7 @@ fn emitControlLabel(builder: *Builder, widget: Widget, tokens: DesignTokens, x: 
         .font_id = tokens.typography.font_id,
         .size = tokens.typography.label_size,
         .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(labelFrameForControl(widget.frame, x), tokens.typography.label_size, 0)),
-        .color = if (widget.state.disabled) tokens.colors.text_muted else tokens.colors.text,
+        .color = widgetForegroundColor(widget, tokens, tokens.colors.text),
         .text = widget.text,
         .text_layout = boundedTextLayout(labelFrameForControl(widget.frame, x), tokens.typography.label_size, 0, .start, .none),
     });
@@ -7605,6 +7617,44 @@ fn colorWithAlpha(color: Color, alpha: f32) Color {
     return Color.rgba(color.r, color.g, color.b, std.math.clamp(alpha, 0, 1));
 }
 
+fn colorFill(color: Color) Fill {
+    return .{ .color = color };
+}
+
+fn widgetBackgroundFill(widget: Widget, fallback: Color) Fill {
+    return colorFill(widget.style.background orelse fallback);
+}
+
+fn widgetAccentFill(widget: Widget, fallback: Color) Fill {
+    return colorFill(widget.style.accent orelse fallback);
+}
+
+fn widgetBorderFill(widget: Widget, fallback: Color) Fill {
+    return colorFill(widget.style.border orelse fallback);
+}
+
+fn widgetFocusRingFill(widget: Widget, tokens: DesignTokens) Fill {
+    return colorFill(widget.style.focus_ring orelse tokens.colors.focus_ring);
+}
+
+fn widgetForegroundColor(widget: Widget, tokens: DesignTokens, fallback: Color) Color {
+    if (widget.state.disabled) return tokens.colors.text_muted;
+    return widget.style.foreground orelse fallback;
+}
+
+fn widgetAccentForegroundColor(widget: Widget, tokens: DesignTokens, fallback: Color) Color {
+    if (widget.state.disabled) return tokens.colors.text_muted;
+    return widget.style.accent_foreground orelse fallback;
+}
+
+fn widgetRadius(widget: Widget, fallback: f32) Radius {
+    return Radius.all(nonNegative(widget.style.radius orelse fallback));
+}
+
+fn widgetStrokeWidth(widget: Widget, fallback: f32) f32 {
+    return nonNegative(widget.style.stroke_width orelse fallback);
+}
+
 fn emitWidgetTextSelectionRects(
     builder: *Builder,
     widget: Widget,
@@ -7679,17 +7729,17 @@ fn emitWidgetTextCaret(
     });
 }
 
-fn buttonFillColor(tokens: DesignTokens, state: WidgetState) Color {
-    if (state.disabled) return tokens.colors.disabled;
-    if (state.pressed or state.selected) return tokens.colors.accent;
-    if (state.hovered) return tokens.colors.surface_subtle;
-    return tokens.colors.surface;
+fn buttonFill(widget: Widget, tokens: DesignTokens) Fill {
+    if (widget.state.disabled) return colorFill(tokens.colors.disabled);
+    if (widget.state.pressed or widget.state.selected) return widgetAccentFill(widget, tokens.colors.accent);
+    if (widget.state.hovered) return widgetBackgroundFill(widget, tokens.colors.surface_subtle);
+    return widgetBackgroundFill(widget, tokens.colors.surface);
 }
 
-fn buttonTextColor(tokens: DesignTokens, state: WidgetState) Color {
-    if (state.disabled) return tokens.colors.text_muted;
-    if (state.pressed or state.selected) return tokens.colors.accent_text;
-    return tokens.colors.text;
+fn buttonTextColorForWidget(widget: Widget, tokens: DesignTokens) Color {
+    if (widget.state.disabled) return tokens.colors.text_muted;
+    if (widget.state.pressed or widget.state.selected) return widgetAccentForegroundColor(widget, tokens, tokens.colors.accent_text);
+    return widgetForegroundColor(widget, tokens, tokens.colors.text);
 }
 
 fn listItemFillColor(tokens: DesignTokens, state: WidgetState) Color {
@@ -9036,7 +9086,8 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         !affinesEqual(previous.widget.transform, next.widget.transform) or
         previous.widget.backdrop_blur != next.widget.backdrop_blur or
         previous.widget.backdrop_blur_token != next.widget.backdrop_blur_token or
-        previous.widget.text_alignment != next.widget.text_alignment;
+        previous.widget.text_alignment != next.widget.text_alignment or
+        !widgetStylesEqual(previous.widget.style, next.widget.style);
     const state_dirty = !widgetStatesEqual(previous.widget.state, next.widget.state);
     const visibility_dirty = previous.widget.semantics.hidden != next.widget.semantics.hidden;
     const layer_dirty = previous.widget.layer != next.widget.layer;
@@ -9201,11 +9252,20 @@ fn widgetClippedDirtyBounds(layout: WidgetLayoutTree, node_index: usize, bounds:
 
 fn widgetPaintChangeBounds(previous: Widget, next: Widget, tokens: DesignTokens) ?geometry.RectF {
     var bounds = unionOptionalBounds(previous.frame, next.frame);
+    if (widgetFrameStrokePaintChanged(previous, next, tokens)) {
+        bounds = unionOptionalBounds(bounds, widgetFrameStrokeBounds(previous, tokens));
+        bounds = unionOptionalBounds(bounds, widgetFrameStrokeBounds(next, tokens));
+    }
     bounds = unionOptionalBounds(bounds, widgetFocusPaintBounds(previous, tokens));
     bounds = unionOptionalBounds(bounds, widgetFocusPaintBounds(next, tokens));
     bounds = unionOptionalBounds(bounds, widgetBackdropBlurPaintBounds(previous, tokens));
     bounds = unionOptionalBounds(bounds, widgetBackdropBlurPaintBounds(next, tokens));
     return bounds;
+}
+
+fn widgetFrameStrokePaintChanged(previous: Widget, next: Widget, tokens: DesignTokens) bool {
+    return widgetFrameStrokeWidth(previous, tokens) != widgetFrameStrokeWidth(next, tokens) or
+        !optionalColorsEqual(previous.style.border, next.style.border);
 }
 
 fn widgetFrameStrokeBounds(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
@@ -9221,10 +9281,10 @@ fn widgetFocusPaintBounds(widget: Widget, tokens: DesignTokens) ?geometry.RectF 
 
 fn widgetFrameStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
     return switch (widget.kind) {
-        .panel, .popover, .menu_surface => tokens.stroke.hairline,
-        .button, .icon_button, .text_field, .search_field, .segmented_control => if (widget.state.focused) tokens.stroke.focus else tokens.stroke.regular,
-        .data_cell => if (widget.state.focused) tokens.stroke.focus else tokens.stroke.hairline,
-        .slider => if (widget.state.focused) tokens.stroke.focus else tokens.stroke.regular,
+        .panel, .popover, .menu_surface => widgetStrokeWidth(widget, tokens.stroke.hairline),
+        .button, .icon_button, .text_field, .search_field, .segmented_control => if (widget.state.focused) tokens.stroke.focus else widgetStrokeWidth(widget, tokens.stroke.regular),
+        .data_cell => if (widget.state.focused) tokens.stroke.focus else widgetStrokeWidth(widget, tokens.stroke.hairline),
+        .slider => if (widget.state.focused) tokens.stroke.focus else widgetStrokeWidth(widget, tokens.stroke.regular),
         .list_item, .menu_item, .checkbox, .toggle => if (widget.state.focused) tokens.stroke.focus else 0,
         else => 0,
     };
@@ -9301,6 +9361,17 @@ fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {
         a.virtual_item_extent == b.virtual_item_extent and
         a.virtual_overscan == b.virtual_overscan and
         sizesEqual(a.min_size, b.min_size);
+}
+
+fn widgetStylesEqual(a: WidgetStyle, b: WidgetStyle) bool {
+    return optionalColorsEqual(a.background, b.background) and
+        optionalColorsEqual(a.foreground, b.foreground) and
+        optionalColorsEqual(a.accent, b.accent) and
+        optionalColorsEqual(a.accent_foreground, b.accent_foreground) and
+        optionalColorsEqual(a.border, b.border) and
+        optionalColorsEqual(a.focus_ring, b.focus_ring) and
+        optionalF32Equal(a.radius, b.radius) and
+        optionalF32Equal(a.stroke_width, b.stroke_width);
 }
 
 fn widgetSemanticsEqual(a: WidgetSemantics, b: WidgetSemantics) bool {
@@ -11129,6 +11200,14 @@ fn offsetsEqual(a: geometry.OffsetF, b: geometry.OffsetF) bool {
 
 fn colorsEqual(a: Color, b: Color) bool {
     return a.r == b.r and a.g == b.g and a.b == b.b and a.a == b.a;
+}
+
+fn optionalColorsEqual(a: ?Color, b: ?Color) bool {
+    if (a) |left| {
+        if (b) |right| return colorsEqual(left, right);
+        return false;
+    }
+    return b == null;
 }
 
 fn radiiEqual(a: Radius, b: Radius) bool {
@@ -14865,6 +14944,41 @@ test "widget layout diff separates paint and semantics dirtiness" {
     try expectRect(geometry.RectF.init(8, 12, 80, 48), image_invalidations[0].dirty_bounds);
 }
 
+test "widget layout diff marks style changes as paint dirty" {
+    const previous_child = [_]Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(10, 10, 100, 30),
+        .text = "Run",
+    }};
+    const styled_child = [_]Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(10, 10, 100, 30),
+        .text = "Run",
+        .style = .{
+            .background = Color.rgb8(12, 18, 24),
+            .foreground = Color.rgb8(235, 241, 247),
+            .border = Color.rgb8(54, 64, 74),
+            .radius = 5,
+            .stroke_width = 2,
+        },
+    }};
+
+    var previous_nodes: [2]WidgetLayoutNode = undefined;
+    var styled_nodes: [2]WidgetLayoutNode = undefined;
+    const previous = try layoutWidgetTree(.{ .kind = .stack, .children = &previous_child }, geometry.RectF.init(0, 0, 140, 80), &previous_nodes);
+    const styled = try layoutWidgetTree(.{ .kind = .stack, .children = &styled_child }, geometry.RectF.init(0, 0, 140, 80), &styled_nodes);
+
+    var invalidations_buffer: [1]WidgetInvalidation = undefined;
+    const invalidations = try WidgetLayoutTree.diff(previous, styled, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 1), invalidations.len);
+    try std.testing.expect(!invalidations[0].layout_dirty);
+    try std.testing.expect(invalidations[0].paint_dirty);
+    try std.testing.expect(!invalidations[0].semantics_dirty);
+    try expectRect(geometry.RectF.init(9, 9, 102, 32), invalidations[0].dirty_bounds);
+}
+
 test "widget layout diff marks grid column changes as layout dirty" {
     const children = [_]Widget{
         .{ .id = 2, .kind = .text, .text = "One" },
@@ -15565,6 +15679,79 @@ test "widget emitter applies button state tokens" {
     }
     switch (display_list.commands[3]) {
         .draw_text => |text| try std.testing.expectEqualDeep(tokens.colors.accent_text, text.color),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "widget emitter applies per-widget style overrides" {
+    const base_style = WidgetStyle{
+        .background = Color.rgb8(12, 18, 24),
+        .foreground = Color.rgb8(235, 241, 247),
+        .border = Color.rgb8(54, 64, 74),
+        .focus_ring = Color.rgb8(90, 120, 255),
+        .radius = 5,
+        .stroke_width = 2,
+    };
+    const active_style = WidgetStyle{
+        .accent = Color.rgb8(30, 80, 210),
+        .accent_foreground = Color.rgb8(255, 255, 255),
+        .border = Color.rgb8(30, 80, 210),
+        .radius = 4,
+    };
+
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, .{
+        .id = 30,
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 0, 128, 36),
+        .text = "Brand",
+        .state = .{ .focused = true },
+        .style = base_style,
+    }, .{});
+    try emitWidgetTree(&builder, .{
+        .id = 31,
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 48, 128, 36),
+        .text = "Active",
+        .state = .{ .pressed = true },
+        .style = active_style,
+    }, .{});
+
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 7), display_list.commandCount());
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| {
+            try expectFillColor(Color.rgb8(12, 18, 24), fill.fill);
+            try std.testing.expectEqualDeep(Radius.all(5), fill.radius);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[1]) {
+        .stroke_rect => |stroke| {
+            try expectFillColor(Color.rgb8(54, 64, 74), stroke.stroke.fill);
+            try std.testing.expectEqual(@as(f32, 2), stroke.stroke.width);
+            try std.testing.expectEqualDeep(Radius.all(5), stroke.radius);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .stroke_rect => |stroke| try expectFillColor(Color.rgb8(90, 120, 255), stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[3]) {
+        .draw_text => |text| try std.testing.expectEqualDeep(Color.rgb8(235, 241, 247), text.color),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[4]) {
+        .fill_rounded_rect => |fill| {
+            try expectFillColor(Color.rgb8(30, 80, 210), fill.fill);
+            try std.testing.expectEqualDeep(Radius.all(4), fill.radius);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[6]) {
+        .draw_text => |text| try std.testing.expectEqualDeep(Color.rgb8(255, 255, 255), text.color),
         else => return error.TestUnexpectedResult,
     }
 }
