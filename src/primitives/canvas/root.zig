@@ -558,6 +558,8 @@ pub const TextSelection = struct {
 pub const TextCaretDirection = enum {
     previous,
     next,
+    previous_word,
+    next_word,
     start,
     end,
 };
@@ -10662,6 +10664,7 @@ fn widgetKeyboardTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEvent {
 fn widgetKeyboardKeyDownTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEvent {
     if (widgetKeyboardSelectAllTextEditEvent(event)) |edit| return edit;
     if (widgetKeyboardCommandTextNavigationEvent(event)) |edit| return edit;
+    if (widgetKeyboardWordTextNavigationEvent(event)) |edit| return edit;
     if (event.modifiers.hasNavigationModifier()) return null;
     if (std.ascii.eqlIgnoreCase(event.key, "backspace")) return .delete_backward;
     if (std.ascii.eqlIgnoreCase(event.key, "delete")) return .delete_forward;
@@ -10676,6 +10679,14 @@ fn widgetKeyboardCommandTextNavigationEvent(event: WidgetKeyboardEvent) ?TextInp
     if (!event.modifiers.super or event.modifiers.alt) return null;
     if (std.ascii.eqlIgnoreCase(event.key, "arrowleft")) return .{ .move_caret = .{ .direction = .start, .extend = event.modifiers.shift } };
     if (std.ascii.eqlIgnoreCase(event.key, "arrowright")) return .{ .move_caret = .{ .direction = .end, .extend = event.modifiers.shift } };
+    return null;
+}
+
+fn widgetKeyboardWordTextNavigationEvent(event: WidgetKeyboardEvent) ?TextInputEvent {
+    if (event.modifiers.super) return null;
+    if (event.modifiers.alt == event.modifiers.control) return null;
+    if (std.ascii.eqlIgnoreCase(event.key, "arrowleft")) return .{ .move_caret = .{ .direction = .previous_word, .extend = event.modifiers.shift } };
+    if (std.ascii.eqlIgnoreCase(event.key, "arrowright")) return .{ .move_caret = .{ .direction = .next_word, .extend = event.modifiers.shift } };
     return null;
 }
 
@@ -13509,6 +13520,8 @@ fn moveTextCaret(state: TextEditState, move: TextCaretMove) TextEditState {
     const target = switch (move.direction) {
         .previous => if (!move.extend and !range.isCollapsed(state.text.len)) range.start else previousTextOffset(state.text, focus),
         .next => if (!move.extend and !range.isCollapsed(state.text.len)) range.end else nextTextOffset(state.text, focus),
+        .previous_word => if (!move.extend and !range.isCollapsed(state.text.len)) range.start else previousTextWordOffset(state.text, focus),
+        .next_word => if (!move.extend and !range.isCollapsed(state.text.len)) range.end else nextTextWordOffset(state.text, focus),
         .start => 0,
         .end => state.text.len,
     };
@@ -13577,6 +13590,32 @@ fn nextTextOffset(text: []const u8, offset: usize) usize {
     return @min(text.len, cursor + utf8SequenceLength(text[cursor]));
 }
 
+fn previousTextWordOffset(text: []const u8, offset: usize) usize {
+    var cursor = snapTextOffset(text, offset);
+    while (cursor > 0) {
+        const previous = previousTextOffset(text, cursor);
+        if (textOffsetStartsWord(text, previous)) break;
+        cursor = previous;
+    }
+    while (cursor > 0) {
+        const previous = previousTextOffset(text, cursor);
+        if (!textOffsetStartsWord(text, previous)) break;
+        cursor = previous;
+    }
+    return cursor;
+}
+
+fn nextTextWordOffset(text: []const u8, offset: usize) usize {
+    var cursor = snapTextOffset(text, offset);
+    while (cursor < text.len and !textOffsetStartsWord(text, cursor)) {
+        cursor = nextTextOffset(text, cursor);
+    }
+    while (cursor < text.len and textOffsetStartsWord(text, cursor)) {
+        cursor = nextTextOffset(text, cursor);
+    }
+    return cursor;
+}
+
 fn snapTextOffset(text: []const u8, offset: usize) usize {
     var cursor = @min(offset, text.len);
     while (cursor > 0 and cursor < text.len and isUtf8ContinuationByte(text[cursor])) {
@@ -13595,6 +13634,14 @@ fn utf8SequenceLength(lead: u8) usize {
 
 fn isUtf8ContinuationByte(byte: u8) bool {
     return (byte & 0xc0) == 0x80;
+}
+
+fn textOffsetStartsWord(text: []const u8, offset: usize) bool {
+    const cursor = snapTextOffset(text, offset);
+    if (cursor >= text.len) return false;
+    const lead = text[cursor];
+    if ((lead & 0x80) != 0) return true;
+    return std.ascii.isAlphanumeric(lead) or lead == '_';
 }
 
 fn commandsEqual(a: CanvasCommand, b: CanvasCommand) bool {
@@ -25395,9 +25442,34 @@ test "widget keyboard events map to text edit events" {
     nav_state = try nav_state.apply(shift_command_left, &nav_storage);
     try std.testing.expectEqualDeep(TextSelection{ .anchor = 4, .focus = 0 }, nav_state.selection);
 
+    nav_state = TextEditState{ .text = "hello brave world", .selection = TextSelection.collapsed(17) };
+    const option_left = (WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowleft", .modifiers = .{ .alt = true } }).textEditEvent().?;
+    nav_state = try nav_state.apply(option_left, &nav_storage);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(12), nav_state.selection);
+
+    nav_state = try nav_state.apply(option_left, &nav_storage);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(6), nav_state.selection);
+
+    nav_state = TextEditState{ .text = "hello brave world", .selection = TextSelection.collapsed(0) };
+    const control_right = (WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowright", .modifiers = .{ .control = true } }).textEditEvent().?;
+    nav_state = try nav_state.apply(control_right, &nav_storage);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(5), nav_state.selection);
+
+    nav_state = try nav_state.apply(control_right, &nav_storage);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(11), nav_state.selection);
+
+    nav_state = TextEditState{ .text = "hello brave world", .selection = TextSelection.collapsed(17) };
+    const shift_option_left = (WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowleft", .modifiers = .{ .alt = true, .shift = true } }).textEditEvent().?;
+    nav_state = try nav_state.apply(shift_option_left, &nav_storage);
+    try std.testing.expectEqualDeep(TextSelection{ .anchor = 17, .focus = 12 }, nav_state.selection);
+
+    nav_state = TextEditState{ .text = "éclair cafe", .selection = TextSelection.collapsed(0) };
+    const unicode_control_right = (WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowright", .modifiers = .{ .control = true } }).textEditEvent().?;
+    nav_state = try nav_state.apply(unicode_control_right, &nav_storage);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(7), nav_state.selection);
+
     try std.testing.expect((WidgetKeyboardEvent{ .phase = .text_input, .text = "a", .modifiers = .{ .super = true } }).textEditEvent() == null);
-    try std.testing.expect((WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowleft", .modifiers = .{ .alt = true } }).textEditEvent() == null);
-    try std.testing.expect((WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowleft", .modifiers = .{ .control = true } }).textEditEvent() == null);
+    try std.testing.expect((WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowleft", .modifiers = .{ .alt = true, .control = true } }).textEditEvent() == null);
     try std.testing.expect((WidgetKeyboardEvent{ .phase = .key_down, .key = "a", .modifiers = .{ .super = true, .shift = true } }).textEditEvent() == null);
     try std.testing.expect((WidgetKeyboardEvent{ .phase = .key_up, .key = "backspace" }).textEditEvent() == null);
 }
