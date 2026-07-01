@@ -1,11 +1,12 @@
 const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
+const text_model = @import("text.zig");
 const widget_model = @import("widgets.zig");
 
 const ObjectId = canvas.ObjectId;
-const TextInputEvent = canvas.TextInputEvent;
-const TextRange = canvas.TextRange;
+const TextInputEvent = text_model.TextInputEvent;
+const TextRange = text_model.TextRange;
 const Widget = widget_model.Widget;
 const WidgetActions = widget_model.WidgetActions;
 const WidgetKind = widget_model.WidgetKind;

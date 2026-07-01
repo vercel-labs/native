@@ -1,6 +1,7 @@
 const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
+const text_model = @import("text.zig");
 const token_model = @import("tokens.zig");
 
 const Error = canvas.Error;
@@ -10,9 +11,9 @@ const Color = canvas.Color;
 const Affine = canvas.Affine;
 const ImageFit = canvas.ImageFit;
 const ImageSampling = canvas.ImageSampling;
-const TextAlign = canvas.TextAlign;
-const TextRange = canvas.TextRange;
-const TextSelection = canvas.TextSelection;
+const TextAlign = text_model.TextAlign;
+const TextRange = text_model.TextRange;
+const TextSelection = text_model.TextSelection;
 const CanvasRenderAnimation = canvas.CanvasRenderAnimation;
 const BlurTokenRef = token_model.BlurTokenRef;
 const MotionDuration = token_model.MotionDuration;
