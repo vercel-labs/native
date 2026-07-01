@@ -1386,6 +1386,15 @@ fn normalizedPixelSnapScale(scale_factor: f32) f32 {
     return scale_factor;
 }
 
+fn transparentContentStyle() canvas.WidgetStyle {
+    return .{
+        .background = rgba(0, 0, 0, 0),
+        .border = rgba(0, 0, 0, 0),
+        .radius = 0,
+        .stroke_width = 0,
+    };
+}
+
 fn buildComponentsWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!canvas.WidgetLayoutTree {
     return buildComponentsWidgetLayoutWithScroll(nodes, .{});
 }
@@ -1768,6 +1777,7 @@ fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode,
         .id = content_stack_id,
         .kind = .stack,
         .frame = rect(0, 0, content_width, content_height),
+        .style = transparentContentStyle(),
         .children = content_widgets[0..content_widget_count],
     }};
     var root_widgets: [7]canvas.Widget = undefined;
@@ -1786,6 +1796,7 @@ fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode,
         .frame = rect(sidebar_width, 0, content_width, content_height_available),
         .value = virtual_scroll.page,
         .layout = .{ .clip_content = true },
+        .style = transparentContentStyle(),
         .semantics = .{ .label = "Component section content" },
         .children = &content_children,
     });
@@ -2232,6 +2243,17 @@ test "gpu components layout keeps finished controls visually separated" {
     try std.testing.expectEqual(canvas.WidgetCursor.resize_horizontal, layout.cursorForHit(layout.hitTest(sidebarResizeHandleFrame(canvas_sidebar_width, canvas_content_height).center())));
     try std.testing.expectEqual(canvas.WidgetCursor.resize_horizontal, layout.cursorForHit(layout.hitTest(pt(canvas_sidebar_width, canvas_content_height - 12))));
     try expectComponentWidgetFrame(layout, content_scroll_id, rect(canvas_sidebar_width, 0, canvas_width - canvas_sidebar_width, canvas_content_height));
+    const transparent_content_style = transparentContentStyle();
+    const content_scroll = layout.findById(content_scroll_id).?.widget;
+    try std.testing.expectEqualDeep(transparent_content_style.background, content_scroll.style.background);
+    try std.testing.expectEqualDeep(transparent_content_style.border, content_scroll.style.border);
+    try std.testing.expectEqual(transparent_content_style.radius, content_scroll.style.radius);
+    try std.testing.expectEqual(transparent_content_style.stroke_width, content_scroll.style.stroke_width);
+    const content_stack = layout.findById(content_stack_id).?.widget;
+    try std.testing.expectEqualDeep(transparent_content_style.background, content_stack.style.background);
+    try std.testing.expectEqualDeep(transparent_content_style.border, content_stack.style.border);
+    try std.testing.expectEqual(transparent_content_style.radius, content_stack.style.radius);
+    try std.testing.expectEqual(transparent_content_style.stroke_width, content_stack.style.stroke_width);
     try expectComponentWidgetFrame(layout, canvas_status_text_id, rect(14, canvas_content_height + 7, canvas_width - 28, 18));
     try std.testing.expectEqualStrings(initial_component_status_text, layout.findById(canvas_status_text_id).?.widget.text);
     try expectComponentWidgetFrame(layout, componentSectionNavId(.controls), rect(14, 78, 180, 34));
