@@ -11,10 +11,11 @@ const widget_tree = @import("widget_tree.zig");
 const widget_access = @import("widget_access.zig");
 const widget_routing = @import("widget_routing.zig");
 const widget_semantics = @import("widget_semantics.zig");
+const widget_metrics = @import("widget_metrics.zig");
+const widget_text_input = @import("widget_text_input.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
-const FontId = canvas.FontId;
 const Builder = canvas.Builder;
 const CanvasCommand = canvas.CanvasCommand;
 const Color = drawing_model.Color;
@@ -28,12 +29,9 @@ const DrawText = text_model.DrawText;
 const TextWrap = text_model.TextWrap;
 const TextAlign = text_model.TextAlign;
 const TextLayoutOptions = text_model.TextLayoutOptions;
-const TextLayout = text_model.TextLayout;
 const TextLine = text_model.TextLine;
 const TextRange = text_model.TextRange;
-const TextSelection = text_model.TextSelection;
 const TextSelectionRect = text_model.TextSelectionRect;
-const Density = token_model.Density;
 const DesignTokens = token_model.DesignTokens;
 const ControlVisualTokens = token_model.ControlVisualTokens;
 const VirtualListRange = token_model.VirtualListRange;
@@ -54,6 +52,25 @@ const booleanControlSelected = widget_access.booleanControlSelected;
 const widgetTextSelectionRange = widget_access.widgetTextSelectionRange;
 const widgetTextCompositionRange = widget_access.widgetTextCompositionRange;
 const widgetTextInputKind = widget_access.widgetTextInputKind;
+const widgetPlaceholder = widget_text_input.widgetPlaceholder;
+const widgetTextInputSize = widget_text_input.widgetTextInputSize;
+const widgetTextInputLayoutOptions = widget_text_input.widgetTextInputLayoutOptions;
+const widgetTextInputOrigin = widget_text_input.widgetTextInputOrigin;
+const widgetTextInputClipRect = widget_text_input.widgetTextInputClipRect;
+const widgetTextInputDrawText = widget_text_input.widgetTextInputDrawText;
+const widgetTextInputInset = widget_text_input.widgetTextInputInset;
+const widgetButtonTextSize = widget_metrics.widgetButtonTextSize;
+const widgetBodyTextSize = widget_metrics.widgetBodyTextSize;
+const widgetLabelTextSize = widget_metrics.widgetLabelTextSize;
+const widgetTypographySize = widget_metrics.widgetTypographySize;
+const widgetLineHeight = widget_metrics.widgetLineHeight;
+const widgetDefaultRowHeight = widget_metrics.widgetDefaultRowHeight;
+const widgetButtonInset = widget_metrics.widgetButtonInset;
+const widgetControlInset = widget_metrics.widgetControlInset;
+const widgetSizedDensityValue = widget_metrics.widgetSizedDensityValue;
+const widgetSizedTokenValue = widget_metrics.widgetSizedTokenValue;
+const widgetSizeScale = widget_metrics.widgetSizeScale;
+const densityValue = widget_metrics.densityValue;
 const WidgetKind = widget_model.WidgetKind;
 const WidgetCursor = widget_model.WidgetCursor;
 const WidgetState = widget_model.WidgetState;
@@ -87,18 +104,9 @@ const estimateTextWidth = text_model.estimateTextWidth;
 const estimateTextWidthForFont = text_model.estimateTextWidthForFont;
 const estimateTextAdvanceForBytes = text_model.estimateTextAdvanceForBytes;
 const estimatedGlyphAdvance = text_model.estimatedGlyphAdvance;
-const snapTextSelection = text_model.snapTextSelection;
-const snapTextRange = text_model.snapTextRange;
 const nextTextOffset = text_model.nextTextOffset;
-const nextTextLineEnd = text_model.nextTextLineEnd;
-const isTextBreakByte = text_model.isTextBreakByte;
-const textLineRange = text_model.textLineRange;
-const textLineCaretX = text_model.textLineCaretX;
-const layoutTextRun = text_model.layoutTextRun;
 const layoutTextCaretRect = text_model.layoutTextCaretRect;
-const textCaretRectForLayout = text_model.textCaretRectForLayout;
 const layoutTextSelectionRects = text_model.layoutTextSelectionRects;
-const layoutTextOffsetForPoint = text_model.layoutTextOffsetForPoint;
 const strokeBounds = drawing_model.strokeBounds;
 const shadowBounds = drawing_model.shadowBounds;
 const rectsEqual = equality_model.rectsEqual;
@@ -115,7 +123,15 @@ const optionalTextRangesEqual = equality_model.optionalTextRangesEqual;
 pub const max_widget_depth: usize = 32;
 pub const max_widget_text_range_rects: usize = 4;
 const max_widget_text_layout_lines: usize = 16;
-const default_widget_row_extent: f32 = 28;
+pub const widgetControlHeight = widget_metrics.widgetControlHeight;
+pub const WidgetTextGeometry = widget_text_input.WidgetTextGeometry;
+pub const textSelectionForWidgetPoint = widget_text_input.textSelectionForWidgetPoint;
+pub const textOffsetForWidgetPoint = widget_text_input.textOffsetForWidgetPoint;
+pub const textInputViewportForWidget = widget_text_input.textInputViewportForWidget;
+pub const textInputContentExtentForWidget = widget_text_input.textInputContentExtentForWidget;
+pub const textInputMaxScrollOffsetForWidget = widget_text_input.textInputMaxScrollOffsetForWidget;
+pub const clampedTextInputScrollOffsetForWidget = widget_text_input.clampedTextInputScrollOffsetForWidget;
+pub const textGeometryForWidget = widget_text_input.textGeometryForWidget;
 const SpinnerSegment = struct { x: f32, y: f32 };
 const spinner_segments = [_]SpinnerSegment{
     .{ .x = 0, .y = -1 },
@@ -2083,240 +2099,6 @@ fn widgetIconGlyphScale(widget: Widget) f32 {
     };
 }
 
-fn widgetPlaceholder(widget: Widget) []const u8 {
-    if (widget.placeholder.len > 0) return widget.placeholder;
-    return switch (widget.kind) {
-        .select, .search_field, .combobox => widget.semantics.label,
-        else => "",
-    };
-}
-
-pub fn textSelectionForWidgetPoint(widget: Widget, point: geometry.PointF, anchor: ?usize, tokens: DesignTokens) ?TextSelection {
-    const offset = textOffsetForWidgetPoint(widget, point, tokens) orelse return null;
-    const selection = if (anchor) |anchor_offset|
-        TextSelection{ .anchor = anchor_offset, .focus = offset }
-    else
-        TextSelection.collapsed(offset);
-    return snapTextSelection(widget.text, selection);
-}
-
-pub fn textOffsetForWidgetPoint(widget: Widget, point: geometry.PointF, tokens: DesignTokens) ?usize {
-    if (!widgetTextInputKind(widget.kind)) return null;
-    if (widget.state.disabled) return null;
-    const text_size = widgetTextInputSize(widget, tokens);
-    const text_inset = widgetTextInputInset(widget, tokens);
-    const layout_options = widgetTextInputLayoutOptions(widget, text_size, text_inset);
-    const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
-    const draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, tokens.colors.text, layout_options);
-    var lines: [max_widget_text_layout_lines]TextLine = undefined;
-    return layoutTextOffsetForPoint(draw_text, layout_options, point, &lines) catch null;
-}
-
-fn widgetButtonTextSize(widget: Widget, tokens: DesignTokens) f32 {
-    return widgetTypographySize(widget, tokens.typography.button_size);
-}
-
-fn widgetBodyTextSize(widget: Widget, tokens: DesignTokens) f32 {
-    return widgetTypographySize(widget, tokens.typography.body_size);
-}
-
-fn widgetLabelTextSize(widget: Widget, tokens: DesignTokens) f32 {
-    return widgetTypographySize(widget, tokens.typography.label_size);
-}
-
-fn widgetTextInputSize(widget: Widget, tokens: DesignTokens) f32 {
-    return widgetBodyTextSize(widget, tokens);
-}
-
-fn widgetTypographySize(widget: Widget, base: f32) f32 {
-    return switch (widget.size) {
-        .sm => @max(8, base - 1),
-        .default, .icon => base,
-        .lg => base + 1,
-    };
-}
-
-fn widgetTextInputLayoutOptions(widget: Widget, text_size: f32, inset: f32) TextLayoutOptions {
-    const line_height = widgetTextInputLineHeight(text_size);
-    const trailing_inset = widgetTextInputTrailingInset(widget, text_size, inset);
-    return .{
-        .max_width = @max(1, widget.frame.width - inset - trailing_inset),
-        .line_height = line_height,
-        .wrap = widgetTextInputWrap(widget, line_height),
-    };
-}
-
-fn widgetTextInputLineHeight(text_size: f32) f32 {
-    return widgetLineHeight(text_size);
-}
-
-fn widgetTextInputWrap(widget: Widget, line_height: f32) TextWrap {
-    if (widget.kind == .textarea) return .word;
-    if (widget.kind == .text_field and widget.frame.height >= line_height * 2.25) return .word;
-    return .none;
-}
-
-fn widgetTextInputVerticalInset(widget: Widget, tokens: DesignTokens, text_size: f32, options: TextLayoutOptions) f32 {
-    if (options.wrap != .none) return widgetControlInset(widget, tokens, tokens.spacing.sm);
-    return @max(0, (widget.frame.height - widgetTextInputLineHeight(text_size)) * 0.5);
-}
-
-fn widgetTextInputScrollOffset(widget: Widget, tokens: DesignTokens, text_size: f32, text_inset: f32, options: TextLayoutOptions) f32 {
-    if (widget.kind != .textarea) return 0;
-    return std.math.clamp(widget.value, 0, widgetTextInputMaxScrollOffset(widget, tokens, text_size, text_inset, options));
-}
-
-fn widgetTextInputOrigin(widget: Widget, tokens: DesignTokens, text_size: f32, inset: f32, options: TextLayoutOptions) geometry.PointF {
-    if (options.wrap != .none) {
-        const scroll_offset = widgetTextInputScrollOffset(widget, tokens, text_size, inset, options);
-        return geometry.PointF.init(
-            widget.frame.x + inset,
-            widget.frame.y + widgetTextInputVerticalInset(widget, tokens, text_size, options) + text_size - scroll_offset,
-        );
-    }
-    return textOrigin(widget.frame, text_size, inset);
-}
-
-fn widgetTextInputClipRect(widget: Widget, tokens: DesignTokens, text_size: f32, inset: f32, options: TextLayoutOptions) geometry.RectF {
-    const vertical_inset = widgetTextInputVerticalInset(widget, tokens, text_size, options);
-    const trailing_inset = widgetTextInputTrailingInset(widget, text_size, inset);
-    return widget.frame.normalized().deflate(.{
-        .top = vertical_inset,
-        .right = trailing_inset,
-        .bottom = vertical_inset,
-        .left = inset,
-    });
-}
-
-pub fn textInputViewportForWidget(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
-    if (!widgetTextInputKind(widget.kind)) return null;
-    if (widget.state.disabled) return null;
-    const text_size = widgetTextInputSize(widget, tokens);
-    const text_inset = widgetTextInputInset(widget, tokens);
-    const options = widgetTextInputLayoutOptions(widget, text_size, text_inset);
-    return widgetTextInputClipRect(widget, tokens, text_size, text_inset, options);
-}
-
-pub fn textInputContentExtentForWidget(widget: Widget, tokens: DesignTokens) f32 {
-    if (!widgetTextInputKind(widget.kind)) return 0;
-    const text_size = widgetTextInputSize(widget, tokens);
-    const text_inset = widgetTextInputInset(widget, tokens);
-    const options = widgetTextInputLayoutOptions(widget, text_size, text_inset);
-    const line_height = widgetTextInputLineHeight(text_size);
-    return @as(f32, @floatFromInt(widgetTextInputLineCount(widget, tokens.typography.font_id, text_size, options))) * line_height;
-}
-
-pub fn textInputMaxScrollOffsetForWidget(widget: Widget, tokens: DesignTokens) f32 {
-    if (!widgetTextInputKind(widget.kind)) return 0;
-    const text_size = widgetTextInputSize(widget, tokens);
-    const text_inset = widgetTextInputInset(widget, tokens);
-    const options = widgetTextInputLayoutOptions(widget, text_size, text_inset);
-    return widgetTextInputMaxScrollOffset(widget, tokens, text_size, text_inset, options);
-}
-
-pub fn clampedTextInputScrollOffsetForWidget(widget: Widget, tokens: DesignTokens, offset: f32) f32 {
-    if (!widgetTextInputKind(widget.kind)) return 0;
-    return std.math.clamp(offset, 0, textInputMaxScrollOffsetForWidget(widget, tokens));
-}
-
-fn widgetTextInputMaxScrollOffset(widget: Widget, tokens: DesignTokens, text_size: f32, text_inset: f32, options: TextLayoutOptions) f32 {
-    const viewport = widgetTextInputClipRect(widget, tokens, text_size, text_inset, options);
-    return @max(0, textInputContentExtentForWidgetWithOptions(widget, tokens.typography.font_id, text_size, options) - viewport.height);
-}
-
-fn textInputContentExtentForWidgetWithOptions(widget: Widget, font_id: FontId, text_size: f32, options: TextLayoutOptions) f32 {
-    return @as(f32, @floatFromInt(widgetTextInputLineCount(widget, font_id, text_size, options))) * widgetTextInputLineHeight(text_size);
-}
-
-fn widgetTextInputLineCount(widget: Widget, font_id: FontId, text_size: f32, options: TextLayoutOptions) usize {
-    if (widget.text.len == 0) return 1;
-    var count: usize = 0;
-    var start: usize = 0;
-    while (start <= widget.text.len) {
-        const end = nextTextLineEnd(widget.text, start, font_id, text_size, options);
-        count += 1;
-        if (end >= widget.text.len) break;
-        start = end;
-        if (start < widget.text.len and widget.text[start] == '\n') start += 1;
-        while (options.wrap == .word and start < widget.text.len and isTextBreakByte(widget.text[start])) start += 1;
-    }
-    return @max(1, count);
-}
-
-fn widgetTextInputDrawText(
-    widget: Widget,
-    tokens: DesignTokens,
-    text_size: f32,
-    origin: geometry.PointF,
-    color: Color,
-    options: TextLayoutOptions,
-) DrawText {
-    return .{
-        .font_id = tokens.typography.font_id,
-        .size = text_size,
-        .origin = pixelSnapTextPoint(tokens, origin),
-        .color = color,
-        .text = widget.text,
-        .text_layout = options,
-    };
-}
-
-fn widgetTextInputInset(widget: Widget, tokens: DesignTokens) f32 {
-    const text_size = widgetTextInputSize(widget, tokens);
-    return switch (widget.kind) {
-        .search_field, .combobox => widgetControlInset(widget, tokens, tokens.spacing.md) + @max(widgetSizedDensityValue(widget, tokens, 8), text_size - 2) + widgetControlInset(widget, tokens, tokens.spacing.sm),
-        else => widgetControlInset(widget, tokens, tokens.spacing.md),
-    };
-}
-
-fn widgetTextInputTrailingInset(widget: Widget, text_size: f32, inset: f32) f32 {
-    if (widget.kind == .combobox) return inset + @max(8, text_size - 4);
-    return inset;
-}
-
-fn widgetButtonInset(widget: Widget, tokens: DesignTokens) f32 {
-    return switch (widget.size) {
-        .icon => 0,
-        else => widgetControlInset(widget, tokens, tokens.spacing.md),
-    };
-}
-
-fn widgetControlInset(widget: Widget, tokens: DesignTokens, base: f32) f32 {
-    return densityValue(tokens, widgetSizedTokenValue(widget, base));
-}
-
-fn widgetSizedDensityValue(widget: Widget, tokens: DesignTokens, value: f32) f32 {
-    return densityValue(tokens, value) * widgetSizeScale(widget);
-}
-
-fn widgetSizedTokenValue(widget: Widget, value: f32) f32 {
-    return switch (widget.size) {
-        .sm => @max(0, value - 2),
-        .default, .icon => value,
-        .lg => value + 2,
-    };
-}
-
-fn widgetSizeScale(widget: Widget) f32 {
-    return switch (widget.size) {
-        .sm => 0.875,
-        .default, .icon => 1,
-        .lg => 1.125,
-    };
-}
-
-fn densityValue(tokens: DesignTokens, value: f32) f32 {
-    return value * densityScale(tokens.density);
-}
-
-fn densityScale(density: Density) f32 {
-    return switch (density) {
-        .compact => 0.875,
-        .regular => 1,
-        .spacious => 1.125,
-    };
-}
-
 fn textInputAffordanceColor(widget: Widget, tokens: DesignTokens) Color {
     const visual = textInputControlVisualTokens(widget, tokens);
     return widget.style.focus_ring orelse widget.style.accent orelse visual.active_background orelse tokens.colors.focus_ring;
@@ -3252,18 +3034,6 @@ fn intrinsicIconExtent(widget: Widget, tokens: DesignTokens) f32 {
     return widgetSizedDensityValue(widget, tokens, 18);
 }
 
-pub fn widgetControlHeight(widget: Widget, tokens: DesignTokens) f32 {
-    return widgetSizedDensityValue(widget, tokens, 34);
-}
-
-fn widgetDefaultRowHeight(widget: Widget, tokens: DesignTokens) f32 {
-    return widgetSizedDensityValue(widget, tokens, default_widget_row_extent);
-}
-
-fn widgetLineHeight(text_size: f32) f32 {
-    return text_size * 1.25;
-}
-
 fn preferredMainExtent(widget: Widget, axis: LayoutAxis, tokens: DesignTokens) f32 {
     const value = switch (axis) {
         .horizontal => widget.frame.width,
@@ -3323,76 +3093,6 @@ fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNod
 
 fn widgetScrollSemantics(layout: WidgetLayoutTree, node_index: usize) widget_semantics.WidgetScrollSemantics {
     return widget_semantics.widgetScrollSemantics(layout, node_index, virtualWidgetScrollContentExtent);
-}
-
-pub const WidgetTextGeometry = struct {
-    caret_bounds: ?geometry.RectF = null,
-    selection_bounds: ?geometry.RectF = null,
-    selection_rect_count: usize = 0,
-    composition_bounds: ?geometry.RectF = null,
-    composition_rect_count: usize = 0,
-};
-
-pub fn textGeometryForWidget(widget: Widget, tokens: DesignTokens) WidgetTextGeometry {
-    var value: WidgetTextGeometry = .{};
-    if (!widgetTextInputKind(widget.kind)) return value;
-    if (widget.state.disabled) return value;
-
-    const text_size = widgetTextInputSize(widget, tokens);
-    const text_inset = widgetTextInputInset(widget, tokens);
-    const layout_options = widgetTextInputLayoutOptions(widget, text_size, text_inset);
-    const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
-    const draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, tokens.colors.text, layout_options);
-
-    var lines: [max_widget_text_layout_lines]TextLine = undefined;
-    const layout = layoutTextRun(draw_text, layout_options, &lines) catch return value;
-
-    if (widgetTextSelectionRange(widget)) |range| {
-        if (range.isCollapsed(widget.text.len)) {
-            value.caret_bounds = textCaretRectForLayout(draw_text, layout, range.start);
-        } else {
-            const bounds = textRangeBoundsForLayout(draw_text, layout, range);
-            value.selection_bounds = bounds.bounds;
-            value.selection_rect_count = bounds.rect_count;
-        }
-    }
-    if (widgetTextCompositionRange(widget)) |range| {
-        if (!range.isCollapsed(widget.text.len)) {
-            const bounds = textRangeBoundsForLayout(draw_text, layout, range);
-            value.composition_bounds = bounds.bounds;
-            value.composition_rect_count = bounds.rect_count;
-        }
-    }
-    return value;
-}
-
-const TextRangeBounds = struct {
-    bounds: ?geometry.RectF = null,
-    rect_count: usize = 0,
-};
-
-fn textRangeBoundsForLayout(text: DrawText, layout: TextLayout, range: TextRange) TextRangeBounds {
-    const normalized = snapTextRange(text.text, range);
-    if (normalized.isCollapsed(text.text.len)) return .{};
-
-    var value: TextRangeBounds = .{};
-    for (layout.lines) |line| {
-        const line_range = textLineRange(text, line);
-        const start = @max(normalized.start, line_range.start);
-        const end = @min(normalized.end, line_range.end);
-        if (start >= end) continue;
-
-        const x0 = textLineCaretX(text, line, start);
-        const x1 = textLineCaretX(text, line, end);
-        const left = @min(x0, x1);
-        const right = @max(x0, x1);
-        value.bounds = unionOptionalBounds(
-            value.bounds,
-            geometry.RectF.init(left, line.bounds.y, @max(1, right - left), @max(1, line.bounds.height)),
-        );
-        value.rect_count += 1;
-    }
-    return value;
 }
 
 pub fn virtualWidgetScrollContentExtent(widget: Widget, viewport_extent: f32) f32 {
