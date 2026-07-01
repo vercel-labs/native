@@ -858,7 +858,7 @@ const GpuComponentsApp = struct {
         self.status_text_len = len;
     }
 
-    fn statusText(self: @This()) []const u8 {
+    fn statusText(self: *const @This()) []const u8 {
         if (self.status_text_len == 0) return initial_component_status_text;
         return self.status_text_storage[0..self.status_text_len];
     }
@@ -911,7 +911,7 @@ const GpuComponentsApp = struct {
         _ = try runtime.setCanvasWidgetLayout(window_id, canvas_label, layout);
     }
 
-    fn componentUiState(self: @This()) ComponentUiState {
+    fn componentUiState(self: *const @This()) ComponentUiState {
         return .{
             .environment_select_open = self.environment_select_open,
             .environment_index = self.environment_index,
@@ -922,7 +922,7 @@ const GpuComponentsApp = struct {
         };
     }
 
-    fn componentTokens(self: @This()) canvas.DesignTokens {
+    fn componentTokens(self: *const @This()) canvas.DesignTokens {
         return componentTokensForScaleMotionAndContrast(self.theme_mode, self.pixel_snap_scale, self.reduce_motion, self.high_contrast);
     }
 
@@ -1997,6 +1997,17 @@ test "gpu components scene declares native shell and gpu canvas" {
     try std.testing.expect(shell_views[5].gpu_alpha_mode.? == .@"opaque");
     try std.testing.expect(shell_views[5].gpu_color_space.? == .srgb);
     try std.testing.expect(shell_views[5].gpu_vsync.?);
+}
+
+test "gpu components status text state keeps app-owned storage" {
+    var app = GpuComponentsApp{};
+    defer app.deinit();
+
+    app.setStatusText("Canvas installed.");
+    const ui_state = app.componentUiState();
+
+    try std.testing.expectEqualStrings("Canvas installed.", ui_state.status_text);
+    try std.testing.expectEqual(@intFromPtr(app.status_text_storage[0..].ptr), @intFromPtr(ui_state.status_text.ptr));
 }
 
 test "gpu components display list covers finished live controls" {

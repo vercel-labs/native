@@ -11838,6 +11838,19 @@ fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChan
     try validateUniqueObjectIds(next);
 
     var len: usize = 0;
+    if (previous.commands.len == 0 and next.commands.len == 0) return output[0..0];
+    if (previous.commands.len == 0 or next.commands.len == 0) {
+        const dirty_bounds = if (previous.commands.len == 0)
+            displayListBoundsWithoutText(next)
+        else
+            displayListBoundsWithoutText(previous);
+        try appendDiffChange(output, &len, .{
+            .kind = .scene_changed,
+            .dirty_bounds = dirty_bounds,
+        });
+        return output[0..len];
+    }
+
     if (!unkeyedCommandsEqual(previous, next)) {
         try appendDiffChange(output, &len, .{
             .kind = .scene_changed,
@@ -11881,6 +11894,17 @@ fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChan
     }
 
     return output[0..len];
+}
+
+fn displayListBoundsWithoutText(display_list: DisplayList) ?geometry.RectF {
+    var result: ?geometry.RectF = null;
+    for (display_list.commands) |command| {
+        if (std.meta.activeTag(command) == .draw_text) return null;
+        if (command.bounds()) |command_bounds| {
+            result = if (result) |current| geometry.RectF.unionWith(current.normalized(), command_bounds.normalized()) else command_bounds;
+        }
+    }
+    return result;
 }
 
 fn appendDiffChange(output: []DiffChange, len: *usize, change: DiffChange) Error!void {
@@ -21380,6 +21404,30 @@ test "display list diffs changed added removed and unkeyed scene commands" {
     try std.testing.expectEqual(DiffKind.added, diff[3].kind);
     try std.testing.expectEqual(@as(?ObjectId, 4), diff[3].id);
     try expectRect(geometry.RectF.init(214, -6, 36, 36), diff[3].dirty_bounds);
+}
+
+test "display list diff treats empty transitions as full scene changes" {
+    const commands = [_]CanvasCommand{.{ .draw_text = .{
+        .id = 1,
+        .origin = geometry.PointF.init(0, 16),
+        .size = 13,
+        .color = Color.rgb8(255, 255, 255),
+        .text = "Initial retained canvas install",
+        .text_layout = .{ .max_width = 140, .line_height = 18, .wrap = .word },
+    } }};
+
+    var changes: [2]DiffChange = undefined;
+    const added = try DisplayList.diff(.{}, .{ .commands = &commands }, &changes);
+    try std.testing.expectEqual(@as(usize, 1), added.len);
+    try std.testing.expectEqual(DiffKind.scene_changed, added[0].kind);
+    try std.testing.expectEqual(@as(?ObjectId, null), added[0].id);
+    try std.testing.expectEqual(@as(?geometry.RectF, null), added[0].dirty_bounds);
+
+    const removed = try DisplayList.diff(.{ .commands = &commands }, .{}, &changes);
+    try std.testing.expectEqual(@as(usize, 1), removed.len);
+    try std.testing.expectEqual(DiffKind.scene_changed, removed[0].kind);
+    try std.testing.expectEqual(@as(?ObjectId, null), removed[0].id);
+    try std.testing.expectEqual(@as(?geometry.RectF, null), removed[0].dirty_bounds);
 }
 
 test "display list diff ignores unchanged keyed commands" {
