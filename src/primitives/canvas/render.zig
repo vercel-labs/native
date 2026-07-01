@@ -3,6 +3,7 @@ const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
 const token_model = @import("tokens.zig");
+const equality_model = @import("equality.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -11,21 +12,22 @@ const FontId = canvas.FontId;
 const CanvasCommand = canvas.CanvasCommand;
 const ReferenceImage = canvas.ReferenceImage;
 const Affine = drawing_model.Affine;
+const Fill = drawing_model.Fill;
+const Stroke = drawing_model.Stroke;
 const Radius = drawing_model.Radius;
 const PathElement = drawing_model.PathElement;
 const Easing = token_model.Easing;
 const SpringToken = token_model.SpringToken;
 
-const RenderBatchPlanner = canvas.RenderBatchPlanner;
 const RenderPathGeometryPlanner = canvas.RenderPathGeometryPlanner;
 const RenderImagePlanner = canvas.RenderImagePlanner;
 const RenderLayerPlanner = canvas.RenderLayerPlanner;
-const RenderPipelineCachePlanner = canvas.RenderPipelineCachePlanner;
 const RenderPathGeometryCachePlanner = canvas.RenderPathGeometryCachePlanner;
 const RenderImageCachePlanner = canvas.RenderImageCachePlanner;
 const RenderResourceCachePlanner = canvas.RenderResourceCachePlanner;
 const RenderLayerCachePlanner = canvas.RenderLayerCachePlanner;
 const VisualEffectCachePlanner = canvas.VisualEffectCachePlanner;
+const optionalRectsEqual = equality_model.optionalRectsEqual;
 
 pub const max_render_state_stack: usize = 32;
 const path_geometry_curve_segments: usize = 12;
@@ -204,6 +206,51 @@ pub const RenderBatchPlan = struct {
     }
 };
 
+pub const RenderBatchPlanner = struct {
+    batches: []RenderBatch,
+    len: usize = 0,
+
+    pub fn init(batches: []RenderBatch) RenderBatchPlanner {
+        return .{ .batches = batches };
+    }
+
+    pub fn reset(self: *RenderBatchPlanner) void {
+        self.len = 0;
+    }
+
+    pub fn build(self: *RenderBatchPlanner, render_plan: RenderPlan) Error!RenderBatchPlan {
+        self.reset();
+        for (render_plan.commands, 0..) |command, index| {
+            try self.consume(command, index);
+        }
+        return .{
+            .batches = self.batches[0..self.len],
+            .bounds = render_plan.bounds,
+        };
+    }
+
+    fn consume(self: *RenderBatchPlanner, command: RenderCommand, index: usize) Error!void {
+        const pipeline = renderPipelineKind(command.command);
+        if (self.len > 0 and renderBatchCanExtend(self.batches[self.len - 1], command, pipeline, index)) {
+            const batch = &self.batches[self.len - 1];
+            batch.command_count += 1;
+            batch.bounds = geometry.RectF.unionWith(batch.bounds.normalized(), command.bounds.normalized());
+            return;
+        }
+
+        if (self.len >= self.batches.len) return error.RenderBatchListFull;
+        self.batches[self.len] = .{
+            .pipeline = pipeline,
+            .command_start = index,
+            .command_count = 1,
+            .opacity = command.opacity,
+            .clip = command.clip,
+            .bounds = command.bounds,
+        };
+        self.len += 1;
+    }
+};
+
 pub const RenderPipelineCacheEntry = struct {
     pipeline: RenderPipelineKind,
     last_used_frame: u64 = 0,
@@ -254,6 +301,74 @@ pub const RenderPipelineCachePlan = struct {
         return count;
     }
 };
+
+pub const RenderPipelineCachePlanner = struct {
+    entries: []RenderPipelineCacheEntry,
+    actions: []RenderPipelineCacheAction,
+    entry_len: usize = 0,
+    action_len: usize = 0,
+
+    pub fn init(entries: []RenderPipelineCacheEntry, actions: []RenderPipelineCacheAction) RenderPipelineCachePlanner {
+        return .{ .entries = entries, .actions = actions };
+    }
+
+    pub fn reset(self: *RenderPipelineCachePlanner) void {
+        self.entry_len = 0;
+        self.action_len = 0;
+    }
+
+    pub fn build(self: *RenderPipelineCachePlanner, batch_plan: RenderBatchPlan, previous: []const RenderPipelineCacheEntry, frame_index: u64) Error!RenderPipelineCachePlan {
+        self.reset();
+        for (batch_plan.batches, 0..) |batch, batch_index| {
+            if (findRenderPipelineCacheEntry(self.entries[0..self.entry_len], batch.pipeline) != null) continue;
+
+            const previous_index = findRenderPipelineCacheEntry(previous, batch.pipeline);
+            try self.appendAction(.{
+                .kind = if (previous_index == null) .upload else .retain,
+                .pipeline = batch.pipeline,
+                .batch_index = batch_index,
+                .cache_index = previous_index,
+            });
+            try self.appendEntry(.{
+                .pipeline = batch.pipeline,
+                .last_used_frame = frame_index,
+            });
+        }
+
+        for (previous, 0..) |entry, cache_index| {
+            if (findRenderPipelineCacheEntry(self.entries[0..self.entry_len], entry.pipeline) != null) continue;
+            try self.appendAction(.{
+                .kind = .evict,
+                .pipeline = entry.pipeline,
+                .cache_index = cache_index,
+            });
+        }
+
+        return .{
+            .entries = self.entries[0..self.entry_len],
+            .actions = self.actions[0..self.action_len],
+        };
+    }
+
+    fn appendEntry(self: *RenderPipelineCachePlanner, entry: RenderPipelineCacheEntry) Error!void {
+        if (self.entry_len >= self.entries.len) return error.RenderPipelineCacheListFull;
+        self.entries[self.entry_len] = entry;
+        self.entry_len += 1;
+    }
+
+    fn appendAction(self: *RenderPipelineCachePlanner, action: RenderPipelineCacheAction) Error!void {
+        if (self.action_len >= self.actions.len) return error.RenderPipelineCacheListFull;
+        self.actions[self.action_len] = action;
+        self.action_len += 1;
+    }
+};
+
+fn findRenderPipelineCacheEntry(entries: []const RenderPipelineCacheEntry, pipeline: RenderPipelineKind) ?usize {
+    for (entries, 0..) |entry, index| {
+        if (entry.pipeline == pipeline) return index;
+    }
+    return null;
+}
 
 pub const RenderPathGeometryKind = enum {
     fill,
@@ -364,6 +479,39 @@ pub fn analyzePathGeometry(elements: []const PathElement, kind: RenderPathGeomet
         },
     }
     return counts;
+}
+
+fn renderBatchCanExtend(batch: RenderBatch, command: RenderCommand, pipeline: RenderPipelineKind, index: usize) bool {
+    return batch.pipeline == pipeline and
+        batch.command_start + batch.command_count == index and
+        batch.opacity == command.opacity and
+        optionalRectsEqual(batch.clip, command.clip);
+}
+
+fn renderPipelineKind(command: CanvasCommand) RenderPipelineKind {
+    return switch (command) {
+        .push_clip, .pop_clip, .push_opacity, .pop_opacity, .transform => .solid,
+        .fill_rect => |value| renderPipelineForFill(value.fill),
+        .stroke_rect => |value| renderPipelineForStroke(value.stroke),
+        .fill_rounded_rect => |value| renderPipelineForFill(value.fill),
+        .draw_line => |value| renderPipelineForStroke(value.stroke),
+        .fill_path, .stroke_path => .path,
+        .draw_image => .image,
+        .draw_text => .glyph_run,
+        .shadow => .shadow,
+        .blur => .blur,
+    };
+}
+
+fn renderPipelineForStroke(stroke: Stroke) RenderPipelineKind {
+    return renderPipelineForFill(stroke.fill);
+}
+
+fn renderPipelineForFill(fill: Fill) RenderPipelineKind {
+    return switch (fill) {
+        .color => .solid,
+        .linear_gradient => .linear_gradient,
+    };
 }
 
 pub const RenderPathGeometryKey = struct {
