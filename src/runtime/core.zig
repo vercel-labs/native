@@ -633,365 +633,107 @@ pub const Runtime = struct {
         self.invalidateFor(.command, null);
     }
 
-    fn CanvasFrameMethods() type {
-        return canvas_frame_helpers.RuntimeCanvasFrames(Runtime);
-    }
-
-    pub fn setCanvasDisplayList(self: *Runtime, window_id: platform.WindowId, label: []const u8, display_list: canvas.DisplayList) anyerror!platform.ViewInfo {
-        return CanvasFrameMethods().setCanvasDisplayList(self, window_id, label, display_list);
-    }
-
-    pub fn canvasDisplayList(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror!canvas.DisplayList {
-        return CanvasFrameMethods().canvasDisplayList(self, window_id, label);
-    }
-
-    pub fn setCanvasRenderAnimations(self: *Runtime, window_id: platform.WindowId, label: []const u8, animations: []const canvas.CanvasRenderAnimation) anyerror!platform.ViewInfo {
-        return CanvasFrameMethods().setCanvasRenderAnimations(self, window_id, label, animations);
-    }
-
-    pub fn clearCanvasRenderAnimations(self: *Runtime, window_id: platform.WindowId, label: []const u8) anyerror!platform.ViewInfo {
-        return CanvasFrameMethods().clearCanvasRenderAnimations(self, window_id, label);
-    }
-
-    pub fn canvasRenderAnimations(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror![]const canvas.CanvasRenderAnimation {
-        return CanvasFrameMethods().canvasRenderAnimations(self, window_id, label);
-    }
-
-    pub fn canvasRenderAnimationStartNs(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror!u64 {
-        return CanvasFrameMethods().canvasRenderAnimationStartNs(self, window_id, label);
-    }
-
-    pub fn canvasFramePlan(self: *const Runtime, window_id: platform.WindowId, label: []const u8, previous: ?canvas.DisplayList, options: canvas.CanvasFrameOptions, storage: canvas.CanvasFrameStorage) anyerror!canvas.CanvasFrame {
-        return CanvasFrameMethods().canvasFramePlan(self, window_id, label, previous, options, storage);
-    }
-
-    pub fn nextCanvasFrame(self: *Runtime, window_id: platform.WindowId, label: []const u8, options: canvas.CanvasFrameOptions, storage: canvas.CanvasFrameStorage) anyerror!canvas.CanvasFrame {
-        return CanvasFrameMethods().nextCanvasFrame(self, window_id, label, options, storage);
-    }
-
-    pub fn nextCanvasGpuPacket(self: *Runtime, window_id: platform.WindowId, label: []const u8, options: canvas.CanvasFrameOptions, storage: canvas.CanvasFrameStorage, output: []canvas.CanvasGpuCommand) anyerror!canvas.CanvasGpuPacket {
-        return CanvasFrameMethods().nextCanvasGpuPacket(self, window_id, label, options, storage, output);
-    }
-
-    pub fn presentNextCanvasGpuPacket(
-        self: *Runtime,
-        window_id: platform.WindowId,
-        label: []const u8,
-        options: canvas.CanvasFrameOptions,
-        storage: canvas.CanvasFrameStorage,
-        clear_color: canvas.Color,
-        output: []canvas.CanvasGpuCommand,
-        packet_json_buffer: []u8,
-    ) anyerror!canvas.CanvasGpuPacket {
-        return CanvasFrameMethods().presentNextCanvasGpuPacket(self, window_id, label, options, storage, clear_color, output, packet_json_buffer);
-    }
-
-    pub fn presentNextCanvasGpuPacketWithScale(
-        self: *Runtime,
-        window_id: platform.WindowId,
-        label: []const u8,
-        options: canvas.CanvasFrameOptions,
-        storage: canvas.CanvasFrameStorage,
-        clear_color: canvas.Color,
-        output: []canvas.CanvasGpuCommand,
-        packet_json_buffer: []u8,
-        packet_scale: ?f32,
-    ) anyerror!canvas.CanvasGpuPacket {
-        return CanvasFrameMethods().presentNextCanvasGpuPacketWithScale(self, window_id, label, options, storage, clear_color, output, packet_json_buffer, packet_scale);
-    }
-
-    pub fn presentNextCanvasFrame(
-        self: *Runtime,
-        window_id: platform.WindowId,
-        label: []const u8,
-        options: canvas.CanvasFrameOptions,
-        storage: canvas.CanvasFrameStorage,
-        gpu_commands: []canvas.CanvasGpuCommand,
-        packet_json_buffer: []u8,
-        pixels: []u8,
-        scratch: []u8,
-        clear_color: canvas.Color,
-        pixel_scale: ?f32,
-    ) anyerror!CanvasPresentationResult {
-        return CanvasFrameMethods().presentNextCanvasFrame(self, window_id, label, options, storage, gpu_commands, packet_json_buffer, pixels, scratch, clear_color, pixel_scale);
-    }
-
-    pub fn presentCanvasFramePixels(
-        self: *Runtime,
-        window_id: platform.WindowId,
-        label: []const u8,
-        canvas_frame: canvas.CanvasFrame,
-        pixels: []u8,
-        scratch: []u8,
-        clear_color: canvas.Color,
-    ) anyerror!void {
-        return CanvasFrameMethods().presentCanvasFramePixels(self, window_id, label, canvas_frame, pixels, scratch, clear_color);
-    }
-
-    pub fn presentNextCanvasFramePixels(
-        self: *Runtime,
-        window_id: platform.WindowId,
-        label: []const u8,
-        options: canvas.CanvasFrameOptions,
-        storage: canvas.CanvasFrameStorage,
-        pixels: []u8,
-        scratch: []u8,
-        clear_color: canvas.Color,
-    ) anyerror!canvas.CanvasFrame {
-        return CanvasFrameMethods().presentNextCanvasFramePixels(self, window_id, label, options, storage, pixels, scratch, clear_color);
-    }
-
-    fn planCanvasFrameForView(self: *Runtime, index: usize, options: canvas.CanvasFrameOptions, storage: canvas.CanvasFrameStorage, record: bool) anyerror!canvas.CanvasFrame {
-        return CanvasFrameMethods().planCanvasFrameForView(self, index, options, storage, record);
-    }
-
-    fn canvasFrameScratchStorage(self: *Runtime) canvas.CanvasFrameStorage {
-        return CanvasFrameMethods().canvasFrameScratchStorage(self);
-    }
-
-    pub fn gpuSurfaceFrame(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror!platform.GpuFrame {
-        return CanvasFrameMethods().gpuSurfaceFrame(self, window_id, label);
-    }
-
-    pub fn setCanvasFrameBudget(self: *Runtime, window_id: platform.WindowId, label: []const u8, budget: canvas.CanvasFrameBudget) anyerror!platform.ViewInfo {
-        return CanvasFrameMethods().setCanvasFrameBudget(self, window_id, label, budget);
-    }
-
-    pub fn setGpuSurfaceInputLatencyBudget(self: *Runtime, window_id: platform.WindowId, label: []const u8, budget_ns: u64) anyerror!platform.ViewInfo {
-        return CanvasFrameMethods().setGpuSurfaceInputLatencyBudget(self, window_id, label, budget_ns);
-    }
-
-    fn requestCanvasFrameForView(self: *Runtime, view_index: usize) anyerror!void {
-        return CanvasFrameMethods().requestCanvasFrameForView(self, view_index);
-    }
-
-    fn invalidateForCanvasChanges(self: *Runtime, view_frame: geometry.RectF, changes: []const canvas.DiffChange) void {
-        return CanvasFrameMethods().invalidateForCanvasChanges(self, view_frame, changes);
-    }
-
-    fn CanvasWidgetStateMethods() type {
-        return runtime_canvas_widget_state.RuntimeCanvasWidgetState(Runtime);
-    }
-
-    pub fn setCanvasWidgetLayout(self: *Runtime, window_id: platform.WindowId, label: []const u8, layout: canvas.WidgetLayoutTree) anyerror!platform.ViewInfo {
-        return CanvasWidgetStateMethods().setCanvasWidgetLayout(self, window_id, label, layout);
-    }
-
-    pub fn canvasWidgetLayout(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror!canvas.WidgetLayoutTree {
-        return CanvasWidgetStateMethods().canvasWidgetLayout(self, window_id, label);
-    }
-
-    pub fn canvasWidgetSemantics(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror![]const canvas.WidgetSemanticsNode {
-        return CanvasWidgetStateMethods().canvasWidgetSemantics(self, window_id, label);
-    }
-
-    pub fn dispatchCanvasWidgetAccessibilityAction(self: *Runtime, app: App, window_id: platform.WindowId, label: []const u8, action: CanvasWidgetAccessibilityAction) anyerror!platform.ViewInfo {
-        return CanvasWidgetStateMethods().dispatchCanvasWidgetAccessibilityAction(self, app, window_id, label, action);
-    }
-
-    pub fn stepCanvasWidgetKineticScroll(self: *Runtime, window_id: platform.WindowId, label: []const u8, dt_ms: f32) anyerror!platform.ViewInfo {
-        return CanvasWidgetStateMethods().stepCanvasWidgetKineticScroll(self, window_id, label, dt_ms);
-    }
-
-    pub fn setCanvasWidgetDesignTokens(self: *Runtime, window_id: platform.WindowId, label: []const u8, tokens: canvas.DesignTokens) anyerror!platform.ViewInfo {
-        return CanvasWidgetStateMethods().setCanvasWidgetDesignTokens(self, window_id, label, tokens);
-    }
-
-    pub fn canvasWidgetDesignTokens(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror!canvas.DesignTokens {
-        return CanvasWidgetStateMethods().canvasWidgetDesignTokens(self, window_id, label);
-    }
-
-    pub fn canvasWidgetTextGeometry(self: *const Runtime, window_id: platform.WindowId, label: []const u8, id: canvas.ObjectId) anyerror!canvas.WidgetTextGeometry {
-        return CanvasWidgetStateMethods().canvasWidgetTextGeometry(self, window_id, label, id);
-    }
-
-    pub fn editCanvasWidgetText(self: *Runtime, window_id: platform.WindowId, label: []const u8, id: canvas.ObjectId, edit: canvas.TextInputEvent) anyerror!platform.ViewInfo {
-        return CanvasWidgetStateMethods().editCanvasWidgetText(self, window_id, label, id, edit);
-    }
-
-    fn CanvasWidgetDisplayMethods() type {
-        return runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime);
-    }
-
-    pub fn emitCanvasWidgetDisplayList(self: *Runtime, window_id: platform.WindowId, label: []const u8, tokens: canvas.DesignTokens) anyerror!platform.ViewInfo {
-        return CanvasWidgetDisplayMethods().emitCanvasWidgetDisplayList(self, window_id, label, tokens);
-    }
-
-    pub fn emitCanvasWidgetDisplayListWithStoredTokens(self: *Runtime, window_id: platform.WindowId, label: []const u8) anyerror!platform.ViewInfo {
-        return CanvasWidgetDisplayMethods().emitCanvasWidgetDisplayListWithStoredTokens(self, window_id, label);
-    }
-
-    pub fn emitCanvasWidgetDisplayListWithChrome(self: *Runtime, window_id: platform.WindowId, label: []const u8, tokens: canvas.DesignTokens, chrome: CanvasWidgetDisplayListChrome) anyerror!platform.ViewInfo {
-        return CanvasWidgetDisplayMethods().emitCanvasWidgetDisplayListWithChrome(self, window_id, label, tokens, chrome);
-    }
-
-    pub fn emitCanvasWidgetDisplayListWithStoredTokensAndChrome(self: *Runtime, window_id: platform.WindowId, label: []const u8, chrome: CanvasWidgetDisplayListChrome) anyerror!platform.ViewInfo {
-        return CanvasWidgetDisplayMethods().emitCanvasWidgetDisplayListWithStoredTokensAndChrome(self, window_id, label, chrome);
-    }
-
-    fn emitCanvasWidgetDisplayListForViewWithChrome(self: *Runtime, index: usize, chrome: CanvasWidgetDisplayListChrome) anyerror!platform.ViewInfo {
-        return CanvasWidgetDisplayMethods().emitCanvasWidgetDisplayListForViewWithChrome(self, index, chrome);
-    }
-
-    fn refreshCanvasWidgetDisplayListIfOwned(self: *Runtime, view_index: usize) anyerror!bool {
-        return CanvasWidgetDisplayMethods().refreshCanvasWidgetDisplayListIfOwned(self, view_index);
-    }
-
-    fn refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility(self: *Runtime, view_index: usize) anyerror!bool {
-        return CanvasWidgetDisplayMethods().refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility(self, view_index);
-    }
-
-    fn refreshCanvasWidgetDisplayListIfOwnedWithAccessibility(self: *Runtime, view_index: usize, publish_accessibility: bool) anyerror!bool {
-        return CanvasWidgetDisplayMethods().refreshCanvasWidgetDisplayListIfOwnedWithAccessibility(self, view_index, publish_accessibility);
-    }
-
-    fn refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate(self: *Runtime, view_index: usize, publish_accessibility: bool) anyerror!bool {
-        return CanvasWidgetDisplayMethods().refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate(self, view_index, publish_accessibility);
-    }
-
-    fn beginCanvasWidgetDisplayListRefreshBatch(self: *Runtime) void {
-        return CanvasWidgetDisplayMethods().beginCanvasWidgetDisplayListRefreshBatch(self);
-    }
-
-    fn cancelCanvasWidgetDisplayListRefreshBatch(self: *Runtime) void {
-        return CanvasWidgetDisplayMethods().cancelCanvasWidgetDisplayListRefreshBatch(self);
-    }
-
-    fn endCanvasWidgetDisplayListRefreshBatch(self: *Runtime) anyerror!void {
-        return CanvasWidgetDisplayMethods().endCanvasWidgetDisplayListRefreshBatch(self);
-    }
-
-    fn advanceCanvasWidgetKineticScrollForFrame(self: *Runtime, view_index: usize, frame_interval_ns: u64, skip_step: bool) anyerror!void {
-        return CanvasWidgetDisplayMethods().advanceCanvasWidgetKineticScrollForFrame(self, view_index, frame_interval_ns, skip_step);
-    }
-
-    fn scheduleCanvasWidgetToggleAnimation(self: *Runtime, view_index: usize, animation: CanvasWidgetToggleAnimation) anyerror!void {
-        return CanvasWidgetDisplayMethods().scheduleCanvasWidgetToggleAnimation(self, view_index, animation);
-    }
-
-    fn publishCanvasWidgetAccessibility(self: *Runtime, view_index: usize) anyerror!void {
-        return CanvasWidgetDisplayMethods().publishCanvasWidgetAccessibility(self, view_index);
-    }
-
-    fn refreshCanvasWidgetDisplayList(self: *Runtime, view_index: usize) anyerror!bool {
-        return CanvasWidgetDisplayMethods().refreshCanvasWidgetDisplayList(self, view_index);
-    }
-
-    fn CanvasWidgetEventMethods() type {
-        return runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime);
-    }
-
-    pub fn routeCanvasWidgetPointerInput(self: *const Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetPointerEvent {
-        return CanvasWidgetEventMethods().routeCanvasWidgetPointerInput(self, input_event, output);
-    }
-
-    pub fn routeCanvasWidgetKeyboardInput(self: *const Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetKeyboardEvent {
-        return CanvasWidgetEventMethods().routeCanvasWidgetKeyboardInput(self, input_event, output);
-    }
-
-    pub fn routeCanvasWidgetTextInput(self: *const Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetKeyboardEvent {
-        return CanvasWidgetEventMethods().routeCanvasWidgetTextInput(self, input_event, output);
-    }
-
-    pub fn routeCanvasWidgetFileDrop(self: *const Runtime, drop: platform.FileDropEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetFileDropEvent {
-        return CanvasWidgetEventMethods().routeCanvasWidgetFileDrop(self, drop, output);
-    }
-
-    pub fn routeCanvasWidgetDragInput(self: *const Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetDragEvent {
-        return CanvasWidgetEventMethods().routeCanvasWidgetDragInput(self, input_event, output);
-    }
-
-    fn updateCanvasWidgetFocusFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
-        return CanvasWidgetEventMethods().updateCanvasWidgetFocusFromPointer(self, pointer_event);
-    }
-
-    fn updateCanvasWidgetInteractionFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
-        return CanvasWidgetEventMethods().updateCanvasWidgetInteractionFromPointer(self, pointer_event);
-    }
-
-    fn syncCanvasWidgetCursorForView(self: *Runtime, view_index: usize) anyerror!void {
-        return CanvasWidgetEventMethods().syncCanvasWidgetCursorForView(self, view_index);
-    }
-
-    fn invalidateForCanvasWidgetRenderStateChange(self: *Runtime, view_index: usize, previous: canvas.WidgetRenderState, next: canvas.WidgetRenderState) anyerror!void {
-        return CanvasWidgetEventMethods().invalidateForCanvasWidgetRenderStateChange(self, view_index, previous, next);
-    }
-
-    fn invalidateForCanvasWidgetRenderStateDirty(self: *Runtime, view_index: usize, local_dirty: ?geometry.RectF) void {
-        return CanvasWidgetEventMethods().invalidateForCanvasWidgetRenderStateDirty(self, view_index, local_dirty);
-    }
-
-    fn canvasWidgetRenderStateAfterLayout(previous: canvas.WidgetRenderState, layout: canvas.WidgetLayoutTree) canvas.WidgetRenderState {
-        return CanvasWidgetEventMethods().canvasWidgetRenderStateAfterLayout(previous, layout);
-    }
-
-    fn canvasWidgetRenderStatesEqual(a: canvas.WidgetRenderState, b: canvas.WidgetRenderState) bool {
-        return CanvasWidgetEventMethods().canvasWidgetRenderStatesEqual(a, b);
-    }
-
-    fn updateCanvasWidgetScrollFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
-        return CanvasWidgetEventMethods().updateCanvasWidgetScrollFromPointer(self, pointer_event);
-    }
-
-    fn updateCanvasWidgetTextFromKeyboard(self: *Runtime, keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
-        return CanvasWidgetEventMethods().updateCanvasWidgetTextFromKeyboard(self, keyboard_event);
-    }
-
-    fn updateCanvasWidgetTextFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
-        return CanvasWidgetEventMethods().updateCanvasWidgetTextFromPointer(self, pointer_event);
-    }
-
-    fn updateCanvasWidgetControlFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
-        return CanvasWidgetEventMethods().updateCanvasWidgetControlFromPointer(self, pointer_event);
-    }
-
-    fn updateCanvasWidgetControlFromKeyboard(self: *Runtime, keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
-        return CanvasWidgetEventMethods().updateCanvasWidgetControlFromKeyboard(self, keyboard_event);
-    }
-
-    fn dismissCanvasWidgetSurfaceFromPointerInput(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!bool {
-        return CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromPointerInput(self, pointer_event);
-    }
-
-    fn dismissCanvasWidgetSurfaceFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent) anyerror!bool {
-        return CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromKeyboardInput(self, input_event);
-    }
-
-    fn dispatchCanvasWidgetCommandForId(self: *Runtime, app: App, view_index: usize, id: canvas.ObjectId) anyerror!void {
-        return CanvasWidgetEventMethods().dispatchCanvasWidgetCommandForId(self, app, view_index, id);
-    }
-
-    fn dispatchCanvasWidgetCommandFromPointer(self: *Runtime, app: App, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
-        return CanvasWidgetEventMethods().dispatchCanvasWidgetCommandFromPointer(self, app, pointer_event);
-    }
-
-    fn dispatchCanvasWidgetCommandFromKeyboard(self: *Runtime, app: App, keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
-        return CanvasWidgetEventMethods().dispatchCanvasWidgetCommandFromKeyboard(self, app, keyboard_event);
-    }
-
-    fn updateCanvasWidgetFocusFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent) anyerror!void {
-        return CanvasWidgetEventMethods().updateCanvasWidgetFocusFromKeyboardInput(self, input_event);
-    }
-
-    fn setCanvasWidgetFocusFromKeyboard(self: *Runtime, view_index: usize, target_id: canvas.ObjectId) anyerror!void {
-        return CanvasWidgetEventMethods().setCanvasWidgetFocusFromKeyboard(self, view_index, target_id);
-    }
-
-    fn invalidateForWidgetInvalidations(self: *Runtime, view_frame: geometry.RectF, invalidations: []const canvas.WidgetInvalidation) void {
-        return CanvasWidgetEventMethods().invalidateForWidgetInvalidations(self, view_frame, invalidations);
-    }
-
-    fn invalidateForCanvasWidgetDirty(self: *Runtime, view_index: usize, dirty: geometry.RectF) anyerror!void {
-        return CanvasWidgetEventMethods().invalidateForCanvasWidgetDirty(self, view_index, dirty);
-    }
-
-    fn GpuSurfaceEventMethods() type {
-        return runtime_gpu_surface_events.RuntimeGpuSurfaceEvents(Runtime);
-    }
-
-    fn AutomationWidgetMethods() type {
-        return runtime_automation_widget_dispatch.RuntimeAutomationWidgetDispatch(Runtime);
-    }
+    const CanvasFrameMethods = canvas_frame_helpers.RuntimeCanvasFrames(Runtime);
+    pub const setCanvasDisplayList = CanvasFrameMethods.setCanvasDisplayList;
+    pub const canvasDisplayList = CanvasFrameMethods.canvasDisplayList;
+    pub const setCanvasRenderAnimations = CanvasFrameMethods.setCanvasRenderAnimations;
+    pub const clearCanvasRenderAnimations = CanvasFrameMethods.clearCanvasRenderAnimations;
+    pub const canvasRenderAnimations = CanvasFrameMethods.canvasRenderAnimations;
+    pub const canvasRenderAnimationStartNs = CanvasFrameMethods.canvasRenderAnimationStartNs;
+    pub const canvasFramePlan = CanvasFrameMethods.canvasFramePlan;
+    pub const nextCanvasFrame = CanvasFrameMethods.nextCanvasFrame;
+    pub const nextCanvasGpuPacket = CanvasFrameMethods.nextCanvasGpuPacket;
+    pub const presentNextCanvasGpuPacket = CanvasFrameMethods.presentNextCanvasGpuPacket;
+    pub const presentNextCanvasGpuPacketWithScale = CanvasFrameMethods.presentNextCanvasGpuPacketWithScale;
+    pub const presentNextCanvasFrame = CanvasFrameMethods.presentNextCanvasFrame;
+    pub const presentCanvasFramePixels = CanvasFrameMethods.presentCanvasFramePixels;
+    pub const presentNextCanvasFramePixels = CanvasFrameMethods.presentNextCanvasFramePixels;
+    const planCanvasFrameForView = CanvasFrameMethods.planCanvasFrameForView;
+    const canvasFrameScratchStorage = CanvasFrameMethods.canvasFrameScratchStorage;
+    pub const gpuSurfaceFrame = CanvasFrameMethods.gpuSurfaceFrame;
+    pub const setCanvasFrameBudget = CanvasFrameMethods.setCanvasFrameBudget;
+    pub const setGpuSurfaceInputLatencyBudget = CanvasFrameMethods.setGpuSurfaceInputLatencyBudget;
+    const requestCanvasFrameForView = CanvasFrameMethods.requestCanvasFrameForView;
+    const invalidateForCanvasChanges = CanvasFrameMethods.invalidateForCanvasChanges;
+
+    const CanvasWidgetStateMethods = runtime_canvas_widget_state.RuntimeCanvasWidgetState(Runtime);
+    pub const setCanvasWidgetLayout = CanvasWidgetStateMethods.setCanvasWidgetLayout;
+    pub const canvasWidgetLayout = CanvasWidgetStateMethods.canvasWidgetLayout;
+    pub const canvasWidgetSemantics = CanvasWidgetStateMethods.canvasWidgetSemantics;
+    pub const dispatchCanvasWidgetAccessibilityAction = CanvasWidgetStateMethods.dispatchCanvasWidgetAccessibilityAction;
+    pub const stepCanvasWidgetKineticScroll = CanvasWidgetStateMethods.stepCanvasWidgetKineticScroll;
+    pub const setCanvasWidgetDesignTokens = CanvasWidgetStateMethods.setCanvasWidgetDesignTokens;
+    pub const canvasWidgetDesignTokens = CanvasWidgetStateMethods.canvasWidgetDesignTokens;
+    pub const canvasWidgetTextGeometry = CanvasWidgetStateMethods.canvasWidgetTextGeometry;
+    pub const editCanvasWidgetText = CanvasWidgetStateMethods.editCanvasWidgetText;
+
+    const CanvasWidgetDisplayMethods = runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime);
+    pub const emitCanvasWidgetDisplayList = CanvasWidgetDisplayMethods.emitCanvasWidgetDisplayList;
+    pub const emitCanvasWidgetDisplayListWithStoredTokens = CanvasWidgetDisplayMethods.emitCanvasWidgetDisplayListWithStoredTokens;
+    pub const emitCanvasWidgetDisplayListWithChrome = CanvasWidgetDisplayMethods.emitCanvasWidgetDisplayListWithChrome;
+    pub const emitCanvasWidgetDisplayListWithStoredTokensAndChrome = CanvasWidgetDisplayMethods.emitCanvasWidgetDisplayListWithStoredTokensAndChrome;
+    const emitCanvasWidgetDisplayListForViewWithChrome = CanvasWidgetDisplayMethods.emitCanvasWidgetDisplayListForViewWithChrome;
+    const refreshCanvasWidgetDisplayListIfOwned = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayListIfOwned;
+    const refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility;
+    const refreshCanvasWidgetDisplayListIfOwnedWithAccessibility = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayListIfOwnedWithAccessibility;
+    const refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate;
+    const beginCanvasWidgetDisplayListRefreshBatch = CanvasWidgetDisplayMethods.beginCanvasWidgetDisplayListRefreshBatch;
+    const cancelCanvasWidgetDisplayListRefreshBatch = CanvasWidgetDisplayMethods.cancelCanvasWidgetDisplayListRefreshBatch;
+    const endCanvasWidgetDisplayListRefreshBatch = CanvasWidgetDisplayMethods.endCanvasWidgetDisplayListRefreshBatch;
+    const advanceCanvasWidgetKineticScrollForFrame = CanvasWidgetDisplayMethods.advanceCanvasWidgetKineticScrollForFrame;
+    const scheduleCanvasWidgetToggleAnimation = CanvasWidgetDisplayMethods.scheduleCanvasWidgetToggleAnimation;
+    const publishCanvasWidgetAccessibility = CanvasWidgetDisplayMethods.publishCanvasWidgetAccessibility;
+    const refreshCanvasWidgetDisplayList = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayList;
+
+    const CanvasWidgetEventMethods = runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime);
+    pub const routeCanvasWidgetPointerInput = CanvasWidgetEventMethods.routeCanvasWidgetPointerInput;
+    pub const routeCanvasWidgetKeyboardInput = CanvasWidgetEventMethods.routeCanvasWidgetKeyboardInput;
+    pub const routeCanvasWidgetTextInput = CanvasWidgetEventMethods.routeCanvasWidgetTextInput;
+    pub const routeCanvasWidgetFileDrop = CanvasWidgetEventMethods.routeCanvasWidgetFileDrop;
+    pub const routeCanvasWidgetDragInput = CanvasWidgetEventMethods.routeCanvasWidgetDragInput;
+    const updateCanvasWidgetFocusFromPointer = CanvasWidgetEventMethods.updateCanvasWidgetFocusFromPointer;
+    const updateCanvasWidgetInteractionFromPointer = CanvasWidgetEventMethods.updateCanvasWidgetInteractionFromPointer;
+    const syncCanvasWidgetCursorForView = CanvasWidgetEventMethods.syncCanvasWidgetCursorForView;
+    const invalidateForCanvasWidgetRenderStateChange = CanvasWidgetEventMethods.invalidateForCanvasWidgetRenderStateChange;
+    const invalidateForCanvasWidgetRenderStateDirty = CanvasWidgetEventMethods.invalidateForCanvasWidgetRenderStateDirty;
+    const canvasWidgetRenderStateAfterLayout = CanvasWidgetEventMethods.canvasWidgetRenderStateAfterLayout;
+    const canvasWidgetRenderStatesEqual = CanvasWidgetEventMethods.canvasWidgetRenderStatesEqual;
+    const updateCanvasWidgetScrollFromPointer = CanvasWidgetEventMethods.updateCanvasWidgetScrollFromPointer;
+    const updateCanvasWidgetTextFromKeyboard = CanvasWidgetEventMethods.updateCanvasWidgetTextFromKeyboard;
+    const updateCanvasWidgetTextFromPointer = CanvasWidgetEventMethods.updateCanvasWidgetTextFromPointer;
+    const updateCanvasWidgetControlFromPointer = CanvasWidgetEventMethods.updateCanvasWidgetControlFromPointer;
+    const updateCanvasWidgetControlFromKeyboard = CanvasWidgetEventMethods.updateCanvasWidgetControlFromKeyboard;
+    const dismissCanvasWidgetSurfaceFromPointerInput = CanvasWidgetEventMethods.dismissCanvasWidgetSurfaceFromPointerInput;
+    const dismissCanvasWidgetSurfaceFromKeyboardInput = CanvasWidgetEventMethods.dismissCanvasWidgetSurfaceFromKeyboardInput;
+    const dispatchCanvasWidgetCommandForId = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandForId;
+    const dispatchCanvasWidgetCommandFromPointer = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandFromPointer;
+    const dispatchCanvasWidgetCommandFromKeyboard = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandFromKeyboard;
+    const updateCanvasWidgetFocusFromKeyboardInput = CanvasWidgetEventMethods.updateCanvasWidgetFocusFromKeyboardInput;
+    const setCanvasWidgetFocusFromKeyboard = CanvasWidgetEventMethods.setCanvasWidgetFocusFromKeyboard;
+    const invalidateForWidgetInvalidations = CanvasWidgetEventMethods.invalidateForWidgetInvalidations;
+    const invalidateForCanvasWidgetDirty = CanvasWidgetEventMethods.invalidateForCanvasWidgetDirty;
+
+    const GpuSurfaceEventMethods = runtime_gpu_surface_events.RuntimeGpuSurfaceEvents(Runtime);
+    const dispatchGpuSurfaceFrame = GpuSurfaceEventMethods.dispatchGpuSurfaceFrame;
+    const dispatchGpuSurfaceResized = GpuSurfaceEventMethods.dispatchGpuSurfaceResized;
+    const dispatchGpuSurfaceInput = GpuSurfaceEventMethods.dispatchGpuSurfaceInput;
+
+    const AutomationWidgetMethods = runtime_automation_widget_dispatch.RuntimeAutomationWidgetDispatch(Runtime);
+    const dispatchAutomationWidgetAction = AutomationWidgetMethods.dispatchAutomationWidgetAction;
+    const dispatchCanvasWidgetSemanticControlAction = AutomationWidgetMethods.dispatchCanvasWidgetSemanticControlAction;
+    const dispatchAutomationWidgetClick = AutomationWidgetMethods.dispatchAutomationWidgetClick;
+    const dispatchAutomationWidgetWheel = AutomationWidgetMethods.dispatchAutomationWidgetWheel;
+    const dispatchAutomationWidgetKeyInput = AutomationWidgetMethods.dispatchAutomationWidgetKeyInput;
+    const dispatchAutomationWidgetPointerDrag = AutomationWidgetMethods.dispatchAutomationWidgetPointerDrag;
+    const canvasWidgetActionsForId = AutomationWidgetMethods.canvasWidgetActionsForId;
+    const dismissAutomationCanvasWidget = AutomationWidgetMethods.dismissAutomationCanvasWidget;
+    const focusAutomationCanvasWidget = AutomationWidgetMethods.focusAutomationCanvasWidget;
+    const dispatchAutomationWidgetKey = AutomationWidgetMethods.dispatchAutomationWidgetKey;
+    const selectAutomationCanvasWidget = AutomationWidgetMethods.selectAutomationCanvasWidget;
+    const setAutomationCanvasWidgetText = AutomationWidgetMethods.setAutomationCanvasWidgetText;
+    const editAutomationCanvasWidgetText = AutomationWidgetMethods.editAutomationCanvasWidgetText;
+    const dispatchAutomationCanvasWidgetDrag = AutomationWidgetMethods.dispatchAutomationCanvasWidgetDrag;
+    const dispatchAutomationCanvasWidgetFileDrop = AutomationWidgetMethods.dispatchAutomationCanvasWidgetFileDrop;
 
     pub fn listViews(self: *const Runtime, window_id: platform.WindowId, output: []platform.ViewInfo) []const platform.ViewInfo {
         const window_index = self.findWindowIndexById(window_id) orelse return output[0..0];
@@ -1249,9 +991,9 @@ pub const Runtime = struct {
                     .view_label = command.view_label,
                 });
             },
-            .gpu_surface_frame => |frame_event| try GpuSurfaceEventMethods().dispatchGpuSurfaceFrame(self, app, frame_event),
+            .gpu_surface_frame => |frame_event| try self.dispatchGpuSurfaceFrame(app, frame_event),
             .gpu_surface_resized => |resize_event| {
-                try GpuSurfaceEventMethods().dispatchGpuSurfaceResized(self, app, resize_event);
+                try self.dispatchGpuSurfaceResized(app, resize_event);
                 try self.log("gpu_surface.resize", "gpu surface resized", &.{
                     trace.string("label", resize_event.label),
                     trace.float("width", resize_event.frame.width),
@@ -1259,7 +1001,7 @@ pub const Runtime = struct {
                     trace.float("scale", resize_event.scale_factor),
                 });
             },
-            .gpu_surface_input => |input_event| try GpuSurfaceEventMethods().dispatchGpuSurfaceInput(self, app, input_event),
+            .gpu_surface_input => |input_event| try self.dispatchGpuSurfaceInput(app, input_event),
             .widget_accessibility_action => |action_event| {
                 _ = try self.dispatchCanvasWidgetAccessibilityAction(app, action_event.window_id, action_event.label, .{
                     .id = action_event.id,
@@ -1656,73 +1398,6 @@ pub const Runtime = struct {
             },
             .wait => {},
         }
-    }
-
-    fn dispatchAutomationWidgetAction(self: *Runtime, app: App, action: AutomationWidgetAction) anyerror!void {
-        return AutomationWidgetMethods().dispatchAutomationWidgetAction(self, app, action);
-    }
-
-    fn dispatchCanvasWidgetSemanticControlAction(
-        self: *Runtime,
-        app: App,
-        view_index: usize,
-        id: canvas.ObjectId,
-        action: canvas.WidgetSemanticAction,
-        actions: canvas.WidgetActions,
-    ) anyerror!bool {
-        return AutomationWidgetMethods().dispatchCanvasWidgetSemanticControlAction(self, app, view_index, id, action, actions);
-    }
-
-    fn dispatchAutomationWidgetClick(self: *Runtime, app: App, target: AutomationWidgetTarget) anyerror!void {
-        return AutomationWidgetMethods().dispatchAutomationWidgetClick(self, app, target);
-    }
-
-    fn dispatchAutomationWidgetWheel(self: *Runtime, app: App, wheel: AutomationWidgetWheel) anyerror!void {
-        return AutomationWidgetMethods().dispatchAutomationWidgetWheel(self, app, wheel);
-    }
-
-    fn dispatchAutomationWidgetKeyInput(self: *Runtime, app: App, key: AutomationWidgetKey) anyerror!void {
-        return AutomationWidgetMethods().dispatchAutomationWidgetKeyInput(self, app, key);
-    }
-
-    fn dispatchAutomationWidgetPointerDrag(self: *Runtime, app: App, drag: AutomationWidgetPointerDrag) anyerror!void {
-        return AutomationWidgetMethods().dispatchAutomationWidgetPointerDrag(self, app, drag);
-    }
-
-    fn canvasWidgetActionsForId(self: *const Runtime, view_index: usize, id: canvas.ObjectId) ?canvas.WidgetActions {
-        return AutomationWidgetMethods().canvasWidgetActionsForId(self, view_index, id);
-    }
-
-    fn dismissAutomationCanvasWidget(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!void {
-        return AutomationWidgetMethods().dismissAutomationCanvasWidget(self, view_index, id);
-    }
-
-    fn focusAutomationCanvasWidget(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!void {
-        return AutomationWidgetMethods().focusAutomationCanvasWidget(self, view_index, id);
-    }
-
-    fn dispatchAutomationWidgetKey(self: *Runtime, app: App, view_index: usize, id: canvas.ObjectId, key: []const u8) anyerror!void {
-        return AutomationWidgetMethods().dispatchAutomationWidgetKey(self, app, view_index, id, key);
-    }
-
-    fn selectAutomationCanvasWidget(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!void {
-        return AutomationWidgetMethods().selectAutomationCanvasWidget(self, view_index, id);
-    }
-
-    fn setAutomationCanvasWidgetText(self: *Runtime, view_index: usize, id: canvas.ObjectId, text: []const u8) anyerror!void {
-        return AutomationWidgetMethods().setAutomationCanvasWidgetText(self, view_index, id, text);
-    }
-
-    fn editAutomationCanvasWidgetText(self: *Runtime, view_index: usize, id: canvas.ObjectId, edit: canvas.TextInputEvent) anyerror!void {
-        return AutomationWidgetMethods().editAutomationCanvasWidgetText(self, view_index, id, edit);
-    }
-
-    fn dispatchAutomationCanvasWidgetDrag(self: *Runtime, app: App, view_index: usize, id: canvas.ObjectId, value: []const u8) anyerror!void {
-        return AutomationWidgetMethods().dispatchAutomationCanvasWidgetDrag(self, app, view_index, id, value);
-    }
-
-    fn dispatchAutomationCanvasWidgetFileDrop(self: *Runtime, app: App, view_index: usize, id: canvas.ObjectId, value: []const u8) anyerror!void {
-        return AutomationWidgetMethods().dispatchAutomationCanvasWidgetFileDrop(self, app, view_index, id, value);
     }
 
     fn createWindowWithSourceMode(self: *Runtime, options: platform.WindowCreateOptions, source_reloads_from_app: bool, source_policy: WindowSourcePolicy) anyerror!platform.WindowInfo {
