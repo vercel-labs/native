@@ -1543,15 +1543,16 @@ fn surfaceOverlayFrame(surface_size: geometry.SizeF, overlay: ComponentSurfaceOv
 
 fn surfaceOverlayFrameForSidebar(surface_size: geometry.SizeF, overlay: ComponentSurfaceOverlay, sidebar_width: f32) geometry.RectF {
     _ = sidebar_width;
-    const size = componentOverlaySize(surface_size);
-    var frame = switch (overlay) {
-        .dialog => centeredWindowOverlayFrame(size, 460, 220),
-        .drawer => bottomDrawerOverlayFrame(size, 260),
-        .sheet => rightSheetOverlayFrame(size, 380),
-        .none => unreachable,
-    };
-    frame.y += componentContentYForSize(surface_size);
-    return frame;
+    const size = componentSurfaceSize(surface_size);
+    return canvas.builtinSurfaceFrame(surfaceOverlayKind(overlay), .{
+        .bounds = rect(0, componentContentYForSize(size), size.width, componentContentHeightForSize(size)),
+        .preferred_size = switch (overlay) {
+            .dialog => geometry.SizeF.init(460, 220),
+            .drawer => geometry.SizeF.init(size.width, 260),
+            .sheet => geometry.SizeF.init(380, componentContentHeightForSize(size)),
+            .none => unreachable,
+        },
+    }).?;
 }
 
 fn surfaceOverlayEnterOffset(surface_size: geometry.SizeF, overlay: ComponentSurfaceOverlay) ?geometry.OffsetF {
@@ -1559,33 +1560,7 @@ fn surfaceOverlayEnterOffset(surface_size: geometry.SizeF, overlay: ComponentSur
 }
 
 fn surfaceOverlayEnterOffsetForSidebar(surface_size: geometry.SizeF, overlay: ComponentSurfaceOverlay, sidebar_width: f32) ?geometry.OffsetF {
-    const frame = surfaceOverlayFrameForSidebar(surface_size, overlay, sidebar_width);
-    return switch (overlay) {
-        .drawer => geometry.OffsetF.init(0, frame.height),
-        .sheet => geometry.OffsetF.init(frame.width, 0),
-        .dialog, .none => null,
-    };
-}
-
-fn centeredWindowOverlayFrame(size: geometry.SizeF, preferred_width: f32, preferred_height: f32) geometry.RectF {
-    const width = @min(preferred_width, @max(1, size.width - 48));
-    const height = @min(preferred_height, @max(1, size.height - 48));
-    return rect(
-        @max(24, (size.width - width) * 0.5),
-        @max(24, (size.height - height) * 0.5),
-        width,
-        height,
-    );
-}
-
-fn bottomDrawerOverlayFrame(size: geometry.SizeF, preferred_height: f32) geometry.RectF {
-    const height = @min(preferred_height, @max(1, size.height));
-    return rect(0, @max(0, size.height - height), @max(1, size.width), height);
-}
-
-fn rightSheetOverlayFrame(size: geometry.SizeF, preferred_width: f32) geometry.RectF {
-    const width = @min(preferred_width, @max(1, size.width));
-    return rect(@max(0, size.width - width), 0, width, @max(1, size.height));
+    return canvas.builtinSurfaceEnterOffset(surfaceOverlayKind(overlay), surfaceOverlayFrameForSidebar(surface_size, overlay, sidebar_width));
 }
 
 fn appendSurfaceChromeSlideAnimations(output: []canvas.CanvasRenderAnimation, count: *usize, motion: canvas.MotionTokens, start_ns: u64, from_transform: canvas.Affine) canvas.Error!void {

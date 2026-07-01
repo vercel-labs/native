@@ -4287,6 +4287,12 @@ pub const BuiltinComponentOptions = struct {
     children: []const Widget = &.{},
 };
 
+pub const BuiltinSurfacePlacementOptions = struct {
+    bounds: geometry.RectF,
+    preferred_size: geometry.SizeF = .{},
+    margin: f32 = 24,
+};
+
 pub fn builtinComponentWidget(kind: BuiltinComponentKind, options: BuiltinComponentOptions) Widget {
     const descriptor = builtinComponentDescriptor(kind);
     return .{
@@ -4318,6 +4324,66 @@ pub fn builtinComponentWidget(kind: BuiltinComponentKind, options: BuiltinCompon
         .semantics = builtinComponentSemantics(descriptor, options.semantics),
         .children = options.children,
     };
+}
+
+pub fn builtinSurfaceFrame(kind: BuiltinComponentKind, options: BuiltinSurfacePlacementOptions) ?geometry.RectF {
+    const bounds = options.bounds.normalized();
+    if (bounds.isEmpty()) return null;
+
+    const preferred = builtinSurfacePreferredSize(kind, options.preferred_size) orelse return null;
+    return switch (kind) {
+        .dialog => centeredBuiltinSurfaceFrame(bounds, preferred, options.margin),
+        .drawer => bottomBuiltinSurfaceFrame(bounds, preferred.height),
+        .sheet => rightBuiltinSurfaceFrame(bounds, preferred.width),
+        else => null,
+    };
+}
+
+pub fn builtinSurfaceEnterOffset(kind: BuiltinComponentKind, frame: geometry.RectF) ?geometry.OffsetF {
+    const normalized = frame.normalized();
+    return switch (kind) {
+        .drawer => geometry.OffsetF.init(0, normalized.height),
+        .sheet => geometry.OffsetF.init(normalized.width, 0),
+        .dialog => null,
+        else => null,
+    };
+}
+
+fn builtinSurfacePreferredSize(kind: BuiltinComponentKind, requested: geometry.SizeF) ?geometry.SizeF {
+    const defaults = switch (kind) {
+        .dialog => geometry.SizeF.init(420, 220),
+        .drawer => geometry.SizeF.init(360, 280),
+        .sheet => geometry.SizeF.init(320, 420),
+        else => return null,
+    };
+    return geometry.SizeF.init(
+        if (std.math.isFinite(requested.width) and requested.width > 0) requested.width else defaults.width,
+        if (std.math.isFinite(requested.height) and requested.height > 0) requested.height else defaults.height,
+    );
+}
+
+fn centeredBuiltinSurfaceFrame(bounds: geometry.RectF, preferred: geometry.SizeF, margin: f32) geometry.RectF {
+    const safe_margin = @min(nonNegative(if (std.math.isFinite(margin)) margin else 0), @min(bounds.width, bounds.height) * 0.5);
+    const available_width = @max(1, bounds.width - safe_margin * 2);
+    const available_height = @max(1, bounds.height - safe_margin * 2);
+    const width = @min(preferred.width, available_width);
+    const height = @min(preferred.height, available_height);
+    return geometry.RectF.init(
+        bounds.x + (bounds.width - width) * 0.5,
+        bounds.y + (bounds.height - height) * 0.5,
+        width,
+        height,
+    );
+}
+
+fn bottomBuiltinSurfaceFrame(bounds: geometry.RectF, preferred_height: f32) geometry.RectF {
+    const height = @min(nonNegative(preferred_height), @max(1, bounds.height));
+    return geometry.RectF.init(bounds.x, bounds.maxY() - height, @max(1, bounds.width), height);
+}
+
+fn rightBuiltinSurfaceFrame(bounds: geometry.RectF, preferred_width: f32) geometry.RectF {
+    const width = @min(nonNegative(preferred_width), @max(1, bounds.width));
+    return geometry.RectF.init(bounds.maxX() - width, bounds.y, width, @max(1, bounds.height));
 }
 
 fn builtinComponentDefaultVariant(kind: BuiltinComponentKind) WidgetVariant {
@@ -17031,6 +17097,31 @@ test "built-in card renders shadcn surface chrome and title" {
 }
 
 test "built-in modal surfaces render shadcn chrome and semantics" {
+    const viewport = geometry.RectF.init(0, 52, 1024, 640);
+    const dialog_frame = builtinSurfaceFrame(.dialog, .{
+        .bounds = viewport,
+        .preferred_size = geometry.SizeF.init(460, 220),
+    }).?;
+    try std.testing.expectEqualDeep(geometry.RectF.init(282, 262, 460, 220), dialog_frame);
+    try std.testing.expect(builtinSurfaceEnterOffset(.dialog, dialog_frame) == null);
+
+    const drawer_frame = builtinSurfaceFrame(.drawer, .{
+        .bounds = viewport,
+        .preferred_size = geometry.SizeF.init(1024, 260),
+    }).?;
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 432, 1024, 260), drawer_frame);
+    try std.testing.expectEqualDeep(geometry.OffsetF.init(0, 260), builtinSurfaceEnterOffset(.drawer, drawer_frame).?);
+
+    const sheet_frame = builtinSurfaceFrame(.sheet, .{
+        .bounds = viewport,
+        .preferred_size = geometry.SizeF.init(380, 640),
+    }).?;
+    try std.testing.expectEqualDeep(geometry.RectF.init(644, 52, 380, 640), sheet_frame);
+    try std.testing.expectEqualDeep(geometry.OffsetF.init(380, 0), builtinSurfaceEnterOffset(.sheet, sheet_frame).?);
+
+    try std.testing.expect(builtinSurfaceFrame(.card, .{ .bounds = viewport }) == null);
+    try std.testing.expect(builtinSurfaceEnterOffset(.card, viewport) == null);
+
     const dialog = builtinComponentWidget(.dialog, .{
         .id = 50,
         .frame = geometry.RectF.init(0, 0, 320, 160),
