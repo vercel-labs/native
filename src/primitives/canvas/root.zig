@@ -7779,6 +7779,7 @@ fn emitModalSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: Desig
 
 fn emitPanelWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
     try emitPanelWidgetChrome(builder, widget, tokens);
+    if (!accordionChildrenVisible(widget)) return;
     try emitWidgetClippedChildren(builder, widget, tokens, depth);
 }
 
@@ -9789,7 +9790,15 @@ fn layoutWidgetDepth(
         else
             try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
         .menu_surface, .dropdown_menu => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
-        .stack, .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover => {
+        .accordion => {
+            if (accordionChildrenVisible(widget)) {
+                const child_content = accordionContentFrame(widget, content, tokens);
+                for (widget.children) |child| {
+                    _ = try layoutWidgetDepth(child, stackChildFrame(child_content, child), index, depth + 1, output, len, tokens);
+                }
+            }
+        },
+        .stack, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover => {
             for (widget.children) |child| {
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len, tokens);
             }
@@ -10105,6 +10114,24 @@ fn stackChildFrame(content: geometry.RectF, child: Widget) geometry.RectF {
         @max(child.layout.min_size.width, width),
         @max(child.layout.min_size.height, height),
     );
+}
+
+fn accordionChildrenVisible(widget: Widget) bool {
+    return widget.kind != .accordion or booleanControlSelected(widget);
+}
+
+fn accordionContentFrame(widget: Widget, content: geometry.RectF, tokens: DesignTokens) geometry.RectF {
+    if (widget.kind != .accordion) return content;
+    const header_height = accordionHeaderHeight(widget, tokens);
+    const gap = nonNegative(widget.layout.gap);
+    const y = @min(content.maxY(), content.y + header_height + gap);
+    return geometry.RectF.init(content.x, y, content.width, @max(0, content.maxY() - y));
+}
+
+fn accordionHeaderHeight(widget: Widget, tokens: DesignTokens) f32 {
+    const text_size = widgetBodyTextSize(widget, tokens);
+    const inset = widgetControlInset(widget, tokens, tokens.spacing.md);
+    return @max(widgetControlHeight(widget, tokens), text_size + inset * 2);
 }
 
 pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
@@ -16826,6 +16853,56 @@ test "built-in resizable renders shadcn resize grip and drag semantics" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "built-in accordion disclosure state controls child layout and semantics" {
+    const content = [_]Widget{.{
+        .id = 46,
+        .kind = .text,
+        .frame = geometry.RectF.init(0, 0, 160, 18),
+        .text = "Advanced content",
+    }};
+    const collapsed = builtinComponentWidget(.accordion, .{
+        .id = 45,
+        .frame = geometry.RectF.init(0, 0, 220, 120),
+        .text = "Advanced options",
+        .children = &content,
+    });
+
+    var collapsed_nodes: [2]WidgetLayoutNode = undefined;
+    const collapsed_layout = try layoutWidgetTree(collapsed, collapsed.frame, &collapsed_nodes);
+    try std.testing.expectEqual(@as(usize, 1), collapsed_layout.nodeCount());
+    try std.testing.expect(collapsed_layout.findById(46) == null);
+
+    var collapsed_semantics_buffer: [2]WidgetSemanticsNode = undefined;
+    const collapsed_semantics = try collapsed_layout.collectSemantics(&collapsed_semantics_buffer);
+    try std.testing.expectEqual(@as(usize, 1), collapsed_semantics.len);
+    try std.testing.expectEqual(@as(?bool, false), collapsed_semantics[0].state.expanded);
+
+    var collapsed_commands: [12]CanvasCommand = undefined;
+    var collapsed_builder = Builder.init(&collapsed_commands);
+    try collapsed_layout.emitDisplayList(&collapsed_builder, .{});
+    try std.testing.expect(collapsed_builder.displayList().findCommandById(widgetPartId(46, 1)) == null);
+
+    var expanded = collapsed;
+    expanded.state.selected = true;
+    expanded.value = 1;
+    var expanded_nodes: [2]WidgetLayoutNode = undefined;
+    const expanded_layout = try layoutWidgetTree(expanded, expanded.frame, &expanded_nodes);
+    try std.testing.expectEqual(@as(usize, 2), expanded_layout.nodeCount());
+    const expanded_child = expanded_layout.findById(46).?;
+    try std.testing.expect(expanded_child.frame.y > expanded.frame.y + expanded.layout.padding.top + widgetControlHeight(expanded, .{}));
+
+    var expanded_semantics_buffer: [2]WidgetSemanticsNode = undefined;
+    const expanded_semantics = try expanded_layout.collectSemantics(&expanded_semantics_buffer);
+    try std.testing.expectEqual(@as(usize, 2), expanded_semantics.len);
+    try std.testing.expectEqual(@as(?bool, true), expanded_semantics[0].state.expanded);
+    try std.testing.expectEqualStrings("Advanced content", expanded_semantics[1].label);
+
+    var expanded_commands: [12]CanvasCommand = undefined;
+    var expanded_builder = Builder.init(&expanded_commands);
+    try expanded_layout.emitDisplayList(&expanded_builder, .{});
+    try std.testing.expect(expanded_builder.displayList().findCommandById(widgetPartId(46, 1)) != null);
 }
 
 test "built-in alert renders shadcn surface chrome and text" {

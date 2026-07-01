@@ -246,6 +246,7 @@ const catalog_accordion_content = [_]canvas.Widget{
 const catalog_accordion_children = [_]canvas.Widget{canvas.builtinComponentWidget(.accordion, .{
     .id = 18101,
     .frame = rect(0, catalog_preview_y, catalog_preview_width, 48),
+    .text = "Details",
     .children = &catalog_accordion_content,
 })};
 const catalog_alert_children = [_]canvas.Widget{canvas.builtinComponentWidget(.alert, .{
@@ -2228,9 +2229,8 @@ test "gpu components display list covers finished live controls" {
     try std.testing.expect(display_list.findCommandById(popover_blur_id) != null);
     try std.testing.expect(display_list.findCommandById(menu_item_text_id) != null);
     try std.testing.expect(display_list.findCommandById(data_cell_text_id) != null);
-    try std.testing.expect(display_list.findCommandById(componentCommandPartId(content_stack_id, 1)) == null);
-    try std.testing.expect(display_list.findCommandById(componentCommandPartId(content_stack_id, 2)) == null);
-    try std.testing.expect(display_list.findCommandById(componentCommandPartId(content_stack_id, 3)) == null);
+    try expectNoContentScrollContainerChrome(display_list);
+    try expectNoSurfaceChrome(display_list, content_stack_id);
     const bounds = display_list.bounds().?;
     try std.testing.expect(bounds.x <= 28);
     try std.testing.expect(bounds.y <= 26);
@@ -3884,6 +3884,23 @@ fn expectComponentFillRoundedRectColor(display_list: canvas.DisplayList, id: can
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+fn expectNoSurfaceChrome(display_list: canvas.DisplayList, id: canvas.ObjectId) !void {
+    for (display_list.commands) |command| {
+        const command_id = command.objectId() orelse continue;
+        if (command_id < id * 16 or command_id >= (id + 1) * 16) continue;
+        switch (command) {
+            .fill_rect, .fill_rounded_rect, .stroke_rect, .shadow => return error.TestUnexpectedResult,
+            else => {},
+        }
+    }
+}
+
+fn expectNoContentScrollContainerChrome(display_list: canvas.DisplayList) !void {
+    const clip_ref = display_list.findCommandById(componentCommandPartId(content_scroll_id, 1)) orelse return error.TestUnexpectedResult;
+    if (clip_ref.command != .push_clip) return error.TestUnexpectedResult;
+    try std.testing.expect(display_list.findCommandById(componentCommandPartId(content_scroll_id, 4)) == null);
 }
 
 fn expectSemanticRole(semantics: []const canvas.WidgetSemanticsNode, id: canvas.ObjectId, role: canvas.WidgetRole) !void {

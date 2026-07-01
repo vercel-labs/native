@@ -1278,14 +1278,16 @@ pub const Runtime = struct {
         else
             null;
         const previous_cursor = self.views[index].canvas_widget_cursor;
+        const previous_widget_revision = self.views[index].widget_revision;
         try self.views[index].copyWidgetLayoutTree(reconciled_layout);
         try self.views[index].copyCanvasWidgetSourceText(layout);
+        const widget_revision_changed = self.views[index].widget_revision != previous_widget_revision;
         if (previous_cursor != self.views[index].canvas_widget_cursor) try self.syncCanvasWidgetCursorForView(index);
         self.invalidateForWidgetInvalidations(self.views[index].frame, invalidations);
         if (render_state_changed) self.invalidateForCanvasWidgetRenderStateDirty(index, render_state_dirty);
         const layout_dirty = invalidations.len > 0 or render_state_changed;
         const requested_frame = try self.refreshCanvasWidgetDisplayListIfOwned(index);
-        if (layout_dirty and !requested_frame) try self.requestCanvasFrameForView(index);
+        if ((layout_dirty or widget_revision_changed) and !requested_frame) try self.requestCanvasFrameForView(index);
         return self.views[index].info();
     }
 
