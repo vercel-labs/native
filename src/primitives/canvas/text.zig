@@ -6,13 +6,12 @@ const drawing_model = @import("drawing.zig");
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
 const FontId = canvas.FontId;
+const DisplayList = canvas.DisplayList;
 const Color = drawing_model.Color;
 const default_sans_font_id = canvas.default_sans_font_id;
 const default_mono_font_id = canvas.default_mono_font_id;
 const default_glyph_atlas_cache_retention_frames = canvas.default_glyph_atlas_cache_retention_frames;
 const default_text_layout_cache_retention_frames = canvas.default_text_layout_cache_retention_frames;
-const GlyphAtlasCachePlanner = canvas.GlyphAtlasCachePlanner;
-const TextLayoutCachePlanner = canvas.TextLayoutCachePlanner;
 
 const max_text_bounds_layout_lines: usize = 64;
 
@@ -52,6 +51,79 @@ pub const GlyphAtlasPlan = struct {
     pub fn cachePlanWithRetention(self: GlyphAtlasPlan, previous: []const GlyphAtlasCacheEntry, frame_index: u64, retention_frames: u64, entries: []GlyphAtlasCacheEntry, actions: []GlyphAtlasCacheAction) Error!GlyphAtlasCachePlan {
         var planner = GlyphAtlasCachePlanner.init(entries, actions);
         return planner.build(self, previous, frame_index, retention_frames);
+    }
+};
+
+pub const GlyphAtlasPlanner = struct {
+    entries: []GlyphAtlasEntry,
+    len: usize = 0,
+
+    pub fn init(entries: []GlyphAtlasEntry) GlyphAtlasPlanner {
+        return .{ .entries = entries };
+    }
+
+    pub fn reset(self: *GlyphAtlasPlanner) void {
+        self.len = 0;
+    }
+
+    pub fn build(self: *GlyphAtlasPlanner, display_list: DisplayList) Error!GlyphAtlasPlan {
+        self.reset();
+        for (display_list.commands, 0..) |command, command_index| {
+            switch (command) {
+                .draw_text => |value| try self.consumeText(value, command_index),
+                else => {},
+            }
+        }
+        return .{ .entries = self.entries[0..self.len] };
+    }
+
+    fn consumeText(self: *GlyphAtlasPlanner, text: DrawText, command_index: usize) Error!void {
+        if (text.glyphs.len > 0) {
+            for (text.glyphs, 0..) |glyph, glyph_index| {
+                const key = GlyphAtlasKey{
+                    .font_id = glyphFontId(text.font_id, glyph),
+                    .glyph_id = glyph.id,
+                    .size = text.size,
+                    .subpixel_x = subpixelBucket(text.origin.x + glyph.x),
+                    .subpixel_y = subpixelBucket(text.origin.y + glyph.y),
+                };
+                try self.appendUnique(key, command_index, glyph_index);
+            }
+            return;
+        }
+
+        var text_offset: usize = 0;
+        var scalar_index: usize = 0;
+        while (text_offset < text.text.len) {
+            const next_offset = nextTextOffset(text.text, text_offset);
+            defer {
+                text_offset = next_offset;
+                scalar_index += 1;
+            }
+            if (isPlanTextSpace(text.text[text_offset])) continue;
+
+            const key = GlyphAtlasKey{
+                .font_id = text.font_id,
+                .glyph_id = fallbackGlyphId(text.text[text_offset..next_offset]),
+                .size = text.size,
+                .subpixel_x = subpixelBucket(text.origin.x + @as(f32, @floatFromInt(scalar_index)) * text.size * 0.5),
+                .subpixel_y = subpixelBucket(text.origin.y),
+            };
+            try self.appendUnique(key, command_index, scalar_index);
+        }
+    }
+
+    fn appendUnique(self: *GlyphAtlasPlanner, key: GlyphAtlasKey, command_index: usize, glyph_index: usize) Error!void {
+        for (self.entries[0..self.len]) |entry| {
+            if (glyphAtlasKeysEqual(entry.key, key)) return;
+        }
+        if (self.len >= self.entries.len) return error.GlyphAtlasListFull;
+        self.entries[self.len] = .{
+            .key = key,
+            .command_index = command_index,
+            .glyph_index = glyph_index,
+        };
+        self.len += 1;
     }
 };
 
@@ -103,6 +175,81 @@ pub const GlyphAtlasCachePlan = struct {
             if (action.kind == kind) count += 1;
         }
         return count;
+    }
+};
+
+pub const GlyphAtlasCachePlanner = struct {
+    entries: []GlyphAtlasCacheEntry,
+    actions: []GlyphAtlasCacheAction,
+    entry_len: usize = 0,
+    action_len: usize = 0,
+
+    pub fn init(entries: []GlyphAtlasCacheEntry, actions: []GlyphAtlasCacheAction) GlyphAtlasCachePlanner {
+        return .{ .entries = entries, .actions = actions };
+    }
+
+    pub fn reset(self: *GlyphAtlasCachePlanner) void {
+        self.entry_len = 0;
+        self.action_len = 0;
+    }
+
+    pub fn build(self: *GlyphAtlasCachePlanner, plan: GlyphAtlasPlan, previous: []const GlyphAtlasCacheEntry, frame_index: u64, retention_frames: u64) Error!GlyphAtlasCachePlan {
+        self.reset();
+
+        for (plan.entries, 0..) |entry, atlas_index| {
+            if (findGlyphAtlasCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
+
+            const previous_index = findGlyphAtlasCacheEntry(previous, entry.key);
+            try self.appendEntry(.{
+                .key = entry.key,
+                .last_used_frame = frame_index,
+            });
+            try self.appendAction(.{
+                .kind = if (previous_index == null) .upload else .retain,
+                .key = entry.key,
+                .atlas_index = atlas_index,
+                .cache_index = previous_index,
+            });
+        }
+
+        for (previous, 0..) |entry, previous_index| {
+            if (findGlyphAtlasCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
+            if (shouldRetainUnusedCacheEntry(frame_index, entry.last_used_frame, retention_frames) and self.hasEntryCapacity()) {
+                try self.appendEntry(entry);
+                try self.appendAction(.{
+                    .kind = .retain,
+                    .key = entry.key,
+                    .cache_index = previous_index,
+                });
+            } else {
+                try self.appendAction(.{
+                    .kind = .evict,
+                    .key = entry.key,
+                    .cache_index = previous_index,
+                });
+            }
+        }
+
+        return .{
+            .entries = self.entries[0..self.entry_len],
+            .actions = self.actions[0..self.action_len],
+        };
+    }
+
+    fn appendEntry(self: *GlyphAtlasCachePlanner, entry: GlyphAtlasCacheEntry) Error!void {
+        if (self.entry_len >= self.entries.len) return error.GlyphAtlasCacheListFull;
+        self.entries[self.entry_len] = entry;
+        self.entry_len += 1;
+    }
+
+    fn hasEntryCapacity(self: *GlyphAtlasCachePlanner) bool {
+        return self.entry_len < self.entries.len;
+    }
+
+    fn appendAction(self: *GlyphAtlasCachePlanner, action: GlyphAtlasCacheAction) Error!void {
+        if (self.action_len >= self.actions.len) return error.GlyphAtlasCacheListFull;
+        self.actions[self.action_len] = action;
+        self.action_len += 1;
     }
 };
 
@@ -208,6 +355,43 @@ pub const TextLayoutPlanSet = struct {
     }
 };
 
+pub const TextLayoutPlanner = struct {
+    plans: []TextLayoutPlan,
+    lines: []TextLine,
+    plan_len: usize = 0,
+    line_len: usize = 0,
+
+    pub fn init(plans: []TextLayoutPlan, lines: []TextLine) TextLayoutPlanner {
+        return .{ .plans = plans, .lines = lines };
+    }
+
+    pub fn reset(self: *TextLayoutPlanner) void {
+        self.plan_len = 0;
+        self.line_len = 0;
+    }
+
+    pub fn build(self: *TextLayoutPlanner, display_list: DisplayList, options: TextLayoutOptions) Error!TextLayoutPlanSet {
+        self.reset();
+        if (self.plans.len == 0 and self.lines.len == 0) return .{};
+
+        for (display_list.commands) |command| {
+            switch (command) {
+                .draw_text => |value| try self.consumeText(value, options),
+                else => {},
+            }
+        }
+        return .{ .plans = self.plans[0..self.plan_len] };
+    }
+
+    fn consumeText(self: *TextLayoutPlanner, text: DrawText, options: TextLayoutOptions) Error!void {
+        if (self.plan_len >= self.plans.len) return error.TextLayoutPlanListFull;
+        const plan = try layoutTextRunPlan(text, textLayoutOptionsForDrawText(options, text), self.lines[self.line_len..]);
+        self.plans[self.plan_len] = plan;
+        self.plan_len += 1;
+        self.line_len += plan.lineCount();
+    }
+};
+
 pub const TextLayoutCacheEntry = struct {
     key: TextLayoutKey,
     line_count: usize = 0,
@@ -258,6 +442,87 @@ pub const TextLayoutCachePlan = struct {
             if (action.kind == kind) count += 1;
         }
         return count;
+    }
+};
+
+pub const TextLayoutCachePlanner = struct {
+    entries: []TextLayoutCacheEntry,
+    actions: []TextLayoutCacheAction,
+    entry_len: usize = 0,
+    action_len: usize = 0,
+
+    pub fn init(entries: []TextLayoutCacheEntry, actions: []TextLayoutCacheAction) TextLayoutCachePlanner {
+        return .{ .entries = entries, .actions = actions };
+    }
+
+    pub fn reset(self: *TextLayoutCachePlanner) void {
+        self.entry_len = 0;
+        self.action_len = 0;
+    }
+
+    pub fn build(self: *TextLayoutCachePlanner, plan: TextLayoutPlan, previous: []const TextLayoutCacheEntry, frame_index: u64, retention_frames: u64) Error!TextLayoutCachePlan {
+        return self.buildMany(&.{plan}, previous, frame_index, retention_frames);
+    }
+
+    pub fn buildMany(self: *TextLayoutCachePlanner, plans: []const TextLayoutPlan, previous: []const TextLayoutCacheEntry, frame_index: u64, retention_frames: u64) Error!TextLayoutCachePlan {
+        self.reset();
+
+        for (plans, 0..) |plan, layout_index| {
+            if (findTextLayoutCacheEntry(self.entries[0..self.entry_len], plan.key) != null) continue;
+
+            const previous_index = findTextLayoutCacheEntry(previous, plan.key);
+            try self.appendEntry(.{
+                .key = plan.key,
+                .line_count = plan.lineCount(),
+                .bounds = plan.layout.bounds,
+                .last_used_frame = frame_index,
+            });
+            try self.appendAction(.{
+                .kind = if (previous_index == null) .upload else .retain,
+                .key = plan.key,
+                .layout_index = layout_index,
+                .cache_index = previous_index,
+            });
+        }
+
+        for (previous, 0..) |entry, index| {
+            if (findTextLayoutCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
+            if (shouldRetainUnusedCacheEntry(frame_index, entry.last_used_frame, retention_frames) and self.hasEntryCapacity()) {
+                try self.appendEntry(entry);
+                try self.appendAction(.{
+                    .kind = .retain,
+                    .key = entry.key,
+                    .cache_index = index,
+                });
+            } else {
+                try self.appendAction(.{
+                    .kind = .evict,
+                    .key = entry.key,
+                    .cache_index = index,
+                });
+            }
+        }
+
+        return .{
+            .entries = self.entries[0..self.entry_len],
+            .actions = self.actions[0..self.action_len],
+        };
+    }
+
+    fn appendEntry(self: *TextLayoutCachePlanner, entry: TextLayoutCacheEntry) Error!void {
+        if (self.entry_len >= self.entries.len) return error.TextLayoutCacheListFull;
+        self.entries[self.entry_len] = entry;
+        self.entry_len += 1;
+    }
+
+    fn hasEntryCapacity(self: *TextLayoutCachePlanner) bool {
+        return self.entry_len < self.entries.len;
+    }
+
+    fn appendAction(self: *TextLayoutCachePlanner, action: TextLayoutCacheAction) Error!void {
+        if (self.action_len >= self.actions.len) return error.TextLayoutCacheListFull;
+        self.actions[self.action_len] = action;
+        self.action_len += 1;
     }
 };
 
@@ -972,6 +1237,25 @@ fn utf8ScalarCount(text: []const u8) usize {
     return count;
 }
 
+fn glyphAtlasKeysEqual(a: GlyphAtlasKey, b: GlyphAtlasKey) bool {
+    return a.font_id == b.font_id and
+        a.glyph_id == b.glyph_id and
+        a.size == b.size and
+        a.subpixel_x == b.subpixel_x and
+        a.subpixel_y == b.subpixel_y;
+}
+
+fn findGlyphAtlasCacheEntry(entries: []const GlyphAtlasCacheEntry, key: GlyphAtlasKey) ?usize {
+    for (entries, 0..) |entry, index| {
+        if (glyphAtlasKeysEqual(entry.key, key)) return index;
+    }
+    return null;
+}
+
+fn textLayoutOptionsForDrawText(frame_options: TextLayoutOptions, text: DrawText) TextLayoutOptions {
+    return text.text_layout orelse frame_options;
+}
+
 fn textLayoutKey(text: DrawText, options: TextLayoutOptions) TextLayoutKey {
     return .{
         .font_id = text.font_id,
@@ -1017,6 +1301,43 @@ fn drawTextFingerprint(text: DrawText) u64 {
 
 fn glyphFontId(run_font_id: FontId, glyph: Glyph) FontId {
     return if (glyph.font_id == 0) run_font_id else glyph.font_id;
+}
+
+fn findTextLayoutCacheEntry(entries: []const TextLayoutCacheEntry, key: TextLayoutKey) ?usize {
+    for (entries, 0..) |entry, index| {
+        if (textLayoutKeysEqual(entry.key, key)) return index;
+    }
+    return null;
+}
+
+fn shouldRetainUnusedCacheEntry(frame_index: u64, last_used_frame: u64, retention_frames: u64) bool {
+    if (retention_frames == 0) return false;
+    if (frame_index <= last_used_frame) return true;
+    return frame_index - last_used_frame <= retention_frames;
+}
+
+fn textLayoutKeysEqual(a: TextLayoutKey, b: TextLayoutKey) bool {
+    return a.font_id == b.font_id and
+        a.size == b.size and
+        a.origin.x == b.origin.x and
+        a.origin.y == b.origin.y and
+        a.max_width == b.max_width and
+        a.line_height == b.line_height and
+        a.wrap == b.wrap and
+        a.alignment == b.alignment and
+        a.text_len == b.text_len and
+        a.glyph_count == b.glyph_count and
+        a.fingerprint == b.fingerprint;
+}
+
+fn isPlanTextSpace(byte: u8) bool {
+    return byte == '\n' or byte == '\r' or byte == '\t' or byte == ' ';
+}
+
+fn subpixelBucket(value: f32) u8 {
+    const fraction = value - @floor(value);
+    const scaled = @floor(fraction * 4.0);
+    return @intFromFloat(std.math.clamp(scaled, 0, 3));
 }
 
 const resource_hash_offset: u64 = 14695981039346656037;

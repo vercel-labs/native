@@ -6,7 +6,6 @@ const text_model = @import("text.zig");
 const render_model = @import("render.zig");
 const frame_model = @import("frame.zig");
 const gpu_model = @import("gpu.zig");
-const hash_model = @import("hash.zig");
 const token_model = @import("tokens.zig");
 const widget_model = @import("widgets.zig");
 const event_model = @import("events.zig");
@@ -98,10 +97,12 @@ pub const Glyph = text_model.Glyph;
 pub const GlyphAtlasKey = text_model.GlyphAtlasKey;
 pub const GlyphAtlasEntry = text_model.GlyphAtlasEntry;
 pub const GlyphAtlasPlan = text_model.GlyphAtlasPlan;
+pub const GlyphAtlasPlanner = text_model.GlyphAtlasPlanner;
 pub const GlyphAtlasCacheEntry = text_model.GlyphAtlasCacheEntry;
 pub const GlyphAtlasCacheActionKind = text_model.GlyphAtlasCacheActionKind;
 pub const GlyphAtlasCacheAction = text_model.GlyphAtlasCacheAction;
 pub const GlyphAtlasCachePlan = text_model.GlyphAtlasCachePlan;
+pub const GlyphAtlasCachePlanner = text_model.GlyphAtlasCachePlanner;
 pub const DrawText = text_model.DrawText;
 pub const TextWrap = text_model.TextWrap;
 pub const TextAlign = text_model.TextAlign;
@@ -111,10 +112,12 @@ pub const TextLayout = text_model.TextLayout;
 pub const TextLayoutKey = text_model.TextLayoutKey;
 pub const TextLayoutPlan = text_model.TextLayoutPlan;
 pub const TextLayoutPlanSet = text_model.TextLayoutPlanSet;
+pub const TextLayoutPlanner = text_model.TextLayoutPlanner;
 pub const TextLayoutCacheEntry = text_model.TextLayoutCacheEntry;
 pub const TextLayoutCacheActionKind = text_model.TextLayoutCacheActionKind;
 pub const TextLayoutCacheAction = text_model.TextLayoutCacheAction;
 pub const TextLayoutCachePlan = text_model.TextLayoutCachePlan;
+pub const TextLayoutCachePlanner = text_model.TextLayoutCachePlanner;
 pub const TextRange = text_model.TextRange;
 pub const TextSelectionRect = text_model.TextSelectionRect;
 pub const TextSelection = text_model.TextSelection;
@@ -1493,7 +1496,6 @@ const estimateTextWidth = text_model.estimateTextWidth;
 const estimateTextWidthForFont = text_model.estimateTextWidthForFont;
 const estimateTextAdvanceForBytes = text_model.estimateTextAdvanceForBytes;
 const estimatedGlyphAdvance = text_model.estimatedGlyphAdvance;
-const fallbackGlyphId = text_model.fallbackGlyphId;
 const snapTextSelection = text_model.snapTextSelection;
 const snapTextRange = text_model.snapTextRange;
 const nextTextOffset = text_model.nextTextOffset;
@@ -1517,16 +1519,6 @@ const affinesEqual = equality_model.affinesEqual;
 const optionalF32Equal = equality_model.optionalF32Equal;
 const optionalTextSelectionsEqual = equality_model.optionalTextSelectionsEqual;
 const optionalTextRangesEqual = equality_model.optionalTextRangesEqual;
-const resourceHashTag = hash_model.resourceHashTag;
-const resourceHashBytes = hash_model.resourceHashBytes;
-const resourceHashU8 = hash_model.resourceHashU8;
-const resourceHashU32 = hash_model.resourceHashU32;
-const resourceHashU64 = hash_model.resourceHashU64;
-const resourceHashUsize = hash_model.resourceHashUsize;
-const resourceHashEnum = hash_model.resourceHashEnum;
-const resourceHashF32 = hash_model.resourceHashF32;
-const resourceHashPoint = hash_model.resourceHashPoint;
-const resourceHashOptionalRect = hash_model.resourceHashOptionalRect;
 
 pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: CanvasFrameOptions, storage: CanvasFrameStorage) Error!CanvasFrame {
     var render_plan = try next.renderPlan(storage.render_commands);
@@ -1746,358 +1738,6 @@ fn optionalAffineEqual(a: ?Affine, b: ?Affine) bool {
     if (a == null or b == null) return false;
     return affinesEqual(a.?, b.?);
 }
-
-fn drawTextFingerprint(text: DrawText) u64 {
-    var hash = resourceHashTag("glyph_run");
-    hash = resourceHashU64(hash, text.font_id);
-    hash = resourceHashF32(hash, text.size);
-    hash = resourceHashPoint(hash, text.origin);
-    hash = resourceHashBytes(hash, text.text);
-    hash = resourceHashUsize(hash, text.glyphs.len);
-    for (text.glyphs) |glyph| {
-        hash = resourceHashU32(hash, glyph.id);
-        hash = resourceHashU64(hash, glyphFontId(text.font_id, glyph));
-        hash = resourceHashF32(hash, glyph.x);
-        hash = resourceHashF32(hash, glyph.y);
-        hash = resourceHashF32(hash, glyph.advance);
-    }
-    hash = resourceHashOptionalTextLayoutOptions(hash, text.text_layout);
-    return hash;
-}
-
-fn textLayoutOptionsForDrawText(frame_options: TextLayoutOptions, text: DrawText) TextLayoutOptions {
-    return text.text_layout orelse frame_options;
-}
-
-fn textLayoutKey(text: DrawText, options: TextLayoutOptions) TextLayoutKey {
-    return .{
-        .font_id = text.font_id,
-        .size = text.size,
-        .origin = text.origin,
-        .max_width = nonNegative(options.max_width),
-        .line_height = nonNegative(options.line_height),
-        .wrap = options.wrap,
-        .alignment = options.alignment,
-        .text_len = text.text.len,
-        .glyph_count = text.glyphs.len,
-        .fingerprint = textLayoutFingerprint(text, options),
-    };
-}
-
-fn textLayoutFingerprint(text: DrawText, options: TextLayoutOptions) u64 {
-    var hash = resourceHashTag("text_layout");
-    hash = resourceHashU64(hash, drawTextFingerprint(text));
-    hash = resourceHashF32(hash, nonNegative(options.max_width));
-    hash = resourceHashF32(hash, nonNegative(options.line_height));
-    hash = resourceHashEnum(hash, @intFromEnum(options.wrap));
-    hash = resourceHashEnum(hash, @intFromEnum(options.alignment));
-    return hash;
-}
-
-fn findTextLayoutCacheEntry(entries: []const TextLayoutCacheEntry, key: TextLayoutKey) ?usize {
-    for (entries, 0..) |entry, index| {
-        if (textLayoutKeysEqual(entry.key, key)) return index;
-    }
-    return null;
-}
-
-fn shouldRetainUnusedCacheEntry(frame_index: u64, last_used_frame: u64, retention_frames: u64) bool {
-    if (retention_frames == 0) return false;
-    if (frame_index <= last_used_frame) return true;
-    return frame_index - last_used_frame <= retention_frames;
-}
-
-fn textLayoutKeysEqual(a: TextLayoutKey, b: TextLayoutKey) bool {
-    return a.font_id == b.font_id and
-        a.size == b.size and
-        a.origin.x == b.origin.x and
-        a.origin.y == b.origin.y and
-        a.max_width == b.max_width and
-        a.line_height == b.line_height and
-        a.wrap == b.wrap and
-        a.alignment == b.alignment and
-        a.text_len == b.text_len and
-        a.glyph_count == b.glyph_count and
-        a.fingerprint == b.fingerprint;
-}
-
-fn resourceHashOptionalTextLayoutOptions(hash: u64, options: ?TextLayoutOptions) u64 {
-    if (options) |value| {
-        var next = resourceHashU8(hash, 1);
-        next = resourceHashF32(next, nonNegative(value.max_width));
-        next = resourceHashF32(next, nonNegative(value.line_height));
-        next = resourceHashEnum(next, @intFromEnum(value.wrap));
-        next = resourceHashEnum(next, @intFromEnum(value.alignment));
-        return next;
-    }
-    return resourceHashU8(hash, 0);
-}
-
-pub const GlyphAtlasPlanner = struct {
-    entries: []GlyphAtlasEntry,
-    len: usize = 0,
-
-    pub fn init(entries: []GlyphAtlasEntry) GlyphAtlasPlanner {
-        return .{ .entries = entries };
-    }
-
-    pub fn reset(self: *GlyphAtlasPlanner) void {
-        self.len = 0;
-    }
-
-    pub fn build(self: *GlyphAtlasPlanner, display_list: DisplayList) Error!GlyphAtlasPlan {
-        self.reset();
-        for (display_list.commands, 0..) |command, command_index| {
-            switch (command) {
-                .draw_text => |value| try self.consumeText(value, command_index),
-                else => {},
-            }
-        }
-        return .{ .entries = self.entries[0..self.len] };
-    }
-
-    fn consumeText(self: *GlyphAtlasPlanner, text: DrawText, command_index: usize) Error!void {
-        if (text.glyphs.len > 0) {
-            for (text.glyphs, 0..) |glyph, glyph_index| {
-                const key = GlyphAtlasKey{
-                    .font_id = glyphFontId(text.font_id, glyph),
-                    .glyph_id = glyph.id,
-                    .size = text.size,
-                    .subpixel_x = subpixelBucket(text.origin.x + glyph.x),
-                    .subpixel_y = subpixelBucket(text.origin.y + glyph.y),
-                };
-                try self.appendUnique(key, command_index, glyph_index);
-            }
-            return;
-        }
-
-        var text_offset: usize = 0;
-        var scalar_index: usize = 0;
-        while (text_offset < text.text.len) {
-            const next_offset = nextTextOffset(text.text, text_offset);
-            defer {
-                text_offset = next_offset;
-                scalar_index += 1;
-            }
-            if (isReferenceTextSpace(text.text[text_offset])) continue;
-
-            const key = GlyphAtlasKey{
-                .font_id = text.font_id,
-                .glyph_id = fallbackGlyphId(text.text[text_offset..next_offset]),
-                .size = text.size,
-                .subpixel_x = subpixelBucket(text.origin.x + @as(f32, @floatFromInt(scalar_index)) * text.size * 0.5),
-                .subpixel_y = subpixelBucket(text.origin.y),
-            };
-            try self.appendUnique(key, command_index, scalar_index);
-        }
-    }
-
-    fn appendUnique(self: *GlyphAtlasPlanner, key: GlyphAtlasKey, command_index: usize, glyph_index: usize) Error!void {
-        for (self.entries[0..self.len]) |entry| {
-            if (glyphAtlasKeysEqual(entry.key, key)) return;
-        }
-        if (self.len >= self.entries.len) return error.GlyphAtlasListFull;
-        self.entries[self.len] = .{
-            .key = key,
-            .command_index = command_index,
-            .glyph_index = glyph_index,
-        };
-        self.len += 1;
-    }
-};
-
-pub const GlyphAtlasCachePlanner = struct {
-    entries: []GlyphAtlasCacheEntry,
-    actions: []GlyphAtlasCacheAction,
-    entry_len: usize = 0,
-    action_len: usize = 0,
-
-    pub fn init(entries: []GlyphAtlasCacheEntry, actions: []GlyphAtlasCacheAction) GlyphAtlasCachePlanner {
-        return .{ .entries = entries, .actions = actions };
-    }
-
-    pub fn reset(self: *GlyphAtlasCachePlanner) void {
-        self.entry_len = 0;
-        self.action_len = 0;
-    }
-
-    pub fn build(self: *GlyphAtlasCachePlanner, plan: GlyphAtlasPlan, previous: []const GlyphAtlasCacheEntry, frame_index: u64, retention_frames: u64) Error!GlyphAtlasCachePlan {
-        self.reset();
-
-        for (plan.entries, 0..) |entry, atlas_index| {
-            if (findGlyphAtlasCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
-
-            const previous_index = findGlyphAtlasCacheEntry(previous, entry.key);
-            try self.appendEntry(.{
-                .key = entry.key,
-                .last_used_frame = frame_index,
-            });
-            try self.appendAction(.{
-                .kind = if (previous_index == null) .upload else .retain,
-                .key = entry.key,
-                .atlas_index = atlas_index,
-                .cache_index = previous_index,
-            });
-        }
-
-        for (previous, 0..) |entry, previous_index| {
-            if (findGlyphAtlasCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
-            if (shouldRetainUnusedCacheEntry(frame_index, entry.last_used_frame, retention_frames) and self.hasEntryCapacity()) {
-                try self.appendEntry(entry);
-                try self.appendAction(.{
-                    .kind = .retain,
-                    .key = entry.key,
-                    .cache_index = previous_index,
-                });
-            } else {
-                try self.appendAction(.{
-                    .kind = .evict,
-                    .key = entry.key,
-                    .cache_index = previous_index,
-                });
-            }
-        }
-
-        return .{
-            .entries = self.entries[0..self.entry_len],
-            .actions = self.actions[0..self.action_len],
-        };
-    }
-
-    fn appendEntry(self: *GlyphAtlasCachePlanner, entry: GlyphAtlasCacheEntry) Error!void {
-        if (self.entry_len >= self.entries.len) return error.GlyphAtlasCacheListFull;
-        self.entries[self.entry_len] = entry;
-        self.entry_len += 1;
-    }
-
-    fn hasEntryCapacity(self: *GlyphAtlasCachePlanner) bool {
-        return self.entry_len < self.entries.len;
-    }
-
-    fn appendAction(self: *GlyphAtlasCachePlanner, action: GlyphAtlasCacheAction) Error!void {
-        if (self.action_len >= self.actions.len) return error.GlyphAtlasCacheListFull;
-        self.actions[self.action_len] = action;
-        self.action_len += 1;
-    }
-};
-
-pub const TextLayoutPlanner = struct {
-    plans: []TextLayoutPlan,
-    lines: []TextLine,
-    plan_len: usize = 0,
-    line_len: usize = 0,
-
-    pub fn init(plans: []TextLayoutPlan, lines: []TextLine) TextLayoutPlanner {
-        return .{ .plans = plans, .lines = lines };
-    }
-
-    pub fn reset(self: *TextLayoutPlanner) void {
-        self.plan_len = 0;
-        self.line_len = 0;
-    }
-
-    pub fn build(self: *TextLayoutPlanner, display_list: DisplayList, options: TextLayoutOptions) Error!TextLayoutPlanSet {
-        self.reset();
-        if (self.plans.len == 0 and self.lines.len == 0) return .{};
-
-        for (display_list.commands) |command| {
-            switch (command) {
-                .draw_text => |value| try self.consumeText(value, options),
-                else => {},
-            }
-        }
-        return .{ .plans = self.plans[0..self.plan_len] };
-    }
-
-    fn consumeText(self: *TextLayoutPlanner, text: DrawText, options: TextLayoutOptions) Error!void {
-        if (self.plan_len >= self.plans.len) return error.TextLayoutPlanListFull;
-        const plan = try layoutTextRunPlan(text, textLayoutOptionsForDrawText(options, text), self.lines[self.line_len..]);
-        self.plans[self.plan_len] = plan;
-        self.plan_len += 1;
-        self.line_len += plan.lineCount();
-    }
-};
-
-pub const TextLayoutCachePlanner = struct {
-    entries: []TextLayoutCacheEntry,
-    actions: []TextLayoutCacheAction,
-    entry_len: usize = 0,
-    action_len: usize = 0,
-
-    pub fn init(entries: []TextLayoutCacheEntry, actions: []TextLayoutCacheAction) TextLayoutCachePlanner {
-        return .{ .entries = entries, .actions = actions };
-    }
-
-    pub fn reset(self: *TextLayoutCachePlanner) void {
-        self.entry_len = 0;
-        self.action_len = 0;
-    }
-
-    pub fn build(self: *TextLayoutCachePlanner, plan: TextLayoutPlan, previous: []const TextLayoutCacheEntry, frame_index: u64, retention_frames: u64) Error!TextLayoutCachePlan {
-        return self.buildMany(&.{plan}, previous, frame_index, retention_frames);
-    }
-
-    pub fn buildMany(self: *TextLayoutCachePlanner, plans: []const TextLayoutPlan, previous: []const TextLayoutCacheEntry, frame_index: u64, retention_frames: u64) Error!TextLayoutCachePlan {
-        self.reset();
-
-        for (plans, 0..) |plan, layout_index| {
-            if (findTextLayoutCacheEntry(self.entries[0..self.entry_len], plan.key) != null) continue;
-
-            const previous_index = findTextLayoutCacheEntry(previous, plan.key);
-            try self.appendEntry(.{
-                .key = plan.key,
-                .line_count = plan.lineCount(),
-                .bounds = plan.layout.bounds,
-                .last_used_frame = frame_index,
-            });
-            try self.appendAction(.{
-                .kind = if (previous_index == null) .upload else .retain,
-                .key = plan.key,
-                .layout_index = layout_index,
-                .cache_index = previous_index,
-            });
-        }
-
-        for (previous, 0..) |entry, index| {
-            if (findTextLayoutCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
-            if (shouldRetainUnusedCacheEntry(frame_index, entry.last_used_frame, retention_frames) and self.hasEntryCapacity()) {
-                try self.appendEntry(entry);
-                try self.appendAction(.{
-                    .kind = .retain,
-                    .key = entry.key,
-                    .cache_index = index,
-                });
-            } else {
-                try self.appendAction(.{
-                    .kind = .evict,
-                    .key = entry.key,
-                    .cache_index = index,
-                });
-            }
-        }
-
-        return .{
-            .entries = self.entries[0..self.entry_len],
-            .actions = self.actions[0..self.action_len],
-        };
-    }
-
-    fn appendEntry(self: *TextLayoutCachePlanner, entry: TextLayoutCacheEntry) Error!void {
-        if (self.entry_len >= self.entries.len) return error.TextLayoutCacheListFull;
-        self.entries[self.entry_len] = entry;
-        self.entry_len += 1;
-    }
-
-    fn hasEntryCapacity(self: *TextLayoutCachePlanner) bool {
-        return self.entry_len < self.entries.len;
-    }
-
-    fn appendAction(self: *TextLayoutCachePlanner, action: TextLayoutCacheAction) Error!void {
-        if (self.action_len >= self.actions.len) return error.TextLayoutCacheListFull;
-        self.actions[self.action_len] = action;
-        self.action_len += 1;
-    }
-};
 
 const WidgetPaintOrder = struct {
     layer: i32,
@@ -6929,25 +6569,6 @@ fn widgetActionsEqual(a: WidgetActions, b: WidgetActions) bool {
         a.dismiss == b.dismiss;
 }
 
-fn glyphAtlasKeysEqual(a: GlyphAtlasKey, b: GlyphAtlasKey) bool {
-    return a.font_id == b.font_id and
-        a.glyph_id == b.glyph_id and
-        a.size == b.size and
-        a.subpixel_x == b.subpixel_x and
-        a.subpixel_y == b.subpixel_y;
-}
-
-fn glyphFontId(run_font_id: FontId, glyph: Glyph) FontId {
-    return if (glyph.font_id == 0) run_font_id else glyph.font_id;
-}
-
-fn findGlyphAtlasCacheEntry(entries: []const GlyphAtlasCacheEntry, key: GlyphAtlasKey) ?usize {
-    for (entries, 0..) |entry, index| {
-        if (glyphAtlasKeysEqual(entry.key, key)) return index;
-    }
-    return null;
-}
-
 fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChange) Error![]const DiffChange {
     try validateUniqueObjectIds(previous);
     try validateUniqueObjectIds(next);
@@ -7737,12 +7358,6 @@ fn ceilVirtualIndex(value: f32) usize {
 
 fn nonZeroObjectId(id: ObjectId) ?ObjectId {
     return if (id == 0) null else id;
-}
-
-fn subpixelBucket(value: f32) u8 {
-    const fraction = value - @floor(value);
-    const scaled = @floor(fraction * 4.0);
-    return @intFromFloat(std.math.clamp(scaled, 0, 3));
 }
 
 pub const writeCanvasGpuPacketJson = serialization.writeCanvasGpuPacketJson;
