@@ -14,6 +14,8 @@ const default_text_layout_cache_retention_frames = canvas.default_text_layout_ca
 const GlyphAtlasCachePlanner = canvas.GlyphAtlasCachePlanner;
 const TextLayoutCachePlanner = canvas.TextLayoutCachePlanner;
 
+const max_text_bounds_layout_lines: usize = 64;
+
 pub const Glyph = struct {
     id: u32,
     font_id: FontId = 0,
@@ -419,6 +421,44 @@ pub fn layoutTextRunPlan(text: DrawText, options: TextLayoutOptions, output: []T
         .key = textLayoutKey(text, options),
         .layout = .{ .lines = output[0..len], .bounds = bounds },
     };
+}
+
+pub fn textBounds(value: DrawText) ?geometry.RectF {
+    if (value.glyphs.len == 0 and value.text.len == 0) return null;
+    if (value.text_layout) |options| {
+        var lines: [max_text_bounds_layout_lines]TextLine = undefined;
+        if (layoutTextRun(value, options, &lines)) |layout| {
+            if (layout.bounds) |bounds| return bounds;
+        } else |_| {}
+    }
+
+    var min_x = value.origin.x;
+    var min_y = value.origin.y - value.size;
+    var max_x = value.origin.x;
+    var max_y = value.origin.y + value.size * 0.25;
+    if (value.glyphs.len > 0) {
+        min_x = value.origin.x + value.glyphs[0].x;
+        max_x = min_x + estimatedGlyphAdvance(value.glyphs[0], value.size);
+        min_y = value.origin.y + value.glyphs[0].y - value.size;
+        max_y = value.origin.y + value.glyphs[0].y + value.size * 0.25;
+        for (value.glyphs[1..]) |glyph| {
+            const glyph_x = value.origin.x + glyph.x;
+            const glyph_y = value.origin.y + glyph.y;
+            min_x = @min(min_x, glyph_x);
+            max_x = @max(max_x, glyph_x + estimatedGlyphAdvance(glyph, value.size));
+            min_y = @min(min_y, glyph_y - value.size);
+            max_y = @max(max_y, glyph_y + value.size * 0.25);
+        }
+    } else {
+        max_x = value.origin.x + estimateTextWidthForFont(value.font_id, value.text, value.size);
+    }
+
+    return geometry.RectF.init(
+        min_x,
+        min_y,
+        @max(value.size * 0.25, max_x - min_x),
+        @max(value.size * 1.25, max_y - min_y),
+    );
 }
 
 pub fn layoutTextCaretRect(text: DrawText, options: TextLayoutOptions, offset: usize, lines: []TextLine) Error!?geometry.RectF {

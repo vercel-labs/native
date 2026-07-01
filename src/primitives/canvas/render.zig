@@ -12,6 +12,7 @@ const CanvasCommand = canvas.CanvasCommand;
 const ReferenceImage = canvas.ReferenceImage;
 const Affine = drawing_model.Affine;
 const Radius = drawing_model.Radius;
+const PathElement = drawing_model.PathElement;
 const Easing = token_model.Easing;
 const SpringToken = token_model.SpringToken;
 
@@ -27,6 +28,7 @@ const RenderLayerCachePlanner = canvas.RenderLayerCachePlanner;
 const VisualEffectCachePlanner = canvas.VisualEffectCachePlanner;
 
 pub const max_render_state_stack: usize = 32;
+const path_geometry_curve_segments: usize = 12;
 
 pub const RenderState = struct {
     opacity: f32 = 1,
@@ -299,6 +301,70 @@ pub const RenderPathGeometryPlan = struct {
         return planner.build(self, previous, frame_index);
     }
 };
+
+pub const PathGeometryCounts = struct {
+    contour_count: usize = 0,
+    line_segment_count: usize = 0,
+    quadratic_segment_count: usize = 0,
+    cubic_segment_count: usize = 0,
+    flattened_segment_count: usize = 0,
+    vertex_count: usize = 0,
+    index_count: usize = 0,
+};
+
+pub fn analyzePathGeometry(elements: []const PathElement, kind: RenderPathGeometryKind) PathGeometryCounts {
+    var counts = PathGeometryCounts{};
+    var has_current = false;
+
+    for (elements) |element| {
+        switch (element.verb) {
+            .move_to => {
+                counts.contour_count += 1;
+                counts.vertex_count += 1;
+                has_current = true;
+            },
+            .line_to => {
+                if (!has_current) {
+                    counts.contour_count += 1;
+                    counts.vertex_count += 1;
+                    has_current = true;
+                    continue;
+                }
+                counts.line_segment_count += 1;
+                counts.flattened_segment_count += 1;
+                counts.vertex_count += 1;
+            },
+            .quad_to => {
+                if (!has_current) continue;
+                counts.quadratic_segment_count += 1;
+                counts.flattened_segment_count += path_geometry_curve_segments;
+                counts.vertex_count += path_geometry_curve_segments;
+            },
+            .cubic_to => {
+                if (!has_current) continue;
+                counts.cubic_segment_count += 1;
+                counts.flattened_segment_count += path_geometry_curve_segments;
+                counts.vertex_count += path_geometry_curve_segments;
+            },
+            .close => {
+                if (!has_current) continue;
+                counts.line_segment_count += 1;
+                counts.flattened_segment_count += 1;
+            },
+        }
+    }
+
+    switch (kind) {
+        .fill => {
+            counts.index_count = if (counts.vertex_count >= 3) (counts.vertex_count - 2) * 3 else 0;
+        },
+        .stroke => {
+            counts.vertex_count = counts.flattened_segment_count * 4;
+            counts.index_count = counts.flattened_segment_count * 6;
+        },
+    }
+    return counts;
+}
 
 pub const RenderPathGeometryKey = struct {
     kind: RenderPathGeometryKind,

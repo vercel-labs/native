@@ -87,6 +87,9 @@ pub const ImageSampling = drawing_model.ImageSampling;
 pub const DrawImage = drawing_model.DrawImage;
 pub const Shadow = drawing_model.Shadow;
 pub const Blur = drawing_model.Blur;
+const strokeBounds = drawing_model.strokeBounds;
+const shadowBounds = drawing_model.shadowBounds;
+const pathBounds = drawing_model.pathBounds;
 
 // Canvas text data lives in `text.zig`; root keeps the public API stable.
 pub const Glyph = text_model.Glyph;
@@ -1534,6 +1537,7 @@ pub const layoutTextOffsetForPoint = text_model.layoutTextOffsetForPoint;
 pub const textOffsetForLayoutPoint = text_model.textOffsetForLayoutPoint;
 pub const applyTextInputEvent = text_model.applyTextInputEvent;
 const textLineBounds = text_model.textLineBounds;
+const textBounds = text_model.textBounds;
 const estimateTextWidth = text_model.estimateTextWidth;
 const estimateTextWidthForFont = text_model.estimateTextWidthForFont;
 const estimateTextAdvanceForBytes = text_model.estimateTextAdvanceForBytes;
@@ -1549,6 +1553,7 @@ const textLineCaretX = text_model.textLineCaretX;
 
 pub const sampleCanvasRenderAnimations = render_model.sampleCanvasRenderAnimations;
 const motionProgress = render_model.motionProgress;
+const analyzePathGeometry = render_model.analyzePathGeometry;
 
 pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: CanvasFrameOptions, storage: CanvasFrameStorage) Error!CanvasFrame {
     var render_plan = try next.renderPlan(storage.render_commands);
@@ -8686,25 +8691,6 @@ fn surfaceRect(surface_size: geometry.SizeF) ?geometry.RectF {
     return if (rect.isEmpty()) null else rect;
 }
 
-fn boundsFromPoints(points: []const geometry.PointF) ?geometry.RectF {
-    if (points.len == 0) return null;
-    var min_x = points[0].x;
-    var min_y = points[0].y;
-    var max_x = points[0].x;
-    var max_y = points[0].y;
-    for (points[1..]) |point| {
-        min_x = @min(min_x, point.x);
-        min_y = @min(min_y, point.y);
-        max_x = @max(max_x, point.x);
-        max_y = @max(max_y, point.y);
-    }
-    return geometry.RectF.init(min_x, min_y, max_x - min_x, max_y - min_y);
-}
-
-fn strokeBounds(rect: geometry.RectF, width: f32) geometry.RectF {
-    return rect.normalized().inflate(geometry.InsetsF.all(nonNegative(width) * 0.5));
-}
-
 const ReferencePixelRect = struct {
     x: usize = 0,
     y: usize = 0,
@@ -9324,149 +9310,6 @@ fn blendRgba8(dst: [4]u8, src: Color, opacity: f32) [4]u8 {
 
 fn colorChannelToByte(value: f32) u8 {
     return @intFromFloat(@round(std.math.clamp(value, 0, 1) * 255.0));
-}
-
-fn shadowBounds(value: Shadow) geometry.RectF {
-    const spread = nonNegative(@abs(value.spread));
-    const blur_radius = nonNegative(value.blur);
-    return value.rect
-        .normalized()
-        .translate(value.offset)
-        .inflate(geometry.InsetsF.all(spread + blur_radius));
-}
-
-const PathGeometryCounts = struct {
-    contour_count: usize = 0,
-    line_segment_count: usize = 0,
-    quadratic_segment_count: usize = 0,
-    cubic_segment_count: usize = 0,
-    flattened_segment_count: usize = 0,
-    vertex_count: usize = 0,
-    index_count: usize = 0,
-};
-
-fn analyzePathGeometry(elements: []const PathElement, kind: RenderPathGeometryKind) PathGeometryCounts {
-    var counts = PathGeometryCounts{};
-    var has_current = false;
-
-    for (elements) |element| {
-        switch (element.verb) {
-            .move_to => {
-                counts.contour_count += 1;
-                counts.vertex_count += 1;
-                has_current = true;
-            },
-            .line_to => {
-                if (!has_current) {
-                    counts.contour_count += 1;
-                    counts.vertex_count += 1;
-                    has_current = true;
-                    continue;
-                }
-                counts.line_segment_count += 1;
-                counts.flattened_segment_count += 1;
-                counts.vertex_count += 1;
-            },
-            .quad_to => {
-                if (!has_current) continue;
-                counts.quadratic_segment_count += 1;
-                counts.flattened_segment_count += reference_curve_segments;
-                counts.vertex_count += reference_curve_segments;
-            },
-            .cubic_to => {
-                if (!has_current) continue;
-                counts.cubic_segment_count += 1;
-                counts.flattened_segment_count += reference_curve_segments;
-                counts.vertex_count += reference_curve_segments;
-            },
-            .close => {
-                if (!has_current) continue;
-                counts.line_segment_count += 1;
-                counts.flattened_segment_count += 1;
-            },
-        }
-    }
-
-    switch (kind) {
-        .fill => {
-            counts.index_count = if (counts.vertex_count >= 3) (counts.vertex_count - 2) * 3 else 0;
-        },
-        .stroke => {
-            counts.vertex_count = counts.flattened_segment_count * 4;
-            counts.index_count = counts.flattened_segment_count * 6;
-        },
-    }
-    return counts;
-}
-
-fn pathBounds(elements: []const PathElement) ?geometry.RectF {
-    var has_point = false;
-    var min_x: f32 = 0;
-    var min_y: f32 = 0;
-    var max_x: f32 = 0;
-    var max_y: f32 = 0;
-    for (elements) |element| {
-        const point_count: usize = switch (element.verb) {
-            .move_to, .line_to => 1,
-            .quad_to => 2,
-            .cubic_to => 3,
-            .close => 0,
-        };
-        for (element.points[0..point_count]) |point| {
-            if (!has_point) {
-                has_point = true;
-                min_x = point.x;
-                min_y = point.y;
-                max_x = point.x;
-                max_y = point.y;
-            } else {
-                min_x = @min(min_x, point.x);
-                min_y = @min(min_y, point.y);
-                max_x = @max(max_x, point.x);
-                max_y = @max(max_y, point.y);
-            }
-        }
-    }
-    if (!has_point) return null;
-    return geometry.RectF.init(min_x, min_y, max_x - min_x, max_y - min_y);
-}
-
-fn textBounds(value: DrawText) ?geometry.RectF {
-    if (value.glyphs.len == 0 and value.text.len == 0) return null;
-    if (value.text_layout) |options| {
-        var lines: [max_reference_text_layout_lines]TextLine = undefined;
-        if (layoutTextRun(value, options, &lines)) |layout| {
-            if (layout.bounds) |bounds| return bounds;
-        } else |_| {}
-    }
-
-    var min_x = value.origin.x;
-    var min_y = value.origin.y - value.size;
-    var max_x = value.origin.x;
-    var max_y = value.origin.y + value.size * 0.25;
-    if (value.glyphs.len > 0) {
-        min_x = value.origin.x + value.glyphs[0].x;
-        max_x = min_x + estimatedGlyphAdvance(value.glyphs[0], value.size);
-        min_y = value.origin.y + value.glyphs[0].y - value.size;
-        max_y = value.origin.y + value.glyphs[0].y + value.size * 0.25;
-        for (value.glyphs[1..]) |glyph| {
-            const glyph_x = value.origin.x + glyph.x;
-            const glyph_y = value.origin.y + glyph.y;
-            min_x = @min(min_x, glyph_x);
-            max_x = @max(max_x, glyph_x + estimatedGlyphAdvance(glyph, value.size));
-            min_y = @min(min_y, glyph_y - value.size);
-            max_y = @max(max_y, glyph_y + value.size * 0.25);
-        }
-    } else {
-        max_x = value.origin.x + estimateTextWidthForFont(value.font_id, value.text, value.size);
-    }
-
-    return geometry.RectF.init(
-        min_x,
-        min_y,
-        @max(value.size * 0.25, max_x - min_x),
-        @max(value.size * 1.25, max_y - min_y),
-    );
 }
 
 fn nonNegative(value: f32) f32 {

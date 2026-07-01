@@ -222,6 +222,51 @@ pub const Blur = struct {
     radius: f32 = 0,
 };
 
+pub fn strokeBounds(rect: geometry.RectF, width: f32) geometry.RectF {
+    return rect.normalized().inflate(geometry.InsetsF.all(nonNegative(width) * 0.5));
+}
+
+pub fn shadowBounds(value: Shadow) geometry.RectF {
+    const spread = nonNegative(@abs(value.spread));
+    const blur_radius = nonNegative(value.blur);
+    return value.rect
+        .normalized()
+        .translate(value.offset)
+        .inflate(geometry.InsetsF.all(spread + blur_radius));
+}
+
+pub fn pathBounds(elements: []const PathElement) ?geometry.RectF {
+    var has_point = false;
+    var min_x: f32 = 0;
+    var min_y: f32 = 0;
+    var max_x: f32 = 0;
+    var max_y: f32 = 0;
+    for (elements) |element| {
+        const point_count: usize = switch (element.verb) {
+            .move_to, .line_to => 1,
+            .quad_to => 2,
+            .cubic_to => 3,
+            .close => 0,
+        };
+        for (element.points[0..point_count]) |point| {
+            if (!has_point) {
+                has_point = true;
+                min_x = point.x;
+                min_y = point.y;
+                max_x = point.x;
+                max_y = point.y;
+            } else {
+                min_x = @min(min_x, point.x);
+                min_y = @min(min_y, point.y);
+                max_x = @max(max_x, point.x);
+                max_y = @max(max_y, point.y);
+            }
+        }
+    }
+    if (!has_point) return null;
+    return geometry.RectF.init(min_x, min_y, max_x - min_x, max_y - min_y);
+}
+
 fn boundsFromPoints(points: []const geometry.PointF) ?geometry.RectF {
     if (points.len == 0) return null;
     var min_x = points[0].x;
@@ -235,4 +280,8 @@ fn boundsFromPoints(points: []const geometry.PointF) ?geometry.RectF {
         max_y = @max(max_y, point.y);
     }
     return geometry.RectF.init(min_x, min_y, max_x - min_x, max_y - min_y);
+}
+
+fn nonNegative(value: f32) f32 {
+    return @max(0, value);
 }
