@@ -2228,6 +2228,9 @@ test "gpu components display list covers finished live controls" {
     try std.testing.expect(display_list.findCommandById(popover_blur_id) != null);
     try std.testing.expect(display_list.findCommandById(menu_item_text_id) != null);
     try std.testing.expect(display_list.findCommandById(data_cell_text_id) != null);
+    try std.testing.expect(display_list.findCommandById(componentCommandPartId(content_stack_id, 1)) == null);
+    try std.testing.expect(display_list.findCommandById(componentCommandPartId(content_stack_id, 2)) == null);
+    try std.testing.expect(display_list.findCommandById(componentCommandPartId(content_stack_id, 3)) == null);
     const bounds = display_list.bounds().?;
     try std.testing.expect(bounds.x <= 28);
     try std.testing.expect(bounds.y <= 26);
@@ -3099,12 +3102,23 @@ test "gpu components app registers component lab on first gpu frame" {
     try expectComponentStatusContains(&harness.runtime, "Keyed list #120: offset 56");
 
     resetComponentDirty(&harness.runtime);
+    const table_packet_count = harness.null_platform.gpu_surface_packet_present_count;
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 150 increment");
     snapshot = harness.runtime.automationSnapshot("Components");
     const keyed_grid = componentSnapshotWidget(snapshot, 150).?;
     try std.testing.expectApproxEqAbs(@as(f32, 56), keyed_grid.scroll.offset, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 56), app.virtual_scroll.data, 0.001);
+    try std.testing.expect(harness.runtime.invalidated);
     try expectComponentStatusContains(&harness.runtime, "Keyed table #150: offset 56");
+    try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(canvas_width, canvas_height),
+        .scale_factor = 2,
+        .frame_index = 3,
+        .timestamp_ns = 1_032_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expectEqual(table_packet_count + 1, harness.null_platform.gpu_surface_packet_present_count);
 
     resetComponentDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 142 select");

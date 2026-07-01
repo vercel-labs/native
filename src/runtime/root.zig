@@ -1283,7 +1283,9 @@ pub const Runtime = struct {
         if (previous_cursor != self.views[index].canvas_widget_cursor) try self.syncCanvasWidgetCursorForView(index);
         self.invalidateForWidgetInvalidations(self.views[index].frame, invalidations);
         if (render_state_changed) self.invalidateForCanvasWidgetRenderStateDirty(index, render_state_dirty);
-        try self.refreshCanvasWidgetDisplayListIfOwned(index);
+        const layout_dirty = invalidations.len > 0 or render_state_changed;
+        const requested_frame = try self.refreshCanvasWidgetDisplayListIfOwned(index);
+        if (layout_dirty and !requested_frame) try self.requestCanvasFrameForView(index);
         return self.views[index].info();
     }
 
@@ -1348,7 +1350,7 @@ pub const Runtime = struct {
         self.views[index].reconcileCanvasWidgetRenderStateAfterScroll(null);
         if (previous_cursor != self.views[index].canvas_widget_cursor) try self.syncCanvasWidgetCursorForView(index);
         try self.invalidateForCanvasWidgetDirty(index, dirty);
-        try self.refreshCanvasWidgetDisplayListIfOwned(index);
+        _ = try self.refreshCanvasWidgetDisplayListIfOwned(index);
         return self.views[index].info();
     }
 
@@ -1361,7 +1363,7 @@ pub const Runtime = struct {
         self.views[index].widget_tokens = tokens;
         self.views[index].widget_revision += 1;
         if (self.views[index].canvas_display_list_widget_owned) {
-            try self.refreshCanvasWidgetDisplayList(index);
+            _ = try self.refreshCanvasWidgetDisplayList(index);
         }
         return self.views[index].info();
     }
@@ -1395,7 +1397,7 @@ pub const Runtime = struct {
 
         const dirty = try self.views[index].applyCanvasWidgetTextEdit(id, edit) orelse return self.views[index].info();
         try self.invalidateForCanvasWidgetDirty(index, dirty);
-        try self.refreshCanvasWidgetDisplayListIfOwned(index);
+        _ = try self.refreshCanvasWidgetDisplayListIfOwned(index);
         return self.views[index].info();
     }
 
@@ -1444,36 +1446,36 @@ pub const Runtime = struct {
         self.views[index].canvas_widget_display_list_prefix_count = chrome.prefix_command_count;
         self.views[index].canvas_widget_display_list_suffix_count = chrome.suffix_command_count;
         self.views[index].canvas_widget_display_list_reserved_count = chrome.reserved_command_count;
-        try self.refreshCanvasWidgetDisplayList(index);
+        _ = try self.refreshCanvasWidgetDisplayList(index);
         self.views[index].canvas_display_list_widget_owned = true;
         try self.publishCanvasWidgetAccessibility(index);
         return self.views[index].info();
     }
 
-    fn refreshCanvasWidgetDisplayListIfOwned(self: *Runtime, view_index: usize) anyerror!void {
+    fn refreshCanvasWidgetDisplayListIfOwned(self: *Runtime, view_index: usize) anyerror!bool {
         return self.refreshCanvasWidgetDisplayListIfOwnedWithAccessibility(view_index, true);
     }
 
-    fn refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility(self: *Runtime, view_index: usize) anyerror!void {
+    fn refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility(self: *Runtime, view_index: usize) anyerror!bool {
         return self.refreshCanvasWidgetDisplayListIfOwnedWithAccessibility(view_index, false);
     }
 
-    fn refreshCanvasWidgetDisplayListIfOwnedWithAccessibility(self: *Runtime, view_index: usize, publish_accessibility: bool) anyerror!void {
+    fn refreshCanvasWidgetDisplayListIfOwnedWithAccessibility(self: *Runtime, view_index: usize, publish_accessibility: bool) anyerror!bool {
         if (self.canvas_widget_display_list_refresh_batch_depth > 0) {
-            if (view_index >= self.canvas_widget_display_list_refresh_pending.len) return;
+            if (view_index >= self.canvas_widget_display_list_refresh_pending.len) return false;
             self.canvas_widget_display_list_refresh_pending[view_index] = true;
             self.canvas_widget_accessibility_publish_pending[view_index] = self.canvas_widget_accessibility_publish_pending[view_index] or publish_accessibility;
-            return;
+            return false;
         }
-        try self.refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate(view_index, publish_accessibility);
+        return self.refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate(view_index, publish_accessibility);
     }
 
-    fn refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate(self: *Runtime, view_index: usize, publish_accessibility: bool) anyerror!void {
-        if (view_index >= self.view_count) return;
-        if (self.views[view_index].kind != .gpu_surface) return;
+    fn refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate(self: *Runtime, view_index: usize, publish_accessibility: bool) anyerror!bool {
+        if (view_index >= self.view_count) return false;
+        if (self.views[view_index].kind != .gpu_surface) return false;
         if (publish_accessibility) try self.publishCanvasWidgetAccessibility(view_index);
-        if (!self.views[view_index].canvas_display_list_widget_owned) return;
-        try self.refreshCanvasWidgetDisplayList(view_index);
+        if (!self.views[view_index].canvas_display_list_widget_owned) return false;
+        return self.refreshCanvasWidgetDisplayList(view_index);
     }
 
     fn beginCanvasWidgetDisplayListRefreshBatch(self: *Runtime) void {
@@ -1501,7 +1503,7 @@ pub const Runtime = struct {
             const publish_accessibility = self.canvas_widget_accessibility_publish_pending[index];
             self.canvas_widget_display_list_refresh_pending[index] = false;
             self.canvas_widget_accessibility_publish_pending[index] = false;
-            try self.refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate(index, publish_accessibility);
+            _ = try self.refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate(index, publish_accessibility);
         }
     }
 
@@ -1609,7 +1611,7 @@ pub const Runtime = struct {
         });
     }
 
-    fn refreshCanvasWidgetDisplayList(self: *Runtime, view_index: usize) anyerror!void {
+    fn refreshCanvasWidgetDisplayList(self: *Runtime, view_index: usize) anyerror!bool {
         if (view_index >= self.view_count) return error.ViewNotFound;
         if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
 
@@ -1633,7 +1635,11 @@ pub const Runtime = struct {
         const changes = try canvas.DisplayList.diff(self.views[view_index].canvasDisplayList(), display_list, &canvas_changes);
         try self.views[view_index].copyCanvasDisplayList(display_list);
         self.invalidateForCanvasChanges(self.views[view_index].frame, changes);
-        if (changes.len > 0) try self.requestCanvasFrameForView(view_index);
+        if (changes.len > 0) {
+            try self.requestCanvasFrameForView(view_index);
+            return true;
+        }
+        return false;
     }
 
     pub fn routeCanvasWidgetPointerInput(self: *const Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetPointerEvent {
@@ -1832,7 +1838,7 @@ pub const Runtime = struct {
         const local_dirty = self.views[view_index].widgetLayoutTree().renderStateDirtyBounds(previous, next);
         self.invalidateForCanvasWidgetRenderStateDirty(view_index, local_dirty);
         const publish_accessibility = previous.focused_id != next.focused_id;
-        try self.refreshCanvasWidgetDisplayListIfOwnedWithAccessibility(view_index, publish_accessibility);
+        _ = try self.refreshCanvasWidgetDisplayListIfOwnedWithAccessibility(view_index, publish_accessibility);
     }
 
     fn invalidateForCanvasWidgetRenderStateDirty(self: *Runtime, view_index: usize, local_dirty: ?geometry.RectF) void {
@@ -1877,7 +1883,7 @@ pub const Runtime = struct {
         } else {
             self.invalidateFor(.state, self.views[index].frame);
         }
-        try self.refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility(index);
+        _ = try self.refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility(index);
     }
 
     fn updateCanvasWidgetTextFromKeyboard(self: *Runtime, keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
@@ -1892,7 +1898,7 @@ pub const Runtime = struct {
         } else {
             self.invalidateFor(.state, self.views[index].frame);
         }
-        try self.refreshCanvasWidgetDisplayListIfOwned(index);
+        _ = try self.refreshCanvasWidgetDisplayListIfOwned(index);
     }
 
     fn updateCanvasWidgetTextFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
@@ -1916,7 +1922,7 @@ pub const Runtime = struct {
         } else {
             self.invalidateFor(.state, self.views[index].frame);
         }
-        try self.refreshCanvasWidgetDisplayListIfOwned(index);
+        _ = try self.refreshCanvasWidgetDisplayListIfOwned(index);
     }
 
     fn updateCanvasWidgetControlFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
@@ -1939,7 +1945,7 @@ pub const Runtime = struct {
         } else {
             self.invalidateFor(.state, self.views[index].frame);
         }
-        try self.refreshCanvasWidgetDisplayListIfOwned(index);
+        _ = try self.refreshCanvasWidgetDisplayListIfOwned(index);
     }
 
     fn updateCanvasWidgetControlFromKeyboard(self: *Runtime, keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
@@ -1958,7 +1964,7 @@ pub const Runtime = struct {
         } else {
             self.invalidateFor(.state, self.views[index].frame);
         }
-        try self.refreshCanvasWidgetDisplayListIfOwned(index);
+        _ = try self.refreshCanvasWidgetDisplayListIfOwned(index);
     }
 
     fn dismissCanvasWidgetSurfaceFromPointerInput(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!bool {
@@ -3396,7 +3402,7 @@ pub const Runtime = struct {
         } else {
             self.invalidateFor(.state, self.views[view_index].frame);
         }
-        try self.refreshCanvasWidgetDisplayListIfOwned(view_index);
+        _ = try self.refreshCanvasWidgetDisplayListIfOwned(view_index);
     }
 
     fn createWindowWithSourceMode(self: *Runtime, options: platform.WindowCreateOptions, source_reloads_from_app: bool) anyerror!platform.WindowInfo {
