@@ -32,6 +32,7 @@ const shadowBounds = drawing_model.shadowBounds;
 const textBounds = text_model.textBounds;
 
 const optionalRectsEqual = equality_model.optionalRectsEqual;
+const optionalF32Equal = equality_model.optionalF32Equal;
 
 pub const max_render_state_stack: usize = 32;
 const path_geometry_curve_segments: usize = 12;
@@ -85,6 +86,82 @@ pub const CanvasRenderAnimation = struct {
     from_transform: ?Affine = null,
     to_transform: ?Affine = null,
 };
+
+pub fn applyRenderOverrides(commands: []RenderCommand, overrides: []const CanvasRenderOverride) ?geometry.RectF {
+    var bounds: ?geometry.RectF = null;
+    for (commands) |*command| {
+        if (command.id) |id| {
+            if (findRenderOverride(overrides, id)) |override| {
+                applyRenderOverride(command, override);
+            }
+        }
+        bounds = unionOptionalBounds(bounds, command.bounds);
+    }
+    return bounds;
+}
+
+fn applyRenderOverride(command: *RenderCommand, override: CanvasRenderOverride) void {
+    if (override.opacity) |opacity| {
+        command.opacity *= std.math.clamp(opacity, 0, 1);
+    }
+    if (override.transform) |transform| {
+        command.transform = command.transform.multiply(transform);
+        if (renderCommandBoundsWithOverride(command.*, null)) |bounds| {
+            command.bounds = bounds;
+        } else {
+            command.bounds = geometry.RectF.zero();
+        }
+    }
+}
+
+pub fn renderOverrideDirtyBounds(commands: []const RenderCommand, previous: []const CanvasRenderOverride, next: []const CanvasRenderOverride) ?geometry.RectF {
+    if (previous.len == 0 and next.len == 0) return null;
+
+    var bounds: ?geometry.RectF = null;
+    for (commands) |command| {
+        const id = command.id orelse continue;
+        const previous_override = findRenderOverride(previous, id);
+        const next_override = findRenderOverride(next, id);
+        if (renderOverridesEqual(previous_override, next_override)) continue;
+        bounds = unionOptionalBounds(bounds, renderCommandBoundsWithOverride(command, previous_override));
+        bounds = unionOptionalBounds(bounds, renderCommandBoundsWithOverride(command, next_override));
+    }
+    return bounds;
+}
+
+fn renderCommandBoundsWithOverride(command: RenderCommand, override: ?CanvasRenderOverride) ?geometry.RectF {
+    const override_transform = if (override) |value| value.transform else null;
+    const transform = if (override_transform) |value| command.transform.multiply(value) else command.transform;
+    var bounds = transform.transformRect(command.local_bounds);
+    if (command.clip) |clip| {
+        bounds = geometry.RectF.intersection(bounds, clip);
+    }
+    const normalized = bounds.normalized();
+    return if (normalized.isEmpty()) null else normalized;
+}
+
+fn findRenderOverride(overrides: []const CanvasRenderOverride, id: ObjectId) ?CanvasRenderOverride {
+    for (overrides) |override| {
+        if (override.id == id) return override;
+    }
+    return null;
+}
+
+fn renderOverridesEqual(a: ?CanvasRenderOverride, b: ?CanvasRenderOverride) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    const left = a.?;
+    const right = b.?;
+    return left.id == right.id and
+        optionalF32Equal(left.opacity, right.opacity) and
+        optionalAffineEqual(left.transform, right.transform);
+}
+
+fn optionalAffineEqual(a: ?Affine, b: ?Affine) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return affinesEqual(a.?, b.?);
+}
 
 pub fn sampleCanvasRenderAnimations(animations: []const CanvasRenderAnimation, timestamp_ns: u64, output: []CanvasRenderOverride) Error![]const CanvasRenderOverride {
     var len: usize = 0;

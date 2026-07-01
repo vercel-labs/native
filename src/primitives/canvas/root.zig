@@ -138,6 +138,8 @@ pub const RenderState = render_model.RenderState;
 pub const RenderCommand = render_model.RenderCommand;
 pub const CanvasRenderOverride = render_model.CanvasRenderOverride;
 pub const CanvasRenderAnimation = render_model.CanvasRenderAnimation;
+pub const applyRenderOverrides = render_model.applyRenderOverrides;
+pub const renderOverrideDirtyBounds = render_model.renderOverrideDirtyBounds;
 pub const RenderPlan = render_model.RenderPlan;
 pub const RenderPlanner = render_model.RenderPlanner;
 pub const RenderPipelineKind = render_model.RenderPipelineKind;
@@ -1321,82 +1323,6 @@ pub fn emitWidgetLayout(builder: *Builder, layout: WidgetLayoutTree, tokens: Des
 
 fn emitWidgetLayoutWithState(builder: *Builder, layout: WidgetLayoutTree, tokens: DesignTokens, state: WidgetRenderState) Error!void {
     try emitWidgetLayoutChildren(builder, layout, null, tokens, state);
-}
-
-pub fn applyRenderOverrides(commands: []RenderCommand, overrides: []const CanvasRenderOverride) ?geometry.RectF {
-    var bounds: ?geometry.RectF = null;
-    for (commands) |*command| {
-        if (command.id) |id| {
-            if (findRenderOverride(overrides, id)) |override| {
-                applyRenderOverride(command, override);
-            }
-        }
-        bounds = unionOptionalBounds(bounds, command.bounds);
-    }
-    return bounds;
-}
-
-fn applyRenderOverride(command: *RenderCommand, override: CanvasRenderOverride) void {
-    if (override.opacity) |opacity| {
-        command.opacity *= std.math.clamp(opacity, 0, 1);
-    }
-    if (override.transform) |transform| {
-        command.transform = command.transform.multiply(transform);
-        if (renderCommandBoundsWithOverride(command.*, null)) |bounds| {
-            command.bounds = bounds;
-        } else {
-            command.bounds = geometry.RectF.zero();
-        }
-    }
-}
-
-pub fn renderOverrideDirtyBounds(commands: []const RenderCommand, previous: []const CanvasRenderOverride, next: []const CanvasRenderOverride) ?geometry.RectF {
-    if (previous.len == 0 and next.len == 0) return null;
-
-    var bounds: ?geometry.RectF = null;
-    for (commands) |command| {
-        const id = command.id orelse continue;
-        const previous_override = findRenderOverride(previous, id);
-        const next_override = findRenderOverride(next, id);
-        if (renderOverridesEqual(previous_override, next_override)) continue;
-        bounds = unionOptionalBounds(bounds, renderCommandBoundsWithOverride(command, previous_override));
-        bounds = unionOptionalBounds(bounds, renderCommandBoundsWithOverride(command, next_override));
-    }
-    return bounds;
-}
-
-fn renderCommandBoundsWithOverride(command: RenderCommand, override: ?CanvasRenderOverride) ?geometry.RectF {
-    const override_transform = if (override) |value| value.transform else null;
-    const transform = if (override_transform) |value| command.transform.multiply(value) else command.transform;
-    var bounds = transform.transformRect(command.local_bounds);
-    if (command.clip) |clip| {
-        bounds = geometry.RectF.intersection(bounds, clip);
-    }
-    const normalized = bounds.normalized();
-    return if (normalized.isEmpty()) null else normalized;
-}
-
-fn findRenderOverride(overrides: []const CanvasRenderOverride, id: ObjectId) ?CanvasRenderOverride {
-    for (overrides) |override| {
-        if (override.id == id) return override;
-    }
-    return null;
-}
-
-fn renderOverridesEqual(a: ?CanvasRenderOverride, b: ?CanvasRenderOverride) bool {
-    if (a == null and b == null) return true;
-    if (a == null or b == null) return false;
-    const left = a.?;
-    const right = b.?;
-    return left.id == right.id and
-        optionalF32Equal(left.opacity, right.opacity) and
-        optionalAffineEqual(left.transform, right.transform);
-}
-
-fn optionalAffineEqual(a: ?Affine, b: ?Affine) bool {
-    if (a == null and b == null) return true;
-    if (a == null or b == null) return false;
-    return affinesEqual(a.?, b.?);
 }
 
 const WidgetPaintOrder = struct {
