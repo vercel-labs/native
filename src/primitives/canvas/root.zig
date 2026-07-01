@@ -168,26 +168,32 @@ pub const RenderImageCachePlanner = render_model.RenderImageCachePlanner;
 pub const RenderResourceKind = render_model.RenderResourceKind;
 pub const RenderResource = render_model.RenderResource;
 pub const RenderResourcePlan = render_model.RenderResourcePlan;
+pub const RenderResourcePlanner = render_model.RenderResourcePlanner;
 pub const RenderResourceKey = render_model.RenderResourceKey;
 pub const RenderResourceCacheEntry = render_model.RenderResourceCacheEntry;
 pub const RenderResourceCacheActionKind = render_model.RenderResourceCacheActionKind;
 pub const RenderResourceCacheAction = render_model.RenderResourceCacheAction;
 pub const RenderResourceCachePlan = render_model.RenderResourceCachePlan;
+pub const RenderResourceCachePlanner = render_model.RenderResourceCachePlanner;
 pub const RenderLayer = render_model.RenderLayer;
 pub const RenderLayerPlan = render_model.RenderLayerPlan;
+pub const RenderLayerPlanner = render_model.RenderLayerPlanner;
 pub const RenderLayerKey = render_model.RenderLayerKey;
 pub const RenderLayerCacheEntry = render_model.RenderLayerCacheEntry;
 pub const RenderLayerCacheActionKind = render_model.RenderLayerCacheActionKind;
 pub const RenderLayerCacheAction = render_model.RenderLayerCacheAction;
 pub const RenderLayerCachePlan = render_model.RenderLayerCachePlan;
+pub const RenderLayerCachePlanner = render_model.RenderLayerCachePlanner;
 pub const VisualEffectKind = render_model.VisualEffectKind;
 pub const VisualEffect = render_model.VisualEffect;
 pub const VisualEffectPlan = render_model.VisualEffectPlan;
+pub const VisualEffectPlanner = render_model.VisualEffectPlanner;
 pub const VisualEffectKey = render_model.VisualEffectKey;
 pub const VisualEffectCacheEntry = render_model.VisualEffectCacheEntry;
 pub const VisualEffectCacheActionKind = render_model.VisualEffectCacheActionKind;
 pub const VisualEffectCacheAction = render_model.VisualEffectCacheAction;
 pub const VisualEffectCachePlan = render_model.VisualEffectCachePlan;
+pub const VisualEffectCachePlanner = render_model.VisualEffectCachePlanner;
 
 // Canvas frame options and diagnostics live in `frame.zig`; root keeps the public API stable.
 pub const CanvasFrameOptions = frame_model.CanvasFrameOptions;
@@ -1498,7 +1504,6 @@ const textLineCaretX = text_model.textLineCaretX;
 
 pub const sampleCanvasRenderAnimations = render_model.sampleCanvasRenderAnimations;
 const motionProgress = render_model.motionProgress;
-const drawImageFingerprint = render_model.drawImageFingerprint;
 const renderImageFingerprint = render_model.renderImageFingerprint;
 const renderImageFingerprintForResource = render_model.renderImageFingerprintForResource;
 const commandsEqual = equality_model.commandsEqual;
@@ -1521,13 +1526,7 @@ const resourceHashUsize = hash_model.resourceHashUsize;
 const resourceHashEnum = hash_model.resourceHashEnum;
 const resourceHashF32 = hash_model.resourceHashF32;
 const resourceHashPoint = hash_model.resourceHashPoint;
-const resourceHashRect = hash_model.resourceHashRect;
 const resourceHashOptionalRect = hash_model.resourceHashOptionalRect;
-const resourceHashOptionalObjectId = hash_model.resourceHashOptionalObjectId;
-const resourceHashAffine = hash_model.resourceHashAffine;
-const resourceHashRadius = hash_model.resourceHashRadius;
-const resourceHashColor = hash_model.resourceHashColor;
-const resourceHashPath = hash_model.resourceHashPath;
 
 pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: CanvasFrameOptions, storage: CanvasFrameStorage) Error!CanvasFrame {
     var render_plan = try next.renderPlan(storage.render_commands);
@@ -1672,482 +1671,6 @@ fn emitWidgetLayoutWithState(builder: *Builder, layout: WidgetLayoutTree, tokens
     try emitWidgetLayoutChildren(builder, layout, null, tokens, state);
 }
 
-fn renderCommandNeedsLayer(command: RenderCommand) bool {
-    return command.opacity != 1 or command.clip != null or !affinesEqual(command.transform, Affine.identity());
-}
-
-fn renderLayerCanExtend(layer: RenderLayer, command: RenderCommand, index: usize) bool {
-    return layer.command_start + layer.command_count == index and
-        layer.opacity == command.opacity and
-        optionalRectsEqual(layer.clip, command.clip) and
-        affinesEqual(layer.transform, command.transform);
-}
-
-pub const RenderLayerPlanner = struct {
-    layers: []RenderLayer,
-    len: usize = 0,
-
-    pub fn init(layers: []RenderLayer) RenderLayerPlanner {
-        return .{ .layers = layers };
-    }
-
-    pub fn reset(self: *RenderLayerPlanner) void {
-        self.len = 0;
-    }
-
-    pub fn build(self: *RenderLayerPlanner, render_plan: RenderPlan) Error!RenderLayerPlan {
-        self.reset();
-        for (render_plan.commands, 0..) |command, index| {
-            try self.consume(command, index);
-        }
-        return .{ .layers = self.layers[0..self.len] };
-    }
-
-    fn consume(self: *RenderLayerPlanner, command: RenderCommand, index: usize) Error!void {
-        if (!renderCommandNeedsLayer(command)) return;
-
-        if (self.len > 0 and renderLayerCanExtend(self.layers[self.len - 1], command, index)) {
-            const layer = &self.layers[self.len - 1];
-            layer.command_count += 1;
-            layer.id = if (layer.id == command.id) layer.id else null;
-            layer.bounds = geometry.RectF.unionWith(layer.bounds.normalized(), command.bounds.normalized());
-            layer.fingerprint = renderLayerFingerprintAppend(layer.fingerprint, command);
-            return;
-        }
-
-        if (self.len >= self.layers.len) return error.LayerListFull;
-        self.layers[self.len] = .{
-            .command_start = index,
-            .command_count = 1,
-            .id = command.id,
-            .bounds = command.bounds,
-            .opacity = command.opacity,
-            .clip = command.clip,
-            .transform = command.transform,
-            .fingerprint = renderLayerFingerprint(command),
-        };
-        self.len += 1;
-    }
-};
-
-pub const RenderLayerCachePlanner = struct {
-    entries: []RenderLayerCacheEntry,
-    actions: []RenderLayerCacheAction,
-    entry_len: usize = 0,
-    action_len: usize = 0,
-
-    pub fn init(entries: []RenderLayerCacheEntry, actions: []RenderLayerCacheAction) RenderLayerCachePlanner {
-        return .{ .entries = entries, .actions = actions };
-    }
-
-    pub fn reset(self: *RenderLayerCachePlanner) void {
-        self.entry_len = 0;
-        self.action_len = 0;
-    }
-
-    pub fn build(self: *RenderLayerCachePlanner, layer_plan: RenderLayerPlan, previous: []const RenderLayerCacheEntry, frame_index: u64) Error!RenderLayerCachePlan {
-        self.reset();
-        for (layer_plan.layers, 0..) |layer, layer_index| {
-            const key = renderLayerKey(layer);
-            if (findRenderLayerCacheEntry(self.entries[0..self.entry_len], key) != null) continue;
-
-            const previous_index = findRenderLayerCacheEntry(previous, key);
-            try self.appendAction(.{
-                .kind = if (previous_index == null) .upload else .retain,
-                .key = key,
-                .layer_index = layer_index,
-                .cache_index = previous_index,
-            });
-            try self.appendEntry(.{
-                .key = key,
-                .last_used_frame = frame_index,
-            });
-        }
-
-        for (previous, 0..) |entry, cache_index| {
-            if (findRenderLayerCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
-            try self.appendAction(.{
-                .kind = .evict,
-                .key = entry.key,
-                .cache_index = cache_index,
-            });
-        }
-
-        return .{
-            .entries = self.entries[0..self.entry_len],
-            .actions = self.actions[0..self.action_len],
-        };
-    }
-
-    fn appendEntry(self: *RenderLayerCachePlanner, entry: RenderLayerCacheEntry) Error!void {
-        if (self.entry_len >= self.entries.len) return error.LayerCacheListFull;
-        self.entries[self.entry_len] = entry;
-        self.entry_len += 1;
-    }
-
-    fn appendAction(self: *RenderLayerCachePlanner, action: RenderLayerCacheAction) Error!void {
-        if (self.action_len >= self.actions.len) return error.LayerCacheListFull;
-        self.actions[self.action_len] = action;
-        self.action_len += 1;
-    }
-};
-
-pub const RenderResourcePlanner = struct {
-    resources: []RenderResource,
-    len: usize = 0,
-
-    pub fn init(resources: []RenderResource) RenderResourcePlanner {
-        return .{ .resources = resources };
-    }
-
-    pub fn reset(self: *RenderResourcePlanner) void {
-        self.len = 0;
-    }
-
-    pub fn build(self: *RenderResourcePlanner, display_list: DisplayList) Error!RenderResourcePlan {
-        self.reset();
-        for (display_list.commands, 0..) |command, index| {
-            try self.consume(command, index);
-        }
-        return .{ .resources = self.resources[0..self.len] };
-    }
-
-    fn consume(self: *RenderResourcePlanner, command: CanvasCommand, index: usize) Error!void {
-        switch (command) {
-            .push_clip, .pop_clip, .push_opacity, .pop_opacity, .transform => {},
-            .fill_rect => |value| try self.consumeFill(value.fill, index, value.id, command.bounds()),
-            .stroke_rect => |value| try self.consumeStroke(value.stroke, index, value.id, command.bounds()),
-            .fill_rounded_rect => |value| try self.consumeFill(value.fill, index, value.id, command.bounds()),
-            .draw_line => |value| try self.consumeStroke(value.stroke, index, value.id, command.bounds()),
-            .fill_path => |value| try self.consumeFill(value.fill, index, value.id, command.bounds()),
-            .stroke_path => |value| try self.consumeStroke(value.stroke, index, value.id, command.bounds()),
-            .draw_image => |value| try self.append(.{
-                .kind = .image,
-                .command_index = index,
-                .id = nonZeroObjectId(value.id),
-                .bounds = value.dst.normalized(),
-                .image_id = value.image_id,
-                .fingerprint = drawImageFingerprint(value),
-            }),
-            .draw_text => |value| try self.append(.{
-                .kind = .glyph_run,
-                .command_index = index,
-                .id = nonZeroObjectId(value.id),
-                .bounds = textBounds(value),
-                .font_id = value.font_id,
-                .glyph_count = value.glyphs.len,
-                .text_len = value.text.len,
-                .fingerprint = drawTextFingerprint(value),
-            }),
-            .shadow => |value| try self.append(.{
-                .kind = .shadow,
-                .command_index = index,
-                .id = nonZeroObjectId(value.id),
-                .bounds = shadowBounds(value),
-                .fingerprint = shadowFingerprint(value),
-            }),
-            .blur => |value| try self.append(.{
-                .kind = .blur,
-                .command_index = index,
-                .id = nonZeroObjectId(value.id),
-                .bounds = value.rect.normalized().inflate(geometry.InsetsF.all(nonNegative(value.radius))),
-                .fingerprint = blurFingerprint(value),
-            }),
-        }
-    }
-
-    fn consumeStroke(self: *RenderResourcePlanner, stroke: Stroke, index: usize, id: ObjectId, bounds: ?geometry.RectF) Error!void {
-        try self.consumeFill(stroke.fill, index, id, bounds);
-    }
-
-    fn consumeFill(self: *RenderResourcePlanner, fill: Fill, index: usize, id: ObjectId, bounds: ?geometry.RectF) Error!void {
-        switch (fill) {
-            .color => {},
-            .linear_gradient => |gradient| try self.append(.{
-                .kind = .linear_gradient,
-                .command_index = index,
-                .id = nonZeroObjectId(id),
-                .bounds = bounds,
-                .gradient_stop_count = gradient.stops.len,
-                .fingerprint = linearGradientFingerprint(gradient),
-            }),
-        }
-    }
-
-    fn append(self: *RenderResourcePlanner, resource: RenderResource) Error!void {
-        if (self.len >= self.resources.len) return error.RenderResourceListFull;
-        self.resources[self.len] = resource;
-        self.len += 1;
-    }
-};
-
-pub const RenderResourceCachePlanner = struct {
-    entries: []RenderResourceCacheEntry,
-    actions: []RenderResourceCacheAction,
-    entry_len: usize = 0,
-    action_len: usize = 0,
-
-    pub fn init(entries: []RenderResourceCacheEntry, actions: []RenderResourceCacheAction) RenderResourceCachePlanner {
-        return .{ .entries = entries, .actions = actions };
-    }
-
-    pub fn reset(self: *RenderResourceCachePlanner) void {
-        self.entry_len = 0;
-        self.action_len = 0;
-    }
-
-    pub fn build(self: *RenderResourceCachePlanner, resource_plan: RenderResourcePlan, previous: []const RenderResourceCacheEntry, frame_index: u64) Error!RenderResourceCachePlan {
-        self.reset();
-        for (resource_plan.resources, 0..) |resource, resource_index| {
-            const key = renderResourceKey(resource);
-            if (findRenderResourceCacheEntry(self.entries[0..self.entry_len], key) != null) continue;
-
-            const previous_index = findRenderResourceCacheEntry(previous, key);
-            try self.appendAction(.{
-                .kind = if (previous_index == null) .upload else .retain,
-                .key = key,
-                .resource_index = resource_index,
-                .cache_index = previous_index,
-            });
-            try self.appendEntry(.{
-                .key = key,
-                .last_used_frame = frame_index,
-            });
-        }
-
-        for (previous, 0..) |entry, cache_index| {
-            if (findRenderResourceCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
-            try self.appendAction(.{
-                .kind = .evict,
-                .key = entry.key,
-                .cache_index = cache_index,
-            });
-        }
-
-        return .{
-            .entries = self.entries[0..self.entry_len],
-            .actions = self.actions[0..self.action_len],
-        };
-    }
-
-    fn appendEntry(self: *RenderResourceCachePlanner, entry: RenderResourceCacheEntry) Error!void {
-        if (self.entry_len >= self.entries.len) return error.RenderResourceCacheListFull;
-        self.entries[self.entry_len] = entry;
-        self.entry_len += 1;
-    }
-
-    fn appendAction(self: *RenderResourceCachePlanner, action: RenderResourceCacheAction) Error!void {
-        if (self.action_len >= self.actions.len) return error.RenderResourceCacheListFull;
-        self.actions[self.action_len] = action;
-        self.action_len += 1;
-    }
-};
-
-pub const VisualEffectPlanner = struct {
-    effects: []VisualEffect,
-    len: usize = 0,
-
-    pub fn init(effects: []VisualEffect) VisualEffectPlanner {
-        return .{ .effects = effects };
-    }
-
-    pub fn reset(self: *VisualEffectPlanner) void {
-        self.len = 0;
-    }
-
-    pub fn build(self: *VisualEffectPlanner, display_list: DisplayList) Error!VisualEffectPlan {
-        self.reset();
-        for (display_list.commands, 0..) |command, index| {
-            try self.consume(command, index);
-        }
-        return .{ .effects = self.effects[0..self.len] };
-    }
-
-    fn consume(self: *VisualEffectPlanner, command: CanvasCommand, index: usize) Error!void {
-        switch (command) {
-            .shadow => |value| try self.append(.{
-                .kind = .shadow,
-                .command_index = index,
-                .id = nonZeroObjectId(value.id),
-                .bounds = shadowBounds(value),
-                .radius = value.radius,
-                .offset = value.offset,
-                .blur = nonNegative(value.blur),
-                .spread = value.spread,
-                .fingerprint = shadowFingerprint(value),
-            }),
-            .blur => |value| try self.append(.{
-                .kind = .blur,
-                .command_index = index,
-                .id = nonZeroObjectId(value.id),
-                .bounds = value.rect.normalized().inflate(geometry.InsetsF.all(nonNegative(value.radius))),
-                .blur = nonNegative(value.radius),
-                .fingerprint = blurFingerprint(value),
-            }),
-            else => {},
-        }
-    }
-
-    fn append(self: *VisualEffectPlanner, effect: VisualEffect) Error!void {
-        if (self.len >= self.effects.len) return error.VisualEffectListFull;
-        self.effects[self.len] = effect;
-        self.len += 1;
-    }
-};
-
-pub const VisualEffectCachePlanner = struct {
-    entries: []VisualEffectCacheEntry,
-    actions: []VisualEffectCacheAction,
-    entry_len: usize = 0,
-    action_len: usize = 0,
-
-    pub fn init(entries: []VisualEffectCacheEntry, actions: []VisualEffectCacheAction) VisualEffectCachePlanner {
-        return .{ .entries = entries, .actions = actions };
-    }
-
-    pub fn reset(self: *VisualEffectCachePlanner) void {
-        self.entry_len = 0;
-        self.action_len = 0;
-    }
-
-    pub fn build(self: *VisualEffectCachePlanner, effect_plan: VisualEffectPlan, previous: []const VisualEffectCacheEntry, frame_index: u64) Error!VisualEffectCachePlan {
-        self.reset();
-        for (effect_plan.effects, 0..) |effect, effect_index| {
-            const key = visualEffectKey(effect);
-            if (findVisualEffectCacheEntry(self.entries[0..self.entry_len], key) != null) continue;
-
-            const previous_index = findVisualEffectCacheEntry(previous, key);
-            try self.appendAction(.{
-                .kind = if (previous_index == null) .upload else .retain,
-                .key = key,
-                .effect_index = effect_index,
-                .cache_index = previous_index,
-            });
-            try self.appendEntry(.{
-                .key = key,
-                .last_used_frame = frame_index,
-            });
-        }
-
-        for (previous, 0..) |entry, cache_index| {
-            if (findVisualEffectCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
-            try self.appendAction(.{
-                .kind = .evict,
-                .key = entry.key,
-                .cache_index = cache_index,
-            });
-        }
-
-        return .{
-            .entries = self.entries[0..self.entry_len],
-            .actions = self.actions[0..self.action_len],
-        };
-    }
-
-    fn appendEntry(self: *VisualEffectCachePlanner, entry: VisualEffectCacheEntry) Error!void {
-        if (self.entry_len >= self.entries.len) return error.VisualEffectCacheListFull;
-        self.entries[self.entry_len] = entry;
-        self.entry_len += 1;
-    }
-
-    fn appendAction(self: *VisualEffectCachePlanner, action: VisualEffectCacheAction) Error!void {
-        if (self.action_len >= self.actions.len) return error.VisualEffectCacheListFull;
-        self.actions[self.action_len] = action;
-        self.action_len += 1;
-    }
-};
-
-fn renderResourceKey(resource: RenderResource) RenderResourceKey {
-    return .{
-        .kind = resource.kind,
-        .id = resource.id,
-        .command_index = if (resource.id == null and resource.kind != .image) resource.command_index else 0,
-        .image_id = resource.image_id,
-        .font_id = resource.font_id,
-        .fingerprint = resource.fingerprint,
-    };
-}
-
-fn findRenderResourceCacheEntry(entries: []const RenderResourceCacheEntry, key: RenderResourceKey) ?usize {
-    for (entries, 0..) |entry, index| {
-        if (renderResourceKeysEqual(entry.key, key)) return index;
-    }
-    return null;
-}
-
-fn renderResourceKeysEqual(a: RenderResourceKey, b: RenderResourceKey) bool {
-    return a.kind == b.kind and
-        a.id == b.id and
-        a.command_index == b.command_index and
-        a.image_id == b.image_id and
-        a.font_id == b.font_id and
-        a.fingerprint == b.fingerprint;
-}
-
-fn renderLayerKey(layer: RenderLayer) RenderLayerKey {
-    return .{
-        .id = layer.id,
-        .command_start = if (layer.id == null) layer.command_start else 0,
-        .fingerprint = layer.fingerprint,
-    };
-}
-
-fn findRenderLayerCacheEntry(entries: []const RenderLayerCacheEntry, key: RenderLayerKey) ?usize {
-    for (entries, 0..) |entry, index| {
-        if (renderLayerKeysEqual(entry.key, key)) return index;
-    }
-    return null;
-}
-
-fn renderLayerKeysEqual(a: RenderLayerKey, b: RenderLayerKey) bool {
-    return a.id == b.id and
-        a.command_start == b.command_start and
-        a.fingerprint == b.fingerprint;
-}
-
-fn renderLayerFingerprint(command: RenderCommand) u64 {
-    var hash = resourceHashTag("layer");
-    hash = resourceHashF32(hash, command.opacity);
-    hash = resourceHashOptionalRect(hash, command.clip);
-    hash = resourceHashAffine(hash, command.transform);
-    return renderLayerFingerprintAppend(hash, command);
-}
-
-fn renderLayerFingerprintAppend(hash: u64, command: RenderCommand) u64 {
-    return resourceHashU64(hash, renderCommandFingerprint(command));
-}
-
-fn renderCommandFingerprint(command: RenderCommand) u64 {
-    var hash = resourceHashTag("render_command");
-    hash = resourceHashOptionalObjectId(hash, command.id);
-    hash = resourceHashRect(hash, command.local_bounds);
-    hash = resourceHashRect(hash, command.bounds);
-    return resourceHashCanvasCommand(hash, command.command);
-}
-
-fn visualEffectKey(effect: VisualEffect) VisualEffectKey {
-    return .{
-        .kind = effect.kind,
-        .id = effect.id,
-        .command_index = if (effect.id == null) effect.command_index else 0,
-        .fingerprint = effect.fingerprint,
-    };
-}
-
-fn findVisualEffectCacheEntry(entries: []const VisualEffectCacheEntry, key: VisualEffectKey) ?usize {
-    for (entries, 0..) |entry, index| {
-        if (visualEffectKeysEqual(entry.key, key)) return index;
-    }
-    return null;
-}
-
-fn visualEffectKeysEqual(a: VisualEffectKey, b: VisualEffectKey) bool {
-    return a.kind == b.kind and
-        a.id == b.id and
-        a.command_index == b.command_index and
-        a.fingerprint == b.fingerprint;
-}
-
 pub fn applyRenderOverrides(commands: []RenderCommand, overrides: []const CanvasRenderOverride) ?geometry.RectF {
     var bounds: ?geometry.RectF = null;
     for (commands) |*command| {
@@ -2224,18 +1747,6 @@ fn optionalAffineEqual(a: ?Affine, b: ?Affine) bool {
     return affinesEqual(a.?, b.?);
 }
 
-fn linearGradientFingerprint(gradient: LinearGradient) u64 {
-    var hash = resourceHashTag("linear_gradient");
-    hash = resourceHashPoint(hash, gradient.start);
-    hash = resourceHashPoint(hash, gradient.end);
-    hash = resourceHashUsize(hash, gradient.stops.len);
-    for (gradient.stops) |stop| {
-        hash = resourceHashF32(hash, stop.offset);
-        hash = resourceHashColor(hash, stop.color);
-    }
-    return hash;
-}
-
 fn drawTextFingerprint(text: DrawText) u64 {
     var hash = resourceHashTag("glyph_run");
     hash = resourceHashU64(hash, text.font_id);
@@ -2310,25 +1821,6 @@ fn textLayoutKeysEqual(a: TextLayoutKey, b: TextLayoutKey) bool {
         a.fingerprint == b.fingerprint;
 }
 
-fn shadowFingerprint(shadow: Shadow) u64 {
-    var hash = resourceHashTag("shadow");
-    hash = resourceHashRect(hash, shadow.rect);
-    hash = resourceHashRadius(hash, shadow.radius);
-    hash = resourceHashF32(hash, shadow.offset.dx);
-    hash = resourceHashF32(hash, shadow.offset.dy);
-    hash = resourceHashF32(hash, shadow.blur);
-    hash = resourceHashF32(hash, shadow.spread);
-    hash = resourceHashColor(hash, shadow.color);
-    return hash;
-}
-
-fn blurFingerprint(blur: Blur) u64 {
-    var hash = resourceHashTag("blur");
-    hash = resourceHashRect(hash, blur.rect);
-    hash = resourceHashF32(hash, blur.radius);
-    return hash;
-}
-
 fn resourceHashOptionalTextLayoutOptions(hash: u64, options: ?TextLayoutOptions) u64 {
     if (options) |value| {
         var next = resourceHashU8(hash, 1);
@@ -2339,84 +1831,6 @@ fn resourceHashOptionalTextLayoutOptions(hash: u64, options: ?TextLayoutOptions)
         return next;
     }
     return resourceHashU8(hash, 0);
-}
-
-fn resourceHashCanvasCommand(hash: u64, command: CanvasCommand) u64 {
-    var next = resourceHashBytes(hash, @tagName(command));
-    switch (command) {
-        .push_clip => |value| {
-            next = resourceHashOptionalObjectId(next, nonZeroObjectId(value.id));
-            next = resourceHashRect(next, value.rect);
-            next = resourceHashRadius(next, value.radius);
-        },
-        .pop_clip, .push_opacity, .pop_opacity, .transform => {},
-        .fill_rect => |value| {
-            next = resourceHashOptionalObjectId(next, nonZeroObjectId(value.id));
-            next = resourceHashRect(next, value.rect);
-            next = resourceHashFill(next, value.fill);
-        },
-        .stroke_rect => |value| {
-            next = resourceHashOptionalObjectId(next, nonZeroObjectId(value.id));
-            next = resourceHashRect(next, value.rect);
-            next = resourceHashRadius(next, value.radius);
-            next = resourceHashStroke(next, value.stroke);
-        },
-        .fill_rounded_rect => |value| {
-            next = resourceHashOptionalObjectId(next, nonZeroObjectId(value.id));
-            next = resourceHashRect(next, value.rect);
-            next = resourceHashRadius(next, value.radius);
-            next = resourceHashFill(next, value.fill);
-        },
-        .draw_line => |value| {
-            next = resourceHashOptionalObjectId(next, nonZeroObjectId(value.id));
-            next = resourceHashPoint(next, value.from);
-            next = resourceHashPoint(next, value.to);
-            next = resourceHashStroke(next, value.stroke);
-        },
-        .fill_path => |value| {
-            next = resourceHashOptionalObjectId(next, nonZeroObjectId(value.id));
-            next = resourceHashPath(next, value.elements);
-            next = resourceHashFill(next, value.fill);
-        },
-        .stroke_path => |value| {
-            next = resourceHashOptionalObjectId(next, nonZeroObjectId(value.id));
-            next = resourceHashPath(next, value.elements);
-            next = resourceHashStroke(next, value.stroke);
-        },
-        .draw_image => |value| {
-            next = resourceHashOptionalObjectId(next, nonZeroObjectId(value.id));
-            next = resourceHashU64(next, drawImageFingerprint(value));
-            next = resourceHashRect(next, value.dst);
-            next = resourceHashF32(next, value.opacity);
-        },
-        .draw_text => |value| {
-            next = resourceHashOptionalObjectId(next, nonZeroObjectId(value.id));
-            next = resourceHashU64(next, drawTextFingerprint(value));
-            next = resourceHashColor(next, value.color);
-        },
-        .shadow => |value| {
-            next = resourceHashOptionalObjectId(next, nonZeroObjectId(value.id));
-            next = resourceHashU64(next, shadowFingerprint(value));
-        },
-        .blur => |value| {
-            next = resourceHashOptionalObjectId(next, nonZeroObjectId(value.id));
-            next = resourceHashU64(next, blurFingerprint(value));
-        },
-    }
-    return next;
-}
-
-fn resourceHashFill(hash: u64, fill: Fill) u64 {
-    return switch (fill) {
-        .color => |color| resourceHashColor(resourceHashBytes(hash, "color"), color),
-        .linear_gradient => |gradient| resourceHashU64(resourceHashBytes(hash, "linear_gradient"), linearGradientFingerprint(gradient)),
-    };
-}
-
-fn resourceHashStroke(hash: u64, stroke: Stroke) u64 {
-    var next = resourceHashF32(resourceHashBytes(hash, "stroke"), stroke.width);
-    next = resourceHashFill(next, stroke.fill);
-    return next;
 }
 
 pub const GlyphAtlasPlanner = struct {
@@ -16434,7 +15848,11 @@ test "visual effect plan collects shadow and blur cache inputs" {
     try expectRect(geometry.RectF.init(74, 84, 32, 22), plan.effects[1].bounds);
     try std.testing.expectEqual(@as(f32, 6), plan.effects[1].blur);
 
-    const key = visualEffectKey(plan.effects[1]);
+    var cache_entries: [2]VisualEffectCacheEntry = undefined;
+    var cache_actions: [2]VisualEffectCacheAction = undefined;
+    const cache_plan = try plan.cachePlan(&.{}, 1, &cache_entries, &cache_actions);
+    try std.testing.expectEqual(@as(usize, 2), cache_plan.actionCount());
+    const key = cache_plan.actions[1].key;
     try std.testing.expectEqual(VisualEffectKind.blur, key.kind);
     try std.testing.expect(key.id == null);
     try std.testing.expectEqual(@as(usize, 1), key.command_index);
