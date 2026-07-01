@@ -1939,6 +1939,20 @@ pub const Runtime = struct {
         try self.refreshCanvasWidgetDisplayListIfOwned(index);
     }
 
+    fn dismissCanvasWidgetSurfaceFromPointerInput(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!bool {
+        if (pointer_event.pointer.phase != .down) return false;
+        const index = self.findViewIndex(pointer_event.window_id, pointer_event.view_label) orelse return false;
+        if (self.views[index].kind != .gpu_surface or !self.views[index].focused) return false;
+        const focused_id = self.views[index].canvas_widget_focused_id;
+        if (focused_id == 0) return false;
+
+        const previous_cursor = self.views[index].canvas_widget_cursor;
+        const dirty = try self.views[index].dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(focused_id, pointer_event.route) orelse return false;
+        if (previous_cursor != self.views[index].canvas_widget_cursor) try self.syncCanvasWidgetCursorForView(index);
+        try self.invalidateForCanvasWidgetDirty(index, dirty);
+        return true;
+    }
+
     fn dismissCanvasWidgetSurfaceFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent) anyerror!bool {
         if (input_event.kind != .key_down) return false;
         if (!canvasWidgetEscapeKey(input_event.key)) return false;
@@ -2476,6 +2490,7 @@ pub const Runtime = struct {
                     else => return err,
                 };
                 if (widget_pointer_event) |pointer_event| {
+                    _ = try self.dismissCanvasWidgetSurfaceFromPointerInput(pointer_event);
                     try self.updateCanvasWidgetControlFromPointer(pointer_event);
                     try self.updateCanvasWidgetInteractionFromPointer(pointer_event);
                     try self.updateCanvasWidgetTextFromPointer(pointer_event);
@@ -7088,9 +7103,20 @@ const RuntimeView = struct {
         if (canvasWidgetEditableTextKind(focused_widget.kind) and focused_widget.text_composition != null) return null;
 
         const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(focused_index) orelse return null;
+        return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
+    }
+
+    fn dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(self: *RuntimeView, focused_id: canvas.ObjectId, route: []const canvas.WidgetEventRouteEntry) anyerror!?geometry.RectF {
+        const focused_index = self.canvasWidgetNodeIndexById(focused_id) orelse return null;
+        const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(focused_index) orelse return null;
+        if (self.canvasWidgetRouteDescendsFromIndex(route, surface_index)) return null;
+        return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
+    }
+
+    fn dismissCanvasWidgetSurfaceAtIndex(self: *RuntimeView, surface_index: usize) anyerror!?geometry.RectF {
+        if (surface_index >= self.widget_layout_node_count) return null;
         const surface = self.widget_layout_nodes[surface_index].widget;
         if (surface.semantics.hidden) return null;
-
         const dirty = self.canvasWidgetDirtyBounds(surface_index, surface.frame) orelse surface.frame;
         self.widget_layout_nodes[surface_index].widget.semantics.hidden = true;
         if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focused_id, surface_index)) self.canvas_widget_focused_id = 0;
@@ -7115,6 +7141,13 @@ const RuntimeView = struct {
             current = self.widget_layout_nodes[index].parent_index;
         }
         return null;
+    }
+
+    fn canvasWidgetRouteDescendsFromIndex(self: *const RuntimeView, route: []const canvas.WidgetEventRouteEntry, ancestor_index: usize) bool {
+        for (route) |entry| {
+            if (self.canvasWidgetNodeIndexDescendsFrom(entry.node_index, ancestor_index)) return true;
+        }
+        return false;
     }
 
     fn canvasWidgetIdDescendsFromIndex(self: *const RuntimeView, id: canvas.ObjectId, ancestor_index: usize) bool {
@@ -13120,6 +13153,96 @@ test "runtime dismisses nearest canvas floating surface with escape" {
     try std.testing.expect(retained_after_dismiss.findCommandById(testCanvasWidgetPartId(2, 2)) == null);
     try std.testing.expect(retained_after_dismiss.findCommandById(testCanvasWidgetPartId(3, 1)) == null);
     try std.testing.expect(retained_after_dismiss.findCommandById(testCanvasWidgetPartId(1, 2)) != null);
+    try std.testing.expect(retained_after_dismiss.findCommandById(testCanvasWidgetPartId(4, 1)) != null);
+}
+
+test "runtime dismisses focused canvas floating surface from outside pointer down" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-surface-outside-dismiss", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 180),
+    });
+
+    const popover_children = [_]canvas.Widget{.{
+        .id = 3,
+        .kind = .button,
+        .frame = geometry.RectF.init(8, 8, 92, 32),
+        .text = "Copy",
+    }};
+    const widgets = [_]canvas.Widget{
+        .{
+            .id = 2,
+            .kind = .popover,
+            .frame = geometry.RectF.init(20, 20, 128, 72),
+            .children = &popover_children,
+        },
+        .{
+            .id = 4,
+            .kind = .button,
+            .frame = geometry.RectF.init(176, 40, 92, 32),
+            .text = "Outside",
+        },
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &widgets }, geometry.RectF.init(0, 0, 320, 180), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    try harness.runtime.focusView(1, "canvas");
+    harness.runtime.views[0].canvas_widget_focused_id = 3;
+    harness.runtime.views[0].canvas_widget_hovered_id = 3;
+    harness.runtime.views[0].canvas_widget_cursor = .pointing_hand;
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 36,
+        .y = 36,
+    } });
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(!retained.findById(2).?.widget.semantics.hidden);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_widget_pressed_id);
+
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 190,
+        .y = 52,
+    } });
+
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(2).?.widget.semantics.hidden);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 4), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 4), harness.runtime.views[0].canvas_widget_hovered_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 4), harness.runtime.views[0].canvas_widget_pressed_id);
+    try std.testing.expectEqual(platform.Cursor.pointing_hand, harness.runtime.views[0].canvas_widget_cursor);
+    try std.testing.expect(harness.runtime.invalidated);
+
+    for (harness.runtime.views[0].widgetSemantics()) |node| {
+        try std.testing.expect(node.id != 2);
+        try std.testing.expect(node.id != 3);
+    }
+    const retained_after_dismiss = try harness.runtime.canvasDisplayList(1, "canvas");
+    try std.testing.expect(retained_after_dismiss.findCommandById(testCanvasWidgetPartId(2, 2)) == null);
+    try std.testing.expect(retained_after_dismiss.findCommandById(testCanvasWidgetPartId(3, 1)) == null);
     try std.testing.expect(retained_after_dismiss.findCommandById(testCanvasWidgetPartId(4, 1)) != null);
 }
 
