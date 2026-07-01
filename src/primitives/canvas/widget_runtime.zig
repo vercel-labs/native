@@ -7,6 +7,9 @@ const token_model = @import("tokens.zig");
 const widget_model = @import("widgets.zig");
 const event_model = @import("events.zig");
 const equality_model = @import("equality.zig");
+const widget_tree = @import("widget_tree.zig");
+const widget_access = @import("widget_access.zig");
+const widget_routing = @import("widget_routing.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -34,6 +37,16 @@ const DesignTokens = token_model.DesignTokens;
 const ControlVisualTokens = token_model.ControlVisualTokens;
 const VirtualListRange = token_model.VirtualListRange;
 const virtualListRange = token_model.virtualListRange;
+const WidgetPaintOrder = widget_tree.WidgetPaintOrder;
+const widgetPaintLayer = widget_tree.widgetPaintLayer;
+const nextWidgetPaintChild = widget_tree.nextWidgetPaintChild;
+const widgetLayoutDirectChildCount = widget_tree.widgetLayoutDirectChildCount;
+const nextWidgetLayoutPaintChild = widget_tree.nextWidgetLayoutPaintChild;
+const widgetTransform = widget_tree.widgetTransform;
+const widgetClipsContent = widget_tree.widgetClipsContent;
+const widgetIndexById = widget_tree.widgetIndexById;
+const isWidgetHiddenInAncestors = widget_tree.isWidgetHiddenInAncestors;
+const semanticFocusable = widget_access.semanticFocusable;
 const WidgetKind = widget_model.WidgetKind;
 const WidgetCursor = widget_model.WidgetCursor;
 const WidgetState = widget_model.WidgetState;
@@ -50,12 +63,10 @@ const WidgetSemantics = widget_model.WidgetSemantics;
 const Widget = widget_model.Widget;
 const WidgetLayoutNode = event_model.WidgetLayoutNode;
 const WidgetHit = event_model.WidgetHit;
-const WidgetPointerPhase = event_model.WidgetPointerPhase;
 const WidgetPointerEvent = event_model.WidgetPointerEvent;
 const WidgetKeyboardEvent = event_model.WidgetKeyboardEvent;
 const WidgetFileDropEvent = event_model.WidgetFileDropEvent;
 const WidgetDragEvent = event_model.WidgetDragEvent;
-const WidgetEventPhase = event_model.WidgetEventPhase;
 const WidgetEventRouteEntry = event_model.WidgetEventRouteEntry;
 const WidgetEventRoute = event_model.WidgetEventRoute;
 const WidgetKeyboardRoute = event_model.WidgetKeyboardRoute;
@@ -67,8 +78,6 @@ const WidgetSemanticsNode = event_model.WidgetSemanticsNode;
 const WidgetInvalidationKind = event_model.WidgetInvalidationKind;
 const WidgetInvalidation = event_model.WidgetInvalidation;
 const semanticActions = event_model.semanticActions;
-const defaultSemanticActions = event_model.defaultSemanticActions;
-const defaultFocusable = event_model.defaultFocusable;
 const textLineBounds = text_model.textLineBounds;
 const estimateTextWidth = text_model.estimateTextWidth;
 const estimateTextWidthForFont = text_model.estimateTextWidthForFont;
@@ -144,44 +153,44 @@ pub const WidgetLayoutTree = struct {
     }
 
     pub fn hitTest(self: WidgetLayoutTree, point: geometry.PointF) ?WidgetHit {
-        return hitTestWidgetLayout(self, point, .{});
+        return widget_routing.hitTestWidgetLayout(self, point, .{});
     }
 
     pub fn hitTestWithTokens(self: WidgetLayoutTree, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
-        return hitTestWidgetLayout(self, point, tokens);
+        return widget_routing.hitTestWidgetLayout(self, point, tokens);
     }
 
     pub fn cursorForHit(self: WidgetLayoutTree, hit: ?WidgetHit) WidgetCursor {
         _ = self;
-        return cursorForWidgetHit(hit);
+        return widget_access.cursorForWidgetHit(hit);
     }
 
     pub fn routePointerEvent(self: WidgetLayoutTree, event: WidgetPointerEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
-        return routeWidgetPointerEvent(self, event, .{}, output);
+        return widget_routing.routeWidgetPointerEvent(self, event, .{}, output);
     }
 
     pub fn routePointerEventWithTokens(self: WidgetLayoutTree, event: WidgetPointerEvent, tokens: DesignTokens, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
-        return routeWidgetPointerEvent(self, event, tokens, output);
+        return widget_routing.routeWidgetPointerEvent(self, event, tokens, output);
     }
 
     pub fn routeKeyboardEvent(self: WidgetLayoutTree, event: WidgetKeyboardEvent, output: []WidgetEventRouteEntry) Error!WidgetKeyboardRoute {
-        return routeWidgetKeyboardEvent(self, event, output);
+        return widget_routing.routeWidgetKeyboardEvent(self, event, output, widgetScrollSemantics);
     }
 
     pub fn routeFileDropEvent(self: WidgetLayoutTree, event: WidgetFileDropEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
-        return routeWidgetFileDropEvent(self, event, output);
+        return widget_routing.routeWidgetFileDropEvent(self, event, output);
     }
 
     pub fn routeDragEvent(self: WidgetLayoutTree, event: WidgetDragEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
-        return routeWidgetDragEvent(self, event, output);
+        return widget_routing.routeWidgetDragEvent(self, event, output);
     }
 
     pub fn focusTarget(self: WidgetLayoutTree, current_id: ?ObjectId, direction: WidgetFocusDirection) ?WidgetFocusTarget {
-        return focusWidgetTarget(self, current_id, direction);
+        return widget_routing.focusWidgetTarget(self, current_id, direction, widgetScrollSemantics);
     }
 
     pub fn focusTargetById(self: WidgetLayoutTree, id: ObjectId) ?WidgetFocusTarget {
-        return focusWidgetTargetById(self, id);
+        return widget_routing.focusWidgetTargetById(self, id, widgetScrollSemantics);
     }
 
     pub fn collectSemantics(self: WidgetLayoutTree, output: []WidgetSemanticsNode) Error![]const WidgetSemanticsNode {
@@ -238,81 +247,6 @@ pub fn emitWidgetLayout(builder: *Builder, layout: WidgetLayoutTree, tokens: Des
 
 fn emitWidgetLayoutWithState(builder: *Builder, layout: WidgetLayoutTree, tokens: DesignTokens, state: WidgetRenderState) Error!void {
     try emitWidgetLayoutChildren(builder, layout, null, tokens, state);
-}
-
-const WidgetPaintOrder = struct {
-    layer: i32,
-    index: usize,
-};
-
-fn widgetPaintLayer(widget: Widget, tokens: DesignTokens) i32 {
-    if (widget.layer) |layer| return layer;
-    return switch (widget.kind) {
-        .popover, .menu_surface, .dropdown_menu => tokens.layer.overlay,
-        .tooltip => tokens.layer.floating,
-        else => tokens.layer.base,
-    };
-}
-
-fn nextWidgetPaintChild(children: []const Widget, tokens: DesignTokens, previous: ?WidgetPaintOrder) ?usize {
-    var best: ?WidgetPaintOrder = null;
-    for (children, 0..) |child, index| {
-        const order = WidgetPaintOrder{ .layer = widgetPaintLayer(child, tokens), .index = index };
-        if (!widgetPaintOrderAfter(order, previous)) continue;
-        if (best == null or widgetPaintOrderLess(order, best.?)) best = order;
-    }
-    return if (best) |order| order.index else null;
-}
-
-fn widgetLayoutDirectChildCount(layout: WidgetLayoutTree, parent_index: ?usize) usize {
-    var count: usize = 0;
-    for (layout.nodes) |node| {
-        if (optionalUsizeEqual(node.parent_index, parent_index)) count += 1;
-    }
-    return count;
-}
-
-fn nextWidgetLayoutPaintChild(layout: WidgetLayoutTree, parent_index: ?usize, tokens: DesignTokens, previous: ?WidgetPaintOrder) ?usize {
-    var best: ?WidgetPaintOrder = null;
-    for (layout.nodes, 0..) |node, index| {
-        if (!optionalUsizeEqual(node.parent_index, parent_index)) continue;
-        const order = WidgetPaintOrder{ .layer = widgetPaintLayer(node.widget, tokens), .index = index };
-        if (!widgetPaintOrderAfter(order, previous)) continue;
-        if (best == null or widgetPaintOrderLess(order, best.?)) best = order;
-    }
-    return if (best) |order| order.index else null;
-}
-
-fn previousWidgetLayoutPaintChild(layout: WidgetLayoutTree, parent_index: ?usize, tokens: DesignTokens, previous: ?WidgetPaintOrder) ?usize {
-    var best: ?WidgetPaintOrder = null;
-    for (layout.nodes, 0..) |node, index| {
-        if (!optionalUsizeEqual(node.parent_index, parent_index)) continue;
-        const order = WidgetPaintOrder{ .layer = widgetPaintLayer(node.widget, tokens), .index = index };
-        if (!widgetPaintOrderBefore(order, previous)) continue;
-        if (best == null or widgetPaintOrderLess(best.?, order)) best = order;
-    }
-    return if (best) |order| order.index else null;
-}
-
-fn widgetPaintOrderAfter(order: WidgetPaintOrder, previous: ?WidgetPaintOrder) bool {
-    const value = previous orelse return true;
-    return order.layer > value.layer or (order.layer == value.layer and order.index > value.index);
-}
-
-fn widgetPaintOrderBefore(order: WidgetPaintOrder, previous: ?WidgetPaintOrder) bool {
-    const value = previous orelse return true;
-    return order.layer < value.layer or (order.layer == value.layer and order.index < value.index);
-}
-
-fn widgetPaintOrderLess(a: WidgetPaintOrder, b: WidgetPaintOrder) bool {
-    return a.layer < b.layer or (a.layer == b.layer and a.index < b.index);
-}
-
-fn optionalUsizeEqual(a: ?usize, b: ?usize) bool {
-    if (a) |a_value| {
-        return if (b) |b_value| a_value == b_value else false;
-    }
-    return b == null;
 }
 
 fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
@@ -507,10 +441,6 @@ fn widgetOpacity(widget: Widget) f32 {
     return std.math.clamp(widget.opacity, 0, 1);
 }
 
-fn widgetTransform(widget: Widget) Affine {
-    return widget.transform;
-}
-
 fn pixelSnapScale(tokens: DesignTokens) ?f32 {
     const scale = tokens.pixel_snap.scale;
     if (!std.math.isFinite(scale) or scale <= 0) return null;
@@ -565,10 +495,6 @@ fn widgetBackdropBlur(widget: Widget, tokens: DesignTokens) f32 {
     if (explicit > 0) return explicit;
     if (widget.backdrop_blur_token) |token| return nonNegative(tokens.blur.value(token));
     return 0;
-}
-
-fn widgetClipsContent(widget: Widget) bool {
-    return widget.kind == .scroll_view or widget.layout.clip_content;
 }
 
 fn widgetContentClip(widget: Widget, tokens: DesignTokens) Clip {
@@ -3412,373 +3338,12 @@ fn intrinsicCrossExtent(widget: Widget, axis: LayoutAxis, tokens: DesignTokens) 
     };
 }
 
-fn hitTestWidgetLayout(layout: WidgetLayoutTree, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
-    return hitTestWidgetLayoutChildren(layout, null, point, tokens);
-}
-
-fn hitTestWidgetLayoutChildren(layout: WidgetLayoutTree, parent_index: ?usize, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
-    const child_count = widgetLayoutDirectChildCount(layout, parent_index);
-    var tested: usize = 0;
-    var previous: ?WidgetPaintOrder = null;
-    while (tested < child_count) : (tested += 1) {
-        const child_index = previousWidgetLayoutPaintChild(layout, parent_index, tokens, previous) orelse return null;
-        if (hitTestWidgetLayoutNode(layout, child_index, point, tokens)) |hit| return hit;
-        previous = .{ .layer = widgetPaintLayer(layout.nodes[child_index].widget, tokens), .index = child_index };
-    }
-    return null;
-}
-
-fn hitTestWidgetLayoutNode(layout: WidgetLayoutTree, node_index: usize, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
-    if (node_index >= layout.nodes.len) return null;
-    const node = layout.nodes[node_index];
-    if (node.widget.semantics.hidden) return null;
-
-    const local_point = widgetLocalHitPoint(node.widget, point) orelse return null;
-    if (widgetClipsContent(node.widget) and !node.frame.normalized().containsPoint(local_point)) return null;
-    if (hitTestWidgetLayoutChildren(layout, node_index, local_point, tokens)) |hit| return hit;
-
-    if (!isHitTarget(node.widget)) return null;
-    if (!node.frame.normalized().containsPoint(local_point)) return null;
-    return widgetHitFromNode(node, node_index);
-}
-
-fn widgetLocalHitPoint(widget: Widget, point: geometry.PointF) ?geometry.PointF {
-    const transform = widgetTransform(widget);
-    if (affinesEqual(transform, Affine.identity())) return point;
-    return if (transform.inverse()) |inverse| inverse.transformPoint(point) else null;
-}
-
-fn widgetHitFromNode(node: WidgetLayoutNode, index: usize) WidgetHit {
-    return .{
-        .id = node.widget.id,
-        .kind = node.widget.kind,
-        .bounds = node.frame,
-        .depth = node.depth,
-        .index = index,
-        .state = node.widget.state,
-    };
-}
-
 pub fn cursorForWidgetHit(hit: ?WidgetHit) WidgetCursor {
-    const target = hit orelse return .arrow;
-    return cursorForWidgetTarget(target.kind, target.state);
+    return widget_access.cursorForWidgetHit(hit);
 }
 
 pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor {
-    if (state.disabled) return .arrow;
-    return switch (kind) {
-        .input, .text_field, .search_field, .combobox, .textarea => .text,
-        .button,
-        .toggle_button,
-        .accordion,
-        .icon_button,
-        .select,
-        .menu_item,
-        .list_item,
-        .data_cell,
-        .segmented_control,
-        .checkbox,
-        .radio,
-        .switch_control,
-        .toggle,
-        => .pointing_hand,
-        .slider, .resizable => .resize_horizontal,
-        else => .arrow,
-    };
-}
-
-fn isPointVisibleInWidgetAncestors(layout: WidgetLayoutTree, node_index: usize, point: geometry.PointF) bool {
-    var current = layout.nodes[node_index].parent_index;
-    while (current) |parent_index| {
-        const parent = layout.nodes[parent_index];
-        if (widgetClipsContent(parent.widget) and !parent.frame.normalized().containsPoint(point)) return false;
-        current = parent.parent_index;
-    }
-    return true;
-}
-
-fn isWidgetFrameVisibleInWidgetAncestors(layout: WidgetLayoutTree, node_index: usize) bool {
-    if (node_index >= layout.nodes.len) return false;
-    const frame = layout.nodes[node_index].frame.normalized();
-    if (frame.isEmpty()) return false;
-    var current = layout.nodes[node_index].parent_index;
-    while (current) |parent_index| {
-        const parent = layout.nodes[parent_index];
-        if (widgetClipsContent(parent.widget) and geometry.RectF.intersection(frame, parent.frame.normalized()).isEmpty()) return false;
-        current = parent.parent_index;
-    }
-    return true;
-}
-
-fn routeWidgetPointerEvent(layout: WidgetLayoutTree, event: WidgetPointerEvent, tokens: DesignTokens, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
-    const target = if (eventUsesPointerCapture(event)) blk: {
-        break :blk capturedWidgetPointerTarget(layout, event) orelse return .{ .entries = output[0..0] };
-    } else hitTestWidgetLayout(layout, event.point, tokens) orelse return .{ .entries = output[0..0] };
-    const entries = try routeWidgetEventPath(layout, target.index, output);
-    return .{ .target = target, .entries = entries };
-}
-
-fn eventUsesPointerCapture(event: WidgetPointerEvent) bool {
-    if (event.captured_id == null) return false;
-    return switch (event.phase) {
-        .move, .up, .cancel => true,
-        .hover, .down, .wheel => false,
-    };
-}
-
-fn capturedWidgetPointerTarget(layout: WidgetLayoutTree, event: WidgetPointerEvent) ?WidgetHit {
-    const id = event.captured_id orelse return null;
-    return switch (event.phase) {
-        .move, .up, .cancel => widgetPointerTargetById(layout, id),
-        .hover, .down, .wheel => null,
-    };
-}
-
-fn widgetPointerTargetById(layout: WidgetLayoutTree, id: ObjectId) ?WidgetHit {
-    const index = widgetIndexById(layout, id) orelse return null;
-    const node = layout.nodes[index];
-    if (!isHitTarget(node.widget)) return null;
-    if (isWidgetHiddenInAncestors(layout, index)) return null;
-    if (!isWidgetFrameVisibleInWidgetAncestors(layout, index)) return null;
-    return widgetHitFromNode(node, index);
-}
-
-fn routeWidgetKeyboardEvent(layout: WidgetLayoutTree, event: WidgetKeyboardEvent, output: []WidgetEventRouteEntry) Error!WidgetKeyboardRoute {
-    const focused_id = event.focused_id orelse return .{ .entries = output[0..0] };
-    const target_index = widgetIndexById(layout, focused_id) orelse return .{ .entries = output[0..0] };
-    const target = focusTargetFromLayoutNode(layout, target_index) orelse return .{ .entries = output[0..0] };
-    const entries = try routeWidgetEventPath(layout, target.index, output);
-    return .{ .target = target, .entries = entries };
-}
-
-fn routeWidgetFileDropEvent(layout: WidgetLayoutTree, event: WidgetFileDropEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
-    if (event.paths.len == 0) return .{ .entries = output[0..0] };
-    const target_index = widgetDropTargetIndexAtPoint(layout, event.point) orelse return .{ .entries = output[0..0] };
-    const entries = try routeWidgetEventPath(layout, target_index, output);
-    return .{ .target = widgetHitFromNode(layout.nodes[target_index], target_index), .entries = entries };
-}
-
-fn routeWidgetDragEvent(layout: WidgetLayoutTree, event: WidgetDragEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
-    const target_index = widgetDragSourceIndex(layout, event.source_id) orelse return .{ .entries = output[0..0] };
-    const entries = try routeWidgetEventPath(layout, target_index, output);
-    return .{ .target = widgetHitFromNode(layout.nodes[target_index], target_index), .entries = entries };
-}
-
-fn widgetDropTargetIndexAtPoint(layout: WidgetLayoutTree, point: geometry.PointF) ?usize {
-    var index = layout.nodes.len;
-    while (index > 0) {
-        index -= 1;
-        const node = layout.nodes[index];
-        if (!isDropTarget(node.widget)) continue;
-        if (isWidgetHiddenInAncestors(layout, index)) continue;
-        if (!node.frame.normalized().containsPoint(point)) continue;
-        if (!isPointVisibleInWidgetAncestors(layout, index, point)) continue;
-        return index;
-    }
-    return null;
-}
-
-fn widgetDragSourceIndex(layout: WidgetLayoutTree, id: ObjectId) ?usize {
-    if (id == 0) return null;
-    const index = widgetIndexById(layout, id) orelse return null;
-    const node = layout.nodes[index];
-    if (!isDragSource(node.widget)) return null;
-    if (isWidgetHiddenInAncestors(layout, index)) return null;
-    if (!isWidgetFrameVisibleInWidgetAncestors(layout, index)) return null;
-    return index;
-}
-
-fn routeWidgetEventPath(layout: WidgetLayoutTree, target_index: usize, output: []WidgetEventRouteEntry) Error![]const WidgetEventRouteEntry {
-    var path: [max_widget_depth]usize = undefined;
-    var path_len: usize = 0;
-    var current: ?usize = target_index;
-    while (current) |node_index| {
-        if (path_len >= path.len) return error.WidgetDepthExceeded;
-        path[path_len] = node_index;
-        path_len += 1;
-        current = layout.nodes[node_index].parent_index;
-    }
-
-    var len: usize = 0;
-    var capture_index = path_len;
-    while (capture_index > 1) {
-        capture_index -= 1;
-        try appendWidgetEventRouteEntry(output, &len, .capture, layout.nodes[path[capture_index]], path[capture_index]);
-    }
-    try appendWidgetEventRouteEntry(output, &len, .target, layout.nodes[target_index], target_index);
-
-    var bubble_index: usize = 1;
-    while (bubble_index < path_len) : (bubble_index += 1) {
-        try appendWidgetEventRouteEntry(output, &len, .bubble, layout.nodes[path[bubble_index]], path[bubble_index]);
-    }
-
-    return output[0..len];
-}
-
-fn appendWidgetEventRouteEntry(
-    output: []WidgetEventRouteEntry,
-    len: *usize,
-    phase: WidgetEventPhase,
-    node: WidgetLayoutNode,
-    node_index: usize,
-) Error!void {
-    if (len.* >= output.len) return error.WidgetEventRouteListFull;
-    output[len.*] = .{
-        .phase = phase,
-        .node_index = node_index,
-        .id = node.widget.id,
-        .kind = node.widget.kind,
-        .bounds = node.frame,
-    };
-    len.* += 1;
-}
-
-fn focusWidgetTarget(layout: WidgetLayoutTree, current_id: ?ObjectId, direction: WidgetFocusDirection) ?WidgetFocusTarget {
-    if (layout.nodes.len == 0) return null;
-    const current_index = if (current_id) |id| widgetIndexById(layout, id) else null;
-    return switch (direction) {
-        .forward => focusForward(layout, current_index),
-        .backward => focusBackward(layout, current_index),
-        .left, .right, .up, .down => if (current_index) |index| focusSpatial(layout, index, direction) else null,
-    };
-}
-
-fn focusWidgetTargetById(layout: WidgetLayoutTree, id: ObjectId) ?WidgetFocusTarget {
-    const index = widgetIndexById(layout, id) orelse return null;
-    return focusTargetFromLayoutNode(layout, index);
-}
-
-fn focusForward(layout: WidgetLayoutTree, current_index: ?usize) ?WidgetFocusTarget {
-    var index: usize = if (current_index) |value| value + 1 else 0;
-    while (index < layout.nodes.len) : (index += 1) {
-        if (focusTargetFromLayoutNode(layout, index)) |target| return target;
-    }
-    index = 0;
-    const stop = current_index orelse layout.nodes.len;
-    while (index < stop and index < layout.nodes.len) : (index += 1) {
-        if (focusTargetFromLayoutNode(layout, index)) |target| return target;
-    }
-    return null;
-}
-
-fn focusBackward(layout: WidgetLayoutTree, current_index: ?usize) ?WidgetFocusTarget {
-    var index = current_index orelse layout.nodes.len;
-    while (index > 0) {
-        index -= 1;
-        if (focusTargetFromLayoutNode(layout, index)) |target| return target;
-    }
-    index = layout.nodes.len;
-    const stop = if (current_index) |value| value + 1 else 0;
-    while (index > stop) {
-        index -= 1;
-        if (focusTargetFromLayoutNode(layout, index)) |target| return target;
-    }
-    return null;
-}
-
-fn focusSpatial(layout: WidgetLayoutTree, current_index: usize, direction: WidgetFocusDirection) ?WidgetFocusTarget {
-    const current = focusTargetFromLayoutNode(layout, current_index) orelse return null;
-    const current_bounds = current.bounds.normalized();
-    const current_center = current_bounds.center();
-    var best: ?WidgetFocusTarget = null;
-    var best_score = std.math.inf(f32);
-
-    for (layout.nodes, 0..) |_, index| {
-        if (index == current_index) continue;
-        const target = focusTargetFromLayoutNode(layout, index) orelse continue;
-        const target_bounds = target.bounds.normalized();
-        const target_center = target_bounds.center();
-        if (!spatialFocusCandidate(current_center, target_bounds, direction)) continue;
-
-        const score = spatialFocusScore(current_bounds, target_bounds, current_center, target_center, direction);
-        if (score < best_score or (score == best_score and (best == null or target.index < best.?.index))) {
-            best = target;
-            best_score = score;
-        }
-    }
-
-    return best;
-}
-
-fn focusTargetFromLayoutNode(layout: WidgetLayoutTree, index: usize) ?WidgetFocusTarget {
-    if (index >= layout.nodes.len) return null;
-    if (isWidgetHiddenInAncestors(layout, index)) return null;
-    if (!isWidgetFrameVisibleInWidgetAncestors(layout, index)) return null;
-    const node = layout.nodes[index];
-    if (node.widget.id == 0) return null;
-    if (!isFocusable(node.widget) and (node.widget.state.disabled or !widgetScrollSemantics(layout, index).scrollable)) return null;
-    return .{
-        .id = node.widget.id,
-        .kind = node.widget.kind,
-        .bounds = node.frame,
-        .index = index,
-        .state = node.widget.state,
-    };
-}
-
-fn spatialFocusCandidate(
-    current_center: geometry.PointF,
-    target_bounds: geometry.RectF,
-    direction: WidgetFocusDirection,
-) bool {
-    return switch (direction) {
-        .left => target_bounds.maxX() <= current_center.x,
-        .right => target_bounds.x >= current_center.x,
-        .up => target_bounds.maxY() <= current_center.y,
-        .down => target_bounds.y >= current_center.y,
-        .forward, .backward => false,
-    };
-}
-
-fn spatialFocusScore(current_bounds: geometry.RectF, target_bounds: geometry.RectF, current_center: geometry.PointF, target_center: geometry.PointF, direction: WidgetFocusDirection) f32 {
-    const dx = @abs(target_center.x - current_center.x);
-    const dy = @abs(target_center.y - current_center.y);
-    const gap_x = rectGapX(current_bounds, target_bounds);
-    const gap_y = rectGapY(current_bounds, target_bounds);
-    return switch (direction) {
-        .left, .right => dx * 4096 + gap_y * 4096 + dy,
-        .up, .down => dy * 4096 + gap_x * 4096 + dx,
-        .forward, .backward => std.math.inf(f32),
-    };
-}
-
-fn rectGapX(a: geometry.RectF, b: geometry.RectF) f32 {
-    if (rectsOverlapX(a, b)) return 0;
-    if (b.x >= a.maxX()) return b.x - a.maxX();
-    return a.x - b.maxX();
-}
-
-fn rectGapY(a: geometry.RectF, b: geometry.RectF) f32 {
-    if (rectsOverlapY(a, b)) return 0;
-    if (b.y >= a.maxY()) return b.y - a.maxY();
-    return a.y - b.maxY();
-}
-
-fn rectsOverlapX(a: geometry.RectF, b: geometry.RectF) bool {
-    return @min(a.maxX(), b.maxX()) > @max(a.x, b.x);
-}
-
-fn rectsOverlapY(a: geometry.RectF, b: geometry.RectF) bool {
-    return @min(a.maxY(), b.maxY()) > @max(a.y, b.y);
-}
-
-fn widgetIndexById(layout: WidgetLayoutTree, id: ObjectId) ?usize {
-    if (id == 0) return null;
-    for (layout.nodes, 0..) |node, index| {
-        if (node.widget.id == id) return index;
-    }
-    return null;
-}
-
-fn isWidgetHiddenInAncestors(layout: WidgetLayoutTree, node_index: usize) bool {
-    var current: ?usize = node_index;
-    while (current) |index| {
-        if (index >= layout.nodes.len) return false;
-        const node = layout.nodes[index];
-        if (node.widget.semantics.hidden) return true;
-        current = node.parent_index;
-    }
-    return false;
+    return widget_access.cursorForWidgetTarget(kind, state);
 }
 
 fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNode) Error![]const WidgetSemanticsNode {
@@ -4286,38 +3851,6 @@ fn virtualWidgetScrollItemCount(widget: Widget) usize {
     if (widget.children.len > 0) return widget.children.len;
     if (widget.semantics.list_item_count) |count| return @intCast(count);
     return 0;
-}
-
-fn semanticFocusable(widget: Widget, actions: WidgetActions) bool {
-    if (widget.id == 0 or widget.state.disabled or widget.semantics.hidden) return false;
-    return widget.semantics.focusable or widget.semantics.actions.focus or actions.focus or defaultFocusable(widget);
-}
-
-fn isFocusable(widget: Widget) bool {
-    if (widget.id == 0 or widget.state.disabled or widget.semantics.hidden) return false;
-    return widget.semantics.focusable or widget.semantics.actions.focus or defaultFocusable(widget);
-}
-
-fn isDropTarget(widget: Widget) bool {
-    return widget.id != 0 and
-        !widget.state.disabled and
-        !widget.semantics.hidden and
-        widget.semantics.actions.drop_files;
-}
-
-fn isDragSource(widget: Widget) bool {
-    return widget.id != 0 and
-        !widget.state.disabled and
-        !widget.semantics.hidden and
-        (widget.semantics.actions.drag or defaultSemanticActions(widget).drag);
-}
-
-fn isHitTarget(widget: Widget) bool {
-    if (widget.id == 0 or widget.state.disabled) return false;
-    return switch (widget.kind) {
-        .row, .column, .grid, .data_grid, .table, .data_row, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner => false,
-        .scroll_view, .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface, .dropdown_menu, .text, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress => true,
-    };
 }
 
 fn widgetWithFrame(widget: Widget, frame: geometry.RectF) Widget {
