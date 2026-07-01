@@ -1422,17 +1422,25 @@ fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode,
         .{ .id = 171, .kind = .textarea, .frame = rect(0, 246, 336, 72), .text = "Compose a native-rendered message", .semantics = .{ .label = "Message textarea" } },
         .{ .id = environment_select_id, .kind = .select, .frame = rect(0, 330, 180, 34), .text = environmentLabel(ui_state.environment_index), .command = environment_toggle_command, .state = .{ .expanded = ui_state.environment_select_open }, .semantics = .{ .label = "Environment select" } },
     };
-    const menu_items = [_]canvas.Widget{
-        .{ .id = 142, .kind = .menu_item, .text = "Copy token" },
+    const card_preview_children = [_]canvas.Widget{
+        .{ .id = 231, .kind = .badge, .frame = rect(176, 0, 66, 24), .text = "Active", .variant = .secondary, .semantics = .{ .label = "Plan status active" } },
+        .{ .id = 232, .kind = .text, .frame = rect(0, 40, 220, 28), .text = "$29 / month", .size = .lg },
+        .{ .id = 233, .kind = .text, .frame = rect(0, 72, 220, 20), .text = "8 of 12 seats used", .size = .sm },
+        .{ .id = 234, .kind = .progress, .frame = rect(0, 102, 244, 8), .value = 0.67, .semantics = .{ .label = "Seat usage" } },
     };
-    const popover_children = [_]canvas.Widget{.{
-        .id = 141,
-        .kind = .dropdown_menu,
-        .frame = rect(12, 12, 150, 64),
-        .layout = .{ .gap = 2 },
-        .semantics = .{ .label = "Component actions" },
-        .children = &menu_items,
-    }};
+    const menu_items = [_]canvas.Widget{
+        .{ .id = 142, .kind = .menu_item, .text = "Copy invite link" },
+        .{ .id = 143, .kind = .menu_item, .text = "Rotate API key" },
+        .{ .id = 144, .kind = .menu_item, .text = "Open audit log" },
+    };
+    const popover_children = [_]canvas.Widget{
+        canvas.builtinComponentWidget(.dropdown_menu, .{
+            .id = 141,
+            .frame = rect(12, 12, 236, 100),
+            .semantics = .{ .label = "Project actions menu" },
+            .children = &menu_items,
+        }),
+    };
     const row0_cells = [_]canvas.Widget{
         .{ .id = 154, .kind = .data_cell, .text = "Focus ring", .layout = .{ .grow = 1 } },
         .{ .id = 155, .kind = .data_cell, .text = "Ready", .layout = .{ .grow = 1 } },
@@ -1492,12 +1500,12 @@ fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode,
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 106, .kind = .stack, .frame = rect(64, 124, 352, 374), .semantics = .{ .label = "Input controls" }, .children = &form_controls });
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 120, .kind = .list, .frame = rect(456, 124, 170, 56), .value = virtual_scroll.nav, .layout = .{ .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .semantics = .{ .label = "Component navigation" }, .children = &nav_items });
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 130, .kind = .scroll_view, .frame = rect(652, 124, 186, 56), .value = virtual_scroll.behavior, .layout = .{ .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .semantics = .{ .label = "Scrollable behavior list" }, .children = &scroll_items });
-            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 174, .kind = .card, .frame = rect(456, 374, 170, 70), .text = "Card primitive", .semantics = .{ .label = "Built-in card" } });
-            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 175, .kind = .button, .frame = rect(456, 462, 170, 44), .text = "Dialog", .variant = .outline, .command = surface_dialog_command, .semantics = .{ .label = "Open dialog" } });
-            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 176, .kind = .button, .frame = rect(456, 516, 82, 44), .text = "Drawer", .variant = .outline, .command = surface_drawer_command, .semantics = .{ .label = "Open drawer" } });
-            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 177, .kind = .button, .frame = rect(544, 516, 82, 44), .text = "Sheet", .variant = .outline, .command = surface_sheet_command, .semantics = .{ .label = "Open sheet" } });
-            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 140, .kind = .popover, .frame = rect(456, 248, 174, 88), .backdrop_blur_token = .sm, .semantics = .{ .label = "Actions popover" }, .children = &popover_children });
-            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 149, .kind = .stack, .frame = rect(64, 584, 568, 60), .semantics = .{ .label = "Data controls" }, .children = &data_panel_children });
+            try appendComponentWidget(&content_widgets, &content_widget_count, canvas.builtinComponentWidget(.card, .{ .id = 174, .frame = rect(456, 384, 276, 156), .text = "Team plan", .semantics = .{ .label = "Team plan card" }, .children = &card_preview_children }));
+            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 175, .kind = .button, .frame = rect(456, 560, 124, 40), .text = "Dialog", .variant = .outline, .command = surface_dialog_command, .semantics = .{ .label = "Open dialog" } });
+            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 176, .kind = .button, .frame = rect(594, 560, 108, 40), .text = "Drawer", .variant = .outline, .command = surface_drawer_command, .semantics = .{ .label = "Open drawer" } });
+            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 177, .kind = .button, .frame = rect(716, 560, 108, 40), .text = "Sheet", .variant = .outline, .command = surface_sheet_command, .semantics = .{ .label = "Open sheet" } });
+            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 140, .kind = .popover, .frame = rect(456, 216, 260, 126), .backdrop_blur_token = .sm, .semantics = .{ .label = "Project actions popover" }, .children = &popover_children });
+            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 149, .kind = .stack, .frame = rect(64, 628, 568, 60), .semantics = .{ .label = "Data controls" }, .children = &data_panel_children });
         },
         .inputs => {
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 101, .kind = .text, .frame = rect(64, 56, 240, 26), .text = "Inputs", .size = .lg });
@@ -1517,12 +1525,12 @@ fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode,
         },
         .surfaces => {
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 101, .kind = .text, .frame = rect(64, 56, 240, 26), .text = "Surfaces", .size = .lg });
-            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 174, .kind = .card, .frame = rect(64, 124, 220, 96), .text = "Card primitive", .semantics = .{ .label = "Built-in card" } });
-            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 140, .kind = .popover, .frame = rect(316, 124, 220, 104), .backdrop_blur_token = .sm, .semantics = .{ .label = "Actions popover" }, .children = &popover_children });
-            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 175, .kind = .button, .frame = rect(64, 276, 170, 44), .text = "Dialog", .variant = .outline, .command = surface_dialog_command, .semantics = .{ .label = "Open dialog" } });
-            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 176, .kind = .button, .frame = rect(248, 276, 120, 44), .text = "Drawer", .variant = .outline, .command = surface_drawer_command, .semantics = .{ .label = "Open drawer" } });
-            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 177, .kind = .button, .frame = rect(382, 276, 120, 44), .text = "Sheet", .variant = .outline, .command = surface_sheet_command, .semantics = .{ .label = "Open sheet" } });
-            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 160, .kind = .tooltip, .frame = rect(64, 372, 176, 32), .text = "Tooltip rendered on GPU", .semantics = .{ .label = "GPU tooltip" } });
+            try appendComponentWidget(&content_widgets, &content_widget_count, canvas.builtinComponentWidget(.card, .{ .id = 174, .frame = rect(64, 124, 276, 156), .text = "Team plan", .semantics = .{ .label = "Team plan card" }, .children = &card_preview_children }));
+            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 140, .kind = .popover, .frame = rect(384, 124, 260, 126), .backdrop_blur_token = .sm, .semantics = .{ .label = "Project actions popover" }, .children = &popover_children });
+            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 175, .kind = .button, .frame = rect(64, 320, 170, 44), .text = "Dialog", .variant = .outline, .command = surface_dialog_command, .semantics = .{ .label = "Open dialog" } });
+            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 176, .kind = .button, .frame = rect(248, 320, 120, 44), .text = "Drawer", .variant = .outline, .command = surface_drawer_command, .semantics = .{ .label = "Open drawer" } });
+            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 177, .kind = .button, .frame = rect(382, 320, 120, 44), .text = "Sheet", .variant = .outline, .command = surface_sheet_command, .semantics = .{ .label = "Open sheet" } });
+            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 160, .kind = .tooltip, .frame = rect(64, 416, 176, 32), .text = "Tooltip rendered on GPU", .semantics = .{ .label = "GPU tooltip" } });
         },
     }
 
@@ -1985,11 +1993,14 @@ test "gpu components layout keeps finished controls visually separated" {
     try std.testing.expect(layout.findById(178) == null);
     try std.testing.expect(layout.findById(213) == null);
     try std.testing.expect(layout.findById(214) == null);
-    try expectComponentWidgetFrame(layout, 174, contentRect(456, 374, 170, 70));
-    try expectComponentWidgetFrame(layout, 175, contentRect(456, 462, 170, 44));
-    try expectComponentWidgetFrame(layout, 176, contentRect(456, 516, 82, 44));
-    try expectComponentWidgetFrame(layout, 177, contentRect(544, 516, 82, 44));
-    try expectComponentWidgetFrame(layout, 140, contentRect(456, 248, 174, 88));
+    try expectComponentWidgetFrame(layout, 174, contentRect(456, 384, 276, 156));
+    try expectComponentWidgetFrame(layout, 175, contentRect(456, 560, 124, 40));
+    try expectComponentWidgetFrame(layout, 176, contentRect(594, 560, 108, 40));
+    try expectComponentWidgetFrame(layout, 177, contentRect(716, 560, 108, 40));
+    try expectComponentWidgetFrame(layout, 140, contentRect(456, 216, 260, 126));
+    try std.testing.expectEqualStrings("Team plan", layout.findById(174).?.widget.text);
+    try std.testing.expectEqualStrings("$29 / month", layout.findById(232).?.widget.text);
+    try std.testing.expectEqualStrings("Copy invite link", layout.findById(142).?.widget.text);
     try expectComponentWidgetsDoNotOverlap(layout, 111, 112);
     try expectComponentWidgetsDoNotOverlap(layout, 113, 114);
     try expectComponentWidgetsDoNotOverlap(layout, 114, 215);
@@ -2011,11 +2022,11 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetsDoNotOverlap(layout, 177, 149);
 
     try std.testing.expect(layout.findById(151) == null);
-    try expectComponentWidgetFrame(layout, 150, contentRect(64, 584, 360, 28));
-    try expectComponentWidgetFrame(layout, 152, contentRect(64, 584, 360, 28));
-    try expectComponentWidgetFrame(layout, 156, contentRect(64, 584, 180, 28));
-    try expectComponentWidgetFrame(layout, 157, contentRect(244, 584, 180, 28));
-    try expectComponentWidgetFrame(layout, 160, contentRect(456, 584, 176, 32));
+    try expectComponentWidgetFrame(layout, 150, contentRect(64, 628, 360, 28));
+    try expectComponentWidgetFrame(layout, 152, contentRect(64, 628, 360, 28));
+    try expectComponentWidgetFrame(layout, 156, contentRect(64, 628, 180, 28));
+    try expectComponentWidgetFrame(layout, 157, contentRect(244, 628, 180, 28));
+    try expectComponentWidgetFrame(layout, 160, contentRect(456, 628, 176, 32));
     try expectComponentWidgetsDoNotOverlap(layout, 150, 160);
     try expectComponentWidgetsDoNotOverlap(layout, 140, 149);
 
@@ -2101,9 +2112,9 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetFrame(scrolled_layout, 133, contentRect(652, 124, 186, 28));
     try expectComponentWidgetFrame(scrolled_layout, 134, contentRect(652, 152, 186, 28));
     try std.testing.expect(scrolled_layout.findById(152) == null);
-    try expectComponentWidgetFrame(scrolled_layout, 153, contentRect(64, 584, 360, 28));
-    try expectComponentWidgetFrame(scrolled_layout, 158, contentRect(64, 584, 180, 28));
-    try expectComponentWidgetFrame(scrolled_layout, 159, contentRect(244, 584, 180, 28));
+    try expectComponentWidgetFrame(scrolled_layout, 153, contentRect(64, 628, 360, 28));
+    try expectComponentWidgetFrame(scrolled_layout, 158, contentRect(64, 628, 180, 28));
+    try expectComponentWidgetFrame(scrolled_layout, 159, contentRect(244, 628, 180, 28));
 
     var smooth_scrolled_nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
     const smooth_scrolled_layout = try buildComponentsWidgetLayoutWithScroll(&smooth_scrolled_nodes, .{
@@ -2268,7 +2279,7 @@ test "gpu components display list renders stable reference snapshot" {
     const surface = (try canvas.ReferenceRenderSurface.initWithScratch(@intFromFloat(canvas_width), @intFromFloat(canvas_height), pixels, scratch)).withImages(&preview_images);
     try surface.renderPass(frame.renderPass(), color(247, 249, 252));
 
-    try std.testing.expectEqual(@as(u64, 4740051840119192199), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 12620084233193515898), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -2985,7 +2996,7 @@ test "gpu components native theme command updates retained design tokens" {
 
     const themed_layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
     try expectComponentWidgetFrame(themed_layout, 111, contentRect(64, 124, 148, 34));
-    try expectComponentWidgetFrame(themed_layout, 160, contentRect(456, 584, 176, 32));
+    try expectComponentWidgetFrame(themed_layout, 160, contentRect(456, 628, 176, 32));
 }
 
 test "gpu components follow system appearance until toolbar theme override" {
