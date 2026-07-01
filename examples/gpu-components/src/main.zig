@@ -11,6 +11,10 @@ const window_width: f32 = 1180;
 const window_height: f32 = 760;
 const toolbar_height: f32 = 52;
 const canvas_sidebar_width: f32 = 208;
+const canvas_sidebar_min_width: f32 = 168;
+const canvas_sidebar_max_width: f32 = 360;
+const canvas_sidebar_min_content_width: f32 = 420;
+const canvas_sidebar_resize_handle_width: f32 = 48;
 const statusbar_height: f32 = 32;
 const canvas_width: f32 = window_width;
 const canvas_height: f32 = window_height - toolbar_height - statusbar_height;
@@ -61,6 +65,7 @@ const content_stack_id: canvas.ObjectId = 91;
 const canvas_sidebar_id: canvas.ObjectId = 92;
 const canvas_sidebar_title_id: canvas.ObjectId = 93;
 const section_nav_base_id: canvas.ObjectId = 94;
+const canvas_sidebar_resize_handle_id: canvas.ObjectId = 99;
 const surface_overlay_backdrop_id: canvas.ObjectId = 222;
 const surface_overlay_id: canvas.ObjectId = 223;
 const surface_overlay_title_id: canvas.ObjectId = 224;
@@ -97,6 +102,7 @@ const ComponentUiState = struct {
     environment_index: usize = 0,
     surface_overlay: ComponentSurfaceOverlay = .none,
     section: ComponentSection = .controls,
+    sidebar_width: f32 = canvas_sidebar_width,
 };
 
 const ComponentSurfaceOverlay = enum {
@@ -312,6 +318,7 @@ const GpuComponentsApp = struct {
     environment_index: usize = 0,
     surface_overlay: ComponentSurfaceOverlay = .none,
     section: ComponentSection = .controls,
+    sidebar_width: f32 = canvas_sidebar_width,
     canvas_size: geometry.SizeF = default_canvas_size,
     pixel_snap_scale: f32 = 1,
     pixels: ?[]u8 = null,
@@ -429,7 +436,14 @@ const GpuComponentsApp = struct {
         if (!std.mem.eql(u8, pointer_event.view_label, canvas_label)) return;
         const target = pointer_event.target orelse return;
         switch (pointer_event.pointer.phase) {
+            .move => {
+                if (target.id == canvas_sidebar_resize_handle_id) {
+                    try self.resizeSidebar(runtime, pointer_event);
+                    return;
+                }
+            },
             .up => {
+                if (target.id == canvas_sidebar_resize_handle_id) return;
                 if (target.id == surface_overlay_backdrop_id and self.surface_overlay != .none) {
                     self.surface_overlay = .none;
                     _ = runtime.clearCanvasRenderAnimations(pointer_event.window_id, canvas_label) catch {};
@@ -456,6 +470,13 @@ const GpuComponentsApp = struct {
             },
             else => {},
         }
+    }
+
+    fn resizeSidebar(self: *@This(), runtime: *zero_native.Runtime, pointer_event: zero_native.runtime.CanvasWidgetPointerEvent) anyerror!void {
+        const next_width = componentSidebarWidthForSize(self.sidebar_width + pointer_event.pointer.delta.dx, self.canvas_size);
+        if (@abs(next_width - self.sidebar_width) < 0.001) return;
+        self.sidebar_width = next_width;
+        try installComponentsCanvasModel(runtime, pointer_event.window_id, self.virtual_scroll, self.componentUiState(), self.componentTokens(), self.canvas_size);
     }
 
     fn handleWidgetKeyboard(self: *@This(), runtime: *zero_native.Runtime, keyboard_event: zero_native.runtime.CanvasWidgetKeyboardEvent) anyerror!void {
@@ -700,7 +721,7 @@ const GpuComponentsApp = struct {
     }
 
     fn scheduleSurfaceOverlayAnimation(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId, overlay: ComponentSurfaceOverlay) anyerror!void {
-        const offset = surfaceOverlayEnterOffset(self.canvas_size, overlay) orelse return;
+        const offset = surfaceOverlayEnterOffsetForSidebar(self.canvas_size, overlay, self.sidebar_width) orelse return;
         const motion = self.componentTokens().motion;
         if (motion.durationMs(.normal) == 0) return;
 
@@ -879,6 +900,7 @@ const GpuComponentsApp = struct {
             .environment_index = self.environment_index,
             .surface_overlay = self.surface_overlay,
             .section = self.section,
+            .sidebar_width = self.sidebar_width,
         };
     }
 
@@ -894,7 +916,10 @@ const GpuComponentsApp = struct {
     }
 
     fn updateCanvasSize(self: *@This(), size: geometry.SizeF) bool {
-        if (componentSizesEqual(self.canvas_size, size)) return false;
+        const next_sidebar_width = componentSidebarWidthForSize(self.sidebar_width, size);
+        const sidebar_changed = @abs(next_sidebar_width - self.sidebar_width) >= 0.001;
+        if (sidebar_changed) self.sidebar_width = next_sidebar_width;
+        if (componentSizesEqual(self.canvas_size, size)) return sidebar_changed;
         self.canvas_size = size;
         return true;
     }
@@ -1015,6 +1040,13 @@ fn componentSurfaceSize(size: geometry.SizeF) geometry.SizeF {
     };
 }
 
+fn componentSidebarWidthForSize(requested_width: f32, surface_size: geometry.SizeF) f32 {
+    const size = componentSurfaceSize(surface_size);
+    const requested = if (std.math.isFinite(requested_width) and requested_width > 0) requested_width else canvas_sidebar_width;
+    const max_for_surface = @min(canvas_sidebar_max_width, @max(canvas_sidebar_min_width, size.width - canvas_sidebar_min_content_width));
+    return std.math.clamp(requested, canvas_sidebar_min_width, max_for_surface);
+}
+
 fn componentVirtualScrollTarget(route: []const canvas.WidgetEventRouteEntry) ?canvas.ObjectId {
     var page_scroll: ?canvas.ObjectId = null;
     for (route) |entry| {
@@ -1092,9 +1124,19 @@ fn componentVirtualScrollStep(widget: canvas.Widget) ?f32 {
 }
 
 fn componentSurfaceCardRect(surface_size: geometry.SizeF) geometry.RectF {
+    return componentSurfaceCardRectForSidebar(surface_size, canvas_sidebar_width);
+}
+
+fn componentSurfaceCardRectForSidebar(surface_size: geometry.SizeF, sidebar_width: f32) geometry.RectF {
     const size = componentSurfaceSize(surface_size);
-    const content_width = @max(1, size.width - canvas_sidebar_width);
-    return rect(canvas_sidebar_width + 28, 26, @max(916, content_width - 56), @max(616, size.height - 60));
+    const resolved_sidebar_width = componentSidebarWidthForSize(sidebar_width, size);
+    const content_width = @max(1, size.width - resolved_sidebar_width);
+    return rect(resolved_sidebar_width + 28, 26, @max(916, content_width - 56), @max(616, size.height - 60));
+}
+
+fn componentSidebarWidthFromLayout(layout: canvas.WidgetLayoutTree) f32 {
+    if (layout.findById(canvas_sidebar_id)) |node| return node.frame.width;
+    return canvas_sidebar_width;
 }
 
 fn componentSizesEqual(a: geometry.SizeF, b: geometry.SizeF) bool {
@@ -1106,7 +1148,7 @@ fn buildComponentsDisplayList(builder: *canvas.Builder, layout: canvas.WidgetLay
 }
 
 fn buildComponentsDisplayListForSize(builder: *canvas.Builder, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens, surface_size: geometry.SizeF) canvas.Error!void {
-    try builder.fillRoundedRect(.{ .id = 3, .rect = componentSurfaceCardRect(surface_size), .radius = canvas.Radius.all(tokens.radius.xl), .fill = .{ .color = tokens.colors.surface } });
+    try builder.fillRoundedRect(.{ .id = 3, .rect = componentSurfaceCardRectForSidebar(surface_size, componentSidebarWidthFromLayout(layout)), .radius = canvas.Radius.all(tokens.radius.xl), .fill = .{ .color = tokens.colors.surface } });
     try layout.emitDisplayList(builder, tokens);
 }
 
@@ -1244,17 +1286,26 @@ fn surfaceOverlayKind(overlay: ComponentSurfaceOverlay) canvas.BuiltinComponentK
 }
 
 fn surfaceOverlayFrame(surface_size: geometry.SizeF, overlay: ComponentSurfaceOverlay) geometry.RectF {
+    return surfaceOverlayFrameForSidebar(surface_size, overlay, canvas_sidebar_width);
+}
+
+fn surfaceOverlayFrameForSidebar(surface_size: geometry.SizeF, overlay: ComponentSurfaceOverlay, sidebar_width: f32) geometry.RectF {
     const size = componentSurfaceSize(surface_size);
+    const resolved_sidebar_width = componentSidebarWidthForSize(sidebar_width, size);
     return switch (overlay) {
-        .dialog => centeredContentOverlayFrame(size, 460, 220),
-        .drawer => bottomDrawerOverlayFrame(size, 260),
+        .dialog => centeredContentOverlayFrame(size, resolved_sidebar_width, 460, 220),
+        .drawer => bottomDrawerOverlayFrame(size, resolved_sidebar_width, 260),
         .sheet => rightSheetOverlayFrame(size, 380),
         .none => unreachable,
     };
 }
 
 fn surfaceOverlayEnterOffset(surface_size: geometry.SizeF, overlay: ComponentSurfaceOverlay) ?geometry.OffsetF {
-    const frame = surfaceOverlayFrame(surface_size, overlay);
+    return surfaceOverlayEnterOffsetForSidebar(surface_size, overlay, canvas_sidebar_width);
+}
+
+fn surfaceOverlayEnterOffsetForSidebar(surface_size: geometry.SizeF, overlay: ComponentSurfaceOverlay, sidebar_width: f32) ?geometry.OffsetF {
+    const frame = surfaceOverlayFrameForSidebar(surface_size, overlay, sidebar_width);
     return switch (overlay) {
         .drawer => geometry.OffsetF.init(0, frame.height),
         .sheet => geometry.OffsetF.init(frame.width, 0),
@@ -1262,22 +1313,22 @@ fn surfaceOverlayEnterOffset(surface_size: geometry.SizeF, overlay: ComponentSur
     };
 }
 
-fn centeredContentOverlayFrame(size: geometry.SizeF, preferred_width: f32, preferred_height: f32) geometry.RectF {
-    const content_width = @max(1, size.width - canvas_sidebar_width);
+fn centeredContentOverlayFrame(size: geometry.SizeF, sidebar_width: f32, preferred_width: f32, preferred_height: f32) geometry.RectF {
+    const content_width = @max(1, size.width - sidebar_width);
     const width = @min(preferred_width, @max(1, content_width - 48));
     const height = @min(preferred_height, @max(1, size.height - 48));
     return rect(
-        canvas_sidebar_width + @max(24, (content_width - width) * 0.5),
+        sidebar_width + @max(24, (content_width - width) * 0.5),
         @max(24, (size.height - height) * 0.5),
         width,
         height,
     );
 }
 
-fn bottomDrawerOverlayFrame(size: geometry.SizeF, preferred_height: f32) geometry.RectF {
-    const content_width = @max(1, size.width - canvas_sidebar_width);
+fn bottomDrawerOverlayFrame(size: geometry.SizeF, sidebar_width: f32, preferred_height: f32) geometry.RectF {
+    const content_width = @max(1, size.width - sidebar_width);
     const height = @min(preferred_height, @max(1, size.height));
-    return rect(canvas_sidebar_width, @max(0, size.height - height), content_width, height);
+    return rect(sidebar_width, @max(0, size.height - height), content_width, height);
 }
 
 fn rightSheetOverlayFrame(size: geometry.SizeF, preferred_width: f32) geometry.RectF {
@@ -1420,13 +1471,17 @@ fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode,
         .{ .id = environmentOptionId(1), .kind = .menu_item, .text = environment_options[1], .command = environment_option_commands[1], .state = .{ .selected = ui_state.environment_index == 1 }, .semantics = .{ .label = environment_options[1] } },
         .{ .id = environmentOptionId(2), .kind = .menu_item, .text = environment_options[2], .command = environment_option_commands[2], .state = .{ .selected = ui_state.environment_index == 2 }, .semantics = .{ .label = environment_options[2] } },
     };
+    const size = componentSurfaceSize(surface_size);
+    const sidebar_width = componentSidebarWidthForSize(ui_state.sidebar_width, size);
+    const sidebar_title_width = @max(1, sidebar_width - 44);
+    const sidebar_item_width = @max(1, sidebar_width - 28);
     const sidebar_children = [_]canvas.Widget{
-        .{ .id = canvas_sidebar_title_id, .kind = .text, .frame = rect(22, 28, 164, 24), .text = "Native-first kit", .size = .lg },
-        .{ .id = componentSectionNavId(.controls), .kind = .list_item, .frame = rect(14, 78, 180, 34), .text = componentSectionLabel(.controls), .command = componentSectionCommand(.controls), .state = .{ .selected = ui_state.section == .controls }, .semantics = .{ .label = componentSectionLabel(.controls) } },
-        .{ .id = componentSectionNavId(.inputs), .kind = .list_item, .frame = rect(14, 118, 180, 34), .text = componentSectionLabel(.inputs), .command = componentSectionCommand(.inputs), .state = .{ .selected = ui_state.section == .inputs }, .semantics = .{ .label = componentSectionLabel(.inputs) } },
-        .{ .id = componentSectionNavId(.data), .kind = .list_item, .frame = rect(14, 158, 180, 34), .text = componentSectionLabel(.data), .command = componentSectionCommand(.data), .state = .{ .selected = ui_state.section == .data }, .semantics = .{ .label = componentSectionLabel(.data) } },
-        .{ .id = componentSectionNavId(.components), .kind = .list_item, .frame = rect(14, 198, 180, 34), .text = componentSectionLabel(.components), .command = componentSectionCommand(.components), .state = .{ .selected = ui_state.section == .components }, .semantics = .{ .label = componentSectionLabel(.components) } },
-        .{ .id = componentSectionNavId(.surfaces), .kind = .list_item, .frame = rect(14, 238, 180, 34), .text = componentSectionLabel(.surfaces), .command = componentSectionCommand(.surfaces), .state = .{ .selected = ui_state.section == .surfaces }, .semantics = .{ .label = componentSectionLabel(.surfaces) } },
+        .{ .id = canvas_sidebar_title_id, .kind = .text, .frame = rect(22, 28, sidebar_title_width, 24), .text = "Native-first kit", .size = .lg },
+        .{ .id = componentSectionNavId(.controls), .kind = .list_item, .frame = rect(14, 78, sidebar_item_width, 34), .text = componentSectionLabel(.controls), .command = componentSectionCommand(.controls), .state = .{ .selected = ui_state.section == .controls }, .semantics = .{ .label = componentSectionLabel(.controls) } },
+        .{ .id = componentSectionNavId(.inputs), .kind = .list_item, .frame = rect(14, 118, sidebar_item_width, 34), .text = componentSectionLabel(.inputs), .command = componentSectionCommand(.inputs), .state = .{ .selected = ui_state.section == .inputs }, .semantics = .{ .label = componentSectionLabel(.inputs) } },
+        .{ .id = componentSectionNavId(.data), .kind = .list_item, .frame = rect(14, 158, sidebar_item_width, 34), .text = componentSectionLabel(.data), .command = componentSectionCommand(.data), .state = .{ .selected = ui_state.section == .data }, .semantics = .{ .label = componentSectionLabel(.data) } },
+        .{ .id = componentSectionNavId(.components), .kind = .list_item, .frame = rect(14, 198, sidebar_item_width, 34), .text = componentSectionLabel(.components), .command = componentSectionCommand(.components), .state = .{ .selected = ui_state.section == .components }, .semantics = .{ .label = componentSectionLabel(.components) } },
+        .{ .id = componentSectionNavId(.surfaces), .kind = .list_item, .frame = rect(14, 238, sidebar_item_width, 34), .text = componentSectionLabel(.surfaces), .command = componentSectionCommand(.surfaces), .state = .{ .selected = ui_state.section == .surfaces }, .semantics = .{ .label = componentSectionLabel(.surfaces) } },
     };
     var content_widgets: [canvas.builtin_component_names.len + 16]canvas.Widget = undefined;
     var content_widget_count: usize = 0;
@@ -1483,8 +1538,7 @@ fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode,
             .children = &environment_menu_items,
         });
     }
-    const size = componentSurfaceSize(surface_size);
-    const content_width = @max(1, size.width - canvas_sidebar_width);
+    const content_width = @max(1, size.width - sidebar_width);
     const content_height = @max(size.height, componentSectionContentHeight(ui_state.section));
     const content_children = [_]canvas.Widget{.{
         .id = content_stack_id,
@@ -1492,12 +1546,12 @@ fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode,
         .frame = rect(0, 0, content_width, content_height),
         .children = content_widgets[0..content_widget_count],
     }};
-    var root_widgets: [4]canvas.Widget = undefined;
+    var root_widgets: [5]canvas.Widget = undefined;
     var root_widget_count: usize = 0;
     try appendComponentWidget(&root_widgets, &root_widget_count, .{
         .id = canvas_sidebar_id,
         .kind = .panel,
-        .frame = rect(0, 0, canvas_sidebar_width, size.height),
+        .frame = rect(0, 0, sidebar_width, size.height),
         .style = .{ .radius = 0 },
         .semantics = .{ .label = "Component sections" },
         .children = &sidebar_children,
@@ -1505,16 +1559,24 @@ fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode,
     try appendComponentWidget(&root_widgets, &root_widget_count, .{
         .id = content_scroll_id,
         .kind = .scroll_view,
-        .frame = rect(canvas_sidebar_width, 0, content_width, size.height),
+        .frame = rect(sidebar_width, 0, content_width, size.height),
         .value = virtual_scroll.page,
         .layout = .{ .clip_content = true },
         .semantics = .{ .label = "Component section content" },
         .children = &content_children,
     });
+    try appendComponentWidget(&root_widgets, &root_widget_count, .{
+        .id = canvas_sidebar_resize_handle_id,
+        .kind = .slider,
+        .frame = sidebarResizeHandleFrame(sidebar_width, size.height),
+        .opacity = 0,
+        .style = .{ .background = rgba(0, 0, 0, 0), .foreground = rgba(0, 0, 0, 0), .border = rgba(0, 0, 0, 0), .radius = 0, .stroke_width = 0 },
+        .semantics = .{ .label = "Resize component sidebar" },
+    });
 
     var surface_overlay_children_storage: [3]canvas.Widget = undefined;
     if (ui_state.surface_overlay != .none) {
-        const overlay_frame = surfaceOverlayFrame(size, ui_state.surface_overlay);
+        const overlay_frame = surfaceOverlayFrameForSidebar(size, ui_state.surface_overlay, sidebar_width);
         const overlay_content_width = @max(1, overlay_frame.width - 40);
         const overlay_content_height = @max(1, overlay_frame.height - 40);
         surface_overlay_children_storage = .{
@@ -1815,7 +1877,16 @@ fn rect(x: f32, y: f32, width: f32, height: f32) geometry.RectF {
 }
 
 fn contentRect(x: f32, y: f32, width: f32, height: f32) geometry.RectF {
-    return rect(canvas_sidebar_width + x, y, width, height);
+    return contentRectForSidebar(canvas_sidebar_width, x, y, width, height);
+}
+
+fn contentRectForSidebar(sidebar_width: f32, x: f32, y: f32, width: f32, height: f32) geometry.RectF {
+    return rect(sidebar_width + x, y, width, height);
+}
+
+fn sidebarResizeHandleFrame(sidebar_width: f32, surface_height: f32) geometry.RectF {
+    const y = @max(0, (surface_height - canvas_sidebar_resize_handle_width) * 0.5);
+    return rect(sidebar_width - canvas_sidebar_resize_handle_width * 0.5, y, canvas_sidebar_resize_handle_width, canvas_sidebar_resize_handle_width);
 }
 
 fn componentCommandPartId(id: canvas.ObjectId, slot: canvas.ObjectId) canvas.ObjectId {
@@ -1888,6 +1959,8 @@ test "gpu components layout keeps finished controls visually separated" {
 
     try expectComponentWidgetFrame(layout, canvas_sidebar_id, rect(0, 0, canvas_sidebar_width, canvas_height));
     try std.testing.expectEqual(@as(?f32, 0), layout.findById(canvas_sidebar_id).?.widget.style.radius);
+    try expectComponentWidgetFrame(layout, canvas_sidebar_resize_handle_id, sidebarResizeHandleFrame(canvas_sidebar_width, canvas_height));
+    try std.testing.expectEqual(canvas.WidgetCursor.resize_horizontal, layout.cursorForHit(layout.hitTest(sidebarResizeHandleFrame(canvas_sidebar_width, canvas_height).center())));
     try expectComponentWidgetFrame(layout, content_scroll_id, rect(canvas_sidebar_width, 0, canvas_width - canvas_sidebar_width, canvas_height));
     try expectComponentWidgetFrame(layout, componentSectionNavId(.controls), rect(14, 78, 180, 34));
     try std.testing.expect(layout.findById(componentSectionNavId(.controls)).?.widget.state.selected);
@@ -2041,6 +2114,33 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetFrame(smooth_scrolled_layout, 131, contentRect(652, 113, 186, 28));
     try expectComponentWidgetFrame(smooth_scrolled_layout, 132, contentRect(652, 141, 186, 28));
     try expectComponentWidgetFrame(smooth_scrolled_layout, 133, contentRect(652, 169, 186, 28));
+}
+
+test "gpu components layout supports resized sidebar width" {
+    const resized_sidebar_width: f32 = 280;
+    var nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
+    const layout = try buildComponentsWidgetLayoutWithStateAndSize(&nodes, .{}, .{
+        .sidebar_width = resized_sidebar_width,
+    }, default_canvas_size);
+
+    try expectComponentWidgetFrame(layout, canvas_sidebar_id, rect(0, 0, resized_sidebar_width, canvas_height));
+    try expectComponentWidgetFrame(layout, content_scroll_id, rect(resized_sidebar_width, 0, canvas_width - resized_sidebar_width, canvas_height));
+    try expectComponentWidgetFrame(layout, canvas_sidebar_resize_handle_id, sidebarResizeHandleFrame(resized_sidebar_width, canvas_height));
+    try expectComponentWidgetFrame(layout, componentSectionNavId(.controls), rect(14, 78, resized_sidebar_width - 28, 34));
+    try expectComponentWidgetFrame(layout, 111, contentRectForSidebar(resized_sidebar_width, 64, 124, 148, 34));
+    try std.testing.expectEqual(canvas.WidgetCursor.resize_horizontal, layout.cursorForHit(layout.hitTest(sidebarResizeHandleFrame(resized_sidebar_width, canvas_height).center())));
+
+    var commands: [max_component_commands]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try buildComponentsDisplayListForSize(&builder, layout, componentTokens(), default_canvas_size);
+    try expectComponentRoundedRectFrame(builder.displayList(), 3, componentSurfaceCardRectForSidebar(default_canvas_size, resized_sidebar_width));
+
+    var drawer_nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
+    const drawer_layout = try buildComponentsWidgetLayoutWithStateAndSize(&drawer_nodes, .{}, .{
+        .surface_overlay = .drawer,
+        .sidebar_width = resized_sidebar_width,
+    }, default_canvas_size);
+    try expectComponentWidgetFrame(drawer_layout, surface_overlay_id, surfaceOverlayFrameForSidebar(default_canvas_size, .drawer, resized_sidebar_width));
 }
 
 test "gpu components combined virtual scroll state stays within display budget" {
@@ -3322,6 +3422,47 @@ test "gpu components slider drag presents incremental cached frame" {
 
     snapshot = harness.runtime.automationSnapshot("Components");
     try std.testing.expectApproxEqAbs(@as(f32, 0.82), componentSnapshotWidget(snapshot, 115).?.value.?, 0.001);
+}
+
+test "gpu components sidebar handle drag resizes retained layout" {
+    var harness: zero_native.TestHarness() = undefined;
+    harness.init(.{ .size = geometry.SizeF.init(window_width, window_height) });
+    harness.null_platform.gpu_surfaces = true;
+
+    var app = GpuComponentsApp{};
+    defer app.deinit();
+    const app_handle = app.app();
+    try harness.start(app_handle);
+
+    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(canvas_width, canvas_height),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000_000,
+        .nonblank = true,
+    } });
+
+    resetComponentDirty(&harness.runtime);
+    try dispatchComponentPointerDrag(&harness.runtime, app_handle, canvas_sidebar_resize_handle_id, 0.5, 1.75);
+    const widened_sidebar_width = canvas_sidebar_width + 60;
+    try std.testing.expectApproxEqAbs(widened_sidebar_width, app.sidebar_width, 0.001);
+    var layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    try expectComponentWidgetFrame(layout, canvas_sidebar_id, rect(0, 0, widened_sidebar_width, canvas_height));
+    try expectComponentWidgetFrame(layout, content_scroll_id, rect(widened_sidebar_width, 0, canvas_width - widened_sidebar_width, canvas_height));
+    try expectComponentWidgetFrame(layout, canvas_sidebar_resize_handle_id, sidebarResizeHandleFrame(widened_sidebar_width, canvas_height));
+    var display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try expectComponentRoundedRectFrame(display_list, 3, componentSurfaceCardRectForSidebar(default_canvas_size, widened_sidebar_width));
+    try std.testing.expect(harness.runtime.invalidated);
+
+    resetComponentDirty(&harness.runtime);
+    try dispatchComponentPointerDrag(&harness.runtime, app_handle, canvas_sidebar_resize_handle_id, 0.5, -2.0);
+    try std.testing.expectApproxEqAbs(canvas_sidebar_min_width, app.sidebar_width, 0.001);
+    layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    try expectComponentWidgetFrame(layout, canvas_sidebar_id, rect(0, 0, canvas_sidebar_min_width, canvas_height));
+    try expectComponentWidgetFrame(layout, content_scroll_id, rect(canvas_sidebar_min_width, 0, canvas_width - canvas_sidebar_min_width, canvas_height));
+    display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try expectComponentRoundedRectFrame(display_list, 3, componentSurfaceCardRectForSidebar(default_canvas_size, canvas_sidebar_min_width));
 }
 
 fn expectSurfaceTransformAnimation(animations: []const canvas.CanvasRenderAnimation, id: canvas.ObjectId, tx: f32, ty: f32) !void {
