@@ -372,6 +372,12 @@ final class ZeroNativeHostViewController: UIViewController {
     }
 
     private func widgetAccessibilityValue(_ node: WidgetSemantics) -> String? {
+        if (node.flags & UInt32(ZERO_NATIVE_WIDGET_FLAG_EXPANDED)) != 0 {
+            return "Expanded"
+        }
+        if (node.flags & UInt32(ZERO_NATIVE_WIDGET_FLAG_COLLAPSED)) != 0 {
+            return "Collapsed"
+        }
         if let value = node.value {
             switch node.role {
             case Int32(ZERO_NATIVE_WIDGET_ROLE_CHECKBOX), Int32(ZERO_NATIVE_WIDGET_ROLE_SWITCH):

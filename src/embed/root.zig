@@ -41,6 +41,8 @@ pub const MobileWidgetFlag = enum(u32) {
     selected = 1 << 3,
     disabled = 1 << 4,
     focusable = 1 << 5,
+    expanded = 1 << 6,
+    collapsed = 1 << 7,
 };
 
 pub const MobileWidgetAction = enum(u32) {
@@ -54,6 +56,7 @@ pub const MobileWidgetAction = enum(u32) {
     select = 1 << 7,
     drag = 1 << 8,
     drop_files = 1 << 9,
+    dismiss = 1 << 10,
 };
 
 pub const MobileWidgetActionKind = enum(c_int) {
@@ -70,6 +73,7 @@ pub const MobileWidgetActionKind = enum(c_int) {
     select = 10,
     drag = 11,
     drop_files = 12,
+    dismiss = 13,
 };
 
 pub const MobileWidgetSemantics = extern struct {
@@ -933,6 +937,7 @@ fn mobileWidgetActionKindFromInt(value: c_int) anyerror!runtime.CanvasWidgetAcce
         @intFromEnum(MobileWidgetActionKind.select) => .select,
         @intFromEnum(MobileWidgetActionKind.drag) => .drag,
         @intFromEnum(MobileWidgetActionKind.drop_files) => .drop_files,
+        @intFromEnum(MobileWidgetActionKind.dismiss) => .dismiss,
         else => error.InvalidCommand,
     };
 }
@@ -1068,6 +1073,9 @@ fn mobileWidgetFlags(node: canvas.WidgetSemanticsNode) u32 {
     if (node.state.selected) flags |= @intFromEnum(MobileWidgetFlag.selected);
     if (node.state.disabled) flags |= @intFromEnum(MobileWidgetFlag.disabled);
     if (node.focusable) flags |= @intFromEnum(MobileWidgetFlag.focusable);
+    if (node.state.expanded) |expanded| {
+        flags |= @intFromEnum(if (expanded) MobileWidgetFlag.expanded else MobileWidgetFlag.collapsed);
+    }
     return flags;
 }
 
@@ -1083,6 +1091,7 @@ fn mobileWidgetActions(actions: canvas.WidgetActions) u32 {
     if (actions.select) flags |= @intFromEnum(MobileWidgetAction.select);
     if (actions.drag) flags |= @intFromEnum(MobileWidgetAction.drag);
     if (actions.drop_files) flags |= @intFromEnum(MobileWidgetAction.drop_files);
+    if (actions.dismiss) flags |= @intFromEnum(MobileWidgetAction.dismiss);
     return flags;
 }
 
@@ -1623,6 +1632,31 @@ test "mobile C ABI exposes GPU widget accessibility semantics" {
     try std.testing.expectEqualStrings("InvalidCommand", std.mem.span(zero_native_app_last_error_name(app)));
     try std.testing.expectEqual(@as(c_int, 0), zero_native_app_widget_semantics_by_id(app, 2, null));
     try std.testing.expectEqualStrings("InvalidCommand", std.mem.span(zero_native_app_last_error_name(app)));
+}
+
+test "mobile C ABI maps expanded state and dismiss action flags" {
+    const expanded_node = canvas.WidgetSemanticsNode{
+        .id = 1,
+        .role = .button,
+        .label = "Menu",
+        .bounds = geometry.RectF.init(0, 0, 120, 32),
+        .state = .{ .expanded = true },
+        .actions = .{ .dismiss = true },
+    };
+    try std.testing.expect((mobileWidgetFlags(expanded_node) & @intFromEnum(MobileWidgetFlag.expanded)) != 0);
+    try std.testing.expect((mobileWidgetFlags(expanded_node) & @intFromEnum(MobileWidgetFlag.collapsed)) == 0);
+    try std.testing.expect((mobileWidgetActions(expanded_node.actions) & @intFromEnum(MobileWidgetAction.dismiss)) != 0);
+    try std.testing.expectEqual(runtime.CanvasWidgetAccessibilityActionKind.dismiss, try mobileWidgetActionKindFromInt(@intFromEnum(MobileWidgetActionKind.dismiss)));
+
+    const collapsed_node = canvas.WidgetSemanticsNode{
+        .id = 2,
+        .role = .button,
+        .label = "Menu",
+        .bounds = geometry.RectF.init(0, 0, 120, 32),
+        .state = .{ .expanded = false },
+    };
+    try std.testing.expect((mobileWidgetFlags(collapsed_node) & @intFromEnum(MobileWidgetFlag.collapsed)) != 0);
+    try std.testing.expect((mobileWidgetFlags(collapsed_node) & @intFromEnum(MobileWidgetFlag.expanded)) == 0);
 }
 
 test "mobile C ABI dispatches GPU widget accessibility actions" {

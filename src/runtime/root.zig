@@ -1581,6 +1581,7 @@ pub const Runtime = struct {
                 .hovered = node.state.hovered or (node.id != 0 and node.id == view.canvas_widget_hovered_id),
                 .pressed = node.state.pressed or (node.id != 0 and node.id == view.canvas_widget_pressed_id),
                 .selected = canvasWidgetSelectedState(node),
+                .expanded = node.state.expanded,
                 .focusable = node.focusable,
                 .actions = platformWidgetAccessibilityActions(node.actions),
             };
@@ -2744,6 +2745,7 @@ pub const Runtime = struct {
                     .hovered = node.state.hovered or (node.id != 0 and node.id == view.canvas_widget_hovered_id),
                     .pressed = node.state.pressed or (node.id != 0 and node.id == view.canvas_widget_pressed_id),
                     .selected = canvasWidgetSelectedState(node),
+                    .expanded = node.state.expanded,
                     .actions = canvasWidgetActions(node.actions),
                     .text_selection = canvasTextRange(node.text_selection),
                     .text_composition = canvasTextRange(node.text_composition),
@@ -18171,6 +18173,7 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
         .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(12, 14, 96, 32), .text = "Deploy", .command = "deploy.run" },
         .{ .id = 3, .kind = .checkbox, .frame = geometry.RectF.init(12, 58, 120, 28), .text = "Preview", .state = .{ .selected = true } },
         .{ .id = 4, .kind = .text_field, .frame = geometry.RectF.init(12, 96, 160, 28), .text = "Search", .text_selection = canvas.TextSelection{ .anchor = 1, .focus = 4 }, .text_composition = canvas.TextRange.init(2, 5) },
+        .{ .id = 5, .kind = .select, .frame = geometry.RectF.init(184, 96, 120, 28), .text = "Production", .state = .{ .expanded = false }, .semantics = .{ .label = "Environment" } },
         .{ .id = 10, .kind = .data_grid, .frame = geometry.RectF.init(12, 132, 220, 64), .text = "Deployments", .layout = .{ .gap = 2 }, .children = &rows },
     };
     var layout_nodes: [16]canvas.WidgetLayoutNode = undefined;
@@ -18186,7 +18189,7 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     try std.testing.expect(platform_state.update_count >= 1);
     try std.testing.expectEqual(@as(platform.WindowId, 1), platform_state.window_id);
     try std.testing.expectEqualStrings("canvas", platform_state.view_label[0..platform_state.view_label_len]);
-    try std.testing.expectEqual(@as(usize, 11), platform_state.node_count);
+    try std.testing.expectEqual(@as(usize, 12), platform_state.node_count);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.group, platform_state.nodes[0].role);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.button, platform_state.nodes[1].role);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.checkbox, platform_state.nodes[2].role);
@@ -18194,6 +18197,8 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     const grid_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 10).?;
     const row_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 14).?;
     const cell_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 16).?;
+    const select_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 5).?;
+    try std.testing.expectEqual(@as(?bool, false), select_node.expanded);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.grid, grid_node.role);
     try std.testing.expectEqual(@as(?usize, 2), grid_node.grid_row_count);
     try std.testing.expectEqual(@as(?usize, 2), grid_node.grid_column_count);
@@ -18492,7 +18497,7 @@ test "runtime automation snapshot exposes canvas menu roles" {
     try std.testing.expectEqualStrings("menuitem", snapshot.widgets[2].role);
     try std.testing.expectEqualStrings("Archive", snapshot.widgets[2].name);
 
-    var a11y_buffer: [512]u8 = undefined;
+    var a11y_buffer: [4096]u8 = undefined;
     var a11y_writer = std.Io.Writer.fixed(&a11y_buffer);
     try automation.snapshot.writeA11yText(snapshot, &a11y_writer);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#1 role=menu name=\"More actions\"") != null);

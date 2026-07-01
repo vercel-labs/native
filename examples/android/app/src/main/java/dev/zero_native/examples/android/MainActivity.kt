@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
 import android.text.InputType
 import android.view.KeyEvent
@@ -244,6 +245,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             info.isFocused = (node.flags and WIDGET_FLAG_FOCUSED) != 0
             info.isAccessibilityFocused = accessibilityFocusedId == node.id
             info.isSelected = (node.flags and WIDGET_FLAG_SELECTED) != 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                if ((node.flags and WIDGET_FLAG_EXPANDED) != 0) {
+                    info.stateDescription = "Expanded"
+                } else if ((node.flags and WIDGET_FLAG_COLLAPSED) != 0) {
+                    info.stateDescription = "Collapsed"
+                }
+            }
             info.isCheckable = node.role == WIDGET_ROLE_CHECKBOX || node.role == WIDGET_ROLE_SWITCH
             info.isChecked = info.isCheckable && widgetValueSelected(node)
             info.isClickable = widgetSupportsAnyAction(node, WIDGET_ACTION_PRESS or WIDGET_ACTION_TOGGLE or WIDGET_ACTION_SELECT)
@@ -774,6 +782,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         private const val WIDGET_FLAG_SELECTED = 1 shl 3
         private const val WIDGET_FLAG_DISABLED = 1 shl 4
         private const val WIDGET_FLAG_FOCUSABLE = 1 shl 5
+        private const val WIDGET_FLAG_EXPANDED = 1 shl 6
+        private const val WIDGET_FLAG_COLLAPSED = 1 shl 7
         private const val WIDGET_ACTION_FOCUS = 1 shl 0
         private const val WIDGET_ACTION_PRESS = 1 shl 1
         private const val WIDGET_ACTION_TOGGLE = 1 shl 2

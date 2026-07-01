@@ -1206,6 +1206,7 @@ pub const WidgetAccessibilityNode = struct {
     hovered: bool = false,
     pressed: bool = false,
     selected: bool = false,
+    expanded: ?bool = null,
     focusable: bool = false,
     actions: WidgetAccessibilityActions = .{},
 };

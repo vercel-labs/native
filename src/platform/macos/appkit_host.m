@@ -1787,6 +1787,11 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
         element.accessibilityEnabled = (node.state_flags & ZERO_NATIVE_APPKIT_WIDGET_STATE_ENABLED) != 0;
         element.accessibilityFocused = (node.state_flags & ZERO_NATIVE_APPKIT_WIDGET_STATE_FOCUSED) != 0;
         element.accessibilitySelected = (node.state_flags & ZERO_NATIVE_APPKIT_WIDGET_STATE_SELECTED) != 0;
+        if ((node.state_flags & ZERO_NATIVE_APPKIT_WIDGET_STATE_EXPANDED) != 0) {
+            element.accessibilityExpanded = YES;
+        } else if ((node.state_flags & ZERO_NATIVE_APPKIT_WIDGET_STATE_COLLAPSED) != 0) {
+            element.accessibilityExpanded = NO;
+        }
         CGFloat nativeY = self.bounds.size.height - node.y - node.height;
         element.accessibilityFrameInParentSpace = NSMakeRect(node.x, nativeY, node.width, node.height);
         [elements addObject:element];

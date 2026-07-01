@@ -408,6 +408,8 @@ fn embedHeader() []const u8 {
     \\  ZERO_NATIVE_WIDGET_FLAG_SELECTED = 1u << 3,
     \\  ZERO_NATIVE_WIDGET_FLAG_DISABLED = 1u << 4,
     \\  ZERO_NATIVE_WIDGET_FLAG_FOCUSABLE = 1u << 5,
+    \\  ZERO_NATIVE_WIDGET_FLAG_EXPANDED = 1u << 6,
+    \\  ZERO_NATIVE_WIDGET_FLAG_COLLAPSED = 1u << 7,
     \\};
     \\enum {
     \\  ZERO_NATIVE_WIDGET_ACTION_FOCUS = 1u << 0,
@@ -1120,6 +1122,12 @@ fn iosViewController() []const u8 {
     \\    }
     \\
     \\    private func widgetAccessibilityValue(_ node: WidgetSemantics) -> String? {
+    \\        if (node.flags & UInt32(ZERO_NATIVE_WIDGET_FLAG_EXPANDED)) != 0 {
+    \\            return "Expanded"
+    \\        }
+    \\        if (node.flags & UInt32(ZERO_NATIVE_WIDGET_FLAG_COLLAPSED)) != 0 {
+    \\            return "Collapsed"
+    \\        }
     \\        if let value = node.value {
     \\            switch node.role {
     \\            case Int32(ZERO_NATIVE_WIDGET_ROLE_CHECKBOX), Int32(ZERO_NATIVE_WIDGET_ROLE_SWITCH):
@@ -1435,6 +1443,7 @@ fn androidActivity() []const u8 {
     \\import android.graphics.Color
     \\import android.graphics.Rect
     \\import android.net.Uri
+    \\import android.os.Build
     \\import android.os.Bundle
     \\import android.view.MotionEvent
     \\import android.view.SurfaceHolder
@@ -1629,6 +1638,13 @@ fn androidActivity() []const u8 {
     \\            info.isFocused = (node.flags and WIDGET_FLAG_FOCUSED) != 0
     \\            info.isAccessibilityFocused = accessibilityFocusedId == node.id
     \\            info.isSelected = (node.flags and WIDGET_FLAG_SELECTED) != 0
+    \\            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+    \\                if ((node.flags and WIDGET_FLAG_EXPANDED) != 0) {
+    \\                    info.stateDescription = "Expanded"
+    \\                } else if ((node.flags and WIDGET_FLAG_COLLAPSED) != 0) {
+    \\                    info.stateDescription = "Collapsed"
+    \\                }
+    \\            }
     \\            info.isCheckable = node.role == WIDGET_ROLE_CHECKBOX || node.role == WIDGET_ROLE_SWITCH
     \\            info.isChecked = info.isCheckable && widgetValueSelected(node)
     \\            info.isClickable = widgetSupportsAnyAction(node, WIDGET_ACTION_PRESS or WIDGET_ACTION_TOGGLE or WIDGET_ACTION_SELECT)
@@ -2106,6 +2122,8 @@ fn androidActivity() []const u8 {
     \\        private const val WIDGET_FLAG_SELECTED = 1 shl 3
     \\        private const val WIDGET_FLAG_DISABLED = 1 shl 4
     \\        private const val WIDGET_FLAG_FOCUSABLE = 1 shl 5
+    \\        private const val WIDGET_FLAG_EXPANDED = 1 shl 6
+    \\        private const val WIDGET_FLAG_COLLAPSED = 1 shl 7
     \\        private const val WIDGET_ACTION_FOCUS = 1 shl 0
     \\        private const val WIDGET_ACTION_PRESS = 1 shl 1
     \\        private const val WIDGET_ACTION_TOGGLE = 1 shl 2
@@ -3006,6 +3024,8 @@ test "mobile package templates include native command shells" {
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_gpu_frame_state_t") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_GPU_SURFACE_STATUS_READY") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_ROLE_TEXTBOX") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_FLAG_EXPANDED") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_FLAG_COLLAPSED") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_ACTION_SET_SELECTION") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_ACTION_KIND_SET_TEXT") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_ACTION_DISMISS") != null);
@@ -3028,6 +3048,7 @@ test "mobile package templates include native command shells" {
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "ZeroNativeShellConfig.assetEntryPath") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "accessibilityPerformEscape") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "dismissWidgetAccessibilityNode") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ios_controller, "ZERO_NATIVE_WIDGET_FLAG_EXPANDED") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "webView.loadFileURL") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "appendingPathComponent(\"Resources\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "keyboardWillChangeFrameNotification") != null);
@@ -3073,6 +3094,7 @@ test "mobile package templates include native command shells" {
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "performAction(virtualViewId") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "AccessibilityNodeInfo.ACTION_DISMISS") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "WIDGET_ACTION_KIND_DISMISS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, android_activity, "stateDescription = \"Expanded\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "rootWindowInsets") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "keyboardBottomInset") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "if (currentSurfaceHolder == holder) currentSurfaceHolder = null") != null);

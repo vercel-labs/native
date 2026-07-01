@@ -227,6 +227,8 @@ const widget_state_enabled: u32 = 1 << 0;
 const widget_state_focused: u32 = 1 << 1;
 const widget_state_selected: u32 = 1 << 2;
 const widget_state_pressed: u32 = 1 << 3;
+const widget_state_expanded: u32 = 1 << 4;
+const widget_state_collapsed: u32 = 1 << 5;
 const widget_action_focus: u32 = 1 << 0;
 const widget_action_press: u32 = 1 << 1;
 const widget_action_toggle: u32 = 1 << 2;
@@ -872,6 +874,9 @@ fn widgetStateFlags(node: platform_mod.WidgetAccessibilityNode) u32 {
     if (node.focused) flags |= widget_state_focused;
     if (node.selected) flags |= widget_state_selected;
     if (node.pressed) flags |= widget_state_pressed;
+    if (node.expanded) |expanded| {
+        flags |= if (expanded) widget_state_expanded else widget_state_collapsed;
+    }
     return flags;
 }
 
@@ -1400,6 +1405,18 @@ test "mac widget accessibility maps retained action flags" {
     try std.testing.expect(flags & widget_action_drag != 0);
     try std.testing.expect(flags & widget_action_drop_files != 0);
     try std.testing.expect(flags & widget_action_dismiss != 0);
+}
+
+test "mac widget accessibility maps expanded state flags" {
+    const expanded = widgetStateFlags(.{ .enabled = true, .expanded = true });
+    try std.testing.expect(expanded & widget_state_enabled != 0);
+    try std.testing.expect(expanded & widget_state_expanded != 0);
+    try std.testing.expect(expanded & widget_state_collapsed == 0);
+
+    const collapsed = widgetStateFlags(.{ .enabled = true, .expanded = false });
+    try std.testing.expect(collapsed & widget_state_enabled != 0);
+    try std.testing.expect(collapsed & widget_state_collapsed != 0);
+    try std.testing.expect(collapsed & widget_state_expanded == 0);
 }
 
 test "mac widget accessibility maps retained action events" {

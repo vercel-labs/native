@@ -3909,6 +3909,7 @@ pub const WidgetState = struct {
     focused: bool = false,
     disabled: bool = false,
     selected: bool = false,
+    expanded: ?bool = null,
 };
 
 pub const WidgetRenderState = struct {
@@ -10669,7 +10670,7 @@ fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNod
             .list = list.metrics,
             .scroll = scroll.metrics,
             .bounds = node.frame,
-            .state = node.widget.state,
+            .state = semanticState(node.widget),
             .focusable = semanticFocusable(node.widget, actions),
             .actions = actions,
             .text_selection = widgetTextSelectionRange(node.widget),
@@ -10804,6 +10805,21 @@ fn semanticValue(widget: Widget) ?f32 {
         .accordion, .checkbox, .switch_control, .toggle, .toggle_button => if (booleanControlSelected(widget)) 1 else 0,
         .slider, .progress => std.math.clamp(widget.value, 0, 1),
         .spinner => null,
+        else => null,
+    };
+}
+
+fn semanticState(widget: Widget) WidgetState {
+    var state = widget.state;
+    if (state.expanded == null) state.expanded = defaultExpandedState(widget);
+    return state;
+}
+
+fn defaultExpandedState(widget: Widget) ?bool {
+    return switch (widget.kind) {
+        .accordion => booleanControlSelected(widget),
+        .select, .combobox => false,
+        .popover, .menu_surface, .dropdown_menu => true,
         else => null,
     };
 }
@@ -11539,7 +11555,8 @@ fn widgetStatesEqual(a: WidgetState, b: WidgetState) bool {
         a.pressed == b.pressed and
         a.focused == b.focused and
         a.disabled == b.disabled and
-        a.selected == b.selected;
+        a.selected == b.selected and
+        a.expanded == b.expanded;
 }
 
 fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {
@@ -16037,6 +16054,7 @@ test "built-in accordion renders shadcn disclosure chrome and toggle semantics" 
     try std.testing.expectEqual(WidgetRole.group, semantics[0].role);
     try std.testing.expectEqualStrings("Advanced options", semantics[0].label);
     try std.testing.expectEqual(@as(?f32, 1), semantics[0].value);
+    try std.testing.expectEqual(@as(?bool, true), semantics[0].state.expanded);
     try std.testing.expect(semantics[0].focusable);
     try std.testing.expect(semantics[0].actions.toggle);
 
@@ -16305,12 +16323,15 @@ test "built-in modal surfaces render shadcn chrome and semantics" {
     try std.testing.expectEqual(WidgetRole.dialog, semantics[0].role);
     try std.testing.expectEqualStrings("Edit profile", semantics[0].label);
     try std.testing.expect(semantics[0].actions.dismiss);
+    try std.testing.expect(semantics[0].state.expanded == null);
     try std.testing.expectEqual(WidgetRole.dialog, semantics[1].role);
     try std.testing.expectEqualStrings("Command drawer", semantics[1].label);
     try std.testing.expect(semantics[1].actions.dismiss);
+    try std.testing.expect(semantics[1].state.expanded == null);
     try std.testing.expectEqual(WidgetRole.dialog, semantics[2].role);
     try std.testing.expectEqualStrings("Inspector", semantics[2].label);
     try std.testing.expect(semantics[2].actions.dismiss);
+    try std.testing.expect(semantics[2].state.expanded == null);
 
     const tokens = DesignTokens{
         .shadow = .{ .md = .{ .y = 0, .blur = 0, .spread = 0 } },
@@ -17639,6 +17660,7 @@ test "widget selects expose trigger semantics and render chevron chrome" {
     try std.testing.expectEqual(@as(usize, 1), semantics.len);
     try std.testing.expectEqual(WidgetRole.button, semantics[0].role);
     try std.testing.expectEqualStrings("Environment", semantics[0].label);
+    try std.testing.expectEqual(@as(?bool, false), semantics[0].state.expanded);
     try std.testing.expect(semantics[0].focusable);
     try std.testing.expect(semantics[0].actions.press);
     try std.testing.expect(!semantics[0].actions.set_text);
@@ -18268,6 +18290,7 @@ test "widget dropdown menus expose menu semantics with shadcn surface chrome" {
     try std.testing.expectEqual(@as(usize, 3), semantics.len);
     try std.testing.expectEqual(WidgetRole.menu, semantics[0].role);
     try std.testing.expectEqualStrings("Account menu", semantics[0].label);
+    try std.testing.expectEqual(@as(?bool, true), semantics[0].state.expanded);
     try std.testing.expectEqual(WidgetRole.menuitem, semantics[1].role);
     try std.testing.expectEqualStrings("Profile", semantics[1].label);
     try std.testing.expect(semantics[1].actions.press);
