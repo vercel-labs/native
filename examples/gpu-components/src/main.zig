@@ -24,6 +24,10 @@ const component_chrome_suffix_commands: usize = 0;
 const refresh_command = "components.refresh";
 const theme_command = "components.theme";
 const environment_toggle_command = "components.environment.toggle";
+const surface_dialog_command = "components.surface.dialog";
+const surface_drawer_command = "components.surface.drawer";
+const surface_sheet_command = "components.surface.sheet";
+const surface_close_command = "components.surface.close";
 const environment_option_commands = [_][]const u8{
     "components.environment.production",
     "components.environment.preview",
@@ -46,6 +50,10 @@ const environment_select_id: canvas.ObjectId = 172;
 const environment_select_text_id: canvas.ObjectId = environment_select_id * 16 + 3;
 const environment_menu_id: canvas.ObjectId = 216;
 const environment_option_base_id: canvas.ObjectId = 21601;
+const surface_overlay_id: canvas.ObjectId = 223;
+const surface_overlay_title_id: canvas.ObjectId = 224;
+const surface_overlay_body_id: canvas.ObjectId = 225;
+const surface_overlay_close_id: canvas.ObjectId = 226;
 const popover_blur_id: canvas.ObjectId = 140 * 16 + 12;
 const preview_image_id: canvas.ImageId = 42;
 const preview_image_command_id: canvas.ObjectId = 118 * 16 + 1;
@@ -61,6 +69,14 @@ const ComponentVirtualScroll = struct {
 const ComponentUiState = struct {
     environment_select_open: bool = false,
     environment_index: usize = 0,
+    surface_overlay: ComponentSurfaceOverlay = .none,
+};
+
+const ComponentSurfaceOverlay = enum {
+    none,
+    dialog,
+    drawer,
+    sheet,
 };
 
 const ComponentThemeMode = enum {
@@ -105,6 +121,24 @@ fn environmentCommandIndex(command_name: []const u8) ?usize {
         if (std.mem.eql(u8, command_name, option_command)) return index;
     }
     return null;
+}
+
+fn surfaceOverlayLabel(overlay: ComponentSurfaceOverlay) []const u8 {
+    return switch (overlay) {
+        .dialog => "Confirm deployment",
+        .drawer => "Project settings",
+        .sheet => "Command palette",
+        .none => "Surface",
+    };
+}
+
+fn surfaceOverlayBody(overlay: ComponentSurfaceOverlay) []const u8 {
+    return switch (overlay) {
+        .dialog => "Production rollout is ready for review.",
+        .drawer => "Team notifications are synced.",
+        .sheet => "Recent actions are ready.",
+        .none => "",
+    };
 }
 
 const preview_image_pixels = [_]u8{
@@ -212,6 +246,7 @@ const GpuComponentsApp = struct {
     virtual_scroll: ComponentVirtualScroll = .{},
     environment_select_open: bool = false,
     environment_index: usize = 0,
+    surface_overlay: ComponentSurfaceOverlay = .none,
     canvas_size: geometry.SizeF = default_canvas_size,
     pixel_snap_scale: f32 = 1,
     pixels: ?[]u8 = null,
@@ -274,6 +309,14 @@ const GpuComponentsApp = struct {
                     try self.toggleEnvironmentSelect(runtime, command);
                 } else if (environmentCommandIndex(command.name)) |index| {
                     try self.selectEnvironment(runtime, command, index);
+                } else if (std.mem.eql(u8, command.name, surface_dialog_command)) {
+                    try self.openSurfaceOverlay(runtime, command, .dialog);
+                } else if (std.mem.eql(u8, command.name, surface_drawer_command)) {
+                    try self.openSurfaceOverlay(runtime, command, .drawer);
+                } else if (std.mem.eql(u8, command.name, surface_sheet_command)) {
+                    try self.openSurfaceOverlay(runtime, command, .sheet);
+                } else if (std.mem.eql(u8, command.name, surface_close_command)) {
+                    try self.closeSurfaceOverlay(runtime, command);
                 } else if (std.mem.eql(u8, command.name, refresh_command)) {
                     try self.refresh(runtime, command);
                 } else if (std.mem.eql(u8, command.name, theme_command)) {
@@ -319,7 +362,12 @@ const GpuComponentsApp = struct {
         const target = pointer_event.target orelse return;
         switch (pointer_event.pointer.phase) {
             .up => {
-                if (target.id == environment_select_id or environmentOptionIndex(target.id) != null) return;
+                if (target.id == environment_select_id or
+                    environmentOptionIndex(target.id) != null or
+                    target.id == 175 or
+                    target.id == 176 or
+                    target.id == 177 or
+                    target.id == surface_overlay_close_id) return;
                 if (self.environment_select_open) {
                     self.environment_select_open = false;
                     try self.updateComponentsCanvasModel(runtime, pointer_event.window_id);
@@ -431,6 +479,7 @@ const GpuComponentsApp = struct {
         self.refresh_count += 1;
         self.virtual_scroll = .{};
         self.environment_select_open = false;
+        self.surface_overlay = .none;
         const gpu_frame = try runtime.gpuSurfaceFrame(command.window_id, canvas_label);
         _ = self.updateCanvasSize(componentSurfaceSize(gpu_frame.size));
         try installComponentsCanvasModel(runtime, command.window_id, self.virtual_scroll, self.componentUiState(), self.componentTokens(), self.canvas_size);
@@ -455,6 +504,23 @@ const GpuComponentsApp = struct {
         var status_buffer: [96]u8 = undefined;
         const status = try std.fmt.bufPrint(&status_buffer, "Environment selected: {s}.", .{environmentLabel(self.environment_index)});
         try self.updateStatus(runtime, command.window_id, status);
+    }
+
+    fn openSurfaceOverlay(self: *@This(), runtime: *zero_native.Runtime, command: zero_native.CommandEvent, overlay: ComponentSurfaceOverlay) anyerror!void {
+        self.environment_select_open = false;
+        self.surface_overlay = overlay;
+        try self.updateComponentsCanvasModel(runtime, command.window_id);
+
+        var status_buffer: [96]u8 = undefined;
+        const status = try std.fmt.bufPrint(&status_buffer, "{s} surface opened.", .{surfaceOverlayLabel(overlay)});
+        try self.updateStatus(runtime, command.window_id, status);
+    }
+
+    fn closeSurfaceOverlay(self: *@This(), runtime: *zero_native.Runtime, command: zero_native.CommandEvent) anyerror!void {
+        if (self.surface_overlay == .none) return;
+        self.surface_overlay = .none;
+        try self.updateComponentsCanvasModel(runtime, command.window_id);
+        try self.updateStatus(runtime, command.window_id, "Surface closed.");
     }
 
     fn changeTheme(self: *@This(), runtime: *zero_native.Runtime, command: zero_native.CommandEvent) anyerror!void {
@@ -619,6 +685,7 @@ const GpuComponentsApp = struct {
         return .{
             .environment_select_open = self.environment_select_open,
             .environment_index = self.environment_index,
+            .surface_overlay = self.surface_overlay,
         };
     }
 
@@ -962,14 +1029,10 @@ fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode,
         .{ .id = 150, .kind = .table, .frame = rect(0, 0, 360, 28), .text = "Finished component behavior", .value = virtual_scroll.data, .layout = .{ .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .children = &data_rows },
         .{ .id = 160, .kind = .tooltip, .frame = rect(392, 0, 176, 32), .text = "Tooltip rendered on GPU", .semantics = .{ .label = "GPU tooltip" } },
     };
-    const accordion_children = [_]canvas.Widget{
-        .{ .id = 220, .kind = .text, .frame = rect(12, 10, 132, 18), .text = "Accordion", .size = .sm },
-    };
-    const bubble_children = [_]canvas.Widget{
-        .{ .id = 221, .kind = .text, .frame = rect(12, 10, 132, 18), .text = "Bubble", .size = .sm },
-    };
-    const resizable_children = [_]canvas.Widget{
-        .{ .id = 222, .kind = .text, .frame = rect(12, 10, 132, 18), .text = "Resizable", .size = .sm },
+    const surface_overlay_children = [_]canvas.Widget{
+        .{ .id = surface_overlay_title_id, .kind = .text, .frame = rect(0, 0, 240, 24), .text = surfaceOverlayLabel(ui_state.surface_overlay), .size = .lg },
+        .{ .id = surface_overlay_body_id, .kind = .text, .frame = rect(0, 40, 260, 22), .text = surfaceOverlayBody(ui_state.surface_overlay), .size = .sm },
+        .{ .id = surface_overlay_close_id, .kind = .button, .frame = rect(0, 92, 96, 34), .text = "Close", .variant = .outline, .command = surface_close_command, .semantics = .{ .label = "Close surface" } },
     };
     const environment_menu_items = [_]canvas.Widget{
         .{ .id = environmentOptionId(0), .kind = .menu_item, .text = environment_options[0], .command = environment_option_commands[0], .state = .{ .selected = ui_state.environment_index == 0 }, .semantics = .{ .label = environment_options[0] } },
@@ -983,20 +1046,16 @@ fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode,
         .{ .id = 106, .kind = .stack, .frame = rect(64, 124, 352, 374), .semantics = .{ .label = "Input controls" }, .children = &form_controls },
         .{ .id = 120, .kind = .list, .frame = rect(456, 124, 170, 56), .value = virtual_scroll.nav, .layout = .{ .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .semantics = .{ .label = "Component navigation" }, .children = &nav_items },
         .{ .id = 130, .kind = .scroll_view, .frame = rect(652, 124, 186, 56), .value = virtual_scroll.behavior, .layout = .{ .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .semantics = .{ .label = "Scrollable behavior list" }, .children = &scroll_items },
-        .{ .id = 179, .kind = .text, .frame = rect(652, 210, 186, 22), .text = "Built-in components", .size = .sm },
-        .{ .id = 180, .kind = .list, .frame = rect(652, 238, 186, 112), .value = virtual_scroll.catalog, .layout = .{ .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .semantics = .{ .label = "Shadcn-style built-in component catalog" }, .children = &component_catalog_items },
-        .{ .id = 173, .kind = .alert, .frame = rect(652, 374, 238, 70), .text = "Web-inspired. Native-rendered.", .semantics = .{ .label = "Built-in alert" } },
+        .{ .id = 179, .kind = .text, .frame = rect(652, 210, 238, 22), .text = "Built-in components", .size = .sm },
+        .{ .id = 180, .kind = .list, .frame = rect(652, 238, 238, 384), .value = virtual_scroll.catalog, .layout = .{ .virtualized = true, .virtual_item_extent = 44, .virtual_overscan = 0 }, .semantics = .{ .label = "Shadcn-style built-in component catalog" }, .children = &component_catalog_items },
         .{ .id = 174, .kind = .card, .frame = rect(456, 374, 170, 70), .text = "Card primitive", .semantics = .{ .label = "Built-in card" } },
-        .{ .id = 175, .kind = .dialog, .frame = rect(456, 462, 170, 58), .text = "Dialog", .semantics = .{ .label = "Built-in dialog" } },
-        .{ .id = 176, .kind = .drawer, .frame = rect(644, 462, 118, 58), .text = "Drawer", .semantics = .{ .label = "Built-in drawer" } },
-        .{ .id = 177, .kind = .sheet, .frame = rect(778, 462, 112, 58), .text = "Sheet", .semantics = .{ .label = "Built-in sheet" } },
-        .{ .id = 178, .kind = .accordion, .frame = rect(704, 540, 186, 36), .semantics = .{ .label = "Built-in accordion" }, .children = &accordion_children },
-        .{ .id = 213, .kind = .bubble, .frame = rect(704, 586, 90, 36), .semantics = .{ .label = "Built-in bubble" }, .children = &bubble_children },
-        .{ .id = 214, .kind = .resizable, .frame = rect(804, 586, 86, 36), .semantics = .{ .label = "Built-in resizable" }, .children = &resizable_children },
+        .{ .id = 175, .kind = .button, .frame = rect(456, 462, 170, 44), .text = "Dialog", .variant = .outline, .command = surface_dialog_command, .semantics = .{ .label = "Open dialog" } },
+        .{ .id = 176, .kind = .button, .frame = rect(456, 516, 82, 44), .text = "Drawer", .variant = .outline, .command = surface_drawer_command, .semantics = .{ .label = "Open drawer" } },
+        .{ .id = 177, .kind = .button, .frame = rect(544, 516, 82, 44), .text = "Sheet", .variant = .outline, .command = surface_sheet_command, .semantics = .{ .label = "Open sheet" } },
         .{ .id = 140, .kind = .popover, .frame = rect(456, 248, 174, 88), .backdrop_blur_token = .sm, .semantics = .{ .label = "Actions popover" }, .children = &popover_children },
-        .{ .id = 149, .kind = .stack, .frame = rect(64, 540, 620, 60), .semantics = .{ .label = "Data controls" }, .children = &data_panel_children },
+        .{ .id = 149, .kind = .stack, .frame = rect(64, 584, 568, 60), .semantics = .{ .label = "Data controls" }, .children = &data_panel_children },
     };
-    var top_widgets: [base_top_widgets.len + 1]canvas.Widget = undefined;
+    var top_widgets: [base_top_widgets.len + 2]canvas.Widget = undefined;
     @memcpy(top_widgets[0..base_top_widgets.len], base_top_widgets[0..]);
     var top_widget_count = base_top_widgets.len;
     if (ui_state.environment_select_open) {
@@ -1007,6 +1066,26 @@ fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode,
             .layout = canvas.builtinComponentWidget(.dropdown_menu, .{}).layout,
             .semantics = .{ .label = "Environment options" },
             .children = &environment_menu_items,
+        };
+        top_widget_count += 1;
+    }
+    if (ui_state.surface_overlay != .none) {
+        top_widgets[top_widget_count] = .{
+            .id = surface_overlay_id,
+            .kind = switch (ui_state.surface_overlay) {
+                .dialog => .dialog,
+                .drawer => .drawer,
+                .sheet => .sheet,
+                .none => unreachable,
+            },
+            .frame = switch (ui_state.surface_overlay) {
+                .dialog => rect(352, 176, 360, 190),
+                .drawer => rect(684, 96, 238, 456),
+                .sheet => rect(312, 448, 430, 164),
+                .none => unreachable,
+            },
+            .semantics = .{ .label = surfaceOverlayLabel(ui_state.surface_overlay) },
+            .children = &surface_overlay_children,
         };
         top_widget_count += 1;
     }
@@ -1367,18 +1446,19 @@ test "gpu components layout keeps finished controls visually separated" {
     try std.testing.expect(layout.findById(environmentOptionId(0)) == null);
     try expectComponentWidgetFrame(layout, 120, rect(456, 124, 170, 56));
     try expectComponentWidgetFrame(layout, 130, rect(652, 124, 186, 56));
-    try expectComponentWidgetFrame(layout, 179, rect(652, 210, 186, 22));
-    try expectComponentWidgetFrame(layout, 180, rect(652, 238, 186, 112));
-    try expectComponentWidgetFrame(layout, 181, rect(652, 238, 186, 28));
-    try expectComponentWidgetFrame(layout, 184, rect(652, 322, 186, 28));
-    try expectComponentWidgetFrame(layout, 173, rect(652, 374, 238, 70));
+    try expectComponentWidgetFrame(layout, 179, rect(652, 210, 238, 22));
+    try expectComponentWidgetFrame(layout, 180, rect(652, 238, 238, 384));
+    try expectComponentWidgetFrame(layout, 181, rect(652, 238, 238, 44));
+    try expectComponentWidgetFrame(layout, 184, rect(652, 370, 238, 44));
+    try expectComponentWidgetFrame(layout, 189, rect(652, 590, 238, 44));
+    try std.testing.expect(layout.findById(173) == null);
+    try std.testing.expect(layout.findById(178) == null);
+    try std.testing.expect(layout.findById(213) == null);
+    try std.testing.expect(layout.findById(214) == null);
     try expectComponentWidgetFrame(layout, 174, rect(456, 374, 170, 70));
-    try expectComponentWidgetFrame(layout, 175, rect(456, 462, 170, 58));
-    try expectComponentWidgetFrame(layout, 176, rect(644, 462, 118, 58));
-    try expectComponentWidgetFrame(layout, 177, rect(778, 462, 112, 58));
-    try expectComponentWidgetFrame(layout, 178, rect(704, 540, 186, 36));
-    try expectComponentWidgetFrame(layout, 213, rect(704, 586, 90, 36));
-    try expectComponentWidgetFrame(layout, 214, rect(804, 586, 86, 36));
+    try expectComponentWidgetFrame(layout, 175, rect(456, 462, 170, 44));
+    try expectComponentWidgetFrame(layout, 176, rect(456, 516, 82, 44));
+    try expectComponentWidgetFrame(layout, 177, rect(544, 516, 82, 44));
     try expectComponentWidgetFrame(layout, 140, rect(456, 248, 174, 88));
     try expectComponentWidgetsDoNotOverlap(layout, 111, 112);
     try expectComponentWidgetsDoNotOverlap(layout, 113, 114);
@@ -1394,25 +1474,22 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetsDoNotOverlap(layout, 130, 140);
     try expectComponentWidgetsDoNotOverlap(layout, 130, 180);
     try expectComponentWidgetsDoNotOverlap(layout, 140, 180);
-    try expectComponentWidgetsDoNotOverlap(layout, 173, 180);
-    try expectComponentWidgetsDoNotOverlap(layout, 173, 140);
-    try expectComponentWidgetsDoNotOverlap(layout, 174, 173);
     try expectComponentWidgetsDoNotOverlap(layout, 174, 140);
     try expectComponentWidgetsDoNotOverlap(layout, 175, 174);
     try expectComponentWidgetsDoNotOverlap(layout, 175, 176);
     try expectComponentWidgetsDoNotOverlap(layout, 176, 177);
-    try expectComponentWidgetsDoNotOverlap(layout, 177, 173);
     try expectComponentWidgetsDoNotOverlap(layout, 175, 149);
-    try expectComponentWidgetsDoNotOverlap(layout, 178, 149);
-    try expectComponentWidgetsDoNotOverlap(layout, 178, 213);
-    try expectComponentWidgetsDoNotOverlap(layout, 213, 214);
+    try expectComponentWidgetsDoNotOverlap(layout, 176, 149);
+    try expectComponentWidgetsDoNotOverlap(layout, 177, 149);
+    try expectComponentWidgetsDoNotOverlap(layout, 180, 140);
+    try expectComponentWidgetsDoNotOverlap(layout, 180, 149);
 
     try std.testing.expect(layout.findById(151) == null);
-    try expectComponentWidgetFrame(layout, 150, rect(64, 540, 360, 28));
-    try expectComponentWidgetFrame(layout, 152, rect(64, 540, 360, 28));
-    try expectComponentWidgetFrame(layout, 156, rect(64, 540, 180, 28));
-    try expectComponentWidgetFrame(layout, 157, rect(244, 540, 180, 28));
-    try expectComponentWidgetFrame(layout, 160, rect(456, 540, 176, 32));
+    try expectComponentWidgetFrame(layout, 150, rect(64, 584, 360, 28));
+    try expectComponentWidgetFrame(layout, 152, rect(64, 584, 360, 28));
+    try expectComponentWidgetFrame(layout, 156, rect(64, 584, 180, 28));
+    try expectComponentWidgetFrame(layout, 157, rect(244, 584, 180, 28));
+    try expectComponentWidgetFrame(layout, 160, rect(456, 584, 176, 32));
     try expectComponentWidgetsDoNotOverlap(layout, 150, 160);
     try expectComponentWidgetsDoNotOverlap(layout, 140, 149);
 
@@ -1432,12 +1509,20 @@ test "gpu components layout keeps finished controls visually separated" {
     try std.testing.expect(open_layout.findById(environmentOptionId(1)).?.widget.state.selected);
     try std.testing.expect(!open_layout.findById(environmentOptionId(2)).?.widget.state.selected);
 
+    var dialog_nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
+    const dialog_layout = try buildComponentsWidgetLayoutWithStateAndSize(&dialog_nodes, .{}, .{
+        .surface_overlay = .dialog,
+    }, default_canvas_size);
+    try expectComponentWidgetFrame(dialog_layout, surface_overlay_id, rect(352, 176, 360, 190));
+    try expectComponentWidgetFrame(dialog_layout, surface_overlay_title_id, rect(352, 176, 240, 24));
+    try expectComponentWidgetFrame(dialog_layout, surface_overlay_close_id, rect(352, 268, 96, 34));
+
     var scrolled_nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
     const scrolled_layout = try buildComponentsWidgetLayoutWithScroll(&scrolled_nodes, .{
         .nav = 28,
         .behavior = 56,
         .data = 56,
-        .catalog = 84,
+        .catalog = 88,
     });
     try std.testing.expect(scrolled_layout.findById(121) == null);
     try expectComponentWidgetFrame(scrolled_layout, 122, rect(456, 124, 170, 28));
@@ -1446,12 +1531,13 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetFrame(scrolled_layout, 133, rect(652, 124, 186, 28));
     try expectComponentWidgetFrame(scrolled_layout, 134, rect(652, 152, 186, 28));
     try std.testing.expect(scrolled_layout.findById(152) == null);
-    try expectComponentWidgetFrame(scrolled_layout, 153, rect(64, 540, 360, 28));
-    try expectComponentWidgetFrame(scrolled_layout, 158, rect(64, 540, 180, 28));
-    try expectComponentWidgetFrame(scrolled_layout, 159, rect(244, 540, 180, 28));
+    try expectComponentWidgetFrame(scrolled_layout, 153, rect(64, 584, 360, 28));
+    try expectComponentWidgetFrame(scrolled_layout, 158, rect(64, 584, 180, 28));
+    try expectComponentWidgetFrame(scrolled_layout, 159, rect(244, 584, 180, 28));
     try std.testing.expect(scrolled_layout.findById(181) == null);
-    try expectComponentWidgetFrame(scrolled_layout, 184, rect(652, 238, 186, 28));
-    try expectComponentWidgetFrame(scrolled_layout, 187, rect(652, 322, 186, 28));
+    try std.testing.expect(scrolled_layout.findById(182) == null);
+    try expectComponentWidgetFrame(scrolled_layout, 183, rect(652, 238, 238, 44));
+    try expectComponentWidgetFrame(scrolled_layout, 186, rect(652, 370, 238, 44));
 
     var smooth_scrolled_nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
     const smooth_scrolled_layout = try buildComponentsWidgetLayoutWithScroll(&smooth_scrolled_nodes, .{
@@ -1576,7 +1662,7 @@ test "gpu components display list renders stable reference snapshot" {
     const surface = (try canvas.ReferenceRenderSurface.initWithScratch(@intFromFloat(canvas_width), @intFromFloat(canvas_height), pixels, scratch)).withImages(&preview_images);
     try surface.renderPass(frame.renderPass(), color(247, 249, 252));
 
-    try std.testing.expectEqual(@as(u64, 9559768891348669277), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 4579527735702951346), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -1670,14 +1756,10 @@ test "gpu components semantics cover retained widget families" {
     try expectSemanticRole(semantics, 170, .radio);
     try expectSemanticRole(semantics, 171, .textbox);
     try expectSemanticRole(semantics, 172, .button);
-    try expectSemanticRole(semantics, 173, .group);
     try expectSemanticRole(semantics, 174, .group);
-    try expectSemanticRole(semantics, 175, .dialog);
-    try expectSemanticRole(semantics, 176, .dialog);
-    try expectSemanticRole(semantics, 177, .dialog);
-    try expectSemanticRole(semantics, 178, .group);
-    try expectSemanticRole(semantics, 213, .group);
-    try expectSemanticRole(semantics, 214, .group);
+    try expectSemanticRole(semantics, 175, .button);
+    try expectSemanticRole(semantics, 176, .button);
+    try expectSemanticRole(semantics, 177, .button);
     try expectSemanticRole(semantics, 180, .list);
     try expectSemanticRole(semantics, 181, .group);
 
@@ -1708,6 +1790,7 @@ test "gpu components semantics cover retained widget families" {
     try std.testing.expect(catalog.scroll.present);
     try std.testing.expect(catalog.actions.increment);
     try std.testing.expect(catalog.actions.decrement);
+    try std.testing.expectEqual(@as(f32, 384), catalog.scroll.viewport_extent);
     const first_catalog_item = expectSemantic(semantics, 181);
     try std.testing.expect(first_catalog_item.state.selected);
     try std.testing.expectEqual(@as(u32, canvas.builtin_component_names.len), first_catalog_item.list.item_count);
@@ -1928,12 +2011,18 @@ test "gpu components app registers component lab on first gpu frame" {
     try std.testing.expectEqual(@as(?usize, 1), componentSnapshotWidget(snapshot, 156).?.grid_row_index);
     try std.testing.expectEqual(@as(?usize, 0), componentSnapshotWidget(snapshot, 156).?.grid_column_index);
     try std.testing.expectEqualStrings("tooltip", componentSnapshotWidget(snapshot, 160).?.role);
-    const accordion = componentSnapshotWidget(snapshot, 178).?;
-    try std.testing.expectEqualStrings("group", accordion.role);
-    try std.testing.expect(accordion.actions.toggle);
-    const resizable = componentSnapshotWidget(snapshot, 214).?;
-    try std.testing.expectEqualStrings("group", resizable.role);
-    try std.testing.expect(resizable.actions.drag);
+    const catalog_snapshot = componentSnapshotWidget(snapshot, 180).?;
+    try std.testing.expectEqual(@as(f32, 384), catalog_snapshot.scroll.viewport_extent);
+    try std.testing.expect(componentSnapshotWidget(snapshot, 189) != null);
+    const dialog_launcher = componentSnapshotWidget(snapshot, 175).?;
+    try std.testing.expectEqualStrings("button", dialog_launcher.role);
+    try std.testing.expect(dialog_launcher.actions.press);
+    const drawer_launcher = componentSnapshotWidget(snapshot, 176).?;
+    try std.testing.expectEqualStrings("button", drawer_launcher.role);
+    try std.testing.expect(drawer_launcher.actions.press);
+    const sheet_launcher = componentSnapshotWidget(snapshot, 177).?;
+    try std.testing.expectEqualStrings("button", sheet_launcher.role);
+    try std.testing.expect(sheet_launcher.actions.press);
 
     resetComponentDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 111 focus");
@@ -2163,7 +2252,7 @@ test "gpu components native theme command updates retained design tokens" {
 
     const themed_layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
     try expectComponentWidgetFrame(themed_layout, 111, rect(64, 124, 148, 34));
-    try expectComponentWidgetFrame(themed_layout, 160, rect(456, 540, 176, 32));
+    try expectComponentWidgetFrame(themed_layout, 160, rect(456, 584, 176, 32));
 }
 
 test "gpu components follow system appearance until toolbar theme override" {
@@ -2390,6 +2479,58 @@ test "gpu components pointer opens and selects environment dropdown options" {
     try expectComponentTextCommand(display_list, environment_select_text_id, "Preview");
     status_view = componentViewByLabel(&harness.runtime, "status-label").?;
     try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Environment selected: Preview.") != null);
+}
+
+test "gpu components surface launchers open and close overlays" {
+    var harness: zero_native.TestHarness() = undefined;
+    harness.init(.{ .size = geometry.SizeF.init(window_width, window_height) });
+    harness.null_platform.gpu_surfaces = true;
+
+    var app = GpuComponentsApp{};
+    defer app.deinit();
+    const app_handle = app.app();
+    try harness.start(app_handle);
+
+    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(canvas_width, canvas_height),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000_000,
+        .nonblank = true,
+    } });
+
+    resetComponentDirty(&harness.runtime);
+    try dispatchComponentPointerClick(&harness.runtime, app_handle, 175);
+    try std.testing.expectEqual(ComponentSurfaceOverlay.dialog, app.surface_overlay);
+    var layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    try expectComponentWidgetFrame(layout, surface_overlay_id, rect(352, 176, 360, 190));
+    try std.testing.expectEqualStrings("Confirm deployment", layout.findById(surface_overlay_title_id).?.widget.text);
+    var snapshot = harness.runtime.automationSnapshot("Components");
+    try std.testing.expectEqualStrings("dialog", componentSnapshotWidget(snapshot, surface_overlay_id).?.role);
+    try std.testing.expect(componentSnapshotWidget(snapshot, surface_overlay_close_id).?.actions.press);
+    const status_view = componentViewByLabel(&harness.runtime, "status-label").?;
+    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Confirm deployment surface opened.") != null);
+
+    resetComponentDirty(&harness.runtime);
+    try dispatchComponentPointerClick(&harness.runtime, app_handle, surface_overlay_close_id);
+    try std.testing.expectEqual(ComponentSurfaceOverlay.none, app.surface_overlay);
+    snapshot = harness.runtime.automationSnapshot("Components");
+    try std.testing.expect(componentSnapshotWidget(snapshot, surface_overlay_id) == null);
+
+    resetComponentDirty(&harness.runtime);
+    try dispatchComponentPointerClick(&harness.runtime, app_handle, 176);
+    try std.testing.expectEqual(ComponentSurfaceOverlay.drawer, app.surface_overlay);
+    layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    try expectComponentWidgetFrame(layout, surface_overlay_id, rect(684, 96, 238, 456));
+    try std.testing.expectEqualStrings("Project settings", layout.findById(surface_overlay_title_id).?.widget.text);
+
+    resetComponentDirty(&harness.runtime);
+    try dispatchComponentPointerClick(&harness.runtime, app_handle, 177);
+    try std.testing.expectEqual(ComponentSurfaceOverlay.sheet, app.surface_overlay);
+    layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    try expectComponentWidgetFrame(layout, surface_overlay_id, rect(312, 448, 430, 164));
+    try std.testing.expectEqualStrings("Command palette", layout.findById(surface_overlay_title_id).?.widget.text);
 }
 
 test "gpu components slider drag presents incremental cached frame" {
