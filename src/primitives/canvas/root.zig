@@ -8680,13 +8680,7 @@ fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: DesignT
 
 fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const visual = selectionControlVisualTokens(widget, tokens);
-    const box_size = @min(@max(widgetSizedDensityValue(widget, tokens, 14), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
-    const box = pixelSnapGeometryRect(tokens, geometry.RectF.init(
-        widget.frame.x,
-        widget.frame.y + (widget.frame.height - box_size) * 0.5,
-        box_size,
-        box_size,
-    ));
+    const box = checkboxWidgetBoxRect(widget, tokens);
     const selected = booleanControlSelected(widget);
     const radius = controlRadius(widget, visual, tokens.radius.sm);
     try builder.fillRoundedRect(.{
@@ -8730,13 +8724,7 @@ fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
 
 fn emitRadioWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const visual = selectionControlVisualTokens(widget, tokens);
-    const circle_size = @min(@max(widgetSizedDensityValue(widget, tokens, 14), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
-    const circle = pixelSnapGeometryRect(tokens, geometry.RectF.init(
-        widget.frame.x,
-        widget.frame.y + (widget.frame.height - circle_size) * 0.5,
-        circle_size,
-        circle_size,
-    ));
+    const circle = radioWidgetCircleRect(widget, tokens);
     const selected = booleanControlSelected(widget);
     const radius = controlRadius(widget, visual, circle.height * 0.5);
     try builder.fillRoundedRect(.{
@@ -8756,7 +8744,7 @@ fn emitRadioWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Erro
     });
     if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 3, circle, radius);
     if (selected) {
-        const dot_size = @max(0, circle_size * 0.48);
+        const dot_size = @max(0, circle.height * 0.48);
         const dot = pixelSnapGeometryRect(tokens, geometry.RectF.init(
             circle.x + (circle.width - dot_size) * 0.5,
             circle.y + (circle.height - dot_size) * 0.5,
@@ -8777,14 +8765,7 @@ fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
     const selected = booleanControlSelected(widget);
     const visual = selectionControlVisualTokens(widget, tokens);
     const knob_inset = widgetSizedDensityValue(widget, tokens, 2);
-    const track_width = @min(widget.frame.width, @max(widgetSizedDensityValue(widget, tokens, 36), widget.frame.height * 1.75));
-    const track_height = @min(widget.frame.height, widgetSizedDensityValue(widget, tokens, 24));
-    const track = pixelSnapGeometryRect(tokens, geometry.RectF.init(
-        widget.frame.x,
-        widget.frame.y + (widget.frame.height - track_height) * 0.5,
-        track_width,
-        track_height,
-    ));
+    const track = toggleWidgetTrackRect(widget, tokens);
     const track_radius = controlRadius(widget, visual, track.height * 0.5);
     const knob_size = @max(0, track.height - knob_inset * 2);
     const knob_x = if (selected)
@@ -8824,26 +8805,9 @@ fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
 fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const value = std.math.clamp(widget.value, 0, 1);
     const visual = selectionControlVisualTokens(widget, tokens);
-    const track_height: f32 = widgetSizedDensityValue(widget, tokens, 4);
-    const track = pixelSnapGeometryRect(tokens, geometry.RectF.init(
-        widget.frame.x,
-        widget.frame.y + (widget.frame.height - track_height) * 0.5,
-        widget.frame.width,
-        track_height,
-    ));
+    const track = sliderWidgetTrackRect(widget, tokens);
     const active = pixelSnapGeometryRect(tokens, geometry.RectF.init(track.x, track.y, track.width * value, track.height));
-    const knob_size = @min(@max(widgetSizedDensityValue(widget, tokens, 14), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
-    const knob_x = std.math.clamp(
-        widget.frame.x + widget.frame.width * value - knob_size * 0.5,
-        widget.frame.x,
-        widget.frame.x + @max(0, widget.frame.width - knob_size),
-    );
-    const knob = pixelSnapGeometryRect(tokens, geometry.RectF.init(
-        knob_x,
-        widget.frame.y + (widget.frame.height - knob_size) * 0.5,
-        knob_size,
-        knob_size,
-    ));
+    const knob = sliderWidgetKnobRect(widget, tokens);
     const track_radius = controlRadius(widget, visual, track.height * 0.5);
     const knob_radius = controlRadius(widget, visual, knob.height * 0.5);
 
@@ -8874,6 +8838,63 @@ fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
             .width = if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
     });
+}
+
+fn checkboxWidgetBoxRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    const box_size = @min(@max(widgetSizedDensityValue(widget, tokens, 14), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
+    return pixelSnapGeometryRect(tokens, geometry.RectF.init(
+        widget.frame.x,
+        widget.frame.y + (widget.frame.height - box_size) * 0.5,
+        box_size,
+        box_size,
+    ));
+}
+
+fn radioWidgetCircleRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    const circle_size = @min(@max(widgetSizedDensityValue(widget, tokens, 14), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
+    return pixelSnapGeometryRect(tokens, geometry.RectF.init(
+        widget.frame.x,
+        widget.frame.y + (widget.frame.height - circle_size) * 0.5,
+        circle_size,
+        circle_size,
+    ));
+}
+
+fn toggleWidgetTrackRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    const track_width = @min(widget.frame.width, @max(widgetSizedDensityValue(widget, tokens, 36), widget.frame.height * 1.75));
+    const track_height = @min(widget.frame.height, widgetSizedDensityValue(widget, tokens, 24));
+    return pixelSnapGeometryRect(tokens, geometry.RectF.init(
+        widget.frame.x,
+        widget.frame.y + (widget.frame.height - track_height) * 0.5,
+        track_width,
+        track_height,
+    ));
+}
+
+fn sliderWidgetTrackRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    const track_height: f32 = widgetSizedDensityValue(widget, tokens, 4);
+    return pixelSnapGeometryRect(tokens, geometry.RectF.init(
+        widget.frame.x,
+        widget.frame.y + (widget.frame.height - track_height) * 0.5,
+        widget.frame.width,
+        track_height,
+    ));
+}
+
+fn sliderWidgetKnobRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    const value = std.math.clamp(widget.value, 0, 1);
+    const knob_size = @min(@max(widgetSizedDensityValue(widget, tokens, 14), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
+    const knob_x = std.math.clamp(
+        widget.frame.x + widget.frame.width * value - knob_size * 0.5,
+        widget.frame.x,
+        widget.frame.x + @max(0, widget.frame.width - knob_size),
+    );
+    return pixelSnapGeometryRect(tokens, geometry.RectF.init(
+        knob_x,
+        widget.frame.y + (widget.frame.height - knob_size) * 0.5,
+        knob_size,
+        knob_size,
+    ));
 }
 
 fn emitProgressWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
@@ -11470,7 +11491,7 @@ fn widgetRenderStateDirtyBounds(layout: WidgetLayoutTree, previous: WidgetRender
         const previous_widget = widgetWithRenderState(base, previous);
         const next_widget = widgetWithRenderState(base, next);
         if (widgetStatesEqual(previous_widget.state, next_widget.state)) continue;
-        bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetPaintChangeBounds(previous_widget, next_widget, tokens)));
+        bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetRenderStatePaintChangeBounds(previous_widget, next_widget, tokens)));
     }
     return bounds;
 }
@@ -11590,6 +11611,23 @@ fn widgetPaintChangeBounds(previous: Widget, next: Widget, tokens: DesignTokens)
     return bounds;
 }
 
+fn widgetRenderStatePaintChangeBounds(previous: Widget, next: Widget, tokens: DesignTokens) ?geometry.RectF {
+    var bounds: ?geometry.RectF = null;
+    if (widgetFrameStrokePaintChanged(previous, next, tokens)) {
+        bounds = unionOptionalBounds(bounds, widgetFrameStrokeBounds(previous, tokens));
+        bounds = unionOptionalBounds(bounds, widgetFrameStrokeBounds(next, tokens));
+    }
+    if (previous.state.focused != next.state.focused) {
+        bounds = unionOptionalBounds(bounds, widgetFocusPaintBounds(previous, tokens));
+        bounds = unionOptionalBounds(bounds, widgetFocusPaintBounds(next, tokens));
+    }
+    if (previous.state.hovered != next.state.hovered or previous.state.pressed != next.state.pressed) {
+        bounds = unionOptionalBounds(bounds, widgetInteractiveStatePaintBounds(previous, tokens));
+        bounds = unionOptionalBounds(bounds, widgetInteractiveStatePaintBounds(next, tokens));
+    }
+    return bounds;
+}
+
 fn widgetFrameStrokePaintChanged(previous: Widget, next: Widget, tokens: DesignTokens) bool {
     return widgetFrameStrokeWidth(previous, tokens) != widgetFrameStrokeWidth(next, tokens) or
         !optionalColorsEqual(previous.style.border, next.style.border);
@@ -11598,12 +11636,42 @@ fn widgetFrameStrokePaintChanged(previous: Widget, next: Widget, tokens: DesignT
 fn widgetFrameStrokeBounds(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
     const width = widgetFrameStrokeWidth(widget, tokens);
     if (width <= 0) return null;
-    return strokeBounds(widget.frame, width);
+    return strokeBounds(widgetChromeStrokeRect(widget, tokens), width);
 }
 
 fn widgetFocusPaintBounds(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
     if (!widget.state.focused or widgetFocusStrokeWidth(widget, tokens) <= 0) return null;
-    return strokeBounds(widget.frame, tokens.stroke.focus);
+    return strokeBounds(widgetFocusPaintRect(widget, tokens), tokens.stroke.focus);
+}
+
+fn widgetInteractiveStatePaintBounds(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    return switch (widget.kind) {
+        .checkbox => checkboxWidgetBoxRect(widget, tokens),
+        .radio => radioWidgetCircleRect(widget, tokens),
+        .switch_control, .toggle => toggleWidgetTrackRect(widget, tokens),
+        .slider => sliderWidgetKnobRect(widget, tokens),
+        else => widget.frame,
+    };
+}
+
+fn widgetChromeStrokeRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    return switch (widget.kind) {
+        .checkbox => checkboxWidgetBoxRect(widget, tokens),
+        .radio => radioWidgetCircleRect(widget, tokens),
+        .switch_control, .toggle => toggleWidgetTrackRect(widget, tokens),
+        .slider => sliderWidgetKnobRect(widget, tokens),
+        else => widget.frame,
+    };
+}
+
+fn widgetFocusPaintRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    return switch (widget.kind) {
+        .checkbox => checkboxWidgetBoxRect(widget, tokens),
+        .radio => radioWidgetCircleRect(widget, tokens),
+        .switch_control, .toggle => toggleWidgetTrackRect(widget, tokens),
+        .slider => sliderWidgetKnobRect(widget, tokens),
+        else => widget.frame,
+    };
 }
 
 fn widgetFrameStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
@@ -21033,6 +21101,46 @@ test "checkbox radio and switch focus rings stay on the control glyph" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "selection control focus bounds exclude clickable labels" {
+    const tokens = DesignTokens{
+        .stroke = .{ .focus = 4 },
+    };
+    const children = [_]Widget{
+        .{
+            .id = 20,
+            .kind = .checkbox,
+            .frame = geometry.RectF.init(10, 10, 160, 32),
+            .text = "Selected",
+        },
+        .{
+            .id = 21,
+            .kind = .switch_control,
+            .frame = geometry.RectF.init(10, 52, 160, 32),
+            .text = "Live",
+        },
+    };
+
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 220, 100), &nodes);
+
+    const checkbox_label_hit = layout.hitTest(geometry.PointF.init(80, 26)).?;
+    try std.testing.expectEqual(@as(ObjectId, 20), checkbox_label_hit.id);
+    try std.testing.expectEqual(WidgetKind.checkbox, checkbox_label_hit.kind);
+
+    const switch_label_hit = layout.hitTest(geometry.PointF.init(100, 68)).?;
+    try std.testing.expectEqual(@as(ObjectId, 21), switch_label_hit.id);
+    try std.testing.expectEqual(WidgetKind.switch_control, switch_label_hit.kind);
+
+    try expectRectApprox(
+        geometry.RectF.init(8, 15.2, 21.6, 21.6),
+        layout.renderStateDirtyBoundsWithTokens(.{}, .{ .focused_id = 20 }, tokens),
+    );
+    try expectRect(
+        geometry.RectF.init(8, 54, 60, 28),
+        layout.renderStateDirtyBoundsWithTokens(.{}, .{ .focused_id = 21 }, tokens),
+    );
 }
 
 test "widget emitter renders list item and segmented control states" {
