@@ -1189,13 +1189,18 @@ pub fn build(b: *std.Build) void {
         \\gpu_frame_before="$(gpu_frame_from_snapshot)"
         \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
         \\gpu_frame_after="$gpu_frame_before"
+        \\canvas_revision_before="$(canvas_revision_from_snapshot)"
+        \\case "$canvas_revision_before" in ''|*[!0-9]*) canvas_revision_before=0 ;; esac
+        \\canvas_revision_after="$canvas_revision_before"
         \\"$cli" automate widget-action components-canvas 120 increment >/dev/null 2>&1
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
         \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
         \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
         \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
-        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
+        \\  canvas_revision_after="$(canvas_revision_from_snapshot)"
+        \\  case "$canvas_revision_after" in ''|*[!0-9]*) canvas_revision_after=0 ;; esac
+        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ] || [ "$canvas_revision_after" -gt "$canvas_revision_before" ]; then
         \\    if snapshot_contains 'Keyed list #120: offset 56.' && snapshot_contains 'widget @w1/components-canvas#120 role=list' && snapshot_contains 'scroll=[offset=56,viewport=56,content=168]'; then
         \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
         \\    fi
@@ -1203,19 +1208,24 @@ pub fn build(b: *std.Build) void {
         \\  attempts=$((attempts + 1))
         \\  sleep 0.1
         \\done
-        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "list automation increment did not request a GPU frame" >&2; exit 1; fi
+        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ] && [ "$canvas_revision_after" -le "$canvas_revision_before" ]; then echo "list automation increment did not update the retained GPU canvas" >&2; exit 1; fi
         \\if ! snapshot_contains 'Keyed list #120: offset 56.' || ! snapshot_contains 'widget @w1/components-canvas#120 role=list' || ! snapshot_contains 'scroll=[offset=56,viewport=56,content=168]'; then echo "list automation increment did not update retained scroll semantics" >&2; exit 1; fi
         \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "list automation increment did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
         \\gpu_frame_before="$(gpu_frame_from_snapshot)"
         \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
         \\gpu_frame_after="$gpu_frame_before"
+        \\canvas_revision_before="$(canvas_revision_from_snapshot)"
+        \\case "$canvas_revision_before" in ''|*[!0-9]*) canvas_revision_before=0 ;; esac
+        \\canvas_revision_after="$canvas_revision_before"
         \\"$cli" automate widget-action components-canvas 150 increment >/dev/null 2>&1
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
         \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
         \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
         \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
-        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
+        \\  canvas_revision_after="$(canvas_revision_from_snapshot)"
+        \\  case "$canvas_revision_after" in ''|*[!0-9]*) canvas_revision_after=0 ;; esac
+        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ] || [ "$canvas_revision_after" -gt "$canvas_revision_before" ]; then
         \\    if snapshot_contains 'Keyed table #150: offset 56.' && snapshot_contains 'widget @w1/components-canvas#150 role=grid' && snapshot_contains 'scroll=[offset=56,viewport=28,content=140]'; then
         \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
         \\    fi
@@ -1223,19 +1233,24 @@ pub fn build(b: *std.Build) void {
         \\  attempts=$((attempts + 1))
         \\  sleep 0.1
         \\done
-        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "data grid automation increment did not request a GPU frame" >&2; exit 1; fi
+        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ] && [ "$canvas_revision_after" -le "$canvas_revision_before" ]; then echo "data grid automation increment did not update the retained GPU canvas" >&2; exit 1; fi
         \\if ! snapshot_contains 'Keyed table #150: offset 56.' || ! snapshot_contains 'widget @w1/components-canvas#150 role=grid' || ! snapshot_contains 'scroll=[offset=56,viewport=28,content=140]'; then echo "data grid automation increment did not update retained scroll semantics" >&2; exit 1; fi
         \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "data grid automation increment did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
         \\gpu_frame_before="$(gpu_frame_from_snapshot)"
         \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
         \\gpu_frame_after="$gpu_frame_before"
+        \\canvas_revision_before="$(canvas_revision_from_snapshot)"
+        \\case "$canvas_revision_before" in ''|*[!0-9]*) canvas_revision_before=0 ;; esac
+        \\canvas_revision_after="$canvas_revision_before"
         \\"$cli" automate widget-wheel components-canvas 130 20 >/dev/null 2>&1
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
         \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
         \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
         \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
-        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
+        \\  canvas_revision_after="$(canvas_revision_from_snapshot)"
+        \\  case "$canvas_revision_after" in ''|*[!0-9]*) canvas_revision_after=0 ;; esac
+        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ] || [ "$canvas_revision_after" -gt "$canvas_revision_before" ]; then
         \\    case "$snapshot" in *'widget @w1/components-canvas#130 role=group'*'scroll=[offset=84,viewport=56,content=140]'*)
         \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
         \\      ;;
@@ -1244,7 +1259,7 @@ pub fn build(b: *std.Build) void {
         \\  attempts=$((attempts + 1))
         \\  sleep 0.1
         \\done
-        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "scroll automation wheel did not request a GPU frame" >&2; exit 1; fi
+        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ] && [ "$canvas_revision_after" -le "$canvas_revision_before" ]; then echo "scroll automation wheel did not update the retained GPU canvas" >&2; exit 1; fi
         \\case "$snapshot" in *'widget @w1/components-canvas#130 role=group'*'scroll=[offset=84,viewport=56,content=140]'*) ;; *) echo "scroll automation wheel did not update retained scroll semantics" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "scroll automation wheel did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
         \\input_timestamp="$(printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/components-canvas kind=gpu_surface.* gpu_input_timestamp_ns=\([0-9][0-9]*\).*/\1/p')"
