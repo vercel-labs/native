@@ -180,6 +180,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD -> {
                     if (widgetSupportsAction(node, WIDGET_ACTION_DECREMENT)) dispatchWidgetAction(id, WIDGET_ACTION_KIND_DECREMENT) else false
                 }
+                AccessibilityNodeInfo.ACTION_DISMISS -> {
+                    if (widgetSupportsAction(node, WIDGET_ACTION_DISMISS)) dispatchWidgetAction(id, WIDGET_ACTION_KIND_DISMISS) else false
+                }
                 AccessibilityNodeInfo.ACTION_SET_TEXT -> {
                     val text = arguments?.getCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE)?.toString()
                     if (text != null && widgetSupportsAction(node, WIDGET_ACTION_SET_TEXT)) dispatchWidgetAction(id, WIDGET_ACTION_KIND_SET_TEXT, text) else false
@@ -264,6 +267,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             if (widgetSupportsAction(node, WIDGET_ACTION_SELECT)) info.addAction(AccessibilityNodeInfo.ACTION_SELECT)
             if (widgetSupportsAction(node, WIDGET_ACTION_INCREMENT)) info.addAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
             if (widgetSupportsAction(node, WIDGET_ACTION_DECREMENT)) info.addAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+            if (widgetSupportsAction(node, WIDGET_ACTION_DISMISS)) info.addAction(AccessibilityNodeInfo.ACTION_DISMISS)
             if (widgetSupportsAction(node, WIDGET_ACTION_SET_TEXT)) info.addAction(AccessibilityNodeInfo.ACTION_SET_TEXT)
             if (widgetSupportsAction(node, WIDGET_ACTION_SET_SELECTION)) info.addAction(AccessibilityNodeInfo.ACTION_SET_SELECTION)
             info.setBoundsInParent(boundsInParent(node, parentNode))
@@ -780,6 +784,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         private const val WIDGET_ACTION_SELECT = 1 shl 7
         private const val WIDGET_ACTION_DRAG = 1 shl 8
         private const val WIDGET_ACTION_DROP_FILES = 1 shl 9
+        private const val WIDGET_ACTION_DISMISS = 1 shl 10
         private const val WIDGET_ACTION_KIND_FOCUS = 0
         private const val WIDGET_ACTION_KIND_PRESS = 1
         private const val WIDGET_ACTION_KIND_TOGGLE = 2
@@ -793,6 +798,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         private const val WIDGET_ACTION_KIND_SELECT = 10
         private const val WIDGET_ACTION_KIND_DRAG = 11
         private const val WIDGET_ACTION_KIND_DROP_FILES = 12
+        private const val WIDGET_ACTION_KIND_DISMISS = 13
         private const val WIDGET_IME_SET_COMPOSITION = 0
         private const val WIDGET_IME_COMMIT_COMPOSITION = 1
         private const val WIDGET_IME_CANCEL_COMPOSITION = 2

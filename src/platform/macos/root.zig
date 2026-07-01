@@ -237,6 +237,7 @@ const widget_action_set_selection: u32 = 1 << 6;
 const widget_action_select: u32 = 1 << 7;
 const widget_action_drag: u32 = 1 << 8;
 const widget_action_drop_files: u32 = 1 << 9;
+const widget_action_dismiss: u32 = 1 << 10;
 
 const AppKitTrayCallback = *const fn (context: ?*anyopaque, item_id: u32) callconv(.c) void;
 
@@ -886,6 +887,7 @@ fn widgetActionFlags(actions: platform_mod.WidgetAccessibilityActions) u32 {
     if (actions.select) flags |= widget_action_select;
     if (actions.drag) flags |= widget_action_drag;
     if (actions.drop_files) flags |= widget_action_drop_files;
+    if (actions.dismiss) flags |= widget_action_dismiss;
     return flags;
 }
 
@@ -1145,6 +1147,7 @@ fn widgetAccessibilityActionFromInt(value: c_int) ?platform_mod.WidgetAccessibil
         7 => .select,
         8 => .drag,
         9 => .drop_files,
+        10 => .dismiss,
         else => null,
     };
 }
@@ -1384,6 +1387,7 @@ test "mac widget accessibility maps retained action flags" {
         .select = true,
         .drag = true,
         .drop_files = true,
+        .dismiss = true,
     });
     try std.testing.expect(flags & widget_action_focus != 0);
     try std.testing.expect(flags & widget_action_press != 0);
@@ -1395,12 +1399,14 @@ test "mac widget accessibility maps retained action flags" {
     try std.testing.expect(flags & widget_action_select != 0);
     try std.testing.expect(flags & widget_action_drag != 0);
     try std.testing.expect(flags & widget_action_drop_files != 0);
+    try std.testing.expect(flags & widget_action_dismiss != 0);
 }
 
 test "mac widget accessibility maps retained action events" {
     try std.testing.expectEqual(platform_mod.WidgetAccessibilityActionKind.drag, widgetAccessibilityActionFromInt(8).?);
     try std.testing.expectEqual(platform_mod.WidgetAccessibilityActionKind.drop_files, widgetAccessibilityActionFromInt(9).?);
-    try std.testing.expect(widgetAccessibilityActionFromInt(10) == null);
+    try std.testing.expectEqual(platform_mod.WidgetAccessibilityActionKind.dismiss, widgetAccessibilityActionFromInt(10).?);
+    try std.testing.expect(widgetAccessibilityActionFromInt(11) == null);
 }
 
 test "mac widget accessibility action preserves text payload" {

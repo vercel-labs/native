@@ -1174,6 +1174,7 @@ pub const WidgetAccessibilityActions = struct {
     select: bool = false,
     drag: bool = false,
     drop_files: bool = false,
+    dismiss: bool = false,
 };
 
 pub const WidgetAccessibilityTextRange = struct {
@@ -1226,6 +1227,7 @@ pub const WidgetAccessibilityActionKind = enum(c_int) {
     select = 7,
     drag = 8,
     drop_files = 9,
+    dismiss = 10,
 };
 
 pub const WidgetAccessibilityActionEvent = struct {

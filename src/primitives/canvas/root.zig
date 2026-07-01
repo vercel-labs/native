@@ -4186,6 +4186,7 @@ pub const WidgetActions = struct {
     select: bool = false,
     drag: bool = false,
     drop_files: bool = false,
+    dismiss: bool = false,
 
     pub fn isEmpty(self: WidgetActions) bool {
         return !self.focus and
@@ -4197,7 +4198,8 @@ pub const WidgetActions = struct {
             !self.set_selection and
             !self.select and
             !self.drag and
-            !self.drop_files;
+            !self.drop_files and
+            !self.dismiss;
     }
 };
 
@@ -11055,6 +11057,7 @@ fn semanticActions(widget: Widget) WidgetActions {
     actions.select = actions.select or widget.semantics.actions.select;
     actions.drag = actions.drag or widget.semantics.actions.drag;
     actions.drop_files = actions.drop_files or widget.semantics.actions.drop_files;
+    actions.dismiss = actions.dismiss or widget.semantics.actions.dismiss;
     return actions;
 }
 
@@ -11089,6 +11092,7 @@ fn defaultSemanticActions(widget: Widget) WidgetActions {
             actions.decrement = true;
         },
         .resizable => actions.drag = true,
+        .dialog, .drawer, .sheet, .popover, .menu_surface, .dropdown_menu, .tooltip => actions.dismiss = true,
         .list_item, .segmented_control, .data_cell => {
             actions.select = true;
             if (widget.command.len > 0) actions.press = true;
@@ -11584,7 +11588,8 @@ fn widgetActionsEqual(a: WidgetActions, b: WidgetActions) bool {
         a.set_selection == b.set_selection and
         a.select == b.select and
         a.drag == b.drag and
-        a.drop_files == b.drop_files;
+        a.drop_files == b.drop_files and
+        a.dismiss == b.dismiss;
 }
 
 fn glyphAtlasKeysEqual(a: GlyphAtlasKey, b: GlyphAtlasKey) bool {
@@ -16299,10 +16304,13 @@ test "built-in modal surfaces render shadcn chrome and semantics" {
     try std.testing.expectEqual(@as(usize, 3), semantics.len);
     try std.testing.expectEqual(WidgetRole.dialog, semantics[0].role);
     try std.testing.expectEqualStrings("Edit profile", semantics[0].label);
+    try std.testing.expect(semantics[0].actions.dismiss);
     try std.testing.expectEqual(WidgetRole.dialog, semantics[1].role);
     try std.testing.expectEqualStrings("Command drawer", semantics[1].label);
+    try std.testing.expect(semantics[1].actions.dismiss);
     try std.testing.expectEqual(WidgetRole.dialog, semantics[2].role);
     try std.testing.expectEqualStrings("Inspector", semantics[2].label);
+    try std.testing.expect(semantics[2].actions.dismiss);
 
     const tokens = DesignTokens{
         .shadow = .{ .md = .{ .y = 0, .blur = 0, .spread = 0 } },

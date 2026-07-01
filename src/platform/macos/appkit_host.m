@@ -589,6 +589,9 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
     if ((self.actionFlags & ZERO_NATIVE_APPKIT_WIDGET_ACTION_DECREMENT) != 0) {
         [actions addObject:NSAccessibilityDecrementAction];
     }
+    if ((self.actionFlags & ZERO_NATIVE_APPKIT_WIDGET_ACTION_DISMISS) != 0) {
+        [actions addObject:NSAccessibilityCancelAction];
+    }
     return actions;
 }
 
@@ -617,6 +620,11 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (BOOL)accessibilityPerformDecrement {
     if (!self.accessibilityEnabled || (self.actionFlags & ZERO_NATIVE_APPKIT_WIDGET_ACTION_DECREMENT) == 0) return NO;
     return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_DECREMENT];
+}
+
+- (BOOL)accessibilityPerformCancel {
+    if (!self.accessibilityEnabled || (self.actionFlags & ZERO_NATIVE_APPKIT_WIDGET_ACTION_DISMISS) == 0) return NO;
+    return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:ZERO_NATIVE_APPKIT_WIDGET_ACCESSIBILITY_ACTION_DISMISS];
 }
 
 - (BOOL)accessibilityIsAttributeSettable:(NSAccessibilityAttributeName)attribute {

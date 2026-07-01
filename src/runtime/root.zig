@@ -133,6 +133,7 @@ pub const CanvasWidgetAccessibilityActionKind = enum {
     select,
     drag,
     drop_files,
+    dismiss,
 };
 
 pub const CanvasWidgetAccessibilityAction = struct {
@@ -1319,6 +1320,7 @@ pub const Runtime = struct {
             .select => try self.selectAutomationCanvasWidget(index, action.id),
             .drag => try self.dispatchAutomationCanvasWidgetDrag(app, index, action.id, action.text),
             .drop_files => try self.dispatchAutomationCanvasWidgetFileDrop(app, index, action.id, action.text),
+            .dismiss => try self.dismissAutomationCanvasWidget(index, action.id),
         }
         return self.views[index].info();
     }
@@ -3050,6 +3052,7 @@ pub const Runtime = struct {
             .select => try self.selectAutomationCanvasWidget(view_index, action.id),
             .drag => try self.dispatchAutomationCanvasWidgetDrag(app, view_index, action.id, action.value),
             .drop_files => try self.dispatchAutomationCanvasWidgetFileDrop(app, view_index, action.id, action.value),
+            .dismiss => try self.dismissAutomationCanvasWidget(view_index, action.id),
         }
     }
 
@@ -3237,6 +3240,13 @@ pub const Runtime = struct {
             if (node.id == id) return node.actions;
         }
         return null;
+    }
+
+    fn dismissAutomationCanvasWidget(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!void {
+        if (view_index >= self.view_count) return error.ViewNotFound;
+        self.views[view_index].recordGpuSurfaceInputTimestamp(automationInputTimestampNs());
+        const dirty = try self.views[view_index].dismissCanvasWidgetSurfaceForTarget(id) orelse return error.InvalidCommand;
+        try self.invalidateForCanvasWidgetDirty(view_index, dirty);
     }
 
     fn focusAutomationCanvasWidget(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!void {
@@ -7105,7 +7115,16 @@ const RuntimeView = struct {
         const focused_widget = self.widget_layout_nodes[focused_index].widget;
         if (canvasWidgetEditableTextKind(focused_widget.kind) and focused_widget.text_composition != null) return null;
 
-        const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(focused_index) orelse return null;
+        return self.dismissCanvasWidgetSurfaceForTargetIndex(focused_index);
+    }
+
+    fn dismissCanvasWidgetSurfaceForTarget(self: *RuntimeView, target_id: canvas.ObjectId) anyerror!?geometry.RectF {
+        const target_index = self.canvasWidgetNodeIndexById(target_id) orelse return null;
+        return self.dismissCanvasWidgetSurfaceForTargetIndex(target_index);
+    }
+
+    fn dismissCanvasWidgetSurfaceForTargetIndex(self: *RuntimeView, target_index: usize) anyerror!?geometry.RectF {
+        const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(target_index) orelse return null;
         return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
     }
 
@@ -8476,6 +8495,7 @@ fn canvasWidgetActions(actions: canvas.WidgetActions) automation.snapshot.Widget
         .select = actions.select,
         .drag = actions.drag,
         .drop_files = actions.drop_files,
+        .dismiss = actions.dismiss,
     };
 }
 
@@ -8491,6 +8511,7 @@ fn platformWidgetAccessibilityActions(actions: canvas.WidgetActions) platform.Wi
         .select = actions.select,
         .drag = actions.drag,
         .drop_files = actions.drop_files,
+        .dismiss = actions.dismiss,
     };
 }
 
@@ -9001,6 +9022,7 @@ const AutomationWidgetActionKind = enum {
     select,
     drag,
     drop_files,
+    dismiss,
 };
 
 const AutomationWidgetAction = struct {
@@ -9182,6 +9204,7 @@ fn automationWidgetActionKindFromString(value: []const u8) ?AutomationWidgetActi
     if (std.ascii.eqlIgnoreCase(value, "select")) return .select;
     if (std.ascii.eqlIgnoreCase(value, "drag")) return .drag;
     if (std.ascii.eqlIgnoreCase(value, "drop_files") or std.ascii.eqlIgnoreCase(value, "drop-files")) return .drop_files;
+    if (std.ascii.eqlIgnoreCase(value, "dismiss")) return .dismiss;
     return null;
 }
 
@@ -9198,6 +9221,7 @@ fn automationWidgetActionSupported(actions: canvas.WidgetActions, action: Automa
         .select => actions.select,
         .drag => actions.drag,
         .drop_files => actions.drop_files,
+        .dismiss => actions.dismiss,
     };
 }
 
@@ -9214,6 +9238,7 @@ fn canvasWidgetAccessibilityActionSupported(actions: canvas.WidgetActions, actio
         .select => actions.select,
         .drag => actions.drag,
         .drop_files => actions.drop_files,
+        .dismiss => actions.dismiss,
     };
 }
 
@@ -9240,6 +9265,7 @@ fn canvasWidgetAccessibilityActionKindFromPlatform(action: platform.WidgetAccess
         .select => .select,
         .drag => .drag,
         .drop_files => .drop_files,
+        .dismiss => .dismiss,
     };
 }
 
@@ -9402,6 +9428,11 @@ test "runtime parses automation widget actions" {
     try std.testing.expectEqual(AutomationWidgetActionKind.drop_files, drop_files_underscore.action);
     try std.testing.expectEqualStrings("/tmp/report.csv", drop_files_underscore.value);
 
+    const dismiss = try parseAutomationWidgetAction("canvas 10 dismiss");
+    try std.testing.expectEqual(@as(canvas.ObjectId, 10), dismiss.id);
+    try std.testing.expectEqual(AutomationWidgetActionKind.dismiss, dismiss.action);
+    try std.testing.expectEqualStrings("", dismiss.value);
+
     var drop_paths_buffer: [2][]const u8 = undefined;
     const drop_paths = try parseAutomationDropPaths(" /tmp/report.csv /tmp/chart.png ", drop_paths_buffer[0..]);
     try std.testing.expectEqual(@as(usize, 2), drop_paths.len);
@@ -9416,6 +9447,7 @@ test "runtime parses automation widget actions" {
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 42 set-selection"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 42 commit-composition extra"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 42 drop-files"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 42 dismiss extra"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetAction("canvas 42 unknown"));
 }
 
@@ -13209,6 +13241,90 @@ test "runtime dismisses nearest canvas floating surface with escape" {
     try std.testing.expect(retained_after_dismiss.findCommandById(testCanvasWidgetPartId(3, 1)) == null);
     try std.testing.expect(retained_after_dismiss.findCommandById(testCanvasWidgetPartId(1, 2)) != null);
     try std.testing.expect(retained_after_dismiss.findCommandById(testCanvasWidgetPartId(4, 1)) != null);
+}
+
+test "runtime dismisses canvas floating surfaces from automation and accessibility actions" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-surface-action-dismiss", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    const Fixture = struct {
+        fn install(runtime: *Runtime) !void {
+            const popover_children = [_]canvas.Widget{.{
+                .id = 3,
+                .kind = .button,
+                .frame = geometry.RectF.init(12, 12, 92, 30),
+                .text = "Copy",
+            }};
+            const children = [_]canvas.Widget{
+                .{
+                    .id = 1,
+                    .kind = .button,
+                    .frame = geometry.RectF.init(12, 12, 104, 32),
+                    .text = "Open",
+                },
+                .{
+                    .id = 2,
+                    .kind = .popover,
+                    .frame = geometry.RectF.init(36, 52, 140, 76),
+                    .semantics = .{ .label = "Actions" },
+                    .children = &popover_children,
+                },
+            };
+            var nodes: [4]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .id = 10, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 220, 160), &nodes);
+            _ = try runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        }
+
+        fn snapshotWidget(snapshot: automation.snapshot.Input, id: u64) ?automation.snapshot.Widget {
+            for (snapshot.widgets) |widget| {
+                if (widget.id == id) return widget;
+            }
+            return null;
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(20, 30, 260, 180),
+    });
+
+    try Fixture.install(&harness.runtime);
+    var snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expect(Fixture.snapshotWidget(snapshot, 2).?.actions.dismiss);
+    try std.testing.expect(!Fixture.snapshotWidget(snapshot, 1).?.actions.dismiss);
+    try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 1, .action = .dismiss }));
+
+    try harness.runtime.dispatchAutomationWidgetAction(app, .{ .view_label = "canvas", .id = 2, .action = .dismiss });
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(2).?.widget.semantics.hidden);
+    try std.testing.expect(canvasWidgetSemanticsById(harness.runtime.views[0].widgetSemantics(), 2) == null);
+    try std.testing.expect(canvasWidgetSemanticsById(harness.runtime.views[0].widgetSemantics(), 3) == null);
+    snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expect(Fixture.snapshotWidget(snapshot, 2) == null);
+    try std.testing.expect(Fixture.snapshotWidget(snapshot, 3) == null);
+
+    try Fixture.install(&harness.runtime);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .widget_accessibility_action = .{
+        .window_id = 1,
+        .label = "canvas",
+        .id = 2,
+        .action = .dismiss,
+    } });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(2).?.widget.semantics.hidden);
+    try std.testing.expect(canvasWidgetSemanticsById(harness.runtime.views[0].widgetSemantics(), 2) == null);
+    try std.testing.expect(canvasWidgetSemanticsById(harness.runtime.views[0].widgetSemantics(), 3) == null);
 }
 
 test "runtime dismisses focused canvas floating surface from outside pointer down" {

@@ -31,6 +31,7 @@ pub const WidgetActions = struct {
     select: bool = false,
     drag: bool = false,
     drop_files: bool = false,
+    dismiss: bool = false,
 
     pub fn isEmpty(self: WidgetActions) bool {
         return !self.focus and
@@ -42,7 +43,8 @@ pub const WidgetActions = struct {
             !self.set_selection and
             !self.select and
             !self.drag and
-            !self.drop_files;
+            !self.drop_files and
+            !self.dismiss;
     }
 };
 
@@ -441,6 +443,7 @@ fn writeWidgetActions(actions: WidgetActions, writer: anytype) !void {
     try writeWidgetAction(actions.select, "select", &wrote, writer);
     try writeWidgetAction(actions.drag, "drag", &wrote, writer);
     try writeWidgetAction(actions.drop_files, "drop_files", &wrote, writer);
+    try writeWidgetAction(actions.dismiss, "dismiss", &wrote, writer);
     try writer.writeByte(']');
 }
 
@@ -721,7 +724,7 @@ test "snapshot emits widget semantics" {
             .hovered = true,
             .pressed = true,
             .selected = true,
-            .actions = .{ .focus = true, .press = true, .set_selection = true, .drag = true, .drop_files = true },
+            .actions = .{ .focus = true, .press = true, .set_selection = true, .drag = true, .drop_files = true, .dismiss = true },
             .text_selection = .{ .start = 4, .end = 4 },
             .text_composition = .{ .start = 0, .end = 3 },
         },
@@ -750,7 +753,7 @@ test "snapshot emits widget semantics" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "state=[focused,hovered,pressed,selected]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "@w1/canvas#43 role=button name=\"Disabled\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "state=[disabled]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "actions=[focus,press,set_selection,drag,drop_files]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "actions=[focus,press,set_selection,drag,drop_files,dismiss]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "selection=4..4") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "composition=0..3") != null);
 
@@ -771,7 +774,7 @@ test "snapshot emits widget semantics" {
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "state=[focused,hovered,pressed,selected]") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#43 role=button name=\"Disabled\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "state=[disabled]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "actions=[focus,press,set_selection,drag,drop_files]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "actions=[focus,press,set_selection,drag,drop_files,dismiss]") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "selection=4..4") != null);
     try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "composition=0..3") != null);
 }

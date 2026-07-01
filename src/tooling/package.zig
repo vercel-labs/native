@@ -420,6 +420,7 @@ fn embedHeader() []const u8 {
     \\  ZERO_NATIVE_WIDGET_ACTION_SELECT = 1u << 7,
     \\  ZERO_NATIVE_WIDGET_ACTION_DRAG = 1u << 8,
     \\  ZERO_NATIVE_WIDGET_ACTION_DROP_FILES = 1u << 9,
+    \\  ZERO_NATIVE_WIDGET_ACTION_DISMISS = 1u << 10,
     \\};
     \\enum {
     \\  ZERO_NATIVE_WIDGET_ACTION_KIND_FOCUS = 0,
@@ -435,6 +436,7 @@ fn embedHeader() []const u8 {
     \\  ZERO_NATIVE_WIDGET_ACTION_KIND_SELECT = 10,
     \\  ZERO_NATIVE_WIDGET_ACTION_KIND_DRAG = 11,
     \\  ZERO_NATIVE_WIDGET_ACTION_KIND_DROP_FILES = 12,
+    \\  ZERO_NATIVE_WIDGET_ACTION_KIND_DISMISS = 13,
     \\};
     \\enum {
     \\  ZERO_NATIVE_GPU_SURFACE_STATUS_UNAVAILABLE = 0,
@@ -839,6 +841,10 @@ fn iosViewController() []const u8 {
     \\                return false
     \\            }
     \\        }
+    \\
+    \\        override func accessibilityPerformEscape() -> Bool {
+    \\            owner?.dismissWidgetAccessibilityNode(node) ?? false
+    \\        }
     \\    }
     \\
     \\    override func viewDidLoad() {
@@ -1151,6 +1157,12 @@ fn iosViewController() []const u8 {
     \\        let current = widgetSemantics(id: node.id) ?? node
     \\        guard widgetSupportsAction(current, UInt32(ZERO_NATIVE_WIDGET_ACTION_DECREMENT)) else { return false }
     \\        return dispatchWidgetAction(id: current.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_DECREMENT))
+    \\    }
+    \\
+    \\    private func dismissWidgetAccessibilityNode(_ node: WidgetSemantics) -> Bool {
+    \\        let current = widgetSemantics(id: node.id) ?? node
+    \\        guard widgetSupportsAction(current, UInt32(ZERO_NATIVE_WIDGET_ACTION_DISMISS)) else { return false }
+    \\        return dispatchWidgetAction(id: current.id, action: Int32(ZERO_NATIVE_WIDGET_ACTION_KIND_DISMISS))
     \\    }
     \\
     \\    private func widgetSupportsAction(_ node: WidgetSemantics, _ action: UInt32) -> Bool {
@@ -1554,6 +1566,9 @@ fn androidActivity() []const u8 {
     \\                AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD -> {
     \\                    if (widgetSupportsAction(node, WIDGET_ACTION_DECREMENT)) dispatchWidgetAction(id, WIDGET_ACTION_KIND_DECREMENT) else false
     \\                }
+    \\                AccessibilityNodeInfo.ACTION_DISMISS -> {
+    \\                    if (widgetSupportsAction(node, WIDGET_ACTION_DISMISS)) dispatchWidgetAction(id, WIDGET_ACTION_KIND_DISMISS) else false
+    \\                }
     \\                AccessibilityNodeInfo.ACTION_SET_TEXT -> {
     \\                    val text = arguments?.getCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE)?.toString()
     \\                    if (text != null && widgetSupportsAction(node, WIDGET_ACTION_SET_TEXT)) dispatchWidgetAction(id, WIDGET_ACTION_KIND_SET_TEXT, text) else false
@@ -1637,6 +1652,7 @@ fn androidActivity() []const u8 {
     \\            if (widgetSupportsAction(node, WIDGET_ACTION_SELECT)) info.addAction(AccessibilityNodeInfo.ACTION_SELECT)
     \\            if (widgetSupportsAction(node, WIDGET_ACTION_INCREMENT)) info.addAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
     \\            if (widgetSupportsAction(node, WIDGET_ACTION_DECREMENT)) info.addAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+    \\            if (widgetSupportsAction(node, WIDGET_ACTION_DISMISS)) info.addAction(AccessibilityNodeInfo.ACTION_DISMISS)
     \\            if (widgetSupportsAction(node, WIDGET_ACTION_SET_TEXT)) info.addAction(AccessibilityNodeInfo.ACTION_SET_TEXT)
     \\            if (widgetSupportsAction(node, WIDGET_ACTION_SET_SELECTION)) info.addAction(AccessibilityNodeInfo.ACTION_SET_SELECTION)
     \\            info.setBoundsInParent(boundsInParent(node, parentNode))
@@ -2098,6 +2114,7 @@ fn androidActivity() []const u8 {
     \\        private const val WIDGET_ACTION_SET_TEXT = 1 shl 5
     \\        private const val WIDGET_ACTION_SET_SELECTION = 1 shl 6
     \\        private const val WIDGET_ACTION_SELECT = 1 shl 7
+    \\        private const val WIDGET_ACTION_DISMISS = 1 shl 10
     \\        private const val WIDGET_ACTION_KIND_FOCUS = 0
     \\        private const val WIDGET_ACTION_KIND_PRESS = 1
     \\        private const val WIDGET_ACTION_KIND_TOGGLE = 2
@@ -2106,6 +2123,7 @@ fn androidActivity() []const u8 {
     \\        private const val WIDGET_ACTION_KIND_SET_TEXT = 5
     \\        private const val WIDGET_ACTION_KIND_SET_SELECTION = 6
     \\        private const val WIDGET_ACTION_KIND_SELECT = 10
+    \\        private const val WIDGET_ACTION_KIND_DISMISS = 13
     \\        private const val html = """
     \\            <!doctype html>
     \\            <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -2990,6 +3008,8 @@ test "mobile package templates include native command shells" {
     try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_ROLE_TEXTBOX") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_ACTION_SET_SELECTION") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_ACTION_KIND_SET_TEXT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_ACTION_DISMISS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "ZERO_NATIVE_WIDGET_ACTION_KIND_DISMISS") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_app_viewport_state") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_app_gpu_frame_state") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "zero_native_app_scroll") != null);
@@ -3006,6 +3026,8 @@ test "mobile package templates include native command shells" {
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "zero_native_app_set_asset_root") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "zero_native_app_set_asset_entry") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "ZeroNativeShellConfig.assetEntryPath") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ios_controller, "accessibilityPerformEscape") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ios_controller, "dismissWidgetAccessibilityNode") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "webView.loadFileURL") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "appendingPathComponent(\"Resources\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_controller, "keyboardWillChangeFrameNotification") != null);
@@ -3049,6 +3071,8 @@ test "mobile package templates include native command shells" {
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "WidgetSurfaceView") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "createAccessibilityNodeInfo") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "performAction(virtualViewId") != null);
+    try std.testing.expect(std.mem.indexOf(u8, android_activity, "AccessibilityNodeInfo.ACTION_DISMISS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, android_activity, "WIDGET_ACTION_KIND_DISMISS") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "rootWindowInsets") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "keyboardBottomInset") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_activity, "if (currentSurfaceHolder == holder) currentSurfaceHolder = null") != null);
