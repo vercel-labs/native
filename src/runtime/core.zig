@@ -16,6 +16,7 @@ const canvas_limits = @import("canvas_limits.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
+const runtime_gpu_surface_events = @import("gpu_surface_events.zig");
 const runtime_state = @import("state.zig");
 const runtime_view = @import("view.zig");
 const widget_bridge = @import("widget_bridge.zig");
@@ -135,13 +136,11 @@ const appendCanvasSummaryChange = canvas_frame_helpers.appendCanvasSummaryChange
 const canvasDirtyBoundsFromChanges = canvas_frame_helpers.canvasDirtyBoundsFromChanges;
 const canvasFrameBudgetIsUnset = canvas_frame_helpers.canvasFrameBudgetIsUnset;
 const canvasFullRepaintBounds = canvas_frame_helpers.canvasFullRepaintBounds;
-const sizesEqual = canvas_frame_helpers.sizesEqual;
 const normalizedCanvasPresentationScale = canvas_frame_helpers.normalizedCanvasPresentationScale;
 const canvasColorToRgba8 = canvas_frame_helpers.canvasColorToRgba8;
 const clippedCanvasDirtyBounds = canvas_frame_helpers.clippedCanvasDirtyBounds;
 const unionRects = canvas_frame_helpers.unionRects;
 const canvasWidgetPointerEventFromGpuInput = canvas_frame_helpers.canvasWidgetPointerEventFromGpuInput;
-const canvasWidgetInputBatchesDisplayListRefresh = canvas_frame_helpers.canvasWidgetInputBatchesDisplayListRefresh;
 const canvasWidgetKeyboardEventFromGpuInput = canvas_frame_helpers.canvasWidgetKeyboardEventFromGpuInput;
 const canvasWidgetTextInputEventFromGpuInput = canvas_frame_helpers.canvasWidgetTextInputEventFromGpuInput;
 const canvasWidgetEscapeKey = canvas_frame_helpers.canvasWidgetEscapeKey;
@@ -151,8 +150,6 @@ const findCanvasRenderOverrideIndex = canvas_frame_helpers.findCanvasRenderOverr
 const canvasRenderOverrideNoop = canvas_frame_helpers.canvasRenderOverrideNoop;
 const canvasRenderAnimationFinalOverrideNoop = canvas_frame_helpers.canvasRenderAnimationFinalOverrideNoop;
 const canvasRenderAnimationActive = canvas_frame_helpers.canvasRenderAnimationActive;
-const platformCanvasFrameProfileRisk = canvas_frame_helpers.platformCanvasFrameProfileRisk;
-const gpuSurfaceFrameEventFromGpuFrame = canvas_frame_helpers.gpuSurfaceFrameEventFromGpuFrame;
 
 const WidgetTextStorageRange = canvas_widget_runtime.WidgetTextStorageRange;
 const CanvasWidgetScrollReconcileEntry = canvas_widget_runtime.CanvasWidgetScrollReconcileEntry;
@@ -1140,6 +1137,10 @@ pub const Runtime = struct {
         return CanvasWidgetEventMethods().invalidateForCanvasWidgetDirty(self, view_index, dirty);
     }
 
+    fn GpuSurfaceEventMethods() type {
+        return runtime_gpu_surface_events.RuntimeGpuSurfaceEvents(Runtime);
+    }
+
     pub fn listViews(self: *const Runtime, window_id: platform.WindowId, output: []platform.ViewInfo) []const platform.ViewInfo {
         const window_index = self.findWindowIndexById(window_id) orelse return output[0..0];
         if (!self.windows[window_index].info.open) return output[0..0];
@@ -1396,139 +1397,9 @@ pub const Runtime = struct {
                     .view_label = command.view_label,
                 });
             },
-            .gpu_surface_frame => |frame_event| {
-                var enriched_frame_event = frame_event;
-                if (self.findViewIndex(frame_event.window_id, frame_event.label)) |index| {
-                    const had_pending_input = self.views[index].gpu_pending_input_timestamp_ns != 0;
-                    if (!sizesEqual(self.views[index].gpu_size, frame_event.size) or self.views[index].gpu_scale_factor != frame_event.scale_factor) {
-                        self.views[index].presented_canvas_valid = false;
-                    }
-                    self.views[index].gpu_size = frame_event.size;
-                    self.views[index].gpu_scale_factor = frame_event.scale_factor;
-                    self.views[index].gpu_frame_index = frame_event.frame_index;
-                    self.views[index].gpu_timestamp_ns = frame_event.timestamp_ns;
-                    self.views[index].recordGpuSurfaceFrameInterval(frame_event.frame_interval_ns);
-                    self.views[index].recordGpuSurfaceFirstFrameLatency(frame_event.timestamp_ns);
-                    self.views[index].recordGpuSurfaceInputLatencyForFrame(frame_event.timestamp_ns);
-                    try self.advanceCanvasWidgetKineticScrollForFrame(index, frame_event.frame_interval_ns, had_pending_input);
-                    self.views[index].gpu_frame_nonblank = frame_event.nonblank;
-                    self.views[index].gpu_sample_color = frame_event.sample_color;
-                    self.views[index].gpu_backend = frame_event.backend;
-                    self.views[index].gpu_pixel_format = frame_event.pixel_format;
-                    self.views[index].gpu_present_mode = frame_event.present_mode;
-                    self.views[index].gpu_alpha_mode = frame_event.alpha_mode;
-                    self.views[index].gpu_color_space = frame_event.color_space;
-                    self.views[index].gpu_vsync = frame_event.vsync;
-                    self.views[index].gpu_status = frame_event.status;
-                    if (self.options.gpu_surface_frame_diagnostics) {
-                        const preview_frame = try self.planCanvasFrameForView(index, .{
-                            .frame_index = frame_event.frame_index,
-                            .timestamp_ns = frame_event.timestamp_ns,
-                            .surface_size = frame_event.size,
-                            .scale = frame_event.scale_factor,
-                        }, self.canvasFrameScratchStorage(), false);
-                        const preview_render_pass = preview_frame.renderPass();
-                        const preview_gpu_packet_summary = preview_frame.gpuPacketSummary();
-                        const preview_budget_status = preview_frame.budgetStatus();
-                        enriched_frame_event.canvas_revision = self.views[index].canvas_revision;
-                        enriched_frame_event.frame_interval_ns = self.views[index].gpu_frame_interval_ns;
-                        enriched_frame_event.input_timestamp_ns = self.views[index].gpu_input_timestamp_ns;
-                        enriched_frame_event.input_latency_ns = self.views[index].gpu_input_latency_ns;
-                        enriched_frame_event.input_latency_budget_ns = self.views[index].gpu_input_latency_budget_ns;
-                        enriched_frame_event.input_latency_budget_exceeded_count = self.views[index].gpu_input_latency_budget_exceeded_count;
-                        enriched_frame_event.input_latency_budget_ok = self.views[index].gpu_input_latency_budget_ok;
-                        enriched_frame_event.first_frame_latency_ns = self.views[index].gpu_first_frame_latency_ns;
-                        enriched_frame_event.first_frame_latency_budget_ns = self.views[index].gpu_first_frame_latency_budget_ns;
-                        enriched_frame_event.first_frame_latency_budget_exceeded_count = self.views[index].gpu_first_frame_latency_budget_exceeded_count;
-                        enriched_frame_event.first_frame_latency_budget_ok = self.views[index].gpu_first_frame_latency_budget_ok;
-                        enriched_frame_event.canvas_command_count = self.views[index].canvas_command_count;
-                        enriched_frame_event.canvas_frame_requires_render = preview_frame.requiresRender();
-                        enriched_frame_event.canvas_frame_full_repaint = preview_frame.full_repaint;
-                        enriched_frame_event.canvas_frame_batch_count = preview_frame.batch_plan.batchCount();
-                        enriched_frame_event.canvas_frame_encoder_command_count = preview_render_pass.encoderCommandCount();
-                        enriched_frame_event.canvas_frame_encoder_cache_action_count = preview_render_pass.encoderCacheActionCount();
-                        enriched_frame_event.canvas_frame_encoder_bind_pipeline_count = preview_render_pass.encoderBindPipelineCount();
-                        enriched_frame_event.canvas_frame_encoder_draw_batch_count = preview_render_pass.encoderDrawBatchCount();
-                        enriched_frame_event.canvas_frame_pipeline_count = preview_frame.pipeline_cache_plan.entryCount();
-                        enriched_frame_event.canvas_frame_pipeline_upload_count = preview_frame.pipeline_cache_plan.uploadCount();
-                        enriched_frame_event.canvas_frame_pipeline_retain_count = preview_frame.pipeline_cache_plan.retainCount();
-                        enriched_frame_event.canvas_frame_pipeline_evict_count = preview_frame.pipeline_cache_plan.evictCount();
-                        enriched_frame_event.canvas_frame_path_geometry_count = preview_frame.path_geometry_plan.geometryCount();
-                        enriched_frame_event.canvas_frame_path_geometry_vertex_count = preview_frame.path_geometry_plan.vertexCount();
-                        enriched_frame_event.canvas_frame_path_geometry_index_count = preview_frame.path_geometry_plan.indexCount();
-                        enriched_frame_event.canvas_frame_path_geometry_upload_count = preview_frame.path_geometry_cache_plan.uploadCount();
-                        enriched_frame_event.canvas_frame_path_geometry_retain_count = preview_frame.path_geometry_cache_plan.retainCount();
-                        enriched_frame_event.canvas_frame_path_geometry_evict_count = preview_frame.path_geometry_cache_plan.evictCount();
-                        enriched_frame_event.canvas_frame_image_count = preview_frame.image_plan.imageCount();
-                        enriched_frame_event.canvas_frame_image_upload_count = preview_frame.image_cache_plan.uploadCount();
-                        enriched_frame_event.canvas_frame_image_retain_count = preview_frame.image_cache_plan.retainCount();
-                        enriched_frame_event.canvas_frame_image_evict_count = preview_frame.image_cache_plan.evictCount();
-                        enriched_frame_event.canvas_frame_layer_count = preview_frame.layer_plan.layerCount();
-                        enriched_frame_event.canvas_frame_layer_opacity_count = preview_frame.layer_plan.opacityLayerCount();
-                        enriched_frame_event.canvas_frame_layer_clip_count = preview_frame.layer_plan.clipLayerCount();
-                        enriched_frame_event.canvas_frame_layer_transform_count = preview_frame.layer_plan.transformLayerCount();
-                        enriched_frame_event.canvas_frame_layer_upload_count = preview_frame.layer_cache_plan.uploadCount();
-                        enriched_frame_event.canvas_frame_layer_retain_count = preview_frame.layer_cache_plan.retainCount();
-                        enriched_frame_event.canvas_frame_layer_evict_count = preview_frame.layer_cache_plan.evictCount();
-                        enriched_frame_event.canvas_frame_resource_count = preview_frame.resource_plan.resourceCount();
-                        enriched_frame_event.canvas_frame_resource_upload_count = preview_frame.resource_cache_plan.uploadCount();
-                        enriched_frame_event.canvas_frame_resource_retain_count = preview_frame.resource_cache_plan.retainCount();
-                        enriched_frame_event.canvas_frame_resource_evict_count = preview_frame.resource_cache_plan.evictCount();
-                        enriched_frame_event.canvas_frame_visual_effect_count = preview_frame.visual_effect_plan.effectCount();
-                        enriched_frame_event.canvas_frame_visual_effect_shadow_count = preview_frame.visual_effect_plan.shadowCount();
-                        enriched_frame_event.canvas_frame_visual_effect_blur_count = preview_frame.visual_effect_plan.blurCount();
-                        enriched_frame_event.canvas_frame_visual_effect_upload_count = preview_frame.visual_effect_cache_plan.uploadCount();
-                        enriched_frame_event.canvas_frame_visual_effect_retain_count = preview_frame.visual_effect_cache_plan.retainCount();
-                        enriched_frame_event.canvas_frame_visual_effect_evict_count = preview_frame.visual_effect_cache_plan.evictCount();
-                        enriched_frame_event.canvas_frame_glyph_atlas_entry_count = preview_frame.glyph_atlas_plan.entryCount();
-                        enriched_frame_event.canvas_frame_glyph_atlas_upload_count = preview_frame.glyph_atlas_cache_plan.uploadCount();
-                        enriched_frame_event.canvas_frame_glyph_atlas_retain_count = preview_frame.glyph_atlas_cache_plan.retainCount();
-                        enriched_frame_event.canvas_frame_glyph_atlas_evict_count = preview_frame.glyph_atlas_cache_plan.evictCount();
-                        enriched_frame_event.canvas_frame_text_layout_count = preview_frame.text_layout_plan.planCount();
-                        enriched_frame_event.canvas_frame_text_layout_line_count = preview_frame.text_layout_plan.lineCount();
-                        enriched_frame_event.canvas_frame_text_layout_upload_count = preview_frame.text_layout_cache_plan.uploadCount();
-                        enriched_frame_event.canvas_frame_text_layout_retain_count = preview_frame.text_layout_cache_plan.retainCount();
-                        enriched_frame_event.canvas_frame_text_layout_evict_count = preview_frame.text_layout_cache_plan.evictCount();
-                        enriched_frame_event.canvas_frame_gpu_packet_command_count = preview_gpu_packet_summary.command_count;
-                        enriched_frame_event.canvas_frame_gpu_packet_cache_action_count = preview_gpu_packet_summary.cache_action_count;
-                        enriched_frame_event.canvas_frame_gpu_packet_cached_resource_command_count = preview_gpu_packet_summary.cached_resource_command_count;
-                        enriched_frame_event.canvas_frame_gpu_packet_unsupported_command_count = preview_gpu_packet_summary.unsupported_command_count;
-                        enriched_frame_event.canvas_frame_gpu_packet_representable = preview_gpu_packet_summary.fullyRepresentable();
-                        enriched_frame_event.canvas_frame_change_count = preview_frame.changes.len;
-                        enriched_frame_event.canvas_frame_budget_exceeded_count = preview_budget_status.exceededCount();
-                        enriched_frame_event.canvas_frame_budget_ok = preview_budget_status.ok();
-                        enriched_frame_event.canvas_frame_dirty_bounds = preview_frame.dirty_bounds;
-                        const preview_profile = preview_frame.profile();
-                        enriched_frame_event.canvas_frame_profile_work_units = preview_profile.work_units;
-                        enriched_frame_event.canvas_frame_profile_risk = platformCanvasFrameProfileRisk(preview_profile.risk);
-                        enriched_frame_event.canvas_frame_profile_surface_area = preview_profile.surface_area;
-                        enriched_frame_event.canvas_frame_profile_dirty_area = preview_profile.dirty_area;
-                        enriched_frame_event.canvas_frame_profile_dirty_ratio = preview_profile.dirty_ratio;
-                        enriched_frame_event.widget_revision = self.views[index].widget_revision;
-                        enriched_frame_event.widget_node_count = self.views[index].widget_layout_node_count;
-                        enriched_frame_event.widget_semantics_count = self.views[index].widget_semantics_node_count;
-                    } else if (self.views[index].info().gpuFrame()) |gpu_frame| {
-                        enriched_frame_event = gpuSurfaceFrameEventFromGpuFrame(gpu_frame);
-                    }
-                }
-                try self.dispatchEvent(app, .{ .gpu_surface_frame = enriched_frame_event });
-            },
+            .gpu_surface_frame => |frame_event| try GpuSurfaceEventMethods().dispatchGpuSurfaceFrame(self, app, frame_event),
             .gpu_surface_resized => |resize_event| {
-                if (self.findViewIndex(resize_event.window_id, resize_event.label)) |index| {
-                    const previous_frame = self.views[index].frame;
-                    const previous_size = self.views[index].gpu_size;
-                    const previous_scale = self.views[index].gpu_scale_factor;
-                    const next_size = resize_event.frame.size();
-                    const frame_changed = !rectsEqual(previous_frame, resize_event.frame);
-                    const surface_changed = !sizesEqual(previous_size, next_size) or previous_scale != resize_event.scale_factor;
-                    self.views[index].frame = resize_event.frame;
-                    self.views[index].gpu_size = next_size;
-                    self.views[index].gpu_scale_factor = resize_event.scale_factor;
-                    if (surface_changed) self.views[index].presented_canvas_valid = false;
-                    if (self.views[index].gpu_status == .unavailable) self.views[index].gpu_status = .ready;
-                    if (frame_changed or surface_changed) self.invalidateFor(.surface_resize, resize_event.frame);
-                }
-                try self.dispatchEvent(app, .{ .gpu_surface_resized = resize_event });
+                try GpuSurfaceEventMethods().dispatchGpuSurfaceResized(self, app, resize_event);
                 try self.log("gpu_surface.resize", "gpu surface resized", &.{
                     trace.string("label", resize_event.label),
                     trace.float("width", resize_event.frame.width),
@@ -1536,96 +1407,7 @@ pub const Runtime = struct {
                     trace.float("scale", resize_event.scale_factor),
                 });
             },
-            .gpu_surface_input => |input_event| {
-                var canvas_widget_refresh_batch_active = canvasWidgetInputBatchesDisplayListRefresh(input_event.kind);
-                if (canvas_widget_refresh_batch_active) self.beginCanvasWidgetDisplayListRefreshBatch();
-                errdefer {
-                    if (canvas_widget_refresh_batch_active) self.cancelCanvasWidgetDisplayListRefreshBatch();
-                }
-
-                if (self.findViewIndex(input_event.window_id, input_event.label)) |index| {
-                    self.views[index].recordGpuSurfaceInputTimestamp(input_event.timestamp_ns);
-                }
-                switch (input_event.kind) {
-                    .pointer_down,
-                    .key_down,
-                    => {
-                        try self.setFocusedView(input_event.window_id, input_event.label);
-                        self.invalidated = true;
-                    },
-                    else => {},
-                }
-                const widget_pointer_event = self.routeCanvasWidgetPointerInput(input_event, &self.widget_event_route_entries) catch |err| switch (err) {
-                    error.WindowNotFound,
-                    error.ViewNotFound,
-                    error.InvalidViewOptions,
-                    => null,
-                    else => return err,
-                };
-                if (widget_pointer_event) |pointer_event| {
-                    _ = try self.dismissCanvasWidgetSurfaceFromPointerInput(pointer_event);
-                    try self.updateCanvasWidgetControlFromPointer(pointer_event);
-                    try self.updateCanvasWidgetInteractionFromPointer(pointer_event);
-                    try self.updateCanvasWidgetTextFromPointer(pointer_event);
-                    try self.updateCanvasWidgetScrollFromPointer(pointer_event);
-                    try self.updateCanvasWidgetFocusFromPointer(pointer_event);
-                }
-                const widget_drag_event = self.routeCanvasWidgetDragInput(input_event, &self.widget_event_route_entries) catch |err| switch (err) {
-                    error.WindowNotFound,
-                    error.ViewNotFound,
-                    error.InvalidViewOptions,
-                    => null,
-                    else => return err,
-                };
-                const widget_surface_dismissed = try self.dismissCanvasWidgetSurfaceFromKeyboardInput(input_event);
-                if (!widget_surface_dismissed) try self.updateCanvasWidgetFocusFromKeyboardInput(input_event);
-                const widget_keyboard_event = if (widget_surface_dismissed)
-                    null
-                else
-                    self.routeCanvasWidgetKeyboardInput(input_event, &self.widget_event_route_entries) catch |err| switch (err) {
-                        error.WindowNotFound,
-                        error.ViewNotFound,
-                        error.InvalidViewOptions,
-                        => null,
-                        else => return err,
-                    };
-                if (widget_keyboard_event) |keyboard_event| {
-                    try self.updateCanvasWidgetControlFromKeyboard(keyboard_event);
-                    try self.updateCanvasWidgetTextFromKeyboard(keyboard_event);
-                }
-                const widget_text_input_event = if (widget_surface_dismissed)
-                    null
-                else
-                    self.routeCanvasWidgetTextInput(input_event, &self.widget_event_route_entries) catch |err| switch (err) {
-                        error.WindowNotFound,
-                        error.ViewNotFound,
-                        error.InvalidViewOptions,
-                        => null,
-                        else => return err,
-                    };
-                if (widget_text_input_event) |text_input_event| {
-                    try self.updateCanvasWidgetTextFromKeyboard(text_input_event);
-                }
-                if (canvas_widget_refresh_batch_active) {
-                    try self.endCanvasWidgetDisplayListRefreshBatch();
-                    canvas_widget_refresh_batch_active = false;
-                }
-                if (widget_pointer_event) |pointer_event| {
-                    try self.dispatchCanvasWidgetCommandFromPointer(app, pointer_event);
-                    try self.dispatchEvent(app, .{ .canvas_widget_pointer = pointer_event });
-                }
-                if (widget_drag_event) |drag_event| {
-                    try self.dispatchEvent(app, .{ .canvas_widget_drag = drag_event });
-                }
-                if (widget_keyboard_event) |keyboard_event| {
-                    try self.dispatchCanvasWidgetCommandFromKeyboard(app, keyboard_event);
-                    try self.dispatchEvent(app, .{ .canvas_widget_keyboard = keyboard_event });
-                }
-                if (widget_text_input_event) |text_input_event| {
-                    try self.dispatchEvent(app, .{ .canvas_widget_keyboard = text_input_event });
-                }
-                try self.dispatchEvent(app, .{ .gpu_surface_input = input_event });
-            },
+            .gpu_surface_input => |input_event| try GpuSurfaceEventMethods().dispatchGpuSurfaceInput(self, app, input_event),
             .widget_accessibility_action => |action_event| {
                 _ = try self.dispatchCanvasWidgetAccessibilityAction(app, action_event.window_id, action_event.label, .{
                     .id = action_event.id,
