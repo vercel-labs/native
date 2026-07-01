@@ -11083,19 +11083,62 @@ fn widgetGridSemantics(layout: WidgetLayoutTree, node_index: usize) WidgetGridSe
     if (node_index >= layout.nodes.len) return .{};
     const node = layout.nodes[node_index];
     return switch (node.widget.kind) {
+        .grid => widgetLayoutGridSemantics(layout, node_index),
         .data_grid, .table => .{
             .row_count = dataGridRowCount(layout, node_index),
             .column_count = maxDataGridColumnCount(layout, node_index),
         },
         .data_row => widgetDataRowGridSemantics(layout, node_index),
         .data_cell => widgetDataCellGridSemantics(layout, node_index),
-        else => .{},
+        else => widgetGridChildSemantics(layout, node_index),
     };
+}
+
+fn widgetLayoutGridSemantics(layout: WidgetLayoutTree, grid_index: usize) WidgetGridSemantics {
+    const grid = layout.nodes[grid_index].widget;
+    if (grid.semantics.role != .grid) return .{};
+    const columns = gridSemanticColumnCount(grid);
+    return .{
+        .row_count = gridSemanticRowCount(grid, columns),
+        .column_count = columns,
+    };
+}
+
+fn widgetGridChildSemantics(layout: WidgetLayoutTree, child_index: usize) WidgetGridSemantics {
+    const grid_index = layout.nodes[child_index].parent_index orelse return .{};
+    if (grid_index >= layout.nodes.len) return .{};
+    const grid = layout.nodes[grid_index].widget;
+    if (grid.kind != .grid or grid.semantics.role != .grid) return .{};
+
+    const columns = gridSemanticColumnCount(grid);
+    if (columns == 0) return .{};
+    const source_index = if (layout.nodes[child_index].widget.semantics.list_item_index) |index|
+        @as(usize, @intCast(index))
+    else
+        directChildOrdinal(layout, grid_index, child_index) orelse return .{};
+
+    return .{
+        .row_index = source_index / columns,
+        .column_index = source_index % columns,
+        .row_count = gridSemanticRowCount(grid, columns),
+        .column_count = columns,
+    };
+}
+
+fn gridSemanticColumnCount(grid: Widget) usize {
+    return gridColumnCount(grid.children.len, grid.layout.columns);
+}
+
+fn gridSemanticRowCount(grid: Widget, columns: usize) usize {
+    if (grid.semantics.list_item_count) |count| return @intCast(count);
+    return gridRowCount(grid.children.len, columns);
 }
 
 fn widgetDataRowGridSemantics(layout: WidgetLayoutTree, row_index: usize) WidgetGridSemantics {
     const grid_index = layout.nodes[row_index].parent_index orelse return .{};
-    if (grid_index >= layout.nodes.len or !widgetTableContainerKind(layout.nodes[grid_index].widget.kind)) return .{};
+    if (grid_index >= layout.nodes.len) return .{};
+    if (layout.nodes[grid_index].widget.kind == .grid) return widgetGridChildSemantics(layout, row_index);
+    if (!widgetTableContainerKind(layout.nodes[grid_index].widget.kind)) return .{};
     const row = layout.nodes[row_index].widget;
     return .{
         .row_index = if (row.semantics.list_item_index) |source_index|
@@ -11109,7 +11152,9 @@ fn widgetDataRowGridSemantics(layout: WidgetLayoutTree, row_index: usize) Widget
 
 fn widgetDataCellGridSemantics(layout: WidgetLayoutTree, cell_index: usize) WidgetGridSemantics {
     const row_index = layout.nodes[cell_index].parent_index orelse return .{};
-    if (row_index >= layout.nodes.len or layout.nodes[row_index].widget.kind != .data_row) return .{};
+    if (row_index >= layout.nodes.len) return .{};
+    if (layout.nodes[row_index].widget.kind == .grid) return widgetGridChildSemantics(layout, cell_index);
+    if (layout.nodes[row_index].widget.kind != .data_row) return .{};
     const grid_index = layout.nodes[row_index].parent_index orelse return .{};
     if (grid_index >= layout.nodes.len or !widgetTableContainerKind(layout.nodes[grid_index].widget.kind)) return .{};
     const row = layout.nodes[row_index].widget;
@@ -11149,6 +11194,16 @@ fn directChildOrdinalByKind(layout: WidgetLayoutTree, parent_index: usize, child
     var ordinal: usize = 0;
     for (layout.nodes, 0..) |node, index| {
         if (node.parent_index != parent_index or node.widget.kind != kind) continue;
+        if (index == child_index) return ordinal;
+        ordinal += 1;
+    }
+    return null;
+}
+
+fn directChildOrdinal(layout: WidgetLayoutTree, parent_index: usize, child_index: usize) ?usize {
+    var ordinal: usize = 0;
+    for (layout.nodes, 0..) |node, index| {
+        if (node.parent_index != parent_index) continue;
         if (index == child_index) return ordinal;
         ordinal += 1;
     }
@@ -15082,6 +15137,7 @@ test "widget virtualized grid lays out visible cells by row" {
         .id = 1,
         .kind = .grid,
         .value = 25,
+        .semantics = .{ .role = .grid, .label = "Tile grid" },
         .layout = .{
             .gap = 5,
             .columns = 2,
@@ -15117,7 +15173,10 @@ test "widget virtualized grid lays out visible cells by row" {
     var semantics_buffer: [6]WidgetSemanticsNode = undefined;
     const semantics = try layout.collectSemantics(&semantics_buffer);
     try std.testing.expectEqual(@as(usize, 5), semantics.len);
-    try std.testing.expectEqual(WidgetRole.group, semantics[0].role);
+    try std.testing.expectEqual(WidgetRole.grid, semantics[0].role);
+    try std.testing.expectEqualStrings("Tile grid", semantics[0].label);
+    try std.testing.expectEqual(@as(?usize, 4), semantics[0].grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), semantics[0].grid_column_count);
     try std.testing.expect(semantics[0].scroll.present);
     try std.testing.expectEqual(@as(f32, 25), semantics[0].scroll.offset);
     try std.testing.expectEqual(@as(f32, 45), semantics[0].scroll.viewport_extent);
@@ -15127,6 +15186,20 @@ test "widget virtualized grid lays out visible cells by row" {
     try std.testing.expect(semantics[0].actions.increment);
     try std.testing.expect(semantics[0].actions.decrement);
     try std.testing.expectEqual(@as(f32, 95), virtualWidgetScrollContentExtent(grid, 45));
+    try std.testing.expectEqual(WidgetRole.button, semantics[1].role);
+    try std.testing.expectEqual(@as(?usize, 1), semantics[1].grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 0), semantics[1].grid_column_index);
+    try std.testing.expectEqual(@as(?usize, 4), semantics[1].grid_row_count);
+    try std.testing.expectEqual(@as(?usize, 2), semantics[1].grid_column_count);
+    try std.testing.expectEqual(WidgetRole.button, semantics[2].role);
+    try std.testing.expectEqual(@as(?usize, 1), semantics[2].grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 1), semantics[2].grid_column_index);
+    try std.testing.expectEqual(WidgetRole.button, semantics[3].role);
+    try std.testing.expectEqual(@as(?usize, 2), semantics[3].grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 0), semantics[3].grid_column_index);
+    try std.testing.expectEqual(WidgetRole.button, semantics[4].role);
+    try std.testing.expectEqual(@as(?usize, 2), semantics[4].grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 1), semantics[4].grid_column_index);
 
     const laid_out_grid = layout.findById(1).?.widget;
     const page_down = WidgetKeyboardEvent{ .phase = .key_down, .key = "pagedown" };
