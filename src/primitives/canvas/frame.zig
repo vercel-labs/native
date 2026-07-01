@@ -9,7 +9,7 @@ const serialization = @import("serialization.zig");
 
 const Error = canvas.Error;
 const DiffChange = canvas.DiffChange;
-const CanvasFrame = canvas.CanvasFrame;
+const DisplayList = canvas.DisplayList;
 const ReferenceImage = canvas.ReferenceImage;
 const default_glyph_atlas_cache_retention_frames = canvas.default_glyph_atlas_cache_retention_frames;
 const default_text_layout_cache_retention_frames = canvas.default_text_layout_cache_retention_frames;
@@ -17,33 +17,50 @@ const default_text_layout_cache_retention_frames = canvas.default_text_layout_ca
 const CanvasRenderOverride = render_model.CanvasRenderOverride;
 const RenderPipelineKind = render_model.RenderPipelineKind;
 const RenderCommand = render_model.RenderCommand;
+const RenderPlan = render_model.RenderPlan;
 const RenderBatch = render_model.RenderBatch;
+const RenderBatchPlan = render_model.RenderBatchPlan;
 const RenderPipelineCacheEntry = render_model.RenderPipelineCacheEntry;
 const RenderPipelineCacheAction = render_model.RenderPipelineCacheAction;
+const RenderPipelineCachePlan = render_model.RenderPipelineCachePlan;
 const RenderPathGeometry = render_model.RenderPathGeometry;
+const RenderPathGeometryPlan = render_model.RenderPathGeometryPlan;
 const RenderPathGeometryCacheEntry = render_model.RenderPathGeometryCacheEntry;
 const RenderPathGeometryCacheAction = render_model.RenderPathGeometryCacheAction;
+const RenderPathGeometryCachePlan = render_model.RenderPathGeometryCachePlan;
 const RenderImage = render_model.RenderImage;
+const RenderImagePlan = render_model.RenderImagePlan;
 const RenderImageCacheEntry = render_model.RenderImageCacheEntry;
 const RenderImageCacheAction = render_model.RenderImageCacheAction;
+const RenderImageCachePlan = render_model.RenderImageCachePlan;
 const RenderLayer = render_model.RenderLayer;
+const RenderLayerPlan = render_model.RenderLayerPlan;
 const RenderLayerCacheEntry = render_model.RenderLayerCacheEntry;
 const RenderLayerCacheAction = render_model.RenderLayerCacheAction;
+const RenderLayerCachePlan = render_model.RenderLayerCachePlan;
 const RenderResource = render_model.RenderResource;
+const RenderResourcePlan = render_model.RenderResourcePlan;
 const RenderResourceCacheEntry = render_model.RenderResourceCacheEntry;
 const RenderResourceCacheAction = render_model.RenderResourceCacheAction;
+const RenderResourceCachePlan = render_model.RenderResourceCachePlan;
 const VisualEffect = render_model.VisualEffect;
+const VisualEffectPlan = render_model.VisualEffectPlan;
 const VisualEffectCacheEntry = render_model.VisualEffectCacheEntry;
 const VisualEffectCacheAction = render_model.VisualEffectCacheAction;
+const VisualEffectCachePlan = render_model.VisualEffectCachePlan;
 
+const GlyphAtlasPlan = text_model.GlyphAtlasPlan;
 const GlyphAtlasEntry = text_model.GlyphAtlasEntry;
 const GlyphAtlasCacheEntry = text_model.GlyphAtlasCacheEntry;
 const GlyphAtlasCacheAction = text_model.GlyphAtlasCacheAction;
+const GlyphAtlasCachePlan = text_model.GlyphAtlasCachePlan;
 const TextLayoutOptions = text_model.TextLayoutOptions;
 const TextLine = text_model.TextLine;
 const TextLayoutPlan = text_model.TextLayoutPlan;
+const TextLayoutPlanSet = text_model.TextLayoutPlanSet;
 const TextLayoutCacheEntry = text_model.TextLayoutCacheEntry;
 const TextLayoutCacheAction = text_model.TextLayoutCacheAction;
+const TextLayoutCachePlan = text_model.TextLayoutCachePlan;
 const CanvasRenderPassLoadAction = gpu_model.CanvasRenderPassLoadAction;
 const RenderEncoderCommand = gpu_model.RenderEncoderCommand;
 const RenderEncoderPlan = gpu_model.RenderEncoderPlan;
@@ -246,6 +263,162 @@ pub const CanvasRenderPass = struct {
             if (!gpu_command.supported()) summary.unsupported_command_count += 1;
         }
         return summary;
+    }
+};
+
+pub const CanvasFrame = struct {
+    frame_index: u64 = 0,
+    timestamp_ns: u64 = 0,
+    surface_size: geometry.SizeF = .{},
+    scale: f32 = 1,
+    full_repaint: bool = false,
+    display_list: DisplayList = .{},
+    render_plan: RenderPlan = .{},
+    batch_plan: RenderBatchPlan = .{},
+    pipeline_cache_plan: RenderPipelineCachePlan = .{},
+    path_geometry_plan: RenderPathGeometryPlan = .{},
+    path_geometry_cache_plan: RenderPathGeometryCachePlan = .{},
+    image_plan: RenderImagePlan = .{},
+    image_cache_plan: RenderImageCachePlan = .{},
+    layer_plan: RenderLayerPlan = .{},
+    layer_cache_plan: RenderLayerCachePlan = .{},
+    resource_plan: RenderResourcePlan = .{},
+    resource_cache_plan: RenderResourceCachePlan = .{},
+    visual_effect_plan: VisualEffectPlan = .{},
+    visual_effect_cache_plan: VisualEffectCachePlan = .{},
+    glyph_atlas_plan: GlyphAtlasPlan = .{},
+    glyph_atlas_cache_plan: GlyphAtlasCachePlan = .{},
+    text_layout_plan: TextLayoutPlanSet = .{},
+    text_layout_cache_plan: TextLayoutCachePlan = .{},
+    image_resources: []const ReferenceImage = &.{},
+    changes: []const DiffChange = &.{},
+    dirty_bounds: ?geometry.RectF = null,
+    budget: CanvasFrameBudget = .{},
+
+    pub fn requiresRender(self: CanvasFrame) bool {
+        return self.full_repaint or self.dirty_bounds != null;
+    }
+
+    pub fn budgetStatus(self: CanvasFrame) CanvasFrameBudgetStatus {
+        return self.budget.status(self.diagnosticsWithoutBudgetStatus());
+    }
+
+    pub fn diagnostics(self: CanvasFrame) CanvasFrameDiagnostics {
+        var result = self.diagnosticsWithoutBudgetStatus();
+        result.budget_status = self.budget.status(result);
+        return result;
+    }
+
+    fn diagnosticsWithoutBudgetStatus(self: CanvasFrame) CanvasFrameDiagnostics {
+        const render_pass = self.renderPass();
+        const gpu_packet_summary = render_pass.gpuPacketSummary();
+        return .{
+            .frame_index = self.frame_index,
+            .command_count = self.render_plan.commandCount(),
+            .batch_count = self.batch_plan.batchCount(),
+            .encoder_command_count = render_pass.encoderCommandCount(),
+            .encoder_cache_action_count = render_pass.encoderCacheActionCount(),
+            .encoder_bind_pipeline_count = render_pass.encoderBindPipelineCount(),
+            .encoder_draw_batch_count = render_pass.encoderDrawBatchCount(),
+            .pipeline_count = self.pipeline_cache_plan.entryCount(),
+            .pipeline_upload_count = self.pipeline_cache_plan.uploadCount(),
+            .pipeline_retain_count = self.pipeline_cache_plan.retainCount(),
+            .pipeline_evict_count = self.pipeline_cache_plan.evictCount(),
+            .path_geometry_count = self.path_geometry_plan.geometryCount(),
+            .path_geometry_vertex_count = self.path_geometry_plan.vertexCount(),
+            .path_geometry_index_count = self.path_geometry_plan.indexCount(),
+            .path_geometry_upload_count = self.path_geometry_cache_plan.uploadCount(),
+            .path_geometry_retain_count = self.path_geometry_cache_plan.retainCount(),
+            .path_geometry_evict_count = self.path_geometry_cache_plan.evictCount(),
+            .image_count = self.image_plan.imageCount(),
+            .image_upload_count = self.image_cache_plan.uploadCount(),
+            .image_retain_count = self.image_cache_plan.retainCount(),
+            .image_evict_count = self.image_cache_plan.evictCount(),
+            .layer_count = self.layer_plan.layerCount(),
+            .layer_opacity_count = self.layer_plan.opacityLayerCount(),
+            .layer_clip_count = self.layer_plan.clipLayerCount(),
+            .layer_transform_count = self.layer_plan.transformLayerCount(),
+            .layer_upload_count = self.layer_cache_plan.uploadCount(),
+            .layer_retain_count = self.layer_cache_plan.retainCount(),
+            .layer_evict_count = self.layer_cache_plan.evictCount(),
+            .resource_count = self.resource_plan.resourceCount(),
+            .resource_upload_count = self.resource_cache_plan.uploadCount(),
+            .resource_retain_count = self.resource_cache_plan.retainCount(),
+            .resource_evict_count = self.resource_cache_plan.evictCount(),
+            .visual_effect_count = self.visual_effect_plan.effectCount(),
+            .visual_effect_shadow_count = self.visual_effect_plan.shadowCount(),
+            .visual_effect_blur_count = self.visual_effect_plan.blurCount(),
+            .visual_effect_upload_count = self.visual_effect_cache_plan.uploadCount(),
+            .visual_effect_retain_count = self.visual_effect_cache_plan.retainCount(),
+            .visual_effect_evict_count = self.visual_effect_cache_plan.evictCount(),
+            .glyph_atlas_entry_count = self.glyph_atlas_plan.entryCount(),
+            .glyph_atlas_upload_count = self.glyph_atlas_cache_plan.uploadCount(),
+            .glyph_atlas_retain_count = self.glyph_atlas_cache_plan.retainCount(),
+            .glyph_atlas_evict_count = self.glyph_atlas_cache_plan.evictCount(),
+            .text_layout_count = self.text_layout_plan.planCount(),
+            .text_layout_line_count = self.text_layout_plan.lineCount(),
+            .text_layout_upload_count = self.text_layout_cache_plan.uploadCount(),
+            .text_layout_retain_count = self.text_layout_cache_plan.retainCount(),
+            .text_layout_evict_count = self.text_layout_cache_plan.evictCount(),
+            .gpu_packet_command_count = gpu_packet_summary.command_count,
+            .gpu_packet_cache_action_count = gpu_packet_summary.cache_action_count,
+            .gpu_packet_cached_resource_command_count = gpu_packet_summary.cached_resource_command_count,
+            .gpu_packet_unsupported_command_count = gpu_packet_summary.unsupported_command_count,
+            .gpu_packet_representable = gpu_packet_summary.fullyRepresentable(),
+            .change_count = self.changes.len,
+            .full_repaint = self.full_repaint,
+            .requires_render = self.requiresRender(),
+            .dirty_bounds = self.dirty_bounds,
+            .budget = self.budget,
+        };
+    }
+
+    pub fn writeDiagnosticsJson(self: CanvasFrame, writer: anytype) !void {
+        try self.diagnostics().writeJson(writer);
+    }
+
+    pub fn profile(self: CanvasFrame) CanvasFrameProfile {
+        return canvasFrameProfile(self);
+    }
+
+    pub fn writeProfileJson(self: CanvasFrame, writer: anytype) !void {
+        try self.profile().writeJson(writer);
+    }
+
+    pub fn renderPass(self: CanvasFrame) CanvasRenderPass {
+        return .{
+            .frame_index = self.frame_index,
+            .timestamp_ns = self.timestamp_ns,
+            .surface_size = self.surface_size,
+            .scale = self.scale,
+            .full_repaint = self.full_repaint,
+            .dirty_bounds = self.dirty_bounds,
+            .commands = self.render_plan.commands,
+            .batches = self.batch_plan.batches,
+            .pipeline_actions = self.pipeline_cache_plan.actions,
+            .path_geometries = self.path_geometry_plan.geometries,
+            .path_geometry_actions = self.path_geometry_cache_plan.actions,
+            .images = self.image_plan.images,
+            .image_actions = self.image_cache_plan.actions,
+            .layers = self.layer_plan.layers,
+            .layer_actions = self.layer_cache_plan.actions,
+            .resources = self.resource_plan.resources,
+            .resource_actions = self.resource_cache_plan.actions,
+            .visual_effects = self.visual_effect_plan.effects,
+            .visual_effect_actions = self.visual_effect_cache_plan.actions,
+            .glyph_atlas_entries = self.glyph_atlas_plan.entries,
+            .glyph_atlas_actions = self.glyph_atlas_cache_plan.actions,
+            .text_layouts = self.text_layout_plan.plans,
+            .text_layout_actions = self.text_layout_cache_plan.actions,
+        };
+    }
+
+    pub fn gpuPacket(self: CanvasFrame, output: []CanvasGpuCommand) Error!CanvasGpuPacket {
+        return self.renderPass().gpuPacket(output);
+    }
+
+    pub fn gpuPacketSummary(self: CanvasFrame) CanvasGpuPacketSummary {
+        return self.renderPass().gpuPacketSummary();
     }
 };
 
