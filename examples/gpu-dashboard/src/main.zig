@@ -10,23 +10,35 @@ const geometry = zero_native.geometry;
 const window_width: f32 = 1240;
 const window_height: f32 = 780;
 const toolbar_height: f32 = 54;
-const sidebar_width: f32 = 196;
-const canvas_pixel_width: usize = 860;
+const canvas_pixel_width: usize = @intFromFloat(window_width);
 const canvas_width: f32 = @floatFromInt(canvas_pixel_width);
-const canvas_height: f32 = 520;
+const canvas_height: f32 = window_height;
 const default_canvas_size = geometry.SizeF.init(canvas_width, canvas_height);
 const statusbar_height: f32 = 34;
+const dashboard_content_y: f32 = toolbar_height;
+const dashboard_content_height: f32 = canvas_height - toolbar_height - statusbar_height;
 const max_dashboard_pipelines: usize = 8;
 const max_dashboard_commands: usize = zero_native.runtime.max_canvas_commands_per_view;
 const max_dashboard_glyphs: usize = zero_native.runtime.max_canvas_glyphs_per_view;
-const max_dashboard_widgets: usize = 40;
-const dashboard_chrome_prefix_commands: usize = 2;
+const max_dashboard_widgets: usize = 48;
+const dashboard_chrome_prefix_commands: usize = 6;
 const dashboard_chrome_suffix_commands: usize = 0;
-const expected_dashboard_command_count: usize = 61;
-const expected_dashboard_interaction_command_count: usize = 62;
-const expected_dashboard_reference_signature: u64 = 11325694797203975265;
+const expected_dashboard_command_count: usize = 72;
+const expected_dashboard_interaction_command_count: usize = 73;
+const expected_dashboard_reference_signature: u64 = 11241989199542776100;
 const refresh_command = "dashboard.refresh";
 const mode_command = "dashboard.mode";
+const dashboard_canvas_label = "dashboard-canvas";
+const dashboard_toolbar_id: canvas.ObjectId = 80;
+const dashboard_toolbar_title_id: canvas.ObjectId = 81;
+const dashboard_toolbar_mode_id: canvas.ObjectId = 82;
+const dashboard_toolbar_refresh_id: canvas.ObjectId = 83;
+const dashboard_toolbar_separator_id: canvas.ObjectId = 84;
+const dashboard_content_stack_id: canvas.ObjectId = 90;
+const dashboard_status_separator_id: canvas.ObjectId = 260;
+const dashboard_status_text_id: canvas.ObjectId = 261;
+const initial_dashboard_status_text = "Canvas scene waiting for the first GPU frame.";
+const max_dashboard_status_text: usize = 192;
 const live_button_fill_command_id: canvas.ObjectId = 103 * 16 + 1;
 const live_button_text_command_id: canvas.ObjectId = 103 * 16 + 4;
 const forecast_text_command_id: canvas.ObjectId = 131 * 16 + 4;
@@ -59,97 +71,9 @@ const warm_stops = [_]canvas.GradientStop{
     .{ .offset = 1, .color = color(251, 191, 36) },
 };
 
-const html =
-    \\<!doctype html>
-    \\<html>
-    \\<head>
-    \\  <meta charset="utf-8">
-    \\  <meta name="viewport" content="width=device-width, initial-scale=1">
-    \\  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline';">
-    \\  <style>
-    \\    :root { color-scheme: light dark; }
-    \\    * { box-sizing: border-box; }
-    \\    body {
-    \\      margin: 0;
-    \\      min-height: 100vh;
-    \\      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Segoe UI, system-ui, sans-serif;
-    \\      background: #f6f7f9;
-    \\      color: #171a22;
-    \\    }
-    \\    main {
-    \\      min-height: 100vh;
-    \\      padding: 28px;
-    \\      display: grid;
-    \\      align-content: start;
-    \\      gap: 16px;
-    \\    }
-    \\    h1 { margin: 0; font-size: 24px; line-height: 1.15; font-weight: 660; letter-spacing: 0; }
-    \\    p { margin: 0; color: #636b77; line-height: 1.5; }
-    \\    .metrics {
-    \\      display: grid;
-    \\      grid-template-columns: repeat(2, minmax(0, 1fr));
-    \\      gap: 10px;
-    \\    }
-    \\    .metric {
-    \\      border: 1px solid #dde3eb;
-    \\      border-radius: 7px;
-    \\      padding: 12px;
-    \\      background: white;
-    \\    }
-    \\    .metric strong { display: block; font-size: 20px; margin-bottom: 4px; }
-    \\    .metric span { color: #697386; font-size: 12px; }
-    \\    code {
-    \\      display: block;
-    \\      width: 100%;
-    \\      overflow-wrap: anywhere;
-    \\      border: 1px solid #e2e7ee;
-    \\      border-radius: 7px;
-    \\      padding: 12px;
-    \\      background: #fbfcfe;
-    \\      color: #374151;
-    \\      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    \\    }
-    \\    @media (prefers-color-scheme: dark) {
-    \\      body { background: #101216; color: #f4f6f8; }
-    \\      p, .metric span { color: #a2aab7; }
-    \\      .metric { background: #181b21; border-color: #2b3038; }
-    \\      code { color: #d8dee8; background: #151820; border-color: #2c3340; }
-    \\    }
-    \\  </style>
-    \\</head>
-    \\<body>
-    \\  <main>
-    \\    <h1>Renderer diagnostics</h1>
-    \\    <p>The dashboard canvas is registered on the native GPU surface. The WebView stays available as an inspector surface.</p>
-    \\    <div class="metrics">
-    \\      <div class="metric"><strong>retained</strong><span>Widget-emitted scene</span></div>
-    \\      <div class="metric"><strong>8</strong><span>Renderer resources</span></div>
-    \\      <div class="metric"><strong>120</strong><span>FPS target</span></div>
-    \\      <div class="metric"><strong>0</strong><span>Steady-frame layout work</span></div>
-    \\    </div>
-    \\    <code>display-list -> frame plan -> GPU surface diagnostics</code>
-    \\  </main>
-    \\</body>
-    \\</html>
-;
-
 const app_permissions = [_][]const u8{ zero_native.security.permission_command, zero_native.security.permission_view };
 const shell_views = [_]zero_native.ShellView{
-    .{ .label = "toolbar", .kind = .toolbar, .edge = .top, .height = toolbar_height, .layer = 30, .role = "Toolbar" },
-    .{ .label = "toolbar-title", .kind = .label, .parent = "toolbar", .x = 18, .y = 17, .width = 220, .height = 20, .layer = 31, .text = "GPU Dashboard" },
-    .{ .label = "view-mode", .kind = .segmented_control, .parent = "toolbar", .x = 252, .y = 12, .width = 214, .height = 30, .layer = 31, .text = "Overview|Revenue|Latency", .command = mode_command },
-    .{ .label = "refresh", .kind = .button, .parent = "toolbar", .x = 484, .y = 12, .width = 86, .height = 30, .layer = 31, .text = "Refresh", .command = refresh_command },
-    .{ .label = "body", .kind = .split, .fill = true, .axis = .row },
-    .{ .label = "sidebar", .kind = .sidebar, .parent = "body", .width = sidebar_width, .min_width = 180, .max_width = 240, .layer = 10, .role = "Navigation" },
-    .{ .label = "sidebar-title", .kind = .label, .parent = "sidebar", .x = 18, .y = 22, .width = 150, .height = 20, .layer = 11, .text = "Northstar" },
-    .{ .label = "nav-overview", .kind = .list_item, .parent = "sidebar", .x = 14, .y = 64, .width = 166, .height = 32, .layer = 11, .text = "Overview" },
-    .{ .label = "nav-customers", .kind = .list_item, .parent = "sidebar", .x = 14, .y = 102, .width = 166, .height = 32, .layer = 11, .text = "Customers" },
-    .{ .label = "nav-latency", .kind = .list_item, .parent = "sidebar", .x = 14, .y = 140, .width = 166, .height = 32, .layer = 11, .text = "Latency" },
-    .{ .label = "sidebar-status", .kind = .label, .parent = "sidebar", .x = 18, .y = 690, .width = 150, .height = 20, .layer = 11, .text = "Native shell" },
-    .{ .label = "dashboard-canvas", .kind = .gpu_surface, .parent = "body", .width = canvas_width, .min_width = 720, .layer = 12, .role = "Native-rendered dashboard canvas", .accessibility_label = "Native-rendered product dashboard canvas", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
-    .{ .label = "inspector", .kind = .webview, .parent = "body", .url = "zero://inline", .fill = true },
-    .{ .label = "statusbar", .kind = .statusbar, .edge = .bottom, .height = statusbar_height, .layer = 30, .role = "Status" },
-    .{ .label = "status-label", .kind = .label, .parent = "statusbar", .x = 14, .y = 8, .width = 840, .height = 18, .layer = 31, .text = "Canvas scene waiting for the first GPU frame." },
+    .{ .label = dashboard_canvas_label, .kind = .gpu_surface, .fill = true, .min_width = 720, .layer = 12, .role = "Native-rendered dashboard canvas", .accessibility_label = "Native-rendered product dashboard canvas", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
 };
 const shell_windows = [_]zero_native.ShellWindow{.{
     .label = "main",
@@ -169,6 +93,8 @@ const GpuDashboardApp = struct {
     high_contrast: bool = false,
     canvas_installed: bool = false,
     reported_planned_frame: bool = false,
+    status_text_storage: [max_dashboard_status_text]u8 = undefined,
+    status_text_len: usize = 0,
     canvas_size: geometry.SizeF = default_canvas_size,
     pixel_snap_scale: f32 = 1,
     pixels: ?[]u8 = null,
@@ -201,7 +127,6 @@ const GpuDashboardApp = struct {
         return .{
             .context = self,
             .name = "gpu-dashboard",
-            .source = zero_native.WebViewSource.html(html),
             .scene_fn = scene,
             .event_fn = event,
             .stop_fn = stop,
@@ -245,15 +170,13 @@ const GpuDashboardApp = struct {
     }
 
     fn handleGpuFrame(self: *@This(), runtime: *zero_native.Runtime, frame_event: zero_native.GpuSurfaceFrameEvent) anyerror!void {
-        if (!std.mem.eql(u8, frame_event.label, "dashboard-canvas")) return;
+        if (!std.mem.eql(u8, frame_event.label, dashboard_canvas_label)) return;
         const first_install = !self.canvas_installed;
         const scale_changed = self.updatePixelSnapScale(frame_event.scale_factor);
         const size_changed = self.updateCanvasSize(dashboardSurfaceSize(frame_event.size));
         if (first_install or scale_changed or size_changed) {
+            if (first_install) self.setStatusText("Dashboard display list presented on the GPU surface.");
             try self.installDashboardCanvas(runtime, frame_event);
-            if (first_install) {
-                try self.updateStatus(runtime, frame_event.window_id, "Dashboard display list presented on the GPU surface.");
-            }
             return;
         }
 
@@ -263,24 +186,30 @@ const GpuDashboardApp = struct {
     }
 
     fn handleWidgetPointer(self: *@This(), runtime: *zero_native.Runtime, pointer_event: zero_native.runtime.CanvasWidgetPointerEvent) anyerror!void {
-        if (!std.mem.eql(u8, pointer_event.view_label, "dashboard-canvas")) return;
+        if (!std.mem.eql(u8, pointer_event.view_label, dashboard_canvas_label)) return;
         const target = pointer_event.target orelse return;
         const action = switch (pointer_event.pointer.phase) {
             .up => "Clicked",
             else => return,
         };
+        if (target.id == dashboard_toolbar_mode_id or target.id == dashboard_toolbar_refresh_id) return;
         try self.reportWidgetInteraction(runtime, pointer_event.window_id, action, target.id);
     }
 
     fn handleWidgetKeyboard(self: *@This(), runtime: *zero_native.Runtime, keyboard_event: zero_native.runtime.CanvasWidgetKeyboardEvent) anyerror!void {
-        if (!std.mem.eql(u8, keyboard_event.view_label, "dashboard-canvas")) return;
+        if (!std.mem.eql(u8, keyboard_event.view_label, dashboard_canvas_label)) return;
         if (keyboard_event.keyboard.phase != .key_down) return;
         const target = keyboard_event.target orelse return;
+        if (target.id == dashboard_toolbar_mode_id or target.id == dashboard_toolbar_refresh_id) return;
+        switch (target.kind) {
+            .scroll_view, .list, .data_grid, .table => return,
+            else => {},
+        }
         try self.reportWidgetInteraction(runtime, keyboard_event.window_id, "Keyed", target.id);
     }
 
     fn reportWidgetInteraction(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId, action: []const u8, id: canvas.ObjectId) anyerror!void {
-        const layout = try runtime.canvasWidgetLayout(window_id, "dashboard-canvas");
+        const layout = try runtime.canvasWidgetLayout(window_id, dashboard_canvas_label);
         const node = layout.findById(id) orelse return;
         const widget = node.widget;
         var status_buffer: [192]u8 = undefined;
@@ -324,7 +253,7 @@ const GpuDashboardApp = struct {
     }
 
     fn installDashboardCanvas(self: *@This(), runtime: *zero_native.Runtime, frame_event: zero_native.GpuSurfaceFrameEvent) anyerror!void {
-        try installDashboardCanvasModelWithTokens(runtime, frame_event.window_id, self.dashboardTokens(), self.canvas_size);
+        try installDashboardCanvasModelWithTokens(runtime, frame_event.window_id, self.dashboardTokens(), self.canvas_size, self.statusText());
         try self.scheduleDashboardAnimations(runtime, frame_event.window_id, frame_event.timestamp_ns);
         _ = try self.presentDashboardCanvas(runtime, frame_event, true);
         self.canvas_installed = true;
@@ -347,17 +276,32 @@ const GpuDashboardApp = struct {
         return true;
     }
 
+    fn setStatusText(self: *@This(), text: []const u8) void {
+        const len = @min(text.len, self.status_text_storage.len);
+        @memcpy(self.status_text_storage[0..len], text[0..len]);
+        self.status_text_len = len;
+    }
+
+    fn statusText(self: *const @This()) []const u8 {
+        if (self.status_text_len == 0) return initial_dashboard_status_text;
+        return self.status_text_storage[0..self.status_text_len];
+    }
+
+    fn updateDashboardCanvasModel(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId) anyerror!void {
+        try installDashboardCanvasModelWithTokens(runtime, window_id, self.dashboardTokens(), self.canvas_size, self.statusText());
+    }
+
     fn updateStatus(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId, text: []const u8) anyerror!void {
-        _ = self;
-        _ = try runtime.updateView(window_id, "status-label", .{ .text = text });
+        self.setStatusText(text);
+        if (self.canvas_installed) try self.updateDashboardCanvasModel(runtime, window_id);
     }
 
     fn refresh(self: *@This(), runtime: *zero_native.Runtime, command: zero_native.CommandEvent) anyerror!void {
         self.refresh_count += 1;
         self.reported_planned_frame = false;
-        const gpu_frame = try runtime.gpuSurfaceFrame(command.window_id, "dashboard-canvas");
+        const gpu_frame = try runtime.gpuSurfaceFrame(command.window_id, dashboard_canvas_label);
         _ = self.updateCanvasSize(dashboardSurfaceSize(gpu_frame.size));
-        try installDashboardCanvasModelWithTokens(runtime, command.window_id, self.dashboardTokens(), self.canvas_size);
+        try installDashboardCanvasModelWithTokens(runtime, command.window_id, self.dashboardTokens(), self.canvas_size, self.statusText());
         try self.scheduleDashboardAnimations(runtime, command.window_id, gpu_frame.timestamp_ns);
         _ = try self.presentDashboardCanvas(runtime, gpuFrameEvent(gpu_frame), true);
 
@@ -383,12 +327,12 @@ const GpuDashboardApp = struct {
         self.high_contrast = appearance.high_contrast;
         if (!self.canvas_installed) return;
 
-        const gpu_frame = runtime.gpuSurfaceFrame(1, "dashboard-canvas") catch |err| switch (err) {
+        const gpu_frame = runtime.gpuSurfaceFrame(1, dashboard_canvas_label) catch |err| switch (err) {
             error.WindowNotFound, error.ViewNotFound, error.InvalidViewOptions => return,
             else => return err,
         };
         _ = self.updateCanvasSize(dashboardSurfaceSize(gpu_frame.size));
-        try installDashboardCanvasModelWithTokens(runtime, 1, self.dashboardTokens(), self.canvas_size);
+        try installDashboardCanvasModelWithTokens(runtime, 1, self.dashboardTokens(), self.canvas_size, self.statusText());
         try self.scheduleDashboardAnimations(runtime, 1, gpu_frame.timestamp_ns);
         _ = try self.presentDashboardCanvas(runtime, gpuFrameEvent(gpu_frame), true);
 
@@ -403,7 +347,7 @@ const GpuDashboardApp = struct {
         const present_scale = referencePresentScale(scale_factor);
         const packet = runtime.presentNextCanvasGpuPacketWithScale(
             frame_event.window_id,
-            "dashboard-canvas",
+            dashboard_canvas_label,
             .{
                 .frame_index = frame_event.frame_index,
                 .timestamp_ns = frame_event.timestamp_ns,
@@ -440,7 +384,7 @@ const GpuDashboardApp = struct {
         try self.ensurePixelBuffers(surface_size, present_scale);
         _ = try runtime.presentNextCanvasFrame(
             window_id,
-            "dashboard-canvas",
+            dashboard_canvas_label,
             .{
                 .frame_index = frame_index,
                 .timestamp_ns = timestamp_ns,
@@ -486,7 +430,7 @@ const GpuDashboardApp = struct {
                 .to_transform = canvas.Affine.identity(),
             }),
         };
-        _ = try runtime.setCanvasRenderAnimations(window_id, "dashboard-canvas", &animations);
+        _ = try runtime.setCanvasRenderAnimations(window_id, dashboard_canvas_label, &animations);
     }
 
     fn frameStorage(self: *@This()) canvas.CanvasFrameStorage {
@@ -529,18 +473,18 @@ const GpuDashboardApp = struct {
 };
 
 fn installDashboardCanvasModel(runtime: *zero_native.Runtime, window_id: zero_native.WindowId) anyerror!void {
-    return installDashboardCanvasModelWithTokens(runtime, window_id, dashboardWidgetTokens(), default_canvas_size);
+    return installDashboardCanvasModelWithTokens(runtime, window_id, dashboardWidgetTokens(), default_canvas_size, initial_dashboard_status_text);
 }
 
-fn installDashboardCanvasModelWithTokens(runtime: *zero_native.Runtime, window_id: zero_native.WindowId, tokens: canvas.DesignTokens, surface_size: geometry.SizeF) anyerror!void {
+fn installDashboardCanvasModelWithTokens(runtime: *zero_native.Runtime, window_id: zero_native.WindowId, tokens: canvas.DesignTokens, surface_size: geometry.SizeF, status_text: []const u8) anyerror!void {
     var commands: [max_dashboard_commands]canvas.CanvasCommand = undefined;
     var nodes: [max_dashboard_widgets]canvas.WidgetLayoutNode = undefined;
     var builder = canvas.Builder.init(&commands);
-    const layout = try buildDashboardWidgetLayoutForSize(&nodes, surface_size);
+    const layout = try buildDashboardWidgetLayoutForSize(&nodes, surface_size, status_text);
     try buildDashboardDisplayListForSize(&builder, layout, tokens, surface_size);
-    _ = try runtime.setCanvasDisplayList(window_id, "dashboard-canvas", builder.displayList());
-    _ = try runtime.setCanvasWidgetLayout(window_id, "dashboard-canvas", layout);
-    _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, "dashboard-canvas", tokens, .{
+    _ = try runtime.setCanvasDisplayList(window_id, dashboard_canvas_label, builder.displayList());
+    _ = try runtime.setCanvasWidgetLayout(window_id, dashboard_canvas_label, layout);
+    _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, dashboard_canvas_label, tokens, .{
         .prefix_command_count = dashboard_chrome_prefix_commands,
         .suffix_command_count = dashboard_chrome_suffix_commands,
     });
@@ -565,9 +509,29 @@ fn dashboardBackdropRect(surface_size: geometry.SizeF) geometry.RectF {
     return rect(0, 0, size.width, size.height);
 }
 
+fn dashboardToolbarHeightForSize(surface_size: geometry.SizeF) f32 {
+    const size = dashboardSurfaceSize(surface_size);
+    const status_height = dashboardStatusbarHeightForSize(size);
+    return @min(toolbar_height, @max(0, size.height - status_height - 1));
+}
+
+fn dashboardStatusbarHeightForSize(surface_size: geometry.SizeF) f32 {
+    const size = dashboardSurfaceSize(surface_size);
+    return @min(statusbar_height, @max(0, size.height - 1));
+}
+
+fn dashboardContentYForSize(surface_size: geometry.SizeF) f32 {
+    return dashboardToolbarHeightForSize(surface_size);
+}
+
+fn dashboardContentHeightForSize(surface_size: geometry.SizeF) f32 {
+    const size = dashboardSurfaceSize(surface_size);
+    return @max(1, size.height - dashboardToolbarHeightForSize(size) - dashboardStatusbarHeightForSize(size));
+}
+
 fn dashboardHeroRect(surface_size: geometry.SizeF) geometry.RectF {
     const size = dashboardSurfaceSize(surface_size);
-    return rect(38, 38, 168, @max(444, size.height - 76));
+    return rect(38, dashboardContentYForSize(size) + 38, 168, @max(444, dashboardContentHeightForSize(size) - 76));
 }
 
 fn dashboardSizesEqual(a: geometry.SizeF, b: geometry.SizeF) bool {
@@ -579,9 +543,27 @@ fn buildDashboardDisplayList(builder: *canvas.Builder, layout: canvas.WidgetLayo
 }
 
 fn buildDashboardDisplayListForSize(builder: *canvas.Builder, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens, surface_size: geometry.SizeF) canvas.Error!void {
-    const backdrop_rect = dashboardBackdropRect(surface_size);
-    const hero_rect = dashboardHeroRect(surface_size);
+    const size = dashboardSurfaceSize(surface_size);
+    const backdrop_rect = dashboardBackdropRect(size);
+    const hero_rect = dashboardHeroRect(size);
+    const content_y = dashboardContentYForSize(size);
+    const content_height = dashboardContentHeightForSize(size);
     try builder.fillRect(.{ .id = 1, .rect = backdrop_rect, .fill = .{ .color = tokens.colors.background } });
+    try builder.fillRect(.{ .id = dashboard_toolbar_id, .rect = rect(0, 0, size.width, toolbar_height), .fill = .{ .color = tokens.colors.surface } });
+    try builder.drawText(.{
+        .id = dashboard_toolbar_title_id,
+        .font_id = tokens.typography.font_id,
+        .size = 16,
+        .origin = geometry.PointF.init(18, 33),
+        .color = tokens.colors.text,
+        .text = "GPU Dashboard",
+        .text_layout = .{
+            .max_width = 220,
+            .line_height = 20,
+        },
+    });
+    try builder.fillRect(.{ .id = dashboard_toolbar_separator_id, .rect = rect(0, toolbar_height - 1, size.width, 1), .fill = .{ .color = tokens.colors.border } });
+    try builder.fillRect(.{ .id = dashboard_status_separator_id, .rect = rect(0, content_y + content_height, size.width, 1), .fill = .{ .color = tokens.colors.border } });
     try builder.fillRoundedRect(.{ .id = 4, .rect = hero_rect, .radius = canvas.Radius.all(16), .fill = .{ .linear_gradient = .{ .start = hero_rect.topLeft(), .end = hero_rect.bottomRight(), .stops = &hero_stops } } });
 
     try layout.emitDisplayList(builder, tokens);
@@ -626,10 +608,10 @@ fn normalizedPixelSnapScale(scale_factor: f32) f32 {
 }
 
 fn buildDashboardWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!canvas.WidgetLayoutTree {
-    return buildDashboardWidgetLayoutForSize(nodes, default_canvas_size);
+    return buildDashboardWidgetLayoutForSize(nodes, default_canvas_size, initial_dashboard_status_text);
 }
 
-fn buildDashboardWidgetLayoutForSize(nodes: []canvas.WidgetLayoutNode, surface_size: geometry.SizeF) canvas.Error!canvas.WidgetLayoutTree {
+fn buildDashboardWidgetLayoutForSize(nodes: []canvas.WidgetLayoutNode, surface_size: geometry.SizeF, status_text: []const u8) canvas.Error!canvas.WidgetLayoutTree {
     const metric_items = [_]canvas.Widget{
         .{ .id = 105, .kind = .list_item, .text = "ARR $12.8M, up 18.4%" },
         .{ .id = 106, .kind = .list_item, .text = "Activation 74.2%, up 6.1%" },
@@ -787,7 +769,42 @@ fn buildDashboardWidgetLayoutForSize(nodes: []canvas.WidgetLayoutNode, surface_s
         },
     };
     const size = dashboardSurfaceSize(surface_size);
-    return canvas.layoutWidgetTree(.{ .kind = .stack, .children = &dashboard_widgets }, rect(0, 0, size.width, size.height), nodes);
+    const content_y = dashboardContentYForSize(size);
+    const content_height = dashboardContentHeightForSize(size);
+    const root_widgets = [_]canvas.Widget{
+        .{
+            .id = dashboard_toolbar_mode_id,
+            .kind = .segmented_control,
+            .frame = rect(252, 12, 214, 30),
+            .text = "Overview|Revenue|Latency",
+            .command = mode_command,
+            .semantics = .{ .label = "Dashboard mode" },
+        },
+        .{
+            .id = dashboard_toolbar_refresh_id,
+            .kind = .button,
+            .frame = rect(484, 12, 86, 30),
+            .text = "Refresh",
+            .variant = .secondary,
+            .command = refresh_command,
+            .semantics = .{ .label = "Refresh dashboard" },
+        },
+        .{
+            .id = dashboard_content_stack_id,
+            .kind = .stack,
+            .frame = rect(0, content_y, size.width, content_height),
+            .children = &dashboard_widgets,
+        },
+        .{
+            .id = dashboard_status_text_id,
+            .kind = .text,
+            .frame = rect(14, content_y + content_height + 8, @max(1, size.width - 28), 18),
+            .text = status_text,
+            .size = .sm,
+            .semantics = .{ .label = status_text },
+        },
+    };
+    return canvas.layoutWidgetTree(.{ .kind = .stack, .children = &root_widgets }, rect(0, 0, size.width, size.height), nodes);
 }
 
 fn dashboardFrame(display_list: canvas.DisplayList, previous: ?canvas.DisplayList, options: canvas.CanvasFrameOptions, storage: canvas.CanvasFrameStorage) canvas.Error!canvas.CanvasFrame {
@@ -964,15 +981,6 @@ fn dashboardSnapshotWidget(snapshot: zero_native.automation.snapshot.Input, id: 
     return null;
 }
 
-fn dashboardViewByLabel(runtime: *const zero_native.Runtime, label: []const u8) ?zero_native.ViewInfo {
-    var views_buffer: [zero_native.platform.max_views + zero_native.platform.max_webviews + 1]zero_native.ViewInfo = undefined;
-    const views = runtime.listViews(1, &views_buffer);
-    for (views) |view| {
-        if (std.mem.eql(u8, view.label, label)) return view;
-    }
-    return null;
-}
-
 fn expectDashboardTextCommand(display_list: canvas.DisplayList, id: canvas.ObjectId, expected: []const u8) !void {
     const command_ref = display_list.findCommandById(id) orelse return error.MissingDashboardCommand;
     switch (command_ref.command) {
@@ -1059,6 +1067,10 @@ fn expectDashboardWidgetFrame(layout: canvas.WidgetLayoutTree, id: canvas.Object
     try expectDashboardRect(node.frame, expected);
 }
 
+fn dashboardContentRect(x: f32, y: f32, width: f32, height: f32) geometry.RectF {
+    return rect(x, dashboard_content_y + y, width, height);
+}
+
 fn expectDashboardWidgetsDoNotOverlap(layout: canvas.WidgetLayoutTree, a_id: canvas.ObjectId, b_id: canvas.ObjectId) !void {
     const a = layout.findById(a_id) orelse return error.TestUnexpectedResult;
     const b = layout.findById(b_id) orelse return error.TestUnexpectedResult;
@@ -1105,18 +1117,17 @@ pub fn main(init: std.process.Init) !void {
     }, init);
 }
 
-test "gpu dashboard scene declares native shell gpu canvas and inspector" {
-    try std.testing.expect(shell_views[5].kind == .sidebar);
-    try std.testing.expect(shell_views[11].kind == .gpu_surface);
-    try std.testing.expect(shell_views[12].kind == .webview);
-    try std.testing.expectEqualStrings("body", shell_views[11].parent.?);
-    try std.testing.expectEqualStrings("body", shell_views[12].parent.?);
-    try std.testing.expect(shell_views[11].gpu_backend.? == .metal);
-    try std.testing.expect(shell_views[11].gpu_pixel_format.? == .bgra8_unorm);
-    try std.testing.expect(shell_views[11].gpu_present_mode.? == .timer);
-    try std.testing.expect(shell_views[11].gpu_alpha_mode.? == .@"opaque");
-    try std.testing.expect(shell_views[11].gpu_color_space.? == .srgb);
-    try std.testing.expect(shell_views[11].gpu_vsync.?);
+test "gpu dashboard scene declares one full-window zero-native canvas" {
+    try std.testing.expectEqual(@as(usize, 1), shell_views.len);
+    try std.testing.expect(shell_views[0].kind == .gpu_surface);
+    try std.testing.expect(shell_views[0].parent == null);
+    try std.testing.expect(shell_views[0].fill);
+    try std.testing.expect(shell_views[0].gpu_backend.? == .metal);
+    try std.testing.expect(shell_views[0].gpu_pixel_format.? == .bgra8_unorm);
+    try std.testing.expect(shell_views[0].gpu_present_mode.? == .timer);
+    try std.testing.expect(shell_views[0].gpu_alpha_mode.? == .@"opaque");
+    try std.testing.expect(shell_views[0].gpu_color_space.? == .srgb);
+    try std.testing.expect(shell_views[0].gpu_vsync.?);
 }
 
 test "gpu dashboard display list builds a complete canvas scene" {
@@ -1138,25 +1149,32 @@ test "gpu dashboard display list builds a complete canvas scene" {
     try std.testing.expect(bounds.x <= 0);
     try std.testing.expect(bounds.y <= 0);
     try std.testing.expect(bounds.width >= canvas_width);
-    try std.testing.expect(bounds.height >= 520);
+    try std.testing.expect(bounds.height >= canvas_height);
 }
 
 test "gpu dashboard layout keeps controls visually separated" {
     var nodes: [max_dashboard_widgets]canvas.WidgetLayoutNode = undefined;
     const layout = try buildDashboardWidgetLayout(&nodes);
 
-    try expectDashboardWidgetFrame(layout, 103, rect(688, 50, 122, 34));
-    try expectDashboardWidgetFrame(layout, 104, rect(236, 128, 332, 76));
-    try expectDashboardWidgetFrame(layout, 108, rect(236, 248, 332, 164));
-    try expectDashboardWidgetFrame(layout, 109, rect(236, 216, 332, 10));
-    try expectDashboardWidgetFrame(layout, 120, rect(596, 238, 196, 112));
-    try expectDashboardWidgetFrame(layout, 130, rect(236, 426, 556, 64));
-    try expectDashboardWidgetFrame(layout, 140, rect(596, 92, 196, 118));
-    try expectDashboardWidgetFrame(layout, 150, rect(260, 306, 284, 28));
-    try expectDashboardWidgetFrame(layout, 131, rect(250, 442, 116, 30));
-    try expectDashboardWidgetFrame(layout, 132, rect(380, 442, 128, 30));
-    try expectDashboardWidgetFrame(layout, 133, rect(522, 443, 94, 28));
-    try expectDashboardWidgetFrame(layout, 134, rect(682, 445, 78, 24));
+    try std.testing.expect(layout.findById(dashboard_toolbar_id) == null);
+    try std.testing.expect(layout.findById(dashboard_toolbar_title_id) == null);
+    try expectDashboardWidgetFrame(layout, dashboard_toolbar_mode_id, rect(252, 12, 214, 30));
+    try expectDashboardWidgetFrame(layout, dashboard_toolbar_refresh_id, rect(484, 12, 86, 30));
+    try std.testing.expect(layout.findById(dashboard_toolbar_separator_id) == null);
+    try expectDashboardWidgetFrame(layout, dashboard_content_stack_id, rect(0, dashboard_content_y, canvas_width, dashboard_content_height));
+    try expectDashboardWidgetFrame(layout, dashboard_status_text_id, rect(14, dashboard_content_y + dashboard_content_height + 8, canvas_width - 28, 18));
+    try expectDashboardWidgetFrame(layout, 103, dashboardContentRect(688, 50, 122, 34));
+    try expectDashboardWidgetFrame(layout, 104, dashboardContentRect(236, 128, 332, 76));
+    try expectDashboardWidgetFrame(layout, 108, dashboardContentRect(236, 248, 332, 164));
+    try expectDashboardWidgetFrame(layout, 109, dashboardContentRect(236, 216, 332, 10));
+    try expectDashboardWidgetFrame(layout, 120, dashboardContentRect(596, 238, 196, 112));
+    try expectDashboardWidgetFrame(layout, 130, dashboardContentRect(236, 426, 556, 64));
+    try expectDashboardWidgetFrame(layout, 140, dashboardContentRect(596, 92, 196, 118));
+    try expectDashboardWidgetFrame(layout, 150, dashboardContentRect(260, 306, 284, 28));
+    try expectDashboardWidgetFrame(layout, 131, dashboardContentRect(250, 442, 116, 30));
+    try expectDashboardWidgetFrame(layout, 132, dashboardContentRect(380, 442, 128, 30));
+    try expectDashboardWidgetFrame(layout, 133, dashboardContentRect(522, 443, 94, 28));
+    try expectDashboardWidgetFrame(layout, 134, dashboardContentRect(682, 445, 78, 24));
 
     try expectDashboardWidgetsDoNotOverlap(layout, 103, 140);
     try expectDashboardWidgetsDoNotOverlap(layout, 104, 140);
@@ -1198,7 +1216,7 @@ test "gpu dashboard display list renders through the reference surface" {
     var text_layout_cache_actions: [max_dashboard_commands * 2]canvas.TextLayoutCacheAction = undefined;
     var changes: [max_dashboard_commands * 2 + 1]canvas.DiffChange = undefined;
     const frame = try dashboardFrame(display_list, null, .{
-        .surface_size = geometry.SizeF.init(canvas_width, 520),
+        .surface_size = geometry.SizeF.init(canvas_width, canvas_height),
         .full_repaint = true,
     }, dashboardFrameStorage(&render_commands, &render_batches, &pipeline_cache_entries, &pipeline_cache_actions, &layers, &layer_cache_entries, &layer_cache_actions, &resources, &cache_entries, &cache_actions, &visual_effects, &visual_effect_cache_entries, &visual_effect_cache_actions, &glyphs, &glyph_cache_entries, &glyph_cache_actions, &text_layout_plans, &text_layout_lines, &text_layout_cache_entries, &text_layout_cache_actions, &changes));
 
@@ -1219,13 +1237,13 @@ test "gpu dashboard display list renders through the reference surface" {
     try std.testing.expectEqual(frame.batch_plan.batchCount(), encoder_plan.drawBatchCount());
     try std.testing.expect(encoder_plan.cacheActionCount() >= frame.pipeline_cache_plan.actionCount());
 
-    const pixel_count = canvas_pixel_width * 520 * 4;
+    const pixel_count = canvas_pixel_width * @as(usize, @intFromFloat(canvas_height)) * 4;
     const pixels = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(pixels);
     const scratch = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(scratch);
     @memset(pixels, 0);
-    const surface = try canvas.ReferenceRenderSurface.initWithScratch(canvas_pixel_width, 520, pixels, scratch);
+    const surface = try canvas.ReferenceRenderSurface.initWithScratch(canvas_pixel_width, @intFromFloat(canvas_height), pixels, scratch);
     try surface.renderPass(frame.renderPass(), color(0, 0, 0));
 
     try std.testing.expectEqual(@as(u64, expected_dashboard_reference_signature), referenceSurfaceSignature(pixels));
@@ -1281,7 +1299,7 @@ test "gpu dashboard render overrides animate without rebuilding commands" {
     var gpu_commands: [max_dashboard_commands]canvas.CanvasGpuCommand = undefined;
 
     const frame = try dashboardFrame(display_list, display_list, .{
-        .surface_size = geometry.SizeF.init(canvas_width, 520),
+        .surface_size = geometry.SizeF.init(canvas_width, canvas_height),
         .render_overrides = sampled,
     }, dashboardFrameStorage(&render_commands, &render_batches, &pipeline_cache_entries, &pipeline_cache_actions, &layers, &layer_cache_entries, &layer_cache_actions, &resources, &cache_entries, &cache_actions, &visual_effects, &visual_effect_cache_entries, &visual_effect_cache_actions, &glyphs, &glyph_cache_entries, &glyph_cache_actions, &text_layout_plans, &text_layout_lines, &text_layout_cache_entries, &text_layout_cache_actions, &changes));
 
@@ -1321,7 +1339,7 @@ test "gpu dashboard scheduled animations render without display list rebuild" {
     const start_ns: u64 = 1_000_000_000;
     try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_frame = .{
         .label = "dashboard-canvas",
-        .size = geometry.SizeF.init(canvas_width, 520),
+        .size = geometry.SizeF.init(canvas_width, canvas_height),
         .scale_factor = 2,
         .frame_index = 1,
         .timestamp_ns = start_ns,
@@ -1336,7 +1354,7 @@ test "gpu dashboard scheduled animations render without display list rebuild" {
     const animation_frame = try harness.runtime.nextCanvasFrame(1, "dashboard-canvas", .{
         .frame_index = 2,
         .timestamp_ns = start_ns + 450_000_000,
-        .surface_size = geometry.SizeF.init(canvas_width, 520),
+        .surface_size = geometry.SizeF.init(canvas_width, canvas_height),
         .scale = 2,
     }, app.frameStorage());
     const animation_view_frame = try harness.runtime.gpuSurfaceFrame(1, "dashboard-canvas");
@@ -1373,7 +1391,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_frame = .{
         .label = "dashboard-canvas",
-        .size = geometry.SizeF.init(canvas_width, 520),
+        .size = geometry.SizeF.init(canvas_width, canvas_height),
         .scale_factor = 2,
         .frame_index = 1,
         .timestamp_ns = 1_000_000_000,
@@ -1392,7 +1410,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     try std.testing.expect(display_list.findCommandById(customers_fill_command_id) == null);
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_packet_present_count);
     try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_present_count);
-    try std.testing.expectEqualDeep(geometry.SizeF.init(canvas_width, 520), harness.null_platform.gpu_surface_packet_present_surface_size);
+    try std.testing.expectEqualDeep(geometry.SizeF.init(canvas_width, canvas_height), harness.null_platform.gpu_surface_packet_present_surface_size);
     try std.testing.expectEqual(@as(f32, 2), harness.null_platform.gpu_surface_packet_present_scale_factor);
     try std.testing.expect(harness.null_platform.gpu_surface_packet_present_representable);
     try std.testing.expect(app.pixels == null);
@@ -1403,11 +1421,26 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     try std.testing.expectEqual(@as(u64, 1_000_000_000), animations[0].start_ns);
 
     const widget_layout = try harness.runtime.canvasWidgetLayout(1, "dashboard-canvas");
-    try std.testing.expectEqual(@as(usize, 32), widget_layout.nodeCount());
-    try std.testing.expectEqualStrings("Dashboard metrics", widget_layout.nodes[4].widget.semantics.label);
+    try std.testing.expectEqual(@as(usize, 36), widget_layout.nodeCount());
+    try std.testing.expectEqualStrings("Dashboard metrics", widget_layout.findById(104).?.widget.semantics.label);
 
     var snapshot = harness.runtime.automationSnapshot("Dashboard");
-    try std.testing.expectEqual(@as(usize, 31), snapshot.widgets.len);
+    try std.testing.expectEqual(@as(usize, 35), snapshot.widgets.len);
+
+    const toolbar_mode = dashboardSnapshotWidget(snapshot, dashboard_toolbar_mode_id).?;
+    try std.testing.expectEqualStrings("tab", toolbar_mode.role);
+    try std.testing.expectEqualStrings("Dashboard mode", toolbar_mode.name);
+    try std.testing.expect(toolbar_mode.actions.press);
+    try std.testing.expect(toolbar_mode.actions.select);
+
+    const toolbar_refresh = dashboardSnapshotWidget(snapshot, dashboard_toolbar_refresh_id).?;
+    try std.testing.expectEqualStrings("button", toolbar_refresh.role);
+    try std.testing.expectEqualStrings("Refresh dashboard", toolbar_refresh.name);
+    try std.testing.expect(toolbar_refresh.actions.press);
+
+    const initial_status = dashboardSnapshotWidget(snapshot, dashboard_status_text_id).?;
+    try std.testing.expectEqualStrings("text", initial_status.role);
+    try std.testing.expectEqualStrings("Dashboard display list presented on the GPU surface.", initial_status.name);
 
     const live_render = dashboardSnapshotWidget(snapshot, 103).?;
     try std.testing.expectEqualStrings("button", live_render.role);
@@ -1491,7 +1524,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     resetDashboardDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 103 press");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
     try std.testing.expectEqual(@as(u32, 1), app.mode_count);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
     try std.testing.expect(dashboardSnapshotWidget(snapshot, 103).?.focused);
@@ -1503,7 +1536,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
         .kind = .key_down,
         .key = "tab",
     } });
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
     try std.testing.expect(!dashboardSnapshotWidget(snapshot, 103).?.focused);
     try std.testing.expect(dashboardSnapshotWidget(snapshot, 105).?.focused);
@@ -1516,7 +1549,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
         .key = "tab",
         .modifiers = .{ .shift = true },
     } });
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
     try std.testing.expect(dashboardSnapshotWidget(snapshot, 103).?.focused);
     try std.testing.expect(!dashboardSnapshotWidget(snapshot, 105).?.focused);
@@ -1533,14 +1566,14 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     resetDashboardDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 156 select");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
     try std.testing.expect(dashboardSnapshotWidget(snapshot, 156).?.selected);
     try std.testing.expect(dashboardSnapshotWidget(snapshot, 156).?.focused);
 
     resetDashboardDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 131 set-text $14.1M");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
     const updated_forecast = dashboardSnapshotWidget(snapshot, 131).?;
     try std.testing.expectEqualStrings("$14.1M", updated_forecast.text_value);
@@ -1551,7 +1584,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     resetDashboardDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 131 set-composition est");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
     const composing_forecast = dashboardSnapshotWidget(snapshot, 131).?;
     try std.testing.expectEqualStrings("$14.1Mest", composing_forecast.text_value);
@@ -1563,7 +1596,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     resetDashboardDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 131 cancel-composition");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
     const canceled_forecast = dashboardSnapshotWidget(snapshot, 131).?;
     try std.testing.expectEqualStrings("$14.1M", canceled_forecast.text_value);
@@ -1575,7 +1608,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     resetDashboardDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 131 set-composition !");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
     const final_composing_forecast = dashboardSnapshotWidget(snapshot, 131).?;
     try std.testing.expectEqualStrings("$14.1M!", final_composing_forecast.text_value);
@@ -1583,7 +1616,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     resetDashboardDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 131 commit-composition");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
     const committed_forecast = dashboardSnapshotWidget(snapshot, 131).?;
     try std.testing.expectEqualStrings("$14.1M!", committed_forecast.text_value);
@@ -1595,7 +1628,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     resetDashboardDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 133 toggle");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
     const disabled_auto_refresh = dashboardSnapshotWidget(snapshot, 133).?;
     try std.testing.expectEqual(@as(?f32, 0), disabled_auto_refresh.value);
@@ -1603,7 +1636,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     resetDashboardDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 134 increment");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
     const updated_confidence = dashboardSnapshotWidget(snapshot, 134).?;
     try std.testing.expectApproxEqAbs(@as(f32, 0.67), updated_confidence.value.?, 0.001);
@@ -1612,7 +1645,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     resetDashboardDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 120 increment");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
     var scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "dashboard-canvas");
     try std.testing.expectEqual(@as(f32, 28), scrolled_layout.findById(120).?.widget.value);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
@@ -1623,7 +1656,7 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     resetDashboardDirty(&harness.runtime);
     try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 120 decrement");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, window_height - toolbar_height - statusbar_height);
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
     scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "dashboard-canvas");
     try std.testing.expectEqual(@as(f32, 0), scrolled_layout.findById(120).?.widget.value);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
@@ -1634,18 +1667,19 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
 
     try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_frame = .{
         .label = "dashboard-canvas",
-        .size = geometry.SizeF.init(canvas_width, 520),
+        .size = geometry.SizeF.init(canvas_width, canvas_height),
         .scale_factor = 2,
         .frame_index = 2,
         .timestamp_ns = 1_016_000_000,
         .nonblank = true,
     } });
-    const status_view = dashboardViewByLabel(&harness.runtime, "status-label").?;
-    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Canvas frame:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "risk") != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "work units") != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "dirty") != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "idle risk") != null);
+    snapshot = harness.runtime.automationSnapshot("Dashboard");
+    const status_widget = dashboardSnapshotWidget(snapshot, dashboard_status_text_id).?;
+    try std.testing.expect(std.mem.indexOf(u8, status_widget.name, "Canvas frame:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_widget.name, "risk") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_widget.name, "work units") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_widget.name, "dirty") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_widget.name, "idle risk") != null);
 
     const frame = try harness.runtime.gpuSurfaceFrame(1, "dashboard-canvas");
     try std.testing.expect(frame.canvas_revision > 1);
@@ -1696,8 +1730,9 @@ test "gpu dashboard follows system appearance tokens" {
     display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
     try expectDashboardFillRectColor(display_list, 1, dashboardWidgetTokensForSchemeScaleMotionAndContrast(.dark, 2, true, true).colors.background);
     try std.testing.expect(display_list.findCommandById(3) == null);
-    const status_view = dashboardViewByLabel(&harness.runtime, "status-label").?;
-    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Dashboard theme: dark from system appearance.") != null);
+    const snapshot = harness.runtime.automationSnapshot("Dashboard");
+    const status_widget = dashboardSnapshotWidget(snapshot, dashboard_status_text_id).?;
+    try std.testing.expect(std.mem.indexOf(u8, status_widget.name, "Dashboard theme: dark from system appearance.") != null);
 }
 
 test "gpu dashboard app rebuilds retained scene for resized gpu surfaces" {
@@ -1725,7 +1760,7 @@ test "gpu dashboard app rebuilds retained scene for resized gpu surfaces" {
     try harness.runtime.dispatchPlatformEvent(app_handle, .{ .gpu_surface_resized = .{
         .window_id = 1,
         .label = "dashboard-canvas",
-        .frame = geometry.RectF.init(sidebar_width, toolbar_height, resized_size.width, resized_size.height),
+        .frame = geometry.RectF.init(0, 0, resized_size.width, resized_size.height),
         .scale_factor = 2,
     } });
     const packet_count_before_resize_frame = harness.null_platform.gpu_surface_packet_present_count;
@@ -1751,14 +1786,14 @@ test "gpu dashboard app rebuilds retained scene for resized gpu surfaces" {
     try expectDashboardRoundedRectFrame(display_list, 4, dashboardHeroRect(resized_size));
 
     const widget_layout = try harness.runtime.canvasWidgetLayout(1, "dashboard-canvas");
-    try expectDashboardWidgetFrame(widget_layout, 103, rect(688, 50, 122, 34));
+    try expectDashboardWidgetFrame(widget_layout, 103, dashboardContentRect(688, 50, 122, 34));
 }
 
 test "gpu dashboard frame event adapter preserves renderer diagnostics" {
     const frame = zero_native.platform.GpuFrame{
         .window_id = 7,
         .label = "dashboard-canvas",
-        .size = geometry.SizeF.init(canvas_width, 520),
+        .size = geometry.SizeF.init(canvas_width, canvas_height),
         .scale_factor = 2,
         .frame_index = 42,
         .timestamp_ns = 1234,
