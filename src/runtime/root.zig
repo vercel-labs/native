@@ -1995,8 +1995,12 @@ pub const Runtime = struct {
             return;
         }
         const direction = canvasWidgetSpatialFocusDirection(input_event) orelse return;
+        if (canvasWidgetGroupDirectionalFocusTarget(layout, focused, direction)) |target| {
+            try self.setCanvasWidgetFocusFromKeyboard(index, target.id);
+            return;
+        }
         const target = layout.focusTarget(focused_id, direction) orelse return;
-        if (!canvasWidgetSpatialFocusAllowed(focused.kind, target.kind, direction)) return;
+        if (!canvasWidgetSpatialFocusAllowed(layout, focused, target, direction)) return;
         try self.setCanvasWidgetFocusFromKeyboard(index, target.id);
     }
 
@@ -5344,6 +5348,7 @@ fn canvasWidgetEditableTextKind(kind: canvas.WidgetKind) bool {
 
 fn canvasWidgetRuntimeControlKind(kind: canvas.WidgetKind) bool {
     return switch (kind) {
+        .accordion,
         .checkbox,
         .radio,
         .switch_control,
@@ -5445,7 +5450,7 @@ fn canvasWidgetLayoutNodeWithControlReconcileState(
     for (previous) |entry| {
         if (entry.id != copy.widget.id or entry.kind != copy.widget.kind) continue;
         switch (copy.widget.kind) {
-            .checkbox, .switch_control, .toggle, .toggle_button => {
+            .accordion, .checkbox, .switch_control, .toggle, .toggle_button => {
                 const selected = entry.state.selected or entry.value >= 0.5;
                 copy.widget.state.selected = selected;
                 copy.widget.value = if (selected) 1 else 0;
@@ -5634,7 +5639,7 @@ fn optionalCanvasTextRangesEqual(a: ?canvas.TextRange, b: ?canvas.TextRange) boo
 
 fn canvasWidgetCommandable(kind: canvas.WidgetKind) bool {
     return switch (kind) {
-        .button, .toggle_button, .icon_button, .select, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle => true,
+        .accordion, .button, .toggle_button, .icon_button, .select, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle => true,
         else => false,
     };
 }
@@ -5701,26 +5706,148 @@ fn canvasWidgetSpatialFocusDirection(input_event: GpuSurfaceInputEvent) ?canvas.
     return null;
 }
 
-fn canvasWidgetSpatialFocusAllowed(focused_kind: canvas.WidgetKind, target_kind: canvas.WidgetKind, direction: canvas.WidgetFocusDirection) bool {
-    if (focused_kind != target_kind) return false;
-    return switch (focused_kind) {
+fn canvasWidgetSpatialFocusAllowed(layout: canvas.WidgetLayoutTree, focused: canvas.WidgetFocusTarget, target: canvas.WidgetFocusTarget, direction: canvas.WidgetFocusDirection) bool {
+    if (focused.kind != target.kind) return false;
+    const same_parent = canvasWidgetFocusTargetsShareParent(layout, focused, target);
+    return switch (focused.kind) {
         .data_cell => true,
-        .list_item, .menu_item => direction == .up or direction == .down,
-        .segmented_control => direction == .left or direction == .right,
-        .radio => true,
+        .list_item, .menu_item => same_parent and (direction == .up or direction == .down),
+        .segmented_control => same_parent and (direction == .left or direction == .right),
+        .radio => same_parent,
+        .button, .icon_button => same_parent and canvasWidgetParentAllowsHorizontalButtonFocus(canvasWidgetFocusParentKind(layout, focused)) and (direction == .left or direction == .right),
+        .toggle_button => same_parent and canvasWidgetParentAllowsHorizontalToggleFocus(canvasWidgetFocusParentKind(layout, focused)) and (direction == .left or direction == .right),
         else => false,
     };
 }
 
-fn canvasWidgetGroupHomeEndFocusKind(kind: canvas.WidgetKind) bool {
-    return switch (kind) {
-        .list_item, .menu_item, .data_cell, .segmented_control, .radio => true,
+fn canvasWidgetFocusTargetsShareParent(layout: canvas.WidgetLayoutTree, a: canvas.WidgetFocusTarget, b: canvas.WidgetFocusTarget) bool {
+    if (a.index >= layout.nodes.len or b.index >= layout.nodes.len) return false;
+    return layout.nodes[a.index].parent_index == layout.nodes[b.index].parent_index;
+}
+
+fn canvasWidgetFocusParentKind(layout: canvas.WidgetLayoutTree, target: canvas.WidgetFocusTarget) ?canvas.WidgetKind {
+    if (target.index >= layout.nodes.len) return null;
+    const parent_index = layout.nodes[target.index].parent_index orelse return null;
+    if (parent_index >= layout.nodes.len) return null;
+    return layout.nodes[parent_index].widget.kind;
+}
+
+fn canvasWidgetParentAllowsHorizontalButtonFocus(kind: ?canvas.WidgetKind) bool {
+    return switch (kind orelse return false) {
+        .button_group, .pagination, .breadcrumb => true,
         else => false,
     };
+}
+
+fn canvasWidgetParentAllowsHorizontalToggleFocus(kind: ?canvas.WidgetKind) bool {
+    return switch (kind orelse return false) {
+        .button_group, .toggle_group => true,
+        else => false,
+    };
+}
+
+fn canvasWidgetGroupHomeEndFocusKind(layout: canvas.WidgetLayoutTree, target: canvas.WidgetFocusTarget) bool {
+    const kind = target.kind;
+    return switch (kind) {
+        .list_item, .menu_item, .data_cell, .segmented_control, .radio => true,
+        .button, .icon_button => canvasWidgetParentAllowsHorizontalButtonFocus(canvasWidgetFocusParentKind(layout, target)),
+        .toggle_button => canvasWidgetParentAllowsHorizontalToggleFocus(canvasWidgetFocusParentKind(layout, target)),
+        else => false,
+    };
+}
+
+const CanvasWidgetGroupDirection = enum {
+    previous,
+    next,
+};
+
+fn canvasWidgetGroupDirectionalFocusTarget(layout: canvas.WidgetLayoutTree, focused: canvas.WidgetFocusTarget, direction: canvas.WidgetFocusDirection) ?canvas.WidgetFocusTarget {
+    if (focused.index >= layout.nodes.len) return null;
+    const parent_index = layout.nodes[focused.index].parent_index orelse return null;
+    if (parent_index >= layout.nodes.len) return null;
+    const parent_kind = layout.nodes[parent_index].widget.kind;
+    const group_direction = canvasWidgetGroupDirectionForFocus(parent_kind, focused.kind, direction) orelse return null;
+    return canvasWidgetAdjacentGroupFocusTarget(layout, parent_index, focused, group_direction) orelse focused;
+}
+
+fn canvasWidgetGroupDirectionForFocus(parent_kind: canvas.WidgetKind, child_kind: canvas.WidgetKind, direction: canvas.WidgetFocusDirection) ?CanvasWidgetGroupDirection {
+    return switch (parent_kind) {
+        .button_group, .pagination, .breadcrumb => if (child_kind == .button or child_kind == .icon_button)
+            canvasWidgetHorizontalGroupDirection(direction)
+        else
+            null,
+        .toggle_group => if (child_kind == .toggle_button)
+            canvasWidgetHorizontalGroupDirection(direction)
+        else
+            null,
+        .tabs => if (child_kind == .segmented_control)
+            canvasWidgetHorizontalGroupDirection(direction)
+        else
+            null,
+        .radio_group => if (child_kind == .radio)
+            canvasWidgetAnyAxisGroupDirection(direction)
+        else
+            null,
+        .list => if (child_kind == .list_item)
+            canvasWidgetVerticalGroupDirection(direction)
+        else
+            null,
+        .menu_surface, .dropdown_menu => if (child_kind == .menu_item)
+            canvasWidgetVerticalGroupDirection(direction)
+        else
+            null,
+        else => null,
+    };
+}
+
+fn canvasWidgetHorizontalGroupDirection(direction: canvas.WidgetFocusDirection) ?CanvasWidgetGroupDirection {
+    return switch (direction) {
+        .left => .previous,
+        .right => .next,
+        .up, .down, .forward, .backward => null,
+    };
+}
+
+fn canvasWidgetVerticalGroupDirection(direction: canvas.WidgetFocusDirection) ?CanvasWidgetGroupDirection {
+    return switch (direction) {
+        .up => .previous,
+        .down => .next,
+        .left, .right, .forward, .backward => null,
+    };
+}
+
+fn canvasWidgetAnyAxisGroupDirection(direction: canvas.WidgetFocusDirection) ?CanvasWidgetGroupDirection {
+    return switch (direction) {
+        .left, .up => .previous,
+        .right, .down => .next,
+        .forward, .backward => null,
+    };
+}
+
+fn canvasWidgetAdjacentGroupFocusTarget(
+    layout: canvas.WidgetLayoutTree,
+    parent_index: usize,
+    focused: canvas.WidgetFocusTarget,
+    direction: CanvasWidgetGroupDirection,
+) ?canvas.WidgetFocusTarget {
+    var previous: ?canvas.WidgetFocusTarget = null;
+    var saw_focused = false;
+    for (layout.nodes) |node| {
+        if (node.parent_index != parent_index or node.widget.kind != focused.kind) continue;
+        const target = layout.focusTargetById(node.widget.id) orelse continue;
+        if (saw_focused) return target;
+        if (target.id == focused.id) {
+            if (direction == .previous) return previous;
+            saw_focused = true;
+        } else {
+            previous = target;
+        }
+    }
+    return null;
 }
 
 fn canvasWidgetGroupFocusEdgeTarget(layout: canvas.WidgetLayoutTree, focused: canvas.WidgetFocusTarget, edge: CanvasWidgetGroupFocusEdge) ?canvas.WidgetFocusTarget {
-    if (!canvasWidgetGroupHomeEndFocusKind(focused.kind)) return null;
+    if (!canvasWidgetGroupHomeEndFocusKind(layout, focused)) return null;
     if (focused.index >= layout.nodes.len) return null;
     const parent_index = layout.nodes[focused.index].parent_index;
     switch (edge) {
@@ -7060,7 +7187,7 @@ const RuntimeView = struct {
     fn toggleCanvasWidgetBooleanControl(self: *RuntimeView, id: canvas.ObjectId) anyerror!?geometry.RectF {
         const index = self.canvasWidgetNodeIndexById(id) orelse return null;
         const widget = self.widget_layout_nodes[index].widget;
-        if ((widget.kind != .checkbox and widget.kind != .toggle_button and !canvasWidgetSwitchControlKind(widget.kind)) or widget.state.disabled) return null;
+        if ((widget.kind != .accordion and widget.kind != .checkbox and widget.kind != .toggle_button and !canvasWidgetSwitchControlKind(widget.kind)) or widget.state.disabled) return null;
 
         const selected = canvasWidgetBooleanSelected(widget);
         self.widget_layout_nodes[index].widget.state.selected = !selected;
@@ -16333,7 +16460,7 @@ test "runtime applies keyboard values to focused canvas controls" {
         .window_id = 1,
         .label = "canvas",
         .kind = .gpu_surface,
-        .frame = geometry.RectF.init(0, 0, 240, 140),
+        .frame = geometry.RectF.init(0, 0, 240, 180),
     });
 
     const controls = [_]canvas.Widget{
@@ -16356,9 +16483,15 @@ test "runtime applies keyboard values to focused canvas controls" {
             .frame = geometry.RectF.init(10, 88, 100, 32),
             .value = 0.5,
         },
+        .{
+            .id = 5,
+            .kind = .accordion,
+            .frame = geometry.RectF.init(10, 126, 140, 36),
+            .text = "Advanced",
+        },
     };
-    var nodes: [4]canvas.WidgetLayoutNode = undefined;
-    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &controls }, geometry.RectF.init(0, 0, 240, 140), &nodes);
+    var nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &controls }, geometry.RectF.init(0, 0, 240, 180), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
 
     harness.runtime.views[0].canvas_widget_focused_id = 2;
@@ -16411,17 +16544,29 @@ test "runtime applies keyboard values to focused canvas controls" {
     } });
     try std.testing.expectEqual(@as(u64, 6), harness.runtime.views[0].widget_revision);
 
+    harness.runtime.views[0].canvas_widget_focused_id = 5;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    try std.testing.expectEqual(@as(u64, 7), harness.runtime.views[0].widget_revision);
+
     const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expect(retained.nodes[1].widget.state.selected);
     try std.testing.expectEqual(@as(f32, 1), retained.nodes[1].widget.value);
     try std.testing.expect(!retained.nodes[2].widget.state.selected);
     try std.testing.expectEqual(@as(f32, 0), retained.nodes[2].widget.value);
     try std.testing.expectEqual(@as(f32, 1), retained.nodes[3].widget.value);
+    try std.testing.expect(retained.findById(5).?.widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 1), retained.findById(5).?.widget.value);
 
     const semantics = harness.runtime.views[0].widgetSemantics();
     try std.testing.expectEqual(@as(?f32, 1), semantics[0].value);
     try std.testing.expectEqual(@as(?f32, 0), semantics[1].value);
     try std.testing.expectEqual(@as(?f32, 1), semantics[2].value);
+    try std.testing.expectEqual(@as(?f32, 1), semantics[3].value);
 
     _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
     const display_list = try harness.runtime.canvasDisplayList(1, "canvas");
@@ -17163,6 +17308,93 @@ test "runtime moves focused grouped canvas controls with arrow keys" {
     try std.testing.expectEqual(@as(canvas.ObjectId, 40), app_state.last_target_id);
     try std.testing.expectEqual(canvas.WidgetKind.button, app_state.last_target_kind);
     try std.testing.expectEqual(@as(u32, 13), app_state.widget_keyboard_count);
+}
+
+test "runtime moves focus within shadcn grouped component controls" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-shadcn-group-navigation", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 360, 280),
+    });
+
+    const button_group_buttons = [_]canvas.Widget{
+        .{ .id = 11, .kind = .button, .text = "One" },
+        .{ .id = 12, .kind = .button, .text = "Two" },
+    };
+    const pagination_buttons = [_]canvas.Widget{
+        .{ .id = 21, .kind = .button, .text = "1" },
+        .{ .id = 22, .kind = .button, .text = "2" },
+        .{ .id = 23, .kind = .button, .text = "Next" },
+    };
+    const toggle_buttons = [_]canvas.Widget{
+        .{ .id = 31, .kind = .toggle_button, .text = "B" },
+        .{ .id = 32, .kind = .toggle_button, .text = "I" },
+    };
+    const tab_buttons = [_]canvas.Widget{
+        .{ .id = 41, .kind = .segmented_control, .text = "Open" },
+        .{ .id = 42, .kind = .segmented_control, .text = "Closed" },
+    };
+    const radio_buttons = [_]canvas.Widget{
+        .{ .id = 51, .kind = .radio, .text = "Card" },
+        .{ .id = 52, .kind = .radio, .text = "List" },
+    };
+    const top_children = [_]canvas.Widget{
+        .{ .id = 10, .kind = .button_group, .frame = geometry.RectF.init(12, 12, 180, 34), .layout = builtinShadcnGroupLayout(), .children = &button_group_buttons },
+        .{ .id = 20, .kind = .pagination, .frame = geometry.RectF.init(12, 56, 220, 34), .layout = builtinShadcnGroupLayout(), .children = &pagination_buttons },
+        .{ .id = 30, .kind = .toggle_group, .frame = geometry.RectF.init(12, 100, 160, 34), .layout = builtinShadcnGroupLayout(), .children = &toggle_buttons },
+        .{ .id = 40, .kind = .tabs, .frame = geometry.RectF.init(12, 144, 180, 34), .layout = builtinShadcnGroupLayout(), .children = &tab_buttons },
+        .{ .id = 50, .kind = .radio_group, .frame = geometry.RectF.init(12, 188, 180, 34), .layout = builtinShadcnGroupLayout(), .children = &radio_buttons },
+        .{ .id = 90, .kind = .button, .frame = geometry.RectF.init(248, 12, 84, 34), .text = "Alone" },
+    };
+    var nodes: [24]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &top_children }, geometry.RectF.init(0, 0, 360, 280), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    harness.runtime.views[0].canvas_widget_focused_id = 11;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowright" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 12), harness.runtime.views[0].canvas_widget_focused_id);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "home" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 11), harness.runtime.views[0].canvas_widget_focused_id);
+
+    harness.runtime.views[0].canvas_widget_focused_id = 21;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "end" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 23), harness.runtime.views[0].canvas_widget_focused_id);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "home" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 21), harness.runtime.views[0].canvas_widget_focused_id);
+
+    harness.runtime.views[0].canvas_widget_focused_id = 31;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowright" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 32), harness.runtime.views[0].canvas_widget_focused_id);
+
+    harness.runtime.views[0].canvas_widget_focused_id = 41;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowright" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 42), harness.runtime.views[0].canvas_widget_focused_id);
+
+    harness.runtime.views[0].canvas_widget_focused_id = 51;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowright" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 52), harness.runtime.views[0].canvas_widget_focused_id);
+
+    harness.runtime.views[0].canvas_widget_focused_id = 90;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowleft" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 90), harness.runtime.views[0].canvas_widget_focused_id);
+}
+
+fn builtinShadcnGroupLayout() canvas.WidgetLayoutStyle {
+    return .{ .gap = 4, .cross_alignment = .center };
 }
 
 test "runtime publishes canvas widget accessibility snapshots to platform" {
