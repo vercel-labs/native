@@ -164,6 +164,20 @@ const CanvasWidgetScrollSource = runtime_view.CanvasWidgetScrollSource;
 const CanvasWidgetToggleAnimation = runtime_view.CanvasWidgetToggleAnimation;
 const canvasRenderAnimationStartNsForView = runtime_view.canvasRenderAnimationStartNsForView;
 const platformCursorFromCanvas = widget_bridge.platformCursorFromCanvas;
+const widgetRoleName = widget_bridge.widgetRoleName;
+const platformWidgetAccessibilityRole = widget_bridge.platformWidgetAccessibilityRole;
+const canvasWidgetActions = widget_bridge.canvasWidgetActions;
+const platformWidgetAccessibilityActions = widget_bridge.platformWidgetAccessibilityActions;
+const platformWidgetAccessibilityTextRange = widget_bridge.platformWidgetAccessibilityTextRange;
+const platformWidgetAccessibilityNodeById = widget_bridge.platformWidgetAccessibilityNodeById;
+const canvasWidgetSemanticsById = widget_bridge.canvasWidgetSemanticsById;
+const canvasWidgetSemanticParentId = widget_bridge.canvasWidgetSemanticParentId;
+const canvasWidgetSelectedState = widget_bridge.canvasWidgetSelectedState;
+const canvasTextRange = widget_bridge.canvasTextRange;
+const canvasVirtualRange = widget_bridge.canvasVirtualRange;
+const canvasWidgetAccessibilityActionSupported = widget_bridge.canvasWidgetAccessibilityActionSupported;
+const canvasWidgetAccessibilitySemanticAction = widget_bridge.canvasWidgetAccessibilitySemanticAction;
+const canvasWidgetAccessibilityActionKindFromPlatform = widget_bridge.canvasWidgetAccessibilityActionKindFromPlatform;
 const canvasWidgetGroupFocusEdgeFromInput = canvas_widget_runtime.canvasWidgetGroupFocusEdgeFromInput;
 const canvasWidgetSpatialFocusDirection = canvas_widget_runtime.canvasWidgetSpatialFocusDirection;
 const canvasWidgetSpatialFocusAllowed = canvas_widget_runtime.canvasWidgetSpatialFocusAllowed;
@@ -244,29 +258,8 @@ pub const CanvasPresentationResult = struct {
     packet_representable: bool = true,
 };
 
-pub const CanvasWidgetAccessibilityActionKind = enum {
-    focus,
-    press,
-    toggle,
-    increment,
-    decrement,
-    set_text,
-    set_selection,
-    set_composition,
-    commit_composition,
-    cancel_composition,
-    select,
-    drag,
-    drop_files,
-    dismiss,
-};
-
-pub const CanvasWidgetAccessibilityAction = struct {
-    id: canvas.ObjectId,
-    action: CanvasWidgetAccessibilityActionKind,
-    text: []const u8 = "",
-    selection: ?canvas.TextSelection = null,
-};
+pub const CanvasWidgetAccessibilityActionKind = widget_bridge.CanvasWidgetAccessibilityActionKind;
+pub const CanvasWidgetAccessibilityAction = widget_bridge.CanvasWidgetAccessibilityAction;
 
 pub const CanvasWidgetFileDropEvent = struct {
     window_id: platform.WindowId = 1,
@@ -5301,148 +5294,6 @@ fn validateCanvasRenderAnimations(animations: []const canvas.CanvasRenderAnimati
     }
 }
 
-fn widgetRoleName(role: canvas.WidgetRole) []const u8 {
-    return switch (role) {
-        .none => "none",
-        .group => "group",
-        .text => "text",
-        .image => "image",
-        .button => "button",
-        .textbox => "textbox",
-        .tooltip => "tooltip",
-        .dialog => "dialog",
-        .menu => "menu",
-        .menuitem => "menuitem",
-        .list => "list",
-        .listitem => "listitem",
-        .row => "row",
-        .grid => "grid",
-        .gridcell => "gridcell",
-        .tab => "tab",
-        .checkbox => "checkbox",
-        .radio => "radio",
-        .switch_control => "switch",
-        .slider => "slider",
-        .progressbar => "progressbar",
-    };
-}
-
-fn platformWidgetAccessibilityRole(role: canvas.WidgetRole) platform.WidgetAccessibilityRole {
-    return switch (role) {
-        .none => .none,
-        .group => .group,
-        .text => .text,
-        .image => .image,
-        .button => .button,
-        .textbox => .textbox,
-        .tooltip => .tooltip,
-        .dialog => .dialog,
-        .menu => .menu,
-        .menuitem => .menuitem,
-        .list => .list,
-        .listitem => .listitem,
-        .row => .row,
-        .grid => .grid,
-        .gridcell => .gridcell,
-        .tab => .tab,
-        .checkbox => .checkbox,
-        .radio => .radio,
-        .switch_control => .switch_control,
-        .slider => .slider,
-        .progressbar => .progressbar,
-    };
-}
-
-fn canvasWidgetActions(actions: canvas.WidgetActions) automation.snapshot.WidgetActions {
-    return .{
-        .focus = actions.focus,
-        .press = actions.press,
-        .toggle = actions.toggle,
-        .increment = actions.increment,
-        .decrement = actions.decrement,
-        .set_text = actions.set_text,
-        .set_selection = actions.set_selection,
-        .select = actions.select,
-        .drag = actions.drag,
-        .drop_files = actions.drop_files,
-        .dismiss = actions.dismiss,
-    };
-}
-
-fn platformWidgetAccessibilityActions(actions: canvas.WidgetActions) platform.WidgetAccessibilityActions {
-    return .{
-        .focus = actions.focus,
-        .press = actions.press,
-        .toggle = actions.toggle,
-        .increment = actions.increment,
-        .decrement = actions.decrement,
-        .set_text = actions.set_text,
-        .set_selection = actions.set_selection,
-        .select = actions.select,
-        .drag = actions.drag,
-        .drop_files = actions.drop_files,
-        .dismiss = actions.dismiss,
-    };
-}
-
-fn platformWidgetAccessibilityTextRange(range: ?canvas.TextRange) ?platform.WidgetAccessibilityTextRange {
-    const value = range orelse return null;
-    return .{ .start = value.start, .end = value.end };
-}
-
-fn platformWidgetAccessibilityNodeById(nodes: []const platform.WidgetAccessibilityNode, id: u64) ?platform.WidgetAccessibilityNode {
-    if (id == 0) return null;
-    for (nodes) |node| {
-        if (node.id == id) return node;
-    }
-    return null;
-}
-
-fn canvasWidgetSemanticsById(nodes: []const canvas.WidgetSemanticsNode, id: canvas.ObjectId) ?canvas.WidgetSemanticsNode {
-    if (id == 0) return null;
-    for (nodes) |node| {
-        if (node.id == id) return node;
-    }
-    return null;
-}
-
-fn canvasWidgetSemanticParentId(nodes: []const canvas.WidgetSemanticsNode, parent_index: ?usize) ?u64 {
-    const index = parent_index orelse return null;
-    if (index >= nodes.len) return null;
-    return nodes[index].id;
-}
-
-fn canvasWidgetSelectedState(node: canvas.WidgetSemanticsNode) bool {
-    if (node.state.selected) return true;
-    const value = node.value orelse return false;
-    if (value < 0.5) return false;
-    return switch (node.role) {
-        .checkbox, .radio, .switch_control, .listitem, .gridcell, .tab => true,
-        else => false,
-    };
-}
-
-fn canvasTextRange(range: ?canvas.TextRange) ?automation.snapshot.TextRange {
-    if (range) |value| return .{ .start = value.start, .end = value.end };
-    return null;
-}
-
-fn canvasVirtualRange(range: ?canvas.VirtualListRange) automation.snapshot.WidgetVirtualRange {
-    const value = range orelse return .{};
-    return .{
-        .present = true,
-        .start_index = saturatingU32(value.start_index),
-        .end_index = saturatingU32(value.end_index),
-        .first_visible_index = saturatingU32(value.first_visible_index),
-        .last_visible_index = saturatingU32(value.last_visible_index),
-        .rendered_count = saturatingU32(value.itemCount()),
-    };
-}
-
-fn saturatingU32(value: usize) u32 {
-    return if (value > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(value);
-}
-
 fn writeWindowJson(window: platform.WindowInfo, output: []u8) ![]const u8 {
     var writer = std.Io.Writer.fixed(output);
     try writeWindowJsonToWriter(window, &writer);
@@ -5848,50 +5699,6 @@ fn builtinBridgeErrorCode(err: anyerror) bridge.ErrorCode {
         => .invalid_request,
         error.NavigationDenied => .invalid_request,
         else => .internal_error,
-    };
-}
-
-fn canvasWidgetAccessibilityActionSupported(actions: canvas.WidgetActions, action: CanvasWidgetAccessibilityActionKind) bool {
-    return switch (action) {
-        .focus => actions.focus,
-        .press => actions.press,
-        .toggle => actions.toggle,
-        .increment => actions.increment,
-        .decrement => actions.decrement,
-        .set_text => actions.set_text,
-        .set_selection => actions.set_selection,
-        .set_composition, .commit_composition, .cancel_composition => actions.set_text,
-        .select => actions.select,
-        .drag => actions.drag,
-        .drop_files => actions.drop_files,
-        .dismiss => actions.dismiss,
-    };
-}
-
-fn canvasWidgetAccessibilitySemanticAction(action: CanvasWidgetAccessibilityActionKind) ?canvas.WidgetSemanticAction {
-    return switch (action) {
-        .press => .press,
-        .toggle => .toggle,
-        .select => .select,
-        .increment => .increment,
-        .decrement => .decrement,
-        else => null,
-    };
-}
-
-fn canvasWidgetAccessibilityActionKindFromPlatform(action: platform.WidgetAccessibilityActionKind) CanvasWidgetAccessibilityActionKind {
-    return switch (action) {
-        .focus => .focus,
-        .press => .press,
-        .toggle => .toggle,
-        .increment => .increment,
-        .decrement => .decrement,
-        .set_text => .set_text,
-        .set_selection => .set_selection,
-        .select => .select,
-        .drag => .drag,
-        .drop_files => .drop_files,
-        .dismiss => .dismiss,
     };
 }
 
