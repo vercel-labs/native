@@ -2008,14 +2008,24 @@ pub const Runtime = struct {
     }
 
     fn dispatchCanvasWidgetCommandFromPointer(self: *Runtime, app: App, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
-        if (pointer_event.pointer.phase != .up) return;
         const index = self.findViewIndex(pointer_event.window_id, pointer_event.view_label) orelse return;
         if (self.views[index].kind != .gpu_surface) return;
         const target = pointer_event.target orelse return;
-        const pressed_id = if (pointer_event.pointer.captured_id != 0) pointer_event.pointer.captured_id else self.views[index].canvas_widget_pressed_id;
-        if (pressed_id != target.id) return;
-        if (!target.bounds.normalized().containsPoint(pointer_event.pointer.point)) return;
-        try self.dispatchCanvasWidgetCommandForId(app, index, target.id);
+        switch (pointer_event.pointer.phase) {
+            .down => {
+                if (!canvasWidgetCommandFiresOnPointerDown(target.kind)) return;
+                if (!target.bounds.normalized().containsPoint(pointer_event.pointer.point)) return;
+                try self.dispatchCanvasWidgetCommandForId(app, index, target.id);
+            },
+            .up => {
+                if (canvasWidgetCommandFiresOnPointerDown(target.kind)) return;
+                const pressed_id = if (pointer_event.pointer.captured_id != 0) pointer_event.pointer.captured_id else self.views[index].canvas_widget_pressed_id;
+                if (pressed_id != target.id) return;
+                if (!target.bounds.normalized().containsPoint(pointer_event.pointer.point)) return;
+                try self.dispatchCanvasWidgetCommandForId(app, index, target.id);
+            },
+            .hover, .move, .cancel, .wheel => return,
+        }
     }
 
     fn dispatchCanvasWidgetCommandFromKeyboard(self: *Runtime, app: App, keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
@@ -5811,6 +5821,13 @@ fn optionalCanvasTextRangesEqual(a: ?canvas.TextRange, b: ?canvas.TextRange) boo
 fn canvasWidgetCommandable(kind: canvas.WidgetKind) bool {
     return switch (kind) {
         .accordion, .button, .toggle_button, .icon_button, .select, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle => true,
+        else => false,
+    };
+}
+
+fn canvasWidgetCommandFiresOnPointerDown(kind: canvas.WidgetKind) bool {
+    return switch (kind) {
+        .select => true,
         else => false,
     };
 }
@@ -17887,7 +17904,7 @@ test "runtime dispatches canvas widget commands from pointer and keyboard activa
         .window_id = 1,
         .label = "canvas",
         .kind = .gpu_surface,
-        .frame = geometry.RectF.init(0, 0, 240, 120),
+        .frame = geometry.RectF.init(0, 0, 240, 160),
     });
 
     const widgets = [_]canvas.Widget{
@@ -17911,9 +17928,16 @@ test "runtime dispatches canvas widget commands from pointer and keyboard activa
             .text = "Archive",
             .command = "widget.archive",
         },
+        .{
+            .id = 5,
+            .kind = .select,
+            .frame = geometry.RectF.init(12, 96, 120, 32),
+            .text = "Environment",
+            .command = "widget.select",
+        },
     };
-    var nodes: [4]canvas.WidgetLayoutNode = undefined;
-    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &widgets }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    var nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &widgets }, geometry.RectF.init(0, 0, 240, 160), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
 
     harness.runtime.views[0].canvas_widget_focused_id = 3;
@@ -17997,6 +18021,24 @@ test "runtime dispatches canvas widget commands from pointer and keyboard activa
     try std.testing.expectEqualStrings("widget.archive", app_state.last_name);
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expect(retained.findById(4).?.widget.state.selected);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 20,
+        .y = 108,
+    } });
+    try std.testing.expectEqual(@as(u32, 5), app_state.command_count);
+    try std.testing.expectEqualStrings("widget.select", app_state.last_name);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_up,
+        .x = 20,
+        .y = 108,
+    } });
+    try std.testing.expectEqual(@as(u32, 5), app_state.command_count);
 }
 
 test "runtime automation snapshot exposes canvas list roles" {

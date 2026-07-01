@@ -3281,12 +3281,29 @@ test "gpu components pointer opens and selects environment dropdown options" {
     } });
 
     resetComponentDirty(&harness.runtime);
-    try dispatchComponentPointerClick(&harness.runtime, app_handle, environment_select_id);
+    const select_point = try componentWidgetCenter(&harness.runtime, environment_select_id);
+    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .x = select_point.x,
+        .y = select_point.y,
+        .button = 0,
+    } });
     try std.testing.expectEqual(@as(u32, 0), app.refresh_count);
     try std.testing.expect(app.environment_select_open);
     var snapshot = harness.runtime.automationSnapshot("Components");
     try std.testing.expect(componentSnapshotWidget(snapshot, environment_menu_id) != null);
     try expectComponentStatusContains(&harness.runtime, "Environment menu opened.");
+    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_up,
+        .x = select_point.x,
+        .y = select_point.y,
+        .button = 0,
+    } });
+    try std.testing.expect(app.environment_select_open);
 
     resetComponentDirty(&harness.runtime);
     try dispatchComponentPointerClick(&harness.runtime, app_handle, environmentOptionId(1));
