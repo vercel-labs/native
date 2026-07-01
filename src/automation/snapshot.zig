@@ -84,6 +84,7 @@ pub const Widget = struct {
     parent_id: ?u64 = null,
     value: ?f32 = null,
     text_value: []const u8 = "",
+    placeholder: []const u8 = "",
     grid_row_index: ?usize = null,
     grid_column_index: ?usize = null,
     grid_row_count: ?usize = null,
@@ -292,6 +293,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
         try writeWidgetParent(widget, writer);
         if (widget.value) |value| try writer.print(" value={d}", .{value});
         try writeWidgetTextValue(widget, writer);
+        try writeWidgetPlaceholder(widget, writer);
         try writeWidgetGrid(widget, writer);
         try writeWidgetList(widget, writer);
         try writeWidgetScroll(widget, writer);
@@ -365,6 +367,11 @@ fn writeWidgetParent(widget: Widget, writer: anytype) !void {
 fn writeWidgetTextValue(widget: Widget, writer: anytype) !void {
     if (widget.text_value.len == 0) return;
     try writer.print(" text=\"{s}\"", .{widget.text_value});
+}
+
+fn writeWidgetPlaceholder(widget: Widget, writer: anytype) !void {
+    if (widget.placeholder.len == 0) return;
+    try writer.print(" placeholder=\"{s}\"", .{widget.placeholder});
 }
 
 fn writeWidgetGrid(widget: Widget, writer: anytype) !void {
@@ -714,6 +721,7 @@ test "snapshot emits widget semantics" {
             .name = "Run query",
             .parent_id = 7,
             .text_value = "deploy",
+            .placeholder = "Search deployments",
             .grid_row_index = 1,
             .grid_column_index = 2,
             .grid_row_count = 4,
@@ -769,6 +777,7 @@ test "snapshot emits widget semantics" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "widget @w1/canvas#42 role=button name=\"Run query\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "parent=#7") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "text=\"deploy\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "placeholder=\"Search deployments\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "grid=[row_index=1,column_index=2,row_count=4,column_count=5]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "list=[index=3,count=9]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "scroll=[offset=12,viewport=80,content=180]") != null);

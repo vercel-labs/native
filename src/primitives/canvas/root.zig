@@ -4227,6 +4227,7 @@ pub const Widget = struct {
     backdrop_blur: f32 = 0,
     backdrop_blur_token: ?BlurTokenRef = null,
     text: []const u8 = "",
+    placeholder: []const u8 = "",
     text_alignment: TextAlign = .start,
     command: []const u8 = "",
     image_id: ImageId = 0,
@@ -4255,6 +4256,7 @@ pub const BuiltinComponentOptions = struct {
     backdrop_blur: f32 = 0,
     backdrop_blur_token: ?BlurTokenRef = null,
     text: []const u8 = "",
+    placeholder: []const u8 = "",
     text_alignment: TextAlign = .start,
     command: []const u8 = "",
     image_id: ImageId = 0,
@@ -4286,6 +4288,7 @@ pub fn builtinComponentWidget(kind: BuiltinComponentKind, options: BuiltinCompon
         .backdrop_blur = options.backdrop_blur,
         .backdrop_blur_token = options.backdrop_blur_token,
         .text = options.text,
+        .placeholder = options.placeholder,
         .text_alignment = options.text_alignment,
         .command = options.command,
         .image_id = options.image_id,
@@ -4586,6 +4589,7 @@ pub const WidgetSemanticsNode = struct {
     label: []const u8,
     value: ?f32 = null,
     text_value: []const u8 = "",
+    placeholder: []const u8 = "",
     grid_row_index: ?usize = null,
     grid_column_index: ?usize = null,
     grid_row_count: ?usize = null,
@@ -8328,8 +8332,9 @@ fn emitSelectWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
         @max(1, widget.frame.width - inset * 2 - chevron_extent),
         widget.frame.height,
     );
-    const visible_text = if (widget.text.len > 0) widget.text else widget.semantics.label;
-    const is_placeholder = widget.text.len == 0;
+    const placeholder = widgetPlaceholder(widget);
+    const visible_text = if (widget.text.len > 0) widget.text else placeholder;
+    const is_placeholder = widget.text.len == 0 and placeholder.len > 0;
 
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
@@ -8412,9 +8417,15 @@ fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
             try emitWidgetTextSelectionRects(builder, widget, draw_text, layout_options, range, 3, 13, max_widget_text_range_rects, tokens);
         }
     }
-    if (widget.text.len > 0) {
+    const placeholder = widgetPlaceholder(widget);
+    const visible_text = if (widget.text.len > 0) widget.text else placeholder;
+    if (visible_text.len > 0) {
         var command = draw_text;
         command.id = widgetPartId(widget.id, if (has_text_affordances) 4 else 3);
+        command.text = visible_text;
+        if (widget.text.len == 0) {
+            command.color = widgetForegroundColor(widget, tokens, tokens.colors.text_muted);
+        }
         try builder.drawText(command);
     }
     if (composition_range) |range| {
@@ -8465,7 +8476,8 @@ fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens
             try emitWidgetTextSelectionRects(builder, widget, draw_text, layout_options, range, 8, 0, 1, tokens);
         }
     }
-    const visible_text = if (widget.text.len > 0) widget.text else widget.semantics.label;
+    const placeholder = widgetPlaceholder(widget);
+    const visible_text = if (widget.text.len > 0) widget.text else placeholder;
     if (visible_text.len > 0) {
         var command = draw_text;
         command.id = widgetPartId(widget.id, 9);
@@ -9026,6 +9038,14 @@ fn widgetTextInputKind(kind: WidgetKind) bool {
     return switch (kind) {
         .input, .text_field, .search_field, .combobox, .textarea => true,
         else => false,
+    };
+}
+
+fn widgetPlaceholder(widget: Widget) []const u8 {
+    if (widget.placeholder.len > 0) return widget.placeholder;
+    return switch (widget.kind) {
+        .select, .search_field, .combobox => widget.semantics.label,
+        else => "",
     };
 }
 
@@ -10666,6 +10686,7 @@ fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNod
             .label = semanticLabel(node.widget),
             .value = scroll.value orelse semanticValue(node.widget),
             .text_value = semanticTextValue(node.widget),
+            .placeholder = semanticPlaceholder(node.widget),
             .grid_row_index = grid.row_index,
             .grid_column_index = grid.column_index,
             .grid_row_count = grid.row_count,
@@ -10830,6 +10851,13 @@ fn defaultExpandedState(widget: Widget) ?bool {
 fn semanticTextValue(widget: Widget) []const u8 {
     return switch (widget.kind) {
         .input, .text_field, .search_field, .combobox, .textarea => widget.text,
+        else => "",
+    };
+}
+
+fn semanticPlaceholder(widget: Widget) []const u8 {
+    return switch (widget.kind) {
+        .select, .input, .text_field, .search_field, .combobox, .textarea => widget.placeholder,
         else => "",
     };
 }
@@ -11275,6 +11303,7 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         !rectsEqual(previous.frame, next.frame) or
         !widgetLayoutStylesEqual(previous.widget.layout, next.widget.layout);
     const content_dirty = !std.mem.eql(u8, previous.widget.text, next.widget.text) or
+        !std.mem.eql(u8, previous.widget.placeholder, next.widget.placeholder) or
         previous.widget.value != next.widget.value or
         previous.widget.image_id != next.widget.image_id or
         !optionalRectsEqual(previous.widget.image_src, next.widget.image_src) or
@@ -15988,6 +16017,7 @@ test "built-in component factory creates shadcn widget foundations" {
     try std.testing.expectEqual(WidgetKind.toggle_button, builtinComponentWidget(.toggle, .{}).kind);
     try std.testing.expectEqual(WidgetVariant.ghost, builtinComponentWidget(.toggle, .{}).variant);
     try std.testing.expectEqual(WidgetSize.sm, builtinComponentWidget(.spinner, .{}).size);
+    try std.testing.expectEqualStrings("Search components", builtinComponentWidget(.combobox, .{ .placeholder = "Search components" }).placeholder);
 }
 
 test "built-in component factory applies shadcn composite defaults" {
@@ -17605,6 +17635,7 @@ test "widget inputs expose textbox semantics and render shadcn input tokens" {
     try std.testing.expectEqual(WidgetRole.textbox, semantics[0].role);
     try std.testing.expectEqualStrings("Project name", semantics[0].label);
     try std.testing.expectEqualStrings("zero-native", semantics[0].text_value);
+    try std.testing.expectEqualStrings("", semantics[0].placeholder);
     try std.testing.expect(semantics[0].focusable);
     try std.testing.expect(semantics[0].actions.set_text);
     try std.testing.expect(semantics[0].actions.set_selection);
@@ -17646,6 +17677,55 @@ test "widget inputs expose textbox semantics and render shadcn input tokens" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "widget text inputs render explicit placeholders without changing text value" {
+    const input = Widget{
+        .id = 20,
+        .kind = .input,
+        .frame = geometry.RectF.init(10, 12, 180, 36),
+        .placeholder = "Project name",
+        .semantics = .{ .label = "Name" },
+    };
+
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(input, input.frame, &nodes);
+    var semantics_buffer: [1]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+    try std.testing.expectEqual(@as(usize, 1), semantics.len);
+    try std.testing.expectEqualStrings("Name", semantics[0].label);
+    try std.testing.expectEqualStrings("", semantics[0].text_value);
+    try std.testing.expectEqualStrings("Project name", semantics[0].placeholder);
+
+    const tokens = DesignTokens{
+        .colors = .{ .text_muted = Color.rgb8(90, 91, 92) },
+    };
+    var commands: [3]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, input, tokens);
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
+    switch (display_list.commands[2]) {
+        .draw_text => |text| {
+            try std.testing.expectEqualStrings("Project name", text.text);
+            try std.testing.expectEqualDeep(Color.rgb8(90, 91, 92), text.color);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const textarea = Widget{
+        .id = 21,
+        .kind = .textarea,
+        .frame = geometry.RectF.init(0, 0, 180, 84),
+        .placeholder = "Write a message",
+        .semantics = .{ .label = "Message" },
+    };
+    var textarea_nodes: [1]WidgetLayoutNode = undefined;
+    const textarea_layout = try layoutWidgetTree(textarea, textarea.frame, &textarea_nodes);
+    var textarea_semantics_buffer: [1]WidgetSemanticsNode = undefined;
+    const textarea_semantics = try textarea_layout.collectSemantics(&textarea_semantics_buffer);
+    try std.testing.expectEqualStrings("", textarea_semantics[0].text_value);
+    try std.testing.expectEqualStrings("Write a message", textarea_semantics[0].placeholder);
 }
 
 test "widget inputs expose required read-only and invalid form state" {
@@ -17694,6 +17774,7 @@ test "widget selects expose trigger semantics and render chevron chrome" {
     try std.testing.expectEqual(@as(usize, 1), semantics.len);
     try std.testing.expectEqual(WidgetRole.button, semantics[0].role);
     try std.testing.expectEqualStrings("Environment", semantics[0].label);
+    try std.testing.expectEqualStrings("", semantics[0].placeholder);
     try std.testing.expectEqual(@as(?bool, false), semantics[0].state.expanded);
     try std.testing.expect(semantics[0].focusable);
     try std.testing.expect(semantics[0].actions.press);
@@ -17757,6 +17838,19 @@ test "widget selects expose trigger semantics and render chevron chrome" {
         .frame = geometry.RectF.init(0, 0, 180, 36),
         .semantics = .{ .label = "Choose item" },
     }, tokens);
+    var placeholder_nodes: [1]WidgetLayoutNode = undefined;
+    const placeholder_layout = try layoutWidgetTree(.{
+        .id = 10,
+        .kind = .select,
+        .frame = geometry.RectF.init(0, 0, 180, 36),
+        .placeholder = "Choose item",
+        .semantics = .{ .label = "Environment" },
+    }, geometry.RectF.init(0, 0, 180, 36), &placeholder_nodes);
+    var placeholder_semantics_buffer: [1]WidgetSemanticsNode = undefined;
+    const placeholder_semantics = try placeholder_layout.collectSemantics(&placeholder_semantics_buffer);
+    try std.testing.expectEqualStrings("", placeholder_semantics[0].text_value);
+    try std.testing.expectEqualStrings("Choose item", placeholder_semantics[0].placeholder);
+
     const placeholder_list = placeholder_builder.displayList();
     switch (placeholder_list.commands[2]) {
         .draw_text => |text| {

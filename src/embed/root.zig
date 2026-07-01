@@ -95,6 +95,8 @@ pub const MobileWidgetSemantics = extern struct {
     label_len: usize = 0,
     text: ?[*]const u8 = null,
     text_len: usize = 0,
+    placeholder: ?[*]const u8 = null,
+    placeholder_len: usize = 0,
     text_selection_start: isize = -1,
     text_selection_end: isize = -1,
     text_composition_start: isize = -1,
@@ -961,6 +963,7 @@ fn mobileWidgetSemanticsFromNode(nodes: []const canvas.WidgetSemanticsNode, inde
     const node = nodes[index];
     const label = mobileOptionalString(node.label);
     const text = mobileOptionalString(node.text_value);
+    const placeholder = mobileOptionalString(node.placeholder);
     return .{
         .id = node.id,
         .parent_id = mobileWidgetSemanticParentId(nodes, node.parent_index),
@@ -977,6 +980,8 @@ fn mobileWidgetSemanticsFromNode(nodes: []const canvas.WidgetSemanticsNode, inde
         .label_len = label.len,
         .text = text.ptr,
         .text_len = text.len,
+        .placeholder = placeholder.ptr,
+        .placeholder_len = placeholder.len,
         .text_selection_start = mobileTextRangeStart(node.text_selection),
         .text_selection_end = mobileTextRangeEnd(node.text_selection),
         .text_composition_start = mobileTextRangeStart(node.text_composition),
@@ -1504,6 +1509,7 @@ test "mobile C ABI exposes GPU widget accessibility semantics" {
             .kind = .text_field,
             .frame = geometry.RectF.init(12, 56, 160, 32),
             .text = "Draft",
+            .placeholder = "Report title placeholder",
             .text_selection = canvas.TextSelection{ .anchor = 1, .focus = 4 },
             .state = .{ .focused = true },
             .semantics = .{ .label = "Report title" },
@@ -1570,6 +1576,7 @@ test "mobile C ABI exposes GPU widget accessibility semantics" {
     try std.testing.expectEqual(@intFromEnum(MobileWidgetRole.textbox), text_node.role);
     try std.testing.expectEqualStrings("Report title", text_node.label.?[0..text_node.label_len]);
     try std.testing.expectEqualStrings("Draft", text_node.text.?[0..text_node.text_len]);
+    try std.testing.expectEqualStrings("Report title placeholder", text_node.placeholder.?[0..text_node.placeholder_len]);
     try std.testing.expectEqual(@as(isize, 1), text_node.text_selection_start);
     try std.testing.expectEqual(@as(isize, 4), text_node.text_selection_end);
     try std.testing.expect((text_node.flags & @intFromEnum(MobileWidgetFlag.focused)) != 0);

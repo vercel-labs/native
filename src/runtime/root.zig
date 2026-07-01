@@ -1563,6 +1563,7 @@ pub const Runtime = struct {
                 .role = platformWidgetAccessibilityRole(node.role),
                 .label = node.label,
                 .text_value = node.text_value,
+                .placeholder = node.placeholder,
                 .text_selection = platformWidgetAccessibilityTextRange(node.text_selection),
                 .text_composition = platformWidgetAccessibilityTextRange(node.text_composition),
                 .value = node.value,
@@ -2726,6 +2727,7 @@ pub const Runtime = struct {
                     .parent_id = canvasWidgetSemanticParentId(semantics, node.parent_index),
                     .value = node.value,
                     .text_value = node.text_value,
+                    .placeholder = node.placeholder,
                     .grid_row_index = node.grid_row_index,
                     .grid_column_index = node.grid_column_index,
                     .grid_row_count = node.grid_row_count,
@@ -18178,7 +18180,7 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     const children = [_]canvas.Widget{
         .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(12, 14, 96, 32), .text = "Deploy", .command = "deploy.run" },
         .{ .id = 3, .kind = .checkbox, .frame = geometry.RectF.init(12, 58, 120, 28), .text = "Preview", .state = .{ .selected = true } },
-        .{ .id = 4, .kind = .text_field, .frame = geometry.RectF.init(12, 96, 160, 28), .text = "Search", .text_selection = canvas.TextSelection{ .anchor = 1, .focus = 4 }, .text_composition = canvas.TextRange.init(2, 5), .state = .{ .required = true, .read_only = true, .invalid = true } },
+        .{ .id = 4, .kind = .text_field, .frame = geometry.RectF.init(12, 96, 160, 28), .text = "Search", .placeholder = "Search deployments", .text_selection = canvas.TextSelection{ .anchor = 1, .focus = 4 }, .text_composition = canvas.TextRange.init(2, 5), .state = .{ .required = true, .read_only = true, .invalid = true } },
         .{ .id = 5, .kind = .select, .frame = geometry.RectF.init(184, 96, 120, 28), .text = "Production", .state = .{ .expanded = false }, .semantics = .{ .label = "Environment" } },
         .{ .id = 10, .kind = .data_grid, .frame = geometry.RectF.init(12, 132, 220, 64), .text = "Deployments", .layout = .{ .gap = 2 }, .children = &rows },
     };
@@ -18227,6 +18229,7 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     try std.testing.expect(platform_state.nodes[1].actions.press);
     try std.testing.expect(platform_state.nodes[2].selected);
     try std.testing.expectEqualStrings("Search", platform_state.nodes[3].text_value);
+    try std.testing.expectEqualStrings("Search deployments", platform_state.nodes[3].placeholder);
     try std.testing.expectEqualDeep(platform.WidgetAccessibilityTextRange{ .start = 1, .end = 4 }, platform_state.nodes[3].text_selection.?);
     try std.testing.expectEqualDeep(platform.WidgetAccessibilityTextRange{ .start = 2, .end = 5 }, platform_state.nodes[3].text_composition.?);
     try std.testing.expect(!platform_state.nodes[3].actions.set_text);
@@ -19337,7 +19340,9 @@ test "runtime lays out startup shell windows with native configured bounds" {
             },
         },
     );
-    var runtime = Runtime.init(.{ .platform = null_platform.platform() });
+    const runtime = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    runtime.* = Runtime.init(.{ .platform = null_platform.platform() });
     var app_state: TestApp = .{};
 
     try runtime.dispatchPlatformEvent(app_state.app(), .app_start);

@@ -1188,6 +1188,7 @@ pub const WidgetAccessibilityNode = struct {
     role: WidgetAccessibilityRole = .none,
     label: []const u8 = "",
     text_value: []const u8 = "",
+    placeholder: []const u8 = "",
     text_selection: ?WidgetAccessibilityTextRange = null,
     text_composition: ?WidgetAccessibilityTextRange = null,
     value: ?f32 = null,

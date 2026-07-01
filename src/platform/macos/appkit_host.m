@@ -1729,6 +1729,7 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
         const zero_native_appkit_widget_accessibility_node_t node = nodes[index];
         NSString *label = ZeroNativeStringFromBytes(node.label, node.label_len) ?: @"";
         NSString *textValue = ZeroNativeStringFromBytes(node.text_value, node.text_value_len) ?: @"";
+        NSString *placeholder = ZeroNativeStringFromBytes(node.placeholder, node.placeholder_len) ?: @"";
         NSString *name = label.length > 0 ? label : textValue;
         ZeroNativeWidgetAccessibilityElement *element = [[ZeroNativeWidgetAccessibilityElement alloc] init];
         element.surfaceView = self;
@@ -1742,6 +1743,9 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
             element.accessibilityValue = [NSString stringWithFormat:@"%.3f", node.value];
         } else if (textValue.length > 0) {
             element.accessibilityValue = textValue;
+        }
+        if (placeholder.length > 0 && [element respondsToSelector:@selector(setAccessibilityPlaceholderValue:)]) {
+            element.accessibilityPlaceholderValue = placeholder;
         }
         if (node.has_grid_row_count) {
             element.accessibilityRowCount = (NSInteger)node.grid_row_count;
