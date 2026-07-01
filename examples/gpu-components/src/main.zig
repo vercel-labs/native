@@ -60,10 +60,13 @@ const content_stack_id: canvas.ObjectId = 91;
 const canvas_sidebar_id: canvas.ObjectId = 92;
 const canvas_sidebar_title_id: canvas.ObjectId = 93;
 const section_nav_base_id: canvas.ObjectId = 94;
+const surface_overlay_backdrop_id: canvas.ObjectId = 222;
 const surface_overlay_id: canvas.ObjectId = 223;
 const surface_overlay_title_id: canvas.ObjectId = 224;
 const surface_overlay_body_id: canvas.ObjectId = 225;
 const surface_overlay_close_id: canvas.ObjectId = 226;
+const surface_backdrop_layer: i32 = 300;
+const surface_overlay_layer: i32 = 301;
 const popover_blur_id: canvas.ObjectId = 140 * 16 + 12;
 const preview_image_id: canvas.ImageId = 42;
 const preview_image_command_id: canvas.ObjectId = 118 * 16 + 1;
@@ -420,6 +423,12 @@ const GpuComponentsApp = struct {
         const target = pointer_event.target orelse return;
         switch (pointer_event.pointer.phase) {
             .up => {
+                if (target.id == surface_overlay_backdrop_id and self.surface_overlay != .none) {
+                    self.surface_overlay = .none;
+                    try self.updateComponentsCanvasModel(runtime, pointer_event.window_id);
+                    try self.updateStatus(runtime, pointer_event.window_id, "Surface closed.");
+                    return;
+                }
                 if (target.id == environment_select_id or
                     environmentOptionIndex(target.id) != null or
                     target.id == 175 or
@@ -1094,6 +1103,55 @@ fn componentSectionContentHeight(section: ComponentSection) f32 {
     };
 }
 
+fn surfaceOverlayKind(overlay: ComponentSurfaceOverlay) canvas.BuiltinComponentKind {
+    return switch (overlay) {
+        .dialog => .dialog,
+        .drawer => .drawer,
+        .sheet => .sheet,
+        .none => unreachable,
+    };
+}
+
+fn surfaceOverlayFrame(surface_size: geometry.SizeF, overlay: ComponentSurfaceOverlay) geometry.RectF {
+    const size = componentSurfaceSize(surface_size);
+    return switch (overlay) {
+        .dialog => centeredContentOverlayFrame(size, 460, 220),
+        .drawer => rightDockedOverlayFrame(size, 360, 24),
+        .sheet => bottomCenteredContentOverlayFrame(size, 520, 188, 24),
+        .none => unreachable,
+    };
+}
+
+fn centeredContentOverlayFrame(size: geometry.SizeF, preferred_width: f32, preferred_height: f32) geometry.RectF {
+    const content_width = @max(1, size.width - canvas_sidebar_width);
+    const width = @min(preferred_width, @max(1, content_width - 48));
+    const height = @min(preferred_height, @max(1, size.height - 48));
+    return rect(
+        canvas_sidebar_width + @max(24, (content_width - width) * 0.5),
+        @max(24, (size.height - height) * 0.5),
+        width,
+        height,
+    );
+}
+
+fn bottomCenteredContentOverlayFrame(size: geometry.SizeF, preferred_width: f32, preferred_height: f32, margin: f32) geometry.RectF {
+    const content_width = @max(1, size.width - canvas_sidebar_width);
+    const width = @min(preferred_width, @max(1, content_width - margin * 2));
+    const height = @min(preferred_height, @max(1, size.height - margin * 2));
+    return rect(
+        canvas_sidebar_width + @max(margin, (content_width - width) * 0.5),
+        @max(margin, size.height - margin - height),
+        width,
+        height,
+    );
+}
+
+fn rightDockedOverlayFrame(size: geometry.SizeF, preferred_width: f32, margin: f32) geometry.RectF {
+    const width = @min(preferred_width, @max(1, size.width - margin * 2));
+    const height = @max(1, size.height - margin * 2);
+    return rect(@max(margin, size.width - margin - width), margin, width, height);
+}
+
 fn appendComponentWidget(output: []canvas.Widget, count: *usize, widget: canvas.Widget) canvas.Error!void {
     if (count.* >= output.len) return error.WidgetLayoutListFull;
     output[count.*] = widget;
@@ -1181,11 +1239,6 @@ fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode,
         .{ .id = 150, .kind = .table, .frame = rect(0, 0, 360, 28), .text = "Finished component behavior", .value = virtual_scroll.data, .layout = .{ .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .children = &data_rows },
         .{ .id = 160, .kind = .tooltip, .frame = rect(392, 0, 176, 32), .text = "Tooltip rendered on GPU", .semantics = .{ .label = "GPU tooltip" } },
     };
-    const surface_overlay_children = [_]canvas.Widget{
-        .{ .id = surface_overlay_title_id, .kind = .text, .frame = rect(0, 0, 240, 24), .text = surfaceOverlayLabel(ui_state.surface_overlay), .size = .lg },
-        .{ .id = surface_overlay_body_id, .kind = .text, .frame = rect(0, 40, 260, 22), .text = surfaceOverlayBody(ui_state.surface_overlay), .size = .sm },
-        .{ .id = surface_overlay_close_id, .kind = .button, .frame = rect(0, 92, 96, 34), .text = "Close", .variant = .outline, .command = surface_close_command, .semantics = .{ .label = "Close surface" } },
-    };
     const environment_menu_items = [_]canvas.Widget{
         .{ .id = environmentOptionId(0), .kind = .menu_item, .text = environment_options[0], .command = environment_option_commands[0], .state = .{ .selected = ui_state.environment_index == 0 }, .semantics = .{ .label = environment_options[0] } },
         .{ .id = environmentOptionId(1), .kind = .menu_item, .text = environment_options[1], .command = environment_option_commands[1], .state = .{ .selected = ui_state.environment_index == 1 }, .semantics = .{ .label = environment_options[1] } },
@@ -1254,25 +1307,6 @@ fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode,
             .children = &environment_menu_items,
         });
     }
-    if (ui_state.surface_overlay != .none) {
-        try appendComponentWidget(&content_widgets, &content_widget_count, .{
-            .id = surface_overlay_id,
-            .kind = switch (ui_state.surface_overlay) {
-                .dialog => .dialog,
-                .drawer => .drawer,
-                .sheet => .sheet,
-                .none => unreachable,
-            },
-            .frame = switch (ui_state.surface_overlay) {
-                .dialog => rect(352, 176, 360, 190),
-                .drawer => rect(684, 96, 238, 456),
-                .sheet => rect(312, 448, 430, 164),
-                .none => unreachable,
-            },
-            .semantics = .{ .label = surfaceOverlayLabel(ui_state.surface_overlay) },
-            .children = &surface_overlay_children,
-        });
-    }
     const size = componentSurfaceSize(surface_size);
     const content_width = @max(1, size.width - canvas_sidebar_width);
     const content_height = @max(size.height, componentSectionContentHeight(ui_state.section));
@@ -1282,25 +1316,53 @@ fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode,
         .frame = rect(0, 0, content_width, content_height),
         .children = content_widgets[0..content_widget_count],
     }};
-    const root_widgets = [_]canvas.Widget{
-        .{
-            .id = canvas_sidebar_id,
+    var root_widgets: [4]canvas.Widget = undefined;
+    var root_widget_count: usize = 0;
+    try appendComponentWidget(&root_widgets, &root_widget_count, .{
+        .id = canvas_sidebar_id,
+        .kind = .panel,
+        .frame = rect(0, 0, canvas_sidebar_width, size.height),
+        .semantics = .{ .label = "Component sections" },
+        .children = &sidebar_children,
+    });
+    try appendComponentWidget(&root_widgets, &root_widget_count, .{
+        .id = content_scroll_id,
+        .kind = .scroll_view,
+        .frame = rect(canvas_sidebar_width, 0, content_width, size.height),
+        .value = virtual_scroll.page,
+        .layout = .{ .clip_content = true },
+        .semantics = .{ .label = "Component section content" },
+        .children = &content_children,
+    });
+
+    var surface_overlay_children_storage: [3]canvas.Widget = undefined;
+    if (ui_state.surface_overlay != .none) {
+        const overlay_frame = surfaceOverlayFrame(size, ui_state.surface_overlay);
+        const overlay_content_width = @max(1, overlay_frame.width - 40);
+        const overlay_content_height = @max(1, overlay_frame.height - 40);
+        surface_overlay_children_storage = .{
+            .{ .id = surface_overlay_title_id, .kind = .text, .frame = rect(0, 0, overlay_content_width, 28), .text = surfaceOverlayLabel(ui_state.surface_overlay), .size = .lg },
+            .{ .id = surface_overlay_body_id, .kind = .text, .frame = rect(0, 48, overlay_content_width, 44), .text = surfaceOverlayBody(ui_state.surface_overlay), .size = .sm },
+            .{ .id = surface_overlay_close_id, .kind = .button, .frame = rect(@max(0, overlay_content_width - 96), @max(104, overlay_content_height - 34), 96, 34), .text = "Close", .variant = .outline, .command = surface_close_command, .semantics = .{ .label = "Close surface" } },
+        };
+        try appendComponentWidget(&root_widgets, &root_widget_count, .{
+            .id = surface_overlay_backdrop_id,
             .kind = .panel,
-            .frame = rect(0, 0, canvas_sidebar_width, size.height),
-            .semantics = .{ .label = "Component sections" },
-            .children = &sidebar_children,
-        },
-        .{
-            .id = content_scroll_id,
-            .kind = .scroll_view,
-            .frame = rect(canvas_sidebar_width, 0, content_width, size.height),
-            .value = virtual_scroll.page,
-            .layout = .{ .clip_content = true },
-            .semantics = .{ .label = "Component section content" },
-            .children = &content_children,
-        },
-    };
-    return canvas.layoutWidgetTree(.{ .kind = .stack, .children = &root_widgets }, rect(0, 0, size.width, size.height), nodes);
+            .frame = rect(0, 0, size.width, size.height),
+            .layer = surface_backdrop_layer,
+            .style = .{ .background = rgba(0, 0, 0, 154), .border = rgba(0, 0, 0, 0), .radius = 0, .stroke_width = 0 },
+            .semantics = .{ .label = "Surface backdrop" },
+        });
+        try appendComponentWidget(&root_widgets, &root_widget_count, canvas.builtinComponentWidget(surfaceOverlayKind(ui_state.surface_overlay), .{
+            .id = surface_overlay_id,
+            .frame = overlay_frame,
+            .layer = surface_overlay_layer,
+            .semantics = .{ .label = surfaceOverlayLabel(ui_state.surface_overlay) },
+            .children = &surface_overlay_children_storage,
+        }));
+    }
+
+    return canvas.layoutWidgetTree(.{ .kind = .stack, .children = root_widgets[0..root_widget_count] }, rect(0, 0, size.width, size.height), nodes);
 }
 
 fn componentFrame(display_list: canvas.DisplayList, previous: ?canvas.DisplayList, options: canvas.CanvasFrameOptions, storage: canvas.CanvasFrameStorage) canvas.Error!canvas.CanvasFrame {
@@ -1733,9 +1795,25 @@ test "gpu components layout keeps finished controls visually separated" {
     const dialog_layout = try buildComponentsWidgetLayoutWithStateAndSize(&dialog_nodes, .{}, .{
         .surface_overlay = .dialog,
     }, default_canvas_size);
-    try expectComponentWidgetFrame(dialog_layout, surface_overlay_id, contentRect(352, 176, 360, 190));
-    try expectComponentWidgetFrame(dialog_layout, surface_overlay_title_id, contentRect(352, 176, 240, 24));
-    try expectComponentWidgetFrame(dialog_layout, surface_overlay_close_id, contentRect(352, 268, 96, 34));
+    const dialog_frame = surfaceOverlayFrame(default_canvas_size, .dialog);
+    try expectComponentWidgetFrame(dialog_layout, surface_overlay_backdrop_id, rect(0, 0, canvas_width, canvas_height));
+    try expectComponentWidgetFrame(dialog_layout, surface_overlay_id, dialog_frame);
+    try expectComponentWidgetFrame(dialog_layout, surface_overlay_title_id, rect(dialog_frame.x + 20, dialog_frame.y + 20, dialog_frame.width - 40, 28));
+    try expectComponentWidgetFrame(dialog_layout, surface_overlay_body_id, rect(dialog_frame.x + 20, dialog_frame.y + 68, dialog_frame.width - 40, 44));
+    try expectComponentWidgetFrame(dialog_layout, surface_overlay_close_id, rect(dialog_frame.x + dialog_frame.width - 116, dialog_frame.y + dialog_frame.height - 54, 96, 34));
+    try std.testing.expectEqual(@as(i32, surface_backdrop_layer), dialog_layout.findById(surface_overlay_backdrop_id).?.widget.layer.?);
+    try std.testing.expectEqual(@as(i32, surface_overlay_layer), dialog_layout.findById(surface_overlay_id).?.widget.layer.?);
+    try std.testing.expect(dialog_layout.findById(surface_overlay_id).?.widget.layout.clip_content);
+
+    var dialog_commands: [max_component_commands]canvas.CanvasCommand = undefined;
+    var dialog_builder = canvas.Builder.init(&dialog_commands);
+    try dialog_layout.emitDisplayList(&dialog_builder, componentTokens());
+    const dialog_display_list = dialog_builder.displayList();
+    const popover_fill = dialog_display_list.findCommandById(140 * 16 + 2).?;
+    const backdrop_fill = dialog_display_list.findCommandById(surface_overlay_backdrop_id * 16 + 2).?;
+    const dialog_fill = dialog_display_list.findCommandById(surface_overlay_id * 16 + 2).?;
+    try std.testing.expect(backdrop_fill.index > popover_fill.index);
+    try std.testing.expect(dialog_fill.index > backdrop_fill.index);
 
     var scrolled_nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
     const scrolled_layout = try buildComponentsWidgetLayoutWithScroll(&scrolled_nodes, .{
@@ -2802,7 +2880,8 @@ test "gpu components surface launchers open and close overlays" {
     try dispatchComponentPointerClick(&harness.runtime, app_handle, 175);
     try std.testing.expectEqual(ComponentSurfaceOverlay.dialog, app.surface_overlay);
     var layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
-    try expectComponentWidgetFrame(layout, surface_overlay_id, contentRect(352, 176, 360, 190));
+    try expectComponentWidgetFrame(layout, surface_overlay_backdrop_id, rect(0, 0, canvas_width, canvas_height));
+    try expectComponentWidgetFrame(layout, surface_overlay_id, surfaceOverlayFrame(default_canvas_size, .dialog));
     try std.testing.expectEqualStrings("Confirm deployment", layout.findById(surface_overlay_title_id).?.widget.text);
     var snapshot = harness.runtime.automationSnapshot("Components");
     try std.testing.expectEqualStrings("dialog", componentSnapshotWidget(snapshot, surface_overlay_id).?.role);
@@ -2820,14 +2899,20 @@ test "gpu components surface launchers open and close overlays" {
     try dispatchComponentPointerClick(&harness.runtime, app_handle, 176);
     try std.testing.expectEqual(ComponentSurfaceOverlay.drawer, app.surface_overlay);
     layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
-    try expectComponentWidgetFrame(layout, surface_overlay_id, contentRect(684, 96, 238, 456));
+    try expectComponentWidgetFrame(layout, surface_overlay_id, surfaceOverlayFrame(default_canvas_size, .drawer));
     try std.testing.expectEqualStrings("Project settings", layout.findById(surface_overlay_title_id).?.widget.text);
+
+    resetComponentDirty(&harness.runtime);
+    try dispatchComponentPointerClick(&harness.runtime, app_handle, surface_overlay_backdrop_id);
+    try std.testing.expectEqual(ComponentSurfaceOverlay.none, app.surface_overlay);
+    snapshot = harness.runtime.automationSnapshot("Components");
+    try std.testing.expect(componentSnapshotWidget(snapshot, surface_overlay_id) == null);
 
     resetComponentDirty(&harness.runtime);
     try dispatchComponentPointerClick(&harness.runtime, app_handle, 177);
     try std.testing.expectEqual(ComponentSurfaceOverlay.sheet, app.surface_overlay);
     layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
-    try expectComponentWidgetFrame(layout, surface_overlay_id, contentRect(312, 448, 430, 164));
+    try expectComponentWidgetFrame(layout, surface_overlay_id, surfaceOverlayFrame(default_canvas_size, .sheet));
     try std.testing.expectEqualStrings("Command palette", layout.findById(surface_overlay_title_id).?.widget.text);
 }
 
