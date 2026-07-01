@@ -14,9 +14,9 @@ const runtime_clock = @import("clock.zig");
 const shell_layout = @import("shell_layout.zig");
 const canvas_frame_helpers = @import("canvas_frame.zig");
 const canvas_limits = @import("canvas_limits.zig");
-const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
+const runtime_canvas_widget_state = @import("canvas_widget_state.zig");
 const runtime_gpu_surface_events = @import("gpu_surface_events.zig");
 const runtime_state = @import("state.zig");
 const runtime_view = @import("view.zig");
@@ -145,16 +145,6 @@ const canvasRenderOverrideNoop = canvas_frame_helpers.canvasRenderOverrideNoop;
 const canvasRenderAnimationFinalOverrideNoop = canvas_frame_helpers.canvasRenderAnimationFinalOverrideNoop;
 const canvasRenderAnimationActive = canvas_frame_helpers.canvasRenderAnimationActive;
 
-const WidgetTextStorageRange = canvas_widget_runtime.WidgetTextStorageRange;
-const CanvasWidgetScrollReconcileEntry = canvas_widget_runtime.CanvasWidgetScrollReconcileEntry;
-const CanvasWidgetControlReconcileEntry = canvas_widget_runtime.CanvasWidgetControlReconcileEntry;
-const CanvasWidgetTextReconcileEntry = canvas_widget_runtime.CanvasWidgetTextReconcileEntry;
-const collectCanvasWidgetControlReconcileEntries = canvas_widget_runtime.collectCanvasWidgetControlReconcileEntries;
-const collectCanvasWidgetScrollReconcileEntries = canvas_widget_runtime.collectCanvasWidgetScrollReconcileEntries;
-const canvasWidgetScrollStateForLayoutNode = canvas_widget_runtime.canvasWidgetScrollStateForLayoutNode;
-const collectCanvasWidgetTextReconcileEntries = canvas_widget_runtime.collectCanvasWidgetTextReconcileEntries;
-const canvasWidgetEditableTextKind = canvas_widget_runtime.canvasWidgetEditableTextKind;
-const canvasWidgetLayoutTreeWithRuntimeReconcileState = canvas_widget_runtime.canvasWidgetLayoutTreeWithRuntimeReconcileState;
 const RuntimeView = runtime_view.RuntimeView;
 const CanvasDisplayListScratch = runtime_view.CanvasDisplayListScratch;
 const CanvasWidgetToggleAnimation = runtime_view.CanvasWidgetToggleAnimation;
@@ -183,14 +173,7 @@ const canvasWidgetSemanticParentId = widget_bridge.canvasWidgetSemanticParentId;
 const canvasWidgetSelectedState = widget_bridge.canvasWidgetSelectedState;
 const canvasTextRange = widget_bridge.canvasTextRange;
 const canvasVirtualRange = widget_bridge.canvasVirtualRange;
-const canvasWidgetAccessibilityActionSupported = widget_bridge.canvasWidgetAccessibilityActionSupported;
-const canvasWidgetAccessibilitySemanticAction = widget_bridge.canvasWidgetAccessibilitySemanticAction;
 const canvasWidgetAccessibilityActionKindFromPlatform = widget_bridge.canvasWidgetAccessibilityActionKindFromPlatform;
-const canvasWidgetGroupFocusEdgeFromInput = canvas_widget_runtime.canvasWidgetGroupFocusEdgeFromInput;
-const canvasWidgetSpatialFocusDirection = canvas_widget_runtime.canvasWidgetSpatialFocusDirection;
-const canvasWidgetSpatialFocusAllowed = canvas_widget_runtime.canvasWidgetSpatialFocusAllowed;
-const canvasWidgetGroupDirectionalFocusTarget = canvas_widget_runtime.canvasWidgetGroupDirectionalFocusTarget;
-const canvasWidgetGroupFocusEdgeTarget = canvas_widget_runtime.canvasWidgetGroupFocusEdgeTarget;
 
 pub const max_canvas_widget_nodes_per_view = canvas_limits.max_canvas_widget_nodes_per_view;
 pub const max_canvas_widget_semantics_per_view = canvas_limits.max_canvas_widget_semantics_per_view;
@@ -786,164 +769,44 @@ pub const Runtime = struct {
         return CanvasFrameMethods().invalidateForCanvasChanges(self, view_frame, changes);
     }
 
+    fn CanvasWidgetStateMethods() type {
+        return runtime_canvas_widget_state.RuntimeCanvasWidgetState(Runtime);
+    }
+
     pub fn setCanvasWidgetLayout(self: *Runtime, window_id: platform.WindowId, label: []const u8, layout: canvas.WidgetLayoutTree) anyerror!platform.ViewInfo {
-        try self.validateViewParent(window_id);
-        try validateViewLabel(label);
-        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
-        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-        if (layout.nodes.len > max_canvas_widget_nodes_per_view) return error.WidgetNodeLimitReached;
-        const previous_layout = self.views[index].widgetLayoutTree();
-        var source_semantics_buffer: [max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined;
-        const source_semantics = try layout.collectSemantics(&source_semantics_buffer);
-        var reconciled_nodes: [max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined;
-        var previous_control_entries: [max_canvas_widget_nodes_per_view]CanvasWidgetControlReconcileEntry = undefined;
-        var previous_text_entries: [max_canvas_widget_nodes_per_view]CanvasWidgetTextReconcileEntry = undefined;
-        var previous_text_bytes: [max_canvas_widget_text_bytes_per_view]u8 = undefined;
-        const tokens = self.views[index].widget_tokens;
-        const reconciled_layout = try canvasWidgetLayoutTreeWithRuntimeReconcileState(
-            previous_layout,
-            layout,
-            source_semantics,
-            self.views[index].widgetSourceTextEntries(),
-            &reconciled_nodes,
-            &previous_control_entries,
-            &previous_text_entries,
-            &previous_text_bytes,
-            tokens,
-        );
-        var widget_invalidations: [max_canvas_widget_invalidations_per_view]canvas.WidgetInvalidation = undefined;
-        const invalidations = try canvas.WidgetLayoutTree.diffWithTokens(previous_layout, reconciled_layout, tokens, &widget_invalidations);
-        const previous_render_state = self.views[index].canvasWidgetRenderState();
-        const next_render_state = canvasWidgetRenderStateAfterLayout(previous_render_state, reconciled_layout);
-        const render_state_changed = !canvasWidgetRenderStatesEqual(previous_render_state, next_render_state);
-        const render_state_dirty = if (render_state_changed)
-            previous_layout.renderStateDirtyBoundsWithTokens(previous_render_state, next_render_state, tokens)
-        else
-            null;
-        const previous_cursor = self.views[index].canvas_widget_cursor;
-        const previous_widget_revision = self.views[index].widget_revision;
-        try self.views[index].copyWidgetLayoutTree(reconciled_layout);
-        try self.views[index].copyCanvasWidgetSourceText(layout);
-        const widget_revision_changed = self.views[index].widget_revision != previous_widget_revision;
-        if (previous_cursor != self.views[index].canvas_widget_cursor) try self.syncCanvasWidgetCursorForView(index);
-        self.invalidateForWidgetInvalidations(self.views[index].frame, invalidations);
-        if (render_state_changed) self.invalidateForCanvasWidgetRenderStateDirty(index, render_state_dirty);
-        const layout_dirty = invalidations.len > 0 or render_state_changed;
-        const requested_frame = try self.refreshCanvasWidgetDisplayListIfOwned(index);
-        if ((layout_dirty or widget_revision_changed) and !requested_frame) try self.requestCanvasFrameForView(index);
-        return self.views[index].info();
+        return CanvasWidgetStateMethods().setCanvasWidgetLayout(self, window_id, label, layout);
     }
 
     pub fn canvasWidgetLayout(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror!canvas.WidgetLayoutTree {
-        try self.validateViewParent(window_id);
-        try validateViewLabel(label);
-        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
-        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-        return self.views[index].widgetLayoutTree();
+        return CanvasWidgetStateMethods().canvasWidgetLayout(self, window_id, label);
     }
 
     pub fn canvasWidgetSemantics(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror![]const canvas.WidgetSemanticsNode {
-        try self.validateViewParent(window_id);
-        try validateViewLabel(label);
-        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
-        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-        return self.views[index].widgetSemantics();
+        return CanvasWidgetStateMethods().canvasWidgetSemantics(self, window_id, label);
     }
 
     pub fn dispatchCanvasWidgetAccessibilityAction(self: *Runtime, app: App, window_id: platform.WindowId, label: []const u8, action: CanvasWidgetAccessibilityAction) anyerror!platform.ViewInfo {
-        try self.validateViewParent(window_id);
-        try validateViewLabel(label);
-        if (action.id == 0) return error.InvalidCommand;
-        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
-        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-        const actions = self.canvasWidgetActionsForId(index, action.id) orelse return error.InvalidCommand;
-        if (!canvasWidgetAccessibilityActionSupported(actions, action.action)) return error.InvalidCommand;
-
-        if (canvasWidgetAccessibilitySemanticAction(action.action)) |semantic_action| {
-            if (try self.dispatchCanvasWidgetSemanticControlAction(app, index, action.id, semantic_action, actions)) {
-                return self.views[index].info();
-            }
-        }
-
-        switch (action.action) {
-            .focus => try self.focusAutomationCanvasWidget(index, action.id),
-            .press => try self.dispatchAutomationWidgetKey(app, index, action.id, "enter"),
-            .toggle => try self.dispatchAutomationWidgetKey(app, index, action.id, "space"),
-            .increment => try self.dispatchAutomationWidgetKey(app, index, action.id, self.views[index].canvasWidgetStepKey(action.id, .increment)),
-            .decrement => try self.dispatchAutomationWidgetKey(app, index, action.id, self.views[index].canvasWidgetStepKey(action.id, .decrement)),
-            .set_text => try self.setAutomationCanvasWidgetText(index, action.id, action.text),
-            .set_selection => try self.editAutomationCanvasWidgetText(index, action.id, .{ .set_selection = action.selection orelse return error.InvalidCommand }),
-            .set_composition => try self.editAutomationCanvasWidgetText(index, action.id, .{ .set_composition = .{ .text = action.text } }),
-            .commit_composition => try self.editAutomationCanvasWidgetText(index, action.id, .commit_composition),
-            .cancel_composition => try self.editAutomationCanvasWidgetText(index, action.id, .cancel_composition),
-            .select => try self.selectAutomationCanvasWidget(index, action.id),
-            .drag => try self.dispatchAutomationCanvasWidgetDrag(app, index, action.id, action.text),
-            .drop_files => try self.dispatchAutomationCanvasWidgetFileDrop(app, index, action.id, action.text),
-            .dismiss => try self.dismissAutomationCanvasWidget(index, action.id),
-        }
-        return self.views[index].info();
+        return CanvasWidgetStateMethods().dispatchCanvasWidgetAccessibilityAction(self, app, window_id, label, action);
     }
 
     pub fn stepCanvasWidgetKineticScroll(self: *Runtime, window_id: platform.WindowId, label: []const u8, dt_ms: f32) anyerror!platform.ViewInfo {
-        try self.validateViewParent(window_id);
-        try validateViewLabel(label);
-        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
-        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-
-        const dirty = try self.views[index].stepCanvasWidgetKineticScroll(dt_ms) orelse return self.views[index].info();
-        const previous_cursor = self.views[index].canvas_widget_cursor;
-        self.views[index].reconcileCanvasWidgetRenderStateAfterScroll(null);
-        if (previous_cursor != self.views[index].canvas_widget_cursor) try self.syncCanvasWidgetCursorForView(index);
-        try self.invalidateForCanvasWidgetDirty(index, dirty);
-        _ = try self.refreshCanvasWidgetDisplayListIfOwned(index);
-        return self.views[index].info();
+        return CanvasWidgetStateMethods().stepCanvasWidgetKineticScroll(self, window_id, label, dt_ms);
     }
 
     pub fn setCanvasWidgetDesignTokens(self: *Runtime, window_id: platform.WindowId, label: []const u8, tokens: canvas.DesignTokens) anyerror!platform.ViewInfo {
-        try self.validateViewParent(window_id);
-        try validateViewLabel(label);
-        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
-        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-        if (std.meta.eql(self.views[index].widget_tokens, tokens)) return self.views[index].info();
-        self.views[index].widget_tokens = tokens;
-        self.views[index].widget_revision += 1;
-        if (self.views[index].canvas_display_list_widget_owned) {
-            _ = try self.refreshCanvasWidgetDisplayList(index);
-        }
-        return self.views[index].info();
+        return CanvasWidgetStateMethods().setCanvasWidgetDesignTokens(self, window_id, label, tokens);
     }
 
     pub fn canvasWidgetDesignTokens(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror!canvas.DesignTokens {
-        try self.validateViewParent(window_id);
-        try validateViewLabel(label);
-        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
-        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-        return self.views[index].widget_tokens;
+        return CanvasWidgetStateMethods().canvasWidgetDesignTokens(self, window_id, label);
     }
 
     pub fn canvasWidgetTextGeometry(self: *const Runtime, window_id: platform.WindowId, label: []const u8, id: canvas.ObjectId) anyerror!canvas.WidgetTextGeometry {
-        try self.validateViewParent(window_id);
-        try validateViewLabel(label);
-        if (id == 0) return error.InvalidCommand;
-        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
-        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-        const node = self.views[index].widgetLayoutTree().findById(id) orelse return error.InvalidCommand;
-        if (!canvasWidgetEditableTextKind(node.widget.kind)) return error.InvalidCommand;
-        return canvas.textGeometryForWidget(node.widget, self.views[index].widget_tokens);
+        return CanvasWidgetStateMethods().canvasWidgetTextGeometry(self, window_id, label, id);
     }
 
     pub fn editCanvasWidgetText(self: *Runtime, window_id: platform.WindowId, label: []const u8, id: canvas.ObjectId, edit: canvas.TextInputEvent) anyerror!platform.ViewInfo {
-        try self.validateViewParent(window_id);
-        try validateViewLabel(label);
-        if (id == 0) return error.InvalidCommand;
-        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
-        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-        if (!self.views[index].canEditCanvasWidgetText(id)) return error.InvalidCommand;
-
-        const dirty = try self.views[index].applyCanvasWidgetTextEdit(id, edit) orelse return self.views[index].info();
-        try self.invalidateForCanvasWidgetDirty(index, dirty);
-        _ = try self.refreshCanvasWidgetDisplayListIfOwned(index);
-        return self.views[index].info();
+        return CanvasWidgetStateMethods().editCanvasWidgetText(self, window_id, label, id, edit);
     }
 
     fn CanvasWidgetDisplayMethods() type {
