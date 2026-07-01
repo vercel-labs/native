@@ -1761,9 +1761,10 @@ pub const Runtime = struct {
             break :blk 0;
         } else 0;
 
-        if (self.views[index].canvas_widget_focused_id == next_focus_id) return;
+        if (self.views[index].canvas_widget_focused_id == next_focus_id and self.views[index].canvas_widget_focus_visible_id == 0) return;
         const previous_state = self.views[index].canvasWidgetRenderState();
         self.views[index].canvas_widget_focused_id = next_focus_id;
+        self.views[index].canvas_widget_focus_visible_id = 0;
         try self.invalidateForCanvasWidgetRenderStateChange(index, previous_state, self.views[index].canvasWidgetRenderState());
     }
 
@@ -1837,18 +1838,19 @@ pub const Runtime = struct {
     fn invalidateForCanvasWidgetRenderStateDirty(self: *Runtime, view_index: usize, local_dirty: ?geometry.RectF) void {
         if (view_index >= self.view_count) return;
         if (self.views[view_index].kind != .gpu_surface) return;
-        if (local_dirty) |dirty| {
-            if (canvasDirtyRegionForView(self.views[view_index].frame, dirty)) |dirty_region| {
-                self.invalidateFor(.state, dirty_region);
-                return;
-            }
+        const dirty = local_dirty orelse return;
+        if (canvasDirtyRegionForView(self.views[view_index].frame, dirty)) |dirty_region| {
+            self.invalidateFor(.state, dirty_region);
+            return;
         }
         self.invalidateFor(.state, self.views[view_index].frame);
     }
 
     fn canvasWidgetRenderStateAfterLayout(previous: canvas.WidgetRenderState, layout: canvas.WidgetLayoutTree) canvas.WidgetRenderState {
+        const next_focused_id = if (previous.focused_id) |id| if (layout.focusTargetById(id) != null) id else null else null;
         return .{
-            .focused_id = if (previous.focused_id) |id| if (layout.focusTargetById(id) != null) id else null else null,
+            .focused_id = next_focused_id,
+            .focus_visible_id = if (previous.focus_visible_id) |id| if (next_focused_id != null and next_focused_id.? == id and layout.focusTargetById(id) != null) id else null else null,
             .hovered_id = if (previous.hovered_id) |id| if (canvasWidgetInteractionTargetExists(layout, id)) id else null else null,
             .pressed_id = if (previous.pressed_id) |id| if (canvasWidgetInteractionTargetExists(layout, id)) id else null else null,
         };
@@ -1856,6 +1858,7 @@ pub const Runtime = struct {
 
     fn canvasWidgetRenderStatesEqual(a: canvas.WidgetRenderState, b: canvas.WidgetRenderState) bool {
         return a.focused_id == b.focused_id and
+            a.focus_visible_id == b.focus_visible_id and
             a.hovered_id == b.hovered_id and
             a.pressed_id == b.pressed_id;
     }
@@ -2059,9 +2062,10 @@ pub const Runtime = struct {
     }
 
     fn setCanvasWidgetFocusFromKeyboard(self: *Runtime, view_index: usize, target_id: canvas.ObjectId) anyerror!void {
-        if (self.views[view_index].canvas_widget_focused_id == target_id) return;
+        if (self.views[view_index].canvas_widget_focused_id == target_id and self.views[view_index].canvas_widget_focus_visible_id == target_id) return;
         const previous_state = self.views[view_index].canvasWidgetRenderState();
         self.views[view_index].canvas_widget_focused_id = target_id;
+        self.views[view_index].canvas_widget_focus_visible_id = target_id;
         try self.invalidateForCanvasWidgetRenderStateChange(view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
     }
 
@@ -3275,9 +3279,10 @@ pub const Runtime = struct {
         if (view_index >= self.view_count) return error.ViewNotFound;
         const target = self.views[view_index].widgetLayoutTree().focusTargetById(id) orelse return error.InvalidCommand;
         try self.focusView(self.views[view_index].window_id, self.views[view_index].label);
-        if (self.views[view_index].canvas_widget_focused_id != target.id) {
+        if (self.views[view_index].canvas_widget_focused_id != target.id or self.views[view_index].canvas_widget_focus_visible_id != target.id) {
             const previous_state = self.views[view_index].canvasWidgetRenderState();
             self.views[view_index].canvas_widget_focused_id = target.id;
+            self.views[view_index].canvas_widget_focus_visible_id = target.id;
             try self.invalidateForCanvasWidgetRenderStateChange(view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
         }
     }
@@ -6198,6 +6203,7 @@ const RuntimeView = struct {
     widget_source_text_entries: [max_canvas_widget_source_text_entries_per_view]CanvasWidgetSourceTextEntry = undefined,
     widget_source_text_count: usize = 0,
     canvas_widget_focused_id: canvas.ObjectId = 0,
+    canvas_widget_focus_visible_id: canvas.ObjectId = 0,
     canvas_widget_hovered_id: canvas.ObjectId = 0,
     canvas_widget_pressed_id: canvas.ObjectId = 0,
     canvas_widget_cursor: platform.Cursor = .arrow,
@@ -6952,6 +6958,10 @@ const RuntimeView = struct {
         self.widget_semantics_node_count = semantics.len;
         if (self.canvas_widget_focused_id != 0 and self.widgetLayoutTree().focusTargetById(self.canvas_widget_focused_id) == null) {
             self.canvas_widget_focused_id = 0;
+            self.canvas_widget_focus_visible_id = 0;
+        }
+        if (self.canvas_widget_focus_visible_id != 0 and (self.canvas_widget_focus_visible_id != self.canvas_widget_focused_id or self.widgetLayoutTree().focusTargetById(self.canvas_widget_focus_visible_id) == null)) {
+            self.canvas_widget_focus_visible_id = 0;
         }
         if (self.canvas_widget_hovered_id != 0 and !canvasWidgetInteractionTargetExists(self.widgetLayoutTree(), self.canvas_widget_hovered_id)) {
             self.canvas_widget_hovered_id = 0;
@@ -6970,8 +6980,10 @@ const RuntimeView = struct {
     }
 
     fn canvasWidgetRenderState(self: *const RuntimeView) canvas.WidgetRenderState {
+        const focused_id: ?canvas.ObjectId = if (!self.focused or self.canvas_widget_focused_id == 0) null else self.canvas_widget_focused_id;
         return .{
-            .focused_id = if (!self.focused or self.canvas_widget_focused_id == 0) null else self.canvas_widget_focused_id,
+            .focused_id = focused_id,
+            .focus_visible_id = if (focused_id) |id| if (self.canvas_widget_focus_visible_id == id) id else null else null,
             .hovered_id = if (self.canvas_widget_hovered_id == 0) null else self.canvas_widget_hovered_id,
             .pressed_id = if (self.canvas_widget_pressed_id == 0) null else self.canvas_widget_pressed_id,
         };
@@ -6981,6 +6993,10 @@ const RuntimeView = struct {
         const layout = self.widgetLayoutTree();
         if (self.canvas_widget_focused_id != 0 and layout.focusTargetById(self.canvas_widget_focused_id) == null) {
             self.canvas_widget_focused_id = 0;
+            self.canvas_widget_focus_visible_id = 0;
+        }
+        if (self.canvas_widget_focus_visible_id != 0 and (self.canvas_widget_focus_visible_id != self.canvas_widget_focused_id or layout.focusTargetById(self.canvas_widget_focus_visible_id) == null)) {
+            self.canvas_widget_focus_visible_id = 0;
         }
 
         var next_hovered_id = self.canvas_widget_hovered_id;
@@ -7327,7 +7343,11 @@ const RuntimeView = struct {
         if (surface.semantics.hidden) return null;
         const dirty = self.canvasWidgetDirtyBounds(surface_index, surface.frame) orelse surface.frame;
         self.widget_layout_nodes[surface_index].widget.semantics.hidden = true;
-        if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focused_id, surface_index)) self.canvas_widget_focused_id = 0;
+        if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focused_id, surface_index)) {
+            self.canvas_widget_focused_id = 0;
+            self.canvas_widget_focus_visible_id = 0;
+        }
+        if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focus_visible_id, surface_index)) self.canvas_widget_focus_visible_id = 0;
         if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_hovered_id, surface_index)) {
             self.canvas_widget_hovered_id = 0;
             self.canvas_widget_cursor = .arrow;
@@ -13032,7 +13052,7 @@ test "runtime emits canvas display list from focused widget layout" {
         .stroke = .{ .focus = 3 },
     });
     try std.testing.expectEqual(@as(u64, 1), info.canvas_revision);
-    try std.testing.expectEqual(@as(usize, 7), info.canvas_command_count);
+    try std.testing.expectEqual(@as(usize, 6), info.canvas_command_count);
     try std.testing.expect(harness.runtime.invalidated);
     try std.testing.expect(harness.runtime.pendingDirtyRegions().len > 0);
 
@@ -13063,7 +13083,7 @@ test "runtime emits canvas display list from focused widget layout" {
             else => {},
         }
     }
-    try std.testing.expect(saw_runtime_focus);
+    try std.testing.expect(!saw_runtime_focus);
     try std.testing.expect(!saw_stale_focus);
     try std.testing.expect(saw_run_text);
 
@@ -13125,7 +13145,7 @@ test "runtime emits canvas display list from focused widget layout" {
     }
 }
 
-test "runtime hides widget-owned focus rings when canvas view loses focus" {
+test "runtime shows canvas widget focus rings only for keyboard-visible focus" {
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "gpu-widget-view-focus-render-state", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
@@ -13153,13 +13173,21 @@ test "runtime hides widget-owned focus rings when canvas view loses focus" {
         .text = "Other",
     });
 
-    const children = [_]canvas.Widget{.{
-        .id = 2,
-        .kind = .button,
-        .frame = geometry.RectF.init(10, 12, 96, 32),
-        .text = "Run",
-    }};
-    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const children = [_]canvas.Widget{
+        .{
+            .id = 2,
+            .kind = .button,
+            .frame = geometry.RectF.init(10, 12, 96, 32),
+            .text = "Run",
+        },
+        .{
+            .id = 3,
+            .kind = .button,
+            .frame = geometry.RectF.init(10, 56, 96, 32),
+            .text = "Stop",
+        },
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 240, 120), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
     _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
@@ -13180,6 +13208,7 @@ test "runtime hides widget-owned focus rings when canvas view loses focus" {
     } });
     try std.testing.expect(harness.runtime.views[0].focused);
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_focus_visible_id);
 
     var display_list = try harness.runtime.canvasDisplayList(1, "canvas");
     var saw_focus_ring = false;
@@ -13188,17 +13217,41 @@ test "runtime hides widget-owned focus rings when canvas view loses focus" {
             if (id == testCanvasWidgetPartId(2, 3)) saw_focus_ring = true;
         }
     }
-    try std.testing.expect(saw_focus_ring);
+    try std.testing.expect(!saw_focus_ring);
 
     var snapshot = harness.runtime.automationSnapshot("Widgets");
-    try std.testing.expectEqual(@as(usize, 1), snapshot.widgets.len);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.widgets.len);
     try std.testing.expect(snapshot.widgets[0].focused);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "tab",
+    } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_widget_focus_visible_id);
+
+    display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    saw_focus_ring = false;
+    for (display_list.commands) |command| {
+        if (command.objectId()) |id| {
+            if (id == testCanvasWidgetPartId(3, 3)) saw_focus_ring = true;
+        }
+    }
+    try std.testing.expect(saw_focus_ring);
+
+    snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expectEqual(@as(usize, 2), snapshot.widgets.len);
+    try std.testing.expect(!snapshot.widgets[0].focused);
+    try std.testing.expect(snapshot.widgets[1].focused);
 
     harness.runtime.invalidated = false;
     harness.runtime.dirty_region_count = 0;
     try harness.runtime.focusView(1, "other");
     try std.testing.expect(!harness.runtime.views[0].focused);
-    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_widget_focus_visible_id);
     try std.testing.expect(harness.runtime.invalidated);
     try std.testing.expect(harness.runtime.pendingDirtyRegions().len >= 1);
 
@@ -13206,14 +13259,14 @@ test "runtime hides widget-owned focus rings when canvas view loses focus" {
     saw_focus_ring = false;
     for (display_list.commands) |command| {
         if (command.objectId()) |id| {
-            if (id == testCanvasWidgetPartId(2, 3)) saw_focus_ring = true;
+            if (id == testCanvasWidgetPartId(3, 3)) saw_focus_ring = true;
         }
     }
     try std.testing.expect(!saw_focus_ring);
 
     snapshot = harness.runtime.automationSnapshot("Widgets");
-    try std.testing.expectEqual(@as(usize, 1), snapshot.widgets.len);
-    try std.testing.expect(!snapshot.widgets[0].focused);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.widgets.len);
+    try std.testing.expect(!snapshot.widgets[1].focused);
 
     harness.runtime.invalidated = false;
     harness.runtime.dirty_region_count = 0;
@@ -13226,14 +13279,14 @@ test "runtime hides widget-owned focus rings when canvas view loses focus" {
     saw_focus_ring = false;
     for (display_list.commands) |command| {
         if (command.objectId()) |id| {
-            if (id == testCanvasWidgetPartId(2, 3)) saw_focus_ring = true;
+            if (id == testCanvasWidgetPartId(3, 3)) saw_focus_ring = true;
         }
     }
     try std.testing.expect(saw_focus_ring);
 
     snapshot = harness.runtime.automationSnapshot("Widgets");
-    try std.testing.expectEqual(@as(usize, 1), snapshot.widgets.len);
-    try std.testing.expect(snapshot.widgets[0].focused);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.widgets.len);
+    try std.testing.expect(snapshot.widgets[1].focused);
 }
 
 test "runtime ignores stale canvas widget keyboard focus when canvas view loses focus" {
@@ -13356,6 +13409,7 @@ test "runtime clears focused canvas widget when layout replacement hides it" {
 
     try harness.runtime.focusView(1, "canvas");
     harness.runtime.views[0].canvas_widget_focused_id = 2;
+    harness.runtime.views[0].canvas_widget_focus_visible_id = 2;
     _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
 
     const retained = try harness.runtime.canvasDisplayList(1, "canvas");
@@ -14641,6 +14695,7 @@ test "runtime clears focused canvas widget after scroll clipping" {
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
     try harness.runtime.focusView(1, "canvas");
     harness.runtime.views[0].canvas_widget_focused_id = 2;
+    harness.runtime.views[0].canvas_widget_focus_visible_id = 2;
     _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
 
     var route_buffer: [4]canvas.WidgetEventRouteEntry = undefined;
@@ -16684,7 +16739,7 @@ test "runtime batches pointer widget display list refreshes" {
         .x = 66,
         .y = 36,
     } });
-    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_frame_request_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_frame_request_count);
     try std.testing.expectEqual(@as(canvas.ObjectId, 4), harness.runtime.views[0].canvas_widget_focused_id);
     try std.testing.expectEqual(@as(canvas.ObjectId, 4), harness.runtime.views[0].canvas_widget_pressed_id);
 
@@ -16696,7 +16751,7 @@ test "runtime batches pointer widget display list refreshes" {
         .x = 66,
         .y = 36,
     } });
-    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.gpu_surface_frame_request_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_frame_request_count);
     try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_pressed_id);
 
     const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
@@ -21123,9 +21178,8 @@ test "runtime dispatches routed canvas widget pointer events" {
     try std.testing.expect(harness.runtime.views[0].focused);
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
     try std.testing.expect(harness.runtime.invalidated);
-    try std.testing.expectEqual(@as(usize, 2), harness.runtime.pendingDirtyRegions().len);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.pendingDirtyRegions().len);
     try std.testing.expectEqualDeep(geometry.RectF.init(10, 12, 96, 32), harness.runtime.pendingDirtyRegions()[0]);
-    try std.testing.expectEqualDeep(geometry.RectF.init(9, 11, 98, 34), harness.runtime.pendingDirtyRegions()[1]);
 
     const snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expectEqual(@as(usize, 3), snapshot.widgets.len);
@@ -21175,7 +21229,7 @@ test "runtime dispatches routed canvas widget pointer events" {
     try std.testing.expectEqualStrings("tab", app_state.last_keyboard_key);
     try std.testing.expect(harness.runtime.invalidated);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.pendingDirtyRegions().len);
-    try std.testing.expectEqualDeep(geometry.RectF.init(9, 11, 142, 74), harness.runtime.pendingDirtyRegions()[0]);
+    try std.testing.expectEqualDeep(geometry.RectF.init(9, 51, 142, 34), harness.runtime.pendingDirtyRegions()[0]);
 
     const tab_snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expect(!tab_snapshot.widgets[1].focused);

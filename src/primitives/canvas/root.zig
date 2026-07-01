@@ -3922,6 +3922,7 @@ pub const WidgetState = struct {
 
 pub const WidgetRenderState = struct {
     focused_id: ?ObjectId = null,
+    focus_visible_id: ?ObjectId = null,
     hovered_id: ?ObjectId = null,
     pressed_id: ?ObjectId = null,
 };
@@ -11317,8 +11318,11 @@ fn widgetWithFrame(widget: Widget, frame: geometry.RectF) Widget {
 
 fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
     var copy = widget;
-    if (state.focused_id) |focused_id| {
-        copy.state.focused = copy.id != 0 and copy.id == focused_id;
+    if (state.focused_id != null or state.focus_visible_id != null) {
+        copy.state.focused = if (state.focus_visible_id) |focus_visible_id|
+            copy.id != 0 and copy.id == focus_visible_id
+        else
+            false;
     }
     if (state.hovered_id) |hovered_id| {
         copy.state.hovered = copy.id != 0 and copy.id == hovered_id;
@@ -11475,11 +11479,15 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
 }
 
 fn widgetRenderStateDirtyBounds(layout: WidgetLayoutTree, previous: WidgetRenderState, next: WidgetRenderState, tokens: DesignTokens) ?geometry.RectF {
-    var ids: [6]?ObjectId = [_]?ObjectId{null} ** 6;
+    var ids: [8]?ObjectId = [_]?ObjectId{null} ** 8;
     var id_len: usize = 0;
     if (previous.focused_id != next.focused_id) {
         appendOptionalObjectId(&ids, &id_len, previous.focused_id);
         appendOptionalObjectId(&ids, &id_len, next.focused_id);
+    }
+    if (previous.focus_visible_id != next.focus_visible_id) {
+        appendOptionalObjectId(&ids, &id_len, previous.focus_visible_id);
+        appendOptionalObjectId(&ids, &id_len, next.focus_visible_id);
     }
     if (previous.hovered_id != next.hovered_id) {
         appendOptionalObjectId(&ids, &id_len, previous.hovered_id);
@@ -19130,8 +19138,8 @@ test "widget render state dirty bounds tracks changed runtime states" {
     try expectRect(
         geometry.RectF.init(9, 11, 98, 78),
         layout.renderStateDirtyBounds(
-            .{ .focused_id = 2, .hovered_id = 2, .pressed_id = 2 },
-            .{ .focused_id = 3, .hovered_id = 3 },
+            .{ .focused_id = 2, .focus_visible_id = 2, .hovered_id = 2, .pressed_id = 2 },
+            .{ .focused_id = 3, .focus_visible_id = 3, .hovered_id = 3 },
         ),
     );
     try std.testing.expect(layout.renderStateDirtyBounds(.{ .focused_id = 2 }, .{ .focused_id = 2 }) == null);
@@ -19153,7 +19161,7 @@ test "widget render state dirty bounds uses custom focus stroke tokens" {
 
     try expectRect(
         geometry.RectF.init(7, 9, 102, 38),
-        layout.renderStateDirtyBoundsWithTokens(.{}, .{ .focused_id = 2 }, tokens),
+        layout.renderStateDirtyBoundsWithTokens(.{}, .{ .focused_id = 2, .focus_visible_id = 2 }, tokens),
     );
 }
 
@@ -20930,7 +20938,7 @@ test "widget layout emission can render runtime focus state" {
 
     var commands: [8]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
-    try layout.emitDisplayListWithState(&builder, tokens, .{ .focused_id = 2, .hovered_id = 2, .pressed_id = 2 });
+    try layout.emitDisplayListWithState(&builder, tokens, .{ .focused_id = 2, .focus_visible_id = 2, .hovered_id = 2, .pressed_id = 2 });
 
     const display_list = builder.displayList();
     try std.testing.expectEqual(@as(usize, 7), display_list.commandCount());
@@ -21225,11 +21233,11 @@ test "selection control focus bounds exclude clickable labels" {
 
     try expectRectApprox(
         geometry.RectF.init(8, 15.2, 21.6, 21.6),
-        layout.renderStateDirtyBoundsWithTokens(.{}, .{ .focused_id = 20 }, tokens),
+        layout.renderStateDirtyBoundsWithTokens(.{}, .{ .focused_id = 20, .focus_visible_id = 20 }, tokens),
     );
     try expectRect(
         geometry.RectF.init(8, 54, 60, 28),
-        layout.renderStateDirtyBoundsWithTokens(.{}, .{ .focused_id = 21 }, tokens),
+        layout.renderStateDirtyBoundsWithTokens(.{}, .{ .focused_id = 21, .focus_visible_id = 21 }, tokens),
     );
 }
 
