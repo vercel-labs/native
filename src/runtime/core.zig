@@ -9,6 +9,7 @@ const bridge_responses = @import("bridge_responses.zig");
 const runtime_async_bridge = @import("async_bridge.zig");
 const runtime_automation_snapshot = @import("automation_snapshot.zig");
 const automation_commands = @import("automation_commands.zig");
+const runtime_automation_widget_dispatch = @import("automation_widget_dispatch.zig");
 const runtime_clock = @import("clock.zig");
 const shell_layout = @import("shell_layout.zig");
 const canvas_frame_helpers = @import("canvas_frame.zig");
@@ -100,14 +101,11 @@ const builtinBridgeErrorCode = bridge_responses.builtinBridgeErrorCode;
 const jsonIntegerField = bridge_payload.jsonIntegerField;
 const jsonBoolField = bridge_payload.jsonBoolField;
 
-const AutomationNativeCommand = automation_commands.AutomationNativeCommand;
-const AutomationWidgetActionKind = automation_commands.AutomationWidgetActionKind;
 const AutomationWidgetAction = automation_commands.AutomationWidgetAction;
 const AutomationWidgetTarget = automation_commands.AutomationWidgetTarget;
 const AutomationWidgetWheel = automation_commands.AutomationWidgetWheel;
 const AutomationWidgetKey = automation_commands.AutomationWidgetKey;
 const AutomationWidgetPointerDrag = automation_commands.AutomationWidgetPointerDrag;
-const AutomationResizeCommand = automation_commands.AutomationResizeCommand;
 const parseAutomationCommandName = automation_commands.parseAutomationCommandName;
 const parseAutomationViewLabel = automation_commands.parseAutomationViewLabel;
 const parseAutomationNativeCommand = automation_commands.parseAutomationNativeCommand;
@@ -116,10 +114,6 @@ const parseAutomationWidgetTarget = automation_commands.parseAutomationWidgetTar
 const parseAutomationWidgetWheel = automation_commands.parseAutomationWidgetWheel;
 const parseAutomationWidgetKey = automation_commands.parseAutomationWidgetKey;
 const parseAutomationWidgetPointerDrag = automation_commands.parseAutomationWidgetPointerDrag;
-const automationWidgetActionSupported = automation_commands.automationWidgetActionSupported;
-const parseAutomationDropPaths = automation_commands.parseAutomationDropPaths;
-const parseAutomationTextSelection = automation_commands.parseAutomationTextSelection;
-const parseAutomationDragDelta = automation_commands.parseAutomationDragDelta;
 const parseAutomationResizeCommand = automation_commands.parseAutomationResizeCommand;
 
 const RuntimeShellLayout = shell_layout.RuntimeShellLayout;
@@ -155,27 +149,18 @@ const WidgetTextStorageRange = canvas_widget_runtime.WidgetTextStorageRange;
 const CanvasWidgetScrollReconcileEntry = canvas_widget_runtime.CanvasWidgetScrollReconcileEntry;
 const CanvasWidgetControlReconcileEntry = canvas_widget_runtime.CanvasWidgetControlReconcileEntry;
 const CanvasWidgetTextReconcileEntry = canvas_widget_runtime.CanvasWidgetTextReconcileEntry;
-const CanvasWidgetScrollKeyboardTarget = canvas_widget_runtime.CanvasWidgetScrollKeyboardTarget;
-const CanvasWidgetStepDirection = canvas_widget_runtime.CanvasWidgetStepDirection;
-const canvasWidgetInteractionTargetExists = canvas_widget_runtime.canvasWidgetInteractionTargetExists;
-const canvasWidgetSelectableTargetExists = canvas_widget_runtime.canvasWidgetSelectableTargetExists;
 const collectCanvasWidgetControlReconcileEntries = canvas_widget_runtime.collectCanvasWidgetControlReconcileEntries;
 const collectCanvasWidgetScrollReconcileEntries = canvas_widget_runtime.collectCanvasWidgetScrollReconcileEntries;
 const canvasWidgetScrollStateForLayoutNode = canvas_widget_runtime.canvasWidgetScrollStateForLayoutNode;
 const collectCanvasWidgetTextReconcileEntries = canvas_widget_runtime.collectCanvasWidgetTextReconcileEntries;
 const canvasWidgetEditableTextKind = canvas_widget_runtime.canvasWidgetEditableTextKind;
 const canvasWidgetLayoutTreeWithRuntimeReconcileState = canvas_widget_runtime.canvasWidgetLayoutTreeWithRuntimeReconcileState;
-const canvasWidgetCommandable = canvas_widget_runtime.canvasWidgetCommandable;
-const canvasWidgetCommandFiresOnPointerDown = canvas_widget_runtime.canvasWidgetCommandFiresOnPointerDown;
-const canvasWidgetKineticScrollFrameMs = canvas_widget_runtime.canvasWidgetKineticScrollFrameMs;
 const RuntimeView = runtime_view.RuntimeView;
 const CanvasDisplayListScratch = runtime_view.CanvasDisplayListScratch;
-const CanvasWidgetScrollSource = runtime_view.CanvasWidgetScrollSource;
 const CanvasWidgetToggleAnimation = runtime_view.CanvasWidgetToggleAnimation;
 const canvasRenderAnimationStartNsForView = runtime_view.canvasRenderAnimationStartNsForView;
 const nowNanoseconds = runtime_clock.nowNanoseconds;
 const timestampToU64 = runtime_clock.timestampToU64;
-const automationInputTimestampNs = runtime_clock.automationInputTimestampNs;
 const RuntimeWindow = runtime_state.RuntimeWindow;
 const RuntimeMainWebViewState = runtime_state.RuntimeMainWebViewState;
 const RuntimeSourceStorage = runtime_state.RuntimeSourceStorage;
@@ -1141,6 +1126,10 @@ pub const Runtime = struct {
         return runtime_gpu_surface_events.RuntimeGpuSurfaceEvents(Runtime);
     }
 
+    fn AutomationWidgetMethods() type {
+        return runtime_automation_widget_dispatch.RuntimeAutomationWidgetDispatch(Runtime);
+    }
+
     pub fn listViews(self: *const Runtime, window_id: platform.WindowId, output: []platform.ViewInfo) []const platform.ViewInfo {
         const window_index = self.findWindowIndexById(window_id) orelse return output[0..0];
         if (!self.windows[window_index].info.open) return output[0..0];
@@ -1807,23 +1796,7 @@ pub const Runtime = struct {
     }
 
     fn dispatchAutomationWidgetAction(self: *Runtime, app: App, action: AutomationWidgetAction) anyerror!void {
-        const view_index = try self.automationWidgetActionViewIndex(action);
-        switch (action.action) {
-            .focus => try self.focusAutomationCanvasWidget(view_index, action.id),
-            .press => try self.dispatchAutomationWidgetKey(app, view_index, action.id, "enter"),
-            .toggle => try self.dispatchAutomationWidgetKey(app, view_index, action.id, "space"),
-            .increment => try self.dispatchAutomationWidgetKey(app, view_index, action.id, self.views[view_index].canvasWidgetStepKey(action.id, .increment)),
-            .decrement => try self.dispatchAutomationWidgetKey(app, view_index, action.id, self.views[view_index].canvasWidgetStepKey(action.id, .decrement)),
-            .set_text => try self.setAutomationCanvasWidgetText(view_index, action.id, action.value),
-            .set_selection => try self.editAutomationCanvasWidgetText(view_index, action.id, .{ .set_selection = try parseAutomationTextSelection(action.value) }),
-            .set_composition => try self.editAutomationCanvasWidgetText(view_index, action.id, .{ .set_composition = .{ .text = action.value } }),
-            .commit_composition => try self.editAutomationCanvasWidgetText(view_index, action.id, .commit_composition),
-            .cancel_composition => try self.editAutomationCanvasWidgetText(view_index, action.id, .cancel_composition),
-            .select => try self.selectAutomationCanvasWidget(view_index, action.id),
-            .drag => try self.dispatchAutomationCanvasWidgetDrag(app, view_index, action.id, action.value),
-            .drop_files => try self.dispatchAutomationCanvasWidgetFileDrop(app, view_index, action.id, action.value),
-            .dismiss => try self.dismissAutomationCanvasWidget(view_index, action.id),
-        }
+        return AutomationWidgetMethods().dispatchAutomationWidgetAction(self, app, action);
     }
 
     fn dispatchCanvasWidgetSemanticControlAction(
@@ -1834,294 +1807,59 @@ pub const Runtime = struct {
         action: canvas.WidgetSemanticAction,
         actions: canvas.WidgetActions,
     ) anyerror!bool {
-        if (view_index >= self.view_count) return error.ViewNotFound;
-        const node_index = self.views[view_index].canvasWidgetNodeIndexById(id) orelse return false;
-        const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
-        const intent = canvas.widgetSemanticControlIntentWithActions(widget, action, actions) orelse return false;
-
-        self.views[view_index].recordGpuSurfaceInputTimestamp(automationInputTimestampNs());
-        self.beginCanvasWidgetDisplayListRefreshBatch();
-        var batch_active = true;
-        errdefer if (batch_active) self.cancelCanvasWidgetDisplayListRefreshBatch();
-
-        if (self.views[view_index].widgetLayoutTree().focusTargetById(id) != null) {
-            try self.focusAutomationCanvasWidget(view_index, id);
-        }
-
-        const toggle_animation = if (intent.kind == .toggle) self.views[view_index].canvasWidgetToggleAnimation(id) else null;
-        const dirty = try self.views[view_index].applyCanvasWidgetControlIntent(node_index, intent);
-        if (toggle_animation) |animation| try self.scheduleCanvasWidgetToggleAnimation(view_index, animation);
-        if (dirty) |bounds| {
-            const previous_cursor = self.views[view_index].canvas_widget_cursor;
-            switch (intent.kind) {
-                .scroll_by, .scroll_to_start, .scroll_to_end => self.views[view_index].reconcileCanvasWidgetRenderStateAfterScroll(null),
-                else => {},
-            }
-            if (previous_cursor != self.views[view_index].canvas_widget_cursor) try self.syncCanvasWidgetCursorForView(view_index);
-            try self.invalidateForCanvasWidgetDirty(view_index, bounds);
-        }
-
-        try self.endCanvasWidgetDisplayListRefreshBatch();
-        batch_active = false;
-
-        if (action == .press and intent.actions.press) {
-            try self.dispatchCanvasWidgetCommandForId(app, view_index, id);
-        }
-        return true;
+        return AutomationWidgetMethods().dispatchCanvasWidgetSemanticControlAction(self, app, view_index, id, action, actions);
     }
 
     fn dispatchAutomationWidgetClick(self: *Runtime, app: App, target: AutomationWidgetTarget) anyerror!void {
-        const view_index = try self.automationWidgetTargetViewIndex(target);
-        const layout = self.views[view_index].widgetLayoutTree();
-        if (!canvasWidgetInteractionTargetExists(layout, target.id)) return error.InvalidCommand;
-        const node = layout.findById(target.id) orelse return error.InvalidCommand;
-        const bounds = node.frame.normalized();
-        if (bounds.isEmpty()) return error.InvalidCommand;
-        const point = bounds.center();
-        const window_id = self.views[view_index].window_id;
-        const label = self.views[view_index].label;
-        const timestamp_ns = automationInputTimestampNs();
-
-        try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-            .window_id = window_id,
-            .label = label,
-            .kind = .pointer_down,
-            .timestamp_ns = timestamp_ns,
-            .x = point.x,
-            .y = point.y,
-            .button = 0,
-        } });
-        try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-            .window_id = window_id,
-            .label = label,
-            .kind = .pointer_up,
-            .timestamp_ns = timestamp_ns,
-            .x = point.x,
-            .y = point.y,
-            .button = 0,
-        } });
+        return AutomationWidgetMethods().dispatchAutomationWidgetClick(self, app, target);
     }
 
     fn dispatchAutomationWidgetWheel(self: *Runtime, app: App, wheel: AutomationWidgetWheel) anyerror!void {
-        const view_index = try self.automationWidgetTargetViewIndex(wheel.target);
-        const layout = self.views[view_index].widgetLayoutTree();
-        if (!canvasWidgetInteractionTargetExists(layout, wheel.target.id)) return error.InvalidCommand;
-        const node = layout.findById(wheel.target.id) orelse return error.InvalidCommand;
-        const bounds = node.frame.normalized();
-        if (bounds.isEmpty()) return error.InvalidCommand;
-        const point = bounds.center();
-        const timestamp_ns = automationInputTimestampNs();
-        try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-            .window_id = self.views[view_index].window_id,
-            .label = self.views[view_index].label,
-            .kind = .scroll,
-            .timestamp_ns = timestamp_ns,
-            .x = point.x,
-            .y = point.y,
-            .delta_y = wheel.delta_y,
-        } });
+        return AutomationWidgetMethods().dispatchAutomationWidgetWheel(self, app, wheel);
     }
 
     fn dispatchAutomationWidgetKeyInput(self: *Runtime, app: App, key: AutomationWidgetKey) anyerror!void {
-        try self.validateViewParent(1);
-        try validateViewLabel(key.view_label);
-        const view_index = self.findViewIndex(1, key.view_label) orelse return error.ViewNotFound;
-        if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
-        try self.focusView(self.views[view_index].window_id, self.views[view_index].label);
-        try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-            .window_id = self.views[view_index].window_id,
-            .label = self.views[view_index].label,
-            .kind = .key_down,
-            .timestamp_ns = automationInputTimestampNs(),
-            .key = key.key,
-            .text = key.text,
-        } });
+        return AutomationWidgetMethods().dispatchAutomationWidgetKeyInput(self, app, key);
     }
 
     fn dispatchAutomationWidgetPointerDrag(self: *Runtime, app: App, drag: AutomationWidgetPointerDrag) anyerror!void {
-        const view_index = try self.automationWidgetTargetViewIndex(drag.target);
-        const layout = self.views[view_index].widgetLayoutTree();
-        if (!canvasWidgetInteractionTargetExists(layout, drag.target.id)) return error.InvalidCommand;
-        const node = layout.findById(drag.target.id) orelse return error.InvalidCommand;
-        const bounds = node.frame.normalized();
-        if (bounds.isEmpty()) return error.InvalidCommand;
-        const start = geometry.PointF.init(
-            bounds.x + bounds.width * drag.start_x_ratio,
-            bounds.y + bounds.height * drag.start_y_ratio,
-        );
-        const end = geometry.PointF.init(
-            bounds.x + bounds.width * drag.end_x_ratio,
-            bounds.y + bounds.height * drag.end_y_ratio,
-        );
-        const timestamp_ns = automationInputTimestampNs();
-
-        try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-            .window_id = self.views[view_index].window_id,
-            .label = self.views[view_index].label,
-            .kind = .pointer_down,
-            .timestamp_ns = timestamp_ns,
-            .x = start.x,
-            .y = start.y,
-            .button = 0,
-        } });
-        try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-            .window_id = self.views[view_index].window_id,
-            .label = self.views[view_index].label,
-            .kind = .pointer_drag,
-            .timestamp_ns = timestamp_ns,
-            .x = end.x,
-            .y = end.y,
-            .delta_x = end.x - start.x,
-            .delta_y = end.y - start.y,
-            .button = 0,
-        } });
-        try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-            .window_id = self.views[view_index].window_id,
-            .label = self.views[view_index].label,
-            .kind = .pointer_up,
-            .timestamp_ns = timestamp_ns,
-            .x = end.x,
-            .y = end.y,
-            .button = 0,
-        } });
-    }
-
-    fn automationWidgetActionViewIndex(self: *Runtime, action: AutomationWidgetAction) anyerror!usize {
-        try self.validateViewParent(1);
-        try validateViewLabel(action.view_label);
-        const view_index = self.findViewIndex(1, action.view_label) orelse return error.ViewNotFound;
-        if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
-        const actions = self.canvasWidgetActionsForId(view_index, action.id) orelse return error.InvalidCommand;
-        if (!automationWidgetActionSupported(actions, action.action)) return error.InvalidCommand;
-        return view_index;
-    }
-
-    fn automationWidgetTargetViewIndex(self: *Runtime, target: AutomationWidgetTarget) anyerror!usize {
-        try self.validateViewParent(1);
-        try validateViewLabel(target.view_label);
-        const view_index = self.findViewIndex(1, target.view_label) orelse return error.ViewNotFound;
-        if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
-        return view_index;
+        return AutomationWidgetMethods().dispatchAutomationWidgetPointerDrag(self, app, drag);
     }
 
     fn canvasWidgetActionsForId(self: *const Runtime, view_index: usize, id: canvas.ObjectId) ?canvas.WidgetActions {
-        if (view_index >= self.view_count or id == 0) return null;
-        for (self.views[view_index].widgetSemantics()) |node| {
-            if (node.id == id) return node.actions;
-        }
-        return null;
+        return AutomationWidgetMethods().canvasWidgetActionsForId(self, view_index, id);
     }
 
     fn dismissAutomationCanvasWidget(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!void {
-        if (view_index >= self.view_count) return error.ViewNotFound;
-        self.views[view_index].recordGpuSurfaceInputTimestamp(automationInputTimestampNs());
-        const dirty = try self.views[view_index].dismissCanvasWidgetSurfaceForTarget(id) orelse return error.InvalidCommand;
-        try self.invalidateForCanvasWidgetDirty(view_index, dirty);
+        return AutomationWidgetMethods().dismissAutomationCanvasWidget(self, view_index, id);
     }
 
     fn focusAutomationCanvasWidget(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!void {
-        if (view_index >= self.view_count) return error.ViewNotFound;
-        const target = self.views[view_index].widgetLayoutTree().focusTargetById(id) orelse return error.InvalidCommand;
-        try self.focusView(self.views[view_index].window_id, self.views[view_index].label);
-        if (self.views[view_index].canvas_widget_focused_id != target.id or self.views[view_index].canvas_widget_focus_visible_id != target.id) {
-            const previous_state = self.views[view_index].canvasWidgetRenderState();
-            self.views[view_index].canvas_widget_focused_id = target.id;
-            self.views[view_index].canvas_widget_focus_visible_id = target.id;
-            try self.invalidateForCanvasWidgetRenderStateChange(view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
-        }
+        return AutomationWidgetMethods().focusAutomationCanvasWidget(self, view_index, id);
     }
 
     fn dispatchAutomationWidgetKey(self: *Runtime, app: App, view_index: usize, id: canvas.ObjectId, key: []const u8) anyerror!void {
-        try self.focusAutomationCanvasWidget(view_index, id);
-        try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-            .window_id = self.views[view_index].window_id,
-            .label = self.views[view_index].label,
-            .kind = .key_down,
-            .timestamp_ns = automationInputTimestampNs(),
-            .key = key,
-        } });
+        return AutomationWidgetMethods().dispatchAutomationWidgetKey(self, app, view_index, id, key);
     }
 
     fn selectAutomationCanvasWidget(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!void {
-        const layout = self.views[view_index].widgetLayoutTree();
-        if (!canvasWidgetSelectableTargetExists(layout, id)) return error.InvalidCommand;
-        if (layout.focusTargetById(id) != null) {
-            try self.focusAutomationCanvasWidget(view_index, id);
-        }
-        const dirty = try self.views[view_index].setCanvasWidgetSelected(id, true) orelse return;
-        try self.invalidateForCanvasWidgetDirty(view_index, dirty);
+        return AutomationWidgetMethods().selectAutomationCanvasWidget(self, view_index, id);
     }
 
     fn setAutomationCanvasWidgetText(self: *Runtime, view_index: usize, id: canvas.ObjectId, text: []const u8) anyerror!void {
-        try self.focusAutomationCanvasWidget(view_index, id);
-        const dirty = try self.views[view_index].setCanvasWidgetTextValue(id, text) orelse return;
-        try self.invalidateForCanvasWidgetDirty(view_index, dirty);
+        return AutomationWidgetMethods().setAutomationCanvasWidgetText(self, view_index, id, text);
     }
 
     fn editAutomationCanvasWidgetText(self: *Runtime, view_index: usize, id: canvas.ObjectId, edit: canvas.TextInputEvent) anyerror!void {
-        try self.focusAutomationCanvasWidget(view_index, id);
-        if (!self.views[view_index].canEditCanvasWidgetText(id)) return error.InvalidCommand;
-        const dirty = try self.views[view_index].applyCanvasWidgetTextEdit(id, edit) orelse return;
-        try self.invalidateForCanvasWidgetDirty(view_index, dirty);
+        return AutomationWidgetMethods().editAutomationCanvasWidgetText(self, view_index, id, edit);
     }
 
     fn dispatchAutomationCanvasWidgetDrag(self: *Runtime, app: App, view_index: usize, id: canvas.ObjectId, value: []const u8) anyerror!void {
-        if (view_index >= self.view_count) return error.ViewNotFound;
-        const delta = try parseAutomationDragDelta(value);
-        const layout = self.views[view_index].widgetLayoutTree();
-        if (!canvasWidgetInteractionTargetExists(layout, id)) return error.InvalidCommand;
-        const node = layout.findById(id) orelse return error.InvalidCommand;
-        const bounds = node.frame.normalized();
-        if (bounds.isEmpty()) return error.InvalidCommand;
-
-        const window_id = self.views[view_index].window_id;
-        const label = self.views[view_index].label;
-        const origin = bounds.center();
-        const previous_pressed_id = self.views[view_index].canvas_widget_pressed_id;
-        const previous_state = self.views[view_index].canvasWidgetRenderState();
-        self.views[view_index].canvas_widget_pressed_id = id;
-        if (previous_pressed_id != id) try self.invalidateForCanvasWidgetRenderStateChange(view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
-        errdefer {
-            if (view_index < self.view_count and self.views[view_index].canvas_widget_pressed_id == id) {
-                self.views[view_index].canvas_widget_pressed_id = previous_pressed_id;
-            }
-        }
-
-        try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-            .window_id = window_id,
-            .label = label,
-            .kind = .pointer_drag,
-            .x = origin.x + delta.dx,
-            .y = origin.y + delta.dy,
-            .delta_x = delta.dx,
-            .delta_y = delta.dy,
-        } });
-
-        if (self.findViewIndex(window_id, label)) |current_index| {
-            if (self.views[current_index].canvas_widget_pressed_id == id) {
-                const release_previous_state = self.views[current_index].canvasWidgetRenderState();
-                self.views[current_index].canvas_widget_pressed_id = 0;
-                try self.invalidateForCanvasWidgetRenderStateChange(current_index, release_previous_state, self.views[current_index].canvasWidgetRenderState());
-            }
-        }
+        return AutomationWidgetMethods().dispatchAutomationCanvasWidgetDrag(self, app, view_index, id, value);
     }
 
     fn dispatchAutomationCanvasWidgetFileDrop(self: *Runtime, app: App, view_index: usize, id: canvas.ObjectId, value: []const u8) anyerror!void {
-        if (view_index >= self.view_count) return error.ViewNotFound;
-        const layout = self.views[view_index].widgetLayoutTree();
-        if (!canvasWidgetInteractionTargetExists(layout, id)) return error.InvalidCommand;
-        var paths_buffer: [platform.max_drop_paths][]const u8 = undefined;
-        const paths = try parseAutomationDropPaths(value, paths_buffer[0..]);
-        const node = layout.findById(id) orelse return error.InvalidCommand;
-        const bounds = node.frame.normalized();
-        if (bounds.isEmpty()) return error.InvalidCommand;
-
-        try self.dispatchPlatformEvent(app, .{ .files_dropped = .{
-            .window_id = self.views[view_index].window_id,
-            .view_label = self.views[view_index].label,
-            .point = bounds.center(),
-            .paths = paths,
-        } });
+        return AutomationWidgetMethods().dispatchAutomationCanvasWidgetFileDrop(self, app, view_index, id, value);
     }
 
     fn createWindowWithSourceMode(self: *Runtime, options: platform.WindowCreateOptions, source_reloads_from_app: bool, source_policy: WindowSourcePolicy) anyerror!platform.WindowInfo {
