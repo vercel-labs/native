@@ -12,6 +12,7 @@ const Affine = drawing_model.Affine;
 const Color = drawing_model.Color;
 const Radius = drawing_model.Radius;
 const LinearGradient = drawing_model.LinearGradient;
+const Fill = drawing_model.Fill;
 const PathElement = drawing_model.PathElement;
 const ImageFit = drawing_model.ImageFit;
 const ImageSampling = drawing_model.ImageSampling;
@@ -20,6 +21,7 @@ const TextLayoutOptions = text_model.TextLayoutOptions;
 const GlyphAtlasCacheAction = text_model.GlyphAtlasCacheAction;
 const TextLayoutCacheAction = text_model.TextLayoutCacheAction;
 const RenderPipelineKind = render_model.RenderPipelineKind;
+const RenderCommand = render_model.RenderCommand;
 const RenderBatch = render_model.RenderBatch;
 const RenderPipelineCacheAction = render_model.RenderPipelineCacheAction;
 const RenderPathGeometryCacheAction = render_model.RenderPathGeometryCacheAction;
@@ -304,3 +306,315 @@ pub const CanvasGpuPacketSummary = struct {
         return self.unsupported_command_count == 0;
     }
 };
+
+pub const RenderEncoderPlanner = struct {
+    commands: []RenderEncoderCommand,
+    len: usize = 0,
+
+    pub fn init(commands: []RenderEncoderCommand) RenderEncoderPlanner {
+        return .{ .commands = commands };
+    }
+
+    pub fn reset(self: *RenderEncoderPlanner) void {
+        self.len = 0;
+    }
+
+    pub fn build(self: *RenderEncoderPlanner, pass: canvas.CanvasRenderPass) Error!RenderEncoderPlan {
+        self.reset();
+        if (!pass.requiresRender()) return .{ .commands = self.commands[0..0] };
+
+        try self.append(.{ .begin_pass = .{
+            .load_action = pass.loadAction(),
+            .surface_size = pass.surface_size,
+            .scale = pass.scale,
+            .dirty_bounds = pass.dirty_bounds,
+        } });
+        if (pass.scissorBounds()) |bounds| try self.append(.{ .set_scissor = bounds });
+
+        for (pass.pipeline_actions) |action| try self.append(.{ .pipeline_cache = action });
+        for (pass.path_geometry_actions) |action| try self.append(.{ .path_geometry_cache = action });
+        for (pass.image_actions) |action| try self.append(.{ .image_cache = action });
+        for (pass.layer_actions) |action| try self.append(.{ .layer_cache = action });
+        for (pass.resource_actions) |action| try self.append(.{ .resource_cache = action });
+        for (pass.visual_effect_actions) |action| try self.append(.{ .visual_effect_cache = action });
+        for (pass.glyph_atlas_actions) |action| try self.append(.{ .glyph_atlas_cache = action });
+        for (pass.text_layout_actions) |action| try self.append(.{ .text_layout_cache = action });
+
+        var bound_pipeline: ?RenderPipelineKind = null;
+        for (pass.batches) |batch| {
+            if (bound_pipeline == null or bound_pipeline.? != batch.pipeline) {
+                try self.append(.{ .bind_pipeline = batch.pipeline });
+                bound_pipeline = batch.pipeline;
+            }
+            try self.append(.{ .draw_batch = batch });
+        }
+        try self.append(.end_pass);
+
+        return .{ .commands = self.commands[0..self.len] };
+    }
+
+    fn append(self: *RenderEncoderPlanner, command: RenderEncoderCommand) Error!void {
+        if (self.len >= self.commands.len) return error.RenderEncoderListFull;
+        self.commands[self.len] = command;
+        self.len += 1;
+    }
+};
+
+pub const CanvasGpuPacketPlanner = struct {
+    commands: []CanvasGpuCommand,
+    len: usize = 0,
+    unsupported_count: usize = 0,
+
+    pub fn init(commands: []CanvasGpuCommand) CanvasGpuPacketPlanner {
+        return .{ .commands = commands };
+    }
+
+    pub fn reset(self: *CanvasGpuPacketPlanner) void {
+        self.len = 0;
+        self.unsupported_count = 0;
+    }
+
+    pub fn build(self: *CanvasGpuPacketPlanner, pass: canvas.CanvasRenderPass) Error!CanvasGpuPacket {
+        self.reset();
+        if (!pass.requiresRender()) {
+            return .{
+                .frame_index = pass.frame_index,
+                .timestamp_ns = pass.timestamp_ns,
+                .load_action = .skip,
+                .surface_size = pass.surface_size,
+                .scale = pass.scale,
+            };
+        }
+
+        const scissor_bounds = pass.scissorBounds();
+        for (pass.commands, 0..) |command, index| {
+            if (scissor_bounds) |scissor| {
+                if (!renderCommandIntersectsDirtyBounds(command, scissor)) continue;
+            }
+            try self.append(canvasGpuCommandFromRenderCommand(command, index));
+        }
+
+        return .{
+            .frame_index = pass.frame_index,
+            .timestamp_ns = pass.timestamp_ns,
+            .load_action = pass.loadAction(),
+            .surface_size = pass.surface_size,
+            .scale = pass.scale,
+            .scissor = pass.scissorBounds(),
+            .images = pass.images,
+            .image_actions = pass.image_actions,
+            .commands = self.commands[0..self.len],
+            .batch_count = pass.batchCount(),
+            .pipeline_action_count = pass.pipelineActionCount(),
+            .path_geometry_count = pass.pathGeometryCount(),
+            .path_geometry_action_count = pass.pathGeometryActionCount(),
+            .image_count = pass.imageCount(),
+            .image_action_count = pass.imageActionCount(),
+            .layer_count = pass.layerCount(),
+            .layer_action_count = pass.layerActionCount(),
+            .resource_count = pass.resourceCount(),
+            .resource_action_count = pass.resourceActionCount(),
+            .visual_effect_count = pass.visualEffectCount(),
+            .visual_effect_action_count = pass.visualEffectActionCount(),
+            .glyph_atlas_entry_count = pass.glyphAtlasEntryCount(),
+            .glyph_atlas_action_count = pass.glyphAtlasActionCount(),
+            .text_layout_count = pass.textLayoutCount(),
+            .text_layout_line_count = pass.textLayoutLineCount(),
+            .text_layout_action_count = pass.textLayoutActionCount(),
+            .unsupported_command_count = self.unsupported_count,
+        };
+    }
+
+    fn append(self: *CanvasGpuPacketPlanner, command: CanvasGpuCommand) Error!void {
+        if (self.len >= self.commands.len) return error.CanvasGpuCommandListFull;
+        if (!command.supported()) self.unsupported_count += 1;
+        self.commands[self.len] = command;
+        self.len += 1;
+    }
+};
+
+pub fn renderCommandIntersectsDirtyBounds(command: RenderCommand, dirty_bounds: geometry.RectF) bool {
+    const command_bounds = command.bounds.normalized();
+    const dirty = dirty_bounds.normalized();
+    if (command_bounds.isEmpty() or dirty.isEmpty()) return false;
+    return command_bounds.intersects(dirty);
+}
+
+pub fn canvasGpuCommandFromRenderCommand(command: RenderCommand, command_index: usize) CanvasGpuCommand {
+    var packet_command = CanvasGpuCommand{
+        .command_index = command_index,
+        .id = command.id,
+        .kind = .unsupported,
+        .bounds = command.bounds,
+        .clip = command.clip,
+        .opacity = command.opacity,
+        .transform = command.transform,
+    };
+
+    switch (command.command) {
+        .fill_rect => |value| {
+            packet_command.kind = canvasGpuFillRectKind(value.fill);
+            packet_command.pipeline = canvasGpuFillPipeline(value.fill);
+            packet_command.shape = .{ .rect = value.rect.normalized() };
+            packet_command.paint = canvasGpuPaint(value.fill);
+            packet_command.uses_resource = canvasGpuFillUsesResource(value.fill);
+        },
+        .fill_rounded_rect => |value| {
+            packet_command.kind = canvasGpuRoundedRectKind(value.fill);
+            packet_command.pipeline = canvasGpuFillPipeline(value.fill);
+            packet_command.shape = .{ .rounded_rect = .{
+                .rect = value.rect.normalized(),
+                .radius = value.radius,
+            } };
+            packet_command.paint = canvasGpuPaint(value.fill);
+            packet_command.uses_resource = canvasGpuFillUsesResource(value.fill);
+        },
+        .stroke_rect => |value| {
+            packet_command.kind = canvasGpuStrokeRectKind(value.stroke.fill);
+            packet_command.pipeline = canvasGpuFillPipeline(value.stroke.fill);
+            packet_command.shape = .{ .stroke_rect = .{
+                .rect = value.rect.normalized(),
+                .radius = value.radius,
+                .width = value.stroke.width,
+            } };
+            packet_command.paint = canvasGpuPaint(value.stroke.fill);
+            packet_command.stroke_width = value.stroke.width;
+            packet_command.uses_resource = canvasGpuFillUsesResource(value.stroke.fill);
+        },
+        .draw_line => |value| {
+            packet_command.kind = canvasGpuLineKind(value.stroke.fill);
+            packet_command.pipeline = canvasGpuFillPipeline(value.stroke.fill);
+            packet_command.shape = .{ .line = .{
+                .from = value.from,
+                .to = value.to,
+                .width = value.stroke.width,
+            } };
+            packet_command.paint = canvasGpuPaint(value.stroke.fill);
+            packet_command.stroke_width = value.stroke.width;
+            packet_command.uses_resource = canvasGpuFillUsesResource(value.stroke.fill);
+        },
+        .fill_path => |value| {
+            packet_command.kind = .fill_path;
+            packet_command.pipeline = .path;
+            packet_command.shape = .{ .path = value.elements };
+            packet_command.paint = canvasGpuPaint(value.fill);
+            packet_command.uses_path_geometry = true;
+            packet_command.uses_resource = canvasGpuFillUsesResource(value.fill);
+        },
+        .stroke_path => |value| {
+            packet_command.kind = .stroke_path;
+            packet_command.pipeline = .path;
+            packet_command.shape = .{ .path = value.elements };
+            packet_command.paint = canvasGpuPaint(value.stroke.fill);
+            packet_command.stroke_width = value.stroke.width;
+            packet_command.uses_path_geometry = true;
+            packet_command.uses_resource = canvasGpuFillUsesResource(value.stroke.fill);
+        },
+        .draw_image => |value| {
+            packet_command.kind = .draw_image;
+            packet_command.pipeline = .image;
+            packet_command.image = .{
+                .image_id = value.image_id,
+                .src = value.src,
+                .dst = value.dst.normalized(),
+                .opacity = value.opacity,
+                .fit = value.fit,
+                .sampling = value.sampling,
+            };
+            packet_command.uses_image = true;
+            packet_command.uses_resource = true;
+        },
+        .draw_text => |value| {
+            packet_command.kind = .draw_text;
+            packet_command.pipeline = .glyph_run;
+            packet_command.paint = .{ .color = value.color };
+            packet_command.text = .{
+                .font_id = value.font_id,
+                .size = value.size,
+                .origin = value.origin,
+                .color = value.color,
+                .text = value.text,
+                .glyphs = value.glyphs,
+                .text_layout = value.text_layout,
+            };
+            packet_command.uses_resource = true;
+            packet_command.uses_glyph_atlas = true;
+            packet_command.uses_text_layout = value.text_layout != null;
+        },
+        .shadow => |value| {
+            packet_command.kind = .shadow;
+            packet_command.pipeline = .shadow;
+            packet_command.effect = .{ .shadow = .{
+                .rect = value.rect.normalized(),
+                .radius = value.radius,
+                .offset = value.offset,
+                .blur = value.blur,
+                .spread = value.spread,
+                .color = value.color,
+            } };
+            packet_command.uses_resource = true;
+            packet_command.uses_visual_effect = true;
+        },
+        .blur => |value| {
+            packet_command.kind = .blur;
+            packet_command.pipeline = .blur;
+            packet_command.effect = .{ .blur = .{
+                .rect = value.rect.normalized(),
+                .radius = value.radius,
+            } };
+            packet_command.uses_resource = true;
+            packet_command.uses_visual_effect = true;
+        },
+        .push_clip, .pop_clip, .push_opacity, .pop_opacity, .transform => {},
+    }
+    return packet_command;
+}
+
+fn canvasGpuPaint(fill: Fill) CanvasGpuPaint {
+    return switch (fill) {
+        .color => |color| .{ .color = color },
+        .linear_gradient => |gradient| .{ .linear_gradient = gradient },
+    };
+}
+
+fn canvasGpuFillPipeline(fill: Fill) RenderPipelineKind {
+    return switch (fill) {
+        .color => .solid,
+        .linear_gradient => .linear_gradient,
+    };
+}
+
+fn canvasGpuFillUsesResource(fill: Fill) bool {
+    return switch (fill) {
+        .color => false,
+        .linear_gradient => true,
+    };
+}
+
+fn canvasGpuFillRectKind(fill: Fill) CanvasGpuCommandKind {
+    return switch (fill) {
+        .color => .fill_rect_solid,
+        .linear_gradient => .fill_rect_gradient,
+    };
+}
+
+fn canvasGpuRoundedRectKind(fill: Fill) CanvasGpuCommandKind {
+    return switch (fill) {
+        .color => .fill_rounded_rect_solid,
+        .linear_gradient => .fill_rounded_rect_gradient,
+    };
+}
+
+fn canvasGpuStrokeRectKind(fill: Fill) CanvasGpuCommandKind {
+    return switch (fill) {
+        .color => .stroke_rect_solid,
+        .linear_gradient => .stroke_rect_gradient,
+    };
+}
+
+fn canvasGpuLineKind(fill: Fill) CanvasGpuCommandKind {
+    return switch (fill) {
+        .color => .draw_line_solid,
+        .linear_gradient => .draw_line_gradient,
+    };
+}
