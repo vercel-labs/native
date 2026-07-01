@@ -578,6 +578,8 @@ pub const TextInputEvent = union(enum) {
     insert_text: []const u8,
     delete_backward,
     delete_forward,
+    delete_word_backward,
+    delete_word_forward,
     clear,
     move_caret: TextCaretMove,
     set_selection: TextSelection,
@@ -4996,6 +4998,8 @@ pub fn applyTextInputEvent(state: TextEditState, event: TextInputEvent, output: 
         .insert_text => |text| replaceTextEditRange(normalized, activeTextReplaceRange(normalized), text, output, null, text.len),
         .delete_backward => deleteBackwardTextEdit(normalized, output),
         .delete_forward => deleteForwardTextEdit(normalized, output),
+        .delete_word_backward => deleteWordBackwardTextEdit(normalized, output),
+        .delete_word_forward => deleteWordForwardTextEdit(normalized, output),
         .clear => .{
             .text = "",
             .selection = TextSelection.collapsed(0),
@@ -10665,6 +10669,7 @@ fn widgetKeyboardKeyDownTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEven
     if (widgetKeyboardSelectAllTextEditEvent(event)) |edit| return edit;
     if (widgetKeyboardCommandTextNavigationEvent(event)) |edit| return edit;
     if (widgetKeyboardWordTextNavigationEvent(event)) |edit| return edit;
+    if (widgetKeyboardWordDeleteTextEditEvent(event)) |edit| return edit;
     if (event.modifiers.hasNavigationModifier()) return null;
     if (std.ascii.eqlIgnoreCase(event.key, "backspace")) return .delete_backward;
     if (std.ascii.eqlIgnoreCase(event.key, "delete")) return .delete_forward;
@@ -10687,6 +10692,14 @@ fn widgetKeyboardWordTextNavigationEvent(event: WidgetKeyboardEvent) ?TextInputE
     if (event.modifiers.alt == event.modifiers.control) return null;
     if (std.ascii.eqlIgnoreCase(event.key, "arrowleft")) return .{ .move_caret = .{ .direction = .previous_word, .extend = event.modifiers.shift } };
     if (std.ascii.eqlIgnoreCase(event.key, "arrowright")) return .{ .move_caret = .{ .direction = .next_word, .extend = event.modifiers.shift } };
+    return null;
+}
+
+fn widgetKeyboardWordDeleteTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEvent {
+    if (event.modifiers.super or event.modifiers.shift) return null;
+    if (event.modifiers.alt == event.modifiers.control) return null;
+    if (std.ascii.eqlIgnoreCase(event.key, "backspace")) return .delete_word_backward;
+    if (std.ascii.eqlIgnoreCase(event.key, "delete")) return .delete_word_forward;
     return null;
 }
 
@@ -13512,6 +13525,24 @@ fn deleteForwardTextEdit(state: TextEditState, output: []u8) Error!TextEditState
     const caret = snapTextOffset(state.text, state.selection.focus);
     if (caret >= state.text.len) return .{ .text = state.text, .selection = TextSelection.collapsed(state.text.len), .composition = null };
     return replaceTextEditRange(state, TextRange.init(caret, nextTextOffset(state.text, caret)), "", output, null, 0);
+}
+
+fn deleteWordBackwardTextEdit(state: TextEditState, output: []u8) Error!TextEditState {
+    const range = activeTextReplaceRange(state);
+    if (!range.isCollapsed(state.text.len)) return replaceTextEditRange(state, range, "", output, null, 0);
+
+    const caret = snapTextOffset(state.text, state.selection.focus);
+    if (caret == 0) return .{ .text = state.text, .selection = TextSelection.collapsed(0), .composition = null };
+    return replaceTextEditRange(state, TextRange.init(previousTextWordOffset(state.text, caret), caret), "", output, null, 0);
+}
+
+fn deleteWordForwardTextEdit(state: TextEditState, output: []u8) Error!TextEditState {
+    const range = activeTextReplaceRange(state);
+    if (!range.isCollapsed(state.text.len)) return replaceTextEditRange(state, range, "", output, null, 0);
+
+    const caret = snapTextOffset(state.text, state.selection.focus);
+    if (caret >= state.text.len) return .{ .text = state.text, .selection = TextSelection.collapsed(state.text.len), .composition = null };
+    return replaceTextEditRange(state, TextRange.init(caret, nextTextWordOffset(state.text, caret)), "", output, null, 0);
 }
 
 fn moveTextCaret(state: TextEditState, move: TextCaretMove) TextEditState {
@@ -25235,6 +25266,22 @@ test "text edit state applies utf8-aware caret insert and delete events" {
     try std.testing.expectEqualStrings("", state.text);
     try std.testing.expectEqualDeep(TextSelection.collapsed(0), state.selection);
 
+    state = TextEditState{ .text = "hello brave world", .selection = TextSelection.collapsed(17) };
+    state = try state.apply(.delete_word_backward, &storage_b);
+    try std.testing.expectEqualStrings("hello brave ", state.text);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(12), state.selection);
+
+    state = TextEditState{ .text = "hello brave world", .selection = TextSelection.collapsed(0) };
+    state = try state.apply(.delete_word_forward, &storage_a);
+    try std.testing.expectEqualStrings(" brave world", state.text);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(0), state.selection);
+
+    state = TextEditState{ .text = "éclair cafe", .selection = TextSelection.collapsed(7) };
+    state = try state.apply(.delete_word_backward, &storage_b);
+    try std.testing.expectEqualStrings(" cafe", state.text);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(0), state.selection);
+
+    state = TextEditState.init("");
     state = try state.apply(.{ .insert_text = "AxB" }, &storage_b);
     try std.testing.expectEqualStrings("AxB", state.text);
     try std.testing.expectEqual(@as(usize, 3), state.selection.focus);
@@ -25468,8 +25515,21 @@ test "widget keyboard events map to text edit events" {
     nav_state = try nav_state.apply(unicode_control_right, &nav_storage);
     try std.testing.expectEqualDeep(TextSelection.collapsed(7), nav_state.selection);
 
+    nav_state = TextEditState{ .text = "hello brave world", .selection = TextSelection.collapsed(17) };
+    const option_backspace = (WidgetKeyboardEvent{ .phase = .key_down, .key = "backspace", .modifiers = .{ .alt = true } }).textEditEvent().?;
+    nav_state = try nav_state.apply(option_backspace, &nav_storage);
+    try std.testing.expectEqualStrings("hello brave ", nav_state.text);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(12), nav_state.selection);
+
+    nav_state = TextEditState{ .text = "hello brave world", .selection = TextSelection.collapsed(0) };
+    const control_delete = (WidgetKeyboardEvent{ .phase = .key_down, .key = "delete", .modifiers = .{ .control = true } }).textEditEvent().?;
+    nav_state = try nav_state.apply(control_delete, &nav_storage);
+    try std.testing.expectEqualStrings(" brave world", nav_state.text);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(0), nav_state.selection);
+
     try std.testing.expect((WidgetKeyboardEvent{ .phase = .text_input, .text = "a", .modifiers = .{ .super = true } }).textEditEvent() == null);
     try std.testing.expect((WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowleft", .modifiers = .{ .alt = true, .control = true } }).textEditEvent() == null);
+    try std.testing.expect((WidgetKeyboardEvent{ .phase = .key_down, .key = "backspace", .modifiers = .{ .alt = true, .control = true } }).textEditEvent() == null);
     try std.testing.expect((WidgetKeyboardEvent{ .phase = .key_down, .key = "a", .modifiers = .{ .super = true, .shift = true } }).textEditEvent() == null);
     try std.testing.expect((WidgetKeyboardEvent{ .phase = .key_up, .key = "backspace" }).textEditEvent() == null);
 }
