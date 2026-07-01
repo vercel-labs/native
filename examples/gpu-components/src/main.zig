@@ -23,6 +23,12 @@ const component_chrome_prefix_commands: usize = 1;
 const component_chrome_suffix_commands: usize = 0;
 const refresh_command = "components.refresh";
 const theme_command = "components.theme";
+const environment_toggle_command = "components.environment.toggle";
+const environment_option_commands = [_][]const u8{
+    "components.environment.production",
+    "components.environment.preview",
+    "components.environment.staging",
+};
 const canvas_label = "components-canvas";
 const primary_button_fill_id: canvas.ObjectId = 104 * 16 + 1;
 const project_static_text_id: canvas.ObjectId = 111 * 16 + 3;
@@ -36,15 +42,25 @@ const scroll_track_id: canvas.ObjectId = 130 * 16 + 2;
 const scroll_thumb_id: canvas.ObjectId = 130 * 16 + 3;
 const menu_item_text_id: canvas.ObjectId = 142 * 16 + 3;
 const data_cell_text_id: canvas.ObjectId = 156 * 16 + 4;
+const environment_select_id: canvas.ObjectId = 172;
+const environment_select_text_id: canvas.ObjectId = environment_select_id * 16 + 3;
+const environment_menu_id: canvas.ObjectId = 216;
+const environment_option_base_id: canvas.ObjectId = 21601;
 const popover_blur_id: canvas.ObjectId = 140 * 16 + 12;
 const preview_image_id: canvas.ImageId = 42;
 const preview_image_command_id: canvas.ObjectId = 118 * 16 + 1;
+const environment_options = [_][]const u8{ "Production", "Preview", "Staging" };
 
 const ComponentVirtualScroll = struct {
     nav: f32 = 0,
     behavior: f32 = 28,
     data: f32 = 28,
     catalog: f32 = 0,
+};
+
+const ComponentUiState = struct {
+    environment_select_open: bool = false,
+    environment_index: usize = 0,
 };
 
 const ComponentThemeMode = enum {
@@ -68,6 +84,28 @@ const ComponentThemeMode = enum {
         };
     }
 };
+
+fn environmentLabel(index: usize) []const u8 {
+    return environment_options[@min(index, environment_options.len - 1)];
+}
+
+fn environmentOptionId(index: usize) canvas.ObjectId {
+    return environment_option_base_id + @as(canvas.ObjectId, @intCast(index));
+}
+
+fn environmentOptionIndex(id: canvas.ObjectId) ?usize {
+    if (id < environment_option_base_id) return null;
+    const index = id - environment_option_base_id;
+    if (index >= environment_options.len) return null;
+    return @intCast(index);
+}
+
+fn environmentCommandIndex(command_name: []const u8) ?usize {
+    for (environment_option_commands, 0..) |option_command, index| {
+        if (std.mem.eql(u8, command_name, option_command)) return index;
+    }
+    return null;
+}
 
 const preview_image_pixels = [_]u8{
     38, 99,  235, 255, 16,  185, 129, 255, 250, 204, 21,  255, 244, 63,  94,  255,
@@ -172,6 +210,8 @@ const GpuComponentsApp = struct {
     canvas_installed: bool = false,
     reported_planned_frame: bool = false,
     virtual_scroll: ComponentVirtualScroll = .{},
+    environment_select_open: bool = false,
+    environment_index: usize = 0,
     canvas_size: geometry.SizeF = default_canvas_size,
     pixel_snap_scale: f32 = 1,
     pixels: ?[]u8 = null,
@@ -230,7 +270,11 @@ const GpuComponentsApp = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         switch (event_value) {
             .command => |command| {
-                if (std.mem.eql(u8, command.name, refresh_command)) {
+                if (std.mem.eql(u8, command.name, environment_toggle_command)) {
+                    try self.toggleEnvironmentSelect(runtime, command);
+                } else if (environmentCommandIndex(command.name)) |index| {
+                    try self.selectEnvironment(runtime, command, index);
+                } else if (std.mem.eql(u8, command.name, refresh_command)) {
                     try self.refresh(runtime, command);
                 } else if (std.mem.eql(u8, command.name, theme_command)) {
                     try self.changeTheme(runtime, command);
@@ -256,7 +300,7 @@ const GpuComponentsApp = struct {
         const scale_changed = self.updatePixelSnapScale(frame_event.scale_factor);
         const size_changed = self.updateCanvasSize(componentSurfaceSize(frame_event.size));
         if (first_install or scale_changed or size_changed) {
-            try installComponentsCanvasModel(runtime, frame_event.window_id, self.virtual_scroll, self.componentTokens(), self.canvas_size);
+            try installComponentsCanvasModel(runtime, frame_event.window_id, self.virtual_scroll, self.componentUiState(), self.componentTokens(), self.canvas_size);
             _ = try self.presentComponentsCanvas(runtime, frame_event, true);
             if (first_install) {
                 try self.updateStatus(runtime, frame_event.window_id, "Component lab display list presented on the GPU surface.");
@@ -274,7 +318,16 @@ const GpuComponentsApp = struct {
         if (!std.mem.eql(u8, pointer_event.view_label, canvas_label)) return;
         const target = pointer_event.target orelse return;
         switch (pointer_event.pointer.phase) {
-            .up => try self.reportWidgetInteraction(runtime, pointer_event.window_id, "Clicked", target.id),
+            .up => {
+                if (target.id == environment_select_id or environmentOptionIndex(target.id) != null) return;
+                if (self.environment_select_open) {
+                    self.environment_select_open = false;
+                    try self.updateComponentsCanvasModel(runtime, pointer_event.window_id);
+                    try self.updateStatus(runtime, pointer_event.window_id, "Environment menu closed.");
+                    return;
+                }
+                try self.reportWidgetInteraction(runtime, pointer_event.window_id, "Clicked", target.id);
+            },
             .wheel => {
                 _ = try self.scrollVirtualWidget(runtime, pointer_event);
             },
@@ -377,13 +430,30 @@ const GpuComponentsApp = struct {
     fn refresh(self: *@This(), runtime: *zero_native.Runtime, command: zero_native.CommandEvent) anyerror!void {
         self.refresh_count += 1;
         self.virtual_scroll = .{};
+        self.environment_select_open = false;
         const gpu_frame = try runtime.gpuSurfaceFrame(command.window_id, canvas_label);
         _ = self.updateCanvasSize(componentSurfaceSize(gpu_frame.size));
-        try installComponentsCanvasModel(runtime, command.window_id, self.virtual_scroll, self.componentTokens(), self.canvas_size);
+        try installComponentsCanvasModel(runtime, command.window_id, self.virtual_scroll, self.componentUiState(), self.componentTokens(), self.canvas_size);
         _ = try self.presentComponentsCanvas(runtime, gpuFrameEvent(gpu_frame), true);
 
         var status_buffer: [160]u8 = undefined;
         const status = try std.fmt.bufPrint(&status_buffer, "Component lab refreshed from {s}. Count {d}.", .{ @tagName(command.source), self.refresh_count });
+        try self.updateStatus(runtime, command.window_id, status);
+    }
+
+    fn toggleEnvironmentSelect(self: *@This(), runtime: *zero_native.Runtime, command: zero_native.CommandEvent) anyerror!void {
+        self.environment_select_open = !self.environment_select_open;
+        try self.updateComponentsCanvasModel(runtime, command.window_id);
+        try self.updateStatus(runtime, command.window_id, if (self.environment_select_open) "Environment menu opened." else "Environment menu closed.");
+    }
+
+    fn selectEnvironment(self: *@This(), runtime: *zero_native.Runtime, command: zero_native.CommandEvent, index: usize) anyerror!void {
+        self.environment_index = @min(index, environment_options.len - 1);
+        self.environment_select_open = false;
+        try self.updateComponentsCanvasModel(runtime, command.window_id);
+
+        var status_buffer: [96]u8 = undefined;
+        const status = try std.fmt.bufPrint(&status_buffer, "Environment selected: {s}.", .{environmentLabel(self.environment_index)});
         try self.updateStatus(runtime, command.window_id, status);
     }
 
@@ -393,7 +463,7 @@ const GpuComponentsApp = struct {
         self.theme_mode = self.theme_mode.next();
         const gpu_frame = try runtime.gpuSurfaceFrame(command.window_id, canvas_label);
         _ = self.updateCanvasSize(componentSurfaceSize(gpu_frame.size));
-        try installComponentsCanvasModel(runtime, command.window_id, self.virtual_scroll, self.componentTokens(), self.canvas_size);
+        try installComponentsCanvasModel(runtime, command.window_id, self.virtual_scroll, self.componentUiState(), self.componentTokens(), self.canvas_size);
         _ = try self.presentComponentsCanvas(runtime, gpuFrameEvent(gpu_frame), true);
 
         var status_buffer: [160]u8 = undefined;
@@ -421,7 +491,7 @@ const GpuComponentsApp = struct {
             else => return err,
         };
         _ = self.updateCanvasSize(componentSurfaceSize(gpu_frame.size));
-        try installComponentsCanvasModel(runtime, 1, self.virtual_scroll, self.componentTokens(), self.canvas_size);
+        try installComponentsCanvasModel(runtime, 1, self.virtual_scroll, self.componentUiState(), self.componentTokens(), self.canvas_size);
         _ = try self.presentComponentsCanvas(runtime, gpuFrameEvent(gpu_frame), true);
 
         var status_buffer: [160]u8 = undefined;
@@ -541,8 +611,15 @@ const GpuComponentsApp = struct {
 
     fn updateComponentsCanvasModel(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId) anyerror!void {
         var nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
-        const layout = try buildComponentsWidgetLayoutWithScrollAndSize(&nodes, self.virtual_scroll, self.canvas_size);
+        const layout = try buildComponentsWidgetLayoutWithStateAndSize(&nodes, self.virtual_scroll, self.componentUiState(), self.canvas_size);
         _ = try runtime.setCanvasWidgetLayout(window_id, canvas_label, layout);
+    }
+
+    fn componentUiState(self: @This()) ComponentUiState {
+        return .{
+            .environment_select_open = self.environment_select_open,
+            .environment_index = self.environment_index,
+        };
     }
 
     fn componentTokens(self: @This()) canvas.DesignTokens {
@@ -595,11 +672,11 @@ const GpuComponentsApp = struct {
     }
 };
 
-fn installComponentsCanvasModel(runtime: *zero_native.Runtime, window_id: zero_native.WindowId, virtual_scroll: ComponentVirtualScroll, tokens: canvas.DesignTokens, surface_size: geometry.SizeF) anyerror!void {
+fn installComponentsCanvasModel(runtime: *zero_native.Runtime, window_id: zero_native.WindowId, virtual_scroll: ComponentVirtualScroll, ui_state: ComponentUiState, tokens: canvas.DesignTokens, surface_size: geometry.SizeF) anyerror!void {
     var commands: [max_component_commands]canvas.CanvasCommand = undefined;
     var nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
     var builder = canvas.Builder.init(&commands);
-    const layout = try buildComponentsWidgetLayoutWithScrollAndSize(&nodes, virtual_scroll, surface_size);
+    const layout = try buildComponentsWidgetLayoutWithStateAndSize(&nodes, virtual_scroll, ui_state, surface_size);
     try buildComponentsDisplayListForSize(&builder, layout, tokens, surface_size);
     _ = try runtime.setCanvasDisplayList(window_id, canvas_label, builder.displayList());
     _ = try runtime.setCanvasWidgetLayout(window_id, canvas_label, layout);
@@ -757,6 +834,10 @@ fn buildComponentsWidgetLayoutWithScroll(nodes: []canvas.WidgetLayoutNode, virtu
     return buildComponentsWidgetLayoutWithScrollAndSize(nodes, virtual_scroll, default_canvas_size);
 }
 
+fn buildComponentsWidgetLayoutWithScrollAndSize(nodes: []canvas.WidgetLayoutNode, virtual_scroll: ComponentVirtualScroll, surface_size: geometry.SizeF) canvas.Error!canvas.WidgetLayoutTree {
+    return buildComponentsWidgetLayoutWithStateAndSize(nodes, virtual_scroll, .{}, surface_size);
+}
+
 fn componentCatalogItems() [canvas.builtin_component_names.len]canvas.Widget {
     var items: [canvas.builtin_component_names.len]canvas.Widget = undefined;
     for (&items, 0..) |*item, index| {
@@ -800,7 +881,7 @@ fn componentCatalogPreviewChildren(kind: canvas.BuiltinComponentKind) []const ca
     };
 }
 
-fn buildComponentsWidgetLayoutWithScrollAndSize(nodes: []canvas.WidgetLayoutNode, virtual_scroll: ComponentVirtualScroll, surface_size: geometry.SizeF) canvas.Error!canvas.WidgetLayoutTree {
+fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode, virtual_scroll: ComponentVirtualScroll, ui_state: ComponentUiState, surface_size: geometry.SizeF) canvas.Error!canvas.WidgetLayoutTree {
     const nav_items = [_]canvas.Widget{
         .{ .id = 121, .kind = .list_item, .text = "Controls", .state = .{ .selected = true } },
         .{ .id = 122, .kind = .list_item, .text = "Inputs" },
@@ -837,7 +918,7 @@ fn buildComponentsWidgetLayoutWithScrollAndSize(nodes: []canvas.WidgetLayoutNode
         .{ .id = 168, .kind = .tabs, .frame = rect(0, 200, 148, 34), .layout = .{ .gap = 4 }, .semantics = .{ .label = "Density tabs" }, .children = &segment_controls },
         .{ .id = 118, .kind = .image, .frame = rect(190, 160, 124, 54), .image_id = preview_image_id, .image_src = rect(0, 0, 4, 4), .image_fit = .cover, .image_sampling = .nearest, .image_opacity = 0.94, .semantics = .{ .label = "GPU image preview" } },
         .{ .id = 171, .kind = .textarea, .frame = rect(0, 246, 336, 72), .text = "Compose a native-rendered message", .semantics = .{ .label = "Message textarea" } },
-        .{ .id = 172, .kind = .select, .frame = rect(0, 330, 180, 34), .text = "Production", .command = refresh_command, .semantics = .{ .label = "Environment select" } },
+        .{ .id = environment_select_id, .kind = .select, .frame = rect(0, 330, 180, 34), .text = environmentLabel(ui_state.environment_index), .command = environment_toggle_command, .state = .{ .expanded = ui_state.environment_select_open }, .semantics = .{ .label = "Environment select" } },
     };
     const menu_items = [_]canvas.Widget{
         .{ .id = 142, .kind = .menu_item, .text = "Copy token" },
@@ -890,7 +971,12 @@ fn buildComponentsWidgetLayoutWithScrollAndSize(nodes: []canvas.WidgetLayoutNode
     const resizable_children = [_]canvas.Widget{
         .{ .id = 222, .kind = .text, .frame = rect(12, 10, 132, 18), .text = "Resizable", .size = .sm },
     };
-    const top_widgets = [_]canvas.Widget{
+    const environment_menu_items = [_]canvas.Widget{
+        .{ .id = environmentOptionId(0), .kind = .menu_item, .text = environment_options[0], .command = environment_option_commands[0], .state = .{ .selected = ui_state.environment_index == 0 }, .semantics = .{ .label = environment_options[0] } },
+        .{ .id = environmentOptionId(1), .kind = .menu_item, .text = environment_options[1], .command = environment_option_commands[1], .state = .{ .selected = ui_state.environment_index == 1 }, .semantics = .{ .label = environment_options[1] } },
+        .{ .id = environmentOptionId(2), .kind = .menu_item, .text = environment_options[2], .command = environment_option_commands[2], .state = .{ .selected = ui_state.environment_index == 2 }, .semantics = .{ .label = environment_options[2] } },
+    };
+    const base_top_widgets = [_]canvas.Widget{
         .{ .id = 101, .kind = .text, .frame = rect(64, 56, 240, 26), .text = "Finished Components", .size = .lg },
         .{ .id = 104, .kind = .button, .frame = rect(724, 54, 118, 34), .text = "Primary", .variant = .primary, .command = refresh_command, .semantics = .{ .label = "Primary action" } },
         .{ .id = 105, .kind = .icon_button, .frame = rect(856, 54, 34, 34), .text = "+", .size = .icon, .semantics = .{ .label = "Add component" } },
@@ -910,8 +996,22 @@ fn buildComponentsWidgetLayoutWithScrollAndSize(nodes: []canvas.WidgetLayoutNode
         .{ .id = 140, .kind = .popover, .frame = rect(456, 248, 174, 88), .backdrop_blur_token = .sm, .semantics = .{ .label = "Actions popover" }, .children = &popover_children },
         .{ .id = 149, .kind = .stack, .frame = rect(64, 540, 620, 60), .semantics = .{ .label = "Data controls" }, .children = &data_panel_children },
     };
+    var top_widgets: [base_top_widgets.len + 1]canvas.Widget = undefined;
+    @memcpy(top_widgets[0..base_top_widgets.len], base_top_widgets[0..]);
+    var top_widget_count = base_top_widgets.len;
+    if (ui_state.environment_select_open) {
+        top_widgets[top_widget_count] = .{
+            .id = environment_menu_id,
+            .kind = .dropdown_menu,
+            .frame = rect(64, 494, 180, 104),
+            .layout = canvas.builtinComponentWidget(.dropdown_menu, .{}).layout,
+            .semantics = .{ .label = "Environment options" },
+            .children = &environment_menu_items,
+        };
+        top_widget_count += 1;
+    }
     const size = componentSurfaceSize(surface_size);
-    return canvas.layoutWidgetTree(.{ .kind = .stack, .children = &top_widgets }, rect(0, 0, size.width, size.height), nodes);
+    return canvas.layoutWidgetTree(.{ .kind = .stack, .children = top_widgets[0..top_widget_count] }, rect(0, 0, size.width, size.height), nodes);
 }
 
 fn componentFrame(display_list: canvas.DisplayList, previous: ?canvas.DisplayList, options: canvas.CanvasFrameOptions, storage: canvas.CanvasFrameStorage) canvas.Error!canvas.CanvasFrame {
@@ -1233,6 +1333,7 @@ test "gpu components display list covers finished live controls" {
     try std.testing.expect(display_list.findCommandById(primary_button_fill_id) != null);
     try std.testing.expect(display_list.findCommandById(project_static_text_id) != null);
     try std.testing.expect(display_list.findCommandById(search_text_id) != null);
+    try expectComponentTextCommand(display_list, environment_select_text_id, "Production");
     try std.testing.expect(display_list.findCommandById(scroll_track_id) != null);
     try std.testing.expect(display_list.findCommandById(scroll_thumb_id) != null);
     try std.testing.expect(display_list.findCommandById(preview_image_command_id) != null);
@@ -1262,6 +1363,8 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetFrame(layout, 118, rect(254, 284, 124, 54));
     try expectComponentWidgetFrame(layout, 171, rect(64, 370, 336, 72));
     try expectComponentWidgetFrame(layout, 172, rect(64, 454, 180, 34));
+    try std.testing.expect(layout.findById(environment_menu_id) == null);
+    try std.testing.expect(layout.findById(environmentOptionId(0)) == null);
     try expectComponentWidgetFrame(layout, 120, rect(456, 124, 170, 56));
     try expectComponentWidgetFrame(layout, 130, rect(652, 124, 186, 56));
     try expectComponentWidgetFrame(layout, 179, rect(652, 210, 186, 22));
@@ -1312,6 +1415,22 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetFrame(layout, 160, rect(456, 540, 176, 32));
     try expectComponentWidgetsDoNotOverlap(layout, 150, 160);
     try expectComponentWidgetsDoNotOverlap(layout, 140, 149);
+
+    var open_nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
+    const open_layout = try buildComponentsWidgetLayoutWithStateAndSize(&open_nodes, .{}, .{
+        .environment_select_open = true,
+        .environment_index = 1,
+    }, default_canvas_size);
+    const open_select = open_layout.findById(environment_select_id).?.widget;
+    try std.testing.expectEqualStrings("Preview", open_select.text);
+    try std.testing.expectEqual(@as(?bool, true), open_select.state.expanded);
+    try expectComponentWidgetFrame(open_layout, environment_menu_id, rect(64, 494, 180, 104));
+    try expectComponentWidgetFrame(open_layout, environmentOptionId(0), rect(68, 498, 172, 28));
+    try expectComponentWidgetFrame(open_layout, environmentOptionId(1), rect(68, 528, 172, 28));
+    try expectComponentWidgetFrame(open_layout, environmentOptionId(2), rect(68, 558, 172, 28));
+    try std.testing.expect(!open_layout.findById(environmentOptionId(0)).?.widget.state.selected);
+    try std.testing.expect(open_layout.findById(environmentOptionId(1)).?.widget.state.selected);
+    try std.testing.expect(!open_layout.findById(environmentOptionId(2)).?.widget.state.selected);
 
     var scrolled_nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
     const scrolled_layout = try buildComponentsWidgetLayoutWithScroll(&scrolled_nodes, .{
@@ -1757,7 +1876,37 @@ test "gpu components app registers component lab on first gpu frame" {
     const select = componentSnapshotWidget(snapshot, 172).?;
     try std.testing.expectEqualStrings("button", select.role);
     try std.testing.expectEqualStrings("Environment select", select.name);
+    try std.testing.expectEqual(@as(?bool, false), select.expanded);
     try std.testing.expect(select.actions.press);
+    try std.testing.expect(componentSnapshotWidget(snapshot, environment_menu_id) == null);
+
+    resetComponentDirty(&harness.runtime);
+    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action components-canvas 172 press");
+    snapshot = harness.runtime.automationSnapshot("Components");
+    try std.testing.expect(app.environment_select_open);
+    const open_select = componentSnapshotWidget(snapshot, environment_select_id).?;
+    try std.testing.expectEqual(@as(?bool, true), open_select.expanded);
+    const environment_menu = componentSnapshotWidget(snapshot, environment_menu_id).?;
+    try std.testing.expectEqualStrings("menu", environment_menu.role);
+    const production_option = componentSnapshotWidget(snapshot, environmentOptionId(0)).?;
+    try std.testing.expectEqualStrings("menuitem", production_option.role);
+    try std.testing.expect(production_option.selected);
+    try std.testing.expect(production_option.actions.press);
+    try std.testing.expect(production_option.actions.select);
+
+    resetComponentDirty(&harness.runtime);
+    var environment_option_action_buffer: [80]u8 = undefined;
+    const environment_option_action = try std.fmt.bufPrint(&environment_option_action_buffer, "widget-action components-canvas {d} press", .{environmentOptionId(2)});
+    try harness.runtime.dispatchAutomationCommand(app.app(), environment_option_action);
+    snapshot = harness.runtime.automationSnapshot("Components");
+    try std.testing.expect(!app.environment_select_open);
+    try std.testing.expectEqual(@as(usize, 2), app.environment_index);
+    try std.testing.expect(componentSnapshotWidget(snapshot, environment_menu_id) == null);
+    try std.testing.expectEqual(@as(?bool, false), componentSnapshotWidget(snapshot, environment_select_id).?.expanded);
+    display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try expectComponentTextCommand(display_list, environment_select_text_id, "Staging");
+    const environment_status_view = componentViewByLabel(&harness.runtime, "status-label").?;
+    try std.testing.expect(std.mem.indexOf(u8, environment_status_view.text, "Environment selected: Staging.") != null);
     const snapshot_nav_list = componentSnapshotWidget(snapshot, 120).?;
     try std.testing.expect(snapshot_nav_list.scroll.present);
     try std.testing.expect(snapshot_nav_list.actions.increment);
@@ -2201,10 +2350,46 @@ test "gpu components pointer clicks update retained controls" {
     try std.testing.expectEqual(@as(f32, 0), refreshed_layout.findById(120).?.widget.value);
     try std.testing.expectEqual(@as(f32, 28), refreshed_layout.findById(130).?.widget.value);
     try std.testing.expectEqual(@as(f32, 28), refreshed_layout.findById(150).?.widget.value);
+}
+
+test "gpu components pointer opens and selects environment dropdown options" {
+    var harness: zero_native.TestHarness() = undefined;
+    harness.init(.{ .size = geometry.SizeF.init(window_width, window_height) });
+    harness.null_platform.gpu_surfaces = true;
+
+    var app = GpuComponentsApp{};
+    defer app.deinit();
+    const app_handle = app.app();
+    try harness.start(app_handle);
+
+    try harness.runtime.dispatchPlatformEvent(app_handle, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(canvas_width, canvas_height),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000_000,
+        .nonblank = true,
+    } });
 
     resetComponentDirty(&harness.runtime);
-    try dispatchComponentPointerClick(&harness.runtime, app_handle, 172);
-    try std.testing.expectEqual(@as(u32, 2), app.refresh_count);
+    try dispatchComponentPointerClick(&harness.runtime, app_handle, environment_select_id);
+    try std.testing.expectEqual(@as(u32, 0), app.refresh_count);
+    try std.testing.expect(app.environment_select_open);
+    var snapshot = harness.runtime.automationSnapshot("Components");
+    try std.testing.expect(componentSnapshotWidget(snapshot, environment_menu_id) != null);
+    var status_view = componentViewByLabel(&harness.runtime, "status-label").?;
+    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Environment menu opened.") != null);
+
+    resetComponentDirty(&harness.runtime);
+    try dispatchComponentPointerClick(&harness.runtime, app_handle, environmentOptionId(1));
+    try std.testing.expectEqual(@as(usize, 1), app.environment_index);
+    try std.testing.expect(!app.environment_select_open);
+    snapshot = harness.runtime.automationSnapshot("Components");
+    try std.testing.expect(componentSnapshotWidget(snapshot, environment_menu_id) == null);
+    const display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try expectComponentTextCommand(display_list, environment_select_text_id, "Preview");
+    status_view = componentViewByLabel(&harness.runtime, "status-label").?;
+    try std.testing.expect(std.mem.indexOf(u8, status_view.text, "Environment selected: Preview.") != null);
 }
 
 test "gpu components slider drag presents incremental cached frame" {
