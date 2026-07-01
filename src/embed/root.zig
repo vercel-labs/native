@@ -43,6 +43,9 @@ pub const MobileWidgetFlag = enum(u32) {
     focusable = 1 << 5,
     expanded = 1 << 6,
     collapsed = 1 << 7,
+    required = 1 << 8,
+    read_only = 1 << 9,
+    invalid = 1 << 10,
 };
 
 pub const MobileWidgetAction = enum(u32) {
@@ -1076,6 +1079,9 @@ fn mobileWidgetFlags(node: canvas.WidgetSemanticsNode) u32 {
     if (node.state.expanded) |expanded| {
         flags |= @intFromEnum(if (expanded) MobileWidgetFlag.expanded else MobileWidgetFlag.collapsed);
     }
+    if (node.state.required) flags |= @intFromEnum(MobileWidgetFlag.required);
+    if (node.state.read_only) flags |= @intFromEnum(MobileWidgetFlag.read_only);
+    if (node.state.invalid) flags |= @intFromEnum(MobileWidgetFlag.invalid);
     return flags;
 }
 
@@ -1634,17 +1640,20 @@ test "mobile C ABI exposes GPU widget accessibility semantics" {
     try std.testing.expectEqualStrings("InvalidCommand", std.mem.span(zero_native_app_last_error_name(app)));
 }
 
-test "mobile C ABI maps expanded state and dismiss action flags" {
+test "mobile C ABI maps widget state and dismiss action flags" {
     const expanded_node = canvas.WidgetSemanticsNode{
         .id = 1,
         .role = .button,
         .label = "Menu",
         .bounds = geometry.RectF.init(0, 0, 120, 32),
-        .state = .{ .expanded = true },
+        .state = .{ .expanded = true, .required = true, .read_only = true, .invalid = true },
         .actions = .{ .dismiss = true },
     };
     try std.testing.expect((mobileWidgetFlags(expanded_node) & @intFromEnum(MobileWidgetFlag.expanded)) != 0);
     try std.testing.expect((mobileWidgetFlags(expanded_node) & @intFromEnum(MobileWidgetFlag.collapsed)) == 0);
+    try std.testing.expect((mobileWidgetFlags(expanded_node) & @intFromEnum(MobileWidgetFlag.required)) != 0);
+    try std.testing.expect((mobileWidgetFlags(expanded_node) & @intFromEnum(MobileWidgetFlag.read_only)) != 0);
+    try std.testing.expect((mobileWidgetFlags(expanded_node) & @intFromEnum(MobileWidgetFlag.invalid)) != 0);
     try std.testing.expect((mobileWidgetActions(expanded_node.actions) & @intFromEnum(MobileWidgetAction.dismiss)) != 0);
     try std.testing.expectEqual(runtime.CanvasWidgetAccessibilityActionKind.dismiss, try mobileWidgetActionKindFromInt(@intFromEnum(MobileWidgetActionKind.dismiss)));
 

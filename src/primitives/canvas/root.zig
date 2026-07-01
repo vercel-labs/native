@@ -3910,6 +3910,9 @@ pub const WidgetState = struct {
     disabled: bool = false,
     selected: bool = false,
     expanded: ?bool = null,
+    required: bool = false,
+    read_only: bool = false,
+    invalid: bool = false,
 };
 
 pub const WidgetRenderState = struct {
@@ -11074,6 +11077,9 @@ fn semanticActions(widget: Widget) WidgetActions {
     actions.drag = actions.drag or widget.semantics.actions.drag;
     actions.drop_files = actions.drop_files or widget.semantics.actions.drop_files;
     actions.dismiss = actions.dismiss or widget.semantics.actions.dismiss;
+    if (widget.state.read_only) {
+        actions.set_text = false;
+    }
     return actions;
 }
 
@@ -11556,7 +11562,10 @@ fn widgetStatesEqual(a: WidgetState, b: WidgetState) bool {
         a.focused == b.focused and
         a.disabled == b.disabled and
         a.selected == b.selected and
-        a.expanded == b.expanded;
+        a.expanded == b.expanded and
+        a.required == b.required and
+        a.read_only == b.read_only and
+        a.invalid == b.invalid;
 }
 
 fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {
@@ -17637,6 +17646,31 @@ test "widget inputs expose textbox semantics and render shadcn input tokens" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "widget inputs expose required read-only and invalid form state" {
+    const input = Widget{
+        .id = 19,
+        .kind = .input,
+        .frame = geometry.RectF.init(0, 0, 180, 36),
+        .text = "readonly",
+        .state = .{ .required = true, .read_only = true, .invalid = true },
+        .semantics = .{ .label = "Readonly project name" },
+    };
+
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(input, input.frame, &nodes);
+    var semantics_buffer: [1]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+
+    try std.testing.expectEqual(@as(usize, 1), semantics.len);
+    try std.testing.expectEqual(WidgetRole.textbox, semantics[0].role);
+    try std.testing.expect(semantics[0].state.required);
+    try std.testing.expect(semantics[0].state.read_only);
+    try std.testing.expect(semantics[0].state.invalid);
+    try std.testing.expect(semantics[0].focusable);
+    try std.testing.expect(!semantics[0].actions.set_text);
+    try std.testing.expect(semantics[0].actions.set_selection);
 }
 
 test "widget selects expose trigger semantics and render chevron chrome" {

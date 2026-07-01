@@ -1582,6 +1582,9 @@ pub const Runtime = struct {
                 .pressed = node.state.pressed or (node.id != 0 and node.id == view.canvas_widget_pressed_id),
                 .selected = canvasWidgetSelectedState(node),
                 .expanded = node.state.expanded,
+                .required = node.state.required,
+                .read_only = node.state.read_only,
+                .invalid = node.state.invalid,
                 .focusable = node.focusable,
                 .actions = platformWidgetAccessibilityActions(node.actions),
             };
@@ -2746,6 +2749,9 @@ pub const Runtime = struct {
                     .pressed = node.state.pressed or (node.id != 0 and node.id == view.canvas_widget_pressed_id),
                     .selected = canvasWidgetSelectedState(node),
                     .expanded = node.state.expanded,
+                    .required = node.state.required,
+                    .read_only = node.state.read_only,
+                    .invalid = node.state.invalid,
                     .actions = canvasWidgetActions(node.actions),
                     .text_selection = canvasTextRange(node.text_selection),
                     .text_composition = canvasTextRange(node.text_composition),
@@ -18172,7 +18178,7 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     const children = [_]canvas.Widget{
         .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(12, 14, 96, 32), .text = "Deploy", .command = "deploy.run" },
         .{ .id = 3, .kind = .checkbox, .frame = geometry.RectF.init(12, 58, 120, 28), .text = "Preview", .state = .{ .selected = true } },
-        .{ .id = 4, .kind = .text_field, .frame = geometry.RectF.init(12, 96, 160, 28), .text = "Search", .text_selection = canvas.TextSelection{ .anchor = 1, .focus = 4 }, .text_composition = canvas.TextRange.init(2, 5) },
+        .{ .id = 4, .kind = .text_field, .frame = geometry.RectF.init(12, 96, 160, 28), .text = "Search", .text_selection = canvas.TextSelection{ .anchor = 1, .focus = 4 }, .text_composition = canvas.TextRange.init(2, 5), .state = .{ .required = true, .read_only = true, .invalid = true } },
         .{ .id = 5, .kind = .select, .frame = geometry.RectF.init(184, 96, 120, 28), .text = "Production", .state = .{ .expanded = false }, .semantics = .{ .label = "Environment" } },
         .{ .id = 10, .kind = .data_grid, .frame = geometry.RectF.init(12, 132, 220, 64), .text = "Deployments", .layout = .{ .gap = 2 }, .children = &rows },
     };
@@ -18197,8 +18203,14 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     const grid_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 10).?;
     const row_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 14).?;
     const cell_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 16).?;
+    const text_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 4).?;
     const select_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 5).?;
     try std.testing.expectEqual(@as(?bool, false), select_node.expanded);
+    try std.testing.expect(text_node.required);
+    try std.testing.expect(text_node.read_only);
+    try std.testing.expect(text_node.invalid);
+    try std.testing.expect(!text_node.actions.set_text);
+    try std.testing.expect(text_node.actions.set_selection);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.grid, grid_node.role);
     try std.testing.expectEqual(@as(?usize, 2), grid_node.grid_row_count);
     try std.testing.expectEqual(@as(?usize, 2), grid_node.grid_column_count);
@@ -18217,7 +18229,7 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     try std.testing.expectEqualStrings("Search", platform_state.nodes[3].text_value);
     try std.testing.expectEqualDeep(platform.WidgetAccessibilityTextRange{ .start = 1, .end = 4 }, platform_state.nodes[3].text_selection.?);
     try std.testing.expectEqualDeep(platform.WidgetAccessibilityTextRange{ .start = 2, .end = 5 }, platform_state.nodes[3].text_composition.?);
-    try std.testing.expect(platform_state.nodes[3].actions.set_text);
+    try std.testing.expect(!platform_state.nodes[3].actions.set_text);
     try std.testing.expect(platform_state.nodes[3].actions.set_selection);
     try std.testing.expectEqual(@as(f32, 12), platform_state.nodes[1].bounds.x);
     try std.testing.expectEqual(@as(f32, 14), platform_state.nodes[1].bounds.y);
@@ -18248,14 +18260,14 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     try std.testing.expectEqual(@as(canvas.ObjectId, 3), runtime.views[0].canvas_widget_focused_id);
     try std.testing.expect(!platform_state.nodes[2].selected);
 
-    try runtime.dispatchPlatformEvent(app_state.app(), .{ .widget_accessibility_action = .{
+    try std.testing.expectError(error.InvalidCommand, runtime.dispatchPlatformEvent(app_state.app(), .{ .widget_accessibility_action = .{
         .window_id = 1,
         .label = "canvas",
         .id = 4,
         .action = .set_text,
         .text = "Customer search",
-    } });
-    try std.testing.expectEqualStrings("Customer search", platform_state.nodes[3].text_value);
+    } }));
+    try std.testing.expectEqualStrings("Search", platform_state.nodes[3].text_value);
 
     try runtime.dispatchPlatformEvent(app_state.app(), .{ .widget_accessibility_action = .{
         .window_id = 1,
@@ -18264,7 +18276,7 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
         .action = .set_selection,
         .selection = .{ .start = 3, .end = 11 },
     } });
-    try std.testing.expectEqualDeep(platform.WidgetAccessibilityTextRange{ .start = 3, .end = 11 }, platform_state.nodes[3].text_selection.?);
+    try std.testing.expectEqualDeep(platform.WidgetAccessibilityTextRange{ .start = 3, .end = 6 }, platform_state.nodes[3].text_selection.?);
 
     const scroll_items = [_]canvas.Widget{
         .{ .id = 22, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "One" },
@@ -22128,7 +22140,8 @@ test "runtime maps bridge dispatch failures to response errors" {
     };
     const handlers = [_]bridge.Handler{.{ .name = "native.fail", .context = &failing_state, .invoke_fn = FailingState.fail }};
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.runtime.options.bridge = .{
         .policy = .{ .enabled = true, .commands = &policies },

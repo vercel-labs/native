@@ -1207,6 +1207,9 @@ pub const WidgetAccessibilityNode = struct {
     pressed: bool = false,
     selected: bool = false,
     expanded: ?bool = null,
+    required: bool = false,
+    read_only: bool = false,
+    invalid: bool = false,
     focusable: bool = false,
     actions: WidgetAccessibilityActions = .{},
 };

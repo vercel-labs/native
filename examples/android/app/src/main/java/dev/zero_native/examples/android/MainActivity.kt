@@ -246,16 +246,12 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             info.isAccessibilityFocused = accessibilityFocusedId == node.id
             info.isSelected = (node.flags and WIDGET_FLAG_SELECTED) != 0
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                if ((node.flags and WIDGET_FLAG_EXPANDED) != 0) {
-                    info.stateDescription = "Expanded"
-                } else if ((node.flags and WIDGET_FLAG_COLLAPSED) != 0) {
-                    info.stateDescription = "Collapsed"
-                }
+                info.stateDescription = widgetStateDescription(node)
             }
             info.isCheckable = node.role == WIDGET_ROLE_CHECKBOX || node.role == WIDGET_ROLE_SWITCH
             info.isChecked = info.isCheckable && widgetValueSelected(node)
             info.isClickable = widgetSupportsAnyAction(node, WIDGET_ACTION_PRESS or WIDGET_ACTION_TOGGLE or WIDGET_ACTION_SELECT)
-            info.isEditable = node.role == WIDGET_ROLE_TEXTBOX
+            info.isEditable = node.role == WIDGET_ROLE_TEXTBOX && (node.flags and WIDGET_FLAG_READ_ONLY) == 0
             info.isScrollable = node.hasScroll
             if (node.value != null) {
                 info.setRangeInfo(AccessibilityNodeInfo.RangeInfo.obtain(AccessibilityNodeInfo.RangeInfo.RANGE_TYPE_FLOAT, 0f, 1f, node.value))
@@ -327,6 +323,16 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
         private fun widgetValueSelected(node: WidgetSemantics): Boolean {
             return node.value != null && node.value >= 0.5f
+        }
+
+        private fun widgetStateDescription(node: WidgetSemantics): String? {
+            val states = ArrayList<String>()
+            if ((node.flags and WIDGET_FLAG_EXPANDED) != 0) states.add("Expanded")
+            if ((node.flags and WIDGET_FLAG_COLLAPSED) != 0) states.add("Collapsed")
+            if ((node.flags and WIDGET_FLAG_REQUIRED) != 0) states.add("Required")
+            if ((node.flags and WIDGET_FLAG_READ_ONLY) != 0) states.add("Read only")
+            if ((node.flags and WIDGET_FLAG_INVALID) != 0) states.add("Invalid")
+            return if (states.isEmpty()) null else states.joinToString(", ")
         }
 
         private fun sendVirtualEvent(id: Long, type: Int) {
@@ -784,6 +790,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         private const val WIDGET_FLAG_FOCUSABLE = 1 shl 5
         private const val WIDGET_FLAG_EXPANDED = 1 shl 6
         private const val WIDGET_FLAG_COLLAPSED = 1 shl 7
+        private const val WIDGET_FLAG_REQUIRED = 1 shl 8
+        private const val WIDGET_FLAG_READ_ONLY = 1 shl 9
+        private const val WIDGET_FLAG_INVALID = 1 shl 10
         private const val WIDGET_ACTION_FOCUS = 1 shl 0
         private const val WIDGET_ACTION_PRESS = 1 shl 1
         private const val WIDGET_ACTION_TOGGLE = 1 shl 2

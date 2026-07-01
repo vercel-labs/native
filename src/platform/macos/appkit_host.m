@@ -1792,6 +1792,19 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
         } else if ((node.state_flags & ZERO_NATIVE_APPKIT_WIDGET_STATE_COLLAPSED) != 0) {
             element.accessibilityExpanded = NO;
         }
+        if ([element respondsToSelector:@selector(setAccessibilityRequired:)]) {
+            element.accessibilityRequired = (node.state_flags & ZERO_NATIVE_APPKIT_WIDGET_STATE_REQUIRED) != 0;
+        }
+        NSMutableArray<NSString *> *stateDescriptions = [NSMutableArray array];
+        if ((node.state_flags & ZERO_NATIVE_APPKIT_WIDGET_STATE_READ_ONLY) != 0) {
+            [stateDescriptions addObject:@"Read only"];
+        }
+        if ((node.state_flags & ZERO_NATIVE_APPKIT_WIDGET_STATE_INVALID) != 0) {
+            [stateDescriptions addObject:@"Invalid"];
+        }
+        if (stateDescriptions.count > 0 && element.accessibilityValueDescription.length == 0) {
+            element.accessibilityValueDescription = [stateDescriptions componentsJoinedByString:@", "];
+        }
         CGFloat nativeY = self.bounds.size.height - node.y - node.height;
         element.accessibilityFrameInParentSpace = NSMakeRect(node.x, nativeY, node.width, node.height);
         [elements addObject:element];
