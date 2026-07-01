@@ -1290,11 +1290,11 @@ fn surfaceOverlayFrame(surface_size: geometry.SizeF, overlay: ComponentSurfaceOv
 }
 
 fn surfaceOverlayFrameForSidebar(surface_size: geometry.SizeF, overlay: ComponentSurfaceOverlay, sidebar_width: f32) geometry.RectF {
+    _ = sidebar_width;
     const size = componentSurfaceSize(surface_size);
-    const resolved_sidebar_width = componentSidebarWidthForSize(sidebar_width, size);
     return switch (overlay) {
-        .dialog => centeredContentOverlayFrame(size, resolved_sidebar_width, 460, 220),
-        .drawer => bottomDrawerOverlayFrame(size, resolved_sidebar_width, 260),
+        .dialog => centeredWindowOverlayFrame(size, 460, 220),
+        .drawer => bottomDrawerOverlayFrame(size, 260),
         .sheet => rightSheetOverlayFrame(size, 380),
         .none => unreachable,
     };
@@ -1313,22 +1313,20 @@ fn surfaceOverlayEnterOffsetForSidebar(surface_size: geometry.SizeF, overlay: Co
     };
 }
 
-fn centeredContentOverlayFrame(size: geometry.SizeF, sidebar_width: f32, preferred_width: f32, preferred_height: f32) geometry.RectF {
-    const content_width = @max(1, size.width - sidebar_width);
-    const width = @min(preferred_width, @max(1, content_width - 48));
+fn centeredWindowOverlayFrame(size: geometry.SizeF, preferred_width: f32, preferred_height: f32) geometry.RectF {
+    const width = @min(preferred_width, @max(1, size.width - 48));
     const height = @min(preferred_height, @max(1, size.height - 48));
     return rect(
-        sidebar_width + @max(24, (content_width - width) * 0.5),
+        @max(24, (size.width - width) * 0.5),
         @max(24, (size.height - height) * 0.5),
         width,
         height,
     );
 }
 
-fn bottomDrawerOverlayFrame(size: geometry.SizeF, sidebar_width: f32, preferred_height: f32) geometry.RectF {
-    const content_width = @max(1, size.width - sidebar_width);
+fn bottomDrawerOverlayFrame(size: geometry.SizeF, preferred_height: f32) geometry.RectF {
     const height = @min(preferred_height, @max(1, size.height));
-    return rect(sidebar_width, @max(0, size.height - height), content_width, height);
+    return rect(0, @max(0, size.height - height), @max(1, size.width), height);
 }
 
 fn rightSheetOverlayFrame(size: geometry.SizeF, preferred_width: f32) geometry.RectF {
@@ -2076,8 +2074,8 @@ test "gpu components layout keeps finished controls visually separated" {
     }, default_canvas_size);
     const drawer_frame = surfaceOverlayFrame(default_canvas_size, .drawer);
     try expectComponentWidgetFrame(drawer_layout, surface_overlay_id, drawer_frame);
-    try std.testing.expectEqual(canvas_sidebar_width, drawer_frame.x);
-    try std.testing.expectEqual(canvas_width - canvas_sidebar_width, drawer_frame.width);
+    try std.testing.expectEqual(@as(f32, 0), drawer_frame.x);
+    try std.testing.expectEqual(canvas_width, drawer_frame.width);
     try std.testing.expectEqual(canvas_height, drawer_frame.y + drawer_frame.height);
 
     var sheet_nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
@@ -2135,12 +2133,24 @@ test "gpu components layout supports resized sidebar width" {
     try buildComponentsDisplayListForSize(&builder, layout, componentTokens(), default_canvas_size);
     try expectComponentRoundedRectFrame(builder.displayList(), 3, componentSurfaceCardRectForSidebar(default_canvas_size, resized_sidebar_width));
 
+    var dialog_nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
+    const dialog_layout = try buildComponentsWidgetLayoutWithStateAndSize(&dialog_nodes, .{}, .{
+        .surface_overlay = .dialog,
+        .sidebar_width = resized_sidebar_width,
+    }, default_canvas_size);
+    const resized_dialog_frame = surfaceOverlayFrameForSidebar(default_canvas_size, .dialog, resized_sidebar_width);
+    try expectComponentWidgetFrame(dialog_layout, surface_overlay_id, resized_dialog_frame);
+    try std.testing.expectApproxEqAbs(canvas_width * 0.5, resized_dialog_frame.center().x, 0.001);
+
     var drawer_nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
     const drawer_layout = try buildComponentsWidgetLayoutWithStateAndSize(&drawer_nodes, .{}, .{
         .surface_overlay = .drawer,
         .sidebar_width = resized_sidebar_width,
     }, default_canvas_size);
-    try expectComponentWidgetFrame(drawer_layout, surface_overlay_id, surfaceOverlayFrameForSidebar(default_canvas_size, .drawer, resized_sidebar_width));
+    const resized_drawer_frame = surfaceOverlayFrameForSidebar(default_canvas_size, .drawer, resized_sidebar_width);
+    try expectComponentWidgetFrame(drawer_layout, surface_overlay_id, resized_drawer_frame);
+    try std.testing.expectEqual(@as(f32, 0), resized_drawer_frame.x);
+    try std.testing.expectEqual(canvas_width, resized_drawer_frame.width);
 }
 
 test "gpu components combined virtual scroll state stays within display budget" {
@@ -3463,6 +3473,21 @@ test "gpu components sidebar handle drag resizes retained layout" {
     try expectComponentWidgetFrame(layout, content_scroll_id, rect(canvas_sidebar_min_width, 0, canvas_width - canvas_sidebar_min_width, canvas_height));
     display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
     try expectComponentRoundedRectFrame(display_list, 3, componentSurfaceCardRectForSidebar(default_canvas_size, canvas_sidebar_min_width));
+
+    resetComponentDirty(&harness.runtime);
+    try dispatchComponentPointerClick(&harness.runtime, app_handle, 175);
+    layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const dialog_frame = surfaceOverlayFrame(default_canvas_size, .dialog);
+    try expectComponentWidgetFrame(layout, surface_overlay_id, dialog_frame);
+    try std.testing.expectApproxEqAbs(canvas_width * 0.5, dialog_frame.center().x, 0.001);
+
+    try dispatchComponentPointerClick(&harness.runtime, app_handle, surface_overlay_close_id);
+    try dispatchComponentPointerClick(&harness.runtime, app_handle, 176);
+    layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const drawer_frame = surfaceOverlayFrame(default_canvas_size, .drawer);
+    try expectComponentWidgetFrame(layout, surface_overlay_id, drawer_frame);
+    try std.testing.expectEqual(@as(f32, 0), drawer_frame.x);
+    try std.testing.expectEqual(canvas_width, drawer_frame.width);
 }
 
 fn expectSurfaceTransformAnimation(animations: []const canvas.CanvasRenderAnimation, id: canvas.ObjectId, tx: f32, ty: f32) !void {
