@@ -748,6 +748,14 @@ pub const Runtime = struct {
         return self.views[index].canvasRenderAnimations();
     }
 
+    pub fn canvasRenderAnimationStartNs(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror!u64 {
+        try self.validateViewParent(window_id);
+        try validateViewLabel(label);
+        const index = self.findViewIndex(window_id, label) orelse return error.ViewNotFound;
+        if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+        return canvasRenderAnimationStartNsForView(&self.views[index]);
+    }
+
     pub fn canvasFramePlan(self: *const Runtime, window_id: platform.WindowId, label: []const u8, previous: ?canvas.DisplayList, options: canvas.CanvasFrameOptions, storage: canvas.CanvasFrameStorage) anyerror!canvas.CanvasFrame {
         try self.validateViewParent(window_id);
         try validateViewLabel(label);
@@ -1541,7 +1549,7 @@ pub const Runtime = struct {
         const from_tx = if (animation.selected) animation.travel else -animation.travel;
         const render_animation = motion.animation(.{
             .id = canvas.toggleWidgetKnobCommandId(animation.id),
-            .start_ns = canvasWidgetAnimationStartNs(&self.views[view_index]),
+            .start_ns = canvasRenderAnimationStartNsForView(&self.views[view_index]),
             .duration = .fast,
             .from_transform = canvas.Affine.translate(from_tx, 0),
             .to_transform = canvas.Affine.identity(),
@@ -5826,9 +5834,8 @@ fn canvasWidgetKineticScrollFrameMs(frame_interval_ns: u64) f32 {
     return @as(f32, @floatFromInt(normalized)) / 1_000_000.0;
 }
 
-fn canvasWidgetAnimationStartNs(view: *const RuntimeView) u64 {
-    if (view.gpu_input_timestamp_ns != 0) return view.gpu_input_timestamp_ns;
-    return view.gpu_timestamp_ns;
+fn canvasRenderAnimationStartNsForView(view: *const RuntimeView) u64 {
+    return @max(view.gpu_input_timestamp_ns, view.gpu_timestamp_ns);
 }
 
 const CanvasWidgetScrollKeyboardTarget = enum {
@@ -12252,6 +12259,7 @@ test "runtime schedules canvas render animations without display list rebuild" {
         .kind = .gpu_surface,
         .frame = geometry.RectF.init(0, 0, 40, 20),
     });
+    try std.testing.expectEqual(@as(u64, 0), try harness.runtime.canvasRenderAnimationStartNs(1, "canvas"));
 
     const commands = [_]canvas.CanvasCommand{.{ .fill_rect = .{
         .id = 1,
@@ -12278,7 +12286,26 @@ test "runtime schedules canvas render animations without display list rebuild" {
     };
 
     const start_ns: u64 = 1_000_000_000;
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(40, 20),
+        .timestamp_ns = start_ns,
+        .nonblank = true,
+    } });
+    harness.runtime.invalidated = false;
+    harness.runtime.dirty_region_count = 0;
     _ = try harness.runtime.nextCanvasFrame(1, "canvas", .{ .frame_index = 1, .timestamp_ns = start_ns }, frame_storage);
+    try std.testing.expectEqual(start_ns, try harness.runtime.canvasRenderAnimationStartNs(1, "canvas"));
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_move,
+        .timestamp_ns = start_ns + 60_000_000,
+        .x = 12,
+        .y = 8,
+    } });
+    try std.testing.expectEqual(start_ns + 60_000_000, try harness.runtime.canvasRenderAnimationStartNs(1, "canvas"));
     const initial_revision = harness.runtime.views[0].canvas_revision;
 
     const animations = [_]canvas.CanvasRenderAnimation{.{

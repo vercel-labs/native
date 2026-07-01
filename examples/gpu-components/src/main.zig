@@ -727,11 +727,10 @@ const GpuComponentsApp = struct {
         const motion = self.componentTokens().motion;
         if (motion.durationMs(.normal) == 0) return;
 
-        const gpu_frame = runtime.gpuSurfaceFrame(window_id, canvas_label) catch |err| switch (err) {
+        const start_ns = runtime.canvasRenderAnimationStartNs(window_id, canvas_label) catch |err| switch (err) {
             error.WindowNotFound, error.ViewNotFound, error.InvalidViewOptions => return,
             else => return err,
         };
-        const start_ns = surfaceOverlayAnimationStartNs(gpu_frame);
         var animations: [max_surface_overlay_animations]canvas.CanvasRenderAnimation = undefined;
         var count: usize = 0;
         try appendSurfaceChromeSlideAnimations(&animations, &count, motion, start_ns, canvas.Affine.translate(offset.dx, offset.dy));
@@ -1286,10 +1285,6 @@ fn surfaceOverlayKind(overlay: ComponentSurfaceOverlay) canvas.BuiltinComponentK
         .sheet => .sheet,
         .none => unreachable,
     };
-}
-
-fn surfaceOverlayAnimationStartNs(frame: zero_native.GpuFrame) u64 {
-    return @max(frame.input_timestamp_ns, frame.timestamp_ns);
 }
 
 fn surfaceOverlayFrame(surface_size: geometry.SizeF, overlay: ComponentSurfaceOverlay) geometry.RectF {
