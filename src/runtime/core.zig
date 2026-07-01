@@ -10,6 +10,7 @@ const shell_layout = @import("shell_layout.zig");
 const canvas_frame_helpers = @import("canvas_frame.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
+const runtime_state = @import("state.zig");
 const runtime_view = @import("view.zig");
 const widget_bridge = @import("widget_bridge.zig");
 const canvas = @import("canvas");
@@ -178,6 +179,16 @@ const CanvasDisplayListScratch = runtime_view.CanvasDisplayListScratch;
 const CanvasWidgetScrollSource = runtime_view.CanvasWidgetScrollSource;
 const CanvasWidgetToggleAnimation = runtime_view.CanvasWidgetToggleAnimation;
 const canvasRenderAnimationStartNsForView = runtime_view.canvasRenderAnimationStartNsForView;
+const RuntimeWindow = runtime_state.RuntimeWindow;
+const RuntimeMainWebViewState = runtime_state.RuntimeMainWebViewState;
+const RuntimeSourceStorage = runtime_state.RuntimeSourceStorage;
+const RuntimeWebView = runtime_state.RuntimeWebView;
+const RuntimeTrayItem = runtime_state.RuntimeTrayItem;
+const ShellApplyMode = runtime_state.ShellApplyMode;
+const WindowSourcePolicy = runtime_state.WindowSourcePolicy;
+const FocusTraversalDirection = runtime_state.FocusTraversalDirection;
+const copySourceInto = runtime_state.copySourceInto;
+const sourceWebViewUrl = runtime_state.sourceWebViewUrl;
 const platformCursorFromCanvas = widget_bridge.platformCursorFromCanvas;
 const widgetRoleName = widget_bridge.widgetRoleName;
 const platformWidgetAccessibilityRole = widget_bridge.platformWidgetAccessibilityRole;
@@ -5155,98 +5166,6 @@ const RunContext = struct {
     app: App,
 };
 
-const RuntimeWindow = struct {
-    info: platform.WindowInfo = .{},
-    main_view_id: platform.ViewId = 0,
-    source: ?platform.WebViewSource = null,
-    source_reloads_from_app: bool = false,
-    main_frame: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
-    main_frame_set: bool = false,
-    main_layer: i32 = 0,
-    main_parent: ?[]const u8 = null,
-    main_zoom: f64 = 1.0,
-    main_focused: bool = false,
-    label_storage: [platform.max_window_label_bytes]u8 = undefined,
-    title_storage: [platform.max_window_title_bytes]u8 = undefined,
-    main_parent_storage: [platform.max_view_label_bytes]u8 = undefined,
-    source_storage: RuntimeSourceStorage = .{},
-};
-
-const RuntimeMainWebViewState = struct {
-    frame: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
-    frame_set: bool = false,
-    layer: i32 = 0,
-    parent: ?[]const u8 = null,
-    parent_storage: [platform.max_view_label_bytes]u8 = undefined,
-};
-
-const RuntimeSourceStorage = struct {
-    bytes: [platform.max_window_source_bytes]u8 = undefined,
-    asset_root_path: [platform.max_window_source_bytes]u8 = undefined,
-    asset_entry: [platform.max_window_source_bytes]u8 = undefined,
-    asset_origin: [platform.max_window_source_bytes]u8 = undefined,
-};
-
-fn copySourceInto(storage: *RuntimeSourceStorage, source: platform.WebViewSource) !platform.WebViewSource {
-    var copied = source;
-    copied.bytes = try copyWindowSourceField(&storage.bytes, source.bytes);
-    if (source.asset_options) |assets| {
-        copied.asset_options = .{
-            .root_path = try copyWindowSourceField(&storage.asset_root_path, assets.root_path),
-            .entry = try copyWindowSourceField(&storage.asset_entry, assets.entry),
-            .origin = try copyWindowSourceField(&storage.asset_origin, assets.origin),
-            .spa_fallback = assets.spa_fallback,
-        };
-    }
-    return copied;
-}
-
-fn copyWindowSourceField(buffer: []u8, value: []const u8) ![]const u8 {
-    if (value.len > buffer.len) return error.WindowSourceTooLarge;
-    @memcpy(buffer[0..value.len], value);
-    return buffer[0..value.len];
-}
-
-const RuntimeWebView = struct {
-    id: platform.ViewId = 0,
-    window_id: platform.WindowId = 1,
-    label: []const u8 = "",
-    parent: ?[]const u8 = null,
-    url: []const u8 = "",
-    frame: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
-    local_frame: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
-    layer: i32 = 0,
-    zoom: f64 = 1.0,
-    transparent: bool = false,
-    bridge_enabled: bool = false,
-    focused: bool = false,
-    open: bool = false,
-    label_storage: [platform.max_webview_label_bytes]u8 = undefined,
-    parent_storage: [platform.max_view_label_bytes]u8 = undefined,
-    url_storage: [platform.max_webview_url_bytes]u8 = undefined,
-};
-
-const RuntimeTrayItem = struct {
-    id: platform.TrayItemId = 0,
-    command: []const u8 = "",
-    command_storage: [platform.max_tray_item_command_bytes]u8 = undefined,
-};
-
-const ShellApplyMode = enum {
-    create,
-    update,
-};
-
-const WindowSourcePolicy = enum {
-    require_source,
-    allow_source_less,
-};
-
-const FocusTraversalDirection = enum {
-    next,
-    previous,
-};
-
 fn appUsesDefaultEmptyWebViewSource(app: App) bool {
     return app.source_fn == null and
         app.source.kind == .html and
@@ -5292,14 +5211,6 @@ fn copyInto(buffer: []u8, value: []const u8) ![]const u8 {
     if (value.len > buffer.len) return error.NoSpaceLeft;
     @memcpy(buffer[0..value.len], value);
     return buffer[0..value.len];
-}
-
-fn sourceWebViewUrl(source: ?platform.WebViewSource) []const u8 {
-    const value = source orelse return "";
-    return switch (value.kind) {
-        .html => "zero://inline",
-        .url, .assets => value.bytes,
-    };
 }
 
 fn validateCanvasRenderAnimations(animations: []const canvas.CanvasRenderAnimation) !void {
