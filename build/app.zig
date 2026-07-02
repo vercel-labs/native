@@ -43,6 +43,8 @@ pub const mobile_export_symbol_names = [_][]const u8{
     "zero_native_app_viewport",
     "zero_native_app_viewport_state",
     "zero_native_app_gpu_frame_state",
+    "zero_native_app_text_input_state",
+    "zero_native_app_set_automation_dir",
     "zero_native_app_touch",
     "zero_native_app_scroll",
     "zero_native_app_key",

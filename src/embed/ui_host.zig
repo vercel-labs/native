@@ -77,6 +77,9 @@ pub fn UiAppHost(comptime AppDef: type) type {
         asset_root_len: usize = 0,
         asset_entry: [max_mobile_asset_entry_bytes]u8 = undefined,
         asset_entry_len: usize = 0,
+        automation_dir: [max_mobile_asset_root_bytes]u8 = undefined,
+        automation_dir_len: usize = 0,
+        automation_io: ?*std.Io.Threaded = null,
 
         pub fn create() !*Self {
             const allocator = std.heap.page_allocator;
@@ -100,6 +103,9 @@ pub fn UiAppHost(comptime AppDef: type) type {
             self.asset_root_len = 0;
             self.asset_entry = undefined;
             self.asset_entry_len = 0;
+            self.automation_dir = undefined;
+            self.automation_dir_len = 0;
+            self.automation_io = null;
             self.ui = MobileUi.init(allocator, AppDef.initModel(), options);
             self.inner_app = self.ui.app();
             self.embedded.initInPlace(.{
@@ -112,6 +118,7 @@ pub fn UiAppHost(comptime AppDef: type) type {
         }
 
         pub fn destroy(self: *Self) void {
+            host.disableAutomation(self);
             self.ui.deinit();
             std.heap.page_allocator.destroy(self);
         }

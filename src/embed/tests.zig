@@ -16,6 +16,7 @@ const MobileWidgetActionKind = types.MobileWidgetActionKind;
 const MobileWidgetSemantics = types.MobileWidgetSemantics;
 const MobileWidgetTextGeometry = types.MobileWidgetTextGeometry;
 const MobileWidgetActionRequest = types.MobileWidgetActionRequest;
+const MobileTextInputState = types.MobileTextInputState;
 const MobileViewportState = types.MobileViewportState;
 const MobileGpuFrameState = types.MobileGpuFrameState;
 const MobileCanvasPixels = types.MobileCanvasPixels;
@@ -914,6 +915,13 @@ test "mobile C ABI drives a user UiApp canvas scene end to end" {
     }
     try std.testing.expect(nonblank_pixels);
 
+    // Before any input lands nothing is focused: the platform keyboard
+    // must stay hidden.
+    var text_input: MobileTextInputState = .{};
+    try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.zero_native_app_text_input_state(app, &text_input));
+    try std.testing.expectEqual(@as(c_int, 0), text_input.active);
+    try std.testing.expectEqual(@as(u64, 0), text_input.widget_id);
+
     // A tap on the button (located through the semantics exports) flows
     // through typed dispatch into update + rebuild.
     const button = try findMobileSemanticsByRole(app, .button);
@@ -923,10 +931,28 @@ test "mobile C ABI drives a user UiApp canvas scene end to end" {
     try std.testing.expect(try uiHostRetainedTextExists(self, "Count 1"));
     try std.testing.expectEqual(button.id, (try findMobileSemanticsByRole(app, .button)).id);
 
+    // The button takes focus but is not editable text: still no keyboard.
+    try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.zero_native_app_text_input_state(app, &text_input));
+    try std.testing.expectEqual(@as(c_int, 0), text_input.active);
+    try std.testing.expectEqual(button.id, text_input.widget_id);
+
     // Tap the textbox to focus it, then type and compose through the same
     // IME path desktop uses; the edits land in the model's text buffer.
     const textbox = try findMobileSemanticsByRole(app, .textbox);
     try tapMobileWidget(app, textbox);
+
+    // Textbox focus is IME intent: the state the shim keys the system
+    // keyboard's show/hide on, with the widget's frame for caret tracking.
+    try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.zero_native_app_text_input_state(app, &text_input));
+    try std.testing.expectEqual(@as(c_int, 1), text_input.active);
+    try std.testing.expectEqual(textbox.id, text_input.widget_id);
+    try std.testing.expectEqual(textbox.x, text_input.x);
+    try std.testing.expectEqual(textbox.y, text_input.y);
+    try std.testing.expectEqual(textbox.width, text_input.width);
+    try std.testing.expectEqual(textbox.height, text_input.height);
+    try std.testing.expectEqual(@as(c_int, 0), MobileCounterApi.zero_native_app_text_input_state(app, null));
+    try std.testing.expectEqualStrings("InvalidCommand", std.mem.span(MobileCounterApi.zero_native_app_last_error_name(app)));
+
     MobileCounterApi.zero_native_app_text(app, "hi", "hi".len);
     try expectNoUiHostError(app);
     try std.testing.expectEqualStrings("hi", self.ui.model.draft.text());
@@ -939,10 +965,47 @@ test "mobile C ABI drives a user UiApp canvas scene end to end" {
     try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.zero_native_app_widget_semantics_by_id(app, textbox.id, &textbox_after));
     try std.testing.expectEqualStrings("hiho", textbox_after.text.?[0..textbox_after.text_len]);
 
+    // Tapping the (non-editable) button again moves focus away from the
+    // textbox: IME intent clears and the shim hides the keyboard.
+    try tapMobileWidget(app, button);
+    try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.zero_native_app_text_input_state(app, &text_input));
+    try std.testing.expectEqual(@as(c_int, 0), text_input.active);
+    try std.testing.expectEqual(button.id, text_input.widget_id);
+
     // The model-driven UI keeps presenting through host-pumped frames.
     MobileCounterApi.zero_native_app_frame(app);
     try expectNoUiHostError(app);
     try std.testing.expect(self.null_platform.gpu_surface_present_count >= 2);
+}
+
+test "mobile C ABI publishes automation snapshots into a host-set directory" {
+    const app = MobileCounterApi.zero_native_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileCounterApi.zero_native_app_destroy(app);
+    const self: *MobileCounterHost = @ptrCast(@alignCast(app));
+
+    const dir = ".zig-cache/test-mobile-embed-automation";
+    std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+
+    MobileCounterApi.zero_native_app_start(app);
+    try expectNoUiHostError(app);
+    try std.testing.expectEqual(@as(c_int, 0), MobileCounterApi.zero_native_app_set_automation_dir(app, "", 0));
+    try std.testing.expectEqualStrings("InvalidCommand", std.mem.span(MobileCounterApi.zero_native_app_last_error_name(app)));
+    try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.zero_native_app_set_automation_dir(app, dir, dir.len));
+    try expectNoUiHostError(app);
+    try std.testing.expect(self.embedded.runtime.options.automation != null);
+
+    var surface_token: u8 = 0;
+    MobileCounterApi.zero_native_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileCounterApi.zero_native_app_frame(app);
+    try expectNoUiHostError(app);
+
+    var buffer: [16 * 1024]u8 = undefined;
+    var file = try std.Io.Dir.cwd().openFile(std.testing.io, dir ++ "/snapshot.txt", .{});
+    defer file.close(std.testing.io);
+    const snapshot = buffer[0..try file.readPositionalAll(std.testing.io, &buffer, 0)];
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "mobile-surface") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "Increment") != null);
 }
 
 test "mobile C ABI dispatches native commands through embedded runtime" {

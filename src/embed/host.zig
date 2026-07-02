@@ -3,6 +3,7 @@ const geometry = @import("geometry");
 const canvas = @import("canvas");
 const runtime = @import("../runtime/root.zig");
 const platform = @import("../platform/root.zig");
+const automation = @import("../automation/root.zig");
 const types = @import("types.zig");
 const conversions = @import("conversions.zig");
 
@@ -147,6 +148,32 @@ pub const EmbeddedApp = struct {
         _ = try self.runtime.dispatchCanvasWidgetAccessibilityAction(self.app, 1, mobile_gpu_surface_label, action);
     }
 
+    /// Focus / IME-intent state for the mobile surface: reads the live
+    /// pointer/keyboard focus (`canvas_widget_focused_id`, the same state
+    /// desktop hosts key their IME activation on) rather than the
+    /// source-declared semantics `focused` flag, and reports whether the
+    /// focused widget accepts text edits right now.
+    pub fn textInputState(self: *const EmbeddedApp) types.MobileTextInputState {
+        var state = types.MobileTextInputState{};
+        for (self.runtime.views[0..self.runtime.view_count]) |*view| {
+            if (!view.open or view.window_id != 1 or view.kind != .gpu_surface) continue;
+            if (!std.mem.eql(u8, view.label, mobile_gpu_surface_label)) continue;
+            if (!view.focused or view.canvas_widget_focused_id == 0) return state;
+            state.widget_id = view.canvas_widget_focused_id;
+            for (view.widgetSemantics()) |node| {
+                if (node.id != state.widget_id) continue;
+                state.x = node.bounds.x;
+                state.y = node.bounds.y;
+                state.width = node.bounds.width;
+                state.height = node.bounds.height;
+                break;
+            }
+            if (view.canEditCanvasWidgetText(state.widget_id)) state.active = 1;
+            return state;
+        }
+        return state;
+    }
+
     pub fn stop(self: *EmbeddedApp) anyerror!void {
         try self.runtime.dispatchPlatformEvent(self.app, .app_shutdown);
     }
@@ -185,6 +212,9 @@ pub const MobileHostApp = struct {
     asset_root_len: usize = 0,
     asset_entry: [max_mobile_asset_entry_bytes]u8 = undefined,
     asset_entry_len: usize = 0,
+    automation_dir: [max_mobile_asset_root_bytes]u8 = undefined,
+    automation_dir_len: usize = 0,
+    automation_io: ?*std.Io.Threaded = null,
     last_command_name: [max_mobile_command_name_bytes + 1]u8 = [_]u8{0} ** (max_mobile_command_name_bytes + 1),
 
     pub fn create() !*MobileHostApp {
@@ -222,6 +252,9 @@ pub const MobileHostApp = struct {
         self.asset_root_len = 0;
         self.asset_entry = undefined;
         self.asset_entry_len = 0;
+        self.automation_dir = undefined;
+        self.automation_dir_len = 0;
+        self.automation_io = null;
         self.last_command_name = [_]u8{0} ** (max_mobile_command_name_bytes + 1);
         self.embedded.initInPlace(.{
             .context = self,
@@ -233,6 +266,7 @@ pub const MobileHostApp = struct {
     }
 
     pub fn destroy(self: *MobileHostApp) void {
+        disableAutomation(self);
         std.heap.page_allocator.destroy(self);
     }
 
@@ -329,4 +363,39 @@ pub fn mobileApp(raw: ?*anyopaque) ?*MobileHostApp {
 
 pub fn recordError(self: anytype, err: anyerror) void {
     self.last_error = err;
+}
+
+/// Point the embedded runtime's automation server at `dir` (the desktop
+/// equivalent is `-Dautomation=true` + `.zig-cache/zero-native-automation`;
+/// mobile shims pass an absolute path inside the app's data container).
+/// The host-pumped frame loop then consumes `command.txt` and publishes
+/// `snapshot.txt` / `accessibility.txt` / `windows.txt` exactly like the
+/// desktop runners.
+pub fn enableAutomation(self: anytype, dir: []const u8) anyerror!void {
+    if (dir.len == 0) return error.InvalidCommand;
+    if (dir.len > self.automation_dir.len) return error.WindowSourceTooLarge;
+    const allocator = std.heap.page_allocator;
+    if (self.automation_io == null) {
+        const threaded = try allocator.create(std.Io.Threaded);
+        errdefer allocator.destroy(threaded);
+        threaded.* = std.Io.Threaded.init(allocator, .{});
+        self.automation_io = threaded;
+    }
+    @memcpy(self.automation_dir[0..dir.len], dir);
+    self.automation_dir_len = dir.len;
+    self.embedded.runtime.options.automation = automation.Server.init(
+        self.automation_io.?.io(),
+        self.automation_dir[0..self.automation_dir_len],
+        self.embedded.app.name,
+    );
+}
+
+pub fn disableAutomation(self: anytype) void {
+    self.embedded.runtime.options.automation = null;
+    self.automation_dir_len = 0;
+    if (self.automation_io) |threaded| {
+        threaded.deinit();
+        std.heap.page_allocator.destroy(threaded);
+        self.automation_io = null;
+    }
 }

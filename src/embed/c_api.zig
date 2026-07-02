@@ -16,6 +16,7 @@ const host = @import("host.zig");
 const conversions = @import("conversions.zig");
 
 const MobileHostApp = host.MobileHostApp;
+const MobileTextInputState = types.MobileTextInputState;
 const MobileWidgetSemantics = types.MobileWidgetSemantics;
 const MobileWidgetTextGeometry = types.MobileWidgetTextGeometry;
 const MobileWidgetActionRequest = types.MobileWidgetActionRequest;
@@ -131,6 +132,40 @@ pub fn MobileCApi(comptime Host: type) type {
                 return 0;
             };
             output.* = mobileGpuFrameStateFromFrame(frame);
+            self.last_error = null;
+            return 1;
+        }
+
+        /// Focus / IME-intent state after input dispatch: `out.active` is
+        /// nonzero while an editable text widget owns focus. Platform shims
+        /// key the system keyboard's show/hide on it (UIKit first
+        /// responder, Android InputMethodManager).
+        pub fn zero_native_app_text_input_state(app: ?*anyopaque, out: ?*MobileTextInputState) callconv(.c) c_int {
+            const self = hostApp(Host, app) orelse return 0;
+            const output = out orelse {
+                recordError(self, error.InvalidCommand);
+                return 0;
+            };
+            output.* = self.embedded.textInputState();
+            self.last_error = null;
+            return 1;
+        }
+
+        /// Enable the automation harness inside the embedded runtime,
+        /// writing `snapshot.txt` (and consuming `command.txt`) under
+        /// `path` — an absolute directory inside the app's data container
+        /// on device. The mobile counterpart of the desktop runners'
+        /// `-Dautomation=true`.
+        pub fn zero_native_app_set_automation_dir(app: ?*anyopaque, path: ?[*]const u8, len: usize) callconv(.c) c_int {
+            const self = hostApp(Host, app) orelse return 0;
+            const dir = inputSlice(path, len) catch |err| {
+                recordError(self, err);
+                return 0;
+            };
+            host.enableAutomation(self, dir) catch |err| {
+                recordError(self, err);
+                return 0;
+            };
             self.last_error = null;
             return 1;
         }
@@ -438,6 +473,8 @@ pub const zero_native_app_resize = FixedShellApi.zero_native_app_resize;
 pub const zero_native_app_viewport = FixedShellApi.zero_native_app_viewport;
 pub const zero_native_app_viewport_state = FixedShellApi.zero_native_app_viewport_state;
 pub const zero_native_app_gpu_frame_state = FixedShellApi.zero_native_app_gpu_frame_state;
+pub const zero_native_app_text_input_state = FixedShellApi.zero_native_app_text_input_state;
+pub const zero_native_app_set_automation_dir = FixedShellApi.zero_native_app_set_automation_dir;
 pub const zero_native_app_touch = FixedShellApi.zero_native_app_touch;
 pub const zero_native_app_scroll = FixedShellApi.zero_native_app_scroll;
 pub const zero_native_app_key = FixedShellApi.zero_native_app_key;

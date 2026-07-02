@@ -140,6 +140,21 @@ pub const MobileWidgetActionRequest = extern struct {
     has_selection: c_int = 0,
 };
 
+/// Focus / IME-intent state for the mobile surface. `active` is nonzero
+/// when an editable text widget owns focus — the platform shim shows the
+/// system keyboard while it is set and hides it when it clears.
+/// `widget_id` is the focused widget (editable or not; 0 when nothing is
+/// focused) and the bounds are its frame in view points, so the shim can
+/// keep the caret visible above the keyboard.
+pub const MobileTextInputState = extern struct {
+    active: c_int = 0,
+    widget_id: u64 = 0,
+    x: f32 = 0,
+    y: f32 = 0,
+    width: f32 = 0,
+    height: f32 = 0,
+};
+
 pub const MobileViewportState = extern struct {
     width: f32 = 0,
     height: f32 = 0,

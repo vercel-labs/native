@@ -1,21 +1,34 @@
-// Minimal iOS presentation shim for a zero-native mobile canvas static
-// library (M2: pixels on a real surface, presentation only — no touch/IME
-// forwarding yet).
+// Minimal iOS shim for a zero-native mobile canvas static library.
 //
-// Mirrors the macOS raster path in src/platform/macos/appkit_host.m: the
-// embed host renders the retained scene through the CPU reference renderer
-// (`zero_native_app_render_pixels`, RGBA8); the shim uploads those bytes to
-// a shared MTLTexture and blit-copies them to the CAMetalLayer drawable.
-// A CADisplayLink pumps `zero_native_app_frame` (the host synthesizes the
-// gpu_surface_frame event a desktop display link would deliver) and the
-// canvas revision from `zero_native_app_gpu_frame_state` gates re-renders,
-// so unchanged frames cost one ABI call and no upload.
+// M2 (presentation): mirrors the macOS raster path in
+// src/platform/macos/appkit_host.m — the embed host renders the retained
+// scene through the CPU reference renderer (`zero_native_app_render_pixels`,
+// RGBA8); the shim uploads those bytes to a shared MTLTexture and
+// blit-copies them to the CAMetalLayer drawable. A CADisplayLink pumps
+// `zero_native_app_frame` and the canvas revision from
+// `zero_native_app_gpu_frame_state` gates re-renders, so unchanged frames
+// cost one ABI call and no upload. The RGBA -> BGRA swizzle happens on the
+// CPU while filling the staging buffer (blit copies require matching pixel
+// formats).
 //
-// The RGBA -> BGRA swizzle happens on the CPU while filling the staging
-// buffer: CAMetalLayer cannot present RGBA8 drawables and blit copies
-// require matching pixel formats, so a BGRA8 texture fed with swizzled
-// bytes is the simplest correct path (appkit_host.m instead samples an
-// RGBA8 texture from a shader; presentation-only M2 does not need one).
+// M3 (input): UITouch sequences forward through the ABI touch/scroll
+// exports in the same point coordinate space the viewport export
+// established (view points; the render scale multiplies pixels, not input).
+// A touch-slop state machine mirrors UIScrollView's delayed content
+// touches: an under-slop touch is a tap (pointer_down + pointer_up), an
+// over-slop move over a scrollable widget pans it through the existing
+// scroll reconciliation (`zero_native_app_scroll` wheel deltas), and an
+// over-slop move elsewhere becomes pointer_down + pointer_drag so sliders
+// and text selection keep desktop semantics. Long-press is not modeled by
+// the embed ABI, so the shim does not synthesize one.
+//
+// The platform keyboard keys off `zero_native_app_text_input_state`: while
+// an editable text widget owns focus the canvas view holds UIKit first
+// responder (system keyboard up); when focus leaves it resigns (keyboard
+// down). Typed characters flow through `zero_native_app_text` and marked
+// text (UITextInput composition, dead keys, CJK) maps onto the same
+// `zero_native_app_ime` set/commit/cancel path the macOS host drives from
+// NSTextInputClient — see appkit_host.m setMarkedText:/insertText:.
 
 #import <UIKit/UIKit.h>
 #import <Metal/Metal.h>
@@ -40,13 +53,493 @@ const struct mach_header *_dyld_get_image_header_containing_address(const void *
     return NULL;
 }
 
-@interface ZeroNativeCanvasView : UIView
+// ---------------------------------------------------------------- UITextInput
+// Index-based position/range objects over the local marked-text store (the
+// "document" the system IME edits is the composition only, matching the
+// macOS host's NSTextInputClient implementation).
+
+@interface ZeroNativeTextPosition : UITextPosition
+@property(nonatomic) NSInteger index;
++ (instancetype)positionWithIndex:(NSInteger)index;
+@end
+
+@implementation ZeroNativeTextPosition
++ (instancetype)positionWithIndex:(NSInteger)index {
+    ZeroNativeTextPosition *position = [[self alloc] init];
+    position.index = index;
+    return position;
+}
+@end
+
+@interface ZeroNativeTextRange : UITextRange
+@property(nonatomic) NSInteger location;
+@property(nonatomic) NSInteger length;
++ (instancetype)rangeWithLocation:(NSInteger)location length:(NSInteger)length;
+@end
+
+@implementation ZeroNativeTextRange
++ (instancetype)rangeWithLocation:(NSInteger)location length:(NSInteger)length {
+    ZeroNativeTextRange *range = [[self alloc] init];
+    range.location = location;
+    range.length = length;
+    return range;
+}
+- (BOOL)isEmpty {
+    return self.length == 0;
+}
+- (UITextPosition *)start {
+    return [ZeroNativeTextPosition positionWithIndex:self.location];
+}
+- (UITextPosition *)end {
+    return [ZeroNativeTextPosition positionWithIndex:self.location + self.length];
+}
+@end
+
+typedef NS_ENUM(NSInteger, ZeroNativeTouchMode) {
+    ZeroNativeTouchModeIdle = 0,
+    // Touch down seen, under slop: undecided between tap / drag / scroll.
+    ZeroNativeTouchModePending,
+    // Over slop on a scrollable widget: forwarding wheel scroll deltas.
+    ZeroNativeTouchModeScrolling,
+    // Over slop elsewhere: forwarded pointer_down, forwarding pointer_drag.
+    ZeroNativeTouchModeDragging,
+};
+
+static const CGFloat ZeroNativeTouchSlop = 8.0;
+
+@interface ZeroNativeCanvasView : UIView <UIKeyInput, UITextInput>
+@property(nonatomic) void *nativeApp;
+@property(nonatomic, weak) UITouch *trackedTouch;
+@property(nonatomic) ZeroNativeTouchMode touchMode;
+@property(nonatomic) CGPoint touchStartPoint;
+@property(nonatomic) CGPoint touchLastPoint;
+@property(nonatomic) uint64_t touchSequence;
+@property(nonatomic, copy) NSString *markedText;
+@property(nonatomic) NSRange markedSelectedRange;
+@property(nonatomic) uint64_t focusedTextWidget;
+@property(nonatomic, copy) NSDictionary<NSAttributedStringKey, id> *markedTextStyle;
+@property(nonatomic, weak) id<UITextInputDelegate> inputDelegate;
 @end
 
 @implementation ZeroNativeCanvasView
+
 + (Class)layerClass {
     return [CAMetalLayer class];
 }
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        _markedText = @"";
+        _markedSelectedRange = NSMakeRange(NSNotFound, 0);
+        self.multipleTouchEnabled = NO;
+    }
+    return self;
+}
+
+- (BOOL)canBecomeFirstResponder {
+    return YES;
+}
+
+// ------------------------------------------------------------------- touch
+
+- (void)forwardTouchPhase:(int)phase point:(CGPoint)point pressure:(float)pressure {
+    if (!self.nativeApp) return;
+    zero_native_app_touch(self.nativeApp, self.touchSequence, phase, (float)point.x, (float)point.y, pressure);
+}
+
+// True when an overflowing scrollable widget's bounds contain the point —
+// the pan-to-scroll decision UIScrollView makes with delayed content
+// touches, taken from the semantics export instead of a native hierarchy.
+- (BOOL)scrollableWidgetAtPoint:(CGPoint)point {
+    if (!self.nativeApp) return NO;
+    uintptr_t count = zero_native_app_widget_semantics_count(self.nativeApp);
+    for (uintptr_t index = 0; index < count; index++) {
+        zero_native_widget_semantics_t node = {0};
+        if (zero_native_app_widget_semantics_at(self.nativeApp, index, &node) != 1) continue;
+        if (!node.has_scroll) continue;
+        if (node.scroll_content_extent <= node.scroll_viewport_extent) continue;
+        if (point.x < node.x || point.x > node.x + node.width) continue;
+        if (point.y < node.y || point.y > node.y + node.height) continue;
+        return YES;
+    }
+    return NO;
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.trackedTouch) return;
+    UITouch *touch = touches.anyObject;
+    self.trackedTouch = touch;
+    self.touchSequence += 1;
+    self.touchMode = ZeroNativeTouchModePending;
+    self.touchStartPoint = [touch locationInView:self];
+    self.touchLastPoint = self.touchStartPoint;
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (!self.trackedTouch || ![touches containsObject:self.trackedTouch]) return;
+    CGPoint point = [self.trackedTouch locationInView:self];
+
+    if (self.touchMode == ZeroNativeTouchModePending) {
+        CGFloat dx = point.x - self.touchStartPoint.x;
+        CGFloat dy = point.y - self.touchStartPoint.y;
+        if (dx * dx + dy * dy < ZeroNativeTouchSlop * ZeroNativeTouchSlop) return;
+        if ([self scrollableWidgetAtPoint:self.touchStartPoint]) {
+            self.touchMode = ZeroNativeTouchModeScrolling;
+        } else {
+            self.touchMode = ZeroNativeTouchModeDragging;
+            [self forwardTouchPhase:ZERO_NATIVE_TOUCH_PHASE_DOWN point:self.touchStartPoint pressure:1];
+        }
+    }
+
+    if (self.touchMode == ZeroNativeTouchModeScrolling) {
+        // Natural scrolling: finger up moves content up = offset grows, so
+        // the wheel delta is the negated finger delta.
+        float deltaX = (float)(self.touchLastPoint.x - point.x);
+        float deltaY = (float)(self.touchLastPoint.y - point.y);
+        if (self.nativeApp && (deltaX != 0 || deltaY != 0)) {
+            zero_native_app_scroll(self.nativeApp, self.touchSequence, (float)point.x, (float)point.y, deltaX, deltaY);
+        }
+    } else if (self.touchMode == ZeroNativeTouchModeDragging) {
+        [self forwardTouchPhase:ZERO_NATIVE_TOUCH_PHASE_DRAG point:point pressure:1];
+    }
+    self.touchLastPoint = point;
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (!self.trackedTouch || ![touches containsObject:self.trackedTouch]) return;
+    CGPoint point = [self.trackedTouch locationInView:self];
+    switch (self.touchMode) {
+        case ZeroNativeTouchModePending:
+            // Under-slop touch: a tap at the start point.
+            [self forwardTouchPhase:ZERO_NATIVE_TOUCH_PHASE_DOWN point:self.touchStartPoint pressure:1];
+            [self forwardTouchPhase:ZERO_NATIVE_TOUCH_PHASE_UP point:self.touchStartPoint pressure:0];
+            break;
+        case ZeroNativeTouchModeDragging:
+            [self forwardTouchPhase:ZERO_NATIVE_TOUCH_PHASE_UP point:point pressure:0];
+            break;
+        default:
+            break;
+    }
+    [self resetTouchTracking];
+    [self syncTextInput];
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (!self.trackedTouch || ![touches containsObject:self.trackedTouch]) return;
+    if (self.touchMode == ZeroNativeTouchModeDragging) {
+        [self forwardTouchPhase:ZERO_NATIVE_TOUCH_PHASE_CANCEL point:self.touchLastPoint pressure:0];
+    }
+    [self resetTouchTracking];
+    [self syncTextInput];
+}
+
+- (void)resetTouchTracking {
+    self.trackedTouch = nil;
+    self.touchMode = ZeroNativeTouchModeIdle;
+}
+
+// ------------------------------------------------- keyboard <-> focus sync
+
+// Reconcile UIKit first responder with the runtime's focus/IME-intent
+// state: keyboard up while an editable text widget owns focus, down when
+// focus leaves. Called after every dispatched input and once per display
+// tick (focus can also move from key handling or model updates).
+- (void)syncTextInput {
+    if (!self.nativeApp || !self.window) return;
+    zero_native_text_input_state_t state = {0};
+    if (zero_native_app_text_input_state(self.nativeApp, &state) != 1) return;
+    if (state.active) {
+        if (state.widget_id != self.focusedTextWidget) {
+            self.focusedTextWidget = state.widget_id;
+            [self clearMarkedTextState];
+        }
+        if (!self.isFirstResponder) [self becomeFirstResponder];
+    } else {
+        self.focusedTextWidget = 0;
+        if (self.isFirstResponder) {
+            [self clearMarkedTextState];
+            [self resignFirstResponder];
+        }
+    }
+}
+
+- (void)clearMarkedTextState {
+    self.markedText = @"";
+    self.markedSelectedRange = NSMakeRange(NSNotFound, 0);
+}
+
+- (void)emitKeyDownUp:(NSString *)key {
+    if (!self.nativeApp) return;
+    const char *bytes = key.UTF8String ?: "";
+    uintptr_t length = [key lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    zero_native_app_key(self.nativeApp, ZERO_NATIVE_KEY_PHASE_DOWN, bytes, length, "", 0, 0);
+    zero_native_app_key(self.nativeApp, ZERO_NATIVE_KEY_PHASE_UP, bytes, length, "", 0, 0);
+}
+
+- (void)emitImeEvent:(int)kind text:(NSString *)text cursor:(intptr_t)cursor {
+    if (!self.nativeApp) return;
+    NSString *value = text ?: @"";
+    zero_native_app_ime(self.nativeApp,
+                        kind,
+                        value.UTF8String ?: "",
+                        [value lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+                        cursor);
+}
+
+// -------------------------------------------------------------- UIKeyInput
+
+- (BOOL)hasText {
+    if (!self.nativeApp || self.focusedTextWidget == 0) return self.markedText.length > 0;
+    zero_native_widget_semantics_t node = {0};
+    if (zero_native_app_widget_semantics_by_id(self.nativeApp, self.focusedTextWidget, &node) != 1) return NO;
+    return node.text_len > 0;
+}
+
+// Mirrors appkit_host.m insertText: committing identical marked text maps
+// to commit_composition; divergent marked text cancels before the plain
+// text insert so the runtime never double-applies the composition.
+- (void)insertText:(NSString *)text {
+    if (text.length == 0) return;
+    if ([text isEqualToString:@"\n"]) {
+        BOOL hadMarkedText = self.markedText.length > 0;
+        [self clearMarkedTextState];
+        if (hadMarkedText) {
+            [self emitImeEvent:ZERO_NATIVE_IME_COMMIT_COMPOSITION text:@"" cursor:-1];
+        }
+        [self emitKeyDownUp:@"enter"];
+        [self syncTextInput];
+        return;
+    }
+
+    BOOL hadMarkedText = self.markedText.length > 0;
+    NSString *previousMarkedText = self.markedText;
+    [self clearMarkedTextState];
+
+    if (hadMarkedText && [previousMarkedText isEqualToString:text]) {
+        [self emitImeEvent:ZERO_NATIVE_IME_COMMIT_COMPOSITION text:@"" cursor:-1];
+        return;
+    }
+    if (hadMarkedText) {
+        [self emitImeEvent:ZERO_NATIVE_IME_CANCEL_COMPOSITION text:@"" cursor:-1];
+    }
+    if (self.nativeApp) {
+        zero_native_app_text(self.nativeApp,
+                             text.UTF8String ?: "",
+                             [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+    }
+}
+
+- (void)deleteBackward {
+    if (self.markedText.length > 0) {
+        [self clearMarkedTextState];
+        [self emitImeEvent:ZERO_NATIVE_IME_CANCEL_COMPOSITION text:@"" cursor:-1];
+        return;
+    }
+    [self emitKeyDownUp:@"backspace"];
+}
+
+// ------------------------------------------------------------- UITextInput
+
+- (NSString *)textInRange:(UITextRange *)range {
+    ZeroNativeTextRange *value = (ZeroNativeTextRange *)range;
+    if (!value || value.location < 0) return @"";
+    NSInteger max = (NSInteger)self.markedText.length;
+    NSInteger location = MIN(value.location, max);
+    NSInteger length = MIN(value.length, max - location);
+    return [self.markedText substringWithRange:NSMakeRange(location, length)];
+}
+
+- (void)replaceRange:(UITextRange *)range withText:(NSString *)text {
+    (void)range;
+    [self insertText:text];
+}
+
+- (UITextRange *)selectedTextRange {
+    NSInteger caret = (NSInteger)self.markedText.length;
+    if (self.markedSelectedRange.location != NSNotFound) {
+        caret = MIN((NSInteger)(self.markedSelectedRange.location + self.markedSelectedRange.length), caret);
+    }
+    return [ZeroNativeTextRange rangeWithLocation:caret length:0];
+}
+
+- (void)setSelectedTextRange:(UITextRange *)range {
+    ZeroNativeTextRange *value = (ZeroNativeTextRange *)range;
+    if (!value) return;
+    self.markedSelectedRange = NSMakeRange(MAX(0, value.location), MAX(0, value.length));
+}
+
+- (UITextRange *)markedTextRange {
+    if (self.markedText.length == 0) return nil;
+    return [ZeroNativeTextRange rangeWithLocation:0 length:(NSInteger)self.markedText.length];
+}
+
+// Marked text is the live composition: forward it (with the caret as a
+// UTF-8 byte offset) through the same set_composition path the desktop
+// hosts use, so dead keys and multi-stage IMEs stay correct.
+- (void)setMarkedText:(NSString *)markedText selectedRange:(NSRange)selectedRange {
+    NSString *text = markedText ?: @"";
+    BOOL hadMarkedText = self.markedText.length > 0;
+    if (text.length == 0) {
+        [self clearMarkedTextState];
+        if (hadMarkedText) {
+            [self emitImeEvent:ZERO_NATIVE_IME_CANCEL_COMPOSITION text:@"" cursor:-1];
+        }
+        return;
+    }
+
+    NSUInteger cursor = text.length;
+    if (selectedRange.location != NSNotFound) {
+        cursor = MIN(text.length, selectedRange.location + selectedRange.length);
+        self.markedSelectedRange = selectedRange;
+    } else {
+        self.markedSelectedRange = NSMakeRange(text.length, 0);
+    }
+    self.markedText = text;
+    intptr_t cursorBytes = (intptr_t)[[text substringToIndex:cursor] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    [self emitImeEvent:ZERO_NATIVE_IME_SET_COMPOSITION text:text cursor:cursorBytes];
+}
+
+- (void)unmarkText {
+    BOOL hadMarkedText = self.markedText.length > 0;
+    [self clearMarkedTextState];
+    if (hadMarkedText) {
+        [self emitImeEvent:ZERO_NATIVE_IME_COMMIT_COMPOSITION text:@"" cursor:-1];
+    }
+}
+
+- (UITextPosition *)beginningOfDocument {
+    return [ZeroNativeTextPosition positionWithIndex:0];
+}
+
+- (UITextPosition *)endOfDocument {
+    return [ZeroNativeTextPosition positionWithIndex:(NSInteger)self.markedText.length];
+}
+
+- (UITextRange *)textRangeFromPosition:(UITextPosition *)fromPosition toPosition:(UITextPosition *)toPosition {
+    NSInteger from = ((ZeroNativeTextPosition *)fromPosition).index;
+    NSInteger to = ((ZeroNativeTextPosition *)toPosition).index;
+    return [ZeroNativeTextRange rangeWithLocation:MIN(from, to) length:ABS(to - from)];
+}
+
+- (UITextPosition *)positionFromPosition:(UITextPosition *)position offset:(NSInteger)offset {
+    NSInteger index = ((ZeroNativeTextPosition *)position).index + offset;
+    if (index < 0 || index > (NSInteger)self.markedText.length) return nil;
+    return [ZeroNativeTextPosition positionWithIndex:index];
+}
+
+- (UITextPosition *)positionFromPosition:(UITextPosition *)position inDirection:(UITextLayoutDirection)direction offset:(NSInteger)offset {
+    NSInteger delta = (direction == UITextLayoutDirectionLeft || direction == UITextLayoutDirectionUp) ? -offset : offset;
+    return [self positionFromPosition:position offset:delta];
+}
+
+- (NSComparisonResult)comparePosition:(UITextPosition *)position toPosition:(UITextPosition *)other {
+    NSInteger a = ((ZeroNativeTextPosition *)position).index;
+    NSInteger b = ((ZeroNativeTextPosition *)other).index;
+    if (a < b) return NSOrderedAscending;
+    if (a > b) return NSOrderedDescending;
+    return NSOrderedSame;
+}
+
+- (NSInteger)offsetFromPosition:(UITextPosition *)fromPosition toPosition:(UITextPosition *)toPosition {
+    return ((ZeroNativeTextPosition *)toPosition).index - ((ZeroNativeTextPosition *)fromPosition).index;
+}
+
+- (id<UITextInputTokenizer>)tokenizer {
+    return [[UITextInputStringTokenizer alloc] initWithTextInput:self];
+}
+
+- (UITextPosition *)positionWithinRange:(UITextRange *)range farthestInDirection:(UITextLayoutDirection)direction {
+    if (direction == UITextLayoutDirectionLeft || direction == UITextLayoutDirectionUp) return range.start;
+    return range.end;
+}
+
+- (UITextRange *)characterRangeByExtendingPosition:(UITextPosition *)position inDirection:(UITextLayoutDirection)direction {
+    NSInteger index = ((ZeroNativeTextPosition *)position).index;
+    if (direction == UITextLayoutDirectionLeft || direction == UITextLayoutDirectionUp) {
+        return [ZeroNativeTextRange rangeWithLocation:0 length:index];
+    }
+    return [ZeroNativeTextRange rangeWithLocation:index length:(NSInteger)self.markedText.length - index];
+}
+
+- (NSWritingDirection)baseWritingDirectionForPosition:(UITextPosition *)position inDirection:(UITextStorageDirection)direction {
+    (void)position;
+    (void)direction;
+    return NSWritingDirectionNatural;
+}
+
+- (void)setBaseWritingDirection:(NSWritingDirection)writingDirection forRange:(UITextRange *)range {
+    (void)writingDirection;
+    (void)range;
+}
+
+- (CGRect)focusedWidgetRect {
+    if (!self.nativeApp) return CGRectZero;
+    zero_native_text_input_state_t state = {0};
+    if (zero_native_app_text_input_state(self.nativeApp, &state) != 1 || !state.active) return CGRectZero;
+    return CGRectMake(state.x, state.y, state.width, state.height);
+}
+
+- (CGRect)firstRectForRange:(UITextRange *)range {
+    (void)range;
+    CGRect rect = [self focusedWidgetRect];
+    return CGRectIsEmpty(rect) ? self.bounds : rect;
+}
+
+- (CGRect)caretRectForPosition:(UITextPosition *)position {
+    (void)position;
+    CGRect rect = [self focusedWidgetRect];
+    if (CGRectIsEmpty(rect)) return CGRectMake(0, 0, 2, 24);
+    return CGRectMake(CGRectGetMaxX(rect) - 2, rect.origin.y, 2, rect.size.height);
+}
+
+- (NSArray<UITextSelectionRect *> *)selectionRectsForRange:(UITextRange *)range {
+    (void)range;
+    return @[];
+}
+
+- (UITextPosition *)closestPositionToPoint:(CGPoint)point {
+    (void)point;
+    return [self endOfDocument];
+}
+
+- (UITextPosition *)closestPositionToPoint:(CGPoint)point withinRange:(UITextRange *)range {
+    (void)point;
+    return range.end;
+}
+
+- (UITextRange *)characterRangeAtPoint:(CGPoint)point {
+    (void)point;
+    return nil;
+}
+
+// -------------------------------------------------------- UITextInputTraits
+// Deterministic input for tests and desktop-parity text handling: the
+// runtime owns editing behavior, so system rewriting stays off.
+
+- (UITextAutocorrectionType)autocorrectionType {
+    return UITextAutocorrectionTypeNo;
+}
+
+- (UITextSpellCheckingType)spellCheckingType {
+    return UITextSpellCheckingTypeNo;
+}
+
+- (UITextSmartQuotesType)smartQuotesType {
+    return UITextSmartQuotesTypeNo;
+}
+
+- (UITextSmartDashesType)smartDashesType {
+    return UITextSmartDashesTypeNo;
+}
+
+- (UITextSmartInsertDeleteType)smartInsertDeleteType {
+    return UITextSmartInsertDeleteTypeNo;
+}
+
+- (UITextAutocapitalizationType)autocapitalizationType {
+    return UITextAutocapitalizationTypeNone;
+}
+
 @end
 
 @interface ZeroNativeCanvasViewController : UIViewController
@@ -68,6 +561,10 @@ const struct mach_header *_dyld_get_image_header_containing_address(const void *
 
 - (CAMetalLayer *)metalLayer {
     return (CAMetalLayer *)self.view.layer;
+}
+
+- (ZeroNativeCanvasView *)canvasView {
+    return (ZeroNativeCanvasView *)self.view;
 }
 
 - (void)loadView {
@@ -94,6 +591,24 @@ const struct mach_header *_dyld_get_image_header_containing_address(const void *
         NSLog(@"zero-native: zero_native_app_create failed");
         return;
     }
+    [self canvasView].nativeApp = self.nativeApp;
+
+    // Verification harness: with ZERO_NATIVE_AUTOMATION set (simctl launch
+    // exports SIMCTL_CHILD_* into the app) the embedded runtime publishes
+    // snapshot.txt into the app's data container, same protocol as the
+    // desktop -Dautomation=true runners.
+    if (getenv("ZERO_NATIVE_AUTOMATION")) {
+        NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject
+            stringByAppendingPathComponent:@"zero-native-automation"];
+        if (dir) {
+            zero_native_app_set_automation_dir(self.nativeApp,
+                                               dir.UTF8String,
+                                               [dir lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+            [self logNativeErrorIfAny:@"automation"];
+            NSLog(@"zero-native: automation dir %@", dir);
+        }
+    }
+
     zero_native_app_start(self.nativeApp);
     zero_native_app_activate(self.nativeApp);
     [self logNativeErrorIfAny:@"start"];
@@ -148,6 +663,11 @@ const struct mach_header *_dyld_get_image_header_containing_address(const void *
     // Host-pumped frame: synthesizes the gpu_surface_frame event (first
     // tick installs the widget tree, later ticks re-present).
     zero_native_app_frame(self.nativeApp);
+
+    // Keyboard show/hide follows the runtime's focus state each tick, not
+    // only after shim-forwarded input: focus can also move from keyboard
+    // handling (tab/escape) or model updates.
+    [[self canvasView] syncTextInput];
 
     // Only re-render + blit when the retained canvas actually changed.
     zero_native_gpu_frame_state_t state = {0};

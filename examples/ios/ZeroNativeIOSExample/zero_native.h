@@ -91,6 +91,8 @@ typedef struct zero_native_widget_semantics {
   uintptr_t label_len;
   const char *text;
   uintptr_t text_len;
+  const char *placeholder;
+  uintptr_t placeholder_len;
   intptr_t text_selection_start;
   intptr_t text_selection_end;
   intptr_t text_composition_start;
@@ -137,6 +139,21 @@ typedef struct zero_native_widget_action {
   uintptr_t selection_focus;
   int has_selection;
 } zero_native_widget_action_t;
+
+typedef struct zero_native_canvas_pixels {
+  uintptr_t width;
+  uintptr_t height;
+  uintptr_t byte_len;
+} zero_native_canvas_pixels_t;
+
+typedef struct zero_native_text_input_state {
+  int active;
+  uint64_t widget_id;
+  float x;
+  float y;
+  float width;
+  float height;
+} zero_native_text_input_state_t;
 
 typedef struct zero_native_viewport_state {
   float width;
@@ -217,3 +234,7 @@ int zero_native_app_widget_semantics_at(void *app, uintptr_t index, zero_native_
 int zero_native_app_widget_semantics_by_id(void *app, uint64_t id, zero_native_widget_semantics_t *out);
 int zero_native_app_widget_text_geometry(void *app, uint64_t id, zero_native_widget_text_geometry_t *out);
 int zero_native_app_widget_action(void *app, const zero_native_widget_action_t *action);
+int zero_native_app_text_input_state(void *app, zero_native_text_input_state_t *out);
+int zero_native_app_set_automation_dir(void *app, const char *path, uintptr_t len);
+int zero_native_app_render_pixel_size(void *app, float scale, zero_native_canvas_pixels_t *out);
+int zero_native_app_render_pixels(void *app, float scale, uint8_t *pixels, uintptr_t pixels_len, zero_native_canvas_pixels_t *out);
