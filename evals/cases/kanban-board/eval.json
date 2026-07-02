@@ -1,0 +1,36 @@
+{
+  "name": "kanban-board",
+  "description": "Port of the manual builder trial: a kanban board built from scratch, with card identity that must survive moving between columns.",
+  "prompt": "This workspace is a freshly scaffolded zero-native native-frontend app (see README.md; the view is src/app.zml, the logic src/main.zig). Replace the counter with a small kanban board app.\n\nRequirements:\n- Three columns named exactly \"Todo\", \"Doing\", and \"Done\", laid out side by side, each showing its column title and the cards currently in it. Seed the board with at least five cards spread across the columns.\n- Each card shows its title and has controls to move it to the previous/next column (a card in Todo can only move right, a card in Done only left).\n- A card is the same logical item wherever it lives: when a card moves between columns its identity must be preserved, not recreated — the automation snapshot's widget id for that card should stay stable across the move.\n- Show a status bar with the count of cards per column, updating live.\n- Keep all logic in src/main.zig (Model, Msg, update); the markup only binds values and dispatches messages.\n- Validate the markup with `zero-native markup check src/app.zml`, and keep `zig build test` green — extend src/tests.zig so the tests move a card between columns through the real dispatch path and assert the counts change.\n\nWhen you are done, make sure `zig build test` passes and summarize what you built.",
+  "frontend": "native",
+  "timeoutMs": 1200000,
+  "maxTurns": 80,
+  "checks": [
+    { "type": "build_test", "args": ["-Dplatform=null"] },
+    { "type": "markup_check" },
+    {
+      "type": "file_grep",
+      "files": "src/*.zml",
+      "pattern": "<for\\s+[^>]*each=",
+      "expect": true,
+      "description": "cards render through a <for> loop"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.zml",
+      "pattern": "global-key=",
+      "expect": true,
+      "description": "cards use global-key so identity survives reparenting"
+    },
+    {
+      "type": "snapshot_grep",
+      "patterns": [
+        "name=\"Todo\"",
+        "name=\"Doing\"",
+        "name=\"Done\"",
+        "role=button"
+      ],
+      "description": "live snapshot shows the three columns and card move buttons"
+    }
+  ]
+}

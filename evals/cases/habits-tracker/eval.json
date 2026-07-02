@@ -1,0 +1,43 @@
+{
+  "name": "habits-tracker",
+  "description": "Port of the manual markup trial: a habit tracker exercising text entry (elm-style mirror), derived/filtered lists, and enum filters.",
+  "prompt": "This workspace is a freshly scaffolded zero-native native-frontend app (see README.md; the view is src/app.zml, the logic src/main.zig). Replace the counter with a small habit tracker app.\n\nRequirements:\n- A list of habits, seeded with at least three. Each habit row shows the habit name, its current streak in days, and a control to mark it done (or not done) for today. Marking a habit done today increments its streak; unmarking decrements it back.\n- A text field to add a new habit: typing updates a draft, pressing enter adds a habit with that name (streak 0, not done today) and clears the field. Adding a blank name does nothing.\n- Filter controls named exactly \"All\", \"Active\", and \"Done\" that switch the list between all habits, only those not yet done today, and only those done today. Exactly one filter is selected at a time and the selected one is visually distinct.\n- A status bar summarizing how many habits are done today out of the total, updating live.\n- Keep all logic in src/main.zig (Model, Msg, update); the markup only binds values and dispatches messages.\n- Validate the markup with `zero-native markup check src/app.zml`, and keep `zig build test` green — extend src/tests.zig so the tests cover marking a habit done, adding a habit through the text entry path, and filtering, all through the real dispatch path.\n\nWhen you are done, make sure `zig build test` passes and summarize what you built.",
+  "frontend": "native",
+  "timeoutMs": 1200000,
+  "maxTurns": 80,
+  "checks": [
+    { "type": "build_test", "args": ["-Dplatform=null"] },
+    { "type": "markup_check" },
+    {
+      "type": "file_grep",
+      "files": "src/*.zml",
+      "pattern": "<text-field\\s+[^>]*on-input=",
+      "expect": true,
+      "description": "habit entry uses a text-field with on-input (elm-style mirror)"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.zml",
+      "pattern": "on-submit=",
+      "expect": true,
+      "description": "enter submits the new habit via on-submit"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.zml",
+      "pattern": "<for\\s+[^>]*each=",
+      "expect": true,
+      "description": "habits render through a <for> loop"
+    },
+    {
+      "type": "snapshot_grep",
+      "patterns": [
+        "role=textbox",
+        "name=\"All\"",
+        "name=\"Active\"",
+        "name=\"Done\""
+      ],
+      "description": "live snapshot shows the entry field and the three filters"
+    }
+  ]
+}

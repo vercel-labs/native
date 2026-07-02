@@ -167,6 +167,23 @@ jobs:
             (cd "$app" && zig build test -Dplatform=null && ../../zig-out/bin/zero-native validate app.zon)
           done
 
+  evals-typecheck:
+    name: Evals Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.23.0
+          package_json_file: evals/package.json
+      - run: pnpm install --frozen-lockfile
+        working-directory: evals
+      - run: pnpm typecheck
+        working-directory: evals
+
   docs:
     name: Docs
     runs-on: ubuntu-latest

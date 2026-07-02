@@ -1,0 +1,50 @@
+{
+  "name": "templates-settings-app",
+  "description": "New grammar under a fresh agent: repeated grouped toggle sections where <template>/<use> is the natural shape, plus token style attributes.",
+  "prompt": "This workspace is a freshly scaffolded zero-native native-frontend app (see README.md; the view is src/app.zml, the logic src/main.zig). Replace the counter with a small Settings app.\n\nRequirements:\n- Three settings sections named exactly \"General\", \"Notifications\", and \"Privacy\". Each section is a card containing a section header followed by at least three labeled toggle rows (a setting name with an on/off switch). The sections all share the same structure and differ only in their data, so factor the repeated markup accordingly rather than copy-pasting it.\n- Visual style comes from the app's design tokens: section headers use the muted text color, and each section card sits on a surface background with rounded corners.\n- Toggling a switch must flip that setting in the model; every setting is independent.\n- Add a status bar showing how many settings are currently enabled out of the total, updating live.\n- Keep all logic in src/main.zig (Model, Msg, update); the markup only binds values and dispatches messages.\n- Validate the markup with `zero-native markup check src/app.zml`, and keep `zig build test` green — extend src/tests.zig so the tests cover toggling at least one setting in each section through the real dispatch path.\n\nWhen you are done, make sure `zig build test` passes and summarize what you built.",
+  "frontend": "native",
+  "timeoutMs": 1200000,
+  "maxTurns": 80,
+  "checks": [
+    { "type": "build_test", "args": ["-Dplatform=null"] },
+    { "type": "markup_check" },
+    {
+      "type": "file_grep",
+      "files": "src/*.zml",
+      "pattern": "<template\\s+[^>]*name=",
+      "expect": true,
+      "description": "markup defines a <template> for the repeated section"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.zml",
+      "pattern": "<use\\s+[^>]*template=",
+      "expect": true,
+      "description": "markup instantiates sections via <use template=...>"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.zml",
+      "pattern": "(foreground|background|accent|accent-foreground|border-color|focus-ring)=\"(background|surface|surface_subtle|surface_pressed|text|text_muted|border|accent|accent_text|destructive|destructive_text|focus_ring|shadow|disabled)\"",
+      "expect": true,
+      "description": "markup uses at least one color token style attribute"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.zml",
+      "pattern": "=\"text_muted\"",
+      "expect": true,
+      "description": "muted section headers reference the text_muted token"
+    },
+    {
+      "type": "snapshot_grep",
+      "patterns": [
+        "role=switch",
+        "name=\"General\"",
+        "name=\"Notifications\"",
+        "name=\"Privacy\""
+      ],
+      "description": "live snapshot shows the three sections and switch widgets"
+    }
+  ]
+}

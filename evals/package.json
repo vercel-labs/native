@@ -1,0 +1,17 @@
+{
+  "name": "@zero-native/evals",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.23.0",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "eval": "tsx src/main.ts",
+    "check": "pnpm typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4.19.2",
+    "typescript": "^5"
+  }
+}
