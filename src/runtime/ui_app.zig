@@ -29,13 +29,31 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
 
         pub const Ui = canvas.Ui(MsgT);
 
+        pub const MarkupView = canvas.MarkupView(ModelT, MsgT);
+
+        pub const MarkupOptions = struct {
+            /// Markup source compiled into the binary (release, and the
+            /// fallback until the watch path parses).
+            source: []const u8,
+            /// Optional file to poll in dev: when its content changes the
+            /// file is re-parsed and the next rebuild uses the new view,
+            /// keeping model state. Parse failures keep the last good view
+            /// and set `markup_diagnostic`. Requires `io`.
+            watch_path: ?[]const u8 = null,
+            io: ?std.Io = null,
+        };
+
         pub const Options = struct {
             name: []const u8,
             scene: app_manifest.ShellConfig,
             canvas_label: []const u8,
             tokens: canvas.DesignTokens = .{},
             update: *const fn (model: *ModelT, msg: MsgT) void,
-            view: *const fn (ui: *Ui, model: *const ModelT) Ui.Node,
+            /// Hand-written view. Exactly one of `view` and `markup` must be
+            /// set.
+            view: ?*const fn (ui: *Ui, model: *const ModelT) Ui.Node = null,
+            /// Markup view. Exactly one of `view` and `markup` must be set.
+            markup: ?MarkupOptions = null,
             /// Optional mapping from shell command events (menus, shortcuts,
             /// native controls) into messages.
             on_command: ?*const fn (name: []const u8) ?MsgT = null,
@@ -48,14 +66,27 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
         tree: ?Ui.Tree = null,
         canvas_size: geometry.SizeF = .{ .width = 1, .height = 1 },
         installed: bool = false,
+        markup_arenas: [2]std.heap.ArenaAllocator,
+        markup_arena_index: usize = 0,
+        markup_view: ?MarkupView = null,
+        markup_source_hash: u64 = 0,
+        markup_poll_countdown: u32 = 1,
+        /// Set when the embedded or watched markup failed to parse or build;
+        /// cleared on the next successful parse. Apps may render it.
+        markup_diagnostic: ?canvas.ui_markup.MarkupErrorInfo = null,
         gpu_commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasGpuCommand = undefined,
         packet_json: [platform.max_gpu_surface_packet_json_bytes]u8 = undefined,
 
         pub fn init(backing: std.mem.Allocator, model: ModelT, options: Options) Self {
+            std.debug.assert((options.view == null) != (options.markup == null));
             return .{
                 .model = model,
                 .options = options,
                 .arenas = .{
+                    std.heap.ArenaAllocator.init(backing),
+                    std.heap.ArenaAllocator.init(backing),
+                },
+                .markup_arenas = .{
                     std.heap.ArenaAllocator.init(backing),
                     std.heap.ArenaAllocator.init(backing),
                 },
@@ -65,6 +96,8 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
         pub fn deinit(self: *Self) void {
             self.arenas[0].deinit();
             self.arenas[1].deinit();
+            self.markup_arenas[0].deinit();
+            self.markup_arenas[1].deinit();
         }
 
         pub fn app(self: *Self) App {
@@ -90,7 +123,8 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
             const next_index = self.arena_index ^ 1;
             _ = self.arenas[next_index].reset(.retain_capacity);
             var ui = Ui.init(self.arenas[next_index].allocator());
-            const tree = try ui.finalizeWithTokens(self.options.view(&ui, &self.model), self.options.tokens);
+            const node = try self.buildViewNode(&ui);
+            const tree = try ui.finalizeWithTokens(node, self.options.tokens);
 
             var nodes: [canvas_limits.max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined;
             const bounds = geometry.RectF.init(0, 0, self.canvas_size.width, self.canvas_size.height);
@@ -99,6 +133,74 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
 
             self.tree = tree;
             self.arena_index = next_index;
+        }
+
+        fn buildViewNode(self: *Self, ui: *Ui) anyerror!Ui.Node {
+            if (self.options.view) |view| return view(ui, &self.model);
+            const view = &(self.markup_view orelse blk: {
+                try self.reloadMarkup(self.options.markup.?.source);
+                break :blk self.markup_view.?;
+            });
+            return view.build(ui, &self.model) catch |err| {
+                if (err == error.MarkupBuild) {
+                    self.markup_diagnostic = .{
+                        .line = view.diagnostic.line,
+                        .column = view.diagnostic.column,
+                        .message = view.diagnostic.message,
+                    };
+                }
+                return err;
+            };
+        }
+
+        /// Parse and activate a markup source (the reload seam: hot reload
+        /// and tests go through this). Failures keep the previous view and
+        /// set `markup_diagnostic`.
+        pub fn reloadMarkup(self: *Self, source: []const u8) anyerror!void {
+            const next_index = self.markup_arena_index ^ 1;
+            _ = self.markup_arenas[next_index].reset(.retain_capacity);
+            const arena = self.markup_arenas[next_index].allocator();
+            const owned_source = try arena.dupe(u8, source);
+            var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
+            const view = MarkupView.initDiagnostic(arena, owned_source, &diagnostic) catch |err| {
+                if (err == error.MarkupSyntax) self.markup_diagnostic = diagnostic;
+                return err;
+            };
+            self.markup_view = view;
+            self.markup_arena_index = next_index;
+            self.markup_source_hash = std.hash.Wyhash.hash(0, source);
+            self.markup_diagnostic = null;
+        }
+
+        /// Dev-mode hot reload: re-parse the watched markup file when its
+        /// content changes. A failed parse keeps the last good view running
+        /// and records the diagnostic.
+        fn maybeReloadMarkup(self: *Self, runtime: *Runtime, window_id: platform.WindowId) void {
+            const markup_options = self.options.markup orelse return;
+            const watch_path = markup_options.watch_path orelse return;
+            const io = markup_options.io orelse return;
+
+            self.markup_poll_countdown -|= 1;
+            if (self.markup_poll_countdown > 0) return;
+            self.markup_poll_countdown = markup_poll_interval_frames;
+
+            var buffer: [256 * 1024]u8 = undefined;
+            const source = readWatchedFile(io, watch_path, &buffer) catch return;
+            const hash = std.hash.Wyhash.hash(0, source);
+            if (hash == self.markup_source_hash) return;
+            self.reloadMarkup(source) catch {
+                self.markup_source_hash = hash;
+                return;
+            };
+            if (self.installed) self.rebuild(runtime, window_id) catch {};
+        }
+
+        const markup_poll_interval_frames: u32 = 30;
+
+        fn readWatchedFile(io: std.Io, path: []const u8, buffer: []u8) ![]const u8 {
+            var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+            defer file.close(io);
+            return buffer[0..try file.readPositionalAll(io, buffer, 0)];
         }
 
         fn sceneFn(context: *anyopaque) anyerror!app_manifest.ShellConfig {
@@ -125,6 +227,7 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
 
         fn handleFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent) anyerror!void {
             if (!std.mem.eql(u8, frame_event.label, self.options.canvas_label)) return;
+            self.maybeReloadMarkup(runtime, frame_event.window_id);
             if (!self.installed) {
                 self.canvas_size = frame_event.size;
                 try self.rebuild(runtime, frame_event.window_id);
