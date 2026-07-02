@@ -196,6 +196,27 @@ fn initialModel() Model {
     return model;
 }
 
+// ------------------------------------------------------------------ mobile
+//
+// `zig build lib -Dmobile=true` compiles this same Model/Msg/update and the
+// comptime-compiled .zml view into the mobile embed static library
+// (`zero_native.addMobileLib`); the embed host drives it on the canonical
+// single-surface canvas scene. Markup hot reload stays desktop-only.
+
+pub fn initModel() Model {
+    return initialModel();
+}
+
+pub fn mobileOptions() zero_native.UiApp(Model, Msg).Options {
+    return .{
+        .name = "ui-inbox",
+        .scene = zero_native.embed.mobile_shell_scene,
+        .canvas_label = zero_native.embed.mobile_gpu_surface_label,
+        .update = update,
+        .view = CompiledInboxView.build,
+    };
+}
+
 pub fn main(init: std.process.Init) !void {
     const app_state = try std.heap.page_allocator.create(InboxApp);
     defer std.heap.page_allocator.destroy(app_state);
