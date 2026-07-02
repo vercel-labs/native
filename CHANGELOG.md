@@ -29,6 +29,7 @@ All notable changes to zero-native will be documented in this file.
 - **Widget capacity**: per-view limits raised to real-app scale (256 widgets, 1024 display-list commands), with the runtime constructing strictly in place so no embedding can overflow a thread stack.
 - **Engine reconciliation**: container intrinsic sizing measured engine-side; scroll offsets and editable text both survive rebuilds until the source changes (programmatic changes win); accessibility actions derive from typed handlers.
 - **CI**: native example tests against real GTK, macOS GPU smokes, a headless Linux canvas smoke under Xvfb, and native template scaffolding now run in CI.
+- **Windows canvas smoke in CI**: the Windows gpu_surface software path (child HWND, WM_TIMER, SetDIBitsToDevice) is now CI-protected — `windows-canvas-smoke` cross-compiles ui-inbox for x86_64-windows-gnu and drives it under Wine + Xvfb, asserting software presentation, automation widget clicks, and real XTEST pointer/keyboard input.
 
 ### Bug Fixes
 

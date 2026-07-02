@@ -128,6 +128,26 @@ jobs:
           "$cli" automate screenshot inbox-canvas
           test -s .zig-cache/zero-native-automation/screenshot-inbox-canvas.png
 
+  windows-canvas-smoke:
+    name: Windows Canvas Smoke (Wine)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Install Wine, Xvfb, and xdotool
+        run: sudo apt-get update && sudo apt-get install -y wine xvfb xdotool
+      # Cross-compiles ui-inbox for x86_64-windows-gnu and drives the
+      # gpu_surface software path (child HWND + WM_TIMER + SetDIBitsToDevice)
+      # under Wine: snapshot ready, gpu_backend=software, gpu_nonblank=true,
+      # automation widget-click, and real XTEST pointer/keyboard input.
+      # Wineprefix init happens inline in the script (measured 21s from
+      # scratch in an ubuntu-24.04 container, so no cache step).
+      - name: Build and drive ui-inbox.exe under Wine
+        run: .github/scripts/windows-canvas-smoke.sh
+
   frontend-examples:
     name: Frontend Examples
     runs-on: ubuntu-latest
