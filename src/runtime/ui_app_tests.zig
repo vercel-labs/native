@@ -202,3 +202,107 @@ test "markup views drive the ui app loop and hot reload preserves state" {
     try app_state.rebuild(&harness.runtime, 1);
     try std.testing.expect(findWidgetIdByText(app_state.tree.?, .button, "Start over") != null);
 }
+
+const counter_timer_id: u64 = 42;
+
+fn counterTimer(id: u64, timestamp_ns: u64) ?CounterMsg {
+    _ = timestamp_ns;
+    if (id == counter_timer_id) return .increment;
+    return null;
+}
+
+test "ui app maps timer events into messages and rebuilds" {
+    const harness = try std.testing.allocator.create(core.TestHarness());
+    defer std.testing.allocator.destroy(harness);
+    harness.init(.{ .size = geometry.SizeF.init(400, 300) });
+    harness.null_platform.gpu_surfaces = true;
+
+    var options = counterOptions();
+    options.on_timer = counterTimer;
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, options);
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 0"));
+
+    // A fired timer maps through on_timer into update + rebuild.
+    try harness.runtime.startTimer(counter_timer_id, 100_000_000, true);
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(counter_timer_id, 2_000_000).?);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
+
+    // Cancelled timers stop producing events entirely.
+    try harness.runtime.cancelTimer(counter_timer_id);
+    try std.testing.expect(harness.null_platform.fireTimer(counter_timer_id, 3_000_000) == null);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+}
+
+test "markup watch polls from the reserved runtime timer" {
+    const io = std.testing.io;
+    const watch_path = ".zig-cache/ui-app-markup-watch-test.zml";
+    const cwd = std.Io.Dir.cwd();
+    try cwd.writeFile(io, .{ .sub_path = watch_path, .data = counter_markup });
+    defer cwd.deleteFile(io, watch_path) catch {};
+
+    const harness = try std.testing.allocator.create(core.TestHarness());
+    defer std.testing.allocator.destroy(harness);
+    harness.init(.{ .size = geometry.SizeF.init(400, 300) });
+    harness.null_platform.gpu_surfaces = true;
+
+    var options = markupCounterOptions();
+    options.markup = .{ .source = counter_markup, .watch_path = watch_path, .io = io };
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, options);
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // Install started the reserved repeating watch timer.
+    const watch_timer = harness.null_platform.startedTimer(CounterApp.markup_watch_timer_id).?;
+    try std.testing.expect(watch_timer.active);
+    try std.testing.expect(watch_timer.repeats);
+    try std.testing.expectEqual(@as(u64, 500_000_000), watch_timer.interval_ns);
+
+    // An idle poll (file unchanged) issues no frame-chain keepalive request.
+    const frame_requests_after_install = harness.null_platform.gpu_surface_frame_request_count;
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 1_500_000).?);
+    try std.testing.expectEqual(frame_requests_after_install, harness.null_platform.gpu_surface_frame_request_count);
+
+    // Advance model state, then hot swap the file: the timer poll reloads
+    // the markup, rebuilds, and keeps model state.
+    const increment_id = findWidgetIdByText(app_state.tree.?, .button, "Increment").?;
+    var command_buffer: [96]u8 = undefined;
+    const click = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ canvas_label, increment_id });
+    try harness.runtime.dispatchAutomationCommand(app, click);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+
+    try cwd.writeFile(io, .{ .sub_path = watch_path, .data = counter_markup_v2 });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 2_000_000).?);
+
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .button, "Start over") != null);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
+}

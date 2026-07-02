@@ -110,6 +110,8 @@ pub const TrayOptions = types.TrayOptions;
 pub const TrayMenuItem = types.TrayMenuItem;
 pub const NativeCommandEvent = types.NativeCommandEvent;
 pub const MenuCommandEvent = types.MenuCommandEvent;
+pub const reserved_timer_id_base = types.reserved_timer_id_base;
+pub const TimerEvent = types.TimerEvent;
 pub const FileDropEvent = types.FileDropEvent;
 pub const GpuFrame = types.GpuFrame;
 pub const GpuSurfaceFrameEvent = types.GpuSurfaceFrameEvent;
@@ -136,6 +138,7 @@ pub const Platform = types.Platform;
 pub const Backend = types.Backend;
 
 pub const NullPlatform = null_backend.NullPlatform;
+pub const NullTimer = null_backend.NullTimer;
 
 pub const macos = @import("macos/root.zig");
 pub const linux = @import("linux/root.zig");

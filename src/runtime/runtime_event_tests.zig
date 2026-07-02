@@ -729,3 +729,49 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(@as(usize, 0), relaxed_frame.input_latency_budget_exceeded_count);
     try std.testing.expect(relaxed_frame.input_latency_budget_ok);
 }
+
+test "runtime starts, fires, and cancels platform timers" {
+    const TestApp = struct {
+        timer_count: usize = 0,
+        last_timer_id: u64 = 0,
+        last_timer_timestamp_ns: u64 = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "timers", .source = platform.WebViewSource.html("<h1>Timers</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .timer => |timer_event| {
+                    self.timer_count += 1;
+                    self.last_timer_id = timer_event.id;
+                    self.last_timer_timestamp_ns = timer_event.timestamp_ns;
+                },
+                else => {},
+            }
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    try harness.runtime.startTimer(11, 250_000_000, true);
+    try std.testing.expect(harness.null_platform.startedTimer(11) != null);
+
+    if (harness.null_platform.fireTimer(11, 77_000)) |event_value| {
+        try harness.runtime.dispatchPlatformEvent(app, event_value);
+    }
+    try std.testing.expectEqual(@as(usize, 1), app_state.timer_count);
+    try std.testing.expectEqual(@as(u64, 11), app_state.last_timer_id);
+    try std.testing.expectEqual(@as(u64, 77_000), app_state.last_timer_timestamp_ns);
+
+    // Cancelled timers stop synthesizing events, so the app hears nothing.
+    try harness.runtime.cancelTimer(11);
+    try std.testing.expect(harness.null_platform.fireTimer(11, 78_000) == null);
+    try std.testing.expectEqual(@as(usize, 1), app_state.timer_count);
+}

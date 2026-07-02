@@ -869,6 +869,16 @@ pub const MenuCommandEvent = struct {
     window_id: WindowId = 1,
 };
 
+/// Timer ids at or above this value are reserved for the framework's own
+/// internal timers (for example the ui-app markup watch poll). Application
+/// code must pick ids below this value when calling `startTimer`.
+pub const reserved_timer_id_base: u64 = 0xffff_ffff_0000_0000;
+
+pub const TimerEvent = struct {
+    id: u64,
+    timestamp_ns: u64 = 0,
+};
+
 pub const FileDropEvent = struct {
     window_id: WindowId = 1,
     view_label: []const u8 = "",
@@ -1274,6 +1284,7 @@ pub const Event = union(enum) {
     shortcut: ShortcutEvent,
     native_command: NativeCommandEvent,
     menu_command: MenuCommandEvent,
+    timer: TimerEvent,
     files_dropped: FileDropEvent,
     gpu_surface_frame: GpuSurfaceFrameEvent,
     gpu_surface_resized: GpuSurfaceResizeEvent,
@@ -1296,6 +1307,7 @@ pub const Event = union(enum) {
             .shortcut => "shortcut",
             .native_command => "native_command",
             .menu_command => "menu_command",
+            .timer => "timer",
             .files_dropped => "files_dropped",
             .gpu_surface_frame => "gpu_surface_frame",
             .gpu_surface_resized => "gpu_surface_resized",
@@ -1372,6 +1384,8 @@ pub const PlatformServices = struct {
     configure_automation_frame_polling_fn: ?*const fn (context: ?*anyopaque, enabled: bool) anyerror!void = null,
     emit_window_event_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void = null,
     request_gpu_surface_frame_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8) anyerror!void = null,
+    start_timer_fn: ?*const fn (context: ?*anyopaque, id: u64, interval_ns: u64, repeats: bool) anyerror!void = null,
+    cancel_timer_fn: ?*const fn (context: ?*anyopaque, id: u64) anyerror!void = null,
     present_gpu_surface_pixels_fn: ?*const fn (context: ?*anyopaque, pixels: GpuSurfacePixels) anyerror!void = null,
     present_gpu_surface_packet_fn: ?*const fn (context: ?*anyopaque, packet: GpuSurfacePacket) anyerror!void = null,
     update_widget_accessibility_fn: ?*const fn (context: ?*anyopaque, snapshot: WidgetAccessibilitySnapshot) anyerror!void = null,
@@ -1618,6 +1632,20 @@ pub const PlatformServices = struct {
         if (label.len == 0 or label.len > max_view_label_bytes) return error.InvalidViewOptions;
         const request_fn = self.request_gpu_surface_frame_fn orelse return;
         return request_fn(self.context, window_id, label);
+    }
+
+    /// Start (or replace) a repeating or one-shot timer identified by `id`.
+    /// The platform delivers `.timer` events carrying the id until the timer
+    /// is cancelled (or after the first fire when `repeats` is false).
+    /// Starting an id that is already running replaces the existing timer.
+    pub fn startTimer(self: PlatformServices, id: u64, interval_ns: u64, repeats: bool) anyerror!void {
+        const start_fn = self.start_timer_fn orelse return error.UnsupportedService;
+        return start_fn(self.context, id, interval_ns, repeats);
+    }
+
+    pub fn cancelTimer(self: PlatformServices, id: u64) anyerror!void {
+        const cancel_fn = self.cancel_timer_fn orelse return error.UnsupportedService;
+        return cancel_fn(self.context, id);
     }
 
     pub fn presentGpuSurfacePixels(self: PlatformServices, pixels: GpuSurfacePixels) anyerror!void {

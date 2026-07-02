@@ -112,6 +112,7 @@ const TrayOptions = types.TrayOptions;
 const TrayMenuItem = types.TrayMenuItem;
 const NativeCommandEvent = types.NativeCommandEvent;
 const MenuCommandEvent = types.MenuCommandEvent;
+const TimerEvent = types.TimerEvent;
 const FileDropEvent = types.FileDropEvent;
 const GpuFrame = types.GpuFrame;
 const GpuSurfaceFrameEvent = types.GpuSurfaceFrameEvent;
@@ -136,6 +137,16 @@ const EventHandler = types.EventHandler;
 const PlatformServices = types.PlatformServices;
 const Platform = types.Platform;
 const Backend = types.Backend;
+
+pub const max_null_timers: usize = 16;
+
+pub const NullTimer = struct {
+    id: u64 = 0,
+    interval_ns: u64 = 0,
+    repeats: bool = false,
+    active: bool = false,
+};
+
 pub const NullPlatform = struct {
     surface_value: Surface = .{},
     web_engine: WebEngine = .system,
@@ -238,6 +249,10 @@ pub const NullPlatform = struct {
     gpu_surface_frame_request_label_storage: [max_view_label_bytes]u8 = undefined,
     gpu_surface_frame_request_label_len: usize = 0,
     gpu_surface_frame_request_count: usize = 0,
+    timers: [max_null_timers]NullTimer = [_]NullTimer{.{}} ** max_null_timers,
+    timer_count: usize = 0,
+    timer_start_count: usize = 0,
+    timer_cancel_count: usize = 0,
     view_cursor_window_id: WindowId = 0,
     view_cursor_label_storage: [max_view_label_bytes]u8 = undefined,
     view_cursor_label_len: usize = 0,
@@ -308,6 +323,8 @@ pub const NullPlatform = struct {
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
                 .emit_window_event_fn = emitWindowEvent,
+                .start_timer_fn = startTimer,
+                .cancel_timer_fn = cancelTimer,
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
                 .present_gpu_surface_packet_fn = presentGpuSurfacePacket,
@@ -811,6 +828,65 @@ pub const NullPlatform = struct {
             self.shortcuts[index] = shortcut;
         }
         self.shortcut_count = shortcuts.len;
+    }
+
+    fn startTimer(context: ?*anyopaque, id: u64, interval_ns: u64, repeats: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.timer_start_count += 1;
+        const entry: NullTimer = .{ .id = id, .interval_ns = interval_ns, .repeats = repeats, .active = true };
+        if (self.findTimerIndex(id)) |index| {
+            self.timers[index] = entry;
+            return;
+        }
+        if (self.timer_count >= max_null_timers) return error.UnsupportedService;
+        self.timers[self.timer_count] = entry;
+        self.timer_count += 1;
+    }
+
+    fn cancelTimer(context: ?*anyopaque, id: u64) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.timer_cancel_count += 1;
+        if (self.findTimerIndex(id)) |index| self.timers[index].active = false;
+    }
+
+    /// Test helper: synthesize the platform event a live timer would deliver.
+    /// Returns null when the timer was never started or has been cancelled.
+    /// A non-repeating timer deactivates after firing once, matching host
+    /// backends. Dispatch the returned event through the runtime to drive
+    /// timers deterministically in tests.
+    pub fn fireTimer(self: *NullPlatform, id: u64, timestamp_ns: u64) ?Event {
+        const index = self.findTimerIndex(id) orelse return null;
+        if (!self.timers[index].active) return null;
+        if (!self.timers[index].repeats) self.timers[index].active = false;
+        return .{ .timer = .{ .id = id, .timestamp_ns = timestamp_ns } };
+    }
+
+    pub fn startedTimer(self: *const NullPlatform, id: u64) ?NullTimer {
+        const index = self.findTimerIndex(id) orelse return null;
+        return self.timers[index];
+    }
+
+    pub fn activeTimerCount(self: *const NullPlatform) usize {
+        var count: usize = 0;
+        for (self.timers[0..self.timer_count]) |timer| {
+            if (timer.active) count += 1;
+        }
+        return count;
+    }
+
+    pub fn timerStartCount(self: *const NullPlatform) usize {
+        return self.timer_start_count;
+    }
+
+    pub fn timerCancelCount(self: *const NullPlatform) usize {
+        return self.timer_cancel_count;
+    }
+
+    fn findTimerIndex(self: *const NullPlatform, id: u64) ?usize {
+        for (self.timers[0..self.timer_count], 0..) |timer, index| {
+            if (timer.id == id) return index;
+        }
+        return null;
     }
 
     fn emitWindowEvent(context: ?*anyopaque, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void {

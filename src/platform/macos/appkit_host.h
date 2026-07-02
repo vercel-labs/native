@@ -27,6 +27,7 @@ typedef enum {
     ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_INPUT = 13,
     ZERO_NATIVE_APPKIT_EVENT_WIDGET_ACCESSIBILITY_ACTION = 14,
     ZERO_NATIVE_APPKIT_EVENT_APPEARANCE_CHANGED = 15,
+    ZERO_NATIVE_APPKIT_EVENT_TIMER = 16,
 } zero_native_appkit_event_kind_t;
 
 typedef enum {
@@ -233,6 +234,7 @@ typedef struct {
     int color_scheme;
     int reduce_motion;
     int high_contrast;
+    uint64_t timer_id;
 } zero_native_appkit_event_t;
 
 typedef void (*zero_native_appkit_event_callback_t)(void *context, const zero_native_appkit_event_t *event);
@@ -266,6 +268,8 @@ int zero_native_appkit_close_view(zero_native_appkit_host_t *host, uint64_t wind
 int zero_native_appkit_present_gpu_surface_pixels(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, size_t width, size_t height, double scale, int has_dirty_rect, double dirty_x, double dirty_y, double dirty_width, double dirty_height, const uint8_t *rgba8, size_t rgba8_len);
 int zero_native_appkit_present_gpu_surface_packet(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double surface_width, double surface_height, double scale, uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a, int requires_render, size_t command_count, size_t unsupported_command_count, int representable, const uint8_t *json, size_t json_len);
 int zero_native_appkit_request_gpu_surface_frame(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len);
+void zero_native_appkit_start_timer(zero_native_appkit_host_t *host, uint64_t timer_id, uint64_t interval_ns, int repeats);
+void zero_native_appkit_cancel_timer(zero_native_appkit_host_t *host, uint64_t timer_id);
 int zero_native_appkit_update_widget_accessibility(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const zero_native_appkit_widget_accessibility_node_t *nodes, size_t node_count);
 size_t zero_native_appkit_clipboard_read(zero_native_appkit_host_t *host, char *buffer, size_t buffer_len);
 void zero_native_appkit_clipboard_write(zero_native_appkit_host_t *host, const char *text, size_t text_len);

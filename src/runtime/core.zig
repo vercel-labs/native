@@ -118,6 +118,7 @@ pub const CommandEvent = runtime_api.CommandEvent;
 pub const Command = runtime_api.Command;
 pub const CommandSource = runtime_api.CommandSource;
 pub const ShortcutEvent = runtime_api.ShortcutEvent;
+pub const TimerEvent = runtime_api.TimerEvent;
 pub const Appearance = runtime_api.Appearance;
 pub const GpuFrame = runtime_api.GpuFrame;
 pub const GpuSurfaceFrameEvent = runtime_api.GpuSurfaceFrameEvent;
@@ -358,6 +359,18 @@ pub const Runtime = struct {
     const openFileDialogFromJson = SystemServiceMethods.openFileDialogFromJson;
     const saveFileDialogFromJson = SystemServiceMethods.saveFileDialogFromJson;
     const showMessageDialogFromJson = SystemServiceMethods.showMessageDialogFromJson;
+
+    /// Start (or replace) a platform timer. The platform delivers `.timer`
+    /// events carrying `id` until `cancelTimer` (or after the first fire when
+    /// `repeats` is false). Ids at or above
+    /// `platform.reserved_timer_id_base` are reserved for the framework.
+    pub fn startTimer(self: *Runtime, id: u64, interval_ns: u64, repeats: bool) anyerror!void {
+        return self.options.platform.services.startTimer(id, interval_ns, repeats);
+    }
+
+    pub fn cancelTimer(self: *Runtime, id: u64) anyerror!void {
+        return self.options.platform.services.cancelTimer(id);
+    }
 
     pub fn listCommands(self: *const Runtime, output: []Command) []const Command {
         const count = @min(output.len, self.options.commands.len);

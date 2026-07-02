@@ -39,6 +39,7 @@ pub const CommandSource = enum {
 };
 
 pub const ShortcutEvent = platform.ShortcutEvent;
+pub const TimerEvent = platform.TimerEvent;
 pub const Appearance = platform.Appearance;
 pub const GpuFrame = platform.GpuFrame;
 pub const GpuSurfaceFrameEvent = platform.GpuSurfaceFrameEvent;
@@ -118,6 +119,7 @@ pub const Event = union(enum) {
     appearance_changed: Appearance,
     command: CommandEvent,
     shortcut: ShortcutEvent,
+    timer: TimerEvent,
     files_dropped: platform.FileDropEvent,
     gpu_surface_frame: GpuSurfaceFrameEvent,
     gpu_surface_resized: GpuSurfaceResizeEvent,
@@ -133,6 +135,7 @@ pub const Event = union(enum) {
             .appearance_changed => "appearance_changed",
             .command => |event_value| event_value.name,
             .shortcut => "shortcut",
+            .timer => "timer",
             .files_dropped => "files_dropped",
             .gpu_surface_frame => "gpu_surface_frame",
             .gpu_surface_resized => "gpu_surface_resized",

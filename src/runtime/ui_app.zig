@@ -38,9 +38,9 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
             /// Optional file to poll in dev: when its content changes the
             /// file is re-parsed and the next rebuild uses the new view,
             /// keeping model state. Parse failures keep the last good view
-            /// and set `markup_diagnostic`. Requires `io`. Watching keeps a
-            /// low-cost frame loop alive, so leave it unset in release
-            /// builds.
+            /// and set `markup_diagnostic`. Requires `io`. Watching runs a
+            /// low-cost repeating runtime timer (`markup_watch_timer_id`),
+            /// so leave it unset in release builds.
             watch_path: ?[]const u8 = null,
             io: ?std.Io = null,
         };
@@ -59,6 +59,11 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
             /// Optional mapping from shell command events (menus, shortcuts,
             /// native controls) into messages.
             on_command: ?*const fn (name: []const u8) ?MsgT = null,
+            /// Optional mapping from runtime timer events (started via
+            /// `runtime.startTimer`) into messages. Framework-reserved timer
+            /// ids (>= `platform.reserved_timer_id_base`) are handled
+            /// internally and never reach this callback.
+            on_timer: ?*const fn (id: u64, timestamp_ns: u64) ?MsgT = null,
         };
 
         model: ModelT,
@@ -67,12 +72,12 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
         arena_index: usize = 0,
         tree: ?Ui.Tree = null,
         canvas_size: geometry.SizeF = .{ .width = 1, .height = 1 },
+        canvas_window_id: platform.WindowId = 1,
         installed: bool = false,
         markup_arenas: [2]std.heap.ArenaAllocator,
         markup_arena_index: usize = 0,
         markup_view: ?MarkupView = null,
         markup_source_hash: u64 = 0,
-        markup_poll_countdown: u32 = 1,
         /// Set when the embedded or watched markup failed to parse or build;
         /// cleared on the next successful parse. Apps may render it.
         markup_diagnostic: ?canvas.ui_markup.MarkupErrorInfo = null,
@@ -174,23 +179,23 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
             self.markup_diagnostic = null;
         }
 
-        /// Dev-mode hot reload: re-parse the watched markup file when its
+        /// Dev-mode hot reload: start the repeating runtime timer that polls
+        /// the watched markup file. Runs once, on first install, and only
+        /// when a watch path and io are configured.
+        fn startMarkupWatch(self: *Self, runtime: *Runtime) void {
+            const markup_options = self.options.markup orelse return;
+            if (markup_options.watch_path == null or markup_options.io == null) return;
+            runtime.startTimer(markup_watch_timer_id, markup_watch_interval_ns, true) catch {};
+        }
+
+        /// Timer-driven poll of the watched markup file: re-parse when its
         /// content changes. A failed parse keeps the last good view running
-        /// and records the diagnostic.
-        fn maybeReloadMarkup(self: *Self, runtime: *Runtime, window_id: platform.WindowId) void {
+        /// and records the diagnostic. A successful reload rebuilds, which
+        /// invalidates the canvas and schedules the presenting frame.
+        fn pollMarkupWatch(self: *Self, runtime: *Runtime, window_id: platform.WindowId) void {
             const markup_options = self.options.markup orelse return;
             const watch_path = markup_options.watch_path orelse return;
             const io = markup_options.io orelse return;
-
-            // Frame callbacks stop when nothing is dirty, which would starve
-            // the poll exactly when a developer edits the file. While
-            // watching, keep the frame chain alive; idle frames are cheap
-            // (nothing dirty means presentation is skipped). Dev-mode cost.
-            runtime.options.platform.services.requestGpuSurfaceFrame(window_id, self.options.canvas_label) catch {};
-
-            self.markup_poll_countdown -|= 1;
-            if (self.markup_poll_countdown > 0) return;
-            self.markup_poll_countdown = markup_poll_interval_frames;
 
             var buffer: [256 * 1024]u8 = undefined;
             const source = readWatchedFile(io, watch_path, &buffer) catch return;
@@ -203,7 +208,10 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
             if (self.installed) self.rebuild(runtime, window_id) catch {};
         }
 
-        const markup_poll_interval_frames: u32 = 30;
+        /// Reserved framework timer id for the markup watch poll. Application
+        /// timer ids must stay below `platform.reserved_timer_id_base`.
+        pub const markup_watch_timer_id: u64 = platform.reserved_timer_id_base | 0x2e70_a11c;
+        const markup_watch_interval_ns: u64 = 500 * std.time.ns_per_ms;
 
         fn readWatchedFile(io: std.Io, path: []const u8, buffer: []u8) ![]const u8 {
             var file = try std.Io.Dir.cwd().openFile(io, path, .{});
@@ -225,6 +233,7 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
                         try self.dispatch(runtime, command.window_id, msg);
                     }
                 },
+                .timer => |timer_event| try self.handleTimer(runtime, timer_event),
                 .gpu_surface_frame => |frame_event| try self.handleFrame(runtime, frame_event),
                 .gpu_surface_resized => |resize_event| try self.handleResize(runtime, resize_event),
                 .canvas_widget_pointer => |pointer_event| try self.handlePointer(runtime, pointer_event),
@@ -233,14 +242,27 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
             }
         }
 
+        fn handleTimer(self: *Self, runtime: *Runtime, timer_event: platform.TimerEvent) anyerror!void {
+            if (timer_event.id == markup_watch_timer_id) {
+                self.pollMarkupWatch(runtime, self.canvas_window_id);
+                return;
+            }
+            if (timer_event.id >= platform.reserved_timer_id_base) return;
+            const map = self.options.on_timer orelse return;
+            if (map(timer_event.id, timer_event.timestamp_ns)) |msg| {
+                try self.dispatch(runtime, self.canvas_window_id, msg);
+            }
+        }
+
         fn handleFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent) anyerror!void {
             if (!std.mem.eql(u8, frame_event.label, self.options.canvas_label)) return;
-            self.maybeReloadMarkup(runtime, frame_event.window_id);
+            self.canvas_window_id = frame_event.window_id;
             if (!self.installed) {
                 self.canvas_size = frame_event.size;
                 try self.rebuild(runtime, frame_event.window_id);
                 _ = try runtime.emitCanvasWidgetDisplayList(frame_event.window_id, self.options.canvas_label, self.options.tokens);
                 self.installed = true;
+                self.startMarkupWatch(runtime);
             }
             _ = runtime.presentNextCanvasGpuPacketWithScale(
                 frame_event.window_id,

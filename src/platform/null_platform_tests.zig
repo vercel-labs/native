@@ -566,3 +566,51 @@ test "file drop path splitter preserves embedded newlines" {
     try std.testing.expectEqualStrings("/tmp/one\nname.txt", paths[0]);
     try std.testing.expectEqualStrings("/tmp/two.txt", paths[1]);
 }
+
+test "null platform records timer start, replace, and cancel" {
+    var null_platform = NullPlatform.init(.{});
+    const services = null_platform.platform().services;
+
+    try services.startTimer(7, 250_000_000, true);
+    try std.testing.expectEqual(@as(usize, 1), null_platform.timerStartCount());
+    const started = null_platform.startedTimer(7).?;
+    try std.testing.expectEqual(@as(u64, 250_000_000), started.interval_ns);
+    try std.testing.expect(started.repeats);
+    try std.testing.expect(started.active);
+
+    // Starting an existing id replaces it in place.
+    try services.startTimer(7, 500_000_000, false);
+    try std.testing.expectEqual(@as(usize, 2), null_platform.timerStartCount());
+    try std.testing.expectEqual(@as(usize, 1), null_platform.activeTimerCount());
+    const replaced = null_platform.startedTimer(7).?;
+    try std.testing.expectEqual(@as(u64, 500_000_000), replaced.interval_ns);
+    try std.testing.expect(!replaced.repeats);
+
+    try services.cancelTimer(7);
+    try std.testing.expectEqual(@as(usize, 1), null_platform.timerCancelCount());
+    try std.testing.expectEqual(@as(usize, 0), null_platform.activeTimerCount());
+    try std.testing.expect(!null_platform.startedTimer(7).?.active);
+}
+
+test "null platform fireTimer synthesizes timer events for live timers only" {
+    var null_platform = NullPlatform.init(.{});
+    const services = null_platform.platform().services;
+
+    // Unknown timers never fire.
+    try std.testing.expect(null_platform.fireTimer(1, 10) == null);
+
+    try services.startTimer(1, 16_000_000, true);
+    const event = null_platform.fireTimer(1, 42_000).?;
+    try std.testing.expectEqual(@as(u64, 1), event.timer.id);
+    try std.testing.expectEqual(@as(u64, 42_000), event.timer.timestamp_ns);
+    // Repeating timers stay live.
+    try std.testing.expect(null_platform.fireTimer(1, 43_000) != null);
+
+    try services.cancelTimer(1);
+    try std.testing.expect(null_platform.fireTimer(1, 44_000) == null);
+
+    // Non-repeating timers fire exactly once.
+    try services.startTimer(2, 1_000_000, false);
+    try std.testing.expect(null_platform.fireTimer(2, 50_000) != null);
+    try std.testing.expect(null_platform.fireTimer(2, 51_000) == null);
+}

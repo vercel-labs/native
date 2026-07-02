@@ -369,6 +369,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 @property(nonatomic, strong) NSMutableSet<NSString *> *bridgeEnabledChildWebViewKeys;
 @property(nonatomic, strong) NSTimer *timer;
 @property(nonatomic, strong) NSTimer *automationFrameTimer;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSTimer *> *appTimers;
 @property(nonatomic, strong) NSString *appName;
 @property(nonatomic, strong) NSString *bundleIdentifier;
 @property(nonatomic, strong) NSString *iconPath;
@@ -457,6 +458,10 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (void)scheduleFrame;
 - (void)setAutomationFramePolling:(BOOL)enabled;
 - (void)emitAutomationFramePoll;
+- (void)startAppTimerWithId:(uint64_t)timerId intervalNs:(uint64_t)intervalNs repeats:(BOOL)repeats;
+- (void)cancelAppTimerWithId:(uint64_t)timerId;
+- (void)appTimerFired:(NSTimer *)timer;
+- (void)invalidateAppTimers;
 - (void)scheduleBridgeFrames;
 - (void)emitFrame;
 - (void)emitShutdown;
@@ -2553,6 +2558,7 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
     self.nativeViewCommands = [[NSMutableDictionary alloc] init];
     self.nativeViewExplicitTextKeys = [[NSMutableSet alloc] init];
     self.bridgeEnabledChildWebViewKeys = [[NSMutableSet alloc] init];
+    self.appTimers = [[NSMutableDictionary alloc] init];
     self.allowedNavigationOrigins = @[ @"zero://app", @"zero://inline" ];
     self.allowedExternalURLs = @[];
     self.externalLinkAction = 0;
@@ -2651,6 +2657,7 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
 - (void)dealloc {
     [self.automationFrameTimer invalidate];
     self.automationFrameTimer = nil;
+    [self invalidateAppTimers];
     [self stopAppearanceObservers];
     if (self.shortcutEventMonitor) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
@@ -3826,6 +3833,7 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     self.timer = nil;
     [self.automationFrameTimer invalidate];
     self.automationFrameTimer = nil;
+    [self invalidateAppTimers];
     if (self.shortcutEventMonitor) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
@@ -4004,6 +4012,47 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
 
 - (void)emitAutomationFramePoll {
     [self scheduleFrame];
+}
+
+- (void)startAppTimerWithId:(uint64_t)timerId intervalNs:(uint64_t)intervalNs repeats:(BOOL)repeats {
+    NSNumber *key = @(timerId);
+    [self.appTimers[key] invalidate];
+    NSTimeInterval interval = (NSTimeInterval)intervalNs / (NSTimeInterval)ZeroNativeNanosecondsPerSecond;
+    self.appTimers[key] = [NSTimer scheduledTimerWithTimeInterval:interval
+                                                           target:self
+                                                         selector:@selector(appTimerFired:)
+                                                         userInfo:@{ @"id": key, @"repeats": @(repeats) }
+                                                          repeats:repeats];
+}
+
+- (void)cancelAppTimerWithId:(uint64_t)timerId {
+    NSNumber *key = @(timerId);
+    [self.appTimers[key] invalidate];
+    [self.appTimers removeObjectForKey:key];
+}
+
+- (void)appTimerFired:(NSTimer *)timer {
+    NSDictionary *info = (NSDictionary *)timer.userInfo;
+    NSNumber *key = info[@"id"];
+    if (!key) return;
+    // A non-repeating timer invalidates itself after this fire; drop the
+    // bookkeeping entry before the callback so it may start a replacement
+    // timer with the same id.
+    if (![info[@"repeats"] boolValue] && self.appTimers[key] == timer) {
+        [self.appTimers removeObjectForKey:key];
+    }
+    [self emitEvent:(zero_native_appkit_event_t){
+        .kind = ZERO_NATIVE_APPKIT_EVENT_TIMER,
+        .timer_id = key.unsignedLongLongValue,
+        .timestamp_ns = ZeroNativeTimestampNanoseconds(),
+    }];
+}
+
+- (void)invalidateAppTimers {
+    for (NSTimer *timer in self.appTimers.allValues) {
+        [timer invalidate];
+    }
+    [self.appTimers removeAllObjects];
 }
 
 - (void)scheduleBridgeFrames {
@@ -4466,6 +4515,16 @@ void zero_native_appkit_run(zero_native_appkit_host_t *host, zero_native_appkit_
 void zero_native_appkit_set_automation_frame_polling(zero_native_appkit_host_t *host, int enabled) {
     ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
     [object setAutomationFramePolling:(enabled != 0)];
+}
+
+void zero_native_appkit_start_timer(zero_native_appkit_host_t *host, uint64_t timer_id, uint64_t interval_ns, int repeats) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    [object startAppTimerWithId:timer_id intervalNs:interval_ns repeats:(repeats != 0)];
+}
+
+void zero_native_appkit_cancel_timer(zero_native_appkit_host_t *host, uint64_t timer_id) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    [object cancelAppTimerWithId:timer_id];
 }
 
 void zero_native_appkit_stop(zero_native_appkit_host_t *host) {
