@@ -1,7 +1,11 @@
 const std = @import("std");
 const ui_markup = @import("ui_markup");
+const markup_lsp = @import("markup_lsp");
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !void {
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "lsp")) {
+        return runLsp(allocator, io);
+    }
     if (args.len < 1 or !std.mem.eql(u8, args[0], "check")) {
         usage();
         return error.MarkupCommandFailed;
@@ -18,6 +22,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         };
     }
     if (failures > 0) return error.MarkupCheckFailed;
+}
+
+fn runLsp(allocator: std.mem.Allocator, io: std.Io) !void {
+    var stdin_buffer: [64 * 1024]u8 = undefined;
+    var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buffer);
+    var stdout_buffer: [64 * 1024]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    var server = markup_lsp.Server.init(allocator, &stdin_reader.interface, &stdout_writer.interface);
+    defer server.deinit();
+    try server.run();
 }
 
 fn checkFile(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8) !void {
@@ -53,10 +67,15 @@ fn readFile(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8) ![]
 fn usage() void {
     std.debug.print(
         \\usage: zero-native markup check <file.zml> [more files...]
+        \\       zero-native markup lsp
         \\
-        \\Parses and validates markup views: grammar, expression forms,
+        \\check: parses and validates markup views: grammar, expression forms,
         \\elements, attributes, and structure tags. Binding paths and message
         \\tags are validated against your Model/Msg when the app builds.
+        \\
+        \\lsp: speaks the Language Server Protocol over stdio (diagnostics,
+        \\completion, hover) for .zml files; wire it into your editor's LSP
+        \\client (see editors/zml/README.md).
         \\
     , .{});
 }

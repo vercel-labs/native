@@ -1,0 +1,118 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "ZML",
+  "scopeName": "source.zml",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#structure-tag" },
+    { "include": "#tag" },
+    { "include": "#expression" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.block.zml",
+      "begin": "<!--",
+      "end": "-->",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.comment.begin.zml" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.comment.end.zml" }
+      }
+    },
+    "structure-tag": {
+      "name": "meta.tag.structure.zml",
+      "begin": "(</?)(for|if|else)(?![a-z0-9_-])",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.zml" },
+        "2": { "name": "keyword.control.structure.zml" }
+      },
+      "end": "(/?>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.end.zml" }
+      },
+      "patterns": [
+        { "include": "#tag-innards" }
+      ]
+    },
+    "tag": {
+      "name": "meta.tag.zml",
+      "begin": "(</?)([a-z][a-z0-9_-]*)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.zml" },
+        "2": { "name": "entity.name.tag.zml" }
+      },
+      "end": "(/?>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.end.zml" }
+      },
+      "patterns": [
+        { "include": "#tag-innards" }
+      ]
+    },
+    "tag-innards": {
+      "patterns": [
+        { "include": "#event-attribute" },
+        { "include": "#attribute" },
+        { "include": "#string" }
+      ]
+    },
+    "event-attribute": {
+      "match": "(on-[a-z][a-z0-9_-]*)\\s*(=)?",
+      "captures": {
+        "1": { "name": "entity.other.attribute-name.event.zml" },
+        "2": { "name": "punctuation.separator.key-value.zml" }
+      }
+    },
+    "attribute": {
+      "match": "([a-z][a-z0-9_-]*)\\s*(=)?",
+      "captures": {
+        "1": { "name": "entity.other.attribute-name.zml" },
+        "2": { "name": "punctuation.separator.key-value.zml" }
+      }
+    },
+    "string": {
+      "name": "string.quoted.double.zml",
+      "begin": "\"",
+      "end": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.zml" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.zml" }
+      },
+      "patterns": [
+        { "include": "#expression" },
+        {
+          "match": "(:)",
+          "name": "punctuation.separator.message-payload.zml"
+        }
+      ]
+    },
+    "expression": {
+      "name": "meta.embedded.expression.zml",
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.embedded.begin.zml" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.section.embedded.end.zml" }
+      },
+      "patterns": [
+        {
+          "match": "==",
+          "name": "keyword.operator.comparison.zml"
+        },
+        {
+          "match": "[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*",
+          "name": "variable.other.binding.zml"
+        },
+        {
+          "match": "\\.",
+          "name": "punctuation.accessor.zml"
+        }
+      ]
+    }
+  }
+}

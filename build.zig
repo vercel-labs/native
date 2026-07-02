@@ -166,10 +166,16 @@ pub fn build(b: *std.Build) void {
     tooling_mod.addImport("trace", trace_mod);
     const tooling_tests = testArtifact(b, tooling_mod);
 
+    const ui_markup_mod = module(b, target, optimize, "src/primitives/canvas/ui_markup.zig");
+    const markup_lsp_mod = module(b, target, optimize, "tools/zero-native/markup_lsp.zig");
+    markup_lsp_mod.addImport("ui_markup", ui_markup_mod);
+    const markup_lsp_tests = testArtifact(b, markup_lsp_mod);
+
     const cli_mod = module(b, target, optimize, "tools/zero-native/main.zig");
     cli_mod.addImport("tooling", tooling_mod);
     cli_mod.addImport("automation_protocol", automation_protocol_mod);
-    cli_mod.addImport("ui_markup", module(b, target, optimize, "src/primitives/canvas/ui_markup.zig"));
+    cli_mod.addImport("ui_markup", ui_markup_mod);
+    cli_mod.addImport("markup_lsp", markup_lsp_mod);
     const cli_exe = b.addExecutable(.{
         .name = "zero-native",
         .root_module = cli_mod,
@@ -194,10 +200,14 @@ pub fn build(b: *std.Build) void {
     host_tooling_mod.addImport("debug", host_debug_mod);
     host_tooling_mod.addImport("platform_info", host_platform_info_mod);
     host_tooling_mod.addImport("trace", host_trace_mod);
+    const host_ui_markup_mod = module(b, host_target, optimize, "src/primitives/canvas/ui_markup.zig");
+    const host_markup_lsp_mod = module(b, host_target, optimize, "tools/zero-native/markup_lsp.zig");
+    host_markup_lsp_mod.addImport("ui_markup", host_ui_markup_mod);
     const host_cli_mod = module(b, host_target, optimize, "tools/zero-native/main.zig");
     host_cli_mod.addImport("tooling", host_tooling_mod);
     host_cli_mod.addImport("automation_protocol", host_automation_protocol_mod);
-    host_cli_mod.addImport("ui_markup", module(b, host_target, optimize, "src/primitives/canvas/ui_markup.zig"));
+    host_cli_mod.addImport("ui_markup", host_ui_markup_mod);
+    host_cli_mod.addImport("markup_lsp", host_markup_lsp_mod);
     const host_cli_exe = b.addExecutable(.{
         .name = "zero-native",
         .root_module = host_cli_mod,
@@ -229,6 +239,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(desktop_tests).step);
     test_step.dependOn(&b.addRunArtifact(automation_protocol_tests).step);
     test_step.dependOn(&b.addRunArtifact(tooling_tests).step);
+    test_step.dependOn(&b.addRunArtifact(markup_lsp_tests).step);
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-package-types", "Verify package TypeScript platform feature names", &.{
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "ZeroNativeCommandInfo" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "list(): Promise<ZeroNativeCommandInfo[]>" },

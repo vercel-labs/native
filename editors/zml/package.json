@@ -1,0 +1,50 @@
+{
+  "name": "zml",
+  "displayName": "ZML (zero-native markup)",
+  "description": "Syntax highlighting, diagnostics, completion, and hover for zero-native .zml markup views.",
+  "version": "0.1.0",
+  "publisher": "zero-native",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:zml"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "zml",
+        "aliases": [
+          "ZML",
+          "zero-native markup"
+        ],
+        "extensions": [
+          ".zml"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "zml",
+        "scopeName": "source.zml",
+        "path": "./syntaxes/zml.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "ZML",
+      "properties": {
+        "zml.serverPath": {
+          "type": "string",
+          "default": "zero-native",
+          "description": "Path to the zero-native CLI used to start the markup language server (`zero-native markup lsp`). Set an absolute path if the CLI is not on PATH."
+        }
+      }
+    }
+  }
+}
