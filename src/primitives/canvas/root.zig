@@ -320,6 +320,11 @@ pub const builtinSurfaceEnterOffset = widget_model.builtinSurfaceEnterOffset;
 pub const max_widget_depth = widget_runtime.max_widget_depth;
 pub const max_widget_text_range_rects = widget_runtime.max_widget_text_range_rects;
 
+// Experimental markup front-end lives in `ui_markup.zig` / `ui_markup_view.zig`.
+pub const ui_markup = @import("ui_markup.zig");
+pub const MarkupView = @import("ui_markup_view.zig").MarkupView;
+pub const MarkupBuildDiagnostic = @import("ui_markup_view.zig").BuildDiagnostic;
+
 // Experimental declarative authoring layer lives in `ui.zig`.
 pub const ui_builder = @import("ui.zig");
 pub const Ui = ui_builder.Ui;
