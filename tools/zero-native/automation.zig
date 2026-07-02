@@ -100,7 +100,7 @@ fn usage() void {
         \\  menu-command <id>
         \\  native-command <id> [view-label]
         \\  widget-action <view-label> <widget-id> <action> [value]
-        \\  widget-click <view-label> <widget-id>
+        \\  widget-click <view-label> <widget-id>   (ids are the bare number; snapshots print #id)
         \\  widget-drag <view-label> <widget-id> <start-x-ratio> <end-x-ratio> [start-y-ratio end-y-ratio]
         \\  widget-wheel <view-label> <widget-id> <delta-y>
         \\  widget-key <view-label> <key> [text]

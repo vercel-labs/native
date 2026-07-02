@@ -345,7 +345,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
 
         fn applyMessageAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
             const expression = markup.parseMessageExpression(attribute.value) orelse {
-                return self.failVoid(node, "invalid message expression");
+                return self.failVoid(node, "invalid message expression: on-* takes a Msg tag (\"add\") or tag with one binding payload (\"toggle:{item.id}\")");
             };
             const event = attribute.name[3..];
             if (std.mem.eql(u8, event, "input")) {
@@ -431,7 +431,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
 
         fn evalAttrExpression(self: *Self, scope: *Scope, node: markup.MarkupNode, raw: []const u8) BuildError!Value {
             const expression = markup.parseAttrExpression(raw) orelse {
-                return self.failValue(node, "invalid expression");
+                return self.failValue(node, "invalid expression: values are a literal, one {binding}, or one {a == b} equality - no other operators or calls (put logic in a model function)");
             };
             return switch (expression) {
                 .literal => |text| literalValue(text),

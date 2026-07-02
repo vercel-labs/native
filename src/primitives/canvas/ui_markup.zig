@@ -385,7 +385,7 @@ fn validateNode(node: MarkupNode, parent_is_element: bool) ?MarkupErrorInfo {
                         return .{ .line = attribute.line, .column = attribute.column, .message = "unknown event attribute" };
                     }
                     if (parseMessageExpression(attribute.value) == null) {
-                        return .{ .line = attribute.line, .column = attribute.column, .message = "invalid message expression" };
+                        return .{ .line = attribute.line, .column = attribute.column, .message = "invalid message expression: on-* takes a Msg tag (\"add\") or tag with one binding payload (\"toggle:{item.id}\")" };
                     }
                     continue;
                 }
@@ -393,7 +393,7 @@ fn validateNode(node: MarkupNode, parent_is_element: bool) ?MarkupErrorInfo {
                     return .{ .line = attribute.line, .column = attribute.column, .message = "unknown attribute" };
                 }
                 if (parseAttrExpression(attribute.value) == null) {
-                    return .{ .line = attribute.line, .column = attribute.column, .message = "invalid expression" };
+                    return .{ .line = attribute.line, .column = attribute.column, .message = "invalid expression: values are a literal, one {binding}, or one {a == b} equality - no other operators or calls (put logic in a model function)" };
                 }
             }
         },
@@ -408,7 +408,7 @@ fn validateNode(node: MarkupNode, parent_is_element: bool) ?MarkupErrorInfo {
         .if_block => {
             if (!parent_is_element) return errorAt(node, "if is only allowed inside an element");
             const test_value = node.attr("test") orelse return errorAt(node, "if requires a test attribute");
-            if (parseAttrExpression(test_value) == null) return errorAt(node, "invalid expression");
+            if (parseAttrExpression(test_value) == null) return errorAt(node, "invalid expression: test takes one {binding} or {a == b} equality");
         },
         .else_block => {},
     }
