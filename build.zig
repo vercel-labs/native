@@ -852,17 +852,33 @@ pub fn build(b: *std.Build) void {
         \\  sleep 0.1
         \\done
         \\case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_commands=72'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "dashboard GPU canvas did not present the retained display list as a packet" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'canvas_commands=72'*'widget_semantics=35'*) ;; *) echo "dashboard GPU canvas was missing retained commands or widget semantics" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'canvas_commands=72'*'widget_semantics=48'*) ;; *) echo "dashboard GPU canvas was missing retained commands or widget semantics" >&2; exit 1 ;; esac
         \\first_frame_latency="$(printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/dashboard-canvas kind=gpu_surface.* gpu_first_frame_latency_ns=\([0-9][0-9]*\).*/\1/p')"
         \\case "$first_frame_latency" in ''|*[!0-9]*) echo "dashboard GPU first frame latency was missing" >&2; exit 1 ;; esac
         \\if [ "$first_frame_latency" -le 0 ] || [ "$first_frame_latency" -gt 150000000 ]; then echo "dashboard GPU first frame exceeded 150 ms: $first_frame_latency ns" >&2; exit 1; fi
         \\case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_first_frame_latency_budget_ns=150000000'*'gpu_first_frame_latency_budget_exceeded=0'*'gpu_first_frame_latency_budget_ok=true'*) ;; *) echo "dashboard GPU first frame exceeded the latency budget" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'widget @w1/dashboard-canvas#82 role=tab'*'actions=[focus,press,select]'*) ;; *) echo "dashboard toolbar mode semantics were missing" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'widget @w1/dashboard-canvas#83 role=button'*'actions=[focus,press]'*) ;; *) echo "dashboard toolbar refresh semantics were missing" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'widget @w1/dashboard-canvas#103 role=button'*'actions=[focus,press]'*) ;; *) echo "dashboard live render button semantics were missing" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'widget @w1/dashboard-canvas#131 role=textbox'*'text="$13.4M"'*) ;; *) echo "dashboard forecast textbox semantics were missing" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'widget @w1/dashboard-canvas#140 role=dialog'*'name="Revenue filter popover"'*) ;; *) echo "dashboard popover semantics were missing" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'widget @w1/dashboard-canvas#261 role=text'*'Canvas frame:'*'packet ok'*) ;; *) echo "dashboard canvas status semantics were missing" >&2; exit 1 ;; esac
+        \\attempts=0
+        \\while [ "$attempts" -lt 50 ]; do
+        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\  case "$snapshot" in *'role=text name="Canvas frame:'*) break ;; esac
+        \\  attempts=$((attempts + 1))
+        \\  sleep 0.1
+        \\done
+        \\widget_line() {
+        \\  printf '%s\n' "$snapshot" | grep -F "$1" | head -1
+        \\}
+        \\line="$(widget_line 'role=tab name="Dashboard mode"')"
+        \\case "$line" in *'actions=[focus,select]'*) ;; *) echo "dashboard toolbar mode semantics were missing" >&2; exit 1 ;; esac
+        \\line="$(widget_line 'role=button name="Refresh dashboard"')"
+        \\case "$line" in *'actions=[focus,press]'*) ;; *) echo "dashboard toolbar refresh semantics were missing" >&2; exit 1 ;; esac
+        \\line="$(widget_line 'role=button name="Live render status"')"
+        \\case "$line" in *'actions=[focus,press]'*) ;; *) echo "dashboard live render button semantics were missing" >&2; exit 1 ;; esac
+        \\line="$(widget_line 'role=textbox name="Forecast amount"')"
+        \\case "$line" in *'text="$13.4M"'*) ;; *) echo "dashboard forecast textbox semantics were missing" >&2; exit 1 ;; esac
+        \\line="$(widget_line 'role=dialog name="Revenue filter popover"')"
+        \\case "$line" in '') echo "dashboard popover semantics were missing" >&2; exit 1 ;; esac
+        \\line="$(widget_line 'role=text name="Canvas frame:')"
+        \\case "$line" in *'packet ok'*) ;; *) echo "dashboard canvas status semantics were missing" >&2; exit 1 ;; esac
         \\gpu_frame_from_snapshot() {
         \\  printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/dashboard-canvas kind=gpu_surface.* gpu_frame=\([0-9][0-9]*\).*/\1/p'
         \\}
@@ -891,23 +907,27 @@ pub fn build(b: *std.Build) void {
         \\gpu_frame_before="$(gpu_frame_from_snapshot)"
         \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
         \\gpu_frame_after="$gpu_frame_before"
-        \\"$cli" automate widget-click dashboard-canvas 133 >/dev/null 2>&1
+        \\switch_id="$(printf '%s\n' "$snapshot" | sed -n 's/.*widget @w1\/dashboard-canvas#\([0-9][0-9]*\) role=switch name="Auto refresh".*/\1/p' | head -1)"
+        \\case "$switch_id" in ''|*[!0-9]*) echo "dashboard auto refresh switch id was missing from snapshot" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-click dashboard-canvas "$switch_id" >/dev/null 2>&1
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
         \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
         \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
         \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
         \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
-        \\    if snapshot_contains 'Clicked toggle #133: off.' && snapshot_contains 'view @w1/dashboard-canvas kind=gpu_surface' && snapshot_contains 'canvas_frame_full_repaint=false' && snapshot_contains 'canvas_frame_pipeline_uploads=0' && snapshot_contains 'canvas_frame_glyph_uploads=0' && snapshot_contains 'canvas_frame_text_uploads=0' && snapshot_contains 'canvas_frame_gpu_packet_unsupported=0' && snapshot_contains 'canvas_frame_gpu_packet_representable=true'; then
-        \\      case "$snapshot" in *'widget @w1/dashboard-canvas#133 role=switch'*'value=0'*) break ;; esac
+        \\    if snapshot_contains 'Auto refresh off.' && snapshot_contains 'view @w1/dashboard-canvas kind=gpu_surface' && snapshot_contains 'canvas_frame_full_repaint=false' && snapshot_contains 'canvas_frame_pipeline_uploads=0' && snapshot_contains 'canvas_frame_glyph_uploads=0' && snapshot_contains 'canvas_frame_text_uploads=0' && snapshot_contains 'canvas_frame_gpu_packet_unsupported=0' && snapshot_contains 'canvas_frame_gpu_packet_representable=true'; then
+        \\      switch_line="$(printf '%s\n' "$snapshot" | grep -F 'role=switch name="Auto refresh"' | head -1)"
+        \\      case "$switch_line" in *'value=0'*) break ;; esac
         \\    fi
         \\  fi
         \\  attempts=$((attempts + 1))
         \\  sleep 0.1
         \\done
         \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "dashboard switch click did not request a GPU frame" >&2; exit 1; fi
-        \\case "$snapshot" in *'Clicked toggle #133: off.'*) ;; *) echo "dashboard switch click did not update status" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'widget @w1/dashboard-canvas#133 role=switch'*'value=0'*) ;; *) echo "dashboard switch click did not route through pointer input" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'Auto refresh off.'*) ;; *) echo "dashboard switch click did not update status" >&2; exit 1 ;; esac
+        \\switch_line="$(printf '%s\n' "$snapshot" | grep -F 'role=switch name="Auto refresh"' | head -1)"
+        \\case "$switch_line" in *'value=0'*) ;; *) echo "dashboard switch click did not route through pointer input" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "dashboard switch click did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
         \\input_timestamp="$(printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/dashboard-canvas kind=gpu_surface.* gpu_input_timestamp_ns=\([0-9][0-9]*\).*/\1/p')"
         \\case "$input_timestamp" in ''|*[!0-9]*) echo "dashboard GPU input timestamp was missing after widget interaction" >&2; exit 1 ;; esac

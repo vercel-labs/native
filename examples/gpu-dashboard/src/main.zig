@@ -1,3 +1,13 @@
+//! gpu-dashboard: a retained-canvas product dashboard authored with the
+//! experimental `canvas.Ui` declarative builder.
+//!
+//! The app is one elm-style loop: `Model` -> `Msg` -> `update` -> `view`.
+//! Widget identity is structural (hashed ids), layout is flex, and events
+//! resolve to typed `Msg` values through the tree's handler table. The
+//! non-widget chrome (background, toolbar title, separators, hero gradient)
+//! is still a hand-built display-list prefix that the runtime preserves via
+//! `emitCanvasWidgetDisplayListWithChrome`.
+
 const std = @import("std");
 const runner = @import("runner");
 const zero_native = @import("zero-native");
@@ -15,42 +25,43 @@ const canvas_width: f32 = @floatFromInt(canvas_pixel_width);
 const canvas_height: f32 = window_height;
 const default_canvas_size = geometry.SizeF.init(canvas_width, canvas_height);
 const statusbar_height: f32 = 34;
-const dashboard_content_y: f32 = toolbar_height;
-const dashboard_content_height: f32 = canvas_height - toolbar_height - statusbar_height;
 const max_dashboard_pipelines: usize = 8;
 const max_dashboard_commands: usize = zero_native.runtime.max_canvas_commands_per_view;
 const max_dashboard_glyphs: usize = zero_native.runtime.max_canvas_glyphs_per_view;
-const max_dashboard_widgets: usize = 48;
+const max_dashboard_widgets: usize = 64;
 const dashboard_chrome_prefix_commands: usize = 6;
 const dashboard_chrome_suffix_commands: usize = 0;
 const expected_dashboard_command_count: usize = 72;
-const expected_dashboard_interaction_command_count: usize = 73;
-const expected_dashboard_reference_signature: u64 = 11241989199542776100;
+const expected_dashboard_interaction_command_count: usize = 72;
+const expected_dashboard_reference_signature: u64 = 17406427282194674082;
+const expected_dashboard_widget_node_count: usize = 48;
+const expected_dashboard_snapshot_widget_count: usize = 48;
 const refresh_command = "dashboard.refresh";
 const mode_command = "dashboard.mode";
 const dashboard_canvas_label = "dashboard-canvas";
+
+// Chrome display-list command ids. These live in the prefix that
+// `emitCanvasWidgetDisplayListWithChrome` preserves in front of the
+// widget-generated commands; they never collide with widget part ids
+// (which are hashed widget ids multiplied into a distinct range).
+const dashboard_background_command_id: canvas.ObjectId = 1;
 const dashboard_toolbar_id: canvas.ObjectId = 80;
 const dashboard_toolbar_title_id: canvas.ObjectId = 81;
-const dashboard_toolbar_mode_id: canvas.ObjectId = 82;
-const dashboard_toolbar_refresh_id: canvas.ObjectId = 83;
 const dashboard_toolbar_separator_id: canvas.ObjectId = 84;
-const dashboard_content_stack_id: canvas.ObjectId = 90;
 const dashboard_status_separator_id: canvas.ObjectId = 260;
-const dashboard_status_text_id: canvas.ObjectId = 261;
+const dashboard_hero_command_id: canvas.ObjectId = 4;
+
+// Display-list part slots used by the widget renderer for a widget's
+// generated commands (`canvas.widgetCommandPartId`).
+const widget_fill_slot: canvas.ObjectId = 1;
+const widget_track_slot: canvas.ObjectId = 2;
+const widget_thumb_slot: canvas.ObjectId = 3;
+const widget_text_slot: canvas.ObjectId = 4;
+const widget_composition_slot: canvas.ObjectId = 5;
+const widget_popover_blur_slot: canvas.ObjectId = 12;
+
 const initial_dashboard_status_text = "Canvas scene waiting for the first GPU frame.";
 const max_dashboard_status_text: usize = 192;
-const live_button_fill_command_id: canvas.ObjectId = 103 * 16 + 1;
-const live_button_text_command_id: canvas.ObjectId = 103 * 16 + 4;
-const forecast_text_command_id: canvas.ObjectId = 131 * 16 + 4;
-const forecast_composition_command_id: canvas.ObjectId = 131 * 16 + 5;
-const confidence_active_command_id: canvas.ObjectId = 134 * 16 + 2;
-const deployment_region_text_command_id: canvas.ObjectId = 156 * 16 + 4;
-const overview_fill_command_id: canvas.ObjectId = 111 * 16 + 1;
-const customers_fill_command_id: canvas.ObjectId = 112 * 16 + 1;
-const activity_scroll_track_command_id: canvas.ObjectId = 120 * 16 + 2;
-const activity_scroll_thumb_command_id: canvas.ObjectId = 120 * 16 + 3;
-const activity_first_text_command_id: canvas.ObjectId = 121 * 16 + 3;
-const filter_popover_blur_command_id: canvas.ObjectId = 140 * 16 + 12;
 const dashboard_glass_blur: f32 = 14;
 
 const bg_stops = [_]canvas.GradientStop{
@@ -85,16 +96,331 @@ const shell_windows = [_]zero_native.ShellWindow{.{
 }};
 const shell_scene: zero_native.ShellConfig = .{ .windows = &shell_windows };
 
-const GpuDashboardApp = struct {
+// ------------------------------------------------------------------ model
+
+const DashboardEntry = struct {
+    index: u8,
+    title: []const u8,
+};
+
+const nav_entries = [_]DashboardEntry{
+    .{ .index = 0, .title = "Overview" },
+    .{ .index = 1, .title = "Customers" },
+    .{ .index = 2, .title = "Latency" },
+};
+const metric_entries = [_]DashboardEntry{
+    .{ .index = 0, .title = "ARR $12.8M, up 18.4%" },
+    .{ .index = 1, .title = "Activation 74.2%, up 6.1%" },
+};
+const activity_entries = [_]DashboardEntry{
+    .{ .index = 0, .title = "Signed enterprise renewal" },
+    .{ .index = 1, .title = "Usage spike in EU region" },
+    .{ .index = 2, .title = "Latency budget recovered" },
+    .{ .index = 3, .title = "Queued invoice batch" },
+};
+const filter_entries = [_]DashboardEntry{
+    .{ .index = 0, .title = "Last 30 days" },
+    .{ .index = 1, .title = "Enterprise" },
+    .{ .index = 2, .title = "High intent" },
+};
+
+pub const Msg = union(enum) {
+    refresh,
+    set_mode,
+    toggle_live,
+    select_nav: u8,
+    select_metric: u8,
+    select_activity: u8,
+    toggle_auto,
+    confidence_changed,
+    select_filter: u8,
+    open_deployment,
+    submit_forecast,
+    submit_search,
+};
+
+pub const Model = struct {
     refresh_count: u32 = 0,
     mode_count: u32 = 0,
+    live_count: u32 = 0,
+    nav_selection: u8 = 0,
+    metric_selection: ?u8 = null,
+    activity_selection: ?u8 = null,
+    filter_selection: ?u8 = null,
+    auto_refresh: bool = true,
+    confidence: f32 = 0.62,
+    activity_scroll: f32 = 18,
+    status_storage: [max_dashboard_status_text]u8 = undefined,
+    status_len: usize = 0,
+
+    pub fn status(model: *const Model) []const u8 {
+        if (model.status_len == 0) return initial_dashboard_status_text;
+        return model.status_storage[0..model.status_len];
+    }
+
+    pub fn setStatus(model: *Model, text: []const u8) void {
+        const len = @min(text.len, model.status_storage.len);
+        @memcpy(model.status_storage[0..len], text[0..len]);
+        model.status_len = len;
+    }
+
+    fn setStatusFmt(model: *Model, comptime format: []const u8, args: anytype) void {
+        const written = std.fmt.bufPrint(&model.status_storage, format, args) catch {
+            model.status_len = 0;
+            return;
+        };
+        model.status_len = written.len;
+    }
+};
+
+pub fn update(model: *Model, msg: Msg) void {
+    switch (msg) {
+        .refresh => {
+            model.refresh_count += 1;
+            model.setStatusFmt("Dashboard canvas refreshed. Count {d}.", .{model.refresh_count});
+        },
+        .set_mode => {
+            model.mode_count += 1;
+            model.setStatusFmt("Dashboard mode changed. Count {d}.", .{model.mode_count});
+        },
+        .toggle_live => {
+            model.live_count += 1;
+            model.setStatusFmt("Live render pulse restarted. Count {d}.", .{model.live_count});
+        },
+        .select_nav => |index| {
+            model.nav_selection = index;
+            model.setStatusFmt("Selected {s}.", .{nav_entries[index].title});
+        },
+        .select_metric => |index| {
+            model.metric_selection = index;
+            model.setStatusFmt("Metric highlighted: {s}.", .{metric_entries[index].title});
+        },
+        .select_activity => |index| {
+            model.activity_selection = index;
+            model.setStatusFmt("Activity noted: {s}.", .{activity_entries[index].title});
+        },
+        .toggle_auto => {
+            model.auto_refresh = !model.auto_refresh;
+            model.setStatusFmt("Auto refresh {s}.", .{if (model.auto_refresh) "on" else "off"});
+        },
+        .confidence_changed => {
+            model.setStatusFmt("Confidence threshold {d}%.", .{dashboardDirtyPercent(model.confidence)});
+        },
+        .select_filter => |index| {
+            model.filter_selection = index;
+            model.setStatusFmt("Filter {s} applied.", .{filter_entries[index].title});
+        },
+        .open_deployment => model.setStatus("Deployment iad1 latency opened."),
+        .submit_forecast => model.setStatus("Forecast amount submitted."),
+        .submit_search => model.setStatus("Segment search submitted."),
+    }
+}
+
+// ------------------------------------------------------------------- view
+
+pub const DashboardUi = canvas.Ui(Msg);
+
+/// Leaf element with rendered text; the builder only special-cases the most
+/// common text leaves (`text`, `button`, `listItem`), so widgets like the
+/// segmented control, toggle, data grid, and fields set text directly.
+fn textLeaf(ui: *DashboardUi, kind: canvas.WidgetKind, options: DashboardUi.ElementOptions, content: []const u8) DashboardUi.Node {
+    var node = ui.el(kind, options, .{});
+    node.widget.text = content;
+    return node;
+}
+
+pub fn view(ui: *DashboardUi, model: *const Model) DashboardUi.Node {
+    return ui.column(.{}, .{
+        toolbarView(ui),
+        contentView(ui, model),
+        statusView(ui, model),
+    });
+}
+
+fn toolbarView(ui: *DashboardUi) DashboardUi.Node {
+    return ui.row(.{ .height = toolbar_height, .padding = 10, .gap = 12, .cross = .center }, .{
+        // The chrome display list draws the "GPU Dashboard" title here.
+        ui.el(.stack, .{ .width = 228 }, .{}),
+        textLeaf(ui, .segmented_control, .{
+            .width = 214,
+            .semantics = .{ .label = "Dashboard mode" },
+            .on_press = .set_mode,
+        }, "Overview|Revenue|Latency"),
+        ui.button(.{
+            .variant = .secondary,
+            .semantics = .{ .label = "Refresh dashboard" },
+            .on_press = .refresh,
+        }, "Refresh"),
+        ui.spacer(1),
+    });
+}
+
+fn contentView(ui: *DashboardUi, model: *const Model) DashboardUi.Node {
+    return ui.row(.{ .grow = 1, .padding = 38, .gap = 24 }, .{
+        heroColumn(ui, model),
+        mainColumn(ui, model),
+        sideColumn(ui, model),
+    });
+}
+
+fn heroColumn(ui: *DashboardUi, model: *const Model) DashboardUi.Node {
+    // Sits on top of the hero gradient the chrome display list paints.
+    return ui.column(.{ .width = 168, .padding = 16, .gap = 12 }, .{
+        ui.el(.list, .{
+            .height = 108,
+            .gap = 8,
+            .semantics = .{ .label = "Dashboard navigation" },
+        }, ui.eachCtx(model.nav_selection, &nav_entries, entryKey, navItem)),
+    });
+}
+
+fn navItem(ui: *DashboardUi, selection: u8, entry: *const DashboardEntry) DashboardUi.Node {
+    return ui.listItem(.{
+        .selected = entry.index == selection,
+        .on_press = Msg{ .select_nav = entry.index },
+    }, entry.title);
+}
+
+fn mainColumn(ui: *DashboardUi, model: *const Model) DashboardUi.Node {
+    return ui.column(.{ .grow = 1, .gap = 18 }, .{
+        ui.column(.{ .gap = 6 }, .{
+            ui.text(.{}, "Revenue pulse"),
+            ui.text(.{}, "Retained canvas dashboard"),
+        }),
+        metricsGrid(ui, model),
+        ui.el(.progress, .{
+            .value = 0.68,
+            .height = 10,
+            .semantics = .{ .label = "Conversion progress" },
+        }, .{}),
+        trendPanel(ui),
+        forecastPanel(ui, model),
+    });
+}
+
+fn metricsGrid(ui: *DashboardUi, model: *const Model) DashboardUi.Node {
+    var node = ui.el(.grid, .{
+        .height = 76,
+        .gap = 8,
+        .semantics = .{ .role = .list, .label = "Dashboard metrics" },
+    }, ui.eachCtx(model.metric_selection, &metric_entries, entryKey, metricItem));
+    node.widget.layout.columns = 2;
+    return node;
+}
+
+fn metricItem(ui: *DashboardUi, selection: ?u8, entry: *const DashboardEntry) DashboardUi.Node {
+    return ui.listItem(.{
+        .selected = selection != null and selection.? == entry.index,
+        .on_press = Msg{ .select_metric = entry.index },
+    }, entry.title);
+}
+
+fn trendPanel(ui: *DashboardUi) DashboardUi.Node {
+    var grid = ui.el(.data_grid, .{ .height = 28 }, ui.el(.data_row, .{ .height = 28 }, textLeaf(ui, .data_cell, .{
+        .grow = 1,
+        .on_press = .open_deployment,
+    }, "iad1 8.6ms P95")));
+    grid.widget.text = "Deployment latency";
+    return ui.panel(.{ .padding = 20, .semantics = .{ .label = "Conversion trend" } }, ui.column(.{ .gap = 14 }, .{
+        ui.text(.{}, "Conversion trend"),
+        grid,
+    }));
+}
+
+fn forecastPanel(ui: *DashboardUi, model: *const Model) DashboardUi.Node {
+    return ui.panel(.{ .padding = 14, .semantics = .{ .label = "Forecast form" } }, ui.row(.{ .gap = 14, .cross = .center }, .{
+        textLeaf(ui, .text_field, .{
+            .semantics = .{ .label = "Forecast amount" },
+            .on_submit = .submit_forecast,
+        }, "$13.4M"),
+        textLeaf(ui, .search_field, .{
+            .semantics = .{ .label = "Segment search" },
+            .on_submit = .submit_search,
+        }, "enterprise"),
+        textLeaf(ui, .toggle, .{
+            .checked = model.auto_refresh,
+            .value = if (model.auto_refresh) 1 else 0,
+            .semantics = .{ .label = "Auto refresh" },
+            .on_toggle = .toggle_auto,
+        }, "Auto"),
+        ui.el(.slider, .{
+            .value = model.confidence,
+            .semantics = .{ .label = "Confidence threshold" },
+            .on_change = .confidence_changed,
+        }, .{}),
+        ui.spacer(1),
+    }));
+}
+
+fn sideColumn(ui: *DashboardUi, model: *const Model) DashboardUi.Node {
+    return ui.column(.{ .width = 196, .gap = 16 }, .{
+        ui.button(.{
+            .semantics = .{ .label = "Live render status" },
+            .on_press = .toggle_live,
+        }, "Live render"),
+        filterPopover(ui, model),
+        ui.scroll(.{
+            .height = 112,
+            .value = model.activity_scroll,
+            .semantics = .{ .label = "Recent activity" },
+        }, ui.column(.{ .gap = 4 }, ui.eachCtx(model.activity_selection, &activity_entries, entryKey, activityItem))),
+    });
+}
+
+fn filterPopover(ui: *DashboardUi, model: *const Model) DashboardUi.Node {
+    var node = ui.el(.popover, .{
+        .height = 118,
+        .padding = 12,
+        .semantics = .{ .label = "Revenue filter popover" },
+    }, ui.el(.menu_surface, .{
+        .gap = 2,
+        .semantics = .{ .label = "Filter options" },
+    }, ui.eachCtx(model.filter_selection, &filter_entries, entryKey, filterItem)));
+    node.widget.backdrop_blur_token = .md;
+    return node;
+}
+
+fn filterItem(ui: *DashboardUi, selection: ?u8, entry: *const DashboardEntry) DashboardUi.Node {
+    return textLeaf(ui, .menu_item, .{
+        .selected = selection != null and selection.? == entry.index,
+        .on_press = Msg{ .select_filter = entry.index },
+    }, entry.title);
+}
+
+fn activityItem(ui: *DashboardUi, selection: ?u8, entry: *const DashboardEntry) DashboardUi.Node {
+    return ui.listItem(.{
+        .height = 32,
+        .selected = selection != null and selection.? == entry.index,
+        .on_press = Msg{ .select_activity = entry.index },
+    }, entry.title);
+}
+
+fn statusView(ui: *DashboardUi, model: *const Model) DashboardUi.Node {
+    const status = model.status();
+    return ui.row(.{ .height = statusbar_height, .padding = 8, .cross = .center }, .{
+        ui.text(.{ .grow = 1, .size = .sm, .semantics = .{ .label = status } }, status),
+    });
+}
+
+fn entryKey(entry: *const DashboardEntry) canvas.UiKey {
+    return canvas.uiKey(entry.title);
+}
+
+// -------------------------------------------------------------------- app
+
+const GpuDashboardApp = struct {
+    model: Model = .{},
+    arenas: [2]std.heap.ArenaAllocator,
+    arena_index: usize = 0,
+    tree: ?DashboardUi.Tree = null,
+    live_button_id: canvas.ObjectId = 0,
+    slider_id: canvas.ObjectId = 0,
+    activity_scroll_id: canvas.ObjectId = 0,
     color_scheme: zero_native.ColorScheme = .light,
     reduce_motion: bool = false,
     high_contrast: bool = false,
     canvas_installed: bool = false,
     reported_planned_frame: bool = false,
-    status_text_storage: [max_dashboard_status_text]u8 = undefined,
-    status_text_len: usize = 0,
     canvas_size: geometry.SizeF = default_canvas_size,
     pixel_snap_scale: f32 = 1,
     pixels: ?[]u8 = null,
@@ -123,6 +449,13 @@ const GpuDashboardApp = struct {
     text_layout_cache_actions: [max_dashboard_commands * 2]canvas.TextLayoutCacheAction = undefined,
     changes: [max_dashboard_commands * 2 + 1]canvas.DiffChange = undefined,
 
+    fn init(backing: std.mem.Allocator) GpuDashboardApp {
+        return .{ .arenas = .{
+            std.heap.ArenaAllocator.init(backing),
+            std.heap.ArenaAllocator.init(backing),
+        } };
+    }
+
     fn app(self: *@This()) zero_native.App {
         return .{
             .context = self,
@@ -138,6 +471,9 @@ const GpuDashboardApp = struct {
         if (self.scratch) |scratch| std.heap.page_allocator.free(scratch);
         self.pixels = null;
         self.scratch = null;
+        self.tree = null;
+        self.arenas[0].deinit();
+        self.arenas[1].deinit();
     }
 
     fn scene(context: *anyopaque) anyerror!zero_native.ShellConfig {
@@ -149,10 +485,12 @@ const GpuDashboardApp = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         switch (event_value) {
             .command => |command| {
+                // CommandEvent is stringly by design; the shell command names
+                // map onto the same typed messages the widgets dispatch.
                 if (std.mem.eql(u8, command.name, refresh_command)) {
-                    try self.refresh(runtime, command);
+                    try self.dispatch(runtime, command.window_id, .refresh);
                 } else if (std.mem.eql(u8, command.name, mode_command)) {
-                    try self.toggleMode(runtime, command);
+                    try self.dispatch(runtime, command.window_id, .set_mode);
                 }
             },
             .gpu_surface_frame => |frame_event| try self.handleGpuFrame(runtime, frame_event),
@@ -169,78 +507,108 @@ const GpuDashboardApp = struct {
         self.deinit();
     }
 
+    /// The elm-style loop: sync runtime-owned control state into the model,
+    /// apply the message, and rebuild the widget tree from the model.
+    fn dispatch(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId, msg: Msg) anyerror!void {
+        self.syncRuntimeWidgetState(runtime, window_id);
+        update(&self.model, msg);
+        switch (msg) {
+            .refresh => try self.reinstallCanvas(runtime, window_id),
+            .toggle_live => {
+                try self.rebuild(runtime, window_id);
+                self.restartLivePulse(runtime, window_id);
+            },
+            else => try self.rebuild(runtime, window_id),
+        }
+    }
+
+    /// The runtime owns transient control state that never reaches the app
+    /// as a typed message payload: slider drags/steps (the `.change` message
+    /// carries no value) and scroll offsets (scroll intents dispatch no
+    /// message at all). Read the reconciled values back into the model
+    /// before rebuilding so the next source tree does not stomp them.
+    /// Slider values would also survive via `setCanvasWidgetLayout`'s
+    /// control reconciliation, but scroll offsets reconcile from the source
+    /// tree, so they must round-trip through the model.
+    fn syncRuntimeWidgetState(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId) void {
+        if (self.tree == null) return;
+        const layout = runtime.canvasWidgetLayout(window_id, dashboard_canvas_label) catch return;
+        if (self.slider_id != 0) {
+            if (layout.findById(self.slider_id)) |node| self.model.confidence = node.widget.value;
+        }
+        if (self.activity_scroll_id != 0) {
+            if (layout.findById(self.activity_scroll_id)) |node| self.model.activity_scroll = node.widget.value;
+        }
+    }
+
+    /// Rebuild the widget tree from the model and hand it to the runtime,
+    /// together with the chrome display-list prefix. The runtime copies and
+    /// reconciles the layout, so the previous tree's arena stays alive only
+    /// until the next rebuild (two arenas, swapped).
+    fn rebuild(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId) anyerror!void {
+        self.syncRuntimeWidgetState(runtime, window_id);
+        const tokens = self.dashboardTokens();
+        const next_index = self.arena_index ^ 1;
+        _ = self.arenas[next_index].reset(.retain_capacity);
+        var ui = DashboardUi.init(self.arenas[next_index].allocator());
+        const tree = try ui.finalizeWithTokens(view(&ui, &self.model), tokens);
+
+        const size = dashboardSurfaceSize(self.canvas_size);
+        var nodes: [max_dashboard_widgets]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTreeWithTokens(tree.root, rect(0, 0, size.width, size.height), tokens, &nodes);
+
+        var commands: [max_dashboard_commands]canvas.CanvasCommand = undefined;
+        var builder = canvas.Builder.init(&commands);
+        try buildDashboardDisplayListForSize(&builder, layout, tokens, size);
+        _ = try runtime.setCanvasDisplayList(window_id, dashboard_canvas_label, builder.displayList());
+        _ = try runtime.setCanvasWidgetLayout(window_id, dashboard_canvas_label, layout);
+        _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, dashboard_canvas_label, tokens, .{
+            .prefix_command_count = dashboard_chrome_prefix_commands,
+            .suffix_command_count = dashboard_chrome_suffix_commands,
+        });
+
+        self.tree = tree;
+        self.arena_index = next_index;
+        self.live_button_id = widgetId(findWidgetKindText(tree.root, .button, "Live render"));
+        self.slider_id = widgetId(findWidgetByKind(tree.root, .slider));
+        self.activity_scroll_id = widgetId(findWidgetByKind(tree.root, .scroll_view));
+    }
+
     fn handleGpuFrame(self: *@This(), runtime: *zero_native.Runtime, frame_event: zero_native.GpuSurfaceFrameEvent) anyerror!void {
         if (!std.mem.eql(u8, frame_event.label, dashboard_canvas_label)) return;
         const first_install = !self.canvas_installed;
         const scale_changed = self.updatePixelSnapScale(frame_event.scale_factor);
         const size_changed = self.updateCanvasSize(dashboardSurfaceSize(frame_event.size));
         if (first_install or scale_changed or size_changed) {
-            if (first_install) self.setStatusText("Dashboard display list presented on the GPU surface.");
-            try self.installDashboardCanvas(runtime, frame_event);
+            if (first_install) self.model.setStatus("Dashboard display list presented on the GPU surface.");
+            try self.rebuild(runtime, frame_event.window_id);
+            try self.scheduleDashboardAnimations(runtime, frame_event.window_id, frame_event.timestamp_ns);
+            try self.presentDashboardCanvas(runtime, frame_event, true);
+            self.canvas_installed = true;
             return;
         }
 
-        _ = try self.presentDashboardCanvas(runtime, frame_event, frame_event.canvas_frame_full_repaint);
-        const current_frame = try runtime.gpuSurfaceFrame(frame_event.window_id, "dashboard-canvas");
+        try self.presentDashboardCanvas(runtime, frame_event, frame_event.canvas_frame_full_repaint);
+        const current_frame = try runtime.gpuSurfaceFrame(frame_event.window_id, dashboard_canvas_label);
         try self.reportFrameStatus(runtime, gpuFrameEvent(current_frame));
     }
 
     fn handleWidgetPointer(self: *@This(), runtime: *zero_native.Runtime, pointer_event: zero_native.runtime.CanvasWidgetPointerEvent) anyerror!void {
         if (!std.mem.eql(u8, pointer_event.view_label, dashboard_canvas_label)) return;
+        const tree = self.tree orelse return;
         const target = pointer_event.target orelse return;
-        const action = switch (pointer_event.pointer.phase) {
-            .up => "Clicked",
-            else => return,
-        };
-        if (target.id == dashboard_toolbar_mode_id or target.id == dashboard_toolbar_refresh_id) return;
-        try self.reportWidgetInteraction(runtime, pointer_event.window_id, action, target.id);
+        if (tree.msgForPointer(target.id, pointer_event.pointer.phase)) |msg| {
+            try self.dispatch(runtime, pointer_event.window_id, msg);
+        }
     }
 
     fn handleWidgetKeyboard(self: *@This(), runtime: *zero_native.Runtime, keyboard_event: zero_native.runtime.CanvasWidgetKeyboardEvent) anyerror!void {
         if (!std.mem.eql(u8, keyboard_event.view_label, dashboard_canvas_label)) return;
-        if (keyboard_event.keyboard.phase != .key_down) return;
+        const tree = self.tree orelse return;
         const target = keyboard_event.target orelse return;
-        if (target.id == dashboard_toolbar_mode_id or target.id == dashboard_toolbar_refresh_id) return;
-        switch (target.kind) {
-            .scroll_view, .list, .data_grid, .table => return,
-            else => {},
+        if (tree.msgForKeyboard(target.id, keyboard_event.keyboard)) |msg| {
+            try self.dispatch(runtime, keyboard_event.window_id, msg);
         }
-        try self.reportWidgetInteraction(runtime, keyboard_event.window_id, "Keyed", target.id);
-    }
-
-    fn reportWidgetInteraction(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId, action: []const u8, id: canvas.ObjectId) anyerror!void {
-        const layout = try runtime.canvasWidgetLayout(window_id, dashboard_canvas_label);
-        const node = layout.findById(id) orelse return;
-        const widget = node.widget;
-        var status_buffer: [192]u8 = undefined;
-        const status = switch (widget.kind) {
-            .checkbox, .toggle => try std.fmt.bufPrint(
-                &status_buffer,
-                "{s} {s} #{d}: {s}.",
-                .{ action, @tagName(widget.kind), id, if (widget.state.selected or widget.value >= 0.5) "on" else "off" },
-            ),
-            .slider, .progress => try std.fmt.bufPrint(
-                &status_buffer,
-                "{s} {s} #{d}: value {d}.",
-                .{ action, @tagName(widget.kind), id, widget.value },
-            ),
-            .scroll_view, .list, .data_grid => try std.fmt.bufPrint(
-                &status_buffer,
-                "{s} {s} #{d}: offset {d}.",
-                .{ action, @tagName(widget.kind), id, widget.value },
-            ),
-            .text_field, .search_field => try std.fmt.bufPrint(
-                &status_buffer,
-                "{s} {s} #{d}: {d} bytes.",
-                .{ action, @tagName(widget.kind), id, widget.text.len },
-            ),
-            else => try std.fmt.bufPrint(
-                &status_buffer,
-                "{s} {s} #{d}{s}.",
-                .{ action, @tagName(widget.kind), id, if (widget.state.selected) ": selected" else "" },
-            ),
-        };
-        try self.updateStatus(runtime, window_id, status);
     }
 
     fn reportFrameStatus(self: *@This(), runtime: *zero_native.Runtime, frame_event: zero_native.GpuSurfaceFrameEvent) anyerror!void {
@@ -248,15 +616,33 @@ const GpuDashboardApp = struct {
             self.reported_planned_frame = true;
             var status_buffer: [192]u8 = undefined;
             const status = try dashboardFrameStatus(&status_buffer, frame_event);
-            try self.updateStatus(runtime, frame_event.window_id, status);
+            self.model.setStatus(status);
+            try self.rebuild(runtime, frame_event.window_id);
         }
     }
 
-    fn installDashboardCanvas(self: *@This(), runtime: *zero_native.Runtime, frame_event: zero_native.GpuSurfaceFrameEvent) anyerror!void {
-        try installDashboardCanvasModelWithTokens(runtime, frame_event.window_id, self.dashboardTokens(), self.canvas_size, self.statusText());
-        try self.scheduleDashboardAnimations(runtime, frame_event.window_id, frame_event.timestamp_ns);
-        _ = try self.presentDashboardCanvas(runtime, frame_event, true);
-        self.canvas_installed = true;
+    /// Full reinstall path for the refresh message: reset diagnostics
+    /// reporting, resync the surface size, rebuild, restart the pulse, and
+    /// present a full repaint immediately (commands can arrive without a
+    /// trailing frame event).
+    fn reinstallCanvas(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId) anyerror!void {
+        self.reported_planned_frame = false;
+        const gpu_frame = runtime.gpuSurfaceFrame(window_id, dashboard_canvas_label) catch |err| switch (err) {
+            error.WindowNotFound, error.ViewNotFound, error.InvalidViewOptions => {
+                try self.rebuild(runtime, window_id);
+                return;
+            },
+            else => return err,
+        };
+        _ = self.updateCanvasSize(dashboardSurfaceSize(gpu_frame.size));
+        try self.rebuild(runtime, window_id);
+        try self.scheduleDashboardAnimations(runtime, window_id, gpu_frame.timestamp_ns);
+        try self.presentDashboardCanvas(runtime, gpuFrameEvent(gpu_frame), true);
+    }
+
+    fn restartLivePulse(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId) void {
+        const gpu_frame = runtime.gpuSurfaceFrame(window_id, dashboard_canvas_label) catch return;
+        self.scheduleDashboardAnimations(runtime, window_id, gpu_frame.timestamp_ns) catch {};
     }
 
     fn dashboardTokens(self: @This()) canvas.DesignTokens {
@@ -276,47 +662,6 @@ const GpuDashboardApp = struct {
         return true;
     }
 
-    fn setStatusText(self: *@This(), text: []const u8) void {
-        const len = @min(text.len, self.status_text_storage.len);
-        @memcpy(self.status_text_storage[0..len], text[0..len]);
-        self.status_text_len = len;
-    }
-
-    fn statusText(self: *const @This()) []const u8 {
-        if (self.status_text_len == 0) return initial_dashboard_status_text;
-        return self.status_text_storage[0..self.status_text_len];
-    }
-
-    fn updateDashboardCanvasModel(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId) anyerror!void {
-        try installDashboardCanvasModelWithTokens(runtime, window_id, self.dashboardTokens(), self.canvas_size, self.statusText());
-    }
-
-    fn updateStatus(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId, text: []const u8) anyerror!void {
-        self.setStatusText(text);
-        if (self.canvas_installed) try self.updateDashboardCanvasModel(runtime, window_id);
-    }
-
-    fn refresh(self: *@This(), runtime: *zero_native.Runtime, command: zero_native.CommandEvent) anyerror!void {
-        self.refresh_count += 1;
-        self.reported_planned_frame = false;
-        const gpu_frame = try runtime.gpuSurfaceFrame(command.window_id, dashboard_canvas_label);
-        _ = self.updateCanvasSize(dashboardSurfaceSize(gpu_frame.size));
-        try installDashboardCanvasModelWithTokens(runtime, command.window_id, self.dashboardTokens(), self.canvas_size, self.statusText());
-        try self.scheduleDashboardAnimations(runtime, command.window_id, gpu_frame.timestamp_ns);
-        _ = try self.presentDashboardCanvas(runtime, gpuFrameEvent(gpu_frame), true);
-
-        var status_buffer: [160]u8 = undefined;
-        const status = try std.fmt.bufPrint(&status_buffer, "Dashboard canvas refreshed from {s}. Count {d}.", .{ @tagName(command.source), self.refresh_count });
-        try self.updateStatus(runtime, command.window_id, status);
-    }
-
-    fn toggleMode(self: *@This(), runtime: *zero_native.Runtime, command: zero_native.CommandEvent) anyerror!void {
-        self.mode_count += 1;
-        var status_buffer: [160]u8 = undefined;
-        const status = try std.fmt.bufPrint(&status_buffer, "Dashboard mode changed from {s}. Count {d}.", .{ @tagName(command.source), self.mode_count });
-        try self.updateStatus(runtime, command.window_id, status);
-    }
-
     fn applySystemAppearance(self: *@This(), runtime: *zero_native.Runtime, appearance: zero_native.Appearance) anyerror!void {
         const scheme_changed = self.color_scheme != appearance.color_scheme;
         const motion_changed = self.reduce_motion != appearance.reduce_motion;
@@ -332,13 +677,10 @@ const GpuDashboardApp = struct {
             else => return err,
         };
         _ = self.updateCanvasSize(dashboardSurfaceSize(gpu_frame.size));
-        try installDashboardCanvasModelWithTokens(runtime, 1, self.dashboardTokens(), self.canvas_size, self.statusText());
+        self.model.setStatusFmt("Dashboard theme: {s} from system appearance.", .{@tagName(self.color_scheme)});
+        try self.rebuild(runtime, 1);
         try self.scheduleDashboardAnimations(runtime, 1, gpu_frame.timestamp_ns);
-        _ = try self.presentDashboardCanvas(runtime, gpuFrameEvent(gpu_frame), true);
-
-        var status_buffer: [160]u8 = undefined;
-        const status = try std.fmt.bufPrint(&status_buffer, "Dashboard theme: {s} from system appearance.", .{@tagName(self.color_scheme)});
-        try self.updateStatus(runtime, 1, status);
+        try self.presentDashboardCanvas(runtime, gpuFrameEvent(gpu_frame), true);
     }
 
     fn presentDashboardCanvas(self: *@This(), runtime: *zero_native.Runtime, frame_event: zero_native.GpuSurfaceFrameEvent, full_repaint: bool) anyerror!void {
@@ -407,12 +749,16 @@ const GpuDashboardApp = struct {
         return normalized;
     }
 
+    fn liveButtonFillCommandId(self: *const @This()) canvas.ObjectId {
+        return widgetPartCommandId(self.live_button_id, widget_fill_slot);
+    }
+
     fn scheduleDashboardAnimations(self: *@This(), runtime: *zero_native.Runtime, window_id: zero_native.WindowId, start_ns: u64) anyerror!void {
-        _ = self;
+        if (self.live_button_id == 0) return;
         const motion = dashboardWidgetTokens().motion;
         const animations = [_]canvas.CanvasRenderAnimation{
             motion.animation(.{
-                .id = live_button_fill_command_id,
+                .id = widgetPartCommandId(self.live_button_id, widget_fill_slot),
                 .start_ns = start_ns,
                 .duration = .slow,
                 .from_opacity = 0.72,
@@ -421,7 +767,7 @@ const GpuDashboardApp = struct {
                 .to_transform = canvas.Affine.identity(),
             }),
             motion.animation(.{
-                .id = live_button_text_command_id,
+                .id = widgetPartCommandId(self.live_button_id, widget_text_slot),
                 .start_ns = start_ns,
                 .duration = .slow,
                 .from_opacity = 0.72,
@@ -472,29 +818,41 @@ const GpuDashboardApp = struct {
     }
 };
 
-fn installDashboardCanvasModel(runtime: *zero_native.Runtime, window_id: zero_native.WindowId) anyerror!void {
-    return installDashboardCanvasModelWithTokens(runtime, window_id, dashboardWidgetTokens(), default_canvas_size, initial_dashboard_status_text);
+// -------------------------------------------------------- widget helpers
+
+fn widgetId(widget: ?canvas.Widget) canvas.ObjectId {
+    return if (widget) |value| value.id else 0;
 }
 
-fn installDashboardCanvasModelWithTokens(runtime: *zero_native.Runtime, window_id: zero_native.WindowId, tokens: canvas.DesignTokens, surface_size: geometry.SizeF, status_text: []const u8) anyerror!void {
-    var commands: [max_dashboard_commands]canvas.CanvasCommand = undefined;
-    var nodes: [max_dashboard_widgets]canvas.WidgetLayoutNode = undefined;
-    var builder = canvas.Builder.init(&commands);
-    const layout = try buildDashboardWidgetLayoutForSize(&nodes, surface_size, status_text);
-    try buildDashboardDisplayListForSize(&builder, layout, tokens, surface_size);
-    _ = try runtime.setCanvasDisplayList(window_id, dashboard_canvas_label, builder.displayList());
-    _ = try runtime.setCanvasWidgetLayout(window_id, dashboard_canvas_label, layout);
-    _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, dashboard_canvas_label, tokens, .{
-        .prefix_command_count = dashboard_chrome_prefix_commands,
-        .suffix_command_count = dashboard_chrome_suffix_commands,
-    });
+fn widgetPartCommandId(id: canvas.ObjectId, slot: canvas.ObjectId) canvas.ObjectId {
+    return canvas.widgetCommandPartId(.{ .widget_id = id, .slot = slot });
 }
 
-fn buildDashboardDisplayListFromWidgets(builder: *canvas.Builder) canvas.Error!void {
-    var nodes: [max_dashboard_widgets]canvas.WidgetLayoutNode = undefined;
-    const layout = try buildDashboardWidgetLayout(&nodes);
-    try buildDashboardDisplayList(builder, layout, dashboardWidgetTokens());
+fn findWidgetByKind(widget: canvas.Widget, kind: canvas.WidgetKind) ?canvas.Widget {
+    if (widget.kind == kind) return widget;
+    for (widget.children) |child| {
+        if (findWidgetByKind(child, kind)) |found| return found;
+    }
+    return null;
 }
+
+fn findWidgetKindText(widget: canvas.Widget, kind: canvas.WidgetKind, text: []const u8) ?canvas.Widget {
+    if (widget.kind == kind and std.mem.eql(u8, widget.text, text)) return widget;
+    for (widget.children) |child| {
+        if (findWidgetKindText(child, kind, text)) |found| return found;
+    }
+    return null;
+}
+
+fn findWidgetByLabel(widget: canvas.Widget, label: []const u8) ?canvas.Widget {
+    if (std.mem.eql(u8, widget.semantics.label, label)) return widget;
+    for (widget.children) |child| {
+        if (findWidgetByLabel(child, label)) |found| return found;
+    }
+    return null;
+}
+
+// ------------------------------------------------------- chrome + tokens
 
 fn dashboardSurfaceSize(size: geometry.SizeF) geometry.SizeF {
     if (size.isEmpty()) return default_canvas_size;
@@ -538,17 +896,13 @@ fn dashboardSizesEqual(a: geometry.SizeF, b: geometry.SizeF) bool {
     return a.width == b.width and a.height == b.height;
 }
 
-fn buildDashboardDisplayList(builder: *canvas.Builder, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens) canvas.Error!void {
-    return buildDashboardDisplayListForSize(builder, layout, tokens, default_canvas_size);
-}
-
 fn buildDashboardDisplayListForSize(builder: *canvas.Builder, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens, surface_size: geometry.SizeF) canvas.Error!void {
     const size = dashboardSurfaceSize(surface_size);
     const backdrop_rect = dashboardBackdropRect(size);
     const hero_rect = dashboardHeroRect(size);
     const content_y = dashboardContentYForSize(size);
     const content_height = dashboardContentHeightForSize(size);
-    try builder.fillRect(.{ .id = 1, .rect = backdrop_rect, .fill = .{ .color = tokens.colors.background } });
+    try builder.fillRect(.{ .id = dashboard_background_command_id, .rect = backdrop_rect, .fill = .{ .color = tokens.colors.background } });
     try builder.fillRect(.{ .id = dashboard_toolbar_id, .rect = rect(0, 0, size.width, toolbar_height), .fill = .{ .color = tokens.colors.surface } });
     try builder.drawText(.{
         .id = dashboard_toolbar_title_id,
@@ -564,7 +918,7 @@ fn buildDashboardDisplayListForSize(builder: *canvas.Builder, layout: canvas.Wid
     });
     try builder.fillRect(.{ .id = dashboard_toolbar_separator_id, .rect = rect(0, toolbar_height - 1, size.width, 1), .fill = .{ .color = tokens.colors.border } });
     try builder.fillRect(.{ .id = dashboard_status_separator_id, .rect = rect(0, content_y + content_height, size.width, 1), .fill = .{ .color = tokens.colors.border } });
-    try builder.fillRoundedRect(.{ .id = 4, .rect = hero_rect, .radius = canvas.Radius.all(16), .fill = .{ .linear_gradient = .{ .start = hero_rect.topLeft(), .end = hero_rect.bottomRight(), .stops = &hero_stops } } });
+    try builder.fillRoundedRect(.{ .id = dashboard_hero_command_id, .rect = hero_rect, .radius = canvas.Radius.all(16), .fill = .{ .linear_gradient = .{ .start = hero_rect.topLeft(), .end = hero_rect.bottomRight(), .stops = &hero_stops } } });
 
     try layout.emitDisplayList(builder, tokens);
 }
@@ -607,205 +961,7 @@ fn normalizedPixelSnapScale(scale_factor: f32) f32 {
     return scale_factor;
 }
 
-fn buildDashboardWidgetLayout(nodes: []canvas.WidgetLayoutNode) canvas.Error!canvas.WidgetLayoutTree {
-    return buildDashboardWidgetLayoutForSize(nodes, default_canvas_size, initial_dashboard_status_text);
-}
-
-fn buildDashboardWidgetLayoutForSize(nodes: []canvas.WidgetLayoutNode, surface_size: geometry.SizeF, status_text: []const u8) canvas.Error!canvas.WidgetLayoutTree {
-    const metric_items = [_]canvas.Widget{
-        .{ .id = 105, .kind = .list_item, .text = "ARR $12.8M, up 18.4%" },
-        .{ .id = 106, .kind = .list_item, .text = "Activation 74.2%, up 6.1%" },
-    };
-    const nav_items = [_]canvas.Widget{
-        .{ .id = 111, .kind = .list_item, .text = "Overview", .state = .{ .selected = true } },
-        .{ .id = 112, .kind = .list_item, .text = "Customers" },
-        .{ .id = 113, .kind = .list_item, .text = "Latency" },
-    };
-    const activity_items = [_]canvas.Widget{
-        .{ .id = 121, .kind = .list_item, .frame = rect(0, 0, 0, 32), .text = "Signed enterprise renewal" },
-        .{ .id = 122, .kind = .list_item, .frame = rect(0, 36, 0, 32), .text = "Usage spike in EU region" },
-        .{ .id = 123, .kind = .list_item, .frame = rect(0, 72, 0, 32), .text = "Latency budget recovered" },
-        .{ .id = 124, .kind = .list_item, .frame = rect(0, 108, 0, 32), .text = "Queued invoice batch" },
-    };
-    const form_fields = [_]canvas.Widget{
-        .{
-            .id = 131,
-            .kind = .text_field,
-            .frame = rect(14, 16, 116, 30),
-            .text = "$13.4M",
-            .semantics = .{ .label = "Forecast amount" },
-        },
-        .{
-            .id = 132,
-            .kind = .search_field,
-            .frame = rect(144, 16, 128, 30),
-            .text = "enterprise",
-            .semantics = .{ .label = "Segment search" },
-        },
-        .{
-            .id = 133,
-            .kind = .toggle,
-            .frame = rect(286, 17, 94, 28),
-            .text = "Auto",
-            .value = 1,
-            .state = .{ .selected = true },
-            .semantics = .{ .label = "Auto refresh" },
-        },
-        .{
-            .id = 134,
-            .kind = .slider,
-            .frame = rect(446, 19, 78, 24),
-            .value = 0.62,
-            .semantics = .{ .label = "Confidence threshold" },
-        },
-    };
-    const filter_items = [_]canvas.Widget{
-        .{ .id = 142, .kind = .menu_item, .text = "Last 30 days" },
-        .{ .id = 143, .kind = .menu_item, .text = "Enterprise" },
-        .{ .id = 144, .kind = .menu_item, .text = "High intent" },
-    };
-    const filter_menu = [_]canvas.Widget{.{
-        .id = 141,
-        .kind = .menu_surface,
-        .frame = rect(12, 12, 172, 92),
-        .layout = .{ .gap = 2 },
-        .semantics = .{ .label = "Filter options" },
-        .children = &filter_items,
-    }};
-    const deployment_cells = [_]canvas.Widget{
-        .{ .id = 156, .kind = .data_cell, .text = "iad1 8.6ms P95", .command = "deployment.open", .layout = .{ .grow = 1 } },
-    };
-    const deployment_rows = [_]canvas.Widget{
-        .{ .id = 155, .kind = .data_row, .frame = rect(0, 0, 0, 28), .children = &deployment_cells },
-    };
-    const trend_widgets = [_]canvas.Widget{
-        .{
-            .id = 116,
-            .kind = .text,
-            .frame = rect(24, 20, 180, 18),
-            .text = "Conversion trend",
-        },
-        .{
-            .id = 150,
-            .kind = .data_grid,
-            .frame = rect(24, 58, 284, 28),
-            .text = "Deployment latency",
-            .children = &deployment_rows,
-        },
-    };
-    const dashboard_widgets = [_]canvas.Widget{
-        .{
-            .id = 101,
-            .kind = .text,
-            .frame = rect(236, 54, 240, 28),
-            .text = "Revenue pulse",
-        },
-        .{
-            .id = 102,
-            .kind = .text,
-            .frame = rect(236, 88, 280, 18),
-            .text = "Retained canvas dashboard",
-        },
-        .{
-            .id = 103,
-            .kind = .button,
-            .frame = rect(688, 50, 122, 34),
-            .text = "Live render",
-            .command = mode_command,
-            .semantics = .{ .label = "Live render status" },
-        },
-        .{
-            .id = 104,
-            .kind = .grid,
-            .frame = rect(236, 128, 332, 76),
-            .layout = .{ .columns = 2, .gap = 8 },
-            .semantics = .{ .role = .list, .label = "Dashboard metrics" },
-            .children = &metric_items,
-        },
-        .{
-            .id = 108,
-            .kind = .panel,
-            .frame = rect(236, 248, 332, 164),
-            .semantics = .{ .label = "Conversion trend" },
-            .children = &trend_widgets,
-        },
-        .{
-            .id = 109,
-            .kind = .progress,
-            .frame = rect(236, 216, 332, 10),
-            .value = 0.68,
-            .semantics = .{ .label = "Conversion progress" },
-        },
-        .{
-            .id = 110,
-            .kind = .list,
-            .frame = rect(54, 136, 136, 120),
-            .layout = .{ .gap = 8 },
-            .semantics = .{ .label = "Dashboard navigation" },
-            .children = &nav_items,
-        },
-        .{
-            .id = 120,
-            .kind = .scroll_view,
-            .frame = rect(596, 238, 196, 112),
-            .value = 18,
-            .semantics = .{ .label = "Recent activity" },
-            .children = &activity_items,
-        },
-        .{
-            .id = 130,
-            .kind = .panel,
-            .frame = rect(236, 426, 556, 64),
-            .semantics = .{ .label = "Forecast form" },
-            .children = &form_fields,
-        },
-        .{
-            .id = 140,
-            .kind = .popover,
-            .frame = rect(596, 92, 196, 118),
-            .backdrop_blur_token = .md,
-            .semantics = .{ .label = "Revenue filter popover" },
-            .children = &filter_menu,
-        },
-    };
-    const size = dashboardSurfaceSize(surface_size);
-    const content_y = dashboardContentYForSize(size);
-    const content_height = dashboardContentHeightForSize(size);
-    const root_widgets = [_]canvas.Widget{
-        .{
-            .id = dashboard_toolbar_mode_id,
-            .kind = .segmented_control,
-            .frame = rect(252, 12, 214, 30),
-            .text = "Overview|Revenue|Latency",
-            .command = mode_command,
-            .semantics = .{ .label = "Dashboard mode" },
-        },
-        .{
-            .id = dashboard_toolbar_refresh_id,
-            .kind = .button,
-            .frame = rect(484, 12, 86, 30),
-            .text = "Refresh",
-            .variant = .secondary,
-            .command = refresh_command,
-            .semantics = .{ .label = "Refresh dashboard" },
-        },
-        .{
-            .id = dashboard_content_stack_id,
-            .kind = .stack,
-            .frame = rect(0, content_y, size.width, content_height),
-            .children = &dashboard_widgets,
-        },
-        .{
-            .id = dashboard_status_text_id,
-            .kind = .text,
-            .frame = rect(14, content_y + content_height + 8, @max(1, size.width - 28), 18),
-            .text = status_text,
-            .size = .sm,
-            .semantics = .{ .label = status_text },
-        },
-    };
-    return canvas.layoutWidgetTree(.{ .kind = .stack, .children = &root_widgets }, rect(0, 0, size.width, size.height), nodes);
-}
+// --------------------------------------------------------- frame helpers
 
 fn dashboardFrame(display_list: canvas.DisplayList, previous: ?canvas.DisplayList, options: canvas.CanvasFrameOptions, storage: canvas.CanvasFrameStorage) canvas.Error!canvas.CanvasFrame {
     return display_list.framePlan(previous, options, storage);
@@ -974,35 +1130,73 @@ fn dashboardDirtyPercent(ratio: f32) u32 {
     return @as(u32, @intFromFloat(@round(std.math.clamp(ratio, 0, 1) * 100.0)));
 }
 
-fn dashboardSnapshotWidget(snapshot: zero_native.automation.snapshot.Input, id: u64) ?zero_native.automation.snapshot.Widget {
+fn color(r: u8, g: u8, b: u8) canvas.Color {
+    return canvas.Color.rgb8(r, g, b);
+}
+
+fn rgba(r: u8, g: u8, b: u8, a: u8) canvas.Color {
+    return canvas.Color.rgba8(r, g, b, a);
+}
+
+fn rect(x: f32, y: f32, width: f32, height: f32) geometry.RectF {
+    return geometry.RectF.init(x, y, width, height);
+}
+
+fn pt(x: f32, y: f32) geometry.PointF {
+    return geometry.PointF.init(x, y);
+}
+
+pub fn main(init: std.process.Init) !void {
+    var app = GpuDashboardApp.init(std.heap.page_allocator);
+    try runner.runWithOptions(app.app(), .{
+        .app_name = "gpu-dashboard",
+        .window_title = "zero-native GPU Dashboard",
+        .bundle_id = "dev.zero_native.gpu_dashboard",
+        .icon_path = "assets/icon.icns",
+        .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
+        .restore_state = false,
+        .js_window_api = false,
+        .security = .{
+            .permissions = &app_permissions,
+            .navigation = .{ .allowed_origins = &.{ "zero://inline", "zero://app" } },
+        },
+    }, init);
+}
+
+// ------------------------------------------------------------------ tests
+
+fn buildTestTree(arena: std.mem.Allocator, model: *const Model) !DashboardUi.Tree {
+    var ui = DashboardUi.init(arena);
+    return ui.finalizeWithTokens(view(&ui, model), dashboardWidgetTokens());
+}
+
+fn layoutTestTree(tree: DashboardUi.Tree, size: geometry.SizeF, nodes: []canvas.WidgetLayoutNode) !canvas.WidgetLayoutTree {
+    return canvas.layoutWidgetTreeWithTokens(tree.root, rect(0, 0, size.width, size.height), dashboardWidgetTokens(), nodes);
+}
+
+fn dashboardSnapshotWidgetNamed(snapshot: zero_native.automation.snapshot.Input, role: []const u8, name: []const u8) ?zero_native.automation.snapshot.Widget {
     for (snapshot.widgets) |widget| {
-        if (widget.id == id and std.mem.eql(u8, widget.view_label, "dashboard-canvas")) return widget;
+        if (!std.mem.eql(u8, widget.view_label, dashboard_canvas_label)) continue;
+        if (!std.mem.eql(u8, widget.role, role)) continue;
+        if (std.mem.eql(u8, widget.name, name)) return widget;
     }
     return null;
 }
 
-fn expectDashboardTextCommand(display_list: canvas.DisplayList, id: canvas.ObjectId, expected: []const u8) !void {
-    const command_ref = display_list.findCommandById(id) orelse return error.MissingDashboardCommand;
-    switch (command_ref.command) {
-        .draw_text => |text| try std.testing.expectEqualStrings(expected, text.text),
-        else => return error.UnexpectedDashboardCommand,
+fn dashboardSnapshotWidgetNameContains(snapshot: zero_native.automation.snapshot.Input, role: []const u8, fragment: []const u8) ?zero_native.automation.snapshot.Widget {
+    for (snapshot.widgets) |widget| {
+        if (!std.mem.eql(u8, widget.view_label, dashboard_canvas_label)) continue;
+        if (!std.mem.eql(u8, widget.role, role)) continue;
+        if (std.mem.indexOf(u8, widget.name, fragment) != null) return widget;
     }
+    return null;
 }
 
-fn dashboardTextCommandOriginY(display_list: canvas.DisplayList, id: canvas.ObjectId) !f32 {
-    const command_ref = display_list.findCommandById(id) orelse return error.MissingDashboardCommand;
-    return switch (command_ref.command) {
-        .draw_text => |text| text.origin.y,
-        else => error.UnexpectedDashboardCommand,
-    };
-}
-
-fn dashboardRoundedRectCommandWidth(display_list: canvas.DisplayList, id: canvas.ObjectId) !f32 {
-    const command_ref = display_list.findCommandById(id) orelse return error.MissingDashboardCommand;
-    return switch (command_ref.command) {
-        .fill_rounded_rect => |rounded| rounded.rect.width,
-        else => error.UnexpectedDashboardCommand,
-    };
+fn dashboardSnapshotWidgetById(snapshot: zero_native.automation.snapshot.Input, id: u64) ?zero_native.automation.snapshot.Widget {
+    for (snapshot.widgets) |widget| {
+        if (widget.id == id and std.mem.eql(u8, widget.view_label, dashboard_canvas_label)) return widget;
+    }
+    return null;
 }
 
 fn expectDashboardFillRectFrame(display_list: canvas.DisplayList, id: canvas.ObjectId, expected: geometry.RectF) !void {
@@ -1032,13 +1226,10 @@ fn expectDashboardRoundedRectFrame(display_list: canvas.DisplayList, id: canvas.
     }
 }
 
-fn expectDashboardRoundedRectColor(display_list: canvas.DisplayList, id: canvas.ObjectId, expected: canvas.Color) !void {
+fn expectDashboardTextCommand(display_list: canvas.DisplayList, id: canvas.ObjectId, expected: []const u8) !void {
     const command_ref = display_list.findCommandById(id) orelse return error.MissingDashboardCommand;
     switch (command_ref.command) {
-        .fill_rounded_rect => |rounded| switch (rounded.fill) {
-            .color => |actual| try std.testing.expectEqualDeep(expected, actual),
-            else => return error.UnexpectedDashboardCommand,
-        },
+        .draw_text => |text| try std.testing.expectEqualStrings(expected, text.text),
         else => return error.UnexpectedDashboardCommand,
     }
 }
@@ -1062,19 +1253,25 @@ fn expectCompactDashboardDirty(runtime: *const zero_native.Runtime, max_width: f
     try std.testing.expect(dirty_area < max_width * max_height);
 }
 
-fn expectDashboardWidgetFrame(layout: canvas.WidgetLayoutTree, id: canvas.ObjectId, expected: geometry.RectF) !void {
+fn dashboardLayoutFrame(layout: canvas.WidgetLayoutTree, id: canvas.ObjectId) !geometry.RectF {
     const node = layout.findById(id) orelse return error.TestUnexpectedResult;
-    try expectDashboardRect(node.frame, expected);
+    return node.frame;
 }
 
-fn dashboardContentRect(x: f32, y: f32, width: f32, height: f32) geometry.RectF {
-    return rect(x, dashboard_content_y + y, width, height);
+fn expectDashboardFramesDoNotOverlap(layout: canvas.WidgetLayoutTree, a_id: canvas.ObjectId, b_id: canvas.ObjectId) !void {
+    const a = try dashboardLayoutFrame(layout, a_id);
+    const b = try dashboardLayoutFrame(layout, b_id);
+    try std.testing.expect(geometry.RectF.intersection(a.normalized(), b.normalized()).isEmpty());
 }
 
-fn expectDashboardWidgetsDoNotOverlap(layout: canvas.WidgetLayoutTree, a_id: canvas.ObjectId, b_id: canvas.ObjectId) !void {
-    const a = layout.findById(a_id) orelse return error.TestUnexpectedResult;
-    const b = layout.findById(b_id) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(geometry.RectF.intersection(a.frame.normalized(), b.frame.normalized()).isEmpty());
+fn expectDashboardFrameVisible(layout: canvas.WidgetLayoutTree, id: canvas.ObjectId, bounds: geometry.RectF) !void {
+    const frame = (try dashboardLayoutFrame(layout, id)).normalized();
+    try std.testing.expect(frame.width > 0);
+    try std.testing.expect(frame.height > 0);
+    try std.testing.expect(frame.x >= bounds.x - 0.001);
+    try std.testing.expect(frame.y >= bounds.y - 0.001);
+    try std.testing.expect(frame.maxX() <= bounds.maxX() + 0.001);
+    try std.testing.expect(frame.maxY() <= bounds.maxY() + 0.001);
 }
 
 fn expectDashboardRect(actual: geometry.RectF, expected: geometry.RectF) !void {
@@ -1082,39 +1279,6 @@ fn expectDashboardRect(actual: geometry.RectF, expected: geometry.RectF) !void {
     try std.testing.expectApproxEqAbs(expected.y, actual.y, 0.001);
     try std.testing.expectApproxEqAbs(expected.width, actual.width, 0.001);
     try std.testing.expectApproxEqAbs(expected.height, actual.height, 0.001);
-}
-
-fn color(r: u8, g: u8, b: u8) canvas.Color {
-    return canvas.Color.rgb8(r, g, b);
-}
-
-fn rgba(r: u8, g: u8, b: u8, a: u8) canvas.Color {
-    return canvas.Color.rgba8(r, g, b, a);
-}
-
-fn rect(x: f32, y: f32, width: f32, height: f32) geometry.RectF {
-    return geometry.RectF.init(x, y, width, height);
-}
-
-fn pt(x: f32, y: f32) geometry.PointF {
-    return geometry.PointF.init(x, y);
-}
-
-pub fn main(init: std.process.Init) !void {
-    var app = GpuDashboardApp{};
-    try runner.runWithOptions(app.app(), .{
-        .app_name = "gpu-dashboard",
-        .window_title = "zero-native GPU Dashboard",
-        .bundle_id = "dev.zero_native.gpu_dashboard",
-        .icon_path = "assets/icon.icns",
-        .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
-        .restore_state = false,
-        .js_window_api = false,
-        .security = .{
-            .permissions = &app_permissions,
-            .navigation = .{ .allowed_origins = &.{ "zero://inline", "zero://app" } },
-        },
-    }, init);
 }
 
 test "gpu dashboard scene declares one full-window zero-native canvas" {
@@ -1130,21 +1294,38 @@ test "gpu dashboard scene declares one full-window zero-native canvas" {
     try std.testing.expect(shell_views[0].gpu_vsync.?);
 }
 
-test "gpu dashboard display list builds a complete canvas scene" {
+test "gpu dashboard view builds a complete retained display list" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    const model = Model{};
+    const tree = try buildTestTree(arena_state.allocator(), &model);
+    var nodes: [max_dashboard_widgets]canvas.WidgetLayoutNode = undefined;
+    const layout = try layoutTestTree(tree, default_canvas_size, &nodes);
+
     var commands: [max_dashboard_commands]canvas.CanvasCommand = undefined;
     var builder = canvas.Builder.init(&commands);
-    try buildDashboardDisplayListFromWidgets(&builder);
+    try buildDashboardDisplayListForSize(&builder, layout, dashboardWidgetTokens(), default_canvas_size);
     const display_list = builder.displayList();
 
     try std.testing.expectEqual(@as(usize, expected_dashboard_command_count), display_list.commandCount());
-    try std.testing.expect(display_list.findCommandById(1) != null);
-    try std.testing.expect(display_list.findCommandById(2) == null);
-    try std.testing.expect(display_list.findCommandById(3) == null);
-    try std.testing.expect(display_list.findCommandById(deployment_region_text_command_id) != null);
-    try std.testing.expect(display_list.findCommandById(live_button_fill_command_id) != null);
-    try std.testing.expect(display_list.findCommandById(activity_scroll_track_command_id) != null);
-    try std.testing.expect(display_list.findCommandById(activity_scroll_thumb_command_id) != null);
-    try std.testing.expect(display_list.findCommandById(filter_popover_blur_command_id) != null);
+    try std.testing.expect(display_list.findCommandById(dashboard_background_command_id) != null);
+    try std.testing.expect(display_list.findCommandById(dashboard_hero_command_id) != null);
+
+    const live_button = findWidgetKindText(tree.root, .button, "Live render").?;
+    try std.testing.expect(display_list.findCommandById(widgetPartCommandId(live_button.id, widget_fill_slot)) != null);
+    try std.testing.expect(display_list.findCommandById(widgetPartCommandId(live_button.id, widget_text_slot)) != null);
+
+    const scroll = findWidgetByKind(tree.root, .scroll_view).?;
+    try std.testing.expect(display_list.findCommandById(widgetPartCommandId(scroll.id, widget_track_slot)) != null);
+    try std.testing.expect(display_list.findCommandById(widgetPartCommandId(scroll.id, widget_thumb_slot)) != null);
+
+    const popover = findWidgetByKind(tree.root, .popover).?;
+    try std.testing.expect(display_list.findCommandById(widgetPartCommandId(popover.id, widget_popover_blur_slot)) != null);
+
+    const cell = findWidgetByKind(tree.root, .data_cell).?;
+    try expectDashboardTextCommand(display_list, widgetPartCommandId(cell.id, widget_text_slot), "iad1 8.6ms P95");
+
     const bounds = display_list.bounds().?;
     try std.testing.expect(bounds.x <= 0);
     try std.testing.expect(bounds.y <= 0);
@@ -1152,46 +1333,136 @@ test "gpu dashboard display list builds a complete canvas scene" {
     try std.testing.expect(bounds.height >= canvas_height);
 }
 
-test "gpu dashboard layout keeps controls visually separated" {
+test "gpu dashboard flex layout keeps controls visually separated" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    const model = Model{};
+    const tree = try buildTestTree(arena_state.allocator(), &model);
     var nodes: [max_dashboard_widgets]canvas.WidgetLayoutNode = undefined;
-    const layout = try buildDashboardWidgetLayout(&nodes);
+    const layout = try layoutTestTree(tree, default_canvas_size, &nodes);
 
-    try std.testing.expect(layout.findById(dashboard_toolbar_id) == null);
-    try std.testing.expect(layout.findById(dashboard_toolbar_title_id) == null);
-    try expectDashboardWidgetFrame(layout, dashboard_toolbar_mode_id, rect(252, 12, 214, 30));
-    try expectDashboardWidgetFrame(layout, dashboard_toolbar_refresh_id, rect(484, 12, 86, 30));
-    try std.testing.expect(layout.findById(dashboard_toolbar_separator_id) == null);
-    try expectDashboardWidgetFrame(layout, dashboard_content_stack_id, rect(0, dashboard_content_y, canvas_width, dashboard_content_height));
-    try expectDashboardWidgetFrame(layout, dashboard_status_text_id, rect(14, dashboard_content_y + dashboard_content_height + 8, canvas_width - 28, 18));
-    try expectDashboardWidgetFrame(layout, 103, dashboardContentRect(688, 50, 122, 34));
-    try expectDashboardWidgetFrame(layout, 104, dashboardContentRect(236, 128, 332, 76));
-    try expectDashboardWidgetFrame(layout, 108, dashboardContentRect(236, 248, 332, 164));
-    try expectDashboardWidgetFrame(layout, 109, dashboardContentRect(236, 216, 332, 10));
-    try expectDashboardWidgetFrame(layout, 120, dashboardContentRect(596, 238, 196, 112));
-    try expectDashboardWidgetFrame(layout, 130, dashboardContentRect(236, 426, 556, 64));
-    try expectDashboardWidgetFrame(layout, 140, dashboardContentRect(596, 92, 196, 118));
-    try expectDashboardWidgetFrame(layout, 150, dashboardContentRect(260, 306, 284, 28));
-    try expectDashboardWidgetFrame(layout, 131, dashboardContentRect(250, 442, 116, 30));
-    try expectDashboardWidgetFrame(layout, 132, dashboardContentRect(380, 442, 128, 30));
-    try expectDashboardWidgetFrame(layout, 133, dashboardContentRect(522, 443, 94, 28));
-    try expectDashboardWidgetFrame(layout, 134, dashboardContentRect(682, 445, 78, 24));
+    const canvas_bounds = rect(0, 0, canvas_width, canvas_height);
+    const segmented = findWidgetByKind(tree.root, .segmented_control).?;
+    const refresh_button = findWidgetKindText(tree.root, .button, "Refresh").?;
+    const live_button = findWidgetKindText(tree.root, .button, "Live render").?;
+    const metrics = findWidgetByLabel(tree.root, "Dashboard metrics").?;
+    const progress = findWidgetByKind(tree.root, .progress).?;
+    const trend_panel = findWidgetByLabel(tree.root, "Conversion trend").?;
+    const forecast_panel = findWidgetByLabel(tree.root, "Forecast form").?;
+    const nav_list = findWidgetByLabel(tree.root, "Dashboard navigation").?;
+    const scroll = findWidgetByKind(tree.root, .scroll_view).?;
+    const popover = findWidgetByKind(tree.root, .popover).?;
+    const forecast_field = findWidgetByKind(tree.root, .text_field).?;
+    const search_field = findWidgetByKind(tree.root, .search_field).?;
+    const auto_toggle = findWidgetByKind(tree.root, .toggle).?;
+    const slider = findWidgetByKind(tree.root, .slider).?;
+    const status_text = findWidgetByLabel(tree.root, initial_dashboard_status_text).?;
 
-    try expectDashboardWidgetsDoNotOverlap(layout, 103, 140);
-    try expectDashboardWidgetsDoNotOverlap(layout, 104, 140);
-    try expectDashboardWidgetsDoNotOverlap(layout, 104, 109);
-    try expectDashboardWidgetsDoNotOverlap(layout, 109, 108);
-    try expectDashboardWidgetsDoNotOverlap(layout, 108, 120);
-    try expectDashboardWidgetsDoNotOverlap(layout, 108, 130);
-    try expectDashboardWidgetsDoNotOverlap(layout, 120, 130);
-    try expectDashboardWidgetsDoNotOverlap(layout, 131, 132);
-    try expectDashboardWidgetsDoNotOverlap(layout, 132, 133);
-    try expectDashboardWidgetsDoNotOverlap(layout, 133, 134);
+    // Everything lands inside the canvas with a real hit-testable area.
+    const ids = [_]canvas.ObjectId{
+        segmented.id,      refresh_button.id, live_button.id, metrics.id, progress.id,
+        trend_panel.id,    forecast_panel.id, nav_list.id,    scroll.id,  popover.id,
+        forecast_field.id, search_field.id,   auto_toggle.id, slider.id,  status_text.id,
+    };
+    for (ids) |id| try expectDashboardFrameVisible(layout, id, canvas_bounds);
+
+    // Toolbar controls clear the chrome title and each other.
+    const segmented_frame = try dashboardLayoutFrame(layout, segmented.id);
+    try std.testing.expect(segmented_frame.x >= 238);
+    try std.testing.expect(segmented_frame.maxY() <= toolbar_height + 0.001);
+    try expectDashboardFramesDoNotOverlap(layout, segmented.id, refresh_button.id);
+
+    // Content sections do not collide.
+    try expectDashboardFramesDoNotOverlap(layout, live_button.id, popover.id);
+    try expectDashboardFramesDoNotOverlap(layout, metrics.id, popover.id);
+    try expectDashboardFramesDoNotOverlap(layout, metrics.id, progress.id);
+    try expectDashboardFramesDoNotOverlap(layout, progress.id, trend_panel.id);
+    try expectDashboardFramesDoNotOverlap(layout, trend_panel.id, scroll.id);
+    try expectDashboardFramesDoNotOverlap(layout, trend_panel.id, forecast_panel.id);
+    try expectDashboardFramesDoNotOverlap(layout, scroll.id, forecast_panel.id);
+    try expectDashboardFramesDoNotOverlap(layout, nav_list.id, metrics.id);
+    try expectDashboardFramesDoNotOverlap(layout, forecast_field.id, search_field.id);
+    try expectDashboardFramesDoNotOverlap(layout, search_field.id, auto_toggle.id);
+    try expectDashboardFramesDoNotOverlap(layout, auto_toggle.id, slider.id);
+
+    // The nav list sits on the hero gradient the chrome paints.
+    const nav_frame = try dashboardLayoutFrame(layout, nav_list.id);
+    const hero = dashboardHeroRect(default_canvas_size);
+    try std.testing.expect(!geometry.RectF.intersection(nav_frame.normalized(), hero.normalized()).isEmpty());
+
+    // The status line stays under the content area, over the status bar.
+    const status_frame = try dashboardLayoutFrame(layout, status_text.id);
+    const content_end = dashboardContentYForSize(default_canvas_size) + dashboardContentHeightForSize(default_canvas_size);
+    try std.testing.expect(status_frame.y >= content_end);
+}
+
+test "gpu dashboard typed messages drive the model" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = Model{};
+
+    // Toolbar refresh resolves through the pointer intent cascade.
+    var tree = try buildTestTree(arena, &model);
+    const refresh_button = findWidgetKindText(tree.root, .button, "Refresh").?;
+    update(&model, tree.msgForPointer(refresh_button.id, .up).?);
+    try std.testing.expectEqual(@as(u32, 1), model.refresh_count);
+    try std.testing.expectEqualStrings("Dashboard canvas refreshed. Count 1.", model.status());
+    try std.testing.expectEqual(@as(?Msg, null), tree.msgForPointer(refresh_button.id, .down));
+
+    // The segmented control and the shell command map to the same message.
+    const segmented = findWidgetByKind(tree.root, .segmented_control).?;
+    try std.testing.expectEqual(Msg.set_mode, tree.msgForPointer(segmented.id, .up).?);
+
+    // Selecting a nav row updates the selection and its id survives rebuild.
+    const customers = findWidgetKindText(tree.root, .list_item, "Customers").?;
+    update(&model, tree.msgForPointer(customers.id, .up).?);
+    try std.testing.expectEqual(@as(u8, 1), model.nav_selection);
+    try std.testing.expectEqualStrings("Selected Customers.", model.status());
+
+    tree = try buildTestTree(arena, &model);
+    const rebuilt_customers = findWidgetKindText(tree.root, .list_item, "Customers").?;
+    try std.testing.expectEqual(customers.id, rebuilt_customers.id);
+    try std.testing.expect(rebuilt_customers.state.selected);
+
+    // Space on the focused toggle flips auto refresh.
+    const auto_toggle = findWidgetByKind(tree.root, .toggle).?;
+    const space_down = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "space" };
+    update(&model, tree.msgForKeyboard(auto_toggle.id, space_down).?);
+    try std.testing.expect(!model.auto_refresh);
+    try std.testing.expectEqualStrings("Auto refresh off.", model.status());
+
+    // Enter submits from the forecast field.
+    const forecast_field = findWidgetByKind(tree.root, .text_field).?;
+    const enter_down = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "enter" };
+    update(&model, tree.msgForKeyboard(forecast_field.id, enter_down).?);
+    try std.testing.expectEqualStrings("Forecast amount submitted.", model.status());
+
+    // Slider arrow steps resolve to the change message.
+    const slider = findWidgetByKind(tree.root, .slider).?;
+    const arrow_right = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowright" };
+    try std.testing.expectEqual(Msg.confidence_changed, tree.msgForKeyboard(slider.id, arrow_right).?);
+
+    // Widgets without handlers dispatch nothing.
+    tree = try buildTestTree(arena, &model);
+    const status_text = findWidgetByLabel(tree.root, model.status()).?;
+    try std.testing.expectEqual(@as(?Msg, null), tree.msgForPointer(status_text.id, .up));
 }
 
 test "gpu dashboard display list renders through the reference surface" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    const model = Model{};
+    const tree = try buildTestTree(arena_state.allocator(), &model);
+    var nodes: [max_dashboard_widgets]canvas.WidgetLayoutNode = undefined;
+    const layout = try layoutTestTree(tree, default_canvas_size, &nodes);
+
     var commands: [max_dashboard_commands]canvas.CanvasCommand = undefined;
     var builder = canvas.Builder.init(&commands);
-    try buildDashboardDisplayListFromWidgets(&builder);
+    try buildDashboardDisplayListForSize(&builder, layout, dashboardWidgetTokens(), default_canvas_size);
     const display_list = builder.displayList();
 
     var render_commands: [max_dashboard_commands]canvas.RenderCommand = undefined;
@@ -1248,20 +1519,30 @@ test "gpu dashboard display list renders through the reference surface" {
 
     try std.testing.expectEqual(@as(u64, expected_dashboard_reference_signature), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(8, 8));
-    try expectVisiblePixel(surface.pixelRgba8(64, 64));
-    try expectVisiblePixel(surface.pixelRgba8(240, 140));
-    try std.testing.expectEqual(@as(u8, 255), surface.pixelRgba8(236, 134)[3]);
+    try expectVisiblePixel(surface.pixelRgba8(64, 140));
+    try expectVisiblePixel(surface.pixelRgba8(620, 390));
+    try std.testing.expectEqual(@as(u8, 255), surface.pixelRgba8(620, 390)[3]);
 }
 
 test "gpu dashboard render overrides animate without rebuilding commands" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    const model = Model{};
+    const tree = try buildTestTree(arena_state.allocator(), &model);
+    var nodes: [max_dashboard_widgets]canvas.WidgetLayoutNode = undefined;
+    const layout = try layoutTestTree(tree, default_canvas_size, &nodes);
+    const live_button = findWidgetKindText(tree.root, .button, "Live render").?;
+    const live_fill_command_id = widgetPartCommandId(live_button.id, widget_fill_slot);
+
     var commands: [max_dashboard_commands]canvas.CanvasCommand = undefined;
     var builder = canvas.Builder.init(&commands);
-    try buildDashboardDisplayListFromWidgets(&builder);
+    try buildDashboardDisplayListForSize(&builder, layout, dashboardWidgetTokens(), default_canvas_size);
     const display_list = builder.displayList();
 
     const motion = dashboardWidgetTokens().motion;
     const animations = [_]canvas.CanvasRenderAnimation{motion.animation(.{
-        .id = live_button_fill_command_id,
+        .id = live_fill_command_id,
         .start_ns = 1_000_000_000,
         .duration = .slow,
         .from_opacity = 0.72,
@@ -1318,7 +1599,7 @@ test "gpu dashboard render overrides animate without rebuilding commands" {
     var found_transformed_live_button = false;
     for (packet.commands) |command| {
         if (command.id) |id| {
-            if (id == live_button_fill_command_id) {
+            if (id == live_fill_command_id) {
                 try std.testing.expect(command.transform.ty < 0);
                 found_transformed_live_button = true;
             }
@@ -1328,11 +1609,16 @@ test "gpu dashboard render overrides animate without rebuilding commands" {
 }
 
 test "gpu dashboard scheduled animations render without display list rebuild" {
-    var harness: zero_native.TestHarness() = undefined;
+    // The runtime and the app are both multi-megabyte structs; keep them off
+    // the test thread's stack.
+    const harness = try std.testing.allocator.create(zero_native.TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{ .size = geometry.SizeF.init(window_width, window_height) });
     harness.null_platform.gpu_surfaces = true;
 
-    var app = GpuDashboardApp{};
+    const app = try std.testing.allocator.create(GpuDashboardApp);
+    defer std.testing.allocator.destroy(app);
+    app.* = GpuDashboardApp.init(std.heap.page_allocator);
     defer app.deinit();
     try harness.start(app.app());
 
@@ -1381,11 +1667,16 @@ test "gpu dashboard scheduled animations render without display list rebuild" {
 }
 
 test "gpu dashboard app registers canvas display list on first gpu frame" {
-    var harness: zero_native.TestHarness() = undefined;
+    // The runtime and the app are both multi-megabyte structs; keep them off
+    // the test thread's stack.
+    const harness = try std.testing.allocator.create(zero_native.TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{ .size = geometry.SizeF.init(window_width, window_height) });
     harness.null_platform.gpu_surfaces = true;
 
-    var app = GpuDashboardApp{};
+    const app = try std.testing.allocator.create(GpuDashboardApp);
+    defer std.testing.allocator.destroy(app);
+    app.* = GpuDashboardApp.init(std.heap.page_allocator);
     defer app.deinit();
     try harness.start(app.app());
 
@@ -1400,14 +1691,24 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     try std.testing.expect(app.canvas_installed);
     try std.testing.expectEqualDeep(dashboardWidgetTokensForScale(2), try harness.runtime.canvasWidgetDesignTokens(1, "dashboard-canvas"));
 
+    const tree = app.tree.?;
+    const live_button = findWidgetKindText(tree.root, .button, "Live render").?;
+    const auto_toggle = findWidgetByKind(tree.root, .toggle).?;
+    const slider = findWidgetByKind(tree.root, .slider).?;
+    const scroll = findWidgetByKind(tree.root, .scroll_view).?;
+    const forecast_field = findWidgetByKind(tree.root, .text_field).?;
+    const customers_item = findWidgetKindText(tree.root, .list_item, "Customers").?;
+    const overview_item = findWidgetKindText(tree.root, .list_item, "Overview").?;
+
     var display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
     try std.testing.expectEqual(@as(usize, expected_dashboard_command_count), display_list.commandCount());
-    try std.testing.expect(display_list.findCommandById(1) != null);
-    try std.testing.expect(display_list.findCommandById(deployment_region_text_command_id) != null);
-    try std.testing.expect(display_list.findCommandById(activity_scroll_track_command_id) != null);
-    try std.testing.expect(display_list.findCommandById(activity_scroll_thumb_command_id) != null);
-    try std.testing.expect(display_list.findCommandById(overview_fill_command_id) != null);
-    try std.testing.expect(display_list.findCommandById(customers_fill_command_id) == null);
+    try std.testing.expect(display_list.findCommandById(dashboard_background_command_id) != null);
+    try std.testing.expect(display_list.findCommandById(dashboard_hero_command_id) != null);
+    try std.testing.expect(display_list.findCommandById(widgetPartCommandId(scroll.id, widget_track_slot)) != null);
+    try std.testing.expect(display_list.findCommandById(widgetPartCommandId(scroll.id, widget_thumb_slot)) != null);
+    // The selected nav row paints a fill; unselected rows do not.
+    try std.testing.expect(display_list.findCommandById(widgetPartCommandId(overview_item.id, widget_fill_slot)) != null);
+    try std.testing.expect(display_list.findCommandById(widgetPartCommandId(customers_item.id, widget_fill_slot)) == null);
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_packet_present_count);
     try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_present_count);
     try std.testing.expectEqualDeep(geometry.SizeF.init(canvas_width, canvas_height), harness.null_platform.gpu_surface_packet_present_surface_size);
@@ -1417,118 +1718,94 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     try std.testing.expect(app.scratch == null);
     const animations = try harness.runtime.canvasRenderAnimations(1, "dashboard-canvas");
     try std.testing.expectEqual(@as(usize, 2), animations.len);
-    try std.testing.expectEqual(live_button_fill_command_id, animations[0].id);
+    try std.testing.expectEqual(app.liveButtonFillCommandId(), animations[0].id);
     try std.testing.expectEqual(@as(u64, 1_000_000_000), animations[0].start_ns);
 
     const widget_layout = try harness.runtime.canvasWidgetLayout(1, "dashboard-canvas");
-    try std.testing.expectEqual(@as(usize, 36), widget_layout.nodeCount());
-    try std.testing.expectEqualStrings("Dashboard metrics", widget_layout.findById(104).?.widget.semantics.label);
+    try std.testing.expectEqual(@as(usize, expected_dashboard_widget_node_count), widget_layout.nodeCount());
+    try std.testing.expectEqualStrings("Dashboard metrics", findWidgetByLabel(tree.root, "Dashboard metrics").?.semantics.label);
 
     var snapshot = harness.runtime.automationSnapshot("Dashboard");
-    try std.testing.expectEqual(@as(usize, 35), snapshot.widgets.len);
+    try std.testing.expectEqual(@as(usize, expected_dashboard_snapshot_widget_count), snapshot.widgets.len);
 
-    const toolbar_mode = dashboardSnapshotWidget(snapshot, dashboard_toolbar_mode_id).?;
-    try std.testing.expectEqualStrings("tab", toolbar_mode.role);
-    try std.testing.expectEqualStrings("Dashboard mode", toolbar_mode.name);
-    try std.testing.expect(toolbar_mode.actions.press);
+    // Without a command string the segmented control exposes `select`; the
+    // typed press handler rides the select intent in the pointer cascade.
+    const toolbar_mode = dashboardSnapshotWidgetNamed(snapshot, "tab", "Dashboard mode").?;
     try std.testing.expect(toolbar_mode.actions.select);
 
-    const toolbar_refresh = dashboardSnapshotWidget(snapshot, dashboard_toolbar_refresh_id).?;
-    try std.testing.expectEqualStrings("button", toolbar_refresh.role);
-    try std.testing.expectEqualStrings("Refresh dashboard", toolbar_refresh.name);
+    const toolbar_refresh = dashboardSnapshotWidgetNamed(snapshot, "button", "Refresh dashboard").?;
     try std.testing.expect(toolbar_refresh.actions.press);
 
-    const initial_status = dashboardSnapshotWidget(snapshot, dashboard_status_text_id).?;
+    const initial_status = dashboardSnapshotWidgetNamed(snapshot, "text", "Dashboard display list presented on the GPU surface.").?;
     try std.testing.expectEqualStrings("text", initial_status.role);
-    try std.testing.expectEqualStrings("Dashboard display list presented on the GPU surface.", initial_status.name);
 
-    const live_render = dashboardSnapshotWidget(snapshot, 103).?;
-    try std.testing.expectEqualStrings("button", live_render.role);
-    try std.testing.expectEqualStrings("Live render status", live_render.name);
+    const live_render = dashboardSnapshotWidgetNamed(snapshot, "button", "Live render status").?;
     try std.testing.expect(live_render.actions.press);
 
-    const progress = dashboardSnapshotWidget(snapshot, 109).?;
-    try std.testing.expectEqualStrings("progressbar", progress.role);
-    try std.testing.expectEqualStrings("Conversion progress", progress.name);
+    const progress = dashboardSnapshotWidgetNamed(snapshot, "progressbar", "Conversion progress").?;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.68), progress.value.?, 0.001);
 
-    const nav_list = dashboardSnapshotWidget(snapshot, 110).?;
+    const nav_list = dashboardSnapshotWidgetNamed(snapshot, "list", "Dashboard navigation").?;
     try std.testing.expectEqualStrings("list", nav_list.role);
-    try std.testing.expectEqualStrings("Dashboard navigation", nav_list.name);
 
-    const overview = dashboardSnapshotWidget(snapshot, 111).?;
-    try std.testing.expectEqualStrings("listitem", overview.role);
+    const overview = dashboardSnapshotWidgetNamed(snapshot, "listitem", "Overview").?;
     try std.testing.expect(overview.selected);
     try std.testing.expect(overview.list.present);
     try std.testing.expectEqual(@as(u32, 0), overview.list.item_index);
     try std.testing.expectEqual(@as(u32, 3), overview.list.item_count);
 
-    const recent = dashboardSnapshotWidget(snapshot, 120).?;
-    try std.testing.expectEqualStrings("group", recent.role);
-    try std.testing.expectEqualStrings("Recent activity", recent.name);
+    const recent = dashboardSnapshotWidgetNamed(snapshot, "group", "Recent activity").?;
     try std.testing.expect(recent.scroll.present);
     try std.testing.expect(recent.scroll.content_extent > recent.scroll.viewport_extent);
     try std.testing.expect(recent.actions.increment);
     try std.testing.expect(recent.actions.decrement);
 
-    const forecast = dashboardSnapshotWidget(snapshot, 131).?;
-    try std.testing.expectEqualStrings("textbox", forecast.role);
-    try std.testing.expectEqualStrings("Forecast amount", forecast.name);
+    const forecast = dashboardSnapshotWidgetNamed(snapshot, "textbox", "Forecast amount").?;
     try std.testing.expectEqualStrings("$13.4M", forecast.text_value);
     try std.testing.expect(forecast.actions.set_text);
     try std.testing.expect(forecast.actions.set_selection);
 
-    const search = dashboardSnapshotWidget(snapshot, 132).?;
-    try std.testing.expectEqualStrings("textbox", search.role);
-    try std.testing.expectEqualStrings("Segment search", search.name);
+    const search = dashboardSnapshotWidgetNamed(snapshot, "textbox", "Segment search").?;
     try std.testing.expectEqualStrings("enterprise", search.text_value);
 
-    const auto_refresh = dashboardSnapshotWidget(snapshot, 133).?;
-    try std.testing.expectEqualStrings("switch", auto_refresh.role);
-    try std.testing.expectEqualStrings("Auto refresh", auto_refresh.name);
+    const auto_refresh = dashboardSnapshotWidgetNamed(snapshot, "switch", "Auto refresh").?;
     try std.testing.expectEqual(@as(?f32, 1), auto_refresh.value);
     try std.testing.expect(auto_refresh.selected);
     try std.testing.expect(auto_refresh.actions.toggle);
 
-    const confidence = dashboardSnapshotWidget(snapshot, 134).?;
-    try std.testing.expectEqualStrings("slider", confidence.role);
-    try std.testing.expectEqualStrings("Confidence threshold", confidence.name);
+    const confidence = dashboardSnapshotWidgetNamed(snapshot, "slider", "Confidence threshold").?;
     try std.testing.expectApproxEqAbs(@as(f32, 0.62), confidence.value.?, 0.001);
     try std.testing.expect(confidence.actions.increment);
     try std.testing.expect(confidence.actions.decrement);
 
-    const popover = dashboardSnapshotWidget(snapshot, 140).?;
-    try std.testing.expectEqualStrings("dialog", popover.role);
-    try std.testing.expectEqualStrings("Revenue filter popover", popover.name);
+    try std.testing.expect(dashboardSnapshotWidgetNamed(snapshot, "dialog", "Revenue filter popover") != null);
+    try std.testing.expect(dashboardSnapshotWidgetNamed(snapshot, "menu", "Filter options") != null);
+    try std.testing.expect(dashboardSnapshotWidgetNamed(snapshot, "menuitem", "Last 30 days") != null);
 
-    const menu = dashboardSnapshotWidget(snapshot, 141).?;
-    try std.testing.expectEqualStrings("menu", menu.role);
-    try std.testing.expectEqualStrings("Filter options", menu.name);
-
-    const menu_item = dashboardSnapshotWidget(snapshot, 142).?;
-    try std.testing.expectEqualStrings("menuitem", menu_item.role);
-    try std.testing.expectEqualStrings("Last 30 days", menu_item.name);
-
-    const deployment_grid = dashboardSnapshotWidget(snapshot, 150).?;
-    try std.testing.expectEqualStrings("grid", deployment_grid.role);
-    try std.testing.expectEqualStrings("Deployment latency", deployment_grid.name);
+    const deployment_grid = dashboardSnapshotWidgetNamed(snapshot, "grid", "Deployment latency").?;
     try std.testing.expectEqual(@as(?usize, 1), deployment_grid.grid_row_count);
     try std.testing.expectEqual(@as(?usize, 1), deployment_grid.grid_column_count);
 
-    const deployment_cell = dashboardSnapshotWidget(snapshot, 156).?;
-    try std.testing.expectEqualStrings("gridcell", deployment_cell.role);
-    try std.testing.expectEqualStrings("iad1 8.6ms P95", deployment_cell.name);
-    try std.testing.expectEqual(@as(?usize, 0), deployment_cell.grid_row_index);
-    try std.testing.expectEqual(@as(?usize, 0), deployment_cell.grid_column_index);
-    try std.testing.expect(deployment_cell.actions.select);
-    try std.testing.expect(deployment_cell.actions.press);
+    const deployment = dashboardSnapshotWidgetNamed(snapshot, "gridcell", "iad1 8.6ms P95").?;
+    try std.testing.expectEqual(@as(?usize, 0), deployment.grid_row_index);
+    try std.testing.expectEqual(@as(?usize, 0), deployment.grid_column_index);
+    try std.testing.expect(deployment.actions.select);
 
+    var command_buffer: [96]u8 = undefined;
+
+    // Pressing the live button dispatches the typed message, restarts the
+    // pulse, and repaints incrementally.
     resetDashboardDirty(&harness.runtime);
-    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 103 press");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
-    try std.testing.expectEqual(@as(u32, 1), app.mode_count);
+    try harness.runtime.dispatchAutomationCommand(app.app(), try std.fmt.bufPrint(&command_buffer, "widget-action dashboard-canvas {d} press", .{live_button.id}));
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, canvas_height);
+    try std.testing.expectEqual(@as(u32, 1), app.model.live_count);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
-    try std.testing.expect(dashboardSnapshotWidget(snapshot, 103).?.focused);
+    try std.testing.expect(dashboardSnapshotWidgetById(snapshot, live_button.id).?.focused);
+    try std.testing.expect(dashboardSnapshotWidgetNamed(snapshot, "text", "Live render pulse restarted. Count 1.") != null);
 
+    // Keyboard focus traversal moves between the form fields and survives
+    // the TEA rebuilds (structural ids keep the focus target stable).
+    try harness.runtime.dispatchAutomationCommand(app.app(), try std.fmt.bufPrint(&command_buffer, "widget-action dashboard-canvas {d} focus", .{forecast_field.id}));
     resetDashboardDirty(&harness.runtime);
     try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_input = .{
         .window_id = 1,
@@ -1536,12 +1813,11 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
         .kind = .key_down,
         .key = "tab",
     } });
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, canvas_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
-    try std.testing.expect(!dashboardSnapshotWidget(snapshot, 103).?.focused);
-    try std.testing.expect(dashboardSnapshotWidget(snapshot, 105).?.focused);
+    try std.testing.expect(!dashboardSnapshotWidgetById(snapshot, forecast_field.id).?.focused);
+    try std.testing.expect(dashboardSnapshotWidgetNamed(snapshot, "textbox", "Segment search").?.focused);
 
-    resetDashboardDirty(&harness.runtime);
     try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = "dashboard-canvas",
@@ -1549,122 +1825,106 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
         .key = "tab",
         .modifiers = .{ .shift = true },
     } });
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
-    try std.testing.expect(dashboardSnapshotWidget(snapshot, 103).?.focused);
-    try std.testing.expect(!dashboardSnapshotWidget(snapshot, 105).?.focused);
+    try std.testing.expect(dashboardSnapshotWidgetById(snapshot, forecast_field.id).?.focused);
+    try std.testing.expect(!dashboardSnapshotWidgetNamed(snapshot, "textbox", "Segment search").?.focused);
 
-    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 112 select");
+    // Clicking a nav row routes pointer input through the typed handler and
+    // moves the model selection.
+    try harness.runtime.dispatchAutomationCommand(app.app(), try std.fmt.bufPrint(&command_buffer, "widget-click dashboard-canvas {d}", .{customers_item.id}));
+    try std.testing.expectEqual(@as(u8, 1), app.model.nav_selection);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
-    try std.testing.expect(!dashboardSnapshotWidget(snapshot, 111).?.selected);
-    try std.testing.expect(dashboardSnapshotWidget(snapshot, 112).?.selected);
+    try std.testing.expect(!dashboardSnapshotWidgetNamed(snapshot, "listitem", "Overview").?.selected);
+    try std.testing.expect(dashboardSnapshotWidgetNamed(snapshot, "listitem", "Customers").?.selected);
+    try std.testing.expect(dashboardSnapshotWidgetNamed(snapshot, "text", "Selected Customers.") != null);
     display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    try std.testing.expect(display_list.findCommandById(1) != null);
-    try std.testing.expect(display_list.findCommandById(deployment_region_text_command_id) != null);
-    try std.testing.expect(display_list.findCommandById(overview_fill_command_id) == null);
-    try std.testing.expect(display_list.findCommandById(customers_fill_command_id) != null);
+    try std.testing.expect(display_list.findCommandById(widgetPartCommandId(overview_item.id, widget_fill_slot)) == null);
+    try std.testing.expect(display_list.findCommandById(widgetPartCommandId(customers_item.id, widget_fill_slot)) != null);
 
+    // Runtime-owned text editing state survives model-driven rebuilds.
     resetDashboardDirty(&harness.runtime);
-    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 156 select");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
+    try harness.runtime.dispatchAutomationCommand(app.app(), try std.fmt.bufPrint(&command_buffer, "widget-action dashboard-canvas {d} set-text $14.1M", .{forecast_field.id}));
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, canvas_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
-    try std.testing.expect(dashboardSnapshotWidget(snapshot, 156).?.selected);
-    try std.testing.expect(dashboardSnapshotWidget(snapshot, 156).?.focused);
-
-    resetDashboardDirty(&harness.runtime);
-    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 131 set-text $14.1M");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
-    snapshot = harness.runtime.automationSnapshot("Dashboard");
-    const updated_forecast = dashboardSnapshotWidget(snapshot, 131).?;
+    const updated_forecast = dashboardSnapshotWidgetNamed(snapshot, "textbox", "Forecast amount").?;
     try std.testing.expectEqualStrings("$14.1M", updated_forecast.text_value);
     try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 6, .end = 6 }, updated_forecast.text_selection.?);
     display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    try expectDashboardTextCommand(display_list, forecast_text_command_id, "$14.1M");
-    const activity_y_before_scroll = try dashboardTextCommandOriginY(display_list, activity_first_text_command_id);
+    try expectDashboardTextCommand(display_list, widgetPartCommandId(forecast_field.id, widget_text_slot), "$14.1M");
 
     resetDashboardDirty(&harness.runtime);
-    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 131 set-composition est");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
+    try harness.runtime.dispatchAutomationCommand(app.app(), try std.fmt.bufPrint(&command_buffer, "widget-action dashboard-canvas {d} set-composition est", .{forecast_field.id}));
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, canvas_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
-    const composing_forecast = dashboardSnapshotWidget(snapshot, 131).?;
+    const composing_forecast = dashboardSnapshotWidgetNamed(snapshot, "textbox", "Forecast amount").?;
     try std.testing.expectEqualStrings("$14.1Mest", composing_forecast.text_value);
-    try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 9, .end = 9 }, composing_forecast.text_selection.?);
     try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 6, .end = 9 }, composing_forecast.text_composition.?);
     display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    try expectDashboardTextCommand(display_list, forecast_text_command_id, "$14.1Mest");
-    try std.testing.expect(display_list.findCommandById(forecast_composition_command_id) != null);
+    try std.testing.expect(display_list.findCommandById(widgetPartCommandId(forecast_field.id, widget_composition_slot)) != null);
 
     resetDashboardDirty(&harness.runtime);
-    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 131 cancel-composition");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
+    try harness.runtime.dispatchAutomationCommand(app.app(), try std.fmt.bufPrint(&command_buffer, "widget-action dashboard-canvas {d} cancel-composition", .{forecast_field.id}));
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, canvas_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
-    const canceled_forecast = dashboardSnapshotWidget(snapshot, 131).?;
+    const canceled_forecast = dashboardSnapshotWidgetNamed(snapshot, "textbox", "Forecast amount").?;
     try std.testing.expectEqualStrings("$14.1M", canceled_forecast.text_value);
-    try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 6, .end = 6 }, canceled_forecast.text_selection.?);
     try std.testing.expect(canceled_forecast.text_composition == null);
     display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    try expectDashboardTextCommand(display_list, forecast_text_command_id, "$14.1M");
-    try std.testing.expect(display_list.findCommandById(forecast_composition_command_id) == null);
+    try std.testing.expect(display_list.findCommandById(widgetPartCommandId(forecast_field.id, widget_composition_slot)) == null);
 
     resetDashboardDirty(&harness.runtime);
-    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 131 set-composition !");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
+    try harness.runtime.dispatchAutomationCommand(app.app(), try std.fmt.bufPrint(&command_buffer, "widget-action dashboard-canvas {d} set-composition !", .{forecast_field.id}));
+    try harness.runtime.dispatchAutomationCommand(app.app(), try std.fmt.bufPrint(&command_buffer, "widget-action dashboard-canvas {d} commit-composition", .{forecast_field.id}));
     snapshot = harness.runtime.automationSnapshot("Dashboard");
-    const final_composing_forecast = dashboardSnapshotWidget(snapshot, 131).?;
-    try std.testing.expectEqualStrings("$14.1M!", final_composing_forecast.text_value);
-    try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 6, .end = 7 }, final_composing_forecast.text_composition.?);
-
-    resetDashboardDirty(&harness.runtime);
-    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 131 commit-composition");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
-    snapshot = harness.runtime.automationSnapshot("Dashboard");
-    const committed_forecast = dashboardSnapshotWidget(snapshot, 131).?;
+    const committed_forecast = dashboardSnapshotWidgetNamed(snapshot, "textbox", "Forecast amount").?;
     try std.testing.expectEqualStrings("$14.1M!", committed_forecast.text_value);
     try std.testing.expectEqualDeep(zero_native.automation.snapshot.TextRange{ .start = 7, .end = 7 }, committed_forecast.text_selection.?);
     try std.testing.expect(committed_forecast.text_composition == null);
     display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    try expectDashboardTextCommand(display_list, forecast_text_command_id, "$14.1M!");
-    try std.testing.expect(display_list.findCommandById(forecast_composition_command_id) == null);
+    try expectDashboardTextCommand(display_list, widgetPartCommandId(forecast_field.id, widget_text_slot), "$14.1M!");
 
+    // Toggling auto refresh routes through the typed handler, mutates the
+    // model, and updates the human-readable status.
     resetDashboardDirty(&harness.runtime);
-    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 133 toggle");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
+    try harness.runtime.dispatchAutomationCommand(app.app(), try std.fmt.bufPrint(&command_buffer, "widget-action dashboard-canvas {d} toggle", .{auto_toggle.id}));
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, canvas_height);
+    try std.testing.expect(!app.model.auto_refresh);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
-    const disabled_auto_refresh = dashboardSnapshotWidget(snapshot, 133).?;
+    const disabled_auto_refresh = dashboardSnapshotWidgetNamed(snapshot, "switch", "Auto refresh").?;
     try std.testing.expectEqual(@as(?f32, 0), disabled_auto_refresh.value);
     try std.testing.expect(!disabled_auto_refresh.selected);
+    try std.testing.expect(dashboardSnapshotWidgetNamed(snapshot, "text", "Auto refresh off.") != null);
 
+    // Slider steps reach the model through the read-back in dispatch.
     resetDashboardDirty(&harness.runtime);
-    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 134 increment");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
+    try harness.runtime.dispatchAutomationCommand(app.app(), try std.fmt.bufPrint(&command_buffer, "widget-action dashboard-canvas {d} increment", .{slider.id}));
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, canvas_height);
     snapshot = harness.runtime.automationSnapshot("Dashboard");
-    const updated_confidence = dashboardSnapshotWidget(snapshot, 134).?;
+    const updated_confidence = dashboardSnapshotWidgetNamed(snapshot, "slider", "Confidence threshold").?;
     try std.testing.expectApproxEqAbs(@as(f32, 0.67), updated_confidence.value.?, 0.001);
-    display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    try std.testing.expectApproxEqAbs(@as(f32, 52.5), try dashboardRoundedRectCommandWidth(display_list, confidence_active_command_id), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.67), app.model.confidence, 0.001);
+    try std.testing.expect(dashboardSnapshotWidgetNamed(snapshot, "text", "Confidence threshold 67%.") != null);
 
+    // Scroll offsets are runtime-owned and survive model-driven rebuilds.
     resetDashboardDirty(&harness.runtime);
-    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 120 increment");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
+    try harness.runtime.dispatchAutomationCommand(app.app(), try std.fmt.bufPrint(&command_buffer, "widget-action dashboard-canvas {d} increment", .{scroll.id}));
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, canvas_height);
     var scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "dashboard-canvas");
-    try std.testing.expectEqual(@as(f32, 28), scrolled_layout.findById(120).?.widget.value);
-    snapshot = harness.runtime.automationSnapshot("Dashboard");
-    try std.testing.expectEqual(@as(f32, 28), dashboardSnapshotWidget(snapshot, 120).?.scroll.offset);
-    display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    const activity_y_after_increment = try dashboardTextCommandOriginY(display_list, activity_first_text_command_id);
-    try std.testing.expect(activity_y_after_increment < activity_y_before_scroll);
-
-    resetDashboardDirty(&harness.runtime);
-    try harness.runtime.dispatchAutomationCommand(app.app(), "widget-action dashboard-canvas 120 decrement");
-    try expectCompactDashboardDirty(&harness.runtime, canvas_width, dashboard_content_height);
+    const scrolled_offset = scrolled_layout.findById(scroll.id).?.widget.value;
+    try std.testing.expect(scrolled_offset > 18);
+    // A model-driven rebuild must not reset the runtime scroll offset.
+    try harness.runtime.dispatchAutomationCommand(app.app(), try std.fmt.bufPrint(&command_buffer, "widget-action dashboard-canvas {d} toggle", .{auto_toggle.id}));
+    try std.testing.expect(app.model.auto_refresh);
     scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "dashboard-canvas");
-    try std.testing.expectEqual(@as(f32, 0), scrolled_layout.findById(120).?.widget.value);
-    snapshot = harness.runtime.automationSnapshot("Dashboard");
-    try std.testing.expectEqual(@as(f32, 0), dashboardSnapshotWidget(snapshot, 120).?.scroll.offset);
-    display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    const activity_y_after_decrement = try dashboardTextCommandOriginY(display_list, activity_first_text_command_id);
-    try std.testing.expect(activity_y_after_decrement > activity_y_after_increment);
+    try std.testing.expectEqual(scrolled_offset, scrolled_layout.findById(scroll.id).?.widget.value);
+    resetDashboardDirty(&harness.runtime);
+    try harness.runtime.dispatchAutomationCommand(app.app(), try std.fmt.bufPrint(&command_buffer, "widget-action dashboard-canvas {d} decrement", .{scroll.id}));
+    try expectCompactDashboardDirty(&harness.runtime, canvas_width, canvas_height);
+    scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "dashboard-canvas");
+    try std.testing.expect(scrolled_layout.findById(scroll.id).?.widget.value < scrolled_offset);
 
+    // The next frame reports plan diagnostics into the status line and the
+    // canvas settles back to an idle profile.
     try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_frame = .{
         .label = "dashboard-canvas",
         .size = geometry.SizeF.init(canvas_width, canvas_height),
@@ -1674,12 +1934,10 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
         .nonblank = true,
     } });
     snapshot = harness.runtime.automationSnapshot("Dashboard");
-    const status_widget = dashboardSnapshotWidget(snapshot, dashboard_status_text_id).?;
-    try std.testing.expect(std.mem.indexOf(u8, status_widget.name, "Canvas frame:") != null);
+    const status_widget = dashboardSnapshotWidgetNameContains(snapshot, "text", "Canvas frame:").?;
     try std.testing.expect(std.mem.indexOf(u8, status_widget.name, "risk") != null);
     try std.testing.expect(std.mem.indexOf(u8, status_widget.name, "work units") != null);
     try std.testing.expect(std.mem.indexOf(u8, status_widget.name, "dirty") != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_widget.name, "idle risk") != null);
 
     const frame = try harness.runtime.gpuSurfaceFrame(1, "dashboard-canvas");
     try std.testing.expect(frame.canvas_revision > 1);
@@ -1697,12 +1955,53 @@ test "gpu dashboard app registers canvas display list on first gpu frame" {
     try std.testing.expectEqual(zero_native.platform.CanvasFrameProfileRisk.idle, frame.canvas_frame_profile_risk);
 }
 
-test "gpu dashboard follows system appearance tokens" {
-    var harness: zero_native.TestHarness() = undefined;
+test "gpu dashboard shell commands map to typed messages" {
+    // The runtime and the app are both multi-megabyte structs; keep them off
+    // the test thread's stack.
+    const harness = try std.testing.allocator.create(zero_native.TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{ .size = geometry.SizeF.init(window_width, window_height) });
     harness.null_platform.gpu_surfaces = true;
 
-    var app = GpuDashboardApp{};
+    const app = try std.testing.allocator.create(GpuDashboardApp);
+    defer std.testing.allocator.destroy(app);
+    app.* = GpuDashboardApp.init(std.heap.page_allocator);
+    defer app.deinit();
+    try harness.start(app.app());
+
+    try harness.runtime.dispatchPlatformEvent(app.app(), .{ .gpu_surface_frame = .{
+        .label = "dashboard-canvas",
+        .size = default_canvas_size,
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app.canvas_installed);
+
+    try harness.runtime.dispatchCommand(app.app(), .{ .name = refresh_command, .window_id = 1, .source = .menu });
+    try std.testing.expectEqual(@as(u32, 1), app.model.refresh_count);
+    try std.testing.expectEqualStrings("Dashboard canvas refreshed. Count 1.", app.model.status());
+
+    try harness.runtime.dispatchCommand(app.app(), .{ .name = mode_command, .window_id = 1, .source = .menu });
+    try std.testing.expectEqual(@as(u32, 1), app.model.mode_count);
+    try std.testing.expectEqualStrings("Dashboard mode changed. Count 1.", app.model.status());
+
+    const snapshot = harness.runtime.automationSnapshot("Dashboard");
+    try std.testing.expect(dashboardSnapshotWidgetNamed(snapshot, "text", "Dashboard mode changed. Count 1.") != null);
+}
+
+test "gpu dashboard follows system appearance tokens" {
+    // The runtime and the app are both multi-megabyte structs; keep them off
+    // the test thread's stack.
+    const harness = try std.testing.allocator.create(zero_native.TestHarness());
+    defer std.testing.allocator.destroy(harness);
+    harness.init(.{ .size = geometry.SizeF.init(window_width, window_height) });
+    harness.null_platform.gpu_surfaces = true;
+
+    const app = try std.testing.allocator.create(GpuDashboardApp);
+    defer std.testing.allocator.destroy(app);
+    app.* = GpuDashboardApp.init(std.heap.page_allocator);
     defer app.deinit();
     const app_handle = app.app();
     try harness.start(app_handle);
@@ -1717,8 +2016,7 @@ test "gpu dashboard follows system appearance tokens" {
     } });
     try std.testing.expectEqualDeep(dashboardWidgetTokensForSchemeAndScale(.light, 2), try harness.runtime.canvasWidgetDesignTokens(1, "dashboard-canvas"));
     var display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    try expectDashboardFillRectColor(display_list, 1, dashboardWidgetTokensForSchemeAndScale(.light, 2).colors.background);
-    try std.testing.expect(display_list.findCommandById(3) == null);
+    try expectDashboardFillRectColor(display_list, dashboard_background_command_id, dashboardWidgetTokensForSchemeAndScale(.light, 2).colors.background);
 
     const packet_count_before_dark = harness.null_platform.gpu_surface_packet_present_count;
     try harness.runtime.dispatchPlatformEvent(app_handle, .{ .appearance_changed = .{ .color_scheme = .dark, .reduce_motion = true, .high_contrast = true } });
@@ -1728,19 +2026,22 @@ test "gpu dashboard follows system appearance tokens" {
     try std.testing.expectEqualDeep(dashboardWidgetTokensForSchemeScaleMotionAndContrast(.dark, 2, true, true), try harness.runtime.canvasWidgetDesignTokens(1, "dashboard-canvas"));
     try std.testing.expect(harness.null_platform.gpu_surface_packet_present_count > packet_count_before_dark);
     display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    try expectDashboardFillRectColor(display_list, 1, dashboardWidgetTokensForSchemeScaleMotionAndContrast(.dark, 2, true, true).colors.background);
-    try std.testing.expect(display_list.findCommandById(3) == null);
+    try expectDashboardFillRectColor(display_list, dashboard_background_command_id, dashboardWidgetTokensForSchemeScaleMotionAndContrast(.dark, 2, true, true).colors.background);
     const snapshot = harness.runtime.automationSnapshot("Dashboard");
-    const status_widget = dashboardSnapshotWidget(snapshot, dashboard_status_text_id).?;
-    try std.testing.expect(std.mem.indexOf(u8, status_widget.name, "Dashboard theme: dark from system appearance.") != null);
+    try std.testing.expect(dashboardSnapshotWidgetNamed(snapshot, "text", "Dashboard theme: dark from system appearance.") != null);
 }
 
 test "gpu dashboard app rebuilds retained scene for resized gpu surfaces" {
-    var harness: zero_native.TestHarness() = undefined;
+    // The runtime and the app are both multi-megabyte structs; keep them off
+    // the test thread's stack.
+    const harness = try std.testing.allocator.create(zero_native.TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{ .size = geometry.SizeF.init(window_width, window_height) });
     harness.null_platform.gpu_surfaces = true;
 
-    var app = GpuDashboardApp{};
+    const app = try std.testing.allocator.create(GpuDashboardApp);
+    defer std.testing.allocator.destroy(app);
+    app.* = GpuDashboardApp.init(std.heap.page_allocator);
     defer app.deinit();
     const app_handle = app.app();
     try harness.start(app_handle);
@@ -1781,12 +2082,21 @@ test "gpu dashboard app rebuilds retained scene for resized gpu surfaces" {
     try std.testing.expectEqualDeep(resized_size, resized_frame.size);
 
     const display_list = try harness.runtime.canvasDisplayList(1, "dashboard-canvas");
-    try expectDashboardFillRectFrame(display_list, 1, dashboardBackdropRect(resized_size));
-    try std.testing.expect(display_list.findCommandById(3) == null);
-    try expectDashboardRoundedRectFrame(display_list, 4, dashboardHeroRect(resized_size));
+    try expectDashboardFillRectFrame(display_list, dashboard_background_command_id, dashboardBackdropRect(resized_size));
+    try expectDashboardRoundedRectFrame(display_list, dashboard_hero_command_id, dashboardHeroRect(resized_size));
 
+    // The flex tree relayouts to the new surface: the side column tracks the
+    // right edge and the status line tracks the bottom edge.
+    const tree = app.tree.?;
+    const live_button = findWidgetKindText(tree.root, .button, "Live render").?;
+    const status_text = findWidgetByLabel(tree.root, app.model.status()).?;
     const widget_layout = try harness.runtime.canvasWidgetLayout(1, "dashboard-canvas");
-    try expectDashboardWidgetFrame(widget_layout, 103, dashboardContentRect(688, 50, 122, 34));
+    const live_frame = try dashboardLayoutFrame(widget_layout, live_button.id);
+    try std.testing.expect(live_frame.maxX() > canvas_width);
+    try std.testing.expect(live_frame.maxX() <= resized_size.width);
+    const status_frame = try dashboardLayoutFrame(widget_layout, status_text.id);
+    const content_end = dashboardContentYForSize(resized_size) + dashboardContentHeightForSize(resized_size);
+    try std.testing.expect(status_frame.y >= content_end);
 }
 
 test "gpu dashboard frame event adapter preserves renderer diagnostics" {
