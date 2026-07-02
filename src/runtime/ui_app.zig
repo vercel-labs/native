@@ -31,6 +31,19 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
 
         pub const MarkupView = canvas.MarkupView(ModelT, MsgT);
 
+        pub const ChromeOptions = struct {
+            /// Number of chrome commands preserved in front of the
+            /// widget-generated commands.
+            prefix_commands: usize,
+            /// Number of chrome commands preserved after the
+            /// widget-generated commands.
+            suffix_commands: usize = 0,
+            /// Builds the chrome display-list commands: exactly
+            /// `prefix_commands` commands followed by `suffix_commands`
+            /// commands.
+            build: *const fn (model: *const ModelT, builder: *canvas.Builder, size: geometry.SizeF, tokens: canvas.DesignTokens) anyerror!void,
+        };
+
         pub const MarkupOptions = struct {
             /// Markup source compiled into the binary (release, and the
             /// fallback until the watch path parses).
@@ -50,6 +63,23 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
             scene: app_manifest.ShellConfig,
             canvas_label: []const u8,
             tokens: canvas.DesignTokens = .{},
+            /// Model-derived design tokens. When set, this is consulted on
+            /// every install and rebuild instead of the static `tokens`,
+            /// and `pixel_snap.scale` is stamped with the live surface
+            /// scale afterwards: the model owns scheme/contrast/motion,
+            /// the runtime owns the surface scale.
+            tokens_fn: ?*const fn (model: *const ModelT) canvas.DesignTokens = null,
+            /// Non-widget chrome (backgrounds, gradients, titles) rebuilt
+            /// together with the widget display list on install, resize,
+            /// and every model rebuild via `setCanvasDisplayList` +
+            /// `emitCanvasWidgetDisplayListWithChrome`.
+            chrome: ?ChromeOptions = null,
+            /// Render animations derived from the model and current tree,
+            /// re-applied after every rebuild through
+            /// `setCanvasRenderAnimations` with the latest frame timestamp
+            /// as `start_ns`. Returns the number of animations written to
+            /// `out`.
+            animations: ?*const fn (model: *const ModelT, tree: *const Ui.Tree, start_ns: u64, out: []canvas.CanvasRenderAnimation) usize = null,
             update: *const fn (model: *ModelT, msg: MsgT) void,
             /// Hand-written view. Exactly one of `view` and `markup` must be
             /// set.
@@ -64,6 +94,19 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
             /// ids (>= `platform.reserved_timer_id_base`) are handled
             /// internally and never reach this callback.
             on_timer: ?*const fn (id: u64, timestamp_ns: u64) ?MsgT = null,
+            /// Optional mapping from system appearance changes into
+            /// messages so the model can own color scheme, contrast, and
+            /// reduce-motion state (and `tokens_fn` can derive from it).
+            on_appearance: ?*const fn (appearance: platform.Appearance) ?MsgT = null,
+            /// Optional mapping from presented gpu frames (carrying the
+            /// renderer diagnostics the runtime recorded) into messages.
+            /// Called after presenting every frame except the installing
+            /// one.
+            on_frame: ?*const fn (model: *const ModelT, frame: platform.GpuFrame) ?MsgT = null,
+            /// Reads runtime-owned widget state (slider values, scroll
+            /// offsets) back into the model before update and rebuild so
+            /// the next source tree does not stomp it.
+            sync: ?*const fn (model: *ModelT, layout: canvas.WidgetLayoutTree) void = null,
         };
 
         model: ModelT,
@@ -74,6 +117,8 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
         canvas_size: geometry.SizeF = .{ .width = 1, .height = 1 },
         canvas_window_id: platform.WindowId = 1,
         installed: bool = false,
+        pixel_snap_scale: f32 = 1,
+        frame_timestamp_ns: u64 = 0,
         markup_arenas: [2]std.heap.ArenaAllocator,
         markup_arena_index: usize = 0,
         markup_view: ?MarkupView = null,
@@ -116,30 +161,103 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
             };
         }
 
-        /// Apply a message and rebuild the widget tree.
+        /// Apply a message and rebuild the widget tree. Runtime-owned
+        /// widget state is synced into the model first so `update` sees
+        /// current slider values and scroll offsets.
         pub fn dispatch(self: *Self, runtime: *Runtime, window_id: platform.WindowId, msg: MsgT) anyerror!void {
+            self.syncModel(runtime, window_id);
             self.options.update(&self.model, msg);
             try self.rebuild(runtime, window_id);
+        }
+
+        /// The design tokens for the next rebuild: static `tokens`, or the
+        /// model-derived `tokens_fn` with the surface scale stamped into
+        /// `pixel_snap.scale`.
+        pub fn effectiveTokens(self: *const Self) canvas.DesignTokens {
+            const tokens_fn = self.options.tokens_fn orelse return self.options.tokens;
+            var tokens = tokens_fn(&self.model);
+            tokens.pixel_snap.scale = self.pixel_snap_scale;
+            return tokens;
+        }
+
+        /// Read runtime-owned widget state back into the model through the
+        /// optional `sync` hook.
+        fn syncModel(self: *Self, runtime: *Runtime, window_id: platform.WindowId) void {
+            const sync = self.options.sync orelse return;
+            if (self.tree == null) return;
+            const layout = runtime.canvasWidgetLayout(window_id, self.options.canvas_label) catch return;
+            sync(&self.model, layout);
         }
 
         /// Rebuild the widget tree from the model and hand it to the
         /// runtime, which copies and reconciles it. The previous tree's
         /// arena stays alive until the following rebuild so the handler
-        /// table remains valid between events.
+        /// table remains valid between events. Apps with a `chrome` hook
+        /// also rebuild the retained display list (chrome prefix + widget
+        /// commands + chrome suffix) here.
         pub fn rebuild(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
+            self.syncModel(runtime, window_id);
+            const tokens = self.effectiveTokens();
             const next_index = self.arena_index ^ 1;
             _ = self.arenas[next_index].reset(.retain_capacity);
             var ui = Ui.init(self.arenas[next_index].allocator());
             const node = try self.buildViewNode(&ui);
-            const tree = try ui.finalizeWithTokens(node, self.options.tokens);
+            const tree = try ui.finalizeWithTokens(node, tokens);
 
             var nodes: [canvas_limits.max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined;
             const bounds = geometry.RectF.init(0, 0, self.canvas_size.width, self.canvas_size.height);
-            const layout = try canvas.layoutWidgetTree(tree.root, bounds, &nodes);
-            _ = try runtime.setCanvasWidgetLayout(window_id, self.options.canvas_label, layout);
+            const layout = try canvas.layoutWidgetTreeWithTokens(tree.root, bounds, tokens, &nodes);
+
+            if (self.options.chrome) |chrome| {
+                try self.installChromeDisplayList(runtime, window_id, chrome, layout, tokens);
+            } else {
+                _ = try runtime.setCanvasWidgetLayout(window_id, self.options.canvas_label, layout);
+                if (self.installed and self.options.tokens_fn != null) {
+                    _ = try runtime.emitCanvasWidgetDisplayList(window_id, self.options.canvas_label, tokens);
+                }
+            }
 
             self.tree = tree;
             self.arena_index = next_index;
+            try self.scheduleAnimations(runtime, window_id);
+        }
+
+        /// Rebuild the retained display list around the reconciled widget
+        /// layout: chrome prefix, widget commands, chrome suffix. The
+        /// runtime then regenerates the widget span on internal state
+        /// changes while preserving the chrome via
+        /// `emitCanvasWidgetDisplayListWithChrome`.
+        fn installChromeDisplayList(self: *Self, runtime: *Runtime, window_id: platform.WindowId, chrome: ChromeOptions, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens) anyerror!void {
+            var chrome_commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
+            var chrome_builder = canvas.Builder.init(&chrome_commands);
+            try chrome.build(&self.model, &chrome_builder, self.canvas_size, tokens);
+            const chrome_list = chrome_builder.displayList();
+            if (chrome_list.commands.len != chrome.prefix_commands + chrome.suffix_commands) {
+                return error.InvalidChromeCommandCount;
+            }
+
+            var commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
+            var builder = canvas.Builder.init(&commands);
+            for (chrome_list.commands[0..chrome.prefix_commands]) |command| try builder.append(command);
+            try layout.emitDisplayList(&builder, tokens);
+            for (chrome_list.commands[chrome.prefix_commands..]) |command| try builder.append(command);
+
+            _ = try runtime.setCanvasDisplayList(window_id, self.options.canvas_label, builder.displayList());
+            _ = try runtime.setCanvasWidgetLayout(window_id, self.options.canvas_label, layout);
+            _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, self.options.canvas_label, tokens, .{
+                .prefix_command_count = chrome.prefix_commands,
+                .suffix_command_count = chrome.suffix_commands,
+            });
+        }
+
+        /// Re-apply the model-derived render animations with the latest
+        /// frame timestamp.
+        fn scheduleAnimations(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
+            const animations_fn = self.options.animations orelse return;
+            const tree = &(self.tree orelse return);
+            var animations: [canvas_limits.max_canvas_render_animations_per_view]canvas.CanvasRenderAnimation = undefined;
+            const count = animations_fn(&self.model, tree, self.frame_timestamp_ns, &animations);
+            _ = try runtime.setCanvasRenderAnimations(window_id, self.options.canvas_label, animations[0..count]);
         }
 
         fn buildViewNode(self: *Self, ui: *Ui) anyerror!Ui.Node {
@@ -233,6 +351,12 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
                         try self.dispatch(runtime, command.window_id, msg);
                     }
                 },
+                .appearance_changed => |appearance| {
+                    const map = self.options.on_appearance orelse return;
+                    if (map(appearance)) |msg| {
+                        try self.dispatch(runtime, self.canvas_window_id, msg);
+                    }
+                },
                 .timer => |timer_event| try self.handleTimer(runtime, timer_event),
                 .gpu_surface_frame => |frame_event| try self.handleFrame(runtime, frame_event),
                 .gpu_surface_resized => |resize_event| try self.handleResize(runtime, resize_event),
@@ -257,12 +381,22 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
         fn handleFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent) anyerror!void {
             if (!std.mem.eql(u8, frame_event.label, self.options.canvas_label)) return;
             self.canvas_window_id = frame_event.window_id;
+            self.frame_timestamp_ns = frame_event.timestamp_ns;
+            const scale = normalizedSurfaceScale(frame_event.scale_factor);
+            var installing = false;
             if (!self.installed) {
+                installing = true;
                 self.canvas_size = frame_event.size;
+                self.pixel_snap_scale = scale;
                 try self.rebuild(runtime, frame_event.window_id);
-                _ = try runtime.emitCanvasWidgetDisplayList(frame_event.window_id, self.options.canvas_label, self.options.tokens);
+                if (self.options.chrome == null) {
+                    _ = try runtime.emitCanvasWidgetDisplayList(frame_event.window_id, self.options.canvas_label, self.effectiveTokens());
+                }
                 self.installed = true;
                 self.startMarkupWatch(runtime);
+            } else if (self.options.tokens_fn != null and @abs(self.pixel_snap_scale - scale) > 0.001) {
+                self.pixel_snap_scale = scale;
+                try self.rebuild(runtime, frame_event.window_id);
             }
             _ = runtime.presentNextCanvasGpuPacketWithScale(
                 frame_event.window_id,
@@ -275,7 +409,7 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
                     .full_repaint = frame_event.canvas_frame_full_repaint,
                 },
                 runtime.canvasFrameScratchStorage(),
-                self.options.tokens.colors.background,
+                self.effectiveTokens().colors.background,
                 &self.gpu_commands,
                 &self.packet_json,
                 null,
@@ -283,6 +417,17 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
                 error.UnsupportedService => {},
                 else => return err,
             };
+            if (installing) return;
+            const on_frame = self.options.on_frame orelse return;
+            const gpu_frame = runtime.gpuSurfaceFrame(frame_event.window_id, self.options.canvas_label) catch return;
+            if (on_frame(&self.model, gpu_frame)) |msg| {
+                try self.dispatch(runtime, frame_event.window_id, msg);
+            }
+        }
+
+        fn normalizedSurfaceScale(scale_factor: f32) f32 {
+            if (!std.math.isFinite(scale_factor) or scale_factor <= 0) return 1;
+            return scale_factor;
         }
 
         fn handleResize(self: *Self, runtime: *Runtime, resize_event: platform.GpuSurfaceResizeEvent) anyerror!void {

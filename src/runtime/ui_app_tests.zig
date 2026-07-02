@@ -246,6 +246,244 @@ test "ui app maps timer events into messages and rebuilds" {
     try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
 }
 
+// ------------------------------------------------------------------ hooks
+
+const ThemedModel = struct {
+    count: u32 = 0,
+    dark: bool = false,
+    high_contrast: bool = false,
+    frame_reports: u32 = 0,
+    slider_value: f32 = 0.5,
+};
+
+const ThemedMsg = union(enum) {
+    increment,
+    appearance: struct { dark: bool, high_contrast: bool },
+    frame_seen,
+    slider_changed,
+};
+
+const ThemedApp = ui_app_model.UiApp(ThemedModel, ThemedMsg);
+
+const themed_light_background = canvas.Color.rgb8(240, 244, 250);
+const themed_dark_background = canvas.Color.rgb8(18, 22, 30);
+const themed_chrome_background_id: canvas.ObjectId = 1;
+const themed_chrome_footer_id: canvas.ObjectId = 2;
+
+fn themedUpdate(model: *ThemedModel, msg: ThemedMsg) void {
+    switch (msg) {
+        .increment => model.count += 1,
+        .appearance => |appearance| {
+            model.dark = appearance.dark;
+            model.high_contrast = appearance.high_contrast;
+        },
+        .frame_seen => model.frame_reports += 1,
+        .slider_changed => {},
+    }
+}
+
+fn themedView(ui: *ThemedApp.Ui, model: *const ThemedModel) ThemedApp.Ui.Node {
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.text(.{}, ui.fmt("Count {d}", .{model.count})),
+        ui.button(.{ .variant = .primary, .on_press = .increment }, "Add"),
+        ui.el(.slider, .{ .value = model.slider_value, .on_change = .slider_changed, .semantics = .{ .label = "Level" } }, .{}),
+    });
+}
+
+fn themedTokens(model: *const ThemedModel) canvas.DesignTokens {
+    var tokens = canvas.DesignTokens{};
+    tokens.colors.background = if (model.dark) themed_dark_background else themed_light_background;
+    tokens.pixel_snap = .{ .geometry = true, .text = true };
+    return tokens;
+}
+
+fn themedChrome(model: *const ThemedModel, builder: *canvas.Builder, size: geometry.SizeF, tokens: canvas.DesignTokens) anyerror!void {
+    _ = model;
+    // One prefix command (backdrop) and one suffix command (footer rule).
+    try builder.fillRect(.{
+        .id = themed_chrome_background_id,
+        .rect = geometry.RectF.init(0, 0, size.width, size.height),
+        .fill = .{ .color = tokens.colors.background },
+    });
+    try builder.fillRect(.{
+        .id = themed_chrome_footer_id,
+        .rect = geometry.RectF.init(0, size.height - 1, size.width, 1),
+        .fill = .{ .color = tokens.colors.text },
+    });
+}
+
+fn themedAnimations(model: *const ThemedModel, tree: *const ThemedApp.Ui.Tree, start_ns: u64, out: []canvas.CanvasRenderAnimation) usize {
+    _ = model;
+    const button_id = findIn(tree.root, .button, "Add") orelse return 0;
+    if (out.len < 1) return 0;
+    out[0] = .{
+        .id = canvas.widgetCommandPartId(.{ .widget_id = button_id, .slot = 1 }),
+        .start_ns = start_ns,
+        .duration_ms = 400,
+        .from_opacity = 0.6,
+        .to_opacity = 1,
+    };
+    return 1;
+}
+
+fn themedAppearance(appearance: core.Appearance) ?ThemedMsg {
+    return ThemedMsg{ .appearance = .{
+        .dark = appearance.color_scheme == .dark,
+        .high_contrast = appearance.high_contrast,
+    } };
+}
+
+fn themedFrame(model: *const ThemedModel, frame: @import("../platform/root.zig").GpuFrame) ?ThemedMsg {
+    if (model.frame_reports > 0) return null;
+    if (frame.canvas_command_count == 0) return null;
+    return .frame_seen;
+}
+
+fn themedSync(model: *ThemedModel, layout: canvas.WidgetLayoutTree) void {
+    for (layout.nodes) |node| {
+        if (node.widget.kind == .slider) model.slider_value = node.widget.value;
+    }
+}
+
+fn themedOptions() ThemedApp.Options {
+    return .{
+        .name = "ui-app-themed",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = themedUpdate,
+        .view = themedView,
+        .tokens_fn = themedTokens,
+        .chrome = .{ .prefix_commands = 1, .suffix_commands = 1, .build = themedChrome },
+        .animations = themedAnimations,
+        .on_appearance = themedAppearance,
+        .on_frame = themedFrame,
+        .sync = themedSync,
+    };
+}
+
+fn expectChromeFillRect(display_list: canvas.DisplayList, id: canvas.ObjectId, expected_rect: geometry.RectF, expected_color: canvas.Color) !void {
+    const command_ref = display_list.findCommandById(id) orelse return error.MissingChromeCommand;
+    switch (command_ref.command) {
+        .fill_rect => |fill| {
+            try std.testing.expectApproxEqAbs(expected_rect.width, fill.rect.width, 0.001);
+            try std.testing.expectApproxEqAbs(expected_rect.height, fill.rect.height, 0.001);
+            switch (fill.fill) {
+                .color => |actual| try std.testing.expectEqualDeep(expected_color, actual),
+                else => return error.UnexpectedChromeCommand,
+            }
+        },
+        else => return error.UnexpectedChromeCommand,
+    }
+}
+
+test "ui app hooks drive chrome, dynamic tokens, animations, and frame reports" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(ThemedApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ThemedApp.init(std.heap.page_allocator, .{}, themedOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    // Install: the chrome prefix and suffix wrap the widget commands, the
+    // model-derived tokens are stored (with the surface scale stamped into
+    // pixel snapping), and the animation hook is applied with the install
+    // frame timestamp.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    var display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try std.testing.expect(display_list.commandCount() > 2);
+    try expectChromeFillRect(display_list, themed_chrome_background_id, geometry.RectF.init(0, 0, 400, 300), themed_light_background);
+    try std.testing.expect(display_list.findCommandById(themed_chrome_footer_id) != null);
+    // The chrome prefix stays first and the suffix stays last around the
+    // regenerated widget commands.
+    try std.testing.expectEqual(themed_chrome_background_id, display_list.commands[0].fill_rect.id);
+    try std.testing.expectEqual(themed_chrome_footer_id, display_list.commands[display_list.commands.len - 1].fill_rect.id);
+
+    const stored_tokens = try harness.runtime.canvasWidgetDesignTokens(1, canvas_label);
+    try std.testing.expectEqualDeep(themed_light_background, stored_tokens.colors.background);
+    try std.testing.expectEqual(@as(f32, 2), stored_tokens.pixel_snap.scale);
+
+    const animations = try harness.runtime.canvasRenderAnimations(1, canvas_label);
+    try std.testing.expectEqual(@as(usize, 1), animations.len);
+    try std.testing.expectEqual(@as(u64, 1_000_000_000), animations[0].start_ns);
+    const button_id = findIn(app_state.tree.?.root, .button, "Add").?;
+    try std.testing.expectEqual(canvas.widgetCommandPartId(.{ .widget_id = button_id, .slot = 1 }), animations[0].id);
+
+    // A dispatch-driven rebuild keeps the chrome and updates the widgets.
+    var command_buffer: [96]u8 = undefined;
+    const click = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ canvas_label, button_id });
+    try harness.runtime.dispatchAutomationCommand(app, click);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
+    display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try expectChromeFillRect(display_list, themed_chrome_background_id, geometry.RectF.init(0, 0, 400, 300), themed_light_background);
+
+    // Runtime-owned slider state syncs back into the model before update.
+    const slider_id = blk: {
+        const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+        for (layout.nodes) |node| {
+            if (node.widget.kind == .slider) break :blk node.widget.id;
+        }
+        return error.TestUnexpectedResult;
+    };
+    const increment = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} increment", .{ canvas_label, slider_id });
+    try harness.runtime.dispatchAutomationCommand(app, increment);
+    try std.testing.expect(app_state.model.slider_value > 0.5);
+
+    // Appearance changes map into messages; the model-owned scheme drives
+    // new tokens and a chrome rebuild.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .appearance_changed = .{ .color_scheme = .dark, .high_contrast = true } });
+    try std.testing.expect(app_state.model.dark);
+    try std.testing.expect(app_state.model.high_contrast);
+    const dark_tokens = try harness.runtime.canvasWidgetDesignTokens(1, canvas_label);
+    try std.testing.expectEqualDeep(themed_dark_background, dark_tokens.colors.background);
+    display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try expectChromeFillRect(display_list, themed_chrome_background_id, geometry.RectF.init(0, 0, 400, 300), themed_dark_background);
+
+    // Resizes rebuild the chrome at the new surface size.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_resized = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .frame = geometry.RectF.init(0, 0, 640, 480),
+        .scale_factor = 2,
+    } });
+    display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    try expectChromeFillRect(display_list, themed_chrome_background_id, geometry.RectF.init(0, 0, 640, 480), themed_dark_background);
+
+    // Non-installing frames report presented gpu frames through on_frame.
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.frame_reports);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(640, 480),
+        .scale_factor = 2,
+        .frame_index = 2,
+        .timestamp_ns = 1_016_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.frame_reports);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(640, 480),
+        .scale_factor = 2,
+        .frame_index = 3,
+        .timestamp_ns = 1_032_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.frame_reports);
+}
+
 test "markup watch polls from the reserved runtime timer" {
     const io = std.testing.io;
     const watch_path = ".zig-cache/ui-app-markup-watch-test.zml";
