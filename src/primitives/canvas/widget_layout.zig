@@ -416,6 +416,10 @@ fn accordionHeaderHeight(widget: Widget, tokens: DesignTokens) f32 {
 }
 
 pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
+    return intrinsicWidgetSizeDepth(widget, tokens, 0);
+}
+
+fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
     return switch (widget.kind) {
         .text => intrinsicTextWidgetSize(widget, tokens, widgetBodyTextSize(widget, tokens)),
         .icon => geometry.SizeF.init(intrinsicIconExtent(widget, tokens), intrinsicIconExtent(widget, tokens)),
@@ -443,8 +447,97 @@ pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF 
         .alert => intrinsicAlertWidgetSize(widget, tokens),
         .card => intrinsicCardWidgetSize(widget, tokens),
         .dialog, .drawer, .sheet => intrinsicModalSurfaceWidgetSize(widget, tokens),
-        .stack, .row, .column, .grid, .data_grid, .table, .scroll_view, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .accordion, .bubble, .resizable, .panel, .popover, .menu_surface, .dropdown_menu, .image => geometry.SizeF.zero(),
+        // Containers measure their children (matching the stacking axis the
+        // layout pass uses), bounded by the widget depth cap. Scroll
+        // viewports and virtualized containers stay zero: their content is
+        // allowed to overflow the space they're given.
+        .row, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group => intrinsicAxisChildrenSize(widget, tokens, .horizontal, depth),
+        .column, .menu_surface, .dropdown_menu => intrinsicAxisChildrenSize(widget, tokens, .vertical, depth),
+        .list, .data_grid, .table => if (widget.layout.virtualized)
+            geometry.SizeF.zero()
+        else
+            intrinsicAxisChildrenSize(widget, tokens, .vertical, depth),
+        .grid => if (widget.layout.virtualized)
+            geometry.SizeF.zero()
+        else
+            intrinsicGridChildrenSize(widget, tokens, depth),
+        .stack, .bubble, .resizable, .panel, .popover => intrinsicOverlayChildrenSize(widget, tokens, depth),
+        .scroll_view, .accordion, .image => geometry.SizeF.zero(),
     };
+}
+
+fn intrinsicChildSize(child: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
+    const intrinsic = intrinsicWidgetSizeDepth(child, tokens, depth);
+    return geometry.SizeF.init(
+        @max(intrinsic.width, @max(child.layout.min_size.width, nonNegative(child.frame.width))),
+        @max(intrinsic.height, @max(child.layout.min_size.height, nonNegative(child.frame.height))),
+    );
+}
+
+fn intrinsicAxisChildrenSize(widget: Widget, tokens: DesignTokens, axis: LayoutAxis, depth: usize) geometry.SizeF {
+    if (depth >= max_widget_depth or widget.children.len == 0) return intrinsicOwnMinSize(widget);
+    const gap = nonNegative(widget.layout.gap) * @as(f32, @floatFromInt(widget.children.len - 1));
+    var main_sum: f32 = 0;
+    var cross_max: f32 = 0;
+    for (widget.children) |child| {
+        const size = intrinsicChildSize(child, tokens, depth + 1);
+        switch (axis) {
+            .horizontal => {
+                main_sum += size.width;
+                cross_max = @max(cross_max, size.height);
+            },
+            .vertical => {
+                main_sum += size.height;
+                cross_max = @max(cross_max, size.width);
+            },
+        }
+    }
+    return paddedIntrinsicSize(widget, switch (axis) {
+        .horizontal => geometry.SizeF.init(main_sum + gap, cross_max),
+        .vertical => geometry.SizeF.init(cross_max, main_sum + gap),
+    });
+}
+
+fn intrinsicOverlayChildrenSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
+    if (depth >= max_widget_depth or widget.children.len == 0) return intrinsicOwnMinSize(widget);
+    var width_max: f32 = 0;
+    var height_max: f32 = 0;
+    for (widget.children) |child| {
+        const size = intrinsicChildSize(child, tokens, depth + 1);
+        width_max = @max(width_max, size.width);
+        height_max = @max(height_max, size.height);
+    }
+    return paddedIntrinsicSize(widget, geometry.SizeF.init(width_max, height_max));
+}
+
+fn intrinsicGridChildrenSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
+    if (depth >= max_widget_depth or widget.children.len == 0) return intrinsicOwnMinSize(widget);
+    var cell_width: f32 = 0;
+    var cell_height: f32 = 0;
+    for (widget.children) |child| {
+        const size = intrinsicChildSize(child, tokens, depth + 1);
+        cell_width = @max(cell_width, size.width);
+        cell_height = @max(cell_height, size.height);
+    }
+    const columns = gridColumnCount(widget.children.len, widget.layout.columns);
+    const rows = (widget.children.len + columns - 1) / columns;
+    const gap = nonNegative(widget.layout.gap);
+    return paddedIntrinsicSize(widget, geometry.SizeF.init(
+        cell_width * @as(f32, @floatFromInt(columns)) + gap * @as(f32, @floatFromInt(columns - 1)),
+        cell_height * @as(f32, @floatFromInt(rows)) + gap * @as(f32, @floatFromInt(rows - 1)),
+    ));
+}
+
+fn intrinsicOwnMinSize(widget: Widget) geometry.SizeF {
+    return geometry.SizeF.init(nonNegative(widget.layout.min_size.width), nonNegative(widget.layout.min_size.height));
+}
+
+fn paddedIntrinsicSize(widget: Widget, content: geometry.SizeF) geometry.SizeF {
+    const padding = widget.layout.padding;
+    return geometry.SizeF.init(
+        @max(content.width + padding.left + padding.right, widget.layout.min_size.width),
+        @max(content.height + padding.top + padding.bottom, widget.layout.min_size.height),
+    );
 }
 
 fn intrinsicTextWidgetSize(widget: Widget, tokens: DesignTokens, text_size: f32) geometry.SizeF {
