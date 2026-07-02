@@ -72,7 +72,8 @@ test "runtime applies pointer values to canvas controls" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -214,7 +215,8 @@ test "runtime automation widget click dispatches pointer input" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -277,7 +279,8 @@ test "runtime batches pointer widget display list refreshes" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -380,7 +383,8 @@ test "runtime batches keyboard widget display list refreshes" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -435,7 +439,8 @@ test "runtime automation widget drag dispatches pointer input" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -492,7 +497,8 @@ test "runtime reconciles canvas control state across layout replacement" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -715,7 +721,8 @@ test "runtime drives retained settings and data grid workflow" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -861,7 +868,8 @@ test "runtime refreshes widget owned display list from canvas input" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -921,7 +929,8 @@ test "runtime routes canvas widget pointers using design token layers" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -986,7 +995,8 @@ test "runtime selects canvas widgets from pointer and keyboard activation" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -1105,7 +1115,8 @@ test "runtime clears sibling canvas selections in retained groups" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -1280,7 +1291,8 @@ test "runtime applies keyboard values to focused canvas controls" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -1448,7 +1460,8 @@ test "runtime dispatches canvas widget commands from pointer and keyboard activa
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};

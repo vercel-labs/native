@@ -30,6 +30,7 @@ const max_canvas_widget_text_bytes_per_view = canvas_limits.max_canvas_widget_te
 const max_canvas_widget_source_text_entries_per_view = canvas_limits.max_canvas_widget_source_text_entries_per_view;
 
 const CanvasWidgetSourceTextEntry = canvas_widget_runtime.CanvasWidgetSourceTextEntry;
+const CanvasWidgetSourceScrollEntry = canvas_widget_runtime.CanvasWidgetSourceScrollEntry;
 fn copyInto(buffer: []u8, value: []const u8) ![]const u8 {
     if (value.len > buffer.len) return error.NoSpaceLeft;
     @memcpy(buffer[0..value.len], value);
@@ -205,6 +206,8 @@ pub const RuntimeView = struct {
     widget_scroll_states: [max_canvas_widget_nodes_per_view]canvas.ScrollState = undefined,
     widget_source_text_entries: [max_canvas_widget_source_text_entries_per_view]CanvasWidgetSourceTextEntry = undefined,
     widget_source_text_count: usize = 0,
+    widget_source_scroll_entries: [canvas_limits.max_canvas_widget_nodes_per_view]CanvasWidgetSourceScrollEntry = undefined,
+    widget_source_scroll_count: usize = 0,
     canvas_widget_focused_id: canvas.ObjectId = 0,
     canvas_widget_focus_visible_id: canvas.ObjectId = 0,
     canvas_widget_hovered_id: canvas.ObjectId = 0,
@@ -311,6 +314,8 @@ pub const RuntimeView = struct {
     pub const widgetSemantics = CanvasWidgetTreeMethods.widgetSemantics;
     pub const widgetSourceTextEntries = CanvasWidgetTreeMethods.widgetSourceTextEntries;
     pub const copyCanvasWidgetSourceText = CanvasWidgetTreeMethods.copyCanvasWidgetSourceText;
+    pub const widgetSourceScrollEntries = CanvasWidgetTreeMethods.widgetSourceScrollEntries;
+    pub const copyCanvasWidgetSourceScroll = CanvasWidgetTreeMethods.copyCanvasWidgetSourceScroll;
     pub const copyWidgetLayoutTree = CanvasWidgetTreeMethods.copyWidgetLayoutTree;
     pub const canvasWidgetCursorForId = CanvasWidgetTreeMethods.canvasWidgetCursorForId;
     pub const canvasWidgetRenderState = CanvasWidgetTreeMethods.canvasWidgetRenderState;

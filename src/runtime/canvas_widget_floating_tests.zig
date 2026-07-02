@@ -72,7 +72,8 @@ test "runtime dismisses nearest canvas floating surface with escape" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -197,7 +198,8 @@ test "runtime dismisses canvas floating surfaces from automation and accessibili
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -246,7 +248,8 @@ test "runtime dismisses focused canvas floating surface from outside pointer dow
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -336,7 +339,8 @@ test "runtime traps tab focus inside canvas floating surfaces" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -423,7 +427,8 @@ test "runtime keeps single focus target scoped inside canvas floating surface" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -488,7 +493,8 @@ test "runtime keeps floating surface open when escape cancels text composition" 
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -544,7 +550,8 @@ test "runtime clears canvas widget interaction state when layout replacement dis
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};

@@ -72,7 +72,8 @@ test "runtime next canvas frame retains and evicts glyph atlas cache" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -179,7 +180,8 @@ test "runtime next canvas frame keeps recent unused text caches warm" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -280,7 +282,8 @@ test "runtime canvas frame scratch storage includes text layout caches" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};

@@ -75,7 +75,8 @@ test "runtime configures platform keyboard shortcuts" {
     const shortcuts = [_]platform.Shortcut{
         .{ .id = "command.palette", .key = "p", .modifiers = .{ .primary = true, .shift = true } },
     };
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.runtime.options.shortcuts = &shortcuts;
     var app_state: TestApp = .{};
@@ -107,7 +108,8 @@ test "runtime dispatches app activation lifecycle events" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     const app = app_state.app();
@@ -151,7 +153,8 @@ test "runtime stores and dispatches appearance preferences" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     const app = app_state.app();
@@ -297,7 +300,8 @@ test "runtime dispatches GPU surface events" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -754,7 +758,8 @@ test "runtime starts, fires, and cancels platform timers" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     const app = app_state.app();

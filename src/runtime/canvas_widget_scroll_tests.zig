@@ -72,7 +72,8 @@ test "runtime retains canvas widget design tokens" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -202,7 +203,8 @@ test "runtime wheel input scrolls retained canvas scroll views" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -412,7 +414,8 @@ test "runtime wheel over virtualized scroll does not bubble to parent scroll vie
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -481,7 +484,8 @@ test "runtime automation widget wheel timestamps retained canvas scroll input" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -540,7 +544,8 @@ test "runtime automation widget key inputs route to focused canvas widgets" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -590,7 +595,8 @@ test "runtime applies stored design token scroll physics" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -657,7 +663,8 @@ test "runtime refreshes hovered canvas widget after scroll clipping" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -729,7 +736,8 @@ test "runtime clears focused canvas widget after scroll clipping" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -827,7 +835,8 @@ test "runtime clears focused canvas widget after kinetic scroll clipping" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -889,7 +898,8 @@ test "runtime reconciles canvas widget render state after keyboard scroll clippi
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -984,7 +994,8 @@ test "runtime reconciles canvas widget scroll momentum across layout replacement
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -1067,7 +1078,8 @@ test "runtime clamps canvas scroll offset after layout replacement shrinks conte
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -1153,7 +1165,8 @@ test "runtime chains wheel input from saturated nested canvas scroll views" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -1238,7 +1251,8 @@ test "runtime leaves virtualized canvas scroll views app driven" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -1312,4 +1326,64 @@ test "runtime leaves virtualized canvas scroll views app driven" {
     try std.testing.expectEqual(@as(u64, 1), kinetic.widget_revision);
     try std.testing.expect(!harness.runtime.invalidated);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDirtyRegions().len);
+}
+
+test "user scroll offsets survive rebuilds until the source offset changes" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-scroll-reconcile", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
+    harness.init(.{});
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 64),
+    });
+
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "One" },
+        .{ .id = 3, .kind = .button, .frame = geometry.RectF.init(0, 40, 0, 32), .text = "Two" },
+        .{ .id = 4, .kind = .button, .frame = geometry.RectF.init(0, 80, 0, 32), .text = "Three" },
+    };
+    const source_root = canvas.Widget{ .id = 1, .kind = .scroll_view, .children = &children };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(source_root, geometry.RectF.init(0, 0, 180, 64), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // The user scrolls: runtime owns the offset.
+    try harness.runtime.dispatchAutomationCommand(app, "widget-wheel canvas 1 18");
+    try std.testing.expectEqual(@as(f32, 18), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(1).?.widget.value);
+
+    // An elm-style rebuild with an unchanged source offset must not reset
+    // the user's scroll position.
+    var rebuild_nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const rebuild_layout = try canvas.layoutWidgetTree(source_root, geometry.RectF.init(0, 0, 180, 64), &rebuild_nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", rebuild_layout);
+    try std.testing.expectEqual(@as(f32, 18), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(1).?.widget.value);
+
+    // A source-side offset change (programmatic scroll) wins over the
+    // runtime offset.
+    var scrolled_root = source_root;
+    scrolled_root.value = 6;
+    var programmatic_nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const programmatic_layout = try canvas.layoutWidgetTree(scrolled_root, geometry.RectF.init(0, 0, 180, 64), &programmatic_nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", programmatic_layout);
+    try std.testing.expectEqual(@as(f32, 6), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(1).?.widget.value);
+
+    // And the runtime owns it again from the new baseline.
+    var final_nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const final_layout = try canvas.layoutWidgetTree(scrolled_root, geometry.RectF.init(0, 0, 180, 64), &final_nodes);
+    try harness.runtime.dispatchAutomationCommand(app, "widget-wheel canvas 1 12");
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", final_layout);
+    try std.testing.expectEqual(@as(f32, 18), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(1).?.widget.value);
 }

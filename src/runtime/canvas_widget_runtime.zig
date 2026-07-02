@@ -41,6 +41,50 @@ pub const CanvasWidgetTextReconcileEntry = struct {
     value: f32 = 0,
 };
 
+pub const CanvasWidgetSourceScrollEntry = struct {
+    id: canvas.ObjectId = 0,
+    value: f32 = 0,
+};
+
+pub fn canvasWidgetSourceScrollById(entries: []const CanvasWidgetSourceScrollEntry, id: canvas.ObjectId) ?f32 {
+    for (entries) |entry| {
+        if (entry.id == id) return entry.value;
+    }
+    return null;
+}
+
+pub fn collectCanvasWidgetScrollOffsetEntries(
+    nodes: []const canvas.WidgetLayoutNode,
+    output: []CanvasWidgetSourceScrollEntry,
+) []const CanvasWidgetSourceScrollEntry {
+    var len: usize = 0;
+    for (nodes) |node| {
+        if (node.widget.kind != .scroll_view or node.widget.id == 0) continue;
+        if (len >= output.len) break;
+        output[len] = .{ .id = node.widget.id, .value = node.widget.value };
+        len += 1;
+    }
+    return output[0..len];
+}
+
+/// Scroll offsets follow the text-editing reconcile rule: the runtime-owned
+/// offset (user scrolling) survives rebuilds as long as the SOURCE offset is
+/// unchanged; a source-side change (programmatic scroll) wins.
+pub fn canvasWidgetLayoutNodeWithScrollReconcileState(
+    node: canvas.WidgetLayoutNode,
+    previous_runtime_offsets: []const CanvasWidgetSourceScrollEntry,
+    previous_source_offsets: []const CanvasWidgetSourceScrollEntry,
+) canvas.WidgetLayoutNode {
+    var copy = node;
+    if (copy.widget.kind != .scroll_view or copy.widget.id == 0) return copy;
+    const previous_runtime = canvasWidgetSourceScrollById(previous_runtime_offsets, copy.widget.id) orelse return copy;
+    const previous_source = canvasWidgetSourceScrollById(previous_source_offsets, copy.widget.id) orelse return copy;
+    if (copy.widget.value == previous_source) {
+        copy.widget.value = previous_runtime;
+    }
+    return copy;
+}
+
 pub const CanvasWidgetSourceTextEntry = struct {
     id: canvas.ObjectId = 0,
     kind: canvas.WidgetKind = .text_field,
@@ -367,8 +411,10 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
     next: canvas.WidgetLayoutTree,
     source_semantics: []const canvas.WidgetSemanticsNode,
     previous_source_text_entries: []const CanvasWidgetSourceTextEntry,
+    previous_source_scroll_entries: []const CanvasWidgetSourceScrollEntry,
     node_buffer: []canvas.WidgetLayoutNode,
     control_entries: []CanvasWidgetControlReconcileEntry,
+    scroll_offset_entries: []CanvasWidgetSourceScrollEntry,
     text_entries: []CanvasWidgetTextReconcileEntry,
     text_storage: []u8,
     tokens: canvas.DesignTokens,
@@ -378,6 +424,10 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
     const previous_control_states = collectCanvasWidgetControlReconcileEntries(
         previous.nodes,
         control_entries,
+    );
+    const previous_runtime_offsets = collectCanvasWidgetScrollOffsetEntries(
+        previous.nodes,
+        scroll_offset_entries,
     );
     var text_len: usize = 0;
     const previous_text_states = try collectCanvasWidgetTextReconcileEntries(
@@ -391,7 +441,8 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
     for (next.nodes, 0..) |node, index| {
         const text_copy = canvasWidgetLayoutNodeWithTextReconcileState(node, next, index, previous_text_states);
         const control_copy = canvasWidgetLayoutNodeWithControlReconcileState(text_copy, next, index, previous_control_states);
-        node_buffer[index] = canvasWidgetLayoutNodeWithSourceSemantics(control_copy, source_semantics);
+        const scroll_copy = canvasWidgetLayoutNodeWithScrollReconcileState(control_copy, previous_runtime_offsets, previous_source_scroll_entries);
+        node_buffer[index] = canvasWidgetLayoutNodeWithSourceSemantics(scroll_copy, source_semantics);
     }
     const reconciled = node_buffer[0..next.nodes.len];
     clampCanvasWidgetLayoutScrollOffsets(reconciled, null);

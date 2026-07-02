@@ -49,6 +49,18 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return self.widget_source_text_entries[0..self.widget_source_text_count];
         }
 
+        pub fn widgetSourceScrollEntries(self: *const RuntimeView) []const canvas_widget_runtime.CanvasWidgetSourceScrollEntry {
+            return self.widget_source_scroll_entries[0..self.widget_source_scroll_count];
+        }
+
+        pub fn copyCanvasWidgetSourceScroll(self: *RuntimeView, layout: canvas.WidgetLayoutTree) void {
+            const entries = canvas_widget_runtime.collectCanvasWidgetScrollOffsetEntries(
+                layout.nodes,
+                &self.widget_source_scroll_entries,
+            );
+            self.widget_source_scroll_count = entries.len;
+        }
+
         pub fn copyCanvasWidgetSourceText(self: *RuntimeView, layout: canvas.WidgetLayoutTree) anyerror!void {
             var entries: [max_canvas_widget_source_text_entries_per_view]CanvasWidgetSourceTextEntry = undefined;
             var entry_count: usize = 0;

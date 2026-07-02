@@ -72,7 +72,8 @@ test "runtime creates lists focuses and closes windows" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -96,7 +97,8 @@ test "runtime handles built-in JavaScript window bridge commands" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.runtime.options.js_window_api = true;
     const webview_origins = [_][]const u8{ "zero://inline", "https://example.com", "https://example.org" };
@@ -189,7 +191,8 @@ test "runtime handles built-in JavaScript command bridge commands" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.runtime.options.js_window_api = true;
     const command_origins = [_][]const u8{"zero://inline"};
@@ -234,7 +237,8 @@ test "runtime lists command catalog through built-in JavaScript command API" {
         .{ .id = "app.save", .title = "Save" },
         .{ .id = "app.sidebar.toggle", .title = "Sidebar", .enabled = false, .checked = true },
     };
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.runtime.options.js_window_api = true;
     harness.runtime.options.commands = &commands;
@@ -332,7 +336,8 @@ test "runtime handles built-in JavaScript platform support commands" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.runtime.options.js_window_api = true;
     harness.runtime.options.security.navigation.allowed_origins = &.{"zero://inline"};

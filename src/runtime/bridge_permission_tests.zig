@@ -167,7 +167,8 @@ test "runtime gates built-in bridge commands through explicit policy" {
         .{ .name = "zero-native.webview.create", .permissions = &window_permissions, .origins = &.{"zero://inline"} },
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.runtime.options.security.permissions = &window_permissions;
     const webview_origins = [_][]const u8{ "zero://inline", "https://example.com" };
@@ -200,9 +201,10 @@ test "runtime gates built-in bridge commands through explicit policy" {
 }
 
 test "runtime denies built-in dialog bridge commands by default" {
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
-    const app = App{ .context = &harness, .name = "dialog-denied", .source = platform.WebViewSource.html("<p>Dialogs</p>") };
+    const app = App{ .context = harness, .name = "dialog-denied", .source = platform.WebViewSource.html("<p>Dialogs</p>") };
     try harness.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
         .bytes = "{\"id\":\"1\",\"command\":\"zero-native.dialog.showMessage\",\"payload\":{\"message\":\"Hello\"}}",
         .origin = "zero://inline",
@@ -212,9 +214,10 @@ test "runtime denies built-in dialog bridge commands by default" {
 }
 
 test "runtime reports dialog bridge validation errors as invalid requests" {
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
-    const app = App{ .context = &harness, .name = "dialog-invalid", .source = platform.WebViewSource.html("<p>Dialogs</p>") };
+    const app = App{ .context = harness, .name = "dialog-invalid", .source = platform.WebViewSource.html("<p>Dialogs</p>") };
     const dialog_permission = [_][]const u8{security.permission_dialog};
     const dialog_policy = [_]bridge.CommandPolicy{.{
         .name = "zero-native.dialog.showMessage",
@@ -235,7 +238,8 @@ test "runtime reports dialog bridge validation errors as invalid requests" {
 }
 
 test "runtime validates native OS actions before platform dispatch" {
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
 
     var dialog_paths: [platform.max_dialog_paths_bytes]u8 = undefined;
@@ -545,9 +549,10 @@ test "runtime builtin JSON field reader only reads top-level fields" {
 }
 
 test "runtime returns bridge permission errors through platform response service" {
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
-    const app = App{ .context = &harness, .name = "bridge-denied", .source = platform.WebViewSource.html("<p>Bridge</p>") };
+    const app = App{ .context = harness, .name = "bridge-denied", .source = platform.WebViewSource.html("<p>Bridge</p>") };
     try harness.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
         .bytes = "{\"id\":\"1\",\"command\":\"native.ping\",\"payload\":null}",
         .origin = "zero://inline",

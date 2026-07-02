@@ -72,7 +72,8 @@ test "runtime loads app source into platform webview" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -116,7 +117,8 @@ test "runtime lets start hook create views before startup source loads" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -139,7 +141,8 @@ test "runtime exposes startup WebView and native views through generic view API"
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -244,7 +247,8 @@ test "runtime createView routes webview kind through WebView backend" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -327,7 +331,8 @@ test "runtime rejects invalid native view parents" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -376,7 +381,8 @@ test "runtime closes native view descendants and logical WebView children with p
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -434,7 +440,8 @@ test "runtime traverses focus across WebViews and native controls" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -491,7 +498,8 @@ test "runtime rejects reserved GPU surface view kind until a backend supports it
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -516,7 +524,8 @@ test "runtime rejects unsupported GPU surface configuration" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};

@@ -93,7 +93,8 @@ test "runtime dispatches native view command events" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -192,7 +193,8 @@ test "runtime exposes configured command catalog" {
         .{ .id = "app.refresh", .title = "Refresh" },
         .{ .id = "app.sidebar.toggle", .title = "Sidebar", .checked = true },
     };
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.runtime.options.commands = &commands;
 
@@ -237,7 +239,8 @@ test "runtime dispatches menu command events" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -279,7 +282,8 @@ test "runtime dispatches tray item commands" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -331,7 +335,8 @@ test "runtime dispatches file drop events to app and window bridge" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -379,7 +384,8 @@ test "runtime routes file drops to retained canvas widget targets" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};

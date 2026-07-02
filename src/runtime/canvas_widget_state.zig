@@ -38,6 +38,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             const source_semantics = try layout.collectSemantics(&source_semantics_buffer);
             var reconciled_nodes: [max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined;
             var previous_control_entries: [max_canvas_widget_nodes_per_view]CanvasWidgetControlReconcileEntry = undefined;
+            var previous_scroll_entries: [max_canvas_widget_nodes_per_view]canvas_widget_runtime.CanvasWidgetSourceScrollEntry = undefined;
             var previous_text_entries: [max_canvas_widget_nodes_per_view]CanvasWidgetTextReconcileEntry = undefined;
             var previous_text_bytes: [max_canvas_widget_text_bytes_per_view]u8 = undefined;
             const tokens = self.views[index].widget_tokens;
@@ -46,8 +47,10 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 layout,
                 source_semantics,
                 self.views[index].widgetSourceTextEntries(),
+                self.views[index].widgetSourceScrollEntries(),
                 &reconciled_nodes,
                 &previous_control_entries,
+                &previous_scroll_entries,
                 &previous_text_entries,
                 &previous_text_bytes,
                 tokens,
@@ -65,6 +68,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             const previous_widget_revision = self.views[index].widget_revision;
             try self.views[index].copyWidgetLayoutTree(reconciled_layout);
             try self.views[index].copyCanvasWidgetSourceText(layout);
+            self.views[index].copyCanvasWidgetSourceScroll(layout);
             const widget_revision_changed = self.views[index].widget_revision != previous_widget_revision;
             if (previous_cursor != self.views[index].canvas_widget_cursor) try CanvasWidgetEventMethods(Runtime).syncCanvasWidgetCursorForView(self, index);
             CanvasWidgetEventMethods(Runtime).invalidateForWidgetInvalidations(self, self.views[index].frame, invalidations);

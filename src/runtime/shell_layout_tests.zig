@@ -72,7 +72,8 @@ test "runtime rejects canvas display lists on non-GPU views" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -111,7 +112,8 @@ test "runtime rejects oversized shell before creating partial views" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -143,7 +145,8 @@ test "runtime rolls back shell views when a later view fails" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -173,7 +176,8 @@ test "runtime applies GPU shell view presentation options" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -213,7 +217,8 @@ test "runtime restores main webview state when shell creation fails after main u
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{ .id = 1, .size = geometry.SizeF.init(800, 600) });
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -270,7 +275,8 @@ test "runtime materializes manifest shell windows into laid out views" {
         .views = &shell_views,
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -418,7 +424,8 @@ test "runtime applies mobile viewport insets to shell layout" {
         .{ .label = "main", .kind = .webview, .url = "zero://inline", .fill = true },
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{
         .id = 1,
         .size = geometry.SizeF.init(390, 844),
@@ -644,7 +651,8 @@ test "runtime loads canvas-only startup shell without implicit main webview" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{ .id = 1, .size = geometry.SizeF.init(800, 600) });
     harness.null_platform.gpu_surfaces = true;
     var app_state: TestApp = .{};
@@ -679,7 +687,8 @@ test "runtime relayouts shell views attached to startup window" {
         .{ .label = "statusbar", .kind = .statusbar, .edge = .bottom, .height = 30 },
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{ .id = 1, .size = geometry.SizeF.init(800, 600) });
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -721,7 +730,8 @@ test "runtime relayout uses owned shell view storage" {
         .{ .label = "main", .kind = .webview, .url = "zero://inline", .fill = true },
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{ .id = 1, .size = geometry.SizeF.init(800, 600) });
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -758,7 +768,8 @@ test "runtime clamps shell view layout constraints" {
         .{ .label = "content", .kind = .webview, .url = "zero://inline", .fill = true, .max_width = 480, .max_height = 360 },
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{ .id = 1, .size = geometry.SizeF.init(800, 600) });
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -800,7 +811,8 @@ test "runtime lays out stack children by column axis" {
         .{ .label = "main", .kind = .webview, .url = "zero://inline", .fill = true },
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{ .id = 1, .size = geometry.SizeF.init(800, 600) });
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -837,7 +849,8 @@ test "runtime lays out split panes and parented webview frames" {
         .{ .label = "main", .kind = .webview, .parent = "body", .url = "zero://inline", .fill = true },
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{ .id = 1, .size = geometry.SizeF.init(800, 600) });
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
@@ -878,7 +891,8 @@ test "runtime platform window close clears shell views and child WebViews" {
         .{ .label = "content", .kind = .webview, .url = "zero://inline", .fill = true },
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{ .id = 1, .size = geometry.SizeF.init(800, 600) });
     var app_state: TestApp = .{};
     const app = app_state.app();
@@ -949,7 +963,8 @@ test "runtime loads scene hook as native shell startup" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{ .id = 1, .size = geometry.SizeF.init(900, 600) });
     const state_store = window_state.Store.init(std.testing.io, ".zig-cache/test-runtime-scene-window-state", ".zig-cache/test-runtime-scene-window-state/windows.zon");
     harness.runtime.options.window_state_store = state_store;
@@ -1010,7 +1025,8 @@ test "runtime automation snapshot includes generic views" {
         }
     };
 
-    var harness: TestHarness() = undefined;
+    const harness = try std.testing.allocator.create(TestHarness());
+    defer std.testing.allocator.destroy(harness);
     harness.init(.{});
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
