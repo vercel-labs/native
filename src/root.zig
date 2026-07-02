@@ -29,6 +29,7 @@ pub const Command = runtime.Command;
 pub const CommandEvent = runtime.CommandEvent;
 pub const CommandSource = runtime.CommandSource;
 pub const TestHarness = runtime.TestHarness;
+pub const UiApp = runtime.UiApp;
 pub const ShellConfig = app_manifest.ShellConfig;
 pub const ShellWindow = app_manifest.ShellWindow;
 pub const ShellView = app_manifest.ShellView;

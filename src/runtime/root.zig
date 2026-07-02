@@ -36,6 +36,7 @@ pub const App = core.App;
 pub const Options = core.Options;
 pub const Runtime = core.Runtime;
 pub const TestHarness = core.TestHarness;
+pub const UiApp = @import("ui_app.zig").UiApp;
 pub const testing = core.testing;
 pub const canvasSurfacePixelSize = core.canvasSurfacePixelSize;
 pub const canvasFramePixelSize = core.canvasFramePixelSize;

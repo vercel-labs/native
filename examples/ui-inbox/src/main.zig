@@ -20,8 +20,7 @@ const window_width: f32 = 720;
 const window_height: f32 = 520;
 const max_tasks = 64;
 const max_task_title = 32;
-const max_layout_nodes = 256;
-const max_gpu_commands = 1024;
+
 
 const app_permissions = [_][]const u8{ zero_native.security.permission_command, zero_native.security.permission_view };
 const shell_views = [_]zero_native.ShellView{
@@ -182,138 +181,30 @@ fn taskRow(ui: *InboxUi, task: *const Task) InboxUi.Node {
 }
 
 // -------------------------------------------------------------------- app
+//
+// The runtime owns the whole loop: install on first gpu frame, presentation,
+// resize, and typed pointer/keyboard dispatch into `update` + rebuild.
 
-const InboxApp = struct {
-    model: Model = .{},
-    arenas: [2]std.heap.ArenaAllocator,
-    arena_index: usize = 0,
-    tree: ?InboxUi.Tree = null,
-    tokens: canvas.DesignTokens = .{},
-    canvas_size: geometry.SizeF = .{ .width = window_width, .height = window_height },
-    installed: bool = false,
-    gpu_commands: [max_gpu_commands]canvas.CanvasGpuCommand = undefined,
-    packet_json: [zero_native.platform.max_gpu_surface_packet_json_bytes]u8 = undefined,
+const InboxApp = zero_native.UiApp(Model, Msg);
 
-    fn init(backing: std.mem.Allocator) InboxApp {
-        var app_state = InboxApp{ .arenas = .{
-            std.heap.ArenaAllocator.init(backing),
-            std.heap.ArenaAllocator.init(backing),
-        } };
-        app_state.model.addTask("Prove the ui builder end to end");
-        app_state.model.addTask("Rewrite gpu-dashboard with it");
-        app_state.model.addTask("Write the public RFC");
-        return app_state;
-    }
-
-    fn deinit(self: *InboxApp) void {
-        self.arenas[0].deinit();
-        self.arenas[1].deinit();
-    }
-
-    fn app(self: *InboxApp) zero_native.App {
-        return .{
-            .context = self,
-            .name = "ui-inbox",
-            .scene_fn = scene,
-            .event_fn = event,
-        };
-    }
-
-    fn scene(context: *anyopaque) anyerror!zero_native.ShellConfig {
-        _ = context;
-        return shell_scene;
-    }
-
-    fn event(context: *anyopaque, runtime: *zero_native.Runtime, event_value: zero_native.Event) anyerror!void {
-        const self: *InboxApp = @ptrCast(@alignCast(context));
-        switch (event_value) {
-            .gpu_surface_frame => |frame_event| try self.handleFrame(runtime, frame_event),
-            .gpu_surface_resized => |resize_event| try self.handleResize(runtime, resize_event),
-            .canvas_widget_pointer => |pointer_event| try self.handlePointer(runtime, pointer_event),
-            .canvas_widget_keyboard => |keyboard_event| try self.handleKeyboard(runtime, keyboard_event),
-            else => {},
-        }
-    }
-
-    /// Rebuild the widget tree from the model and hand it to the runtime.
-    /// The runtime copies and reconciles the layout, so the previous tree's
-    /// arena stays alive only until the next rebuild (two arenas, swapped).
-    fn rebuild(self: *InboxApp, runtime: *zero_native.Runtime, window_id: zero_native.WindowId) anyerror!void {
-        const next_index = self.arena_index ^ 1;
-        _ = self.arenas[next_index].reset(.retain_capacity);
-        var ui = InboxUi.init(self.arenas[next_index].allocator());
-        const tree = try ui.finalizeWithTokens(view(&ui, &self.model), self.tokens);
-
-        var nodes: [max_layout_nodes]canvas.WidgetLayoutNode = undefined;
-        const bounds = geometry.RectF.init(0, 0, self.canvas_size.width, self.canvas_size.height);
-        const layout = try canvas.layoutWidgetTree(tree.root, bounds, &nodes);
-        _ = try runtime.setCanvasWidgetLayout(window_id, canvas_label, layout);
-
-        self.tree = tree;
-        self.arena_index = next_index;
-    }
-
-    fn dispatch(self: *InboxApp, runtime: *zero_native.Runtime, window_id: zero_native.WindowId, msg: Msg) anyerror!void {
-        update(&self.model, msg);
-        try self.rebuild(runtime, window_id);
-    }
-
-    fn handleFrame(self: *InboxApp, runtime: *zero_native.Runtime, frame_event: zero_native.GpuSurfaceFrameEvent) anyerror!void {
-        if (!std.mem.eql(u8, frame_event.label, canvas_label)) return;
-        if (!self.installed) {
-            self.canvas_size = frame_event.size;
-            try self.rebuild(runtime, frame_event.window_id);
-            _ = try runtime.emitCanvasWidgetDisplayList(frame_event.window_id, canvas_label, self.tokens);
-            self.installed = true;
-        }
-        _ = runtime.presentNextCanvasGpuPacketWithScale(
-            frame_event.window_id,
-            canvas_label,
-            .{
-                .frame_index = frame_event.frame_index,
-                .timestamp_ns = frame_event.timestamp_ns,
-                .surface_size = frame_event.size,
-                .scale = frame_event.scale_factor,
-                .full_repaint = frame_event.canvas_frame_full_repaint,
-            },
-            runtime.canvasFrameScratchStorage(),
-            self.tokens.colors.background,
-            &self.gpu_commands,
-            &self.packet_json,
-            null,
-        ) catch |err| switch (err) {
-            error.UnsupportedService => {},
-            else => return err,
-        };
-    }
-
-    fn handleResize(self: *InboxApp, runtime: *zero_native.Runtime, resize_event: zero_native.GpuSurfaceResizeEvent) anyerror!void {
-        if (!std.mem.eql(u8, resize_event.label, canvas_label)) return;
-        self.canvas_size = .{ .width = resize_event.frame.width, .height = resize_event.frame.height };
-        if (self.installed) try self.rebuild(runtime, resize_event.window_id);
-    }
-
-    fn handlePointer(self: *InboxApp, runtime: *zero_native.Runtime, pointer_event: zero_native.runtime.CanvasWidgetPointerEvent) anyerror!void {
-        if (!std.mem.eql(u8, pointer_event.view_label, canvas_label)) return;
-        const tree = self.tree orelse return;
-        const target = pointer_event.target orelse return;
-        if (tree.msgForPointer(target.id, pointer_event.pointer.phase)) |msg| {
-            try self.dispatch(runtime, pointer_event.window_id, msg);
-        }
-    }
-
-    fn handleKeyboard(self: *InboxApp, runtime: *zero_native.Runtime, keyboard_event: zero_native.runtime.CanvasWidgetKeyboardEvent) anyerror!void {
-        if (!std.mem.eql(u8, keyboard_event.view_label, canvas_label)) return;
-        const tree = self.tree orelse return;
-        const target = keyboard_event.target orelse return;
-        if (tree.msgForKeyboard(target.id, keyboard_event.keyboard)) |msg| {
-            try self.dispatch(runtime, keyboard_event.window_id, msg);
-        }
-    }
-};
+fn initialModel() Model {
+    var model = Model{};
+    model.addTask("Prove the ui builder end to end");
+    model.addTask("Rewrite gpu-dashboard with it");
+    model.addTask("Record the authoring decisions");
+    return model;
+}
 
 pub fn main(init: std.process.Init) !void {
-    var app_state = InboxApp.init(std.heap.page_allocator);
+    const app_state = try std.heap.page_allocator.create(InboxApp);
+    defer std.heap.page_allocator.destroy(app_state);
+    app_state.* = InboxApp.init(std.heap.page_allocator, initialModel(), .{
+        .name = "ui-inbox",
+        .scene = shell_scene,
+        .canvas_label = canvas_label,
+        .update = update,
+        .view = view,
+    });
     defer app_state.deinit();
     try runner.runWithOptions(app_state.app(), .{
         .app_name = "ui-inbox",
