@@ -7,6 +7,7 @@
 //! dispatch all come from the same `canvas.Ui(Msg)` layer.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const runner = @import("runner");
 const zero_native = @import("zero-native");
 
@@ -198,13 +199,18 @@ pub fn update(model: *Model, msg: Msg) void {
 
 pub const InboxUi = canvas.Ui(Msg);
 pub const inbox_markup = @embedFile("inbox.zml");
+pub const CompiledInboxView = canvas.CompiledMarkupView(Model, Msg, inbox_markup);
+
+/// Debug builds keep the interpreter for .zml hot reload; release builds
+/// ship the comptime-compiled view with no parser in the binary.
+const dev_markup_reload = builtin.mode == .Debug;
 
 // -------------------------------------------------------------------- app
 //
 // The runtime owns the whole loop: install on first gpu frame, presentation,
 // resize, and typed pointer/keyboard dispatch into `update` + rebuild.
 
-const InboxApp = zero_native.UiApp(Model, Msg);
+const InboxApp = zero_native.UiAppWithFeatures(Model, Msg, .{ .runtime_markup = dev_markup_reload });
 
 fn initialModel() Model {
     var model = Model{};
@@ -222,7 +228,11 @@ pub fn main(init: std.process.Init) !void {
         .scene = shell_scene,
         .canvas_label = canvas_label,
         .update = update,
-        .markup = .{ .source = inbox_markup, .watch_path = "src/inbox.zml", .io = init.io },
+        .view = CompiledInboxView.build,
+        .markup = if (dev_markup_reload)
+            .{ .source = inbox_markup, .watch_path = "src/inbox.zml", .io = init.io }
+        else
+            null,
     });
     defer app_state.deinit();
     try runner.runWithOptions(app_state.app(), .{

@@ -8,6 +8,7 @@
 //! when it migrates between columns.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const runner = @import("runner");
 const zero_native = @import("zero-native");
 
@@ -192,10 +193,15 @@ pub fn update(model: *Model, msg: Msg) void {
 
 pub const KanbanUi = canvas.Ui(Msg);
 pub const board_markup = @embedFile("board.zml");
+pub const CompiledBoardView = canvas.CompiledMarkupView(Model, Msg, board_markup);
+
+/// Debug builds keep the interpreter for .zml hot reload; release builds
+/// ship the comptime-compiled view with no parser in the binary.
+const dev_markup_reload = builtin.mode == .Debug;
 
 // -------------------------------------------------------------------- app
 
-const KanbanApp = zero_native.UiApp(Model, Msg);
+const KanbanApp = zero_native.UiAppWithFeatures(Model, Msg, .{ .runtime_markup = dev_markup_reload });
 
 fn initialModel() Model {
     var model = Model{};
@@ -220,7 +226,11 @@ pub fn main(init: std.process.Init) !void {
         .scene = shell_scene,
         .canvas_label = canvas_label,
         .update = update,
-        .markup = .{ .source = board_markup, .watch_path = "src/board.zml", .io = init.io },
+        .view = CompiledBoardView.build,
+        .markup = if (dev_markup_reload)
+            .{ .source = board_markup, .watch_path = "src/board.zml", .io = init.io }
+        else
+            null,
     });
     defer app_state.deinit();
     try runner.runWithOptions(app_state.app(), .{

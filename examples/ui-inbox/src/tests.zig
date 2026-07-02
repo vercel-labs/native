@@ -141,3 +141,28 @@ fn findByKind(widget: canvas.Widget, kind: canvas.WidgetKind) ?canvas.Widget {
     }
     return null;
 }
+
+test "compiled and interpreted inbox views build identical trees" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = Model{};
+    model.addTask("First");
+    model.addTask("Second");
+
+    const interpreted = try buildTree(arena, &model);
+    var compiled_ui = InboxUi.init(arena);
+    const compiled = try compiled_ui.finalize(main.CompiledInboxView.build(&compiled_ui, &model));
+
+    try expectSameIds(interpreted.root, compiled.root);
+    try testing.expectEqual(interpreted.handlers.len, compiled.handlers.len);
+}
+
+fn expectSameIds(expected: canvas.Widget, actual: canvas.Widget) !void {
+    try testing.expectEqual(expected.id, actual.id);
+    try testing.expectEqual(expected.children.len, actual.children.len);
+    for (expected.children, actual.children) |expected_child, actual_child| {
+        try expectSameIds(expected_child, actual_child);
+    }
+}
