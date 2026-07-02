@@ -481,6 +481,7 @@ pub fn build(b: *std.Build) void {
     addExampleTestStep(b, native_examples_step, "test-example-gpu-dashboard", "Run GPU dashboard example tests", "examples/gpu-dashboard");
     addExampleTestStep(b, native_examples_step, "test-example-gpu-components", "Run GPU components example tests", "examples/gpu-components");
     addExampleTestStep(b, native_examples_step, "test-example-ui-inbox", "Run ui builder inbox example tests", "examples/ui-inbox");
+    addExampleTestStep(b, native_examples_step, "test-example-kanban", "Run ui builder kanban example tests", "examples/kanban");
     addExampleTestStep(b, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities");
     addFileContainsCheckStep(b, file_contains_checker, native_examples_step, "test-example-capabilities-events", "Verify capabilities example event bridge names", &.{
         .{ .path = "examples/capabilities/src/main.zig", .pattern = "zero-native:drop:files" },
