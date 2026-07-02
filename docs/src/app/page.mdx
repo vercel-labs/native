@@ -1,12 +1,20 @@
 # zero-native
 
-Build native apps with Zig, secure WebView surfaces, native controls, and OS capabilities. Use web UI where it is strongest, and native surfaces where the operating system should own the experience.
+Cross-platform native development inspired by the web. Views are declarative `.zml` markup with flex layout and bindings, logic is Zig, and rendering is zero-native's own engine — with hot-reloading views in dev and no browser runtime in the binary. WebViews remain a first-class coexisting surface: build native, web, or both.
 
 ## Why zero-native
 
+### Model like HTML, logic in a real language
+
+A view is a `.zml` file: elements, flex layout, `{bindings}`, and typed message dispatch. Logic is plain Zig — a `Model` struct, a `Msg` union, an `update` function. Markup compiles at comptime, so view mistakes are compile errors with positions, and release builds carry no parser.
+
+### Edit the view while the app runs
+
+Dev builds watch your `.zml`: save and the window updates in place, preserving model state and widget identity. No JS engine required for hot reload.
+
 ### Native shell, web where it fits
 
-Create native windows, menus, shortcuts, controls, status bars, sidebars, dialogs, and OS capability calls from Zig. WebViews remain first-class for rich product UI, but they are one surface in the app, not the entire model.
+Create native windows, menus, shortcuts, controls, status bars, sidebars, dialogs, and OS capability calls from Zig. WebViews remain first-class for web-shaped features — browser surfaces, previews, embedded web apps — or as the whole UI for WebView-shell apps.
 
 ### Tiny and fast
 

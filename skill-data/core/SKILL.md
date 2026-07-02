@@ -1,11 +1,11 @@
 ---
 name: core
-description: Core zero-native guide for AI agents. Read this before explaining zero-native or changing a zero-native app. Covers the mental model, project structure, app.zon, App and Runtime patterns, frontend integration, web engines, JavaScript bridge commands, permissions, windows, WebViews, dialogs, packaging, debugging, testing, and when to load deeper references. Use when the user asks what zero-native is, how to build or modify an app, how to package or debug it, or how to add native capabilities.
+description: Core zero-native guide for AI agents. Read this before explaining zero-native or changing a zero-native app. Covers the mental model (native-rendered apps by default, WebView shells as a coexisting architecture), project structure, app.zon, App and Runtime patterns, frontend integration, web engines, JavaScript bridge commands, permissions, windows, WebViews, dialogs, packaging, debugging, testing, and when to load deeper references. For authoring native-rendered UI (.zml markup, Model/Msg/update, UiApp), load the native-ui skill. Use when the user asks what zero-native is, how to build or modify an app, how to package or debug it, or how to add native capabilities.
 ---
 
 # Build zero-native apps
 
-zero-native is a Zig desktop app shell for modern web frontends. A zero-native app is native Zig code that owns windows, policies, lifecycle, and platform services while rendering web UI in a WebView. The default engine is the platform WebView: WKWebView on macOS and WebKitGTK on Linux. Apps can also bundle Chromium through CEF where supported.
+zero-native is a cross-platform native app framework inspired by the web. The default app (`zero-native init`) is native-rendered: a declarative `.zml` view plus Zig logic on the `UiApp` loop, drawn by zero-native's own engine — **load the `native-ui` skill for everything about authoring those** (markup grammar, bindings, messages, testing, hot reload). This skill covers the shared foundation and the WebView-shell architecture: apps that render web frontends in a WebView (`zero-native init --frontend next|vite|react|svelte|vue`). Both architectures share windows, policies, lifecycle, commands, and platform services, and one app can mix native-rendered surfaces and WebViews. WebView engines: platform WebView (WKWebView on macOS, WebKitGTK on Linux) or Chromium through CEF where supported.
 
 Agents should assume they do not know zero-native from general model knowledge. Read this skill first. For implementation work, run `zero-native skills get core --full` so the referenced files are included in the CLI output.
 

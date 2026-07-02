@@ -1,8 +1,8 @@
 # zero-native
 
-Build native desktop apps with Zig, secure WebView surfaces, native-rendered components, and OS capabilities. Tiny binaries. Minimal memory. Instant rebuilds.
+Cross-platform native development inspired by the web. Views are declarative `.zml` markup, styling is a token system, logic is Zig — rendered by zero-native's own engine, not a browser. Tiny binaries. Minimal memory. Instant rebuilds, with hot-reloading views.
 
-zero-native is a native app framework where WebView content is one first-class surface, not the whole app model. Use native windows, menus, shortcuts, zero-native components, dialogs, and OS services around rich product UI. Use WebViews when a feature should stay web-shaped, such as browser surfaces, rich previews, embedded web apps, or third-party content.
+zero-native apps are native-rendered by default: a retained widget tree with flex layout, typed message dispatch, accessibility, and a built-in component catalog, drawn through the platform's GPU surface. WebViews remain a first-class coexisting surface — use one when a feature should stay web-shaped (browser surfaces, rich previews, embedded web apps, third-party content), or build the whole app as a WebView shell with the frontend framework you already use. Native, web, or both.
 
 ## Quick Start
 
@@ -27,33 +27,33 @@ Read the full guide at [zero-native.dev/quick-start](https://zero-native.dev/qui
 
 ## Why zero-native
 
-### Native shell, web where it fits
+### Model like HTML, logic in a real language
 
-Build app chrome and trusted utility surfaces with native views and zero-native components, while keeping WebViews available for browser-like workflows, rich previews, embedded web apps, and third-party content.
+A view is a `.zml` file: elements, flex layout, `{bindings}`, and typed message dispatch — the composability of the web with a deliberately closed grammar. Logic is plain Zig: a `Model` struct, a `Msg` union, and an `update` function. The markup compiles at comptime, so release builds carry no parser and a typo in a view is a compile error with a line and column.
+
+### Edit the view while the app runs
+
+In dev builds the `.zml` file is watched: save it and the window updates in place, keeping your model state, selection, and widget identity. No JS engine, no bundler.
+
+### Built to be verified
+
+Deterministic rendering, a headless automation harness (drive widgets, read accessibility snapshots, take reference-renderer screenshots), and structural widget ids that stay stable across rebuilds make zero-native apps checkable by tests and AI agents without a human watching the screen.
 
 ### Tiny and fast
 
-System WebView apps do not bundle a browser runtime, so the native shell stays small and starts quickly. Your app uses WKWebView on macOS and WebKitGTK on Linux.
+No browser runtime in a native-rendered app and no GC in the loop: layout, paint, and dispatch are Zig. Binaries stay small, rebuilds are quick, and WebView-shell apps keep using the system engine (WKWebView on macOS, WebKitGTK on Linux) or pinned Chromium via CEF.
 
-### Choose your web engine
+### Web where it fits
 
-Pick the engine that fits the product. System WebView gives you a lightweight native footprint. Chromium through CEF gives you predictable rendering and a pinned web platform on supported targets.
-
-### Fast native rebuilds
-
-The native layer is Zig, so app logic, bridge commands, and platform integrations rebuild quickly. Your frontend can still use the web tooling you already know.
+WebViews are a composition tool, not the app model. Mix native-rendered surfaces, real OS chrome, and WebViews in one window with one command routing and security policy — the WebView is untrusted by default, and every native capability is opt-in and policy controlled.
 
 ### OS power without heavy glue
 
-Zig calls C directly, which keeps platform SDKs, native libraries, codecs, and local system integrations within reach when the WebView layer needs to do real native work.
-
-### Explicit security model
-
-The WebView is treated as untrusted by default. Native commands, permissions, navigation, external links, and window APIs are opt-in and policy controlled.
+Zig calls C directly, which keeps platform SDKs, native libraries, codecs, and local system integrations within reach.
 
 ## Status
 
-zero-native is pre-release. Desktop support now covers macOS 11+, Linux, and Windows build paths, platform shell controls on system-WebView hosts, native-rendered canvas widgets, and Chromium/CEF distributed as platform-specific runtimes.
+zero-native is pre-release. Native-rendered apps run on macOS 11+ (Metal) and Linux (software presentation); Windows currently covers WebView-shell apps and native window chrome, with canvas support planned. WebView engines: system WebView everywhere, Chromium/CEF on macOS and Linux.
 
 ## Core Concepts
 

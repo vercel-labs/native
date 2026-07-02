@@ -1,6 +1,6 @@
 ---
 name: zero-native
-description: Discovery skill for zero-native, a Zig desktop app shell for building native apps with web UIs. Use when the user asks what zero-native is, how to build a zero-native app, scaffold a frontend app, configure app.zon, choose a WebView engine, add bridge commands, package an app, test a running app, or automate a zero-native WebView shell.
+description: Discovery skill for zero-native, a cross-platform native app framework inspired by the web - native-rendered apps from .zml markup views plus Zig logic by default, with WebView-shell apps as a coexisting architecture. Use when the user asks what zero-native is, how to build a zero-native app, author native UI, scaffold an app, configure app.zon, choose a WebView engine, add bridge commands, package an app, test a running app, or automate a zero-native app.
 allowed-tools: Bash(zero-native:*), Bash(npx zero-native:*)
 hidden: true
 ---
