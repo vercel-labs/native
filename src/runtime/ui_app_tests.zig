@@ -700,3 +700,74 @@ test "with view and markup both set the compiled view renders until the watched 
     try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
     try std.testing.expectEqual(increment_id, findWidgetIdByText(app_state.tree.?, .button, "Increment").?);
 }
+
+const RosterModel = struct {
+    row_count: usize = 70,
+
+    pub fn rows(model: *const RosterModel, arena: std.mem.Allocator) []const usize {
+        const out = arena.alloc(usize, model.row_count) catch return &.{};
+        for (out, 0..) |*slot, index| slot.* = index;
+        return out[0..model.row_count];
+    }
+};
+
+const RosterMsg = union(enum) { noop };
+const RosterApp = ui_app_model.UiApp(RosterModel, RosterMsg);
+
+fn rosterUpdate(model: *RosterModel, msg: RosterMsg) void {
+    _ = model;
+    _ = msg;
+}
+
+fn rosterKey(index: *const usize) canvas.UiKey {
+    return canvas.uiKey(@as(u64, index.*));
+}
+
+fn rosterRow(ui: *RosterApp.Ui, index: *const usize) RosterApp.Ui.Node {
+    return ui.row(.{ .gap = 4 }, .{
+        ui.checkbox(.{ .on_toggle = .noop }),
+        ui.text(.{ .grow = 1 }, ui.fmt("Row {d}", .{index.*})),
+    });
+}
+
+fn rosterView(ui: *RosterApp.Ui, model: *const RosterModel) RosterApp.Ui.Node {
+    return ui.column(.{ .gap = 2 }, ui.each(model.rows(ui.arena), rosterKey, rosterRow));
+}
+
+test "widget trees beyond the old 64-node cap install and reconcile" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 2000) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(RosterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = RosterApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-roster",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = rosterUpdate,
+        .view = rosterView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 2000),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // 70 keyed rows x (row + checkbox + text) + root column = 211 nodes.
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    try std.testing.expect(layout.nodes.len > 64);
+    try std.testing.expectEqual(@as(usize, 211), layout.nodes.len);
+
+    // A rebuild through the reconcile path holds at that size.
+    try app_state.rebuild(&harness.runtime, 1);
+    try std.testing.expectEqual(@as(usize, 211), (try harness.runtime.canvasWidgetLayout(1, canvas_label)).nodes.len);
+}

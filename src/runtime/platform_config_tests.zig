@@ -335,7 +335,7 @@ test "runtime wraps a platform text measure service into a canvas provider" {
 
     const runtime = try std.testing.allocator.create(Runtime);
     defer std.testing.allocator.destroy(runtime);
-    runtime.* = Runtime.init(.{ .platform = measured_platform });
+    Runtime.initAt(runtime, .{ .platform = measured_platform });
 
     const provider = runtime.textMeasureProvider() orelse return error.MissingProvider;
     try std.testing.expectEqual(@as(f32, 35), provider.measureWidth(1, 12, "hello"));

@@ -219,7 +219,7 @@ fn runNull(app: zero_native.App, options: RunOptions, init: std.process.Init) !v
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(zero_native.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
-    runtime.* = zero_native.Runtime.init(.{
+    zero_native.Runtime.initAt(runtime, .{
         .platform = null_platform.platform(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
@@ -265,7 +265,7 @@ fn runMacos(app: zero_native.App, options: RunOptions, init: std.process.Init) !
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(zero_native.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
-    runtime.* = zero_native.Runtime.init(.{
+    zero_native.Runtime.initAt(runtime, .{
         .platform = mac_platform.platform(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
@@ -311,7 +311,7 @@ fn runLinux(app: zero_native.App, options: RunOptions, init: std.process.Init) !
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(zero_native.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
-    runtime.* = zero_native.Runtime.init(.{
+    zero_native.Runtime.initAt(runtime, .{
         .platform = linux_platform.platform(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
@@ -357,7 +357,7 @@ fn runWindows(app: zero_native.App, options: RunOptions, init: std.process.Init)
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(zero_native.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
-    runtime.* = zero_native.Runtime.init(.{
+    zero_native.Runtime.initAt(runtime, .{
         .platform = windows_platform.platform(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,

@@ -188,7 +188,11 @@ fn runWindows(app: zero_native.App, options: RunOptions, init: std.process.Init)
 fn runRuntime(app: zero_native.App, options: RunOptions, init: std.process.Init, platform: zero_native.Platform) !void {
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
-    var runtime = zero_native.Runtime.init(.{
+    // The Runtime is tens of megabytes; construct on the heap (default
+    // main-thread stacks overflow on a stack instance).
+    const runtime = try std.heap.page_allocator.create(zero_native.Runtime);
+    defer std.heap.page_allocator.destroy(runtime);
+    zero_native.Runtime.initAt(runtime, .{
         .platform = platform,
         .bridge = options.bridge,
         .builtin_bridge = options.builtin_bridge,

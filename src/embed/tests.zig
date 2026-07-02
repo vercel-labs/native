@@ -64,7 +64,8 @@ fn expectNoMobileWidgetSemanticsByIdForTest(app: ?*anyopaque, id: u64) !void {
 test "embedded app starts and loads source" {
     var null_platform = platform.NullPlatform.init(.{});
     var state: u8 = 0;
-    var embedded: EmbeddedApp = undefined;
+    const embedded = try std.testing.allocator.create(EmbeddedApp);
+    defer std.testing.allocator.destroy(embedded);
     embedded.initInPlace(.{
         .context = &state,
         .name = "embedded",

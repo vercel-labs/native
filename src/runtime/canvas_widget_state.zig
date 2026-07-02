@@ -34,9 +34,8 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             if (layout.nodes.len > max_canvas_widget_nodes_per_view) return error.WidgetNodeLimitReached;
 
             const previous_layout = self.views[index].widgetLayoutTree();
-            var source_semantics_buffer: [max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined;
-            const source_semantics = try layout.collectSemantics(&source_semantics_buffer);
-            var reconciled_nodes: [max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined;
+            const source_semantics = try layout.collectSemantics(&self.canvas_widget_source_semantics_scratch);
+            const reconciled_nodes = &self.canvas_widget_reconcile_nodes;
             var previous_control_entries: [max_canvas_widget_nodes_per_view]CanvasWidgetControlReconcileEntry = undefined;
             var previous_scroll_entries: [max_canvas_widget_nodes_per_view]canvas_widget_runtime.CanvasWidgetSourceScrollEntry = undefined;
             var previous_text_entries: [max_canvas_widget_nodes_per_view]CanvasWidgetTextReconcileEntry = undefined;
@@ -48,7 +47,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 source_semantics,
                 self.views[index].widgetSourceTextEntries(),
                 self.views[index].widgetSourceScrollEntries(),
-                &reconciled_nodes,
+                reconciled_nodes,
                 &previous_control_entries,
                 &previous_scroll_entries,
                 &previous_text_entries,
@@ -228,7 +227,7 @@ fn runtimeFindWindowIndexById(self: anytype, id: platform.WindowId) ?usize {
 }
 
 fn runtimeFindViewIndex(self: anytype, window_id: platform.WindowId, label: []const u8) ?usize {
-    for (self.views[0..self.view_count], 0..) |view, index| {
+    for (self.views[0..self.view_count], 0..) |*view, index| {
         if (view.open and view.window_id == window_id and std.mem.eql(u8, view.label, label)) return index;
     }
     return null;

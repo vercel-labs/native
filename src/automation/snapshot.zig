@@ -4,7 +4,7 @@ const platform = @import("../platform/root.zig");
 
 pub const max_windows: usize = platform.max_windows;
 pub const max_views: usize = platform.max_windows + platform.max_views + platform.max_webviews;
-pub const max_widgets_per_view: usize = 64;
+pub const max_widgets_per_view: usize = 256;
 pub const max_widgets: usize = platform.max_views * max_widgets_per_view;
 
 pub const Window = struct {

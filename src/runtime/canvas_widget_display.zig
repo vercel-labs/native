@@ -270,7 +270,7 @@ fn runtimeFindWindowIndexById(self: anytype, id: platform.WindowId) ?usize {
 }
 
 fn runtimeFindViewIndex(self: anytype, window_id: platform.WindowId, label: []const u8) ?usize {
-    for (self.views[0..self.view_count], 0..) |view, index| {
+    for (self.views[0..self.view_count], 0..) |*view, index| {
         if (view.open and view.window_id == window_id and std.mem.eql(u8, view.label, label)) return index;
     }
     return null;

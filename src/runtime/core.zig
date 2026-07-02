@@ -172,6 +172,10 @@ pub const Runtime = struct {
     automation_widgets: [automation.snapshot.max_widgets]automation.snapshot.Widget = undefined,
     widget_event_route_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined,
     canvas_widget_display_list_refresh_batch_depth: usize = 0,
+    // Scratch for setCanvasWidgetLayout's reconcile pass: too large for the
+    // stack at the current node cap, and the event loop is single-threaded.
+    canvas_widget_reconcile_nodes: [canvas_limits.max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
+    canvas_widget_source_semantics_scratch: [canvas_limits.max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
     canvas_widget_display_list_refresh_pending: [platform.max_views]bool = [_]bool{false} ** platform.max_views,
     canvas_widget_accessibility_publish_pending: [platform.max_views]bool = [_]bool{false} ** platform.max_views,
     canvas_frame_render_commands: [max_canvas_commands_per_view]canvas.RenderCommand = undefined,
@@ -206,18 +210,34 @@ pub const Runtime = struct {
     text_measure_provider: ?canvas.TextMeasureProvider = null,
 
     pub fn init(options: Options) Runtime {
-        return .{
-            .options = options,
-            .surface = options.platform.surface(),
-            .started_timestamp_ns = timestampToU64(nowNanoseconds()),
-            .windows = undefined,
-            .views = undefined,
-            .shell_layouts = undefined,
-            .text_measure_provider = if (options.platform.services.measure_text_fn) |measure_fn|
-                .{ .context = options.platform.services.context, .measure_fn = measure_fn }
-            else
-                null,
-        };
+        var self: Runtime = undefined;
+        initAt(&self, options);
+        return self;
+    }
+
+    /// Construct in place. The Runtime is tens of megabytes of fixed-capacity
+    /// storage; by-value construction materializes a stack temporary in Debug
+    /// builds that overflows default thread stacks, so every embedding
+    /// constructs through a pointer.
+    pub fn initAt(self: *Runtime, options: Options) void {
+        inline for (@typeInfo(Runtime).@"struct".fields) |field| {
+            if (comptime fieldHasSmallDefault(field)) {
+                @field(self, field.name) = @as(*const field.type, @alignCast(@ptrCast(field.default_value_ptr.?))).*;
+            }
+        }
+        self.options = options;
+        self.surface = options.platform.surface();
+        self.started_timestamp_ns = timestampToU64(nowNanoseconds());
+        self.text_measure_provider = if (options.platform.services.measure_text_fn) |measure_fn|
+            .{ .context = options.platform.services.context, .measure_fn = measure_fn }
+        else
+            null;
+    }
+
+    fn fieldHasSmallDefault(comptime field: std.builtin.Type.StructField) bool {
+        // Large fixed-capacity arrays default to undefined; skip writing
+        // them so construction touches kilobytes, not megabytes.
+        return field.default_value_ptr != null and @sizeOf(field.type) <= 4096;
     }
 
     pub fn invalidate(self: *Runtime) void {
@@ -546,7 +566,7 @@ pub fn TestHarness() type {
         pub fn init(self: *Self, surface: platform.Surface) void {
             self.null_platform = platform.NullPlatform.init(surface);
             self.trace_sink = trace.BufferSink.init(&self.trace_records);
-            self.runtime = Runtime.init(.{
+            Runtime.initAt(&self.runtime, .{
                 .platform = self.null_platform.platform(),
                 .trace_sink = self.trace_sink.sink(),
             });

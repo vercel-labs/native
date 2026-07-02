@@ -30,7 +30,7 @@ pub const EmbeddedApp = struct {
 
     pub fn initInPlace(self: *EmbeddedApp, app: runtime.App, platform_value: platform.Platform) void {
         self.app = app;
-        self.runtime = runtime.Runtime.init(.{ .platform = platform_value });
+        runtime.Runtime.initAt(&self.runtime, .{ .platform = platform_value });
     }
 
     pub fn start(self: *EmbeddedApp) anyerror!void {

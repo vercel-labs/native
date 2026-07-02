@@ -158,6 +158,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Set when the embedded or watched markup failed to parse or build;
         /// cleared on the next successful parse. Apps may render it.
         markup_diagnostic: ?canvas.ui_markup.MarkupErrorInfo = null,
+        layout_nodes: [canvas_limits.max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
         gpu_commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasGpuCommand = undefined,
         packet_json: [platform.max_gpu_surface_packet_json_bytes]u8 = undefined,
         /// Allocator backing the arenas and the lazily grown pixel
@@ -252,9 +253,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const node = try self.buildViewNode(&ui);
             const tree = try ui.finalizeWithTokens(node, tokens);
 
-            var nodes: [canvas_limits.max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined;
             const bounds = geometry.RectF.init(0, 0, self.canvas_size.width, self.canvas_size.height);
-            const layout = try canvas.layoutWidgetTreeWithTokens(tree.root, bounds, tokens, &nodes);
+            const layout = try canvas.layoutWidgetTreeWithTokens(tree.root, bounds, tokens, &self.layout_nodes);
 
             if (self.options.chrome) |chrome| {
                 try self.installChromeDisplayList(runtime, window_id, chrome, layout, tokens);

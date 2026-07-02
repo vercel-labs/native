@@ -524,7 +524,9 @@ test "runtime lays out created shell windows with native returned bounds" {
     };
 
     var host: ShellCreatePlatform = .{};
-    var runtime = Runtime.init(.{ .platform = host.platformValue() });
+    const runtime = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    Runtime.initAt(runtime, .{ .platform = host.platformValue() });
     const window = try runtime.createShellWindow(shell_window, platform.WebViewSource.html("<h1>Restored</h1>"));
 
     try std.testing.expectEqual(@as(usize, 1), host.create_count);
@@ -588,7 +590,7 @@ test "runtime lays out startup shell windows with native configured bounds" {
     );
     const runtime = try std.testing.allocator.create(Runtime);
     defer std.testing.allocator.destroy(runtime);
-    runtime.* = Runtime.init(.{ .platform = null_platform.platform() });
+    Runtime.initAt(runtime, .{ .platform = null_platform.platform() });
     var app_state: TestApp = .{};
 
     try runtime.dispatchPlatformEvent(app_state.app(), .app_start);

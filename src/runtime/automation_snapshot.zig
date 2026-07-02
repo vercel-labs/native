@@ -65,7 +65,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
         }
 
         fn appendAutomationWidgets(self: *Runtime, window_id: platform.WindowId, widget_count: *usize) void {
-            for (self.views[0..self.view_count]) |view| {
+            for (self.views[0..self.view_count]) |*view| {
                 if (!view.open or view.window_id != window_id or view.kind != .gpu_surface) continue;
                 const layout = view.widgetLayoutTree();
                 const semantics = view.widgetSemantics();

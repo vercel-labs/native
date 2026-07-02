@@ -198,7 +198,11 @@ fn runNull(app: zero_native.App, options: RunOptions, init: std.process.Init) !v
     }
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
-    var runtime = zero_native.Runtime.init(.{
+    // The Runtime is tens of megabytes; construct on the heap (default
+    // main-thread stacks overflow on a stack instance).
+    const runtime = try std.heap.page_allocator.create(zero_native.Runtime);
+    defer std.heap.page_allocator.destroy(runtime);
+    zero_native.Runtime.initAt(runtime, .{
         .platform = null_platform.platform(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
@@ -237,7 +241,11 @@ fn runMacos(app: zero_native.App, options: RunOptions, init: std.process.Init) !
     }
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
-    var runtime = zero_native.Runtime.init(.{
+    // The Runtime is tens of megabytes; construct on the heap (default
+    // main-thread stacks overflow on a stack instance).
+    const runtime = try std.heap.page_allocator.create(zero_native.Runtime);
+    defer std.heap.page_allocator.destroy(runtime);
+    zero_native.Runtime.initAt(runtime, .{
         .platform = mac_platform.platform(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
@@ -276,7 +284,11 @@ fn runLinux(app: zero_native.App, options: RunOptions, init: std.process.Init) !
     }
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
-    var runtime = zero_native.Runtime.init(.{
+    // The Runtime is tens of megabytes; construct on the heap (default
+    // main-thread stacks overflow on a stack instance).
+    const runtime = try std.heap.page_allocator.create(zero_native.Runtime);
+    defer std.heap.page_allocator.destroy(runtime);
+    zero_native.Runtime.initAt(runtime, .{
         .platform = linux_platform.platform(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
@@ -315,7 +327,11 @@ fn runWindows(app: zero_native.App, options: RunOptions, init: std.process.Init)
     }
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
-    var runtime = zero_native.Runtime.init(.{
+    // The Runtime is tens of megabytes; construct on the heap (default
+    // main-thread stacks overflow on a stack instance).
+    const runtime = try std.heap.page_allocator.create(zero_native.Runtime);
+    defer std.heap.page_allocator.destroy(runtime);
+    zero_native.Runtime.initAt(runtime, .{
         .platform = windows_platform.platform(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
