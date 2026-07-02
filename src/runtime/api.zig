@@ -120,6 +120,10 @@ pub const Event = union(enum) {
     command: CommandEvent,
     shortcut: ShortcutEvent,
     timer: TimerEvent,
+    /// The platform loop was nudged from another thread
+    /// (`PlatformServices.wake_fn`): apps drain their effect completion
+    /// queues here, on the loop thread, and dispatch the resulting Msgs.
+    effects_wake,
     files_dropped: platform.FileDropEvent,
     gpu_surface_frame: GpuSurfaceFrameEvent,
     gpu_surface_resized: GpuSurfaceResizeEvent,
@@ -136,6 +140,7 @@ pub const Event = union(enum) {
             .command => |event_value| event_value.name,
             .shortcut => "shortcut",
             .timer => "timer",
+            .effects_wake => "effects_wake",
             .files_dropped => "files_dropped",
             .gpu_surface_frame => "gpu_surface_frame",
             .gpu_surface_resized => "gpu_surface_resized",

@@ -253,6 +253,11 @@ pub const NullPlatform = struct {
     timer_count: usize = 0,
     timer_start_count: usize = 0,
     timer_cancel_count: usize = 0,
+    /// Pending cross-thread wake requests. Incremented atomically because
+    /// `wake_fn` is the one service worker threads call; tests and the
+    /// embed host drain it on their own thread via `takeWake` and then
+    /// dispatch the `.wake` platform event themselves.
+    wake_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     view_cursor_window_id: WindowId = 0,
     view_cursor_label_storage: [max_view_label_bytes]u8 = undefined,
     view_cursor_label_len: usize = 0,
@@ -325,6 +330,7 @@ pub const NullPlatform = struct {
                 .emit_window_event_fn = emitWindowEvent,
                 .start_timer_fn = startTimer,
                 .cancel_timer_fn = cancelTimer,
+                .wake_fn = wakeService,
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
                 .present_gpu_surface_packet_fn = presentGpuSurfacePacket,
@@ -847,6 +853,31 @@ pub const NullPlatform = struct {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         self.timer_cancel_count += 1;
         if (self.findTimerIndex(id)) |index| self.timers[index].active = false;
+    }
+
+    fn wakeService(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        _ = self.wake_count.fetchAdd(1, .release);
+    }
+
+    /// Consume one pending wake request, returning the `.wake` platform
+    /// event a live loop would deliver (or null when none are pending).
+    /// Tests dispatch the returned event through the runtime, mirroring
+    /// how host loops marshal `wake_fn` calls back onto their own thread.
+    pub fn takeWake(self: *NullPlatform) ?Event {
+        var current = self.wake_count.load(.acquire);
+        while (current > 0) {
+            if (self.wake_count.cmpxchgWeak(current, current - 1, .acq_rel, .acquire)) |actual| {
+                current = actual;
+            } else {
+                return .wake;
+            }
+        }
+        return null;
+    }
+
+    pub fn pendingWakeCount(self: *const NullPlatform) usize {
+        return self.wake_count.load(.acquire);
     }
 
     /// Test helper: synthesize the platform event a live timer would deliver.

@@ -207,6 +207,62 @@ draft: canvas.TextBuffer(64) = .{},                   // model field: text + sel
 
 See `examples/ui-inbox` for the complete pattern.
 
+## Effects: subprocesses from update
+
+`update` can take a third parameter — the effects channel — by declaring `.update_fx` instead of `.update` (existing two-argument apps are untouched; set exactly one):
+
+```zig
+const App = zero_native.UiApp(Model, Msg);
+const Effects = App.Effects;
+
+pub fn update(model: *Model, msg: Msg, fx: *Effects) void { ... }
+// options: .update_fx = update,
+```
+
+`fx.spawn` runs a subprocess on a runtime-owned worker thread and streams each stdout line back as a typed Msg; the exit arrives as one more Msg. Keys are caller-chosen `u64`s you keep in the model — no handles:
+
+```zig
+pub const Msg = union(enum) {
+    start,
+    cancel,
+    line: zero_native.EffectLine,     // payload types are fixed
+    exited: zero_native.EffectExit,
+};
+
+.start => fx.spawn(.{
+    .key = stream_key,                          // model-stored identity
+    .argv = &.{ "gh", "issue", "list" },
+    .stdin = null,                              // optional, written once
+    .on_line = Effects.lineMsg(.line),          // comptime constructors,
+    .on_exit = Effects.exitMsg(.exited),        // like ui.inputMsg(.tag)
+}),
+.cancel => fx.cancel(stream_key),
+.line => |line| model.recordLine(line),         // COPY line.line — it is
+                                                // drain scratch, dead after
+                                                // this update call
+.exited => |exit| model.finish(exit),           // exit.reason, exit.code
+```
+
+Rules that keep this honest:
+
+- Effects are update-side ONLY. The view never spawns anything — a button dispatches a Msg, and that Msg's update arm spawns. Markup stays declarative.
+- One `on_exit` Msg per spawn, always. A spawn that cannot run (all `max_effects = 16` slots busy, duplicate active key, argv over capacity) still delivers it, with reason `.rejected`. Reasons: `exited` (code is real), `signaled`, `cancelled`, `rejected`, `spawn_failed`.
+- After `fx.cancel(key)` returns, no further `on_line` Msgs for that spawn arrive; exactly one `.cancelled` exit follows. The process is killed and reaped — no zombies. Streaming a chat agent's stdout for minutes and cancelling mid-stream is the designed-for case.
+- Overflow is never silent: a full completion queue drops lines but the next delivered line's `dropped_before` and the exit's `dropped_lines` carry the count; over-long lines arrive truncated with `truncated = true`. Capacities: 16 in-flight effects, 4 KiB per line, 64 queued completions.
+
+Test effects with the fake executor — deterministic, no processes:
+
+```zig
+app_state.effects.executor = .fake;             // before dispatching
+try app_state.dispatch(&harness.runtime, 1, .start);
+const request = app_state.effects.pendingSpawnAt(0).?;   // assert key/argv
+try app_state.effects.feedLine(stream_key, "stream line 1");
+try app_state.effects.feedExit(stream_key, 0);
+try harness.runtime.dispatchPlatformEvent(app, .wake);   // drain -> update
+```
+
+The `.wake` platform event is how live platforms marshal worker completions onto the loop thread (macOS main-queue dispatch, GTK `g_idle_add`, Win32 `PostMessage`); dispatching it in tests exercises the same drain path. See `examples/effects-probe` for the complete pattern, including the live cancel flow.
+
 ## Structure tags
 
 ```html

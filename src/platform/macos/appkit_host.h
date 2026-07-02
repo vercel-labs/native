@@ -28,6 +28,7 @@ typedef enum {
     ZERO_NATIVE_APPKIT_EVENT_WIDGET_ACCESSIBILITY_ACTION = 14,
     ZERO_NATIVE_APPKIT_EVENT_APPEARANCE_CHANGED = 15,
     ZERO_NATIVE_APPKIT_EVENT_TIMER = 16,
+    ZERO_NATIVE_APPKIT_EVENT_WAKE = 17,
 } zero_native_appkit_event_kind_t;
 
 typedef enum {
@@ -270,6 +271,9 @@ int zero_native_appkit_present_gpu_surface_packet(zero_native_appkit_host_t *hos
 int zero_native_appkit_request_gpu_surface_frame(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len);
 void zero_native_appkit_start_timer(zero_native_appkit_host_t *host, uint64_t timer_id, uint64_t interval_ns, int repeats);
 void zero_native_appkit_cancel_timer(zero_native_appkit_host_t *host, uint64_t timer_id);
+/* Thread-safe: nudges the main run loop to emit a WAKE event. May be
+ * called from any thread (worker threads streaming effect results). */
+void zero_native_appkit_wake(zero_native_appkit_host_t *host);
 int zero_native_appkit_update_widget_accessibility(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const zero_native_appkit_widget_accessibility_node_t *nodes, size_t node_count);
 size_t zero_native_appkit_clipboard_read(zero_native_appkit_host_t *host, char *buffer, size_t buffer_len);
 double zero_native_appkit_measure_text(uint64_t font_id, double size, const char *text, size_t text_len);

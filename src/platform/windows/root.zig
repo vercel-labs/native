@@ -29,6 +29,7 @@ const WindowsEventKind = enum(c_int) {
     gpu_surface_frame = 12,
     gpu_surface_resize = 13,
     gpu_surface_input = 14,
+    wake = 15,
 };
 
 const WindowsEvent = extern struct {
@@ -87,6 +88,7 @@ extern fn zero_native_windows_create(app_name: [*]const u8, app_name_len: usize,
 extern fn zero_native_windows_destroy(host: *WindowsHost) void;
 extern fn zero_native_windows_run(host: *WindowsHost, callback: WindowsCallback, context: ?*anyopaque) void;
 extern fn zero_native_windows_stop(host: *WindowsHost) void;
+extern fn zero_native_windows_wake(host: *WindowsHost) void;
 extern fn zero_native_windows_load_webview(host: *WindowsHost, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) void;
 extern fn zero_native_windows_load_window_webview(host: *WindowsHost, window_id: u64, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) void;
 extern fn zero_native_windows_set_bridge_callback(host: *WindowsHost, callback: WindowsBridgeCallback, context: ?*anyopaque) void;
@@ -265,6 +267,7 @@ pub const WindowsPlatform = struct {
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
                 .emit_window_event_fn = emitWindowEvent,
+                .wake_fn = wake,
             },
             .app_info = self.app_info,
         };
@@ -416,6 +419,7 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .scale_factor = @floatCast(event.scale),
         } }),
         .gpu_surface_input => state.emit(.{ .gpu_surface_input = gpuSurfaceInputEventFromWindowsEvent(event) }),
+        .wake => state.emit(.wake),
     }
 }
 
@@ -535,6 +539,13 @@ fn completeWebViewBridge(context: ?*anyopaque, window_id: platform_mod.WindowId,
 fn emitWindowEvent(context: ?*anyopaque, window_id: platform_mod.WindowId, name: []const u8, detail_json: []const u8) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     zero_native_windows_emit_window_event(self.host, window_id, name.ptr, name.len, detail_json.ptr, detail_json.len);
+}
+
+/// Thread-safe: `PostMessage` into the existing message loop, whose
+/// window procedure emits `.wake` on the loop thread.
+fn wake(context: ?*anyopaque) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    zero_native_windows_wake(self.host);
 }
 
 fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyerror!platform_mod.WindowInfo {

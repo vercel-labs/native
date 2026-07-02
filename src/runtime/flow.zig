@@ -253,6 +253,9 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .timer => |timer_event| {
                     try dispatchEvent(self, app, .{ .timer = timer_event });
                 },
+                .wake => {
+                    try dispatchEvent(self, app, .effects_wake);
+                },
                 .files_dropped => |drop| {
                     const widget_drop_event = self.routeCanvasWidgetFileDrop(drop, &self.widget_event_route_entries) catch |err| switch (err) {
                         error.WindowNotFound,
@@ -296,6 +299,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     self.invalidateFor(.state, null);
                 },
                 .timer => {},
+                .effects_wake => {},
                 .files_dropped => {},
                 .gpu_surface_frame => {},
                 .gpu_surface_resized => {},

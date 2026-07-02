@@ -25,6 +25,7 @@ typedef enum {
     ZERO_NATIVE_GTK_EVENT_GPU_SURFACE_FRAME = 11,
     ZERO_NATIVE_GTK_EVENT_GPU_SURFACE_RESIZE = 12,
     ZERO_NATIVE_GTK_EVENT_GPU_SURFACE_INPUT = 13,
+    ZERO_NATIVE_GTK_EVENT_WAKE = 14,
 } zero_native_gtk_event_kind_t;
 
 typedef struct {
@@ -119,6 +120,9 @@ zero_native_gtk_host_t *zero_native_gtk_create(const char *app_name, size_t app_
 void zero_native_gtk_destroy(zero_native_gtk_host_t *host);
 void zero_native_gtk_run(zero_native_gtk_host_t *host, zero_native_gtk_event_callback_t callback, void *context);
 void zero_native_gtk_stop(zero_native_gtk_host_t *host);
+/* Thread-safe: schedules a WAKE event on the GLib main loop via
+ * g_idle_add. May be called from any thread (effect worker threads). */
+void zero_native_gtk_wake(zero_native_gtk_host_t *host);
 void zero_native_gtk_load_webview(zero_native_gtk_host_t *host, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback);
 void zero_native_gtk_load_window_webview(zero_native_gtk_host_t *host, uint64_t window_id, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback);
 void zero_native_gtk_set_bridge_callback(zero_native_gtk_host_t *host, zero_native_gtk_bridge_callback_t callback, void *context);

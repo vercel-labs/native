@@ -27,6 +27,7 @@ const platform = @import("../platform/root.zig");
 const core = @import("core.zig");
 const canvas_frame = @import("canvas_frame.zig");
 const canvas_limits = @import("canvas_limits.zig");
+const runtime_effects = @import("effects.zig");
 
 const Runtime = core.Runtime;
 const App = core.App;
@@ -53,6 +54,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         pub const Ui = canvas.Ui(MsgT);
 
         pub const MarkupView = canvas.MarkupView(ModelT, MsgT);
+
+        /// The app's effect system (TEA's Cmd half): `fx.spawn` /
+        /// `fx.cancel` from an `update_fx`-style update. See
+        /// `runtime/effects.zig` for capacities and semantics.
+        pub const Effects = runtime_effects.Effects(MsgT);
 
         pub const ChromeOptions = struct {
             /// Number of chrome commands preserved in front of the
@@ -106,7 +112,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// as `start_ns`. Returns the number of animations written to
             /// `out`.
             animations: ?*const fn (model: *const ModelT, tree: *const Ui.Tree, start_ns: u64, out: []canvas.CanvasRenderAnimation) usize = null,
-            update: *const fn (model: *ModelT, msg: MsgT) void,
+            /// Elm-style update. Set exactly one of `update` and
+            /// `update_fx`: the plain form for pure apps, the `_fx` form
+            /// when update needs the effects channel. Both drive the
+            /// same loop; existing two-argument apps keep compiling
+            /// unchanged.
+            update: ?*const fn (model: *ModelT, msg: MsgT) void = null,
+            /// Effects-capable update: the third parameter spawns and
+            /// cancels subprocess effects (`fx.spawn(.{ ... })`,
+            /// `fx.cancel(key)`). Effects are update-side only — views
+            /// never spawn.
+            update_fx: ?*const fn (model: *ModelT, msg: MsgT, fx: *Effects) void = null,
             /// Hand-written or comptime-compiled view
             /// (`canvas.CompiledMarkupView(Model, Msg, source).build` slots
             /// in directly). At least one of `view` and `markup` must be
@@ -171,9 +187,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// these.
         pixel_buffer: []u8 = &.{},
         pixel_scratch: []u8 = &.{},
+        /// Worker threads, completion queue, and spawn slots for the
+        /// effect system. Fixed-capacity; lives with the app struct
+        /// (heap-allocated like the rest of it).
+        effects: Effects,
 
         pub fn init(backing: std.mem.Allocator, model: ModelT, options: Options) Self {
             std.debug.assert(options.view != null or options.markup != null);
+            std.debug.assert((options.update != null) != (options.update_fx != null));
             if (comptime !features.runtime_markup) std.debug.assert(options.markup == null);
             return .{
                 .model = model,
@@ -187,10 +208,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     std.heap.ArenaAllocator.init(backing),
                     std.heap.ArenaAllocator.init(backing),
                 },
+                .effects = Effects.init(backing),
             };
         }
 
         pub fn deinit(self: *Self) void {
+            self.effects.deinit();
             self.arenas[0].deinit();
             self.arenas[1].deinit();
             self.markup_arenas[0].deinit();
@@ -214,9 +237,39 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// widget state is synced into the model first so `update` sees
         /// current slider values and scroll offsets.
         pub fn dispatch(self: *Self, runtime: *Runtime, window_id: platform.WindowId, msg: MsgT) anyerror!void {
+            self.effects.bindServices(&runtime.options.platform.services);
             self.syncModel(runtime, window_id);
-            self.options.update(&self.model, msg);
+            self.applyMsg(msg);
             try self.rebuild(runtime, window_id);
+        }
+
+        /// Run `update` through whichever form the app declared; the
+        /// effects channel rides along for the `update_fx` form.
+        fn applyMsg(self: *Self, msg: MsgT) void {
+            if (self.options.update_fx) |update_fx| {
+                update_fx(&self.model, msg, &self.effects);
+            } else {
+                self.options.update.?(&self.model, msg);
+            }
+        }
+
+        /// Drain the effect completion queue on the loop thread: every
+        /// queued line/exit becomes a Msg through its stored constructor
+        /// and runs through `update`; one rebuild follows. Called on
+        /// `.effects_wake` (the platform marshalled a worker's `wake_fn`
+        /// nudge) and each presented frame (host-pumped embeds have no
+        /// wake delivery; their frame pump drains naturally).
+        pub fn drainEffects(self: *Self, runtime: *Runtime) anyerror!void {
+            if (!self.installed) return;
+            if (!self.effects.hasPending()) return;
+            self.effects.bindServices(&runtime.options.platform.services);
+            self.syncModel(runtime, self.canvas_window_id);
+            var dispatched = false;
+            while (self.effects.takeMsg()) |msg| {
+                self.applyMsg(msg);
+                dispatched = true;
+            }
+            if (dispatched) try self.rebuild(runtime, self.canvas_window_id);
         }
 
         /// The design tokens for the next rebuild: static `tokens`, or the
@@ -426,6 +479,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     }
                 },
                 .timer => |timer_event| try self.handleTimer(runtime, timer_event),
+                .effects_wake => try self.drainEffects(runtime),
                 .gpu_surface_frame => |frame_event| try self.handleFrame(runtime, frame_event),
                 .gpu_surface_resized => |resize_event| try self.handleResize(runtime, resize_event),
                 .canvas_widget_pointer => |pointer_event| try self.handlePointer(runtime, pointer_event),
@@ -448,6 +502,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn handleFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent) anyerror!void {
             if (!std.mem.eql(u8, frame_event.label, self.options.canvas_label)) return;
+            // Host-pumped embeds deliver no `.wake`; drain pending effect
+            // results with the frame tick so this frame presents them.
+            try self.drainEffects(runtime);
             self.canvas_window_id = frame_event.window_id;
             self.frame_timestamp_ns = frame_event.timestamp_ns;
             const scale = normalizedSurfaceScale(frame_event.scale_factor);

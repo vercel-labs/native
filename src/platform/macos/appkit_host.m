@@ -462,6 +462,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (void)cancelAppTimerWithId:(uint64_t)timerId;
 - (void)appTimerFired:(NSTimer *)timer;
 - (void)invalidateAppTimers;
+- (void)wakeFromAnyThread;
 - (void)scheduleBridgeFrames;
 - (void)emitFrame;
 - (void)emitShutdown;
@@ -4064,6 +4065,21 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     [self scheduleFrame];
 }
 
+/* Called from any thread: marshal onto the main queue and emit the WAKE
+ * event there, so the runtime's effect-queue drain always runs on the
+ * loop thread. */
+- (void)wakeFromAnyThread {
+    __weak ZeroNativeAppKitHost *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ZeroNativeAppKitHost *strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.didShutdown) return;
+        [strongSelf emitEvent:(zero_native_appkit_event_t){
+            .kind = ZERO_NATIVE_APPKIT_EVENT_WAKE,
+            .timestamp_ns = ZeroNativeTimestampNanoseconds(),
+        }];
+    });
+}
+
 - (void)startAppTimerWithId:(uint64_t)timerId intervalNs:(uint64_t)intervalNs repeats:(BOOL)repeats {
     NSNumber *key = @(timerId);
     [self.appTimers[key] invalidate];
@@ -4575,6 +4591,11 @@ void zero_native_appkit_start_timer(zero_native_appkit_host_t *host, uint64_t ti
 void zero_native_appkit_cancel_timer(zero_native_appkit_host_t *host, uint64_t timer_id) {
     ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
     [object cancelAppTimerWithId:timer_id];
+}
+
+void zero_native_appkit_wake(zero_native_appkit_host_t *host) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    [object wakeFromAnyThread];
 }
 
 void zero_native_appkit_stop(zero_native_appkit_host_t *host) {

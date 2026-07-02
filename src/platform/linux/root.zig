@@ -28,6 +28,7 @@ const GtkEventKind = enum(c_int) {
     gpu_surface_frame = 11,
     gpu_surface_resize = 12,
     gpu_surface_input = 13,
+    wake = 14,
 };
 
 const GtkEvent = extern struct {
@@ -85,6 +86,7 @@ extern fn zero_native_gtk_create(app_name: [*]const u8, app_name_len: usize, win
 extern fn zero_native_gtk_destroy(host: *GtkHost) void;
 extern fn zero_native_gtk_run(host: *GtkHost, callback: GtkCallback, context: ?*anyopaque) void;
 extern fn zero_native_gtk_stop(host: *GtkHost) void;
+extern fn zero_native_gtk_wake(host: *GtkHost) void;
 extern fn zero_native_gtk_load_webview(host: *GtkHost, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) void;
 extern fn zero_native_gtk_load_window_webview(host: *GtkHost, window_id: u64, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) void;
 extern fn zero_native_gtk_set_bridge_callback(host: *GtkHost, callback: GtkBridgeCallback, context: ?*anyopaque) void;
@@ -262,6 +264,7 @@ pub const LinuxPlatform = struct {
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
                 .emit_window_event_fn = emitWindowEvent,
+                .wake_fn = wake,
             },
             .app_info = self.app_info,
         };
@@ -418,6 +421,7 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
             .scale_factor = @floatCast(event.scale),
         } }),
         .gpu_surface_input => state.emit(.{ .gpu_surface_input = gpuSurfaceInputEventFromGtkEvent(event) }),
+        .wake => state.emit(.wake),
     }
 }
 
@@ -536,6 +540,13 @@ fn completeWebViewBridge(context: ?*anyopaque, window_id: platform_mod.WindowId,
 fn emitWindowEvent(context: ?*anyopaque, window_id: platform_mod.WindowId, name: []const u8, detail_json: []const u8) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     zero_native_gtk_emit_window_event(self.host, window_id, name.ptr, name.len, detail_json.ptr, detail_json.len);
+}
+
+/// Thread-safe: schedules an idle source on the GLib main loop, which
+/// emits `.wake` there. The one service worker threads may call.
+fn wake(context: ?*anyopaque) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    zero_native_gtk_wake(self.host);
 }
 
 fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyerror!platform_mod.WindowInfo {

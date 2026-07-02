@@ -131,6 +131,32 @@ draft: canvas.TextBuffer(64) = .{},
 .add => { model.addTask(model.draft.text()); model.draft.clear(); },
 ```
 
+## Effects
+
+For anything asynchronous — running `gh`, streaming an agent's stdout — `update` takes a third parameter, the effects channel. Declare `.update_fx` instead of `.update` (two-argument apps are unchanged):
+
+```zig
+const Effects = zero_native.UiApp(Model, Msg).Effects;
+
+pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
+    switch (msg) {
+        .start => fx.spawn(.{
+            .key = stream_key,                    // caller-chosen u64, kept in the model
+            .argv = &.{ "gh", "issue", "list" },
+            .on_line = Effects.lineMsg(.line),    // each stdout line becomes Msg{ .line = ... }
+            .on_exit = Effects.exitMsg(.exited),  // the exit becomes Msg{ .exited = ... }
+        }),
+        .cancel => fx.cancel(stream_key),
+        .line => |line| model.recordLine(line),   // copy the bytes — the slice dies with this call
+        .exited => |exit| model.finish(exit),
+    }
+}
+```
+
+The process runs on a worker thread the runtime owns; results post to a bounded queue, the platform loop is nudged, and Msgs dispatch on the loop thread — the model is never touched off-thread. Views never spawn: a button dispatches a Msg, and that Msg's update arm spawns.
+
+Failure and overflow are always visible: a spawn that cannot run delivers an exit Msg with reason `rejected`; dropped or truncated lines carry counts and flags; `cancel` kills and reaps the process and always ends in exactly one `cancelled` exit Msg, with no further line Msgs after it. Tests use the fake executor (`effects.executor = .fake`) to assert on spawn requests and feed synthetic lines and exits back deterministically — see `examples/effects-probe`.
+
 ## Tooling
 
 - `zero-native markup check src/app.zml` — instant validation with `file:line:column` errors.

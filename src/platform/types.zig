@@ -1290,6 +1290,11 @@ pub const Event = union(enum) {
     native_command: NativeCommandEvent,
     menu_command: MenuCommandEvent,
     timer: TimerEvent,
+    /// A cross-thread nudge posted through `PlatformServices.wake_fn`:
+    /// worker threads (effect executors) ask the platform loop to deliver
+    /// this on its own thread so the runtime can drain completion queues
+    /// without ever touching app state off-thread.
+    wake,
     files_dropped: FileDropEvent,
     gpu_surface_frame: GpuSurfaceFrameEvent,
     gpu_surface_resized: GpuSurfaceResizeEvent,
@@ -1313,6 +1318,7 @@ pub const Event = union(enum) {
             .native_command => "native_command",
             .menu_command => "menu_command",
             .timer => "timer",
+            .wake => "wake",
             .files_dropped => "files_dropped",
             .gpu_surface_frame => "gpu_surface_frame",
             .gpu_surface_resized => "gpu_surface_resized",
@@ -1391,6 +1397,13 @@ pub const PlatformServices = struct {
     request_gpu_surface_frame_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8) anyerror!void = null,
     start_timer_fn: ?*const fn (context: ?*anyopaque, id: u64, interval_ns: u64, repeats: bool) anyerror!void = null,
     cancel_timer_fn: ?*const fn (context: ?*anyopaque, id: u64) anyerror!void = null,
+    /// Nudge the platform event loop from ANY thread: the platform must
+    /// deliver a `.wake` event on its loop thread as soon as possible.
+    /// This is the only `PlatformServices` entry that may be called
+    /// off-thread; every implementation must be thread-safe (macOS:
+    /// main-queue dispatch, GTK: `g_idle_add`, Win32: `PostMessage`,
+    /// null platform: an atomic counter tests drain explicitly).
+    wake_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     present_gpu_surface_pixels_fn: ?*const fn (context: ?*anyopaque, pixels: GpuSurfacePixels) anyerror!void = null,
     present_gpu_surface_packet_fn: ?*const fn (context: ?*anyopaque, packet: GpuSurfacePacket) anyerror!void = null,
     update_widget_accessibility_fn: ?*const fn (context: ?*anyopaque, snapshot: WidgetAccessibilitySnapshot) anyerror!void = null,
@@ -1657,6 +1670,14 @@ pub const PlatformServices = struct {
     pub fn cancelTimer(self: PlatformServices, id: u64) anyerror!void {
         const cancel_fn = self.cancel_timer_fn orelse return error.UnsupportedService;
         return cancel_fn(self.context, id);
+    }
+
+    /// Ask the platform loop to deliver a `.wake` event on its own thread.
+    /// Safe to call from any thread; a missing implementation is an error
+    /// so callers never assume a nudge happened when it did not.
+    pub fn wake(self: PlatformServices) anyerror!void {
+        const wake_fn = self.wake_fn orelse return error.UnsupportedService;
+        return wake_fn(self.context);
     }
 
     pub fn presentGpuSurfacePixels(self: PlatformServices, pixels: GpuSurfacePixels) anyerror!void {

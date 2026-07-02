@@ -49,6 +49,7 @@ enum EventKind {
     kGpuSurfaceFrame = 12,
     kGpuSurfaceResize = 13,
     kGpuSurfaceInput = 14,
+    kWake = 15,
 };
 
 constexpr uint32_t kShortcutModifierPrimary = 1u << 0;
@@ -60,6 +61,10 @@ constexpr size_t kMaxShortcuts = 64;
 constexpr uint32_t kMenuCommandBase = 0x4000;
 constexpr uint32_t kTrayCommandBase = 0x5000;
 constexpr UINT kNotificationCallbackMessage = WM_APP + 42;
+/* Posted from any thread (effect worker threads) via
+ * zero_native_windows_wake; the window procedure emits kWake on the
+ * message loop thread. */
+constexpr UINT kWakeMessage = WM_APP + 43;
 constexpr const char *kAssetVirtualOrigin = "https://zero-native-app.localhost";
 
 constexpr int kViewWebView = 0;
@@ -2199,6 +2204,14 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
     }
     Host *host = hostFromWindow(hwnd);
     switch (message) {
+        case kWakeMessage:
+            if (host) {
+                WindowsEvent wake = {};
+                wake.kind = kWake;
+                wake.window_id = 1;
+                if (host->callback) host->callback(host->callback_context, &wake);
+            }
+            return 0;
         case kNotificationCallbackMessage:
             if (host && host->tray_active) {
                 UINT tray_event = LOWORD(lparam);
@@ -2420,6 +2433,19 @@ void zero_native_windows_stop(Host *host) {
     if (!host) return;
     host->running = false;
     PostQuitMessage(0);
+}
+
+/* Thread-safe wake: posts kWakeMessage into the message loop, which
+ * emits the kWake event on the loop thread. The lifetime mutex guards
+ * the window map against concurrent create/destroy. */
+void zero_native_windows_wake(Host *host) {
+    if (!host) return;
+    std::shared_ptr<HostLifetime> lifetime = host->lifetime;
+    std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
+    if (!lifetime->alive || !host->running) return;
+    HWND hwnd = parentWindow(host);
+    if (!hwnd) return;
+    PostMessageW(hwnd, kWakeMessage, 0, 0);
 }
 
 void zero_native_windows_load_webview(Host *host, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback) {

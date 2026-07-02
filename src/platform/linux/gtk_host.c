@@ -2174,6 +2174,23 @@ void zero_native_gtk_stop(zero_native_gtk_host_t *host) {
     g_application_quit(G_APPLICATION(host->app));
 }
 
+/* Runs on the GLib main loop: emit the wake event there, so the runtime
+ * drains effect completions on its own thread. */
+static gboolean zero_native_emit_wake_idle(gpointer data) {
+    zero_native_gtk_host_t *host = data;
+    if (host && !host->did_shutdown) {
+        zero_native_emit(host, (zero_native_gtk_event_t){ .kind = ZERO_NATIVE_GTK_EVENT_WAKE });
+    }
+    return G_SOURCE_REMOVE;
+}
+
+void zero_native_gtk_wake(zero_native_gtk_host_t *host) {
+    if (!host) return;
+    /* g_idle_add is documented thread-safe: any thread may schedule onto
+     * the default main context. */
+    g_idle_add(zero_native_emit_wake_idle, host);
+}
+
 void zero_native_gtk_load_webview(zero_native_gtk_host_t *host, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback) {
     zero_native_gtk_load_window_webview(host, 1, source, source_len, source_kind, asset_root, asset_root_len, asset_entry, asset_entry_len, asset_origin, asset_origin_len, spa_fallback);
 }
