@@ -26,6 +26,9 @@ const WindowsEventKind = enum(c_int) {
     files_dropped = 9,
     menu_command = 10,
     tray_action = 11,
+    gpu_surface_frame = 12,
+    gpu_surface_resize = 13,
+    gpu_surface_input = 14,
 };
 
 const WindowsEvent = extern struct {
@@ -54,6 +57,21 @@ const WindowsEvent = extern struct {
     drop_paths: [*]const u8,
     drop_paths_len: usize,
     tray_item_id: u32,
+    frame_index: u64,
+    timestamp_ns: u64,
+    frame_interval_ns: u64,
+    nonblank: c_int,
+    sample_color: u32,
+    input_kind: c_int,
+    button: c_int,
+    delta_x: f64,
+    delta_y: f64,
+    key_text: [*]const u8,
+    key_text_len: usize,
+    input_text: [*]const u8,
+    input_text_len: usize,
+    has_composition_cursor: c_int,
+    composition_cursor: usize,
 };
 
 const WindowsCallback = *const fn (context: ?*anyopaque, event: *const WindowsEvent) callconv(.c) void;
@@ -88,6 +106,8 @@ extern fn zero_native_windows_set_view_frame(host: *WindowsHost, window_id: u64,
 extern fn zero_native_windows_set_view_visible(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, visible: c_int) c_int;
 extern fn zero_native_windows_focus_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn zero_native_windows_close_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
+extern fn zero_native_windows_request_gpu_surface_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
+extern fn zero_native_windows_present_gpu_surface_pixels(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, width: usize, height: usize, scale: f64, has_dirty_rect: c_int, dirty_x: f64, dirty_y: f64, dirty_width: f64, dirty_height: f64, rgba8: [*]const u8, rgba8_len: usize) c_int;
 extern fn zero_native_windows_create_webview(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, transparent: c_int, bridge_enabled: c_int) c_int;
 extern fn zero_native_windows_set_webview_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn zero_native_windows_navigate_webview(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize) c_int;
@@ -219,6 +239,8 @@ pub const WindowsPlatform = struct {
                 .set_view_visible_fn = setViewVisible,
                 .focus_view_fn = focusView,
                 .close_view_fn = closeView,
+                .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
+                .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
                 .navigate_webview_fn = navigateWebView,
@@ -268,8 +290,8 @@ pub const WindowsPlatform = struct {
             .credentials,
             .file_drops,
             .app_activation_events,
+            .gpu_surfaces,
             => self.web_engine == .system,
-            .gpu_surfaces => false,
         };
     }
 
@@ -369,7 +391,68 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .window_id = event.window_id,
         } }),
         .tray_action => state.emit(.{ .tray_action = event.tray_item_id }),
+        .gpu_surface_frame => state.emit(.{ .gpu_surface_frame = .{
+            .window_id = event.window_id,
+            .label = event.view_label[0..event.view_label_len],
+            .size = geometry.SizeF.init(@floatCast(event.width), @floatCast(event.height)),
+            .scale_factor = @floatCast(event.scale),
+            .frame_index = event.frame_index,
+            .timestamp_ns = event.timestamp_ns,
+            .frame_interval_ns = event.frame_interval_ns,
+            .nonblank = event.nonblank != 0,
+            .sample_color = event.sample_color,
+            .backend = .software,
+            .pixel_format = .bgra8_unorm,
+            .present_mode = .timer,
+            .alpha_mode = .@"opaque",
+            .color_space = .srgb,
+            .vsync = true,
+            .status = .ready,
+        } }),
+        .gpu_surface_resize => state.emit(.{ .gpu_surface_resized = .{
+            .window_id = event.window_id,
+            .label = event.view_label[0..event.view_label_len],
+            .frame = geometry.RectF.init(@floatCast(event.x), @floatCast(event.y), @floatCast(event.width), @floatCast(event.height)),
+            .scale_factor = @floatCast(event.scale),
+        } }),
+        .gpu_surface_input => state.emit(.{ .gpu_surface_input = gpuSurfaceInputEventFromWindowsEvent(event) }),
     }
+}
+
+fn gpuSurfaceInputEventFromWindowsEvent(event: *const WindowsEvent) platform_mod.GpuSurfaceInputEvent {
+    return .{
+        .window_id = event.window_id,
+        .label = event.view_label[0..event.view_label_len],
+        .kind = gpuSurfaceInputKindFromInt(event.input_kind),
+        .timestamp_ns = event.timestamp_ns,
+        .x = @floatCast(event.x),
+        .y = @floatCast(event.y),
+        .button = event.button,
+        .delta_x = @floatCast(event.delta_x),
+        .delta_y = @floatCast(event.delta_y),
+        .key = event.key_text[0..event.key_text_len],
+        .text = event.input_text[0..event.input_text_len],
+        .composition_cursor = if (event.has_composition_cursor != 0) event.composition_cursor else null,
+        .modifiers = shortcutModifiersFromFlags(event.shortcut_modifiers),
+    };
+}
+
+fn gpuSurfaceInputKindFromInt(value: c_int) platform_mod.GpuSurfaceInputKind {
+    return switch (value) {
+        0 => .pointer_down,
+        1 => .pointer_up,
+        2 => .pointer_move,
+        3 => .pointer_drag,
+        4 => .scroll,
+        5 => .key_down,
+        6 => .key_up,
+        7 => .text_input,
+        8 => .ime_set_composition,
+        9 => .ime_commit_composition,
+        10 => .ime_cancel_composition,
+        11 => .pointer_cancel,
+        else => .pointer_move,
+    };
 }
 
 fn windowsBridgeCallback(context: ?*anyopaque, window_id: u64, webview_label: [*]const u8, webview_label_len: usize, message: [*]const u8, message_len: usize, origin: [*]const u8, origin_len: usize) callconv(.c) void {
@@ -575,6 +658,34 @@ fn closeView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []co
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedViewKind;
     if (zero_native_windows_close_view(self.host, window_id, label.ptr, label.len) == 0) return error.ViewNotFound;
+}
+
+fn requestGpuSurfaceFrame(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    if (zero_native_windows_request_gpu_surface_frame(self.host, window_id, label.ptr, label.len) == 0) return error.ViewNotFound;
+}
+
+fn presentGpuSurfacePixels(context: ?*anyopaque, pixels: platform_mod.GpuSurfacePixels) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedViewKind;
+    const dirty_bounds = if (pixels.dirty_bounds) |bounds| bounds.normalized() else geometry.RectF{};
+    if (zero_native_windows_present_gpu_surface_pixels(
+        self.host,
+        pixels.window_id,
+        pixels.label.ptr,
+        pixels.label.len,
+        pixels.width,
+        pixels.height,
+        pixels.scale_factor,
+        if (pixels.dirty_bounds != null) 1 else 0,
+        dirty_bounds.x,
+        dirty_bounds.y,
+        dirty_bounds.width,
+        dirty_bounds.height,
+        pixels.rgba8.ptr,
+        pixels.rgba8.len,
+    ) == 0) return error.ViewNotFound;
 }
 
 fn createWebView(context: ?*anyopaque, options: platform_mod.WebViewOptions) anyerror!void {
@@ -924,9 +1035,9 @@ fn isSupportedNativeViewKind(kind: platform_mod.ViewKind) bool {
         .label,
         .spacer,
         .progress_indicator,
+        .gpu_surface,
         => true,
         .webview,
-        .gpu_surface,
         => false,
     };
 }
@@ -936,7 +1047,50 @@ test "windows supports native container and control kinds" {
     try std.testing.expect(isSupportedNativeViewKind(.stack));
     try std.testing.expect(isSupportedNativeViewKind(.icon_button));
     try std.testing.expect(isSupportedNativeViewKind(.list_item));
-    try std.testing.expect(!isSupportedNativeViewKind(.gpu_surface));
+    try std.testing.expect(isSupportedNativeViewKind(.gpu_surface));
+}
+
+test "windows gpu surface input preserves key and text" {
+    const label = "canvas";
+    const key = "enter";
+    const text = "\n";
+    var event = std.mem.zeroes(WindowsEvent);
+    event.window_id = 7;
+    event.view_label = label.ptr;
+    event.view_label_len = label.len;
+    event.input_kind = 5;
+    event.timestamp_ns = 123_000_000;
+    event.x = 12;
+    event.y = 18;
+    event.button = 1;
+    event.delta_x = -2;
+    event.delta_y = 4;
+    event.key_text = key.ptr;
+    event.key_text_len = key.len;
+    event.input_text = text.ptr;
+    event.input_text_len = text.len;
+    event.shortcut_modifiers = shortcut_modifier_primary | shortcut_modifier_shift;
+
+    const input = gpuSurfaceInputEventFromWindowsEvent(&event);
+    try std.testing.expectEqual(@as(platform_mod.WindowId, 7), input.window_id);
+    try std.testing.expectEqualStrings("canvas", input.label);
+    try std.testing.expectEqual(platform_mod.GpuSurfaceInputKind.key_down, input.kind);
+    try std.testing.expectEqual(@as(u64, 123_000_000), input.timestamp_ns);
+    try std.testing.expectEqual(@as(f32, 12), input.x);
+    try std.testing.expectEqual(@as(f32, 18), input.y);
+    try std.testing.expectEqual(@as(i32, 1), input.button);
+    try std.testing.expectEqual(@as(f32, -2), input.delta_x);
+    try std.testing.expectEqual(@as(f32, 4), input.delta_y);
+    try std.testing.expectEqualStrings("enter", input.key);
+    try std.testing.expectEqualStrings("\n", input.text);
+    try std.testing.expect(input.modifiers.primary);
+    try std.testing.expect(input.modifiers.shift);
+}
+
+test "windows gpu surface input maps pointer cancel" {
+    var event = std.mem.zeroes(WindowsEvent);
+    event.input_kind = 11;
+    try std.testing.expectEqual(platform_mod.GpuSurfaceInputKind.pointer_cancel, gpuSurfaceInputEventFromWindowsEvent(&event).kind);
 }
 
 test "windows chromium reports unsupported native surfaces" {
@@ -946,6 +1100,7 @@ test "windows chromium reports unsupported native surfaces" {
     try std.testing.expect(WindowsPlatform.supportsFeature(&system, .native_views));
     try std.testing.expect(WindowsPlatform.supportsFeature(&system, .native_control_commands));
     try std.testing.expect(WindowsPlatform.supportsFeature(&system, .menus));
+    try std.testing.expect(WindowsPlatform.supportsFeature(&system, .gpu_surfaces));
 
     var chromium = testPlatformWithEngine(.chromium);
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .main_webview));
@@ -954,6 +1109,7 @@ test "windows chromium reports unsupported native surfaces" {
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .native_control_commands));
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .menus));
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .shortcuts));
+    try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .gpu_surfaces));
 }
 
 fn testPlatformWithEngine(web_engine: platform_mod.WebEngine) WindowsPlatform {

@@ -46,6 +46,9 @@ enum EventKind {
     kFilesDropped = 9,
     kMenuCommand = 10,
     kTrayAction = 11,
+    kGpuSurfaceFrame = 12,
+    kGpuSurfaceResize = 13,
+    kGpuSurfaceInput = 14,
 };
 
 constexpr uint32_t kShortcutModifierPrimary = 1u << 0;
@@ -105,6 +108,21 @@ struct WindowsEvent {
     const char *drop_paths;
     size_t drop_paths_len;
     uint32_t tray_item_id;
+    uint64_t frame_index;
+    uint64_t timestamp_ns;
+    uint64_t frame_interval_ns;
+    int nonblank;
+    uint32_t sample_color;
+    int input_kind;
+    int button;
+    double delta_x;
+    double delta_y;
+    const char *key_text;
+    size_t key_text_len;
+    const char *input_text;
+    size_t input_text_len;
+    int has_composition_cursor;
+    size_t composition_cursor;
 };
 
 struct WindowsOpenDialogOpts {
@@ -210,6 +228,20 @@ struct NativeView {
     bool visible = true;
     bool enabled = true;
     bool explicit_text = false;
+    /* gpu_surface (software canvas) state */
+    std::vector<uint8_t> gpu_bgra;
+    int gpu_buf_width = 0;
+    int gpu_buf_height = 0;
+    uint64_t gpu_frame_index = 0;
+    double gpu_emitted_width = 0;
+    double gpu_emitted_height = 0;
+    double gpu_emitted_scale = 0;
+    int gpu_nonblank = 0;
+    uint32_t gpu_sample_color = 0;
+    int gpu_pointer_down = 0;
+    double gpu_pointer_x = 0;
+    double gpu_pointer_y = 0;
+    WCHAR gpu_pending_high_surrogate = 0;
 };
 
 struct Shortcut {
@@ -1171,7 +1203,8 @@ static bool isSupportedNativeViewKind(int kind) {
         kind == kViewTextField ||
         kind == kViewSearchField ||
         kind == kViewLabel ||
-        kind == kViewProgressIndicator;
+        kind == kViewProgressIndicator ||
+        kind == kViewGpuSurface;
 }
 
 static std::string nativeViewDisplayText(const NativeView &view) {
@@ -1249,6 +1282,7 @@ static void applyNativeViewText(NativeView &view, const std::string &text) {
         case kViewTitlebarAccessory:
         case kViewSidebar:
         case kViewStatusbar:
+        case kViewGpuSurface:
             break;
         default:
             SetWindowTextW(view.hwnd, wide.c_str());
@@ -1367,6 +1401,360 @@ static void destroyNativeViewsForWindow(Host *host, uint64_t window_id) {
         if (entry.second.window_id == window_id) keys.push_back(entry.first);
     }
     for (const std::string &key : keys) destroyNativeViewAndChildren(host, key);
+}
+
+/* ---------------------------------------------------------------- gpu surface
+ *
+ * A gpu_surface view is a plain Win32 child HWND driven by the CPU pixel
+ * path: the runtime rasterizes canvas frames with the reference renderer
+ * and hands RGBA8 buffers to zero_native_windows_present_gpu_surface_pixels,
+ * which swizzles them into a top-down 32bpp BGRA DIB and invalidates the
+ * child; WM_PAINT blits with SetDIBitsToDevice (StretchDIBits while a
+ * resize is in flight). A 16 ms WM_TIMER on the child plays the role of
+ * the `.timer` present mode: it emits gpu_surface_frame events (and
+ * gpu_surface_resize when the logical size or DPI scale changes), matching
+ * the macOS Metal and Linux GTK hosts' event cadence. Mouse, wheel, and
+ * key input map onto the same gpu_surface_input kinds the other hosts
+ * emit; printable text arrives through WM_CHAR as text_input events while
+ * WM_KEYDOWN carries only the key name, so nothing inserts twice. IME
+ * composition (WM_IME_*) is not wired yet: composed text still lands as
+ * WM_CHAR commits, but ime_set_composition preview events are deferred.
+ */
+
+constexpr int kGpuInputPointerDown = 0;
+constexpr int kGpuInputPointerUp = 1;
+constexpr int kGpuInputPointerMove = 2;
+constexpr int kGpuInputPointerDrag = 3;
+constexpr int kGpuInputScroll = 4;
+constexpr int kGpuInputKeyDown = 5;
+constexpr int kGpuInputKeyUp = 6;
+constexpr int kGpuInputTextInput = 7;
+constexpr int kGpuInputPointerCancel = 11;
+constexpr uint64_t kGpuFrameIntervalNs = 16666667ull;
+constexpr UINT_PTR kGpuFrameTimerId = 1;
+
+static uint64_t gpuTimestampNs() {
+    static LARGE_INTEGER frequency = {};
+    if (frequency.QuadPart == 0) QueryPerformanceFrequency(&frequency);
+    if (frequency.QuadPart <= 0) return (uint64_t)GetTickCount64() * 1000000ull;
+    LARGE_INTEGER counter = {};
+    QueryPerformanceCounter(&counter);
+    const uint64_t seconds = (uint64_t)(counter.QuadPart / frequency.QuadPart);
+    const uint64_t remainder = (uint64_t)(counter.QuadPart % frequency.QuadPart);
+    return seconds * 1000000000ull + remainder * 1000000000ull / (uint64_t)frequency.QuadPart;
+}
+
+/* Device scale for a gpu_surface child. GetDpiForWindow is resolved
+ * dynamically so the host keeps working on Windows versions (and Wine
+ * prefixes) that predate per-monitor DPI. In a DPI-unaware process the
+ * call reports 96, so logical size == client pixels, matching how the
+ * rest of this host treats coordinates. */
+static double gpuSurfaceScale(HWND hwnd) {
+    using GetDpiForWindowFn = UINT(WINAPI *)(HWND);
+    static GetDpiForWindowFn get_dpi = reinterpret_cast<GetDpiForWindowFn>(
+        reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow")));
+    if (get_dpi && hwnd) {
+        const UINT dpi = get_dpi(hwnd);
+        if (dpi > 0) return (double)dpi / 96.0;
+    }
+    return 1.0;
+}
+
+static NativeView *gpuSurfaceViewForHwnd(Host *host, HWND hwnd) {
+    if (!host || !hwnd) return nullptr;
+    for (auto &entry : host->native_views) {
+        if (entry.second.hwnd == hwnd && entry.second.kind == kViewGpuSurface) return &entry.second;
+    }
+    return nullptr;
+}
+
+static uint32_t gpuModifierFlags() {
+    uint32_t flags = 0;
+    if (keyDown(VK_CONTROL)) flags |= kShortcutModifierPrimary | kShortcutModifierControl;
+    if (keyDown(VK_MENU)) flags |= kShortcutModifierOption;
+    if (keyDown(VK_SHIFT)) flags |= kShortcutModifierShift;
+    if (keyDown(VK_LWIN) || keyDown(VK_RWIN)) flags |= kShortcutModifierCommand;
+    return flags;
+}
+
+static void emitGpuSurfaceEvent(Host *host, const NativeView &view, WindowsEvent &event) {
+    if (!host || !host->callback) return;
+    event.window_id = view.window_id;
+    event.view_label = view.label.c_str();
+    event.view_label_len = view.label.size();
+    if (!event.key_text) event.key_text = "";
+    if (!event.input_text) event.input_text = "";
+    host->callback(host->callback_context, &event);
+}
+
+static void emitGpuSurfaceInput(Host *host, NativeView &view, int input_kind, double x, double y, int button, double delta_x, double delta_y, const char *key, const char *text, uint32_t modifiers) {
+    WindowsEvent event = {};
+    event.kind = kGpuSurfaceInput;
+    event.x = x;
+    event.y = y;
+    event.timestamp_ns = gpuTimestampNs();
+    event.input_kind = input_kind;
+    event.button = button;
+    event.delta_x = delta_x;
+    event.delta_y = delta_y;
+    event.key_text = key ? key : "";
+    event.key_text_len = key ? strlen(key) : 0;
+    event.input_text = text ? text : "";
+    event.input_text_len = text ? strlen(text) : 0;
+    event.shortcut_modifiers = modifiers;
+    emitGpuSurfaceEvent(host, view, event);
+}
+
+/* Emit a gpu_surface_resize when the child's logical size or device scale
+ * differ from the last emitted values. Returns true when an event was sent. */
+static bool syncGpuSurfaceGeometry(Host *host, NativeView &view, double width, double height, double scale) {
+    if (width == view.gpu_emitted_width && height == view.gpu_emitted_height && scale == view.gpu_emitted_scale) return false;
+    view.gpu_emitted_width = width;
+    view.gpu_emitted_height = height;
+    view.gpu_emitted_scale = scale;
+    WindowsEvent event = {};
+    event.kind = kGpuSurfaceResize;
+    event.x = view.x;
+    event.y = view.y;
+    event.width = width;
+    event.height = height;
+    event.scale = scale;
+    event.timestamp_ns = gpuTimestampNs();
+    emitGpuSurfaceEvent(host, view, event);
+    return true;
+}
+
+static bool gpuSurfaceLogicalSize(const NativeView &view, HWND hwnd, double scale, double *out_width, double *out_height) {
+    RECT rect = {};
+    GetClientRect(hwnd, &rect);
+    double width = scale > 0 ? (double)(rect.right - rect.left) / scale : 0;
+    double height = scale > 0 ? (double)(rect.bottom - rect.top) / scale : 0;
+    if (width <= 0 && view.width > 0) width = view.width;
+    if (height <= 0 && view.height > 0) height = view.height;
+    *out_width = width;
+    *out_height = height;
+    return width > 0 && height > 0;
+}
+
+static void gpuSurfaceFrameTick(Host *host, NativeView &view, HWND hwnd) {
+    const double scale = gpuSurfaceScale(hwnd);
+    double width = 0;
+    double height = 0;
+    if (!gpuSurfaceLogicalSize(view, hwnd, scale, &width, &height)) return;
+    (void)syncGpuSurfaceGeometry(host, view, width, height, scale);
+
+    view.gpu_frame_index += 1;
+    WindowsEvent event = {};
+    event.kind = kGpuSurfaceFrame;
+    event.width = width;
+    event.height = height;
+    event.scale = scale;
+    event.frame_index = view.gpu_frame_index;
+    event.timestamp_ns = gpuTimestampNs();
+    event.frame_interval_ns = kGpuFrameIntervalNs;
+    event.nonblank = view.gpu_nonblank;
+    event.sample_color = view.gpu_sample_color;
+    emitGpuSurfaceEvent(host, view, event);
+}
+
+static void paintGpuSurface(NativeView &view, HWND hwnd, HDC dc) {
+    if (view.gpu_bgra.empty() || view.gpu_buf_width <= 0 || view.gpu_buf_height <= 0) return;
+    RECT rect = {};
+    GetClientRect(hwnd, &rect);
+    const int client_width = rect.right - rect.left;
+    const int client_height = rect.bottom - rect.top;
+    if (client_width <= 0 || client_height <= 0) return;
+
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = view.gpu_buf_width;
+    /* Negative height marks the DIB as top-down, matching the renderer's
+     * row order; BI_RGB 32bpp rows are B,G,R,X bytes (the present path
+     * already swizzled from RGBA8). */
+    info.bmiHeader.biHeight = -view.gpu_buf_height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    if (client_width == view.gpu_buf_width && client_height == view.gpu_buf_height) {
+        SetDIBitsToDevice(dc, 0, 0, view.gpu_buf_width, view.gpu_buf_height, 0, 0, 0, view.gpu_buf_height, view.gpu_bgra.data(), &info, DIB_RGB_COLORS);
+        return;
+    }
+    /* Mid-resize frames where the buffer is stale stretch until the next
+     * presented frame replaces them. */
+    SetStretchBltMode(dc, HALFTONE);
+    SetBrushOrgEx(dc, 0, 0, nullptr);
+    StretchDIBits(dc, 0, 0, client_width, client_height, 0, 0, view.gpu_buf_width, view.gpu_buf_height, view.gpu_bgra.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+}
+
+/* Key names match shortcutKeyFromWParam (which mirrors the GTK/AppKit gpu
+ * key set) plus the navigation keys the canvas text editor understands. */
+static std::string gpuSurfaceKeyName(WPARAM wparam) {
+    std::string key = shortcutKeyFromWParam(wparam);
+    if (!key.empty()) return key;
+    switch (wparam) {
+        case VK_DELETE: return "delete";
+        case VK_HOME: return "home";
+        case VK_END: return "end";
+        case VK_PRIOR: return "pageup";
+        case VK_NEXT: return "pagedown";
+        default: return std::string();
+    }
+}
+
+static void gpuSurfaceCharInput(Host *host, NativeView &view, WPARAM wparam) {
+    const WCHAR unit = (WCHAR)wparam;
+    std::wstring wide;
+    if (unit >= 0xD800 && unit <= 0xDBFF) {
+        view.gpu_pending_high_surrogate = unit;
+        return;
+    }
+    if (unit >= 0xDC00 && unit <= 0xDFFF) {
+        if (!view.gpu_pending_high_surrogate) return;
+        wide.push_back(view.gpu_pending_high_surrogate);
+        view.gpu_pending_high_surrogate = 0;
+        wide.push_back(unit);
+    } else {
+        view.gpu_pending_high_surrogate = 0;
+        if (unit < 0x20 || unit == 0x7f) return;
+        wide.push_back(unit);
+    }
+    /* Control/alt chords produce control characters or menu accelerators,
+     * not text; mirror the GTK path, which skips text for modified keys. */
+    if (keyDown(VK_CONTROL) || keyDown(VK_MENU) || keyDown(VK_LWIN) || keyDown(VK_RWIN)) return;
+    const std::string text = narrow(wide);
+    if (text.empty()) return;
+    emitGpuSurfaceInput(host, view, kGpuInputTextInput, view.gpu_pointer_x, view.gpu_pointer_y, 0, 0, 0, "", text.c_str(), gpuModifierFlags());
+}
+
+static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    Host *host = reinterpret_cast<Host *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    NativeView *view = gpuSurfaceViewForHwnd(host, hwnd);
+    if (!view) return DefWindowProcW(hwnd, message, wparam, lparam);
+    const double scale = gpuSurfaceScale(hwnd);
+    switch (message) {
+        case WM_TIMER:
+            if (wparam == kGpuFrameTimerId) {
+                gpuSurfaceFrameTick(host, *view, hwnd);
+                return 0;
+            }
+            break;
+        case WM_PAINT: {
+            PAINTSTRUCT paint = {};
+            HDC dc = BeginPaint(hwnd, &paint);
+            if (dc) paintGpuSurface(*view, hwnd, dc);
+            EndPaint(hwnd, &paint);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_SIZE: {
+            double width = 0;
+            double height = 0;
+            if (gpuSurfaceLogicalSize(*view, hwnd, scale, &width, &height)) {
+                (void)syncGpuSurfaceGeometry(host, *view, width, height, scale);
+            }
+            return 0;
+        }
+        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN: {
+            SetFocus(hwnd);
+            SetCapture(hwnd);
+            const double x = (double)(short)LOWORD(lparam) / scale;
+            const double y = (double)(short)HIWORD(lparam) / scale;
+            view->gpu_pointer_down = 1;
+            view->gpu_pointer_x = x;
+            view->gpu_pointer_y = y;
+            const int button = message == WM_LBUTTONDOWN ? 0 : message == WM_RBUTTONDOWN ? 1 : 2;
+            emitGpuSurfaceInput(host, *view, kGpuInputPointerDown, x, y, button, 0, 0, "", "", gpuModifierFlags());
+            return 0;
+        }
+        case WM_LBUTTONUP:
+        case WM_RBUTTONUP:
+        case WM_MBUTTONUP: {
+            const double x = (double)(short)LOWORD(lparam) / scale;
+            const double y = (double)(short)HIWORD(lparam) / scale;
+            view->gpu_pointer_down = 0;
+            view->gpu_pointer_x = x;
+            view->gpu_pointer_y = y;
+            const int button = message == WM_LBUTTONUP ? 0 : message == WM_RBUTTONUP ? 1 : 2;
+            emitGpuSurfaceInput(host, *view, kGpuInputPointerUp, x, y, button, 0, 0, "", "", gpuModifierFlags());
+            if (GetCapture() == hwnd) ReleaseCapture();
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            const double x = (double)(short)LOWORD(lparam) / scale;
+            const double y = (double)(short)HIWORD(lparam) / scale;
+            view->gpu_pointer_x = x;
+            view->gpu_pointer_y = y;
+            const int kind = view->gpu_pointer_down ? kGpuInputPointerDrag : kGpuInputPointerMove;
+            emitGpuSurfaceInput(host, *view, kind, x, y, 0, 0, 0, "", "", gpuModifierFlags());
+            return 0;
+        }
+        case WM_CAPTURECHANGED:
+            if (view->gpu_pointer_down) {
+                view->gpu_pointer_down = 0;
+                emitGpuSurfaceInput(host, *view, kGpuInputPointerCancel, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, "", "", gpuModifierFlags());
+            }
+            break;
+        case WM_MOUSEWHEEL:
+        case WM_MOUSEHWHEEL: {
+            POINT point = { (int)(short)LOWORD(lparam), (int)(short)HIWORD(lparam) };
+            ScreenToClient(hwnd, &point);
+            const double x = (double)point.x / scale;
+            const double y = (double)point.y / scale;
+            view->gpu_pointer_x = x;
+            view->gpu_pointer_y = y;
+            /* One wheel notch scrolls 40 logical units, the cadence the GTK
+             * host uses; forward wheel rotation (positive Win32 delta) means
+             * scroll up, which the shared input semantics express as a
+             * negative delta_y. */
+            const double delta = (double)(short)HIWORD(wparam) / (double)WHEEL_DELTA * 40.0;
+            const double delta_x = message == WM_MOUSEHWHEEL ? delta : 0;
+            const double delta_y = message == WM_MOUSEWHEEL ? -delta : 0;
+            emitGpuSurfaceInput(host, *view, kGpuInputScroll, x, y, 0, delta_x, delta_y, "", "", gpuModifierFlags());
+            return 0;
+        }
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN: {
+            if (emitShortcutForHwnd(host, GetAncestor(hwnd, GA_ROOT), wparam)) return 0;
+            const std::string key = gpuSurfaceKeyName(wparam);
+            if (!key.empty()) {
+                emitGpuSurfaceInput(host, *view, kGpuInputKeyDown, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, key.c_str(), "", gpuModifierFlags());
+            }
+            break;
+        }
+        case WM_KEYUP:
+        case WM_SYSKEYUP: {
+            const std::string key = gpuSurfaceKeyName(wparam);
+            if (!key.empty()) {
+                emitGpuSurfaceInput(host, *view, kGpuInputKeyUp, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, key.c_str(), "", gpuModifierFlags());
+            }
+            break;
+        }
+        case WM_CHAR:
+            gpuSurfaceCharInput(host, *view, wparam);
+            return 0;
+        case WM_GETDLGCODE:
+            return DLGC_WANTALLKEYS | DLGC_WANTCHARS | DLGC_WANTARROWS;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+static const wchar_t *gpuSurfaceClassName(Host *host) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = gpuSurfaceProc;
+        wc.hInstance = host->instance;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.lpszClassName = L"ZeroNativeGpuSurface";
+        registered = RegisterClassExW(&wc) != 0;
+    }
+    return L"ZeroNativeGpuSurface";
 }
 
 static void destroyChildWebViewsForWindow(Host *host, uint64_t window_id) {
@@ -2368,6 +2756,11 @@ int zero_native_windows_create_view(Host *host, uint64_t window_id, const char *
             style |= PBS_MARQUEE;
             wide_text.clear();
             break;
+        case kViewGpuSurface:
+            class_name = gpuSurfaceClassName(host);
+            style |= WS_TABSTOP;
+            wide_text.clear();
+            break;
         default:
             return 0;
     }
@@ -2396,6 +2789,69 @@ int zero_native_windows_create_view(Host *host, uint64_t window_id, const char *
     }
     host->native_views[key] = view;
     reorderWindowChildren(host, window_id);
+    if (kind == kViewGpuSurface) {
+        /* The class WndProc resolves the host through GWLP_USERDATA; set it
+         * before the frame timer starts ticking so the first WM_TIMER can
+         * already emit gpu_surface_frame events. */
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(host));
+        SetTimer(hwnd, kGpuFrameTimerId, 16, nullptr);
+        SetFocus(hwnd);
+    }
+    return 1;
+}
+
+int zero_native_windows_request_gpu_surface_frame(Host *host, uint64_t window_id, const char *label, size_t label_len) {
+    if (!host || label_len == 0) return 0;
+    auto found = host->native_views.find(nativeViewKey(window_id, slice(label, label_len)));
+    if (found == host->native_views.end() || found->second.kind != kViewGpuSurface || !found->second.hwnd) return 0;
+    /* The per-view frame timer already drives `.timer` present mode; a
+     * request only needs to guarantee the next tick repaints. */
+    InvalidateRect(found->second.hwnd, nullptr, FALSE);
+    return 1;
+}
+
+int zero_native_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id, const char *label, size_t label_len, size_t width, size_t height, double scale, int has_dirty_rect, double dirty_x, double dirty_y, double dirty_width, double dirty_height, const uint8_t *rgba8, size_t rgba8_len) {
+    (void)scale;
+    (void)has_dirty_rect;
+    (void)dirty_x;
+    (void)dirty_y;
+    (void)dirty_width;
+    (void)dirty_height;
+    if (!host || label_len == 0) return 0;
+    auto found = host->native_views.find(nativeViewKey(window_id, slice(label, label_len)));
+    if (found == host->native_views.end() || found->second.kind != kViewGpuSurface || !found->second.hwnd) return 0;
+    if (!rgba8 || width == 0 || height == 0) return 0;
+    if (width > INT_MAX || height > INT_MAX) return 0;
+    if (rgba8_len != width * height * 4) return 0;
+    NativeView &view = found->second;
+
+    /* Straight RGBA8 -> top-down BGRA rows for a BI_RGB 32bpp DIB. The
+     * surface is opaque (alpha_mode "opaque"), so no premultiply is needed
+     * and GDI ignores the fourth byte. */
+    view.gpu_bgra.resize(width * height * 4);
+    uint8_t *dst = view.gpu_bgra.data();
+    const size_t pixel_count = width * height;
+    for (size_t index = 0; index < pixel_count; index++) {
+        const uint8_t *src = rgba8 + index * 4;
+        dst[index * 4 + 0] = src[2];
+        dst[index * 4 + 1] = src[1];
+        dst[index * 4 + 2] = src[0];
+        dst[index * 4 + 3] = src[3];
+    }
+    view.gpu_buf_width = (int)width;
+    view.gpu_buf_height = (int)height;
+
+    const size_t sample_index = ((height / 2) * width + width / 2) * 4;
+    const uint8_t sr = rgba8[sample_index + 0];
+    const uint8_t sg = rgba8[sample_index + 1];
+    const uint8_t sb = rgba8[sample_index + 2];
+    const uint8_t sa = rgba8[sample_index + 3];
+    if (sr != 0 || sg != 0 || sb != 0) {
+        view.gpu_nonblank = 1;
+        view.gpu_sample_color = ((uint32_t)sa << 24) | ((uint32_t)sr << 16) | ((uint32_t)sg << 8) | (uint32_t)sb;
+    }
+
+    InvalidateRect(view.hwnd, nullptr, FALSE);
     return 1;
 }
 

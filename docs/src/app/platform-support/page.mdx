@@ -170,7 +170,7 @@ Feature names match the Zig `PlatformFeature` enum and the TypeScript `ZeroNativ
 
 ## Native Surfaces
 
-The macOS, Linux, and Windows system-WebView hosts support `toolbar`, `titlebar_accessory`, `sidebar`, `statusbar`, `split`, `stack`, `button`, `icon_button`, `list_item`, `checkbox`, `toggle`, `segmented_control`, `text_field`, `search_field`, `label`, `spacer`, and `progress_indicator` native view kinds. The macOS system-WebView host also supports `gpu_surface` as a Metal-backed child view, and the Linux system-WebView host supports `gpu_surface` as a software (CPU reference-rendered) child view presented through the pixel blit path.
+The macOS, Linux, and Windows system-WebView hosts support `toolbar`, `titlebar_accessory`, `sidebar`, `statusbar`, `split`, `stack`, `button`, `icon_button`, `list_item`, `checkbox`, `toggle`, `segmented_control`, `text_field`, `search_field`, `label`, `spacer`, and `progress_indicator` native view kinds. The macOS system-WebView host also supports `gpu_surface` as a Metal-backed child view, and the Linux and Windows system-WebView hosts support `gpu_surface` as a software (CPU reference-rendered) child view presented through the pixel blit path (cairo on Linux, GDI on Windows).
 
 `ViewKind.webview` is the compatibility path for WebView-backed views. Existing `runtime.createWebView(...)` and `window.zero.webviews.*` APIs remain available.
 
@@ -234,7 +234,7 @@ iOS and Android are supported today through embedded host examples rather than t
 
 Mobile hosts own safe areas, orientation, keyboard avoidance, back gestures, and platform lifecycle integration. The current mobile mapping is package-time shell metadata for native header/workspace structure; dynamic generic native view bridge commands should still be treated as desktop APIs until UIKit and Android runtime view mutation is added.
 
-`gpu_surface` is implemented for the macOS system-WebView host as a Metal-backed child surface and for the Linux system-WebView host as a software-rendered (CPU reference renderer + GTK pixel blit) child surface; Linux frame events report `backend=software`, and a manifest that declares another backend (for example `gpu_backend = "metal"`) falls back to software on Linux instead of erroring. Other current hosts report unsupported operations for that view kind and `runtime.supports(.gpu_surfaces)` / `window.zero.platform.supports("gpuSurfaces")` return `false`.
+`gpu_surface` is implemented for the macOS system-WebView host as a Metal-backed child surface and for the Linux and Windows system-WebView hosts as a software-rendered (CPU reference renderer + GTK pixel blit on Linux, GDI DIB blit on Windows) child surface; Linux and Windows frame events report `backend=software`, and a manifest that declares another backend (for example `gpu_backend = "metal"`) falls back to software on those hosts instead of erroring. Windows IME composition preview (`ime_set_composition`) is not wired yet — committed text still arrives through `WM_CHAR` text input. Other current hosts report unsupported operations for that view kind and `runtime.supports(.gpu_surfaces)` / `window.zero.platform.supports("gpuSurfaces")` return `false`.
 
 ## Related Docs
 
