@@ -462,7 +462,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 self.pixel_snap_scale = scale;
                 try self.rebuild(runtime, frame_event.window_id);
             }
-            try self.presentFrame(runtime, frame_event);
+            try self.presentFrame(runtime, frame_event, installing);
             if (installing) return;
             const on_frame = self.options.on_frame orelse return;
             const gpu_frame = runtime.gpuSurfaceFrame(frame_event.window_id, self.options.canvas_label) catch return;
@@ -478,7 +478,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// reports `UnsupportedService` at present time also falls back to
         /// pixels; that attempt forces a full repaint because the failed
         /// packet plan already recorded the frame's presented summary.
-        fn presentFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent) anyerror!void {
+        fn presentFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent, installing: bool) anyerror!void {
+            // The installing frame must paint unconditionally: on software
+            // platforms with no window-manager-driven resizes, nothing else
+            // invalidates before the first present, and the surface would
+            // stay blank until the first input arrives.
             const services = runtime.options.platform.services;
             const clear_color = self.effectiveTokens().colors.background;
             var packet_attempted = false;
@@ -493,7 +497,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                             .timestamp_ns = frame_event.timestamp_ns,
                             .surface_size = frame_event.size,
                             .scale = frame_event.scale_factor,
-                            .full_repaint = frame_event.canvas_frame_full_repaint,
+                            .full_repaint = frame_event.canvas_frame_full_repaint or installing,
                         },
                         runtime.canvasFrameScratchStorage(),
                         clear_color,
@@ -518,7 +522,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     .timestamp_ns = frame_event.timestamp_ns,
                     .surface_size = frame_event.size,
                     .scale = frame_event.scale_factor,
-                    .full_repaint = frame_event.canvas_frame_full_repaint or packet_attempted,
+                    .full_repaint = frame_event.canvas_frame_full_repaint or packet_attempted or installing,
                 },
                 runtime.canvasFrameScratchStorage(),
                 self.pixel_buffer,
