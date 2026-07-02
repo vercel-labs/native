@@ -31,6 +31,94 @@ pub const AppOptions = struct {
     main: []const u8 = "src/main.zig",
 };
 
+/// The `zero_native_app_*` C ABI every embed static library exports.
+pub const mobile_export_symbol_names = [_][]const u8{
+    "zero_native_app_create",
+    "zero_native_app_destroy",
+    "zero_native_app_start",
+    "zero_native_app_activate",
+    "zero_native_app_deactivate",
+    "zero_native_app_stop",
+    "zero_native_app_resize",
+    "zero_native_app_viewport",
+    "zero_native_app_viewport_state",
+    "zero_native_app_gpu_frame_state",
+    "zero_native_app_touch",
+    "zero_native_app_scroll",
+    "zero_native_app_key",
+    "zero_native_app_text",
+    "zero_native_app_ime",
+    "zero_native_app_command",
+    "zero_native_app_frame",
+    "zero_native_app_set_asset_root",
+    "zero_native_app_set_asset_entry",
+    "zero_native_app_last_command_count",
+    "zero_native_app_last_command_name",
+    "zero_native_app_last_error_name",
+    "zero_native_app_widget_semantics_count",
+    "zero_native_app_widget_semantics_at",
+    "zero_native_app_widget_semantics_by_id",
+    "zero_native_app_widget_text_geometry",
+    "zero_native_app_widget_action",
+    "zero_native_app_render_pixel_size",
+    "zero_native_app_render_pixels",
+};
+
+pub const MobileSceneOption = enum {
+    /// The user app's UiApp on a gpu_surface view (window 1,
+    /// "mobile-surface"), pumped by the host's frame callback.
+    canvas,
+    /// The fixed WebView shell the ios/android/mobile-shell examples embed
+    /// today; the app module is not compiled in.
+    webview,
+};
+
+pub const MobileLibOptions = struct {
+    name: []const u8,
+    /// Mobile app entry (the `"app"` module the embed host drives); must
+    /// declare `Model`, `Msg`, `initModel`, and `mobileOptions` — see
+    /// `src/embed/ui_host.zig`. Ignored for `.scene = .webview`.
+    main: []const u8 = "src/main.zig",
+    scene: MobileSceneOption = .canvas,
+};
+
+/// Mobile counterpart of `addApp`: produce the embed static library
+/// (`zero_native_app_*` C ABI) compiled with the user's UiApp. Call it from
+/// a standalone build.zig (it registers the standard `target`/`optimize`
+/// options itself).
+pub fn addMobileLib(b: *std.Build, dep: *std.Build.Dependency, options: MobileLibOptions) void {
+    const target = zeroNativeTarget(b);
+    const optimize_request = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size");
+    const optimize = exampleOptimizeMode(b, optimize_request, .Debug);
+
+    const zero_native_mod = zeroNativeModule(b, dep, target, optimize);
+    const exports_mod = b.createModule(.{
+        .root_source_file = dep.path(switch (options.scene) {
+            .canvas => "src/embed/app_exports.zig",
+            .webview => "src/embed/c_exports.zig",
+        }),
+        .target = target,
+        .optimize = optimize,
+    });
+    exports_mod.addImport("zero-native", zero_native_mod);
+    if (options.scene == .canvas) {
+        const app_mod = localModule(b, target, optimize, options.main);
+        app_mod.addImport("zero-native", zero_native_mod);
+        exports_mod.addImport("app", app_mod);
+    }
+    exports_mod.export_symbol_names = &mobile_export_symbol_names;
+
+    const lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = options.name,
+        .root_module = exports_mod,
+    });
+    b.installArtifact(lib);
+
+    const lib_step = b.step("lib", "Build the mobile embed static library");
+    lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step);
+}
+
 pub fn addApp(b: *std.Build, dep: *std.Build.Dependency, app_options: AppOptions) void {
     const target = zeroNativeTarget(b);
     const optimize_request = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size");

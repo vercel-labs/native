@@ -159,6 +159,14 @@ pub const MobileViewportState = extern struct {
     content_height: f32 = 0,
 };
 
+/// Dimensions of a canvas render produced by
+/// `zero_native_app_render_pixels` (tightly packed RGBA8).
+pub const MobileCanvasPixels = extern struct {
+    width: usize = 0,
+    height: usize = 0,
+    byte_len: usize = 0,
+};
+
 pub const MobileGpuFrameState = extern struct {
     surface_id: u64 = 0,
     window_id: u64 = 0,

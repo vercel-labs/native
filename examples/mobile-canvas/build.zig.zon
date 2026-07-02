@@ -1,0 +1,8 @@
+.{
+    .name = .mobile_canvas,
+    .fingerprint = 0xdabb871273e3dcbe,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{ .zero_native = .{ .path = "../.." } },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "app.zon" },
+}

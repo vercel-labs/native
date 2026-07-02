@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const host = @import("host.zig");
+const ui_host = @import("ui_host.zig");
 const c_api = @import("c_api.zig");
 
 pub const MobileWidgetRole = types.MobileWidgetRole;
@@ -12,8 +13,15 @@ pub const MobileWidgetTextGeometry = types.MobileWidgetTextGeometry;
 pub const MobileWidgetActionRequest = types.MobileWidgetActionRequest;
 pub const MobileViewportState = types.MobileViewportState;
 pub const MobileGpuFrameState = types.MobileGpuFrameState;
+pub const MobileCanvasPixels = types.MobileCanvasPixels;
+pub const mobile_gpu_surface_label = types.mobile_gpu_surface_label;
 
 pub const EmbeddedApp = host.EmbeddedApp;
+pub const MobileHostApp = host.MobileHostApp;
+pub const UiAppHost = ui_host.UiAppHost;
+pub const mobile_shell_scene = ui_host.mobile_shell_scene;
+pub const MobileCApi = c_api.MobileCApi;
+pub const exportMobileCApi = c_api.exportMobileCApi;
 
 pub const zero_native_app_create = c_api.zero_native_app_create;
 pub const zero_native_app_destroy = c_api.zero_native_app_destroy;
@@ -42,6 +50,8 @@ pub const zero_native_app_widget_semantics_at = c_api.zero_native_app_widget_sem
 pub const zero_native_app_widget_semantics_by_id = c_api.zero_native_app_widget_semantics_by_id;
 pub const zero_native_app_widget_text_geometry = c_api.zero_native_app_widget_text_geometry;
 pub const zero_native_app_widget_action = c_api.zero_native_app_widget_action;
+pub const zero_native_app_render_pixel_size = c_api.zero_native_app_render_pixel_size;
+pub const zero_native_app_render_pixels = c_api.zero_native_app_render_pixels;
 
 test {
     std.testing.refAllDecls(@This());

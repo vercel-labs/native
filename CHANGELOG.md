@@ -18,6 +18,7 @@ All notable changes to zero-native will be documented in this file.
 - **Automation screenshots**: `zero-native automate screenshot` renders a canvas view through the reference renderer to a deterministic PNG, enabling golden-image verification for tests and agents.
 - **`.zml` tooling**: `zero-native markup check` (instant grammar validation with positions), `zero-native markup lsp` (diagnostics, completion, hover), and a TextMate grammar with editor setup under `editors/zml/`.
 - **Framework build helper**: `zero_native.addApp` gives an app a complete build from a five-line build.zig; the shared runner lives in the framework.
+- **Mobile canvas embed host**: `zero_native.addMobileLib` compiles a user's `UiApp` into the mobile embed static library — `zero_native_app_create` instantiates it on a gpu_surface scene (window 1, "mobile-surface") pumped by the host's frame callback, frames render to pixels retrievable over the ABI (`zero_native_app_render_pixels`), and the previously missing scroll/viewport-state/frame-state/semantics-by-id/text-geometry symbols are exported. The fixed WebView shell remains the default `zig build lib`; `examples/mobile-canvas` shows the new seam.
 - **`native-ui` agent skill**: the complete markup and UiApp authoring reference, served through the skills CLI.
 
 ### Improvements

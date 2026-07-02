@@ -1,0 +1,21 @@
+.{
+    .id = "dev.zero_native.mobile_canvas",
+    .name = "mobile-canvas",
+    .display_name = "Mobile Canvas",
+    .version = "0.1.0",
+    .platforms = .{ "ios", "android" },
+    .permissions = .{},
+    .capabilities = .{ "native_views", "gpu_surfaces" },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Mobile Canvas",
+                .views = .{
+                    .{ .label = "mobile-surface", .kind = "gpu_surface", .fill = true, .role = "Mobile canvas", .accessibility_label = "Mobile canvas", .gpu_backend = "metal" },
+                },
+            },
+        },
+    },
+    .web_engine = "system",
+}

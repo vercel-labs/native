@@ -37,6 +37,9 @@ const SigningMode = enum {
 
 pub const AppOptions = @import("build/app.zig").AppOptions;
 pub const addApp = @import("build/app.zig").addApp;
+pub const MobileLibOptions = @import("build/app.zig").MobileLibOptions;
+pub const addMobileLib = @import("build/app.zig").addMobileLib;
+const mobile_export_symbol_names = @import("build/app.zig").mobile_export_symbol_names;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -121,36 +124,18 @@ pub fn build(b: *std.Build) void {
     desktop_mod.addImport("platform_info", platform_info_mod);
     desktop_mod.addImport("json", json_mod);
     desktop_mod.addImport("canvas", canvas_mod);
-    desktop_mod.export_symbol_names = &.{
-        "zero_native_app_create",
-        "zero_native_app_destroy",
-        "zero_native_app_start",
-        "zero_native_app_activate",
-        "zero_native_app_deactivate",
-        "zero_native_app_stop",
-        "zero_native_app_resize",
-        "zero_native_app_viewport",
-        "zero_native_app_touch",
-        "zero_native_app_key",
-        "zero_native_app_text",
-        "zero_native_app_ime",
-        "zero_native_app_command",
-        "zero_native_app_frame",
-        "zero_native_app_set_asset_root",
-        "zero_native_app_set_asset_entry",
-        "zero_native_app_last_command_count",
-        "zero_native_app_last_command_name",
-        "zero_native_app_last_error_name",
-        "zero_native_app_widget_semantics_count",
-        "zero_native_app_widget_semantics_at",
-        "zero_native_app_widget_action",
-    };
     const desktop_tests = testArtifact(b, desktop_mod);
 
+    // The embeddable static library's root module carries only the C ABI
+    // exports (fixed WebView shell host); user-app canvas libraries are
+    // produced by `addMobileLib` from src/embed/app_exports.zig instead.
+    const embed_exports_mod = module(b, target, optimize, "src/embed/c_exports.zig");
+    embed_exports_mod.addImport("zero-native", desktop_mod);
+    embed_exports_mod.export_symbol_names = &mobile_export_symbol_names;
     const embed_lib = b.addLibrary(.{
         .linkage = .static,
         .name = "zero-native",
-        .root_module = desktop_mod,
+        .root_module = embed_exports_mod,
     });
     b.installArtifact(embed_lib);
 
@@ -563,6 +548,12 @@ pub fn build(b: *std.Build) void {
         .{ .path = "examples/android/app/src/main/cpp/zero_native_jni.c", .pattern = "zero_native_app_widget_semantics_by_id" },
         .{ .path = "examples/android/app/src/main/cpp/zero_native_jni.c", .pattern = "zero_native_app_scroll" },
     });
+
+    const build_mobile_canvas_lib = b.addSystemCommand(&.{ "zig", "build", "lib" });
+    build_mobile_canvas_lib.setCwd(b.path("examples/mobile-canvas"));
+    const mobile_canvas_lib_step = b.step("test-example-mobile-canvas-lib", "Build the mobile-canvas embed static library through addMobileLib");
+    mobile_canvas_lib_step.dependOn(&build_mobile_canvas_lib.step);
+    mobile_examples_step.dependOn(&build_mobile_canvas_lib.step);
 
     const examples_step = b.step("test-examples", "Run all example tests and layout checks");
     examples_step.dependOn(frontend_examples_step);

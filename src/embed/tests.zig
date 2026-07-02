@@ -5,6 +5,7 @@ const runtime = @import("../runtime/root.zig");
 const platform = @import("../platform/root.zig");
 const types = @import("types.zig");
 const host = @import("host.zig");
+const ui_host = @import("ui_host.zig");
 const c_api = @import("c_api.zig");
 const conversions = @import("conversions.zig");
 
@@ -17,6 +18,7 @@ const MobileWidgetTextGeometry = types.MobileWidgetTextGeometry;
 const MobileWidgetActionRequest = types.MobileWidgetActionRequest;
 const MobileViewportState = types.MobileViewportState;
 const MobileGpuFrameState = types.MobileGpuFrameState;
+const MobileCanvasPixels = types.MobileCanvasPixels;
 const EmbeddedApp = host.EmbeddedApp;
 const mobileApp = host.mobileApp;
 const mobile_html = host.mobile_html;
@@ -765,6 +767,182 @@ test "mobile C ABI dispatches GPU widget accessibility actions" {
     action = .{ .id = 2, .action = 999 };
     try std.testing.expectEqual(@as(c_int, 0), zero_native_app_widget_action(app, &action));
     try std.testing.expectEqualStrings("InvalidCommand", std.mem.span(zero_native_app_last_error_name(app)));
+}
+
+// ------------------------------------------------------------- UiApp host
+//
+// M1 end-to-end: a user UiApp compiled into the embed host answers the same
+// C ABI the mobile shims call — create, viewport, host-pumped frames that
+// render pixels, touch that mutates the model, and IME text that lands in a
+// textbox — with NullPlatform standing in for the (M2) real surface.
+
+const MobileCounterDef = struct {
+    pub const Model = struct {
+        count: u32 = 0,
+        draft: canvas.TextBuffer(64) = .{},
+    };
+
+    pub const Msg = union(enum) {
+        increment,
+        draft_edit: canvas.TextInputEvent,
+    };
+
+    const App = runtime.UiApp(Model, Msg);
+
+    pub fn initModel() Model {
+        return .{};
+    }
+
+    pub fn mobileOptions() App.Options {
+        return .{
+            .name = "mobile-counter",
+            .scene = ui_host.mobile_shell_scene,
+            .canvas_label = mobile_gpu_surface_label,
+            .update = update,
+            .view = view,
+        };
+    }
+
+    fn update(model: *Model, msg: Msg) void {
+        switch (msg) {
+            .increment => model.count += 1,
+            .draft_edit => |edit| model.draft.apply(edit),
+        }
+    }
+
+    fn view(ui: *App.Ui, model: *const Model) App.Ui.Node {
+        return ui.column(.{ .gap = 8, .padding = 12 }, .{
+            ui.text(.{}, ui.fmt("Count {d}", .{model.count})),
+            ui.button(.{ .variant = .primary, .on_press = .increment }, "Increment"),
+            ui.textField(.{
+                .text = model.draft.text(),
+                .placeholder = "Note",
+                .on_input = App.Ui.inputMsg(.draft_edit),
+            }),
+        });
+    }
+};
+
+const MobileCounterHost = ui_host.UiAppHost(MobileCounterDef);
+const MobileCounterApi = c_api.MobileCApi(MobileCounterHost);
+
+fn expectNoUiHostError(app: ?*anyopaque) !void {
+    try std.testing.expectEqualStrings("", std.mem.span(MobileCounterApi.zero_native_app_last_error_name(app)));
+}
+
+fn findMobileSemanticsByRole(app: ?*anyopaque, role: MobileWidgetRole) !MobileWidgetSemantics {
+    const count = MobileCounterApi.zero_native_app_widget_semantics_count(app);
+    var index: usize = 0;
+    while (index < count) : (index += 1) {
+        var node: MobileWidgetSemantics = .{};
+        try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.zero_native_app_widget_semantics_at(app, index, &node));
+        if (node.role == @intFromEnum(role)) return node;
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn uiHostRetainedTextExists(self: *MobileCounterHost, text: []const u8) !bool {
+    const layout = try self.embedded.runtime.canvasWidgetLayout(1, mobile_gpu_surface_label);
+    for (layout.nodes) |node| {
+        if (node.widget.kind == .text and std.mem.eql(u8, node.widget.text, text)) return true;
+    }
+    return false;
+}
+
+fn tapMobileWidget(app: ?*anyopaque, node: MobileWidgetSemantics) !void {
+    const x = node.x + node.width / 2;
+    const y = node.y + node.height / 2;
+    MobileCounterApi.zero_native_app_touch(app, 1, 0, x, y, 1);
+    try expectNoUiHostError(app);
+    MobileCounterApi.zero_native_app_touch(app, 1, 1, x, y, 0);
+    try expectNoUiHostError(app);
+}
+
+test "mobile C ABI drives a user UiApp canvas scene end to end" {
+    const app = MobileCounterApi.zero_native_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileCounterApi.zero_native_app_destroy(app);
+    const self: *MobileCounterHost = @ptrCast(@alignCast(app));
+
+    MobileCounterApi.zero_native_app_start(app);
+    try expectNoUiHostError(app);
+
+    // Host-reported viewport: window and mobile-surface view take the size.
+    var surface_token: u8 = 0;
+    MobileCounterApi.zero_native_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    try expectNoUiHostError(app);
+    var viewport: MobileViewportState = .{};
+    try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.zero_native_app_viewport_state(app, &viewport));
+    try std.testing.expectEqual(@as(f32, 390), viewport.width);
+    try std.testing.expectEqual(@as(f32, 844), viewport.height);
+
+    // First host-pumped frame installs the widget tree and presents pixels.
+    MobileCounterApi.zero_native_app_frame(app);
+    try expectNoUiHostError(app);
+    try std.testing.expect(self.ui.installed);
+    try std.testing.expect(try uiHostRetainedTextExists(self, "Count 0"));
+    try std.testing.expectEqual(@as(usize, 1), self.null_platform.gpu_surface_present_count);
+
+    // The next frame reports the presented pixels: nonblank with a sample.
+    MobileCounterApi.zero_native_app_frame(app);
+    try expectNoUiHostError(app);
+    var frame_state: MobileGpuFrameState = .{};
+    try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.zero_native_app_gpu_frame_state(app, &frame_state));
+    try std.testing.expectEqual(@as(f32, 390), frame_state.width);
+    try std.testing.expectEqual(@as(f32, 844), frame_state.height);
+    try std.testing.expectEqual(@as(c_int, 1), frame_state.nonblank);
+    try std.testing.expect(frame_state.sample_color != 0);
+    try std.testing.expect(frame_state.widget_node_count > 0);
+    try std.testing.expect(frame_state.widget_semantics_count > 0);
+
+    // Pixels are retrievable over the ABI and are not blank.
+    var pixel_info: MobileCanvasPixels = .{};
+    try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.zero_native_app_render_pixel_size(app, 1, &pixel_info));
+    try std.testing.expectEqual(@as(usize, 390), pixel_info.width);
+    try std.testing.expectEqual(@as(usize, 844), pixel_info.height);
+    try std.testing.expectEqual(@as(usize, 390 * 844 * 4), pixel_info.byte_len);
+    const pixels = try std.testing.allocator.alloc(u8, pixel_info.byte_len);
+    defer std.testing.allocator.free(pixels);
+    var rendered: MobileCanvasPixels = .{};
+    try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.zero_native_app_render_pixels(app, 1, pixels.ptr, pixels.len, &rendered));
+    try std.testing.expectEqual(pixel_info.byte_len, rendered.byte_len);
+    var nonblank_pixels = false;
+    for (pixels) |byte| {
+        if (byte != 0) {
+            nonblank_pixels = true;
+            break;
+        }
+    }
+    try std.testing.expect(nonblank_pixels);
+
+    // A tap on the button (located through the semantics exports) flows
+    // through typed dispatch into update + rebuild.
+    const button = try findMobileSemanticsByRole(app, .button);
+    try std.testing.expect(button.width > 0 and button.height > 0);
+    try tapMobileWidget(app, button);
+    try std.testing.expectEqual(@as(u32, 1), self.ui.model.count);
+    try std.testing.expect(try uiHostRetainedTextExists(self, "Count 1"));
+    try std.testing.expectEqual(button.id, (try findMobileSemanticsByRole(app, .button)).id);
+
+    // Tap the textbox to focus it, then type and compose through the same
+    // IME path desktop uses; the edits land in the model's text buffer.
+    const textbox = try findMobileSemanticsByRole(app, .textbox);
+    try tapMobileWidget(app, textbox);
+    MobileCounterApi.zero_native_app_text(app, "hi", "hi".len);
+    try expectNoUiHostError(app);
+    try std.testing.expectEqualStrings("hi", self.ui.model.draft.text());
+    MobileCounterApi.zero_native_app_ime(app, 0, "ho", "ho".len, "ho".len);
+    try expectNoUiHostError(app);
+    MobileCounterApi.zero_native_app_ime(app, 1, "ho", "ho".len, -1);
+    try expectNoUiHostError(app);
+    try std.testing.expectEqualStrings("hiho", self.ui.model.draft.text());
+    var textbox_after: MobileWidgetSemantics = .{};
+    try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.zero_native_app_widget_semantics_by_id(app, textbox.id, &textbox_after));
+    try std.testing.expectEqualStrings("hiho", textbox_after.text.?[0..textbox_after.text_len]);
+
+    // The model-driven UI keeps presenting through host-pumped frames.
+    MobileCounterApi.zero_native_app_frame(app);
+    try expectNoUiHostError(app);
+    try std.testing.expect(self.null_platform.gpu_surface_present_count >= 2);
 }
 
 test "mobile C ABI dispatches native commands through embedded runtime" {

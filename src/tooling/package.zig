@@ -562,6 +562,11 @@ fn embedHeader() []const u8 {
     \\  uintptr_t widget_node_count;
     \\  uintptr_t widget_semantics_count;
     \\} zero_native_gpu_frame_state_t;
+    \\typedef struct zero_native_canvas_pixels {
+    \\  uintptr_t width;
+    \\  uintptr_t height;
+    \\  uintptr_t byte_len;
+    \\} zero_native_canvas_pixels_t;
     \\void *zero_native_app_create(void);
     \\void zero_native_app_destroy(void *app);
     \\void zero_native_app_start(void *app);
@@ -589,6 +594,8 @@ fn embedHeader() []const u8 {
     \\int zero_native_app_widget_semantics_by_id(void *app, uint64_t id, zero_native_widget_semantics_t *out);
     \\int zero_native_app_widget_text_geometry(void *app, uint64_t id, zero_native_widget_text_geometry_t *out);
     \\int zero_native_app_widget_action(void *app, const zero_native_widget_action_t *action);
+    \\int zero_native_app_render_pixel_size(void *app, float scale, zero_native_canvas_pixels_t *out);
+    \\int zero_native_app_render_pixels(void *app, float scale, uint8_t *pixels, uintptr_t pixels_len, zero_native_canvas_pixels_t *out);
     \\
     ;
 }

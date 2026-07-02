@@ -190,6 +190,7 @@ pub const MobileHostApp = struct {
     pub fn create() !*MobileHostApp {
         const allocator = std.heap.page_allocator;
         const self = try allocator.create(MobileHostApp);
+        errdefer allocator.destroy(self);
         self.null_platform = platform.NullPlatform.init(.{});
         self.last_error = null;
         self.activation_count = 0;
@@ -229,6 +230,18 @@ pub const MobileHostApp = struct {
             .event_fn = handleEvent,
         }, self.null_platform.platform());
         return self;
+    }
+
+    pub fn destroy(self: *MobileHostApp) void {
+        std.heap.page_allocator.destroy(self);
+    }
+
+    pub fn start(self: *MobileHostApp) anyerror!void {
+        try self.embedded.start();
+    }
+
+    pub fn frame(self: *MobileHostApp) anyerror!void {
+        try self.embedded.frame();
     }
 
     fn source(self: *MobileHostApp) platform.WebViewSource {
@@ -314,6 +327,6 @@ pub fn mobileApp(raw: ?*anyopaque) ?*MobileHostApp {
     return @ptrCast(@alignCast(pointer));
 }
 
-pub fn recordError(self: *MobileHostApp, err: anyerror) void {
+pub fn recordError(self: anytype, err: anyerror) void {
     self.last_error = err;
 }
