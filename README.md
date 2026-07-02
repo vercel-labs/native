@@ -15,12 +15,13 @@ npm install -g zero-native
 Create and run an app:
 
 ```bash
-zero-native init my_app --frontend next
+zero-native init my_app            # native-rendered app (default)
+zero-native init my_app --frontend next   # or a WebView app with a web frontend
 cd my_app
 zig build run
 ```
 
-The first run installs frontend dependencies, builds the generated native shell, and opens a desktop window rendering your WebView content.
+The default app is native-rendered: a declarative `.zml` view plus Zig logic, with hot reload of the view while the app runs. With a web frontend selected, the first run installs frontend dependencies and opens a desktop window rendering your WebView content.
 
 Read the full guide at [zero-native.dev/quick-start](https://zero-native.dev/quick-start).
 

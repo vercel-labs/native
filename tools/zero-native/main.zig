@@ -18,14 +18,14 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("zero-native {s}\n", .{version});
     } else if (std.mem.eql(u8, command, "init")) {
         const destination = positionalArg(args[2..]) orelse ".";
-        const frontend_str = flagValue(args, "--frontend") catch fail("--frontend requires a value: next, vite, react, svelte, vue, native") orelse fail("--frontend is required: next, vite, react, svelte, vue, native");
-        const frontend = tooling.templates.Frontend.parse(frontend_str) orelse fail("invalid --frontend value: use next, vite, react, svelte, vue, or native");
+        const frontend_str = flagValue(args, "--frontend") catch fail("--frontend requires a value: native, next, vite, react, svelte, vue") orelse "native";
+        const frontend = tooling.templates.Frontend.parse(frontend_str) orelse fail("invalid --frontend value: use native (default), next, vite, react, svelte, or vue");
         const app_name, const free_app_name = try initAppName(allocator, init.io, destination);
         defer if (free_app_name) allocator.free(app_name);
         const framework_path, const free_framework_path = try initFrameworkPath(allocator, init.io);
         defer if (free_framework_path) allocator.free(framework_path);
         try tooling.templates.writeDefaultApp(allocator, init.io, destination, .{ .app_name = app_name, .framework_path = framework_path, .frontend = frontend });
-        std.debug.print("created zero-native app at {s} (frontend: {s})\n", .{ destination, frontend_str });
+        std.debug.print("created zero-native app at {s} ({s})\n", .{ destination, frontend_str });
         printInitNextSteps(destination);
     } else if (std.mem.eql(u8, command, "doctor")) {
         try tooling.doctor.run(allocator, init.io, init.environ_map, args[2..]);
@@ -149,7 +149,7 @@ fn usage() void {
         \\usage: zero-native <command>
         \\
         \\commands:
-        \\  init [path] --frontend <next|vite|react|svelte|vue|native>
+        \\  init [path] [--frontend <native|next|vite|react|svelte|vue>]   (default: native)
         \\  cef install|path|doctor [--dir path] [--version version] [--source prepared|official] [--force]
         \\  doctor [--strict] [--manifest app.zon] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install]
         \\  validate [app.zon]

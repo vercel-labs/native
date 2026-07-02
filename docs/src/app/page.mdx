@@ -35,7 +35,8 @@ No borrow checker. No lifetimes. No fighting the compiler for 20 minutes over a 
 ## Get started
 
 ```bash
-zero-native init my_app --frontend next
+zero-native init my_app            # native-rendered app (default)
+zero-native init my_app --frontend next   # or a WebView app with a web frontend
 cd my_app
 zig build run
 ```
