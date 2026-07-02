@@ -41,6 +41,7 @@ pub const UiHandlerEvent = enum {
     toggle,
     change,
     submit,
+    input,
 };
 
 pub fn Ui(comptime Msg: type) type {
@@ -83,7 +84,16 @@ pub fn Ui(comptime Msg: type) type {
             on_toggle: ?Msg = null,
             on_change: ?Msg = null,
             on_submit: ?Msg = null,
+            /// Message constructor for text edits: called with each
+            /// `TextInputEvent` on text-entry widgets. Pair with `inputMsg`.
+            on_input: ?InputMsgFn = null,
+            /// Message constructor for value changes carrying the new value
+            /// (slider steps, accessibility set-value). Pair with `valueMsg`.
+            on_value: ?ValueMsgFn = null,
         };
+
+        pub const InputMsgFn = *const fn (edit: canvas.TextInputEvent) Msg;
+        pub const ValueMsgFn = *const fn (value: f32) Msg;
 
         pub const Node = struct {
             widget: Widget = .{ .kind = .stack },
@@ -93,14 +103,42 @@ pub fn Ui(comptime Msg: type) type {
             on_toggle: ?Msg = null,
             on_change: ?Msg = null,
             on_submit: ?Msg = null,
+            on_input: ?InputMsgFn = null,
+            on_value: ?ValueMsgFn = null,
             nodes: []const Node = &.{},
         };
 
         pub const Handler = struct {
             id: ObjectId,
             event: UiHandlerEvent,
-            msg: Msg,
+            action: Action,
+
+            pub const Action = union(enum) {
+                message: Msg,
+                input: InputMsgFn,
+                value: ValueMsgFn,
+            };
         };
+
+        /// Comptime message constructor for `on_input`: `inputMsg(.draft)`
+        /// yields a function building `Msg{ .draft = edit }`.
+        pub fn inputMsg(comptime tag: std.meta.Tag(Msg)) InputMsgFn {
+            return struct {
+                fn make(edit: canvas.TextInputEvent) Msg {
+                    return @unionInit(Msg, @tagName(tag), edit);
+                }
+            }.make;
+        }
+
+        /// Comptime message constructor for `on_value`: `valueMsg(.confidence)`
+        /// yields a function building `Msg{ .confidence = value }`.
+        pub fn valueMsg(comptime tag: std.meta.Tag(Msg)) ValueMsgFn {
+            return struct {
+                fn make(value: f32) Msg {
+                    return @unionInit(Msg, @tagName(tag), value);
+                }
+            }.make;
+        }
 
         pub const Tree = struct {
             root: Widget,
@@ -108,7 +146,31 @@ pub fn Ui(comptime Msg: type) type {
 
             pub fn msgFor(self: Tree, id: ObjectId, event: UiHandlerEvent) ?Msg {
                 for (self.handlers) |handler| {
-                    if (handler.id == id and handler.event == event) return handler.msg;
+                    if (handler.id == id and handler.event == event and handler.action == .message) {
+                        return handler.action.message;
+                    }
+                }
+                return null;
+            }
+
+            /// Typed dispatch for text edits: builds the message through the
+            /// widget's `on_input` constructor.
+            pub fn msgForTextEdit(self: Tree, id: ObjectId, edit: canvas.TextInputEvent) ?Msg {
+                for (self.handlers) |handler| {
+                    if (handler.id == id and handler.event == .input and handler.action == .input) {
+                        return handler.action.input(edit);
+                    }
+                }
+                return null;
+            }
+
+            /// Typed dispatch for value changes: builds the message through
+            /// the widget's `on_value` constructor.
+            pub fn msgForValue(self: Tree, id: ObjectId, value: f32) ?Msg {
+                for (self.handlers) |handler| {
+                    if (handler.id == id and handler.event == .change and handler.action == .value) {
+                        return handler.action.value(value);
+                    }
                 }
                 return null;
             }
@@ -142,6 +204,11 @@ pub fn Ui(comptime Msg: type) type {
                 if (isSubmitKeyboard(widget, keyboard)) {
                     if (self.msgFor(target_id, .submit)) |msg| return msg;
                 }
+                if (isTextEntryWidget(widget) and !widget.state.disabled) {
+                    if (keyboard.textEditEvent()) |edit| {
+                        if (self.msgForTextEdit(target_id, edit)) |msg| return msg;
+                    }
+                }
                 return null;
             }
 
@@ -150,7 +217,12 @@ pub fn Ui(comptime Msg: type) type {
                     .press => self.msgFor(id, .press),
                     .toggle => self.msgFor(id, .toggle),
                     .select => self.msgFor(id, .press),
-                    .set_value => self.msgFor(id, .change),
+                    .set_value => blk: {
+                        if (intent.value) |value| {
+                            if (self.msgForValue(id, value)) |msg| break :blk msg;
+                        }
+                        break :blk self.msgFor(id, .change);
+                    },
                     .scroll_by, .scroll_to_start, .scroll_to_end => null,
                 };
             }
@@ -169,6 +241,8 @@ pub fn Ui(comptime Msg: type) type {
                 .on_toggle = options.on_toggle,
                 .on_change = options.on_change,
                 .on_submit = options.on_submit,
+                .on_input = options.on_input,
+                .on_value = options.on_value,
                 .nodes = self.childNodes(children),
             };
         }
@@ -323,12 +397,20 @@ pub fn Ui(comptime Msg: type) type {
             appendHandler(handlers, handler_len, widget.id, .toggle, node.on_toggle);
             appendHandler(handlers, handler_len, widget.id, .change, node.on_change);
             appendHandler(handlers, handler_len, widget.id, .submit, node.on_submit);
+            if (node.on_input) |make| {
+                handlers[handler_len.*] = .{ .id = widget.id, .event = .input, .action = .{ .input = make } };
+                handler_len.* += 1;
+            }
+            if (node.on_value) |make| {
+                handlers[handler_len.*] = .{ .id = widget.id, .event = .change, .action = .{ .value = make } };
+                handler_len.* += 1;
+            }
             return widget;
         }
 
         fn appendHandler(handlers: []Handler, handler_len: *usize, id: ObjectId, event: UiHandlerEvent, msg: ?Msg) void {
             const value = msg orelse return;
-            handlers[handler_len.*] = .{ .id = id, .event = event, .msg = value };
+            handlers[handler_len.*] = .{ .id = id, .event = event, .action = .{ .message = value } };
             handler_len.* += 1;
         }
 
@@ -338,6 +420,8 @@ pub fn Ui(comptime Msg: type) type {
             if (node.on_toggle != null) total += 1;
             if (node.on_change != null) total += 1;
             if (node.on_submit != null) total += 1;
+            if (node.on_input != null) total += 1;
+            if (node.on_value != null) total += 1;
             for (node.nodes) |child| total += countHandlers(child);
             return total;
         }
@@ -440,6 +524,13 @@ fn findWidgetIn(widget: Widget, id: ObjectId) ?Widget {
         if (findWidgetIn(child, id)) |found| return found;
     }
     return null;
+}
+
+fn isTextEntryWidget(widget: Widget) bool {
+    return switch (widget.kind) {
+        .input, .text_field, .search_field, .combobox, .textarea => true,
+        else => false,
+    };
 }
 
 fn isSubmitKeyboard(widget: Widget, keyboard: canvas.WidgetKeyboardEvent) bool {

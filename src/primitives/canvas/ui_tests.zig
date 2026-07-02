@@ -21,6 +21,8 @@ const Msg = union(enum) {
     add,
     toggle: u32,
     set_filter: Filter,
+    draft: canvas.TextInputEvent,
+    confidence: f32,
 };
 
 const InboxUi = ui_model.Ui(Msg);
@@ -307,6 +309,48 @@ test "keyboard events resolve activation and submit messages" {
     try testing.expectEqual(@as(?Msg, null), tree.msgForKeyboard(text_field.id, control_enter));
     const letter = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "a" };
     try testing.expectEqual(@as(?Msg, null), tree.msgForKeyboard(checkbox.id, letter));
+}
+
+test "payload-carrying handlers build messages from edits and values" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var ui = InboxUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.column(.{ .gap = 8 }, .{
+        ui.textField(.{ .placeholder = "New task…", .on_input = InboxUi.inputMsg(.draft), .on_submit = .add }),
+        ui.el(.slider, .{ .value = 0.5, .on_value = InboxUi.valueMsg(.confidence) }, .{}),
+    }));
+
+    const text_field = findByKind(tree.root, .text_field).?;
+    const slider = findByKind(tree.root, .slider).?;
+
+    // Typed text becomes a draft message carrying the edit.
+    const typed = canvas.WidgetKeyboardEvent{ .phase = .text_input, .text = "a" };
+    const draft_msg = tree.msgForKeyboard(text_field.id, typed).?;
+    try testing.expectEqualStrings("a", draft_msg.draft.insert_text);
+
+    // Editing keys carry structured edits.
+    const backspace = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "backspace" };
+    try testing.expectEqual(canvas.TextInputEvent.delete_backward, tree.msgForKeyboard(text_field.id, backspace).?.draft);
+
+    // Enter still submits rather than editing.
+    const enter = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "enter" };
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(text_field.id, enter).?);
+
+    // Slider keyboard steps carry the new value.
+    const step_up = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowright" };
+    const confidence_msg = tree.msgForKeyboard(slider.id, step_up).?;
+    try testing.expect(confidence_msg.confidence > 0.5);
+
+    // Direct value dispatch (accessibility set-value) works too.
+    try testing.expectEqual(@as(f32, 0.25), tree.msgForValue(slider.id, 0.25).?.confidence);
+
+    // Widgets without payload handlers dispatch nothing for edits.
+    const checkbox_tree = blk: {
+        var other_ui = InboxUi.init(arena_state.allocator());
+        break :blk try other_ui.finalize(other_ui.checkbox(.{ .on_toggle = Msg{ .toggle = 1 } }));
+    };
+    try testing.expectEqual(@as(?Msg, null), checkbox_tree.msgForTextEdit(checkbox_tree.root.id, .delete_backward));
 }
 
 test "toggling one of a thousand keyed rows invalidates O(changed), not O(n)" {
