@@ -55,6 +55,8 @@ pub fn Ui(comptime Msg: type) type {
             disabled: bool = false,
             variant: canvas.WidgetVariant = .default,
             size: canvas.WidgetSize = .default,
+            width: f32 = 0,
+            height: f32 = 0,
             grow: f32 = 0,
             gap: f32 = 0,
             padding: f32 = 0,
@@ -218,6 +220,11 @@ pub fn Ui(comptime Msg: type) type {
             return self.el(.separator, options, .{});
         }
 
+        /// Flexible empty space between siblings.
+        pub fn spacer(self: *Self, grow: f32) Node {
+            return self.el(.stack, .{ .grow = grow }, .{});
+        }
+
         /// Keyed list projection: one node per item, keyed by `key_fn` unless
         /// the item view assigned its own key.
         pub fn each(self: *Self, items: anytype, comptime key_fn: anytype, comptime view_fn: anytype) []const Node {
@@ -379,6 +386,7 @@ pub fn Ui(comptime Msg: type) type {
                     .cross_alignment = options.cross,
                     .virtualized = options.virtualized,
                     .virtual_item_extent = options.virtual_item_extent,
+                    .min_size = .{ .width = options.width, .height = options.height },
                 },
                 .style = options.style,
                 .semantics = options.semantics,
