@@ -1,0 +1,76 @@
+# Native UI
+
+The default zero-native app is native-rendered: the view is a `.zml` markup file, the logic is Zig, and rendering happens through zero-native's own engine. Scaffold one with `zero-native init my_app` and run it with `zig build run`.
+
+An app is four things:
+
+- `src/app.zml` — the entire UI: elements, layout, bindings, and message dispatch.
+- `Model` — a plain Zig struct holding your state.
+- `Msg` — a tagged union of everything that can happen.
+- `update(model, msg)` — the only place state changes.
+
+The runtime owns the rest: install, presentation, resize, typed event dispatch, timers, and hot reload. In dev builds, edit the `.zml` while the app runs and the window updates in place — model state, selection, and widget identity all survive. In release builds the markup is compiled at comptime, so the binary carries no parser and a typo in a view is a compile error with a line and column.
+
+## A complete view
+
+```html
+<column gap="12" padding="16">
+  <row gap="8" cross="center">
+    <text-field text="{draft}" placeholder="New task…" on-input="draft_edit" on-submit="add" grow="1" />
+    <button variant="primary" on-press="add">Add task</button>
+  </row>
+  <scroll grow="1">
+    <column gap="2">
+      <for each="visible" key="id" as="t">
+        <row gap="8" padding="6" cross="center">
+          <checkbox checked="{t.done}" on-toggle="toggle:{t.id}" />
+          <text grow="1">{t.title}</text>
+        </row>
+      </for>
+    </column>
+  </scroll>
+  <status-bar>{openCount} open</status-bar>
+</column>
+```
+
+## Elements
+
+| Markup | Renders as | Notes |
+| --- | --- | --- |
+| `row`, `column` | flex containers | horizontal / vertical main axis |
+| `stack`, `panel`, `card` | overlay containers | children layer on top of each other |
+| `scroll` | scroll view | wrap multiple children in a `column` inside it |
+| `list`, `grid` | list, grid | vertical stack / cell grid |
+| `text`, `badge` | text leaves | `{}` interpolation allowed in content |
+| `button`, `list-item`, `menu-item`, `toggle` | text-bearing controls | the label is the element content |
+| `checkbox`, `radio`, `slider`, `progress` | value controls | `checked`, `value` |
+| `text-field`, `search-field`, `textarea` | text entry | `placeholder`; edits arrive via `on-input` |
+| `status-bar` | status bar | content only, no children |
+| `separator`, `spacer` | separator, flexible space | give `spacer` a `grow` |
+
+Layout attributes: `gap`, `padding`, `grow`, `width`, `height`, `main`, `cross`, `virtualized`. Appearance: `variant`, `size`, `disabled`, `checked`, `selected`. Semantics: `role`, `label`. Identity: `key` (sibling-scoped) and `global-key` (survives moving between containers — board cards, tab pages).
+
+## Expressions
+
+Attribute values take a literal or exactly one expression. There are three forms — `{path.to.value}` (a binding), `{a == b}` (equality, for selection states), and `msg` or `msg:{path}` on `on-*` attributes. Text content also interpolates: `{openCount} open`. There is no arithmetic, no other comparisons, and no function calls — anything smarter is a Zig model function you bind to.
+
+Bindings resolve against your model: struct fields, zero-argument public methods, and — for `for each` — slices, public array declarations, or functions taking `(*const Model)` or `(*const Model, std.mem.Allocator)` (the allocator variant is how filtered lists work). Enums resolve to their tag names.
+
+## Messages
+
+`on-press`, `on-toggle`, `on-change`, and `on-submit` name a variant of your `Msg` union, optionally with one binding payload (`toggle:{t.id}`). `on-input` names a variant whose payload is `canvas.TextInputEvent`; pair it with `canvas.TextBuffer` in the model for editor state that survives rebuilds:
+
+```zig
+draft: canvas.TextBuffer(64) = .{},
+// in update:
+.draft_edit => |edit| model.draft.apply(edit),
+.add => { model.addTask(model.draft.text()); model.draft.clear(); },
+```
+
+## Tooling
+
+- `zero-native markup check src/app.zml` — instant validation with `file:line:column` errors.
+- `zero-native markup lsp` — diagnostics, completion, and hover in your editor (see `editors/zml/` in the repo for VS Code, Helix, and Neovim setup).
+- The automation harness drives widgets and reads accessibility snapshots and screenshots headlessly — see [Automation](/debugging/automation).
+
+For the component catalog and styling model, see [Built-in Components](/built-in-components). For dropping down to the programmatic API, the `canvas.Ui(Msg)` builder produces exactly the same trees the markup compiles to.
