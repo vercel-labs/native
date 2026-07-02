@@ -31,6 +31,8 @@ jobs:
           version: 0.16.0
       - run: zig build test-webview-system-link
       - run: zig build test-webview-smoke
+      - run: zig build test-gpu-dashboard-smoke
+      - run: zig build test-gpu-components-smoke
 
   linux-webkitgtk:
     name: Linux WebKitGTK
@@ -75,6 +77,57 @@ jobs:
       - run: npm --prefix packages/zero-native run version:check
       - run: npm --prefix packages/zero-native run scripts:check
 
+  native-examples:
+    name: Native Examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Install GTK dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
+      - run: zig build test-examples-native
+
+  linux-canvas-smoke:
+    name: Linux Canvas Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Install GTK and Xvfb
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev xvfb
+      - name: Build and drive ui-inbox headless
+        run: |
+          set -euo pipefail
+          zig build
+          cd examples/ui-inbox
+          zig build -Dplatform=linux -Dweb-engine=system -Dautomation=true
+          rm -rf .zig-cache/zero-native-automation
+          xvfb-run -a ./zig-out/bin/ui-inbox &
+          pid=$!
+          trap 'kill "$pid" >/dev/null 2>&1 || true' EXIT
+          cli=../../zig-out/bin/zero-native
+          "$cli" automate wait | grep -q 'ready=true'
+          snap=.zig-cache/zero-native-automation/snapshot.txt
+          for i in $(seq 1 50); do
+            grep -q 'gpu_nonblank=true' "$snap" && break
+            sleep 0.2
+          done
+          grep -q 'gpu_nonblank=true' "$snap"
+          grep -q 'gpu_backend=software' "$snap"
+          add=$(grep -o 'widget @w1/inbox-canvas#[0-9]* role=button name="Add task"' "$snap" | grep -o '#[0-9]*' | tr -d '#')
+          "$cli" automate widget-click inbox-canvas "$add"
+          for i in $(seq 1 50); do
+            grep -q '4 open' "$snap" && break
+            sleep 0.2
+          done
+          grep -q '4 open' "$snap"
+          "$cli" automate screenshot inbox-canvas
+          test -s .zig-cache/zero-native-automation/screenshot-inbox-canvas.png
+
   frontend-examples:
     name: Frontend Examples
     runs-on: ubuntu-latest
@@ -107,7 +160,7 @@ jobs:
       - name: Scaffold and test frontend templates
         run: |
           set -euo pipefail
-          for frontend in next vite react svelte vue; do
+          for frontend in native next vite react svelte vue; do
             app=".zig-cache/scaffold-${frontend}"
             rm -rf "$app"
             ./zig-out/bin/zero-native init "$app" --frontend "$frontend"
