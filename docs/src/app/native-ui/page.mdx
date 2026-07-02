@@ -50,6 +50,42 @@ The runtime owns the rest: install, presentation, resize, typed event dispatch, 
 
 Layout attributes: `gap`, `padding`, `grow`, `width`, `height`, `main`, `cross`, `virtualized`. Appearance: `variant`, `size`, `disabled`, `checked`, `selected`. Semantics: `role`, `label`. Identity: `key` (sibling-scoped) and `global-key` (survives moving between containers — board cards, tab pages).
 
+## Styling with design tokens
+
+Color and radius attributes reference design tokens by name — literals only, validated against the token lists (a typo is a check/compile error, never a silent default):
+
+```html
+<row background="surface" radius="md" padding="8">
+  <text foreground="text_muted">Muted caption</text>
+</row>
+```
+
+The color attributes are `background`, `foreground`, `accent`, `accent-foreground`, `border-color`, and `focus-ring`; values are `ColorTokens` field names: `background`, `surface`, `surface_subtle`, `surface_pressed`, `text`, `text_muted`, `border`, `accent`, `accent_text`, `destructive`, `destructive_text`, `focus_ring`, `shadow`, `disabled`. `radius` takes a `RadiusTokens` name: `sm`, `md`, `lg`, `xl`.
+
+References resolve against the app's live tokens on every rebuild, so themed apps re-resolve them when the theme changes — dark mode flips `surface` for free. Anything dynamic beyond that (raw colors, per-state styling) stays in Zig via `ElementOptions.style`, which always wins over a token reference.
+
+## Templates
+
+When the same subtree repeats with different data, define it once — templates go at the top of the file, before the single view root:
+
+```html
+<template name="board-column" args="title cards">
+  <column grow="1" gap="8" label="{title}">
+    <text foreground="text_muted">{title}</text>
+    <for each="cards" key="id" as="c">
+      <row global-key="{c.id}"><text>{c.title}</text></row>
+    </for>
+  </column>
+</template>
+<row grow="1" gap="12">
+  <use template="board-column" title="Todo"  cards="{todoCards}" />
+  <use template="board-column" title="Doing" cards="{doingCards}" />
+  <use template="board-column" title="Done"  cards="{doneCards}" />
+</row>
+```
+
+A `<use>` is allowed anywhere an element is, and its attributes must match the template's declared `args` exactly. Args bind like `for` variables: a `{binding}` naming an iterable (the same set `for each` accepts) is iterable inside the template; anything else — a literal or a scalar binding — is a value for bindings and interpolation. The body is built in place of the `<use>`, so widget ids are identical to writing it out by hand: converting copy-pasted markup to a template changes no ids. Templates may only reference templates defined earlier in the file, which keeps expansion finite; bindings stay zero-argument, so per-case queries (`todoCards`, `doingCards`) remain named model functions.
+
 ## Expressions
 
 Attribute values take a literal or exactly one expression. There are three forms — `{path.to.value}` (a binding), `{a == b}` (equality, for selection states), and `msg` or `msg:{path}` on `on-*` attributes. Text content also interpolates: `{openCount} open`. There is no arithmetic, no other comparisons, and no function calls — anything smarter is a Zig model function you bind to.

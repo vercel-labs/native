@@ -156,6 +156,97 @@ test "the board lays out through the canvas engine with cards in their columns" 
     try testing.expectEqual(todo_frame.?.y, doing_frame.?.y);
 }
 
+/// The board markup before the board-column template existed: three
+/// copy-pasted column blocks. Template expansion happens at the use site,
+/// so the templated board must produce byte-identical widget ids.
+const legacy_board_markup =
+    \\<column gap="12" padding="16">
+    \\  <row gap="8" cross="center">
+    \\    <text grow="1">Kanban</text>
+    \\    <button variant="primary" on-press="add">Add card</button>
+    \\  </row>
+    \\  <row grow="1" gap="12">
+    \\    <column grow="1" gap="8" padding="10" label="Todo">
+    \\      <text>Todo</text>
+    \\      <column gap="8">
+    \\        <for each="todoCards" key="id" as="c">
+    \\          <row global-key="{c.id}" gap="8" padding="8" cross="center" role="listitem" label="{c.title}">
+    \\            <text grow="1">{c.title}</text>
+    \\            <if test="{c.movable}">
+    \\              <button size="sm" on-press="move_right:{c.id}">></button>
+    \\            </if>
+    \\          </row>
+    \\        </for>
+    \\      </column>
+    \\    </column>
+    \\    <column grow="1" gap="8" padding="10" label="Doing">
+    \\      <text>Doing</text>
+    \\      <column gap="8">
+    \\        <for each="doingCards" key="id" as="c">
+    \\          <row global-key="{c.id}" gap="8" padding="8" cross="center" role="listitem" label="{c.title}">
+    \\            <text grow="1">{c.title}</text>
+    \\            <if test="{c.movable}">
+    \\              <button size="sm" on-press="move_right:{c.id}">></button>
+    \\            </if>
+    \\          </row>
+    \\        </for>
+    \\      </column>
+    \\    </column>
+    \\    <column grow="1" gap="8" padding="10" label="Done">
+    \\      <text>Done</text>
+    \\      <column gap="8">
+    \\        <for each="doneCards" key="id" as="c">
+    \\          <row global-key="{c.id}" gap="8" padding="8" cross="center" role="listitem" label="{c.title}">
+    \\            <text grow="1">{c.title}</text>
+    \\            <if test="{c.movable}">
+    \\              <button size="sm" on-press="move_right:{c.id}">></button>
+    \\            </if>
+    \\          </row>
+    \\        </for>
+    \\      </column>
+    \\    </column>
+    \\  </row>
+    \\  <status-bar>{todoCount} todo · {doingCount} doing · {doneCount} done</status-bar>
+    \\</column>
+;
+
+test "the templated board keeps the pre-template widget ids exactly" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = Model{};
+    model.addCard("Ship it");
+    model.addCard("Fix the bug");
+    model.addCard("Old work");
+    main.update(&model, .{ .move_right = 2 });
+    main.update(&model, .{ .move_right = 3 });
+    main.update(&model, .{ .move_right = 3 });
+
+    const templated = try buildTree(arena, &model);
+    var legacy_view = try KanbanMarkup.init(arena, legacy_board_markup);
+    var legacy_ui = KanbanUi.init(arena);
+    const legacy = try legacy_ui.finalize(try legacy_view.build(&legacy_ui, &model));
+    try expectSameIds(legacy.root, templated.root);
+}
+
+test "the board's style tokens resolve to concrete card and header styles" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = Model{};
+    model.addCard("Ship it");
+
+    const tree = try buildTree(arena, &model);
+    const tokens = canvas.DesignTokens{};
+    const card = findCard(tree.root, "Ship it").?;
+    try testing.expectEqualDeep(tokens.colors.surface, card.style.background.?);
+    try testing.expectEqual(tokens.radius.md, card.style.radius.?);
+    const header = findByText(tree.root, .text, "Todo").?;
+    try testing.expectEqualDeep(tokens.colors.text_muted, header.style.foreground.?);
+}
+
 test "compiled and interpreted kanban views build identical trees" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

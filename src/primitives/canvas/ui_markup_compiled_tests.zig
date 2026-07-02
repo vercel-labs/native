@@ -299,3 +299,91 @@ test "the compiled path accepts every element the validator knows" {
         try testing.expect(markup_view.elementKind(name) != null);
     }
 }
+
+// ------------------------------------------- template/use + style parity
+
+fn expectSameStyles(expected: canvas.Widget, actual: canvas.Widget) !void {
+    try testing.expect(std.meta.eql(expected.style, actual.style));
+    try testing.expectEqual(expected.children.len, actual.children.len);
+    for (expected.children, actual.children) |expected_child, actual_child| {
+        try expectSameStyles(expected_child, actual_child);
+    }
+}
+
+const TemplateUi = fixture.TemplateUi;
+const TemplateInterpreter = markup_view.MarkupView(fixture.TemplateModel, fixture.TemplateMsg);
+const TemplateCompiled = canvas.CompiledMarkupView(fixture.TemplateModel, fixture.TemplateMsg, fixture.template_markup_source);
+
+fn interpretTemplates(arena: std.mem.Allocator, model: *const fixture.TemplateModel, tokens: canvas.DesignTokens) !TemplateUi.Tree {
+    var view = try TemplateInterpreter.init(arena, fixture.template_markup_source);
+    var ui = TemplateUi.init(arena);
+    return ui.finalizeWithTokens(try view.build(&ui, model), tokens);
+}
+
+fn compileTemplates(arena: std.mem.Allocator, model: *const fixture.TemplateModel, tokens: canvas.DesignTokens) !TemplateUi.Tree {
+    var ui = TemplateUi.init(arena);
+    return ui.finalizeWithTokens(TemplateCompiled.build(&ui, model), tokens);
+}
+
+test "compiled templates with slice and value args match the interpreter and the hand-written view" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = fixture.templateTestModel();
+    const tokens = canvas.DesignTokens{};
+
+    const interpreted = try interpretTemplates(arena, &model, tokens);
+    const compiled = try compileTemplates(arena, &model, tokens);
+    var hand_ui = TemplateUi.init(arena);
+    const hand = try hand_ui.finalizeWithTokens(fixture.handTemplateView(&hand_ui, &model), tokens);
+
+    // All three engines agree: ids, handlers, texts, and resolved styles.
+    // The fixture covers a value arg (title), a slice arg iterated by a
+    // for inside the template, a nested use whose arg binds a loop item
+    // field, and style token attributes.
+    try expectSameTree(fixture.TemplateMsg, hand, interpreted);
+    try expectSameTree(fixture.TemplateMsg, hand, compiled);
+    try expectSameTexts(interpreted.root, compiled.root);
+    try expectSameStyles(hand.root, interpreted.root);
+    try expectSameStyles(hand.root, compiled.root);
+
+    // Dispatch parity for a handler declared inside a template body.
+    const pear_button = fixture.findByText(compiled.root, .button, "pear").?;
+    try testing.expectEqual(
+        interpreted.msgForPointer(pear_button.id, .up).?,
+        compiled.msgForPointer(pear_button.id, .up).?,
+    );
+    try testing.expectEqual(@as(u32, 2), compiled.msgForPointer(pear_button.id, .up).?.pick);
+
+    // Style token references resolved to the same concrete values.
+    const badge = fixture.findByText(compiled.root, .badge, "apple").?;
+    try testing.expectEqualDeep(tokens.colors.surface, badge.style.background.?);
+    try testing.expectEqual(tokens.radius.md, badge.style.radius.?);
+}
+
+test "compiled template expansion keeps ids per use site and re-resolves tokens" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = fixture.templateTestModel();
+
+    const light = try compileTemplates(arena, &model, canvas.DesignTokens{});
+    const top_text = fixture.findByText(light.root, .text, "Top").?;
+    const bottom_text = fixture.findByText(light.root, .text, "Bottom").?;
+    try testing.expect(top_text.id != bottom_text.id);
+
+    // Retheme rebuild: same ids, new resolved colors — and the
+    // interpreter agrees on both.
+    const dark_tokens = canvas.DesignTokens.theme(.{ .color_scheme = .dark });
+    const dark = try compileTemplates(arena, &model, dark_tokens);
+    const dark_top_text = fixture.findByText(dark.root, .text, "Top").?;
+    try testing.expectEqual(top_text.id, dark_top_text.id);
+    try testing.expectEqualDeep(dark_tokens.colors.text_muted, dark_top_text.style.foreground.?);
+    try testing.expect(!std.meta.eql(top_text.style.foreground.?, dark_top_text.style.foreground.?));
+
+    const dark_interpreted = try interpretTemplates(arena, &model, dark_tokens);
+    try expectSameTree(fixture.TemplateMsg, dark_interpreted, dark);
+    try expectSameStyles(dark_interpreted.root, dark.root);
+}

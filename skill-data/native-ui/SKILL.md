@@ -79,6 +79,21 @@ Identity: `key` (sibling-scoped), `global-key` (parent-independent — use for i
 
 Numbers are plain (`gap="12"`), booleans are `true`/`false` or a binding.
 
+## Style token attributes
+
+Color and radius come from the design tokens, referenced by token NAME — literals only, no bindings, no raw colors (dynamic styling stays in Zig via `ElementOptions.style`):
+
+- Color attributes: `background`, `foreground`, `accent`, `accent-foreground`, `border-color`, `focus-ring`. Values are `canvas.ColorTokens` field names — the complete list: `background`, `surface`, `surface_subtle`, `surface_pressed`, `text`, `text_muted`, `border`, `accent`, `accent_text`, `destructive`, `destructive_text`, `focus_ring`, `shadow`, `disabled`. (`border-color`, not bare `border` — that name is reserved for a future width shorthand.)
+- `radius` — `canvas.RadiusTokens` field names: `sm`, `md`, `lg`, `xl`.
+
+```html
+<row background="surface" radius="md" padding="8">
+  <text foreground="text_muted">Muted caption</text>
+</row>
+```
+
+References resolve against the app's LIVE tokens on every rebuild (`finalizeWithTokens`), so a themed app (`tokens`/`tokens_fn`) re-resolves them when the theme changes — dark mode flips `surface` automatically. An explicit `style` value set in Zig always wins over a token ref on the same field. Unknown token names are validation/compile errors.
+
 ## Expressions — the complete list
 
 Attribute values take a literal or exactly ONE expression; there are only three forms:
@@ -130,6 +145,35 @@ See `examples/ui-inbox` for the complete pattern.
 <if test="{c.movable}"> <button ...>Move</button> </if>
 <else> <text>Done!</text> </else>                             <!-- must directly follow the if -->
 ```
+
+## Templates: `<template>` + `<use>`
+
+When the same subtree repeats with different data (board columns, dashboard sections), define it ONCE at the top of the file — zero or more `<template>` definitions, then exactly one view root:
+
+```html
+<template name="board-column" args="title cards">
+  <column grow="1" gap="8" label="{title}">
+    <text foreground="text_muted">{title}</text>
+    <for each="cards" key="id" as="c">
+      <row global-key="{c.id}"><text>{c.title}</text></row>
+    </for>
+  </column>
+</template>
+<row grow="1" gap="12">
+  <use template="board-column" title="Todo"  cards="{todoCards}" />
+  <use template="board-column" title="Doing" cards="{doingCards}" />
+  <use template="board-column" title="Done"  cards="{doneCards}" />
+</row>
+```
+
+Rules and semantics:
+
+- A template takes `name` (kebab-case), optional `args` (space-separated names), and exactly one element child. `<use template="name">` is allowed anywhere an element is (including as a `for` child or the view root); its other attributes must match the template's `args` exactly — missing or extra args are errors.
+- The template body is built IN PLACE of the `<use>`: structural widget ids hash through the parent chain at the expansion site, exactly as if you had written the body inline. Two uses at different sites get different ids; the same site is stable across rebuilds. Rewriting copy-pasted markup as a template does not change any widget id.
+- Args bind like `for` variables: an arg whose value is a `{binding}` naming an iterable (model slice/array field, pub decl, or model fn — the same set `for each` accepts) is iterable inside the template (`<for each="cards" ...>`); any other arg (literal or scalar binding) is a value usable in bindings, interpolation, and equality (`{title}`, `label="{title}"`). Args are evaluated at the use site; inside the body only the args, the model, and the body's own loop variables are in scope. Value args are scalars — `{arg.field}` is an error.
+- Uses inside a template body may only reference templates defined EARLIER in the file (this also makes recursion impossible). Bindings stay zero-argument: the template deduplicates the view, the per-case query stays a named model function.
+
+Both engines implement templates: the interpreter expands at build time, `CompiledMarkupView` inlines each use at comptime with the identical result. See `examples/kanban/src/board.zml`.
 
 ## Validate without building
 

@@ -25,6 +25,8 @@ pub const MarkupNodeKind = enum {
     for_block,
     if_block,
     else_block,
+    template_block,
+    use_block,
 };
 
 pub const MarkupAttr = struct {
@@ -54,8 +56,35 @@ pub const MarkupNode = struct {
 };
 
 pub const MarkupDocument = struct {
+    /// Top-level `<template name="..." args="...">` definitions, in file
+    /// order. `<use>` sites reference them by name; a use may only
+    /// reference templates defined earlier in the file (which also rules
+    /// out recursion structurally).
+    templates: []const MarkupNode = &.{},
     root: MarkupNode,
+
+    pub fn templateIndex(self: MarkupDocument, name: []const u8) ?usize {
+        for (self.templates, 0..) |template_node, index| {
+            const template_name = template_node.attr("name") orelse continue;
+            if (std.mem.eql(u8, template_name, name)) return index;
+        }
+        return null;
+    }
 };
+
+/// Iterate a template's declared arg names (the space-separated `args`
+/// attribute). Works at runtime and comptime.
+pub fn templateArgs(template_node: MarkupNode) std.mem.TokenIterator(u8, .scalar) {
+    return std.mem.tokenizeScalar(u8, template_node.attr("args") orelse "", ' ');
+}
+
+pub fn templateDeclaresArg(template_node: MarkupNode, name: []const u8) bool {
+    var args = templateArgs(template_node);
+    while (args.next()) |arg_name| {
+        if (std.mem.eql(u8, arg_name, name)) return true;
+    }
+    return false;
+}
 
 pub const ParseError = error{ MarkupSyntax, OutOfMemory };
 
@@ -71,16 +100,27 @@ pub const Parser = struct {
         return .{ .arena = arena, .source = source };
     }
 
-    /// Parse a document: comments and whitespace around exactly one root
+    /// Parse a document: comments and whitespace around zero or more
+    /// top-level `<template>` definitions followed by exactly one root
     /// element.
     pub fn parse(self: *Parser) ParseError!MarkupDocument {
-        self.skipWhitespaceAndComments();
-        const root = try self.parseElement();
-        self.skipWhitespaceAndComments();
-        if (self.index < self.source.len) {
-            return self.fail("expected end of file after the root element");
+        var templates: std.ArrayListUnmanaged(MarkupNode) = .empty;
+        while (true) {
+            self.skipWhitespaceAndComments();
+            if (self.index >= self.source.len and templates.items.len > 0) {
+                return self.fail("expected a view root element after the template definitions");
+            }
+            const node = try self.parseElement();
+            if (node.kind == .template_block) {
+                try templates.append(self.arena, node);
+                continue;
+            }
+            self.skipWhitespaceAndComments();
+            if (self.index < self.source.len) {
+                return self.fail("expected end of file after the root element");
+            }
+            return .{ .templates = templates.items, .root = node };
         }
-        return .{ .root = root };
     }
 
     fn parseElement(self: *Parser) ParseError!MarkupNode {
@@ -273,6 +313,8 @@ fn nodeKindForName(name: []const u8) MarkupNodeKind {
     if (std.mem.eql(u8, name, "for")) return .for_block;
     if (std.mem.eql(u8, name, "if")) return .if_block;
     if (std.mem.eql(u8, name, "else")) return .else_block;
+    if (std.mem.eql(u8, name, "template")) return .template_block;
+    if (std.mem.eql(u8, name, "use")) return .use_block;
     return .element;
 }
 
@@ -288,13 +330,23 @@ pub fn parseComptime(comptime source: []const u8) MarkupDocument {
     comptime {
         @setEvalBranchQuota(comptime_parse_quota_base + source.len * comptime_parse_quota_per_byte);
         var parser = Parser.init(undefined, source);
-        parser.skipWhitespaceAndComments();
-        const root = parseElementComptime(&parser);
-        parser.skipWhitespaceAndComments();
-        if (parser.index < parser.source.len) {
-            failComptime(&parser, parser.fail("expected end of file after the root element"));
+        var templates: []const MarkupNode = &.{};
+        while (true) {
+            parser.skipWhitespaceAndComments();
+            if (parser.index >= parser.source.len and templates.len > 0) {
+                failComptime(&parser, parser.fail("expected a view root element after the template definitions"));
+            }
+            const node = parseElementComptime(&parser);
+            if (node.kind == .template_block) {
+                templates = templates ++ &[_]MarkupNode{node};
+                continue;
+            }
+            parser.skipWhitespaceAndComments();
+            if (parser.index < parser.source.len) {
+                failComptime(&parser, parser.fail("expected end of file after the root element"));
+            }
+            return .{ .templates = templates, .root = node };
         }
-        return .{ .root = root };
     }
 }
 
@@ -476,17 +528,112 @@ pub const known_option_attrs = [_][]const u8{
 
 pub const known_events = [_][]const u8{ "press", "toggle", "change", "submit", "input" };
 
+/// Markup attributes that reference a color design token by name. Values
+/// must be literal `ColorTokens` field names (`known_color_token_names`);
+/// the builder resolves them against live tokens in `finalizeWithTokens`.
+/// `border-color` (not bare `border`) keeps the name free for a future
+/// border-width shorthand.
+pub const known_color_style_attrs = [_][]const u8{
+    "background", "foreground", "accent", "accent-foreground", "border-color", "focus-ring",
+};
+
+/// The field names of `canvas.ColorTokens`, kept in sync by a test in
+/// ui_markup_view_tests.zig (this module stays std-only).
+pub const known_color_token_names = [_][]const u8{
+    "background",  "surface",          "surface_subtle", "surface_pressed",
+    "text",        "text_muted",       "border",         "accent",
+    "accent_text", "destructive",      "destructive_text", "focus_ring",
+    "shadow",      "disabled",
+};
+
+/// The field names of `canvas.RadiusTokens` (same sync test).
+pub const known_radius_token_names = [_][]const u8{ "sm", "md", "lg", "xl" };
+
+pub const style_token_literal_message = "style token attributes take a literal token name - dynamic styling stays in Zig";
+pub const unknown_color_token_message = "unknown color token: color style attributes take a canvas ColorTokens field name (background, surface, surface_subtle, surface_pressed, text, text_muted, border, accent, accent_text, destructive, destructive_text, focus_ring, shadow, disabled)";
+pub const unknown_radius_token_message = "unknown radius token: radius takes a canvas RadiusTokens field name (sm, md, lg, xl)";
+
+pub const invalid_expression_message = "invalid expression: values are a literal, one {binding}, or one {a == b} equality - no other operators or calls (put logic in a model function)";
+pub const template_top_level_message = "template definitions are only allowed at the top of the file, before the view root";
+pub const template_name_message = "template requires a name attribute";
+pub const template_unique_name_message = "template names must be unique";
+pub const template_args_message = "template args must be space-separated names (args=\"title cards\")";
+pub const template_attrs_message = "template takes only name and args attributes";
+pub const template_one_child_message = "template takes exactly one element child (wrap siblings in a container)";
+pub const use_template_attr_message = "use requires a template attribute naming a template defined at the top of the file";
+pub const use_undefined_template_message = "use references an undefined template (define <template name=\"...\"> before the view root)";
+pub const use_earlier_template_message = "use may only reference templates defined earlier in the file";
+pub const use_missing_arg_message = "use is missing an argument the template declares in args";
+pub const use_extra_arg_message = "use passes an argument the template does not declare in args";
+pub const use_no_children_message = "use takes no children (the template body is built in its place)";
+
 /// Model-agnostic structural validation: unknown elements or attributes,
-/// malformed expressions, and misshapen structure tags. Binding paths and
-/// message tags are checked against the concrete Model/Msg by the
-/// interpreter; this pass is what `zero-native markup check` runs.
+/// malformed expressions, misshapen structure tags, and template/use
+/// wiring. Binding paths and message tags are checked against the concrete
+/// Model/Msg by the interpreter; this pass is what
+/// `zero-native markup check` runs.
 pub fn validate(document: MarkupDocument) ?MarkupErrorInfo {
-    return validateNode(document.root, false);
+    for (document.templates, 0..) |template_node, index| {
+        if (validateTemplate(document, template_node, index)) |info| return info;
+    }
+    return validateNode(document, document.root, false, document.templates.len);
 }
 
-fn validateNode(node: MarkupNode, parent_is_element: bool) ?MarkupErrorInfo {
+fn validateTemplate(document: MarkupDocument, node: MarkupNode, index: usize) ?MarkupErrorInfo {
+    const name = node.attr("name") orelse return errorAt(node, template_name_message);
+    if (!isTemplateName(name)) return errorAt(node, template_name_message);
+    for (document.templates[0..index]) |earlier| {
+        const earlier_name = earlier.attr("name") orelse continue;
+        if (std.mem.eql(u8, earlier_name, name)) return errorAt(node, template_unique_name_message);
+    }
+    for (node.attrs) |attribute| {
+        if (std.mem.eql(u8, attribute.name, "name")) continue;
+        if (std.mem.eql(u8, attribute.name, "args")) {
+            var args = templateArgs(node);
+            while (args.next()) |arg_name| {
+                if (!isBindingName(arg_name)) {
+                    return .{ .line = attribute.line, .column = attribute.column, .message = template_args_message };
+                }
+            }
+            continue;
+        }
+        return .{ .line = attribute.line, .column = attribute.column, .message = template_attrs_message };
+    }
+    if (node.children.len != 1 or node.children[0].kind != .element) {
+        return errorAt(node, template_one_child_message);
+    }
+    // The body sees templates defined before this one, which also rules
+    // out recursion.
+    return validateNode(document, node.children[0], false, index);
+}
+
+fn validateUse(document: MarkupDocument, node: MarkupNode, template_limit: usize) ?MarkupErrorInfo {
+    const name = node.attr("template") orelse return errorAt(node, use_template_attr_message);
+    const index = document.templateIndex(name) orelse return errorAt(node, use_undefined_template_message);
+    if (index >= template_limit) return errorAt(node, use_earlier_template_message);
+    if (node.children.len != 0) return errorAt(node, use_no_children_message);
+    const template_node = document.templates[index];
+    var args = templateArgs(template_node);
+    while (args.next()) |arg_name| {
+        if (node.attr(arg_name) == null) return errorAt(node, use_missing_arg_message);
+    }
+    for (node.attrs) |attribute| {
+        if (std.mem.eql(u8, attribute.name, "template")) continue;
+        if (!templateDeclaresArg(template_node, attribute.name)) {
+            return .{ .line = attribute.line, .column = attribute.column, .message = use_extra_arg_message };
+        }
+        if (parseAttrExpression(attribute.value) == null) {
+            return .{ .line = attribute.line, .column = attribute.column, .message = invalid_expression_message };
+        }
+    }
+    return null;
+}
+
+fn validateNode(document: MarkupDocument, node: MarkupNode, parent_is_element: bool, template_limit: usize) ?MarkupErrorInfo {
     switch (node.kind) {
         .text => return null,
+        .template_block => return errorAt(node, template_top_level_message),
+        .use_block => return validateUse(document, node, template_limit),
         .element => {
             if (!nameInList(node.name, &known_element_names)) {
                 return errorAt(node, "unknown element");
@@ -501,11 +648,31 @@ fn validateNode(node: MarkupNode, parent_is_element: bool) ?MarkupErrorInfo {
                     }
                     continue;
                 }
+                if (nameInList(attribute.name, &known_color_style_attrs)) {
+                    if (!nameInList(attribute.value, &known_color_token_names)) {
+                        const message = if (parseAttrExpression(attribute.value)) |expression|
+                            (if (expression == .literal) unknown_color_token_message else style_token_literal_message)
+                        else
+                            style_token_literal_message;
+                        return .{ .line = attribute.line, .column = attribute.column, .message = message };
+                    }
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "radius")) {
+                    if (!nameInList(attribute.value, &known_radius_token_names)) {
+                        const message = if (parseAttrExpression(attribute.value)) |expression|
+                            (if (expression == .literal) unknown_radius_token_message else style_token_literal_message)
+                        else
+                            style_token_literal_message;
+                        return .{ .line = attribute.line, .column = attribute.column, .message = message };
+                    }
+                    continue;
+                }
                 if (!nameInList(attribute.name, &known_option_attrs)) {
                     return .{ .line = attribute.line, .column = attribute.column, .message = "unknown attribute" };
                 }
                 if (parseAttrExpression(attribute.value) == null) {
-                    return .{ .line = attribute.line, .column = attribute.column, .message = "invalid expression: values are a literal, one {binding}, or one {a == b} equality - no other operators or calls (put logic in a model function)" };
+                    return .{ .line = attribute.line, .column = attribute.column, .message = invalid_expression_message };
                 }
             }
         },
@@ -513,7 +680,7 @@ fn validateNode(node: MarkupNode, parent_is_element: bool) ?MarkupErrorInfo {
             if (!parent_is_element) return errorAt(node, "for is only allowed inside an element");
             if (node.attr("each") == null) return errorAt(node, "for requires an each attribute");
             if (node.attr("as") == null) return errorAt(node, "for requires an as attribute");
-            if (node.children.len != 1 or node.children[0].kind != .element) {
+            if (node.children.len != 1 or (node.children[0].kind != .element and node.children[0].kind != .use_block)) {
                 return errorAt(node, "for takes exactly one element child");
             }
         },
@@ -529,12 +696,30 @@ fn validateNode(node: MarkupNode, parent_is_element: bool) ?MarkupErrorInfo {
         if (child.kind == .else_block and previous_kind != .if_block) {
             return errorAt(child, "else must directly follow an if");
         }
-        if (validateNode(child, node.kind == .element or node.kind == .for_block or node.kind == .if_block or node.kind == .else_block)) |info| {
+        if (validateNode(document, child, node.kind == .element or node.kind == .for_block or node.kind == .if_block or node.kind == .else_block, template_limit)) |info| {
             return info;
         }
         previous_kind = child.kind;
     }
     return null;
+}
+
+/// A single undotted binding-path segment: template arg names (they must
+/// be resolvable as binding heads).
+fn isBindingName(text: []const u8) bool {
+    return isBindingPath(text) and std.mem.indexOfScalar(u8, text, '.') == null;
+}
+
+/// A lowercase kebab-case name, like element names: template names
+/// ("board-column") are referenced by `use`, never by bindings.
+fn isTemplateName(text: []const u8) bool {
+    if (text.len == 0) return false;
+    if (!(text[0] >= 'a' and text[0] <= 'z')) return false;
+    for (text) |byte| {
+        const valid = (byte >= 'a' and byte <= 'z') or (byte >= '0' and byte <= '9') or byte == '-' or byte == '_';
+        if (!valid) return false;
+    }
+    return true;
 }
 
 fn nameInList(name: []const u8, list: []const []const u8) bool {

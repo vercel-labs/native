@@ -126,6 +126,117 @@ test "message expressions parse tag and optional payload binding" {
     try testing.expectEqual(@as(?markup.MessageExpression, null), markup.parseMessageExpression("1add"));
 }
 
+test "templates parse before the root and expose name and args" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    const source =
+        \\<template name="pill" args="label">
+        \\  <badge>{label}</badge>
+        \\</template>
+        \\<template name="pill-row" args="a b">
+        \\  <row gap="4">
+        \\    <use template="pill" label="{a}" />
+        \\    <use template="pill" label="{b}" />
+        \\  </row>
+        \\</template>
+        \\<row>
+        \\  <use template="pill-row" a="one" b="two" />
+        \\</row>
+    ;
+    const document = try parseSource(arena_state.allocator(), source);
+    try testing.expectEqual(@as(usize, 2), document.templates.len);
+    try testing.expectEqualStrings("pill", document.templates[0].attr("name").?);
+    try testing.expectEqual(@as(?usize, 1), document.templateIndex("pill-row"));
+    try testing.expectEqual(@as(?usize, null), document.templateIndex("missing"));
+
+    var args = markup.templateArgs(document.templates[1]);
+    try testing.expectEqualStrings("a", args.next().?);
+    try testing.expectEqualStrings("b", args.next().?);
+    try testing.expectEqual(@as(?[]const u8, null), args.next());
+    try testing.expect(markup.templateDeclaresArg(document.templates[0], "label"));
+    try testing.expect(!markup.templateDeclaresArg(document.templates[0], "cards"));
+
+    try testing.expectEqualStrings("row", document.root.name);
+    try testing.expectEqual(markup.MarkupNodeKind.use_block, document.root.children[0].kind);
+    try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(document));
+}
+
+test "a template file without a view root is a parse error" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var parser = markup.Parser.init(arena_state.allocator(), "<template name=\"only\"><text>x</text></template>");
+    try testing.expectError(error.MarkupSyntax, parser.parse());
+    try testing.expectEqualStrings("expected a view root element after the template definitions", parser.diagnostic.message);
+}
+
+test "template and use misuse is validated with positions and teaching messages" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        // Templates must be top-level, named, unique, and single-bodied.
+        .{ .source = "<column>\n  <template name=\"t\"><text>x</text></template>\n</column>", .message = markup.template_top_level_message },
+        .{ .source = "<template args=\"a\"><text>x</text></template>\n<row />", .message = markup.template_name_message },
+        .{ .source = "<template name=\"t\"><text>x</text></template>\n<template name=\"t\"><text>y</text></template>\n<row />", .message = markup.template_unique_name_message },
+        .{ .source = "<template name=\"t\" args=\"a.b\"><text>x</text></template>\n<row />", .message = markup.template_args_message },
+        .{ .source = "<template name=\"t\" bogus=\"1\"><text>x</text></template>\n<row />", .message = markup.template_attrs_message },
+        .{ .source = "<template name=\"t\"><text>x</text><text>y</text></template>\n<row />", .message = markup.template_one_child_message },
+        // Use sites must name a defined, earlier template and match its args.
+        .{ .source = "<row>\n  <use />\n</row>", .message = markup.use_template_attr_message },
+        .{ .source = "<row>\n  <use template=\"missing\" />\n</row>", .message = markup.use_undefined_template_message },
+        .{ .source = "<template name=\"a\"><column><use template=\"b\" /></column></template>\n<template name=\"b\"><text>x</text></template>\n<row />", .message = markup.use_earlier_template_message },
+        .{ .source = "<template name=\"t\" args=\"title\"><text>{title}</text></template>\n<row>\n  <use template=\"t\" />\n</row>", .message = markup.use_missing_arg_message },
+        .{ .source = "<template name=\"t\"><text>x</text></template>\n<row>\n  <use template=\"t\" extra=\"1\" />\n</row>", .message = markup.use_extra_arg_message },
+        .{ .source = "<template name=\"t\"><text>x</text></template>\n<row>\n  <use template=\"t\"><text>y</text></use>\n</row>", .message = markup.use_no_children_message },
+        .{ .source = "<template name=\"t\" args=\"title\"><text>{title}</text></template>\n<row>\n  <use template=\"t\" title=\"{a + b}\" />\n</row>", .message = markup.invalid_expression_message },
+        // A template using itself is a later-reference error (recursion).
+        .{ .source = "<template name=\"loop\"><column><use template=\"loop\" /></column></template>\n<row />", .message = markup.use_earlier_template_message },
+    };
+    for (cases) |case| {
+        var parser = markup.Parser.init(arena_state.allocator(), case.source);
+        const info = markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+        try testing.expect(info.line > 0);
+        try testing.expect(info.column > 0);
+    }
+}
+
+test "style token attributes validate against the token name lists" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    // Every color style attribute accepts every known color token name,
+    // and radius accepts every radius token name.
+    for (markup.known_color_style_attrs) |attr| {
+        for (markup.known_color_token_names) |token| {
+            const source = try std.fmt.allocPrint(arena_state.allocator(), "<row {s}=\"{s}\" />", .{ attr, token });
+            var parser = markup.Parser.init(arena_state.allocator(), source);
+            try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+        }
+    }
+    for (markup.known_radius_token_names) |token| {
+        const source = try std.fmt.allocPrint(arena_state.allocator(), "<row radius=\"{s}\" />", .{token});
+        var parser = markup.Parser.init(arena_state.allocator(), source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        .{ .source = "<row background=\"chartreuse\" />", .message = markup.unknown_color_token_message },
+        .{ .source = "<row foreground=\"#ff0000\" />", .message = markup.unknown_color_token_message },
+        .{ .source = "<row radius=\"tiny\" />", .message = markup.unknown_radius_token_message },
+        .{ .source = "<row background=\"{accentColor}\" />", .message = markup.style_token_literal_message },
+        .{ .source = "<row radius=\"{r}\" />", .message = markup.style_token_literal_message },
+    };
+    for (cases) |case| {
+        var parser = markup.Parser.init(arena_state.allocator(), case.source);
+        const info = markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+        try testing.expect(info.line > 0);
+    }
+}
+
 test "structural validation reports positions for grammar misuse" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

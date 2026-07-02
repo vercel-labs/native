@@ -44,6 +44,70 @@ pub const UiHandlerEvent = enum {
     input,
 };
 
+/// A color design token referenced by name (the fields of
+/// `canvas.ColorTokens`). Markup style attributes (`background="surface"`)
+/// parse into these; `finalizeWithTokens` resolves them against live
+/// tokens, so themed apps re-resolve on retheme rebuilds.
+pub const ColorTokenName = std.meta.FieldEnum(canvas.ColorTokens);
+
+/// A radius design token referenced by name (the fields of
+/// `canvas.RadiusTokens`).
+pub const RadiusTokenName = std.meta.FieldEnum(canvas.RadiusTokens);
+
+/// Token references for the style a widget should resolve at finalize
+/// time. Each maps to the matching `WidgetStyle` field and only applies
+/// when the author has not already set that field explicitly
+/// (`border_color` maps to `WidgetStyle.border`; the markup attribute is
+/// `border-color`, keeping bare `border` free for a future width
+/// shorthand).
+pub const StyleTokenRefs = struct {
+    background: ?ColorTokenName = null,
+    foreground: ?ColorTokenName = null,
+    accent: ?ColorTokenName = null,
+    accent_foreground: ?ColorTokenName = null,
+    border_color: ?ColorTokenName = null,
+    focus_ring: ?ColorTokenName = null,
+    radius: ?RadiusTokenName = null,
+};
+
+fn colorTokenValue(colors: canvas.ColorTokens, ref: ColorTokenName) canvas.Color {
+    return switch (ref) {
+        inline else => |tag| @field(colors, @tagName(tag)),
+    };
+}
+
+fn radiusTokenValue(radius: canvas.RadiusTokens, ref: RadiusTokenName) f32 {
+    return switch (ref) {
+        inline else => |tag| @field(radius, @tagName(tag)),
+    };
+}
+
+/// Resolve token references into concrete style values, keeping any style
+/// field the author already set explicitly.
+fn applyStyleTokens(style: *canvas.WidgetStyle, refs: StyleTokenRefs, tokens: *const canvas.DesignTokens) void {
+    if (refs.background) |ref| {
+        if (style.background == null) style.background = colorTokenValue(tokens.colors, ref);
+    }
+    if (refs.foreground) |ref| {
+        if (style.foreground == null) style.foreground = colorTokenValue(tokens.colors, ref);
+    }
+    if (refs.accent) |ref| {
+        if (style.accent == null) style.accent = colorTokenValue(tokens.colors, ref);
+    }
+    if (refs.accent_foreground) |ref| {
+        if (style.accent_foreground == null) style.accent_foreground = colorTokenValue(tokens.colors, ref);
+    }
+    if (refs.border_color) |ref| {
+        if (style.border == null) style.border = colorTokenValue(tokens.colors, ref);
+    }
+    if (refs.focus_ring) |ref| {
+        if (style.focus_ring == null) style.focus_ring = colorTokenValue(tokens.colors, ref);
+    }
+    if (refs.radius) |ref| {
+        if (style.radius == null) style.radius = radiusTokenValue(tokens.radius, ref);
+    }
+}
+
 pub fn Ui(comptime Msg: type) type {
     return struct {
         const Self = @This();
@@ -83,6 +147,9 @@ pub fn Ui(comptime Msg: type) type {
             virtualized: bool = false,
             virtual_item_extent: f32 = 0,
             style: canvas.WidgetStyle = .{},
+            /// Named token references resolved against design tokens in
+            /// `finalizeWithTokens`; explicit `style` values win.
+            style_tokens: StyleTokenRefs = .{},
             semantics: canvas.WidgetSemantics = .{},
             on_press: ?Msg = null,
             on_toggle: ?Msg = null,
@@ -103,6 +170,7 @@ pub fn Ui(comptime Msg: type) type {
             widget: Widget = .{ .kind = .stack },
             key: ?UiKey = null,
             global_key: ?UiKey = null,
+            style_tokens: StyleTokenRefs = .{},
             on_press: ?Msg = null,
             on_toggle: ?Msg = null,
             on_change: ?Msg = null,
@@ -241,6 +309,7 @@ pub fn Ui(comptime Msg: type) type {
                 .widget = widgetFromOptions(kind, options),
                 .key = options.key,
                 .global_key = options.global_key,
+                .style_tokens = options.style_tokens,
                 .on_press = options.on_press,
                 .on_toggle = options.on_toggle,
                 .on_change = options.on_change,
@@ -358,21 +427,26 @@ pub fn Ui(comptime Msg: type) type {
 
         /// Assign structural ids, materialize widget children, and collect
         /// the typed handler table. Container sizing is measured by the
-        /// engine's `intrinsicWidgetSize` at layout time.
+        /// engine's `intrinsicWidgetSize` at layout time. Style token
+        /// references resolve against the default tokens; themed apps use
+        /// `finalizeWithTokens`.
         pub fn finalize(self: *Self, node: Node) error{OutOfMemory}!Tree {
             return self.finalizeWithTokens(node, .{});
         }
 
-        /// Deprecated alias for `finalize`: container measurement moved into
-        /// the engine, so tokens no longer affect finalization.
+        /// `finalize` against live design tokens: node `style_tokens`
+        /// references (markup `background="surface"`, `radius="md"`, ...)
+        /// resolve into concrete `widget.style` values here, unless the
+        /// author already set the style field explicitly. `UiApp` calls
+        /// this with `effectiveTokens()` on every rebuild, so token refs
+        /// re-resolve when the theme changes.
         pub fn finalizeWithTokens(self: *Self, node: Node, tokens: canvas.DesignTokens) error{OutOfMemory}!Tree {
-            _ = tokens;
             if (self.failed) return error.OutOfMemory;
             const handler_capacity = countHandlers(node);
             const handlers = try self.arena.alloc(Handler, handler_capacity);
             var handler_len: usize = 0;
             const root_key = node.key orelse UiKey{ .index = 0 };
-            const root = try self.finalizeNode(node, root_id_seed, root_key, handlers, &handler_len);
+            const root = try self.finalizeNode(node, root_id_seed, root_key, handlers, &handler_len, &tokens);
             return .{ .root = root, .handlers = handlers[0..handler_len] };
         }
 
@@ -383,8 +457,10 @@ pub fn Ui(comptime Msg: type) type {
             key: UiKey,
             handlers: []Handler,
             handler_len: *usize,
+            tokens: *const canvas.DesignTokens,
         ) error{OutOfMemory}!Widget {
             var widget = node.widget;
+            applyStyleTokens(&widget.style, node.style_tokens, tokens);
             widget.id = if (node.global_key) |global_key|
                 structuralId(global_id_seed, widget.kind, global_key)
             else
@@ -402,7 +478,7 @@ pub fn Ui(comptime Msg: type) type {
                 const child_widgets = try self.arena.alloc(Widget, node.nodes.len);
                 for (node.nodes, 0..) |child, index| {
                     const child_key = child.key orelse UiKey{ .index = index };
-                    child_widgets[index] = try self.finalizeNode(child, widget.id, child_key, handlers, handler_len);
+                    child_widgets[index] = try self.finalizeNode(child, widget.id, child_key, handlers, handler_len, tokens);
                 }
                 widget.children = child_widgets;
             }

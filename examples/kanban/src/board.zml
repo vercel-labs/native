@@ -1,53 +1,34 @@
-<!-- The kanban board view. Three explicit column blocks because markup
-     bindings are zero-argument: a per-column card query needs one model
-     function per column (todoCards/doingCards/doneCards). Cards carry a
-     global-key so their widget ids survive moving between columns, and the
-     move button is an <if> over card.movable. -->
+<!-- The kanban board view. One board-column template instantiated three
+     times; bindings stay zero-argument, so each <use> passes its own
+     model query (todoCards/doingCards/doneCards) as the cards arg. The
+     template body is built in place of each <use>, so widget ids are
+     identical to writing the three columns out by hand. Cards carry a
+     global-key so their ids survive moving between columns, and the move
+     button is an <if> over card.movable. -->
+<template name="board-column" args="title cards">
+  <column grow="1" gap="8" padding="10" label="{title}">
+    <text foreground="text_muted">{title}</text>
+    <column gap="8">
+      <for each="cards" key="id" as="c">
+        <row global-key="{c.id}" background="surface" radius="md" gap="8" padding="8" cross="center" role="listitem" label="{c.title}">
+          <text grow="1">{c.title}</text>
+          <if test="{c.movable}">
+            <button size="sm" on-press="move_right:{c.id}">></button>
+          </if>
+        </row>
+      </for>
+    </column>
+  </column>
+</template>
 <column gap="12" padding="16">
   <row gap="8" cross="center">
     <text grow="1">Kanban</text>
     <button variant="primary" on-press="add">Add card</button>
   </row>
   <row grow="1" gap="12">
-    <column grow="1" gap="8" padding="10" label="Todo">
-      <text>Todo</text>
-      <column gap="8">
-        <for each="todoCards" key="id" as="c">
-          <row global-key="{c.id}" gap="8" padding="8" cross="center" role="listitem" label="{c.title}">
-            <text grow="1">{c.title}</text>
-            <if test="{c.movable}">
-              <button size="sm" on-press="move_right:{c.id}">></button>
-            </if>
-          </row>
-        </for>
-      </column>
-    </column>
-    <column grow="1" gap="8" padding="10" label="Doing">
-      <text>Doing</text>
-      <column gap="8">
-        <for each="doingCards" key="id" as="c">
-          <row global-key="{c.id}" gap="8" padding="8" cross="center" role="listitem" label="{c.title}">
-            <text grow="1">{c.title}</text>
-            <if test="{c.movable}">
-              <button size="sm" on-press="move_right:{c.id}">></button>
-            </if>
-          </row>
-        </for>
-      </column>
-    </column>
-    <column grow="1" gap="8" padding="10" label="Done">
-      <text>Done</text>
-      <column gap="8">
-        <for each="doneCards" key="id" as="c">
-          <row global-key="{c.id}" gap="8" padding="8" cross="center" role="listitem" label="{c.title}">
-            <text grow="1">{c.title}</text>
-            <if test="{c.movable}">
-              <button size="sm" on-press="move_right:{c.id}">></button>
-            </if>
-          </row>
-        </for>
-      </column>
-    </column>
+    <use template="board-column" title="Todo" cards="{todoCards}" />
+    <use template="board-column" title="Doing" cards="{doingCards}" />
+    <use template="board-column" title="Done" cards="{doneCards}" />
   </row>
   <status-bar>{todoCount} todo · {doingCount} doing · {doneCount} done</status-bar>
 </column>

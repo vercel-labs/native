@@ -576,6 +576,8 @@ pub const structure_docs = [_]Doc{
     .{ .name = "for", .doc = "Structure tag: repeats its single element child over each; requires each and as, key names an item field." },
     .{ .name = "if", .doc = "Structure tag: renders children when test={binding} or {a == b} is true." },
     .{ .name = "else", .doc = "Structure tag: must directly follow an if." },
+    .{ .name = "template", .doc = "Top-level template definition (before the view root): name, optional args, exactly one element child." },
+    .{ .name = "use", .doc = "Expands a template in place: template names an earlier definition, other attributes must match its args exactly." },
 };
 
 pub const attribute_docs = [_]Doc{
@@ -600,6 +602,19 @@ pub const attribute_docs = [_]Doc{
     .{ .name = "global-key", .doc = "Parent-independent identity: ids survive reparenting between containers." },
     .{ .name = "role", .doc = "Accessibility role (listitem, button, ...)." },
     .{ .name = "label", .doc = "Accessible name." },
+    .{ .name = "background", .doc = "Background color token (literal ColorTokens field name: background, surface, surface_subtle, ...)." },
+    .{ .name = "foreground", .doc = "Foreground/text color token (literal ColorTokens field name, e.g. text, text_muted)." },
+    .{ .name = "accent", .doc = "Accent color token (literal ColorTokens field name, e.g. accent, destructive)." },
+    .{ .name = "accent-foreground", .doc = "Accent foreground color token (literal ColorTokens field name, e.g. accent_text)." },
+    .{ .name = "border-color", .doc = "Border color token (literal ColorTokens field name, e.g. border)." },
+    .{ .name = "focus-ring", .doc = "Focus ring color token (literal ColorTokens field name, e.g. focus_ring)." },
+    .{ .name = "radius", .doc = "Corner radius token (literal RadiusTokens field name: sm, md, lg, xl)." },
+};
+
+pub const template_attr_docs = [_]Doc{
+    .{ .name = "name", .doc = "template: the definition's name, referenced by use." },
+    .{ .name = "args", .doc = "template: space-separated arg names use sites must pass (slice bindings iterate, scalars bind as values)." },
+    .{ .name = "template", .doc = "use: names an earlier top-level template to expand in place." },
 };
 
 pub const for_attr_docs = [_]Doc{
@@ -629,6 +644,7 @@ pub fn attributeDoc(name: []const u8) ?[]const u8 {
     if (findDoc(&attribute_docs, name)) |doc| return doc;
     if (findDoc(&event_docs, name)) |doc| return doc;
     if (findDoc(&for_attr_docs, name)) |doc| return doc;
+    if (findDoc(&template_attr_docs, name)) |doc| return doc;
     return findDoc(&if_attr_docs, name);
 }
 
@@ -807,10 +823,16 @@ test "doc tables cover every known element, attribute, and event" {
     for (ui_markup.known_element_names) |name| {
         try testing.expect(elementDoc(name) != null);
     }
-    for ([_][]const u8{ "for", "if", "else" }) |name| {
+    for ([_][]const u8{ "for", "if", "else", "template", "use" }) |name| {
         try testing.expect(elementDoc(name) != null);
     }
     for (ui_markup.known_option_attrs) |name| {
+        try testing.expect(attributeDoc(name) != null);
+    }
+    for (ui_markup.known_color_style_attrs) |name| {
+        try testing.expect(attributeDoc(name) != null);
+    }
+    for ([_][]const u8{ "radius", "name", "args", "template" }) |name| {
         try testing.expect(attributeDoc(name) != null);
     }
     for (ui_markup.known_events) |event| {

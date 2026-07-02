@@ -338,7 +338,7 @@ fn themedUpdate(model: *ThemedModel, msg: ThemedMsg) void {
 }
 
 fn themedView(ui: *ThemedApp.Ui, model: *const ThemedModel) ThemedApp.Ui.Node {
-    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+    return ui.column(.{ .gap = 8, .padding = 12, .style_tokens = .{ .background = .background } }, .{
         ui.text(.{}, ui.fmt("Count {d}", .{model.count})),
         ui.button(.{ .variant = .primary, .on_press = .increment }, "Add"),
         ui.el(.slider, .{ .value = model.slider_value, .on_change = .slider_changed, .semantics = .{ .label = "Level" } }, .{}),
@@ -470,6 +470,9 @@ test "ui app hooks drive chrome, dynamic tokens, animations, and frame reports" 
     try std.testing.expectEqualDeep(themed_light_background, stored_tokens.colors.background);
     try std.testing.expectEqual(@as(f32, 2), stored_tokens.pixel_snap.scale);
 
+    // The root's style token ref resolved against the model-derived tokens.
+    try std.testing.expectEqualDeep(themed_light_background, app_state.tree.?.root.style.background.?);
+
     const animations = try harness.runtime.canvasRenderAnimations(1, canvas_label);
     try std.testing.expectEqual(@as(usize, 1), animations.len);
     try std.testing.expectEqual(@as(u64, 1_000_000_000), animations[0].start_ns);
@@ -504,6 +507,9 @@ test "ui app hooks drive chrome, dynamic tokens, animations, and frame reports" 
     try std.testing.expect(app_state.model.high_contrast);
     const dark_tokens = try harness.runtime.canvasWidgetDesignTokens(1, canvas_label);
     try std.testing.expectEqualDeep(themed_dark_background, dark_tokens.colors.background);
+    // Style token refs re-resolve on the retheme rebuild: the same widget
+    // now carries the dark token's concrete color.
+    try std.testing.expectEqualDeep(themed_dark_background, app_state.tree.?.root.style.background.?);
     display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
     try expectChromeFillRect(display_list, themed_chrome_background_id, geometry.RectF.init(0, 0, 400, 300), themed_dark_background);
 

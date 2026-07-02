@@ -43,18 +43,36 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
 
         pub const document = markup.parseComptime(source);
 
-        /// Loop variables in scope at a point in the tree. Names and item
-        /// types are comptime; the runtime value is a nested struct with
-        /// one `*const Item` per enclosing `for`.
-        const ScopeEntry = struct { name: []const u8, Item: type };
+        /// Loop variables and template args in scope at a point in the
+        /// tree. Names, kinds, and item types are comptime; the runtime
+        /// value is a nested struct with one payload per entry: a
+        /// `*const Item` for `for` items, a `Value` for scalar template
+        /// args, and a `[]const Item` for slice-valued template args.
+        const ScopeEntry = struct {
+            name: []const u8,
+            kind: Kind,
+            Item: type = void,
+            /// For value args: the comptime-known Value variant of the
+            /// use-site expression (null when only runtime-known, e.g. a
+            /// binding through an optional).
+            variant: ?ValueVariant = null,
 
-        fn ScopeValue(comptime entries: []const ScopeEntry) type {
-            if (entries.len == 0) return struct {};
-            return struct {
-                parent: ScopeValue(entries[0 .. entries.len - 1]),
-                item: *const entries[entries.len - 1].Item,
+            const Kind = enum { item, value_arg, slice_arg };
+        };
+
+        fn EntryPayload(comptime entry: ScopeEntry) type {
+            return switch (entry.kind) {
+                .item => *const entry.Item,
+                .value_arg => Value,
+                .slice_arg => []const entry.Item,
             };
         }
+
+        // Runtime scopes are anonymous `{ parent, item }` chains passed as
+        // `anytype`: one link per entry, innermost last, so a link's type
+        // never depends on comptime slice identity (a child list created
+        // with `entries ++ ...` re-slices a fresh array, which would not
+        // unify with the parent's `entries` under generic instantiation).
 
         const no_entries: []const ScopeEntry = &.{};
 
@@ -65,18 +83,55 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
         /// the builder's own sugar (`ui.fmt`, `ui.each`).
         pub fn build(ui: *Ui, model: *const ModelT) Ui.Node {
             comptime {
+                checkTemplates();
                 switch (document.root.kind) {
-                    .element => {},
+                    .element, .use_block => {},
+                    .template_block => fail(document.root, markup.template_top_level_message),
                     .text => fail(document.root, "text content is only allowed inside text-bearing elements"),
                     .for_block, .if_block, .else_block => fail(document.root, "structure tags are only allowed inside an element"),
                 }
             }
+            if (comptime (document.root.kind == .use_block)) {
+                return buildUse(document.root, no_entries, ui, model, .{});
+            }
             return buildElement(document.root, no_entries, ui, model, .{});
+        }
+
+        /// Comptime template wiring checks, mirroring the validator: a
+        /// name, exactly one element child, and uses inside template
+        /// bodies referencing only earlier templates — which also
+        /// guarantees comptime expansion terminates.
+        fn checkTemplates() void {
+            comptime {
+                @setEvalBranchQuota(10_000);
+                for (document.templates, 0..) |template_node, index| {
+                    const name = template_node.attr("name") orelse fail(template_node, markup.template_name_message);
+                    for (document.templates[0..index]) |earlier| {
+                        const earlier_name = earlier.attr("name") orelse continue;
+                        if (std.mem.eql(u8, earlier_name, name)) fail(template_node, markup.template_unique_name_message);
+                    }
+                    if (template_node.children.len != 1 or template_node.children[0].kind != .element) {
+                        fail(template_node, markup.template_one_child_message);
+                    }
+                    checkUseOrder(template_node.children[0], index);
+                }
+            }
+        }
+
+        fn checkUseOrder(comptime node: markup.MarkupNode, comptime limit: usize) void {
+            comptime {
+                if (node.kind == .use_block) {
+                    const name = node.attr("template") orelse fail(node, markup.use_template_attr_message);
+                    const index = document.templateIndex(name) orelse fail(node, markup.use_undefined_template_message);
+                    if (index >= limit) fail(node, markup.use_earlier_template_message);
+                }
+                for (node.children) |child| checkUseOrder(child, limit);
+            }
         }
 
         // ------------------------------------------------------ building
 
-        fn buildElement(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: ScopeValue(entries)) Ui.Node {
+        fn buildElement(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype) Ui.Node {
             const kind = comptime (interpreter.elementKind(node.name) orelse fail(node, "unknown element"));
             var options: Ui.ElementOptions = .{};
             applyAttrs(node, entries, ui, model, scope, &options);
@@ -92,11 +147,12 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
             return ui.el(kind, options, @as([]const Ui.Node, children.items));
         }
 
-        /// One runtime step per child: elements append a node, `for` blocks
-        /// append per item, and an `if` (with its adjacent `else` paired at
-        /// comptime) branches on the test binding.
+        /// One runtime step per child: elements and `use` expansions append
+        /// a node, `for` blocks append per item, and an `if` (with its
+        /// adjacent `else` paired at comptime) branches on the test binding.
         const ChildStep = union(enum) {
             element: markup.MarkupNode,
+            use: markup.MarkupNode,
             for_block: markup.MarkupNode,
             conditional: struct { if_block: markup.MarkupNode, else_block: ?markup.MarkupNode },
         };
@@ -110,6 +166,8 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
                     const child = node.children[index];
                     switch (child.kind) {
                         .element => steps = steps ++ &[_]ChildStep{.{ .element = child }},
+                        .use_block => steps = steps ++ &[_]ChildStep{.{ .use = child }},
+                        .template_block => fail(child, markup.template_top_level_message),
                         .for_block => steps = steps ++ &[_]ChildStep{.{ .for_block = child }},
                         .if_block => {
                             var else_block: ?markup.MarkupNode = null;
@@ -127,12 +185,18 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
             }
         }
 
-        fn buildChildren(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: ScopeValue(entries), out: *std.ArrayListUnmanaged(Ui.Node)) void {
+        fn buildChildren(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, out: *std.ArrayListUnmanaged(Ui.Node)) void {
             const steps = comptime childSteps(node);
             inline for (0..steps.len) |index| {
                 const step = comptime steps[index];
                 if (comptime (step == .element)) {
                     const built = buildElement(comptime step.element, entries, ui, model, scope);
+                    out.append(ui.arena, built) catch {
+                        ui.failed = true;
+                        return;
+                    };
+                } else if (comptime (step == .use)) {
+                    const built = buildUse(comptime step.use, entries, ui, model, scope);
                     out.append(ui.arena, built) catch {
                         ui.failed = true;
                         return;
@@ -152,25 +216,46 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
             }
         }
 
-        fn buildFor(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: ScopeValue(entries), out: *std.ArrayListUnmanaged(Ui.Node)) void {
+        fn buildFor(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, out: *std.ArrayListUnmanaged(Ui.Node)) void {
             const each = comptime (node.attr("each") orelse fail(node, "for requires an each attribute"));
-            const as_name = comptime (node.attr("as") orelse fail(node, "for requires an as attribute"));
             comptime {
-                if (node.children.len != 1 or node.children[0].kind != .element) {
+                _ = node.attr("as") orelse fail(node, "for requires an as attribute");
+                if (node.children.len != 1 or (node.children[0].kind != .element and node.children[0].kind != .use_block)) {
                     fail(node, "for takes exactly one element child");
                 }
             }
-            const template = comptime node.children[0];
-            const info = comptime (eachInfo(each) orelse fail(node, "each does not name an iterable on the model"));
-            const child_entries = comptime (entries ++ &[_]ScopeEntry{.{ .name = as_name, .Item = info.Item }});
-
+            // Comptime mirror of the interpreter's `each` resolution:
+            // slice-valued template args in scope shadow model iterables.
+            const scope_index_opt = comptime scopeIndex(entries, each);
+            if (comptime (scope_index_opt != null)) {
+                const scope_index = comptime scope_index_opt.?;
+                comptime {
+                    if (entries[scope_index].kind != .slice_arg) {
+                        fail(node, "each does not name an iterable (a model slice, array, or fn - or a slice-valued template arg)");
+                    }
+                }
+                const items = scopePayload(entries, scope_index, scope);
+                buildForItems(comptime entries[scope_index].Item, node, entries, items, ui, model, scope, out);
+                return;
+            }
+            const info = comptime (eachInfo(each) orelse fail(node, "each does not name an iterable (a model slice, array, or fn - or a slice-valued template arg)"));
             const items = eachItems(info, ui, model);
+            buildForItems(info.Item, node, entries, items, ui, model, scope, out);
+        }
+
+        fn buildForItems(comptime ItemT: type, comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, items: []const ItemT, ui: *Ui, model: *const ModelT, scope: anytype, out: *std.ArrayListUnmanaged(Ui.Node)) void {
+            const as_name = comptime node.attr("as").?;
+            const template = comptime node.children[0];
+            const child_entries = comptime (entries ++ &[_]ScopeEntry{.{ .name = as_name, .kind = .item, .Item = ItemT }});
             for (items) |*item| {
-                const child_scope = ScopeValue(child_entries){ .parent = scope, .item = item };
-                var built = buildElement(template, child_entries, ui, model, child_scope);
+                const child_scope = .{ .parent = scope, .item = @as(*const ItemT, item) };
+                var built = if (comptime (template.kind == .use_block))
+                    buildUse(template, child_entries, ui, model, child_scope)
+                else
+                    buildElement(template, child_entries, ui, model, child_scope);
                 if (comptime (node.attr("key") != null)) {
                     if (built.key == null and built.global_key == null) {
-                        built.key = itemKey(info.Item, template, comptime node.attr("key").?, ui, item);
+                        built.key = itemKey(ItemT, template, comptime node.attr("key").?, ui, item);
                     }
                 }
                 out.append(ui.arena, built) catch {
@@ -178,6 +263,136 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
                     return;
                 };
             }
+        }
+
+        // ------------------------------------------------------ templates
+
+        /// A `<use>` arg as resolved at comptime against the use site: a
+        /// scalar `Value` (literal, equality, or scalar binding) or a
+        /// slice (a model iterable path, or a slice arg re-passed from an
+        /// enclosing template).
+        const ArgSpec = struct {
+            name: []const u8,
+            raw: []const u8,
+            kind: Kind,
+            Item: type = void,
+            variant: ?ValueVariant = null,
+            each: ?EachInfo = null,
+            site_index: ?usize = null,
+
+            const Kind = enum { value, slice };
+        };
+
+        /// Expand a `<use>` site: resolve the template, check its declared
+        /// args against the use attributes, evaluate the args against the
+        /// use-site scope, and inline the template's single element child
+        /// in place — structural ids hash through the parent chain at the
+        /// expansion site, exactly as if the body were written inline. The
+        /// body's scope holds only the args (plus the model), never the
+        /// use site's loop variables.
+        fn buildUse(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype) Ui.Node {
+            const template_name = comptime (node.attr("template") orelse fail(node, markup.use_template_attr_message));
+            const template_index = comptime (document.templateIndex(template_name) orelse fail(node, markup.use_undefined_template_message));
+            const template_node = comptime document.templates[template_index];
+            comptime {
+                if (template_node.children.len != 1 or template_node.children[0].kind != .element) {
+                    fail(template_node, markup.template_one_child_message);
+                }
+                if (node.children.len != 0) fail(node, markup.use_no_children_message);
+            }
+            const specs = comptime useArgSpecs(node, template_node, entries);
+            const body_entries = comptime argEntries(specs);
+            const body_scope = buildArgScope(specs, entries, node, ui, model, scope);
+            return buildElement(comptime template_node.children[0], body_entries, ui, model, body_scope);
+        }
+
+        fn useArgSpecs(comptime node: markup.MarkupNode, comptime template_node: markup.MarkupNode, comptime site_entries: []const ScopeEntry) []const ArgSpec {
+            comptime {
+                @setEvalBranchQuota(10_000);
+                for (node.attrs) |attribute| {
+                    if (std.mem.eql(u8, attribute.name, "template")) continue;
+                    if (!markup.templateDeclaresArg(template_node, attribute.name)) {
+                        fail(node, markup.use_extra_arg_message);
+                    }
+                }
+                var specs: []const ArgSpec = &.{};
+                var args = markup.templateArgs(template_node);
+                while (args.next()) |arg_name| {
+                    const raw = node.attr(arg_name) orelse fail(node, markup.use_missing_arg_message);
+                    specs = specs ++ &[_]ArgSpec{argSpec(node, site_entries, arg_name, raw)};
+                }
+                return specs;
+            }
+        }
+
+        /// Comptime mirror of the interpreter's `argPayload` resolution
+        /// order: scope entries shadow model iterables; a binding naming
+        /// an iterable becomes a slice arg, anything else a value arg.
+        fn argSpec(comptime node: markup.MarkupNode, comptime site_entries: []const ScopeEntry, comptime arg_name: []const u8, comptime raw: []const u8) ArgSpec {
+            comptime {
+                const expression = markup.parseAttrExpression(raw) orelse fail(node, invalid_expression_message);
+                if (expression == .binding) {
+                    const path = expression.binding;
+                    const head = interpreter.pathHead(path);
+                    if (scopeIndex(site_entries, head)) |index| {
+                        if (site_entries[index].kind == .slice_arg and interpreter.pathTail(path) == null) {
+                            return .{ .name = arg_name, .raw = raw, .kind = .slice, .Item = site_entries[index].Item, .site_index = index };
+                        }
+                    } else if (eachInfo(path)) |info| {
+                        return .{ .name = arg_name, .raw = raw, .kind = .slice, .Item = info.Item, .each = info };
+                    }
+                }
+                return .{ .name = arg_name, .raw = raw, .kind = .value, .variant = exprVariant(node, site_entries, raw) };
+            }
+        }
+
+        fn argEntries(comptime specs: []const ArgSpec) []const ScopeEntry {
+            comptime {
+                var entries: []const ScopeEntry = &.{};
+                for (specs) |spec| {
+                    entries = entries ++ &[_]ScopeEntry{switch (spec.kind) {
+                        .value => .{ .name = spec.name, .kind = .value_arg, .variant = spec.variant },
+                        .slice => .{ .name = spec.name, .kind = .slice_arg, .Item = spec.Item },
+                    }};
+                }
+                return entries;
+            }
+        }
+
+        fn ArgPayload(comptime spec: ArgSpec) type {
+            return switch (spec.kind) {
+                .value => Value,
+                .slice => []const spec.Item,
+            };
+        }
+
+        /// The scope chain type for a template body: one link per arg,
+        /// nothing from the use site — a template sees the model and its
+        /// args, never the loop variables where it is used.
+        fn ArgScope(comptime specs: []const ArgSpec) type {
+            if (specs.len == 0) return struct {};
+            return struct {
+                parent: ArgScope(specs[0 .. specs.len - 1]),
+                item: ArgPayload(specs[specs.len - 1]),
+            };
+        }
+
+        fn buildArgScope(comptime specs: []const ArgSpec, comptime site_entries: []const ScopeEntry, comptime node: markup.MarkupNode, ui: *Ui, model: *const ModelT, site_scope: anytype) ArgScope(specs) {
+            if (comptime (specs.len == 0)) return .{};
+            return .{
+                .parent = buildArgScope(comptime specs[0 .. specs.len - 1], site_entries, node, ui, model, site_scope),
+                .item = argPayloadValue(comptime specs[specs.len - 1], site_entries, node, ui, model, site_scope),
+            };
+        }
+
+        fn argPayloadValue(comptime spec: ArgSpec, comptime site_entries: []const ScopeEntry, comptime node: markup.MarkupNode, ui: *Ui, model: *const ModelT, site_scope: anytype) ArgPayload(spec) {
+            if (comptime (spec.kind == .slice)) {
+                if (comptime (spec.site_index != null)) {
+                    return scopePayload(site_entries, comptime spec.site_index.?, site_scope);
+                }
+                return eachItems(comptime spec.each.?, ui, model);
+            }
+            return evalExpr(node, site_entries, spec.raw, model, site_scope);
         }
 
         // -------------------------------------------------- `for` sources
@@ -240,7 +455,7 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
 
         // ---------------------------------------------------- attributes
 
-        fn applyAttrs(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: ScopeValue(entries), options: *Ui.ElementOptions) void {
+        fn applyAttrs(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, options: *Ui.ElementOptions) void {
             inline for (0..node.attrs.len) |attr_index| {
                 const attribute = comptime node.attrs[attr_index];
                 if (comptime std.mem.eql(u8, attribute.name, "kind")) {
@@ -259,9 +474,48 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
                         .string => |text| text,
                         else => runtimeFail([]const u8, ui),
                     };
+                } else if (comptime (colorStyleField(attribute.name) != null)) {
+                    // Style token refs resolve entirely at comptime: a typo
+                    // in a token name is a compile error.
+                    @field(options.style_tokens, colorStyleField(attribute.name).?) =
+                        comptime colorTokenRef(node, attribute.value);
+                } else if (comptime std.mem.eql(u8, attribute.name, "radius")) {
+                    options.style_tokens.radius = comptime radiusTokenRef(node, attribute.value);
                 } else {
                     setOption(node, comptime optionFieldName(node, attribute.name), attribute.value, entries, ui, model, scope, options);
                 }
+            }
+        }
+
+        fn colorStyleField(comptime attr_name: []const u8) ?[]const u8 {
+            comptime {
+                @setEvalBranchQuota(10_000);
+                for (interpreter.color_style_attr_fields) |entry| {
+                    if (std.mem.eql(u8, attr_name, entry.markup)) return entry.zig;
+                }
+                return null;
+            }
+        }
+
+        fn styleTokenLiteral(comptime node: markup.MarkupNode, comptime raw: []const u8) []const u8 {
+            comptime {
+                const expression = markup.parseAttrExpression(raw) orelse fail(node, markup.style_token_literal_message);
+                if (expression != .literal) fail(node, markup.style_token_literal_message);
+                return expression.literal;
+            }
+        }
+
+        fn colorTokenRef(comptime node: markup.MarkupNode, comptime raw: []const u8) canvas.ColorTokenName {
+            comptime {
+                return std.meta.stringToEnum(canvas.ColorTokenName, styleTokenLiteral(node, raw)) orelse
+                    fail(node, markup.unknown_color_token_message);
+            }
+        }
+
+        fn radiusTokenRef(comptime node: markup.MarkupNode, comptime raw: []const u8) canvas.RadiusTokenName {
+            comptime {
+                return std.meta.stringToEnum(canvas.RadiusTokenName, styleTokenLiteral(node, raw)) orelse
+                    fail(node, markup.unknown_radius_token_message);
             }
         }
 
@@ -275,7 +529,7 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
             }
         }
 
-        fn setOption(comptime node: markup.MarkupNode, comptime zig_field: []const u8, comptime raw: []const u8, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: ScopeValue(entries), options: *Ui.ElementOptions) void {
+        fn setOption(comptime node: markup.MarkupNode, comptime zig_field: []const u8, comptime raw: []const u8, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, options: *Ui.ElementOptions) void {
             const FieldType = @FieldType(Ui.ElementOptions, zig_field);
             const variant = comptime exprVariant(node, entries, raw);
             switch (comptime @typeInfo(FieldType)) {
@@ -314,7 +568,7 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
             }
         }
 
-        fn attrKey(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime raw: []const u8, ui: *Ui, model: *const ModelT, scope: ScopeValue(entries), comptime message: []const u8) canvas.UiKey {
+        fn attrKey(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime raw: []const u8, ui: *Ui, model: *const ModelT, scope: anytype, comptime message: []const u8) canvas.UiKey {
             comptime requireVariant(exprVariant(node, entries, raw), &.{ .integer, .string }, node, message);
             return uiKeyFromValue(evalExpr(node, entries, raw, model, scope), ui);
         }
@@ -330,7 +584,7 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
             };
         }
 
-        fn roleValue(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime raw: []const u8, ui: *Ui, model: *const ModelT, scope: ScopeValue(entries)) canvas.WidgetRole {
+        fn roleValue(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime raw: []const u8, ui: *Ui, model: *const ModelT, scope: anytype) canvas.WidgetRole {
             comptime requireVariant(exprVariant(node, entries, raw), &.{.string}, node, "role expects a role name");
             const expression = comptime (markup.parseAttrExpression(raw) orelse fail(node, invalid_expression_message));
             if (comptime (expression == .literal)) {
@@ -345,7 +599,7 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
 
         // ------------------------------------------------------ messages
 
-        fn applyMessageAttr(comptime node: markup.MarkupNode, comptime attribute: markup.MarkupAttr, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: ScopeValue(entries), options: *Ui.ElementOptions) void {
+        fn applyMessageAttr(comptime node: markup.MarkupNode, comptime attribute: markup.MarkupAttr, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, options: *Ui.ElementOptions) void {
             const expression = comptime (markup.parseMessageExpression(attribute.value) orelse fail(node, "invalid message expression: on-* takes a Msg tag (\"add\") or tag with one binding payload (\"toggle:{item.id}\")"));
             const event = comptime attribute.name[3..];
             if (comptime std.mem.eql(u8, event, "input")) {
@@ -388,7 +642,7 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
             }
         }
 
-        fn constructMessage(comptime node: markup.MarkupNode, comptime expression: markup.MessageExpression, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: ScopeValue(entries)) MsgT {
+        fn constructMessage(comptime node: markup.MarkupNode, comptime expression: markup.MessageExpression, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype) MsgT {
             const tag_index = comptime (msgTagIndex(expression.tag) orelse fail(node, "unknown message tag"));
             const field = comptime @typeInfo(MsgT).@"union".fields[tag_index];
             if (comptime (field.type == void)) {
@@ -400,7 +654,7 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
             comptime {
                 if (expression.payload.len == 0) fail(node, "message requires a payload");
             }
-            const variant = comptime bindingVariant(BindingLeaf(node, entries, expression.payload));
+            const variant = comptime pathVariant(node, entries, expression.payload);
             const value = bindingValue(node, entries, expression.payload, model, scope);
             return @unionInit(MsgT, field.name, coerce(field.type, node, variant, ui, value));
         }
@@ -447,9 +701,9 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
 
         // --------------------------------------------------- expressions
 
-        const invalid_expression_message = "invalid expression: values are a literal, one {binding}, or one {a == b} equality - no other operators or calls (put logic in a model function)";
+        const invalid_expression_message = markup.invalid_expression_message;
 
-        fn evalExpr(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime raw: []const u8, model: *const ModelT, scope: ScopeValue(entries)) Value {
+        fn evalExpr(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime raw: []const u8, model: *const ModelT, scope: anytype) Value {
             const expression = comptime (markup.parseAttrExpression(raw) orelse fail(node, invalid_expression_message));
             if (comptime (expression == .literal)) {
                 return comptime interpreter.literalValue(expression.literal);
@@ -477,13 +731,13 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
                         .float => .float,
                         .boolean => .boolean,
                     }),
-                    .binding => |path| bindingVariant(BindingLeaf(node, entries, path)),
+                    .binding => |path| pathVariant(node, entries, path),
                     .equals => .boolean,
                 };
             }
         }
 
-        /// Innermost scope entry whose loop variable matches `head`.
+        /// Innermost scope entry whose name matches `head`.
         fn scopeIndex(comptime entries: []const ScopeEntry, comptime head: []const u8) ?usize {
             comptime {
                 @setEvalBranchQuota(10_000);
@@ -496,19 +750,23 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
             }
         }
 
-        fn scopeItemPtr(comptime entries: []const ScopeEntry, comptime index: usize, scope: ScopeValue(entries)) *const entries[index].Item {
+        fn scopePayload(comptime entries: []const ScopeEntry, comptime index: usize, scope: anytype) EntryPayload(entries[index]) {
             if (comptime (index == entries.len - 1)) return scope.item;
-            return scopeItemPtr(entries[0 .. entries.len - 1], index, scope.parent);
+            return scopePayload(entries[0 .. entries.len - 1], index, scope.parent);
         }
 
-        /// Comptime mirror of the interpreter's `evalBinding` resolution:
-        /// the Zig type a binding path resolves to, or a compile error with
-        /// the interpreter's message.
+        /// Comptime mirror of the interpreter's `evalBinding` resolution
+        /// for loop items and model paths: the Zig type a binding path
+        /// resolves to, or a compile error with the interpreter's message.
+        /// Value args have no leaf type; `pathVariant` handles them.
         fn BindingLeaf(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime path: []const u8) type {
             comptime {
                 const head = interpreter.pathHead(path);
                 if (scopeIndex(entries, head)) |index| {
-                    const Item = entries[index].Item;
+                    const entry = entries[index];
+                    if (entry.kind == .slice_arg) fail(node, "slice-valued template args are only usable with for each");
+                    if (entry.kind == .value_arg) fail(node, "template arg values have no fields");
+                    const Item = entry.Item;
                     if (interpreter.pathTail(path)) |tail| {
                         return OnType(Item, tail) orelse fail(node, "binding does not name a field on the loop item");
                     }
@@ -519,19 +777,46 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
             }
         }
 
-        fn bindingValue(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime path: []const u8, model: *const ModelT, scope: ScopeValue(entries)) Value {
-            const Leaf = comptime BindingLeaf(node, entries, path);
+        /// The comptime-known Value variant a binding path produces:
+        /// template value args carry their use-site variant, loop items
+        /// and model paths derive it from the resolved leaf type.
+        fn pathVariant(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime path: []const u8) ?ValueVariant {
+            comptime {
+                const head = interpreter.pathHead(path);
+                if (scopeIndex(entries, head)) |index| {
+                    if (entries[index].kind == .value_arg) {
+                        if (interpreter.pathTail(path) != null) fail(node, "template arg values have no fields");
+                        return entries[index].variant;
+                    }
+                }
+                return bindingVariant(BindingLeaf(node, entries, path));
+            }
+        }
+
+        fn bindingValue(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime path: []const u8, model: *const ModelT, scope: anytype) Value {
             const head = comptime interpreter.pathHead(path);
             const index_opt = comptime scopeIndex(entries, head);
             if (comptime (index_opt != null)) {
                 const index = comptime index_opt.?;
-                const item = scopeItemPtr(entries, index, scope);
+                const entry = comptime entries[index];
+                if (comptime (entry.kind == .value_arg)) {
+                    comptime {
+                        if (interpreter.pathTail(path) != null) fail(node, "template arg values have no fields");
+                    }
+                    return scopePayload(entries, index, scope);
+                }
+                if (comptime (entry.kind == .slice_arg)) {
+                    comptime fail(node, "slice-valued template args are only usable with for each");
+                }
+                const Leaf = comptime BindingLeaf(node, entries, path);
+                const item = scopePayload(entries, index, scope);
                 if (comptime (interpreter.pathTail(path) != null)) {
                     const tail = comptime interpreter.pathTail(path).?;
-                    return interpreter.valueOf(Leaf, valueOn(entries[index].Item, tail, item)) orelse unreachable;
+                    return interpreter.valueOf(Leaf, valueOn(entry.Item, tail, item)) orelse unreachable;
                 }
                 return interpreter.valueOf(Leaf, item.*) orelse unreachable;
             }
+            const Leaf = comptime BindingLeaf(node, entries, path);
             return interpreter.valueOf(Leaf, valueOn(ModelT, path, model)) orelse unreachable;
         }
 
@@ -622,7 +907,7 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
         const comptime_text_quota_base = 2_000;
         const comptime_text_quota_per_byte = 100;
 
-        fn interpolatedText(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: ScopeValue(entries)) []const u8 {
+        fn interpolatedText(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype) []const u8 {
             const text = comptime blk: {
                 if (node.children.len > 1) fail(node, "text elements take a single run of text");
                 var content: []const u8 = "";

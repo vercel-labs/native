@@ -85,10 +85,19 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         /// functions returning slices (optionally taking an arena).
         const item_types = collectItemTypes(ModelT);
 
+        /// A named value in scope: a `for` loop item (typed pointer tagged
+        /// into `item_types`), a slice-valued template arg (iterable by a
+        /// `for each` inside the template), or a scalar template arg
+        /// (usable in bindings, interpolation, and equality).
         const ScopeEntry = struct {
             name: []const u8,
-            type_index: usize,
-            ptr: *const anyopaque,
+            payload: Payload,
+
+            const Payload = union(enum) {
+                item: struct { type_index: usize, ptr: *const anyopaque },
+                slice: struct { type_index: usize, ptr: *const anyopaque, len: usize },
+                value: Value,
+            };
         };
 
         const max_scope_depth = 8;
@@ -97,6 +106,23 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             model: *const ModelT,
             entries: [max_scope_depth]ScopeEntry = undefined,
             len: usize = 0,
+            /// Bindings resolve entries[floor..len] then the model: a
+            /// template body sees its args and its own loop variables but
+            /// not the loop variables at the expansion site.
+            floor: usize = 0,
+            /// Template expansion depth, bounding runtime recursion on
+            /// documents the validator would reject (uses may only
+            /// reference templates defined earlier in the file).
+            use_depth: usize = 0,
+
+            fn lookup(self: *const Scope, head: []const u8) ?*const ScopeEntry {
+                var index = self.len;
+                while (index > self.floor) {
+                    index -= 1;
+                    if (std.mem.eql(u8, self.entries[index].name, head)) return &self.entries[index];
+                }
+                return null;
+            }
         };
 
         // ------------------------------------------------------ building
@@ -104,6 +130,8 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         fn buildNode(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!Ui.Node {
             switch (node.kind) {
                 .element => return self.buildElement(ui, scope, node),
+                .use_block => return self.buildUse(ui, scope, node),
+                .template_block => return self.failNode(node, markup.template_top_level_message),
                 .text => return self.failNode(node, "text content is only allowed inside text-bearing elements"),
                 .for_block, .if_block, .else_block => return self.failNode(node, "structure tags are only allowed inside an element"),
             }
@@ -134,6 +162,8 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 const child = node.children[index];
                 switch (child.kind) {
                     .element => try out.append(ui.arena, try self.buildElement(ui, scope, child)),
+                    .use_block => try out.append(ui.arena, try self.buildUse(ui, scope, child)),
+                    .template_block => return self.failVoid(child, markup.template_top_level_message),
                     .for_block => try self.buildFor(ui, scope, child, out),
                     .if_block => {
                         const test_value = child.attr("test") orelse {
@@ -162,23 +192,22 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             const as_name = node.attr("as") orelse return self.failVoid(node, "for requires an as attribute");
             const key_field = node.attr("key");
             if (scope.len >= max_scope_depth) return self.failVoid(node, "for nesting is too deep");
-            if (node.children.len != 1 or node.children[0].kind != .element) {
+            if (node.children.len != 1 or (node.children[0].kind != .element and node.children[0].kind != .use_block)) {
                 return self.failVoid(node, "for takes exactly one element child");
             }
             const template = node.children[0];
 
             inline for (item_types, 0..) |Item, type_index| {
-                if (try self.iterateItems(ui, Item, scope, each)) |items| {
+                if (try self.iterateItems(ui, Item, type_index, scope, each)) |items| {
                     for (items) |*item| {
                         scope.entries[scope.len] = .{
                             .name = as_name,
-                            .type_index = type_index,
-                            .ptr = @ptrCast(item),
+                            .payload = .{ .item = .{ .type_index = type_index, .ptr = @ptrCast(item) } },
                         };
                         scope.len += 1;
                         defer scope.len -= 1;
 
-                        var built = try self.buildElement(ui, scope, template);
+                        var built = try self.buildNode(ui, scope, template);
                         if (built.key == null and built.global_key == null) {
                             if (key_field) |field| {
                                 built.key = try self.itemKey(Item, item, template, field);
@@ -189,13 +218,25 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     return;
                 }
             }
-            return self.failVoid(node, "each does not name an iterable on the model");
+            return self.failVoid(node, "each does not name an iterable (a model slice, array, or fn - or a slice-valued template arg)");
         }
 
-        /// Resolve `each` to a slice of Item on the model: a field, a public
-        /// array declaration, or a public function (with or without arena).
-        fn iterateItems(self: *Self, ui: *Ui, comptime Item: type, scope: *Scope, each: []const u8) BuildError!?[]const Item {
+        /// Resolve `each` to a slice of Item: a slice-valued template arg
+        /// in scope, or on the model a field, a public array declaration,
+        /// or a public function (with or without arena).
+        fn iterateItems(self: *Self, ui: *Ui, comptime Item: type, comptime type_index: usize, scope: *Scope, each: []const u8) BuildError!?[]const Item {
             _ = self;
+            if (scope.lookup(each)) |entry| {
+                switch (entry.payload) {
+                    .slice => |slice_entry| {
+                        if (slice_entry.type_index != type_index) return null;
+                        const items: [*]const Item = @ptrCast(@alignCast(slice_entry.ptr));
+                        return items[0..slice_entry.len];
+                    },
+                    // The name is shadowed by a non-iterable scope entry.
+                    else => return null,
+                }
+            }
             const model = scope.model;
             inline for (@typeInfo(ModelT).@"struct".fields) |field| {
                 if (comptime sliceElement(field.type) != null and sliceElement(field.type).? == Item) {
@@ -223,6 +264,104 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 }
             }
             return null;
+        }
+
+        // ------------------------------------------------------ templates
+
+        /// Build a `<use>` site: evaluate the template args against the
+        /// use-site scope, push them as scope entries, and build the
+        /// template's single element child in place — structural ids hash
+        /// through the parent chain at the expansion site, exactly as if
+        /// the body were written inline.
+        fn buildUse(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!Ui.Node {
+            const template_name = node.attr("template") orelse {
+                return self.failNode(node, markup.use_template_attr_message);
+            };
+            const template_index = self.document.templateIndex(template_name) orelse {
+                return self.failNode(node, markup.use_undefined_template_message);
+            };
+            const template_node = self.document.templates[template_index];
+            if (scope.use_depth >= self.document.templates.len) {
+                return self.failNode(node, markup.use_earlier_template_message);
+            }
+            if (template_node.children.len != 1 or template_node.children[0].kind != .element) {
+                return self.failNode(template_node, markup.template_one_child_message);
+            }
+            if (node.children.len != 0) {
+                return self.failNode(node, markup.use_no_children_message);
+            }
+
+            for (node.attrs) |attribute| {
+                if (std.mem.eql(u8, attribute.name, "template")) continue;
+                if (!markup.templateDeclaresArg(template_node, attribute.name)) {
+                    return self.failNode(node, markup.use_extra_arg_message);
+                }
+            }
+
+            // Evaluate every arg against the pristine use-site scope before
+            // any entry is pushed, so args cannot see each other.
+            const saved_len = scope.len;
+            const saved_floor = scope.floor;
+            var arg_count: usize = 0;
+            var args = markup.templateArgs(template_node);
+            while (args.next()) |arg_name| {
+                const raw = node.attr(arg_name) orelse {
+                    return self.failNode(node, markup.use_missing_arg_message);
+                };
+                if (saved_len + arg_count >= max_scope_depth) {
+                    return self.failNode(node, "template args nest too deep");
+                }
+                scope.entries[saved_len + arg_count] = .{
+                    .name = arg_name,
+                    .payload = try self.argPayload(ui, scope, node, raw),
+                };
+                arg_count += 1;
+            }
+
+            scope.len = saved_len + arg_count;
+            scope.floor = saved_len;
+            scope.use_depth += 1;
+            defer {
+                scope.len = saved_len;
+                scope.floor = saved_floor;
+                scope.use_depth -= 1;
+            }
+            return self.buildElement(ui, scope, template_node.children[0]);
+        }
+
+        /// A template arg's scope payload: a `{binding}` naming an iterable
+        /// (in scope or on the model, the same resolution set as
+        /// `for each`) binds as a slice; anything else evaluates to a
+        /// `Value` at the use site.
+        fn argPayload(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, raw: []const u8) BuildError!ScopeEntry.Payload {
+            const expression = markup.parseAttrExpression(raw) orelse {
+                return self.failPayload(node, markup.invalid_expression_message);
+            };
+            if (expression == .binding) {
+                const path = expression.binding;
+                if (scope.lookup(pathHead(path))) |entry| {
+                    if (entry.payload == .slice and pathTail(path) == null) {
+                        // Re-pass a slice arg to a nested use.
+                        return entry.payload;
+                    }
+                } else {
+                    inline for (item_types, 0..) |Item, type_index| {
+                        if (try self.iterateItems(ui, Item, type_index, scope, path)) |items| {
+                            return .{ .slice = .{
+                                .type_index = type_index,
+                                .ptr = @ptrCast(items.ptr),
+                                .len = items.len,
+                            } };
+                        }
+                    }
+                }
+            }
+            return .{ .value = try self.evalAttrExpression(scope, node, raw) };
+        }
+
+        fn failPayload(self: *Self, node: markup.MarkupNode, message: []const u8) BuildError {
+            self.setDiagnostic(node, message);
+            return error.MarkupBuild;
         }
 
         fn itemKey(self: *Self, comptime Item: type, item: *const Item, node: markup.MarkupNode, field: []const u8) BuildError!canvas.UiKey {
@@ -272,10 +411,42 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     };
                     continue;
                 }
+                if (try self.applyStyleTokenAttr(node, options, attribute)) continue;
                 if (!try self.applyOptionAttr(scope, node, options, attribute)) {
                     return self.failVoid(node, "unknown attribute for this element");
                 }
             }
+        }
+
+        /// Style token references (`background="surface"`, `radius="md"`):
+        /// literal token names only, validated against the token FieldEnums
+        /// and resolved by the builder's `finalizeWithTokens`.
+        fn applyStyleTokenAttr(self: *Self, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!bool {
+            inline for (color_style_attr_fields) |entry| {
+                if (std.mem.eql(u8, attribute.name, entry.markup)) {
+                    const literal = try self.styleTokenLiteral(node, attribute.value);
+                    @field(options.style_tokens, entry.zig) = std.meta.stringToEnum(canvas.ColorTokenName, literal) orelse {
+                        return self.failVoid(node, markup.unknown_color_token_message);
+                    };
+                    return true;
+                }
+            }
+            if (std.mem.eql(u8, attribute.name, "radius")) {
+                const literal = try self.styleTokenLiteral(node, attribute.value);
+                options.style_tokens.radius = std.meta.stringToEnum(canvas.RadiusTokenName, literal) orelse {
+                    return self.failVoid(node, markup.unknown_radius_token_message);
+                };
+                return true;
+            }
+            return false;
+        }
+
+        fn styleTokenLiteral(self: *Self, node: markup.MarkupNode, raw: []const u8) BuildError![]const u8 {
+            const expression = markup.parseAttrExpression(raw) orelse {
+                return self.failPayload(node, markup.style_token_literal_message);
+            };
+            if (expression != .literal) return self.failPayload(node, markup.style_token_literal_message);
+            return expression.literal;
         }
 
         fn applyOptionAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!bool {
@@ -426,21 +597,27 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
 
         fn evalBinding(self: *Self, scope: *Scope, node: markup.MarkupNode, path: []const u8) BuildError!Value {
             const head = pathHead(path);
-            var index = scope.len;
-            while (index > 0) {
-                index -= 1;
-                const entry = scope.entries[index];
-                if (std.mem.eql(u8, entry.name, head)) {
-                    inline for (item_types, 0..) |Item, type_index| {
-                        if (entry.type_index == type_index) {
-                            const item: *const Item = @ptrCast(@alignCast(entry.ptr));
-                            if (pathTail(path)) |tail| {
-                                return resolveOn(Item, item, tail) orelse self.failValue(node, "binding does not name a field on the loop item");
+            if (scope.lookup(head)) |entry| {
+                switch (entry.payload) {
+                    .item => |item_entry| {
+                        inline for (item_types, 0..) |Item, type_index| {
+                            if (item_entry.type_index == type_index) {
+                                const item: *const Item = @ptrCast(@alignCast(item_entry.ptr));
+                                if (pathTail(path)) |tail| {
+                                    return resolveOn(Item, item, tail) orelse self.failValue(node, "binding does not name a field on the loop item");
+                                }
+                                return valueOf(Item, item.*) orelse self.failValue(node, "loop items of this type cannot be used as values");
                             }
-                            return valueOf(Item, item.*) orelse self.failValue(node, "loop items of this type cannot be used as values");
                         }
-                    }
-                    unreachable;
+                        unreachable;
+                    },
+                    .value => |value| {
+                        if (pathTail(path) != null) {
+                            return self.failValue(node, "template arg values have no fields");
+                        }
+                        return value;
+                    },
+                    .slice => return self.failValue(node, "slice-valued template args are only usable with for each"),
                 }
             }
             return resolveOn(ModelT, scope.model, path) orelse self.failValue(node, "binding does not name a model field");
@@ -534,6 +711,18 @@ pub const attr_names: []const AttrName = &.{
     .{ .markup = "cross", .zig = "cross" },
     .{ .markup = "virtualized", .zig = "virtualized" },
     .{ .markup = "virtual-item-extent", .zig = "virtual_item_extent" },
+};
+
+/// Markup color style attribute → `StyleTokenRefs` field. Shared with the
+/// comptime-compiled path; kept consistent with
+/// `ui_markup.known_color_style_attrs` by a test.
+pub const color_style_attr_fields: []const AttrName = &.{
+    .{ .markup = "background", .zig = "background" },
+    .{ .markup = "foreground", .zig = "foreground" },
+    .{ .markup = "accent", .zig = "accent" },
+    .{ .markup = "accent-foreground", .zig = "accent_foreground" },
+    .{ .markup = "border-color", .zig = "border_color" },
+    .{ .markup = "focus-ring", .zig = "focus_ring" },
 };
 
 fn collectItemTypes(comptime Model: type) []const type {
