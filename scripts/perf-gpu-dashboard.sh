@@ -55,6 +55,14 @@ require_positive_int ZN_PERF_INPUT_BUDGET_MS "$input_budget_ms"
 first_frame_budget_ns=$((first_frame_budget_ms * 1000000))
 input_budget_ns=$((input_budget_ms * 1000000))
 
+dump_diagnostics() { # failure forensics for shared CI runners: app log + canvas line
+  echo "---- app log ($log) ----" >&2
+  cat "$log" >&2 2>/dev/null || true
+  echo "---- dashboard-canvas snapshot line ----" >&2
+  read_snapshot
+  printf '%s\n' "$snapshot" | grep 'view @w1/dashboard-canvas' >&2 || echo "(no dashboard-canvas line in snapshot)" >&2
+}
+
 pid=""
 trap 'kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true' EXIT
 stop_app() {
@@ -80,7 +88,7 @@ launch_and_measure_first_frame() {
   "$app" > "$log" 2>&1 &
   pid=$!
   ready="$("$cli" automate wait 2>&1)"
-  case "$ready" in *"ready=true"*) ;; *) echo "perf: gpu-dashboard automation snapshot was not ready" >&2; exit 1 ;; esac
+  case "$ready" in *"ready=true"*) ;; *) echo "perf: gpu-dashboard automation snapshot was not ready" >&2; dump_diagnostics; exit 1 ;; esac
   first_frame_latency=""
   attempts=0
   while [ "$attempts" -lt 100 ]; do
@@ -95,6 +103,7 @@ launch_and_measure_first_frame() {
     sleep 0.1
   done
   echo "perf: dashboard GPU first frame latency was not recorded within 10s" >&2
+  dump_diagnostics
   exit 1
 }
 
@@ -162,7 +171,10 @@ while [ "$i" -le "$interactions" ]; do
   "$cli" automate widget-click dashboard-canvas "$switch_id" >/dev/null 2>&1
   input_latency=""
   attempts=0
-  while [ "$attempts" -lt 100 ]; do
+  # 200 x 50ms nominal; each iteration also spawns several subprocesses, so
+  # the real window is 2-4x longer on a loaded shared runner. That headroom
+  # only delays a genuine failure — a healthy click lands in a few frames.
+  while [ "$attempts" -lt 200 ]; do
     read_snapshot
     input_ts="$(canvas_field gpu_input_timestamp_ns)"
     frame_ts="$(canvas_field gpu_timestamp_ns)"
@@ -175,7 +187,11 @@ while [ "$i" -le "$interactions" ]; do
     attempts=$((attempts + 1))
     sleep 0.05
   done
-  if [ -z "$input_latency" ]; then echo "perf: widget-click $i did not produce a presented frame with recorded input latency within 5s" >&2; exit 1; fi
+  if [ -z "$input_latency" ]; then
+    echo "perf: widget-click $i did not produce a presented frame with recorded input latency within the wait window" >&2
+    dump_diagnostics
+    exit 1
+  fi
   prev_input_ts="$input_ts"
   append_sample input_samples "$input_latency"
   echo "perf: input-latency sample $i/$interactions: $input_latency ns ($(ns_to_ms "$input_latency") ms)"

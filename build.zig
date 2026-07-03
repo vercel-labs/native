@@ -627,7 +627,7 @@ pub fn build(b: *std.Build) void {
         \\printf 'bridge %s\n' "$request" > .zig-cache/zero-native-automation/command.txt
         \\"$app" > .zig-cache/zero-native-webview-smoke.log 2>&1 &
         \\pid=$!
-        \\trap 'kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true' EXIT
+        \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/zero-native-webview-smoke.log) ----" >&2; cat .zig-cache/zero-native-webview-smoke.log >&2 2>/dev/null || true; fi' EXIT
         \\snapshot="$("$cli" automate wait 2>&1)"
         \\case "$snapshot" in *"ready=true"*) ;; *) echo "automation snapshot was not ready" >&2; exit 1 ;; esac
         \\attempts=0
@@ -684,7 +684,7 @@ pub fn build(b: *std.Build) void {
         \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir/command.txt" "$response_file"
         \\"$app" > .zig-cache/zero-native-native-shell-smoke.log 2>&1 &
         \\pid=$!
-        \\trap 'kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true' EXIT
+        \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/zero-native-native-shell-smoke.log) ----" >&2; cat .zig-cache/zero-native-native-shell-smoke.log >&2 2>/dev/null || true; fi' EXIT
         \\ready="$("$cli" automate wait 2>&1)"
         \\case "$ready" in *"ready=true"*) ;; *) echo "native-shell automation snapshot was not ready" >&2; exit 1 ;; esac
         \\snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
@@ -819,7 +819,7 @@ pub fn build(b: *std.Build) void {
         \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir/command.txt"
         \\"$app" > .zig-cache/zero-native-gpu-surface-smoke.log 2>&1 &
         \\pid=$!
-        \\trap 'kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true' EXIT
+        \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/zero-native-gpu-surface-smoke.log) ----" >&2; cat .zig-cache/zero-native-gpu-surface-smoke.log >&2 2>/dev/null || true; fi' EXIT
         \\ready="$("$cli" automate wait 2>&1)"
         \\case "$ready" in *"ready=true"*) ;; *) echo "gpu-surface automation snapshot was not ready" >&2; exit 1 ;; esac
         \\ready_uptime="$(printf '%s\n' "$ready" | sed -n 's/.*runtime_uptime_ns=\([0-9][0-9]*\).*/\1/p')"
@@ -899,7 +899,7 @@ pub fn build(b: *std.Build) void {
         \\if [ "$smoke_budget_ms" -le 0 ]; then echo "ZN_SMOKE_BUDGET_MS must be a positive integer of milliseconds: $smoke_budget_ms" >&2; exit 1; fi
         \\smoke_budget_ns=$((smoke_budget_ms * 1000000))
         \\pid=""
-        \\trap 'kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true' EXIT
+        \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/zero-native-gpu-dashboard-smoke.log) ----" >&2; cat .zig-cache/zero-native-gpu-dashboard-smoke.log >&2 2>/dev/null || true; fi' EXIT
         \\stop_app() {
         \\  kill "$pid" >/dev/null 2>&1 || true
         \\  wait "$pid" >/dev/null 2>&1 || true
@@ -1070,7 +1070,7 @@ pub fn build(b: *std.Build) void {
         \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir/command.txt" "$automation_dir/screenshot-preview-canvas.png"
         \\"$app" > .zig-cache/zero-native-canvas-preview-smoke.log 2>&1 &
         \\pid=$!
-        \\trap 'kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true' EXIT
+        \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/zero-native-canvas-preview-smoke.log) ----" >&2; cat .zig-cache/zero-native-canvas-preview-smoke.log >&2 2>/dev/null || true; fi' EXIT
         \\ready="$("$cli" automate wait 2>&1)"
         \\case "$ready" in *"ready=true"*) ;; *) echo "canvas-preview automation snapshot was not ready" >&2; exit 1 ;; esac
         \\# Both architectures live in window 1: a presenting Metal canvas and
@@ -1118,7 +1118,7 @@ pub fn build(b: *std.Build) void {
         \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir/command.txt"
         \\"$app" > .zig-cache/zero-native-gpu-components-smoke.log 2>&1 &
         \\pid=$!
-        \\trap 'kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true' EXIT
+        \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/zero-native-gpu-components-smoke.log) ----" >&2; cat .zig-cache/zero-native-gpu-components-smoke.log >&2 2>/dev/null || true; fi' EXIT
         \\ready="$("$cli" automate wait 2>&1)"
         \\case "$ready" in *"ready=true"*) ;; *) echo "gpu-components automation snapshot was not ready" >&2; exit 1 ;; esac
         \\ready_uptime="$(printf '%s\n' "$ready" | sed -n 's/.*runtime_uptime_ns=\([0-9][0-9]*\).*/\1/p')"
@@ -1475,7 +1475,7 @@ pub fn build(b: *std.Build) void {
         \\printf 'bridge %s\n' "$request" > .zig-cache/zero-native-automation/command.txt
         \\"$app" > .zig-cache/zero-native-webview-cef-smoke.log 2>&1 &
         \\pid=$!
-        \\trap 'kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true' EXIT
+        \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/zero-native-webview-cef-smoke.log) ----" >&2; cat .zig-cache/zero-native-webview-cef-smoke.log >&2 2>/dev/null || true; fi' EXIT
         \\snapshot="$("$cli" automate wait 2>&1)"
         \\case "$snapshot" in *"ready=true"*) ;; *) echo "automation snapshot was not ready" >&2; exit 1 ;; esac
         \\attempts=0
@@ -1690,7 +1690,11 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
 }
 
 fn testArtifact(b: *std.Build, mod: *std.Build.Module) *std.Build.Step.Compile {
-    return b.addTest(.{ .root_module = mod });
+    // use_llvm: Zig 0.16.0's self-hosted x86_64 backend miscompiles the
+    // SysV C ABI for f32-heavy signatures (zero_native_app_viewport); see
+    // useLlvmWorkaround in build/app.zig for the full story and repro.
+    const use_llvm = if (mod.resolved_target) |target| @import("build/app.zig").useLlvmWorkaround(target) else null;
+    return b.addTest(.{ .root_module = mod, .use_llvm = use_llvm });
 }
 
 fn addTestStep(b: *std.Build, name: []const u8, description: []const u8, artifact: *std.Build.Step.Compile) void {

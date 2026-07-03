@@ -122,6 +122,13 @@ pub fn addMobileLib(b: *std.Build, dep: *std.Build.Dependency, options: MobileLi
         .linkage = .static,
         .name = options.name,
         .root_module = exports_mod,
+        // The embed C ABI (`zero_native_app_viewport`) is exactly the
+        // f32-heavy SysV signature Zig 0.16.0's self-hosted x86_64 backend
+        // miscompiles (see useLlvmWorkaround in the framework build.zig):
+        // clang-compiled hosts calling a self-hosted Debug lib receive
+        // corrupted inset/keyboard floats on x86_64 (Android emulators,
+        // Intel simulators). Force LLVM there; Release already uses it.
+        .use_llvm = useLlvmWorkaround(target),
     });
     b.installArtifact(lib);
 
@@ -192,9 +199,27 @@ pub fn addApp(b: *std.Build, dep: *std.Build.Dependency, app_options: AppOptions
     run_step.dependOn(&run.step);
 
     const test_app_mod = if (app_optimize == optimize) app_mod else appModule(b, dep, target, optimize, app_options, options_mod);
-    const tests = b.addTest(.{ .root_module = test_app_mod });
+    const tests = b.addTest(.{ .root_module = test_app_mod, .use_llvm = useLlvmWorkaround(target) });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+/// Zig 0.16.0's self-hosted x86_64 backend miscompiles the SysV C calling
+/// convention for f32-heavy signatures with interleaved pointer arguments
+/// (`zero_native_app_viewport`: 11 f32s + 2 pointers): both the caller and
+/// the callee place/read the wrong registers and stack slots, so safe-area
+/// insets arrive as garbage on x86_64 Debug builds while every LLVM-backed
+/// build is correct. Minimal repro (fails under `zig test`, passes with
+/// `-fllvm` on x86_64-linux):
+///
+///   fn take(a: ?*anyopaque, w: f32, h: f32, s: f32, p: ?*anyopaque,
+///           t: f32, r: f32, bo: f32, l: f32, kt: f32, kr: f32, kb: f32,
+///           kl: f32) callconv(.c) void { ... }
+///
+/// Force the LLVM backend on x86_64 until the upstream backend is fixed;
+/// Release modes already default to LLVM, so this only changes Debug.
+pub fn useLlvmWorkaround(target: std.Build.ResolvedTarget) ?bool {
+    return if (target.result.cpu.arch == .x86_64) true else null;
 }
 
 fn exampleOptimizeMode(b: *std.Build, requested: ?std.builtin.OptimizeMode, default_mode: std.builtin.OptimizeMode) std.builtin.OptimizeMode {
@@ -301,12 +326,21 @@ fn externalModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.R
     });
 }
 
+// -fno-sanitize=builtin on every ObjC compile: Zig 0.16.0's Debug UBSan
+// aborts any process whose first dispatch_once runs — the macOS SDK's
+// inline `_dispatch_once` ends in `__builtin_assume(*predicate == ~0l)`
+// (dispatch/once.h), Zig's bundled clang instruments that builtin, and the
+// check fires spuriously at startup; zig's ubsan_rt then cannot even decode
+// the report ("invalid enum value" / "passing zero to clz()" panics).
+// Reproduced with a 10-line `zig cc` program against both the 14.5 and
+// 26.0 SDKs. Release builds never hit it (no UBSan), which is why only
+// Debug-built examples (standardOptimizeOption default) crashed.
 fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, cef_dir: []const u8, cef_auto_install: bool) void {
     if (platform == .macos) {
         switch (web_engine) {
             .system => {
                 const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
-                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-ObjC", "-mmacosx-version-min=11.0" };
+                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/macos/appkit_host.m"), .flags = flags });
                 app_mod.linkFramework("WebKit", .{});
             },
@@ -320,7 +354,7 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 const include_arg = b.fmt("-I{s}", .{cef_dir});
                 const define_arg = b.fmt("-DZERO_NATIVE_CEF_DIR=\"{s}\"", .{cef_dir});
                 const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
-                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-ObjC++", "-std=c++17", "-stdlib=libc++", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include, include_arg, define_arg } else &.{ "-fobjc-arc", "-ObjC++", "-std=c++17", "-stdlib=libc++", "-mmacosx-version-min=11.0", include_arg, define_arg };
+                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC++", "-std=c++17", "-stdlib=libc++", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include, include_arg, define_arg } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC++", "-std=c++17", "-stdlib=libc++", "-mmacosx-version-min=11.0", include_arg, define_arg };
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/macos/cef_host.mm"), .flags = flags });
                 app_mod.addObjectFile(b.path(b.fmt("{s}/libcef_dll_wrapper/libcef_dll_wrapper.a", .{cef_dir})));
                 app_mod.addFrameworkPath(b.path(b.fmt("{s}/Release", .{cef_dir})));

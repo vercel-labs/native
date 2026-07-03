@@ -204,11 +204,15 @@ else # full
     run_step "smoke-gpu-surface" zig build test-gpu-surface-smoke
     run_step "smoke-gpu-dashboard" zig build test-gpu-dashboard-smoke
     run_step "smoke-gpu-components" zig build test-gpu-components-smoke
+    run_step "smoke-webview" zig build test-webview-smoke
+    run_step "smoke-native-shell" zig build test-native-shell-smoke
     run_step "smoke-canvas-preview" zig build test-canvas-preview-smoke
   else
     skip_step "smoke-gpu-surface" "macOS only"
     skip_step "smoke-gpu-dashboard" "macOS only"
     skip_step "smoke-gpu-components" "macOS only"
+    skip_step "smoke-webview" "macOS only"
+    skip_step "smoke-native-shell" "macOS only"
     skip_step "smoke-canvas-preview" "macOS only"
   fi
 

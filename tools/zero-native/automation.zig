@@ -179,8 +179,11 @@ fn printFile(io: std.Io, name: []const u8) !void {
 }
 
 fn waitForFile(allocator: std.mem.Allocator, io: std.Io, name: []const u8, marker: []const u8) !void {
+    // 30s to match the assert default: `wait` gates on a cold app start,
+    // and a GTK/software-EGL launch on a loaded shared CI runner routinely
+    // needs more than the 5s this used to allow.
     var attempts: usize = 0;
-    while (attempts < 50) : (attempts += 1) {
+    while (attempts < 300) : (attempts += 1) {
         var file_path: [256]u8 = undefined;
         const bytes = readFile(allocator, io, path(&file_path, name)) catch {
             try std.Io.sleep(io, std.Io.Duration.fromNanoseconds(100 * std.time.ns_per_ms), .awake);

@@ -8,8 +8,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
 const repoRoot = join(projectRoot, '..', '..');
 
-const runtimeSource = readFileSync(join(repoRoot, 'src', 'runtime', 'root.zig'), 'utf8');
-const platformSource = readFileSync(join(repoRoot, 'src', 'platform', 'root.zig'), 'utf8');
+const runtimeSource = readFileSync(join(repoRoot, 'src', 'runtime', 'bridge_responses.zig'), 'utf8');
+const platformSource = readFileSync(join(repoRoot, 'src', 'platform', 'types.zig'), 'utf8');
 const typeSource = readFileSync(join(projectRoot, 'zero-native.d.ts'), 'utf8');
 
 const errors = [];
