@@ -1,0 +1,8 @@
+.{
+    .name = .soundboard,
+    .fingerprint = 0x4f0621c2e6e20f06,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{ .zero_native = .{ .path = "../.." } },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "app.zon" },
+}

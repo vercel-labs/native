@@ -1,0 +1,25 @@
+<!-- The now-playing transport bar. The circular cover is the one image
+     binding markup carries (the avatar's u64 ImageId); progress is a seek
+     slider whose reconciled value reaches update through the sync hook.
+     Playback is simulated by a repeating timer effect — see model.zig. -->
+<column>
+  <separator />
+  <row height="76" padding="12" gap="14" cross="center" background="surface" label="Now playing bar">
+    <avatar image="{nowPlayingCover}" width="52" height="52" label="Now playing cover">{nowPlayingInitials}</avatar>
+    <column width="220" gap="2">
+      <text label="Now playing title">{nowPlayingTitle}</text>
+      <text size="sm" foreground="text_muted">{nowPlayingArtist}</text>
+    </column>
+    <row gap="6" cross="center">
+      <button size="sm" variant="ghost" disabled="{idle}" on-press="prev_track" label="Previous track">Prev</button>
+      <button variant="primary" width="72" on-press="toggle_play" label="Play or pause">{playPauseLabel}</button>
+      <button size="sm" variant="ghost" disabled="{idle}" on-press="next_track" label="Next track">Next</button>
+    </row>
+    <text size="sm" foreground="text_muted" width="34">{elapsedLabel}</text>
+    <slider grow="1" value="{progressFraction}" disabled="{idle}" on-change="seeked" label="Seek" />
+    <text size="sm" foreground="text_muted" width="34">{durationLabel}</text>
+    <if test="{hasQueue}">
+      <badge variant="secondary">{queueLabel}</badge>
+    </if>
+  </row>
+</column>

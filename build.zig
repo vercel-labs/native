@@ -508,6 +508,7 @@ pub fn build(b: *std.Build) void {
     addExampleTestStep(b, native_examples_step, "test-example-ui-inbox", "Run ui builder inbox example tests", "examples/ui-inbox");
     addExampleTestStep(b, native_examples_step, "test-example-kanban", "Run ui builder kanban example tests", "examples/kanban");
     addExampleTestStep(b, native_examples_step, "test-example-habits", "Run markup habits example tests", "examples/habits");
+    addExampleTestStep(b, native_examples_step, "test-example-soundboard", "Run soundboard example tests", "examples/soundboard");
     addExampleTestStep(b, native_examples_step, "test-example-effects-probe", "Run effects probe example tests", "examples/effects-probe");
     addExampleTestStep(b, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview");
     addExampleTestStep(b, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities");
