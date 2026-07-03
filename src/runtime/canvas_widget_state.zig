@@ -7,6 +7,7 @@ const runtime_api = @import("api.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const canvas_frame_helpers = @import("canvas_frame.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
+const runtime_canvas_widget_scroll_drivers = @import("canvas_widget_scroll_drivers.zig");
 const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 const runtime_automation_widget_dispatch = @import("automation_widget_dispatch.zig");
@@ -54,6 +55,11 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 &self.canvas_widget_reconcile_text_bytes,
                 tokens,
             );
+            // Native scroll drivers (#66): mark natively driven scroll
+            // regions before the copy so rebuild-time clamping and display
+            // emission both see the flag (engine scrollbar + engine clamp
+            // stand down; the OS scroller owns them).
+            ScrollDriverMethods(Runtime).stampCanvasWidgetNativeScroll(self, reconciled_nodes[0..reconciled_layout.nodes.len]);
             const invalidations = try canvas.WidgetLayoutTree.diffWithTokens(previous_layout, reconciled_layout, tokens, &self.canvas_widget_invalidations_scratch);
             const previous_render_state = self.views[index].canvasWidgetRenderState();
             const next_render_state = CanvasWidgetEventMethods(Runtime).canvasWidgetRenderStateAfterLayout(previous_render_state, reconciled_layout);
@@ -67,6 +73,9 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             try self.views[index].copyWidgetLayoutTree(reconciled_layout, &self.canvas_widget_copy_scratch);
             try self.views[index].copyCanvasWidgetSourceText(layout);
             self.views[index].copyCanvasWidgetSourceScroll(layout);
+            // Push the reconciled regions (frames, content extents,
+            // diverged offsets) to the native scroll drivers.
+            ScrollDriverMethods(Runtime).syncCanvasWidgetScrollDriversForView(self, index);
             const widget_revision_changed = self.views[index].widget_revision != previous_widget_revision;
             if (previous_cursor != self.views[index].canvas_widget_cursor) try CanvasWidgetEventMethods(Runtime).syncCanvasWidgetCursorForView(self, index);
             CanvasWidgetEventMethods(Runtime).invalidateForWidgetInvalidations(self, self.views[index].frame, invalidations);
@@ -211,6 +220,10 @@ fn CanvasWidgetEventMethods(comptime Runtime: type) type {
 
 fn AutomationWidgetMethods(comptime Runtime: type) type {
     return runtime_automation_widget_dispatch.RuntimeAutomationWidgetDispatch(Runtime);
+}
+
+fn ScrollDriverMethods(comptime Runtime: type) type {
+    return runtime_canvas_widget_scroll_drivers.RuntimeCanvasWidgetScrollDrivers(Runtime);
 }
 
 fn validateRuntimeViewParent(self: anytype, window_id: platform.WindowId) !void {

@@ -294,6 +294,10 @@ pub const LinuxPlatform = struct {
             => self.web_engine == .system,
             .credentials => self.web_engine == .system and credentialsAvailable(self.host),
             .tray => false,
+            // Native scroll drivers and native context menus are macOS-only
+            // today; GTK keeps the engine's wheel physics and has no
+            // popover-menu presenter yet (documented in the skill).
+            .gpu_surface_scroll_drivers, .context_menus => false,
         };
     }
 

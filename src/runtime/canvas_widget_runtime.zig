@@ -542,6 +542,11 @@ pub fn applyCanvasWidgetSourceScrollSemantics(
 pub fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, states: ?[]canvas.ScrollState) void {
     for (nodes, 0..) |node, index| {
         if (node.widget.kind != .scroll_view or node.widget.layout.virtualized) continue;
+        // Native scroll drivers own clamping: the OS scroller constrains
+        // its own contentOffset (including mid-rubber-band rebuilds, which
+        // an engine clamp here would fight) and reports the settled offset
+        // back through the driver event.
+        if (node.widget.native_scroll) continue;
 
         const viewport = node.frame.inset(node.widget.layout.padding).normalized();
         if (viewport.isEmpty()) continue;

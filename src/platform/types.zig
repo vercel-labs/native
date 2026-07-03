@@ -90,6 +90,14 @@ pub const PlatformFeature = enum {
     file_drops,
     app_activation_events,
     gpu_surfaces,
+    /// Per-scrollable-region native scroll drivers for gpu-surface canvas
+    /// views (macOS: invisible `NSScrollView`s that own scroll input,
+    /// momentum, rubber-band, and overlay scrollbars).
+    gpu_surface_scroll_drivers,
+    /// Native context menus presented at the pointer (macOS: `NSMenu`
+    /// `popUpMenuPositioningItem`). Selection returns asynchronously as a
+    /// `context_menu_action` event.
+    context_menus,
 };
 
 pub const WebViewSourceKind = enum {
@@ -1144,6 +1152,80 @@ pub const GpuSurfaceInputEvent = struct {
     modifiers: ShortcutModifiers = .{},
 };
 
+/// Upper bound on native scroll drivers per gpu-surface view (one per
+/// scrollable canvas region).
+pub const max_gpu_surface_scroll_drivers: usize = 16;
+
+/// One native scroll driver's desired state, pushed by the runtime on
+/// every widget-layout install and every presented frame (self-healing
+/// against host-side relayouts). Coordinates are view-local canvas points
+/// (top-left origin, y-down) — the host converts to its own convention.
+pub const GpuSurfaceScrollDriver = struct {
+    /// Stable identity: the scroll widget's structural id. Drivers are
+    /// reconciled host-side by this id (create / update / remove).
+    id: u64,
+    /// The scroll region's layout frame, view-local.
+    frame: geometry.RectF,
+    /// Total scrollable content size for the region. The vertical max
+    /// scroll offset is `content_size.height - frame.height`.
+    content_size: geometry.SizeF,
+    /// The runtime's current scroll offset (canvas points, y-down).
+    offset_y: f32 = 0,
+    /// True when the runtime changed the offset from a non-driver source
+    /// (keyboard scroll, programmatic scroll, rebuild clamp): the host
+    /// must write `offset_y` into the native scroller. False leaves the
+    /// native scroller alone — the driver owns the offset.
+    set_offset: bool = false,
+};
+
+/// A native scroll driver reported a new content offset (the user
+/// scrolled through the OS scroller). Offsets are view-local canvas
+/// points; rubber-band overscroll passes through as values below 0 or
+/// beyond the max offset.
+pub const GpuSurfaceScrollDriverEvent = struct {
+    window_id: WindowId = 1,
+    label: []const u8,
+    driver_id: u64,
+    offset_y: f32 = 0,
+    timestamp_ns: u64 = 0,
+};
+
+/// Upper bound on items in one native context menu.
+pub const max_context_menu_items: usize = 32;
+
+/// One native context-menu entry (the chrome-menu item shape, minus the
+/// command string: selections come back by `id`).
+pub const ContextMenuItem = struct {
+    /// Non-zero selection id reported back in `ContextMenuActionEvent`.
+    id: u32 = 0,
+    label: []const u8 = "",
+    enabled: bool = true,
+    separator: bool = false,
+};
+
+/// A request to present a native context menu at a pointer location
+/// (view-local canvas points, y-down). Presentation is asynchronous: the
+/// platform shows the menu on its own loop turn and reports the selection
+/// (or dismissal) as a `context_menu_action` event carrying `token`.
+pub const ContextMenuRequest = struct {
+    window_id: WindowId = 1,
+    view_label: []const u8 = "",
+    point: geometry.PointF = .{},
+    /// Opaque correlation token echoed back on the action event (the
+    /// runtime uses the target widget's id).
+    token: u64 = 0,
+    items: []const ContextMenuItem = &.{},
+};
+
+/// The user selected a native context-menu item (or dismissed the menu:
+/// `item_id` 0).
+pub const ContextMenuActionEvent = struct {
+    window_id: WindowId = 1,
+    view_label: []const u8 = "",
+    token: u64 = 0,
+    item_id: u32 = 0,
+};
+
 pub const GpuSurfacePixels = struct {
     window_id: WindowId = 1,
     label: []const u8,
@@ -1343,6 +1425,8 @@ pub const Event = union(enum) {
     gpu_surface_frame: GpuSurfaceFrameEvent,
     gpu_surface_resized: GpuSurfaceResizeEvent,
     gpu_surface_input: GpuSurfaceInputEvent,
+    gpu_surface_scroll_driver: GpuSurfaceScrollDriverEvent,
+    context_menu_action: ContextMenuActionEvent,
     widget_accessibility_action: WidgetAccessibilityActionEvent,
 
     pub fn name(self: Event) []const u8 {
@@ -1367,6 +1451,8 @@ pub const Event = union(enum) {
             .gpu_surface_frame => "gpu_surface_frame",
             .gpu_surface_resized => "gpu_surface_resized",
             .gpu_surface_input => "gpu_surface_input",
+            .gpu_surface_scroll_driver => "gpu_surface_scroll_driver",
+            .context_menu_action => "context_menu_action",
             .widget_accessibility_action => "widget_accessibility_action",
         };
     }
@@ -1461,6 +1547,19 @@ pub const PlatformServices = struct {
     /// unregister path). Removing an unknown id is a no-op, not an error.
     remove_gpu_surface_image_fn: ?*const fn (context: ?*anyopaque, id: u64) anyerror!void = null,
     update_widget_accessibility_fn: ?*const fn (context: ?*anyopaque, snapshot: WidgetAccessibilitySnapshot) anyerror!void = null,
+    /// Reconcile the native scroll drivers for a gpu-surface view against
+    /// the full desired set: create missing drivers, update frames /
+    /// content extents / (when `set_offset`) offsets, remove drivers whose
+    /// id is absent. Idempotent — the runtime calls this on every layout
+    /// install and every presented frame. Null on platforms without
+    /// native scroll drivers (GTK / Win32 / null default), which keeps
+    /// scrolling on the engine's wheel physics.
+    set_gpu_surface_scroll_drivers_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, drivers: []const GpuSurfaceScrollDriver) anyerror!void = null,
+    /// Present a native context menu at the request's pointer location.
+    /// Asynchronous: the selection (or dismissal) arrives later as a
+    /// `context_menu_action` event echoing `request.token`. Null on
+    /// platforms without native menus.
+    show_context_menu_fn: ?*const fn (context: ?*anyopaque, request: ContextMenuRequest) anyerror!void = null,
     /// Single-line text measurement matching the fonts the platform draws
     /// with: returns the typographic width of `text` at `size` for
     /// `font_id` (the canvas font id namespace). Null on platforms without
@@ -1616,6 +1715,16 @@ pub const PlatformServices = struct {
     pub fn closeWebView(self: PlatformServices, window_id: WindowId, label: []const u8) anyerror!void {
         const close_fn = self.close_webview_fn orelse return error.UnsupportedService;
         return close_fn(self.context, window_id, label);
+    }
+
+    pub fn setGpuSurfaceScrollDrivers(self: PlatformServices, window_id: WindowId, label: []const u8, drivers: []const GpuSurfaceScrollDriver) anyerror!void {
+        const set_fn = self.set_gpu_surface_scroll_drivers_fn orelse return error.UnsupportedService;
+        return set_fn(self.context, window_id, label, drivers);
+    }
+
+    pub fn showContextMenu(self: PlatformServices, request: ContextMenuRequest) anyerror!void {
+        const show_fn = self.show_context_menu_fn orelse return error.UnsupportedService;
+        return show_fn(self.context, request);
     }
 
     pub fn showOpenDialog(self: PlatformServices, options: OpenDialogOptions, buffer: []u8) anyerror!OpenDialogResult {
@@ -1844,6 +1953,8 @@ fn defaultSupportsFeature(services: PlatformServices, feature: PlatformFeature) 
         .file_drops => false,
         .app_activation_events => false,
         .gpu_surfaces => false,
+        .gpu_surface_scroll_drivers => services.set_gpu_surface_scroll_drivers_fn != null,
+        .context_menus => services.show_context_menu_fn != null,
     };
 }
 

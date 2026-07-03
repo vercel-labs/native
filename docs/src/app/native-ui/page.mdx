@@ -154,6 +154,25 @@ draft: canvas.TextBuffer(64) = .{},
 
 Handlers belong on hit-target elements only. Layout containers (`row`, `column`, `stack`, `grid`, `tabs`, `toggle-group`, ...) and decoration leaves (`badge`, `avatar`, `tooltip`, `separator`, ...) are never hit-tested, so an `on-*` on one could never fire — the validator, both engines, and the LSP reject it with a teaching error instead of accepting a dead handler. Put the handler on a leaf like `list-item` or `text`, or on a control inside the container.
 
+## Native scrolling and context menus
+
+On macOS, every non-virtualized `scroll` region is driven by an invisible `NSScrollView`: momentum, rubber-band overscroll, and the system overlay scrollbar are all OS-computed while the engine renders the content. This needs no app code — scroll offsets stay on the widget (`sync`, snapshot offsets, and programmatic scrolls work unchanged), and the engine's drawn scrollbar stands down for natively driven regions. Other platforms keep the engine's wheel physics.
+
+Right/ctrl-click presents a real OS context menu (`NSMenu` on macOS). Declare per-widget items with typed messages from a Zig view function (`canvas.Ui` builder — the closed markup grammar has no list-valued attributes):
+
+```zig
+ui.listItem(.{
+    .on_press = Msg{ .select = entry.index },
+    .context_menu = &.{
+        .{ .label = "Open", .msg = Msg{ .select = entry.index } },
+        .{ .separator = true },
+        .{ .label = "Delete", .msg = Msg{ .delete = entry.index } },
+    },
+}, entry.title)
+```
+
+Editable text fields present the standard Cut / Copy / Paste / Select All menu with no declaration, wired to the same clipboard actions as the keyboard shortcuts; a selected static text presents Copy.
+
 ## Effects
 
 For anything asynchronous — running `gh`, streaming an agent's stdout — `update` takes a third parameter, the effects channel. Declare `.update_fx` instead of `.update` (two-argument apps are unchanged):

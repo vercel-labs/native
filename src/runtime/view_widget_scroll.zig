@@ -18,6 +18,8 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         pub fn canvasWidgetKineticScrollActive(self: *const RuntimeView) bool {
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
                 if (node.widget.kind != .scroll_view or node.widget.layout.virtualized) continue;
+                // Native drivers own momentum + rubber-band recovery (#66).
+                if (node.widget.native_scroll) continue;
                 const viewport = node.frame.inset(node.widget.layout.padding).normalized();
                 if (viewport.isEmpty()) continue;
                 if (self.canvasWidgetScrollState(index, node, viewport).needsKineticStep(self.widget_tokens.scroll)) return true;
@@ -131,8 +133,13 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             if (viewport.isEmpty()) return null;
 
             const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
+            // Native-driven regions take engine wheel input (automation's
+            // widget-wheel command) clamped: their rubber-band recovery
+            // lives in the OS scroller, so an engine overscroll here would
+            // have no kinetic step to pull it back.
+            const rubberband = allow_rubberband and !scroll_node.widget.native_scroll;
             const next = switch (source) {
-                .wheel => if (allow_rubberband)
+                .wheel => if (rubberband)
                     current.applyWheel(delta_y, self.widget_tokens.scroll)
                 else
                     current.applyWheelClamped(delta_y, self.widget_tokens.scroll),
@@ -184,6 +191,35 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             return self.canvasWidgetDirtyBounds(scroll_index, widget.frame);
         }
 
+        /// Absolute offset write from a native scroll driver (#66): the OS
+        /// scroller computed the offset (momentum, rubber-band — overscroll
+        /// values pass through so the bounce is visible), the engine just
+        /// follows. Engine velocity is zeroed; the driver owns physics.
+        pub fn applyCanvasWidgetScrollDriverOffset(self: *RuntimeView, scroll_index: usize, offset: f32) anyerror!?geometry.RectF {
+            if (scroll_index >= self.widget_layout_node_count) return null;
+            const scroll_node = self.widget_layout_nodes[scroll_index];
+            if (scroll_node.widget.kind != .scroll_view or scroll_node.widget.layout.virtualized) return null;
+
+            const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
+            if (viewport.isEmpty()) return null;
+
+            const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
+            var next = current;
+            next.offset = offset;
+            next.velocity = 0;
+            self.widget_scroll_states[scroll_index] = next;
+            if (next.offset == current.offset) return null;
+
+            const offset_delta = next.offset - current.offset;
+            self.widget_layout_nodes[scroll_index].widget.value = next.offset;
+            self.translateCanvasWidgetScrollDescendants(scroll_index, -offset_delta);
+            self.noteCanvasWidgetScrollEvent(scroll_node.widget.id);
+
+            try self.refreshCanvasWidgetSemantics();
+            self.widget_revision += 1;
+            return self.canvasWidgetDirtyBounds(scroll_index, scroll_node.frame);
+        }
+
         pub fn applyCanvasWidgetScrollKeyboardTarget(self: *RuntimeView, scroll_index: usize, target: CanvasWidgetScrollKeyboardTarget) anyerror!?geometry.RectF {
             if (scroll_index >= self.widget_layout_node_count) return null;
             const scroll_node = self.widget_layout_nodes[scroll_index];
@@ -220,6 +256,8 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
 
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |scroll_node, scroll_index| {
                 if (scroll_node.widget.kind != .scroll_view or scroll_node.widget.layout.virtualized) continue;
+                // Native drivers own momentum + rubber-band recovery (#66).
+                if (scroll_node.widget.native_scroll) continue;
 
                 const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
                 if (viewport.isEmpty()) {

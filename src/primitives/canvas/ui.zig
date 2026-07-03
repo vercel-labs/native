@@ -62,6 +62,7 @@ pub const UiHandlerEvent = enum {
     submit,
     input,
     scroll,
+    context_menu,
 };
 
 /// A color design token referenced by name (the fields of
@@ -231,6 +232,22 @@ pub fn Ui(comptime Msg: type) type {
             /// so echoing it back into `value` on the next rebuild never
             /// fights the scroll reconcile rule.
             on_scroll: ?ScrollMsgFn = null,
+            /// Native context menu for this widget: right/ctrl-click (or a
+            /// touch long-press) presents these items through the OS menu
+            /// (macOS `NSMenu`); selecting one dispatches its `msg`.
+            /// Deepest declaring widget on the hit route wins. Builder-only
+            /// (the closed markup grammar has no list-valued attributes) —
+            /// markup apps attach menus from a wrapping Zig view.
+            context_menu: []const ContextMenuItem = &.{},
+        };
+
+        /// One `ElementOptions.context_menu` entry: the chrome-menu item
+        /// shape with a typed message instead of a command string.
+        pub const ContextMenuItem = struct {
+            label: []const u8 = "",
+            msg: ?Msg = null,
+            enabled: bool = true,
+            separator: bool = false,
         };
 
         pub const InputMsgFn = *const fn (edit: canvas.TextInputEvent) Msg;
@@ -255,6 +272,7 @@ pub fn Ui(comptime Msg: type) type {
             on_input: ?InputMsgFn = null,
             on_value: ?ValueMsgFn = null,
             on_scroll: ?ScrollMsgFn = null,
+            context_menu: []const ContextMenuItem = &.{},
             nodes: []const Node = &.{},
         };
 
@@ -268,6 +286,10 @@ pub fn Ui(comptime Msg: type) type {
                 input: InputMsgFn,
                 value: ValueMsgFn,
                 scroll: ScrollMsgFn,
+                /// Per-item context-menu messages, indexed like the
+                /// widget's `context_menu` items (null = inert entry:
+                /// separator or msg-less item).
+                context_menu: []const ?Msg,
             };
         };
 
@@ -361,6 +383,19 @@ pub fn Ui(comptime Msg: type) type {
                 return null;
             }
 
+            /// Typed dispatch for a selected context-menu item: the message
+            /// declared for the widget's `context_menu[item_index]`.
+            pub fn msgForContextMenu(self: Tree, id: ObjectId, item_index: usize) ?Msg {
+                for (self.handlers) |handler| {
+                    if (handler.id == id and handler.event == .context_menu and handler.action == .context_menu) {
+                        const msgs = handler.action.context_menu;
+                        if (item_index >= msgs.len) return null;
+                        return msgs[item_index];
+                    }
+                }
+                return null;
+            }
+
             pub fn findWidget(self: Tree, id: ObjectId) ?Widget {
                 return findWidgetIn(self.root, id);
             }
@@ -432,8 +467,21 @@ pub fn Ui(comptime Msg: type) type {
                 .on_input = options.on_input,
                 .on_value = options.on_value,
                 .on_scroll = options.on_scroll,
+                .context_menu = self.dupeContextMenuItems(options.context_menu),
                 .nodes = self.childNodes(children),
             };
+        }
+
+        /// Copy rather than alias: callers pass slices of literals that do
+        /// not outlive the expression (same rule as `childNodes`).
+        fn dupeContextMenuItems(self: *Self, items: []const ContextMenuItem) []const ContextMenuItem {
+            if (items.len == 0) return &.{};
+            const copy = self.arena.alloc(ContextMenuItem, items.len) catch {
+                self.failed = true;
+                return &.{};
+            };
+            @memcpy(copy, items);
+            return copy;
         }
 
         pub fn row(self: *Self, options: ElementOptions, children: anytype) Node {
@@ -969,6 +1017,24 @@ pub fn Ui(comptime Msg: type) type {
                 handlers[handler_len.*] = .{ .id = widget.id, .event = .scroll, .action = .{ .scroll = make } };
                 handler_len.* += 1;
             }
+            if (node.context_menu.len > 0) {
+                // Split the declared items: labels ride the widget (the
+                // runtime builds the platform request from them), messages
+                // land in the handler table keyed by item index.
+                const items = try self.arena.alloc(canvas.WidgetContextMenuItem, node.context_menu.len);
+                const msgs = try self.arena.alloc(?Msg, node.context_menu.len);
+                for (node.context_menu, 0..) |item, index| {
+                    items[index] = .{
+                        .label = item.label,
+                        .enabled = item.enabled,
+                        .separator = item.separator,
+                    };
+                    msgs[index] = item.msg;
+                }
+                widget.context_menu = items;
+                handlers[handler_len.*] = .{ .id = widget.id, .event = .context_menu, .action = .{ .context_menu = msgs } };
+                handler_len.* += 1;
+            }
             return widget;
         }
 
@@ -987,6 +1053,7 @@ pub fn Ui(comptime Msg: type) type {
             if (node.on_input != null) total += 1;
             if (node.on_value != null) total += 1;
             if (node.on_scroll != null) total += 1;
+            if (node.context_menu.len > 0) total += 1;
             for (node.nodes) |child| total += countHandlers(child);
             return total;
         }

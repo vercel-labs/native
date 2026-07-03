@@ -3,8 +3,10 @@ const geometry = @import("geometry");
 const platform = @import("../platform/root.zig");
 const runtime_api = @import("api.zig");
 const canvas_frame_helpers = @import("canvas_frame.zig");
+const runtime_canvas_widget_context_menu = @import("canvas_widget_context_menu.zig");
 const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
+const runtime_canvas_widget_scroll_drivers = @import("canvas_widget_scroll_drivers.zig");
 
 const canvasWidgetInputBatchesDisplayListRefresh = canvas_frame_helpers.canvasWidgetInputBatchesDisplayListRefresh;
 const gpuSurfaceFrameEventFromGpuFrame = canvas_frame_helpers.gpuSurfaceFrameEventFromGpuFrame;
@@ -53,6 +55,11 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 } else if (self.views[index].info().gpuFrame()) |gpu_frame| {
                     enriched_frame_event = gpuSurfaceFrameEventFromGpuFrame(gpu_frame);
                 }
+                // Native scroll drivers reconcile against live host state
+                // on every presented frame (the #68 relayout-stomp
+                // lesson): frames, content extents, and diverged offsets
+                // all self-heal here.
+                ScrollDriverMethods().syncCanvasWidgetScrollDriversForView(self, index);
             }
             try self.dispatchEvent(app, .{ .gpu_surface_frame = enriched_frame_event });
         }
@@ -76,6 +83,22 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
         }
 
         pub fn dispatchGpuSurfaceInput(self: *Runtime, app: runtime_api.App(Runtime), input_event: platform.GpuSurfaceInputEvent) anyerror!void {
+            // Secondary-button (right/ctrl-click, touch long-press) input
+            // is the context-menu gesture (#67): the press presents the
+            // native menu and the whole button-1 stream is consumed so a
+            // right-click never acts as a primary press.
+            if (ContextMenuMethods().canvasWidgetContextPointerInput(input_event)) {
+                if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
+                    self.views[index].recordGpuSurfaceInputTimestamp(input_event.timestamp_ns);
+                }
+                if (input_event.kind == .pointer_down) {
+                    try setFocusedView(self, input_event.window_id, input_event.label);
+                    self.invalidated = true;
+                    try ContextMenuMethods().presentCanvasWidgetContextMenuFromPointer(self, input_event);
+                }
+                try self.dispatchEvent(app, .{ .gpu_surface_input = input_event });
+                return;
+            }
             var canvas_widget_refresh_batch_active = canvasWidgetInputBatchesDisplayListRefresh(input_event.kind);
             if (canvas_widget_refresh_batch_active) CanvasWidgetDisplayMethods().beginCanvasWidgetDisplayListRefreshBatch(self);
             errdefer {
@@ -312,6 +335,14 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
 
         fn CanvasWidgetEventMethods() type {
             return runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime);
+        }
+
+        fn ContextMenuMethods() type {
+            return runtime_canvas_widget_context_menu.RuntimeCanvasWidgetContextMenu(Runtime);
+        }
+
+        fn ScrollDriverMethods() type {
+            return runtime_canvas_widget_scroll_drivers.RuntimeCanvasWidgetScrollDrivers(Runtime);
         }
     };
 }

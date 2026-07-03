@@ -11,6 +11,8 @@ const automation_commands = @import("automation_commands.zig");
 const runtime_clock = @import("clock.zig");
 const shell_layout = @import("shell_layout.zig");
 const runtime_builtin_bridge = @import("builtin_bridge.zig");
+const runtime_canvas_widget_context_menu = @import("canvas_widget_context_menu.zig");
+const runtime_canvas_widget_scroll_drivers = @import("canvas_widget_scroll_drivers.zig");
 const runtime_gpu_surface_events = @import("gpu_surface_events.zig");
 const runtime_system_services = @import("system_services.zig");
 const runtime_window_views = @import("window_views.zig");
@@ -60,6 +62,14 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
 
         fn GpuSurfaceEventMethods() type {
             return runtime_gpu_surface_events.RuntimeGpuSurfaceEvents(Runtime);
+        }
+
+        fn ScrollDriverMethods() type {
+            return runtime_canvas_widget_scroll_drivers.RuntimeCanvasWidgetScrollDrivers(Runtime);
+        }
+
+        fn ContextMenuMethods() type {
+            return runtime_canvas_widget_context_menu.RuntimeCanvasWidgetContextMenu(Runtime);
         }
 
         fn AutomationWidgetMethods() type {
@@ -235,6 +245,8 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     });
                 },
                 .gpu_surface_input => |input_event| try GpuSurfaceEventMethods().dispatchGpuSurfaceInput(self, app, input_event),
+                .gpu_surface_scroll_driver => |driver_event| try ScrollDriverMethods().dispatchGpuSurfaceScrollDriver(self, app, driver_event),
+                .context_menu_action => |action_event| try ContextMenuMethods().dispatchContextMenuAction(self, app, action_event),
                 .widget_accessibility_action => |action_event| {
                     _ = try self.dispatchCanvasWidgetAccessibilityAction(app, action_event.window_id, action_event.label, .{
                         .id = action_event.id,
@@ -322,6 +334,9 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .canvas_widget_scroll => {},
                 .canvas_widget_file_drop => {},
                 .canvas_widget_drag => {},
+                .canvas_widget_context_menu => {
+                    self.invalidateFor(.command, null);
+                },
                 .lifecycle => {},
             }
         }

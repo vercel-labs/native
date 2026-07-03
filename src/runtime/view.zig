@@ -227,6 +227,12 @@ pub const RuntimeView = struct {
     widget_source_text_count: usize = 0,
     widget_source_scroll_entries: [canvas_limits.max_canvas_widget_nodes_per_view]CanvasWidgetSourceScrollEntry = undefined,
     widget_source_scroll_count: usize = 0,
+    /// Native scroll-driver tracking (#66): each installed driver's id and
+    /// the last offset it reported (or was pushed), so the sync only
+    /// forces `set_offset` when a non-driver source moved the offset.
+    scroll_driver_ids: [platform.max_gpu_surface_scroll_drivers]u64 = undefined,
+    scroll_driver_offsets: [platform.max_gpu_surface_scroll_drivers]f32 = undefined,
+    scroll_driver_count: usize = 0,
     canvas_widget_focused_id: canvas.ObjectId = 0,
     canvas_widget_focus_visible_id: canvas.ObjectId = 0,
     canvas_widget_hovered_id: canvas.ObjectId = 0,
@@ -240,6 +246,8 @@ pub const RuntimeView = struct {
     widget_text_len: usize = 0,
     widget_span_entries: [canvas_limits.max_canvas_widget_spans_per_view]canvas.TextSpan = undefined,
     widget_span_len: usize = 0,
+    widget_context_menu_items: [canvas_limits.max_canvas_widget_context_menu_items_per_view]canvas.WidgetContextMenuItem = undefined,
+    widget_context_menu_len: usize = 0,
     focused: bool = false,
     open: bool = false,
     label_storage: [platform.max_view_label_bytes]u8 = undefined,
@@ -269,6 +277,7 @@ pub const RuntimeView = struct {
     pub const canvasWidgetScrollCanConsume = CanvasWidgetScrollMethods.canvasWidgetScrollCanConsume;
     pub const applyCanvasWidgetScroll = CanvasWidgetScrollMethods.applyCanvasWidgetScroll;
     pub const applyCanvasWidgetTextareaScroll = CanvasWidgetScrollMethods.applyCanvasWidgetTextareaScroll;
+    pub const applyCanvasWidgetScrollDriverOffset = CanvasWidgetScrollMethods.applyCanvasWidgetScrollDriverOffset;
     pub const applyCanvasWidgetScrollKeyboardTarget = CanvasWidgetScrollMethods.applyCanvasWidgetScrollKeyboardTarget;
     pub const stepCanvasWidgetKineticScroll = CanvasWidgetScrollMethods.stepCanvasWidgetKineticScroll;
     pub const canvasWidgetScrollContentExtent = CanvasWidgetScrollMethods.canvasWidgetScrollContentExtent;
@@ -371,6 +380,7 @@ pub const RuntimeView = struct {
     pub const copyWidgetLayoutNode = CanvasWidgetTreeMethods.copyWidgetLayoutNode;
     pub const copyWidgetText = CanvasWidgetTreeMethods.copyWidgetText;
     pub const copyWidgetSpans = CanvasWidgetTreeMethods.copyWidgetSpans;
+    pub const copyWidgetContextMenu = CanvasWidgetTreeMethods.copyWidgetContextMenu;
 
     // By pointer, never by value: a RuntimeView is multiple MiB of fixed
     // capacity arrays, and a by-value self parameter copies it onto the

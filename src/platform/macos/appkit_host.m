@@ -252,6 +252,29 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 
 @class ZeroNativeMetalSurfaceView;
 
+/* Flipped, hit-test-transparent document view for a native scroll driver:
+ * flipped so the clip view's bounds origin y IS the canvas scroll offset
+ * (0 = top, +y = scrolled down), transparent so canvas content beneath
+ * stays clickable. */
+@interface ZeroNativeScrollDriverDocumentView : NSView
+@end
+
+/* An invisible NSScrollView owning input + physics for one scrollable
+ * canvas region (#66): the OS computes momentum, rubber-band, and draws
+ * the overlay scroller; the engine renders the content. Hit testing
+ * passes everything through except the scrollers themselves (so the
+ * overlay knob stays grabbable). */
+@interface ZeroNativeScrollDriverView : NSScrollView
+@property(nonatomic, assign) uint64_t driverId;
+@end
+
+/* Captures the selected item id of a context-menu popUp; NSMenuItem
+ * targets are weak, so the presenter keeps this alive during tracking. */
+@interface ZeroNativeContextMenuTarget : NSObject
+@property(nonatomic, assign) uint32_t selectedItemId;
+- (void)contextMenuItemClicked:(NSMenuItem *)item;
+@end
+
 @interface ZeroNativeWidgetAccessibilityElement : NSAccessibilityElement
 @property(nonatomic, assign) ZeroNativeMetalSurfaceView *surfaceView;
 @property(nonatomic, assign) uint64_t widgetId;
@@ -309,6 +332,14 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 @property(nonatomic, assign) NSRange selectedTextRange;
 @property(nonatomic, assign) BOOL interpretedKeyEventEmittedInput;
 @property(nonatomic, strong) NSArray<NSAccessibilityElement *> *widgetAccessibilityElements;
+@property(nonatomic, strong) NSMutableArray<ZeroNativeScrollDriverView *> *scrollDrivers;
+@property(nonatomic, weak) ZeroNativeScrollDriverView *activeWheelDriver;
+@property(nonatomic, assign) BOOL applyingScrollDriverOffset;
+@property(nonatomic, assign) BOOL scrollDriverEventPending;
+@property(nonatomic, assign) uint64_t pendingScrollDriverId;
+@property(nonatomic, assign) double pendingScrollDriverOffsetY;
+@property(nonatomic, assign) uint64_t scrollDriverEventLastEmitNs;
+@property(nonatomic, assign) BOOL controlClickActive;
 - (void)configureWithHost:(ZeroNativeAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label;
 - (BOOL)isAvailable;
 - (void)updateDrawableSize;
@@ -336,6 +367,7 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (BOOL)emitWidgetAccessibilityActionWithId:(uint64_t)widgetId action:(NSInteger)action;
 - (BOOL)emitWidgetAccessibilityActionWithId:(uint64_t)widgetId action:(NSInteger)action text:(NSString *)text selectedRange:(NSRange)selectedRange hasSelectedRange:(BOOL)hasSelectedRange;
 - (void)setSurfaceCursor:(NSCursor *)cursor;
+- (void)setScrollDrivers:(const zero_native_appkit_scroll_driver_t *)drivers count:(NSUInteger)count;
 @end
 
 @interface ZeroNativeAssetSchemeHandler : NSObject <WKURLSchemeHandler>
@@ -419,6 +451,8 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (BOOL)presentGpuSurfacePixelsInWindow:(uint64_t)windowId label:(NSString *)label width:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
 - (NSInteger)presentGpuSurfacePacketInWindow:(uint64_t)windowId label:(NSString *)label surfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable json:(const uint8_t *)json byteLength:(NSUInteger)byteLength;
 - (BOOL)requestGpuSurfaceFrameInWindow:(uint64_t)windowId label:(NSString *)label;
+- (BOOL)setGpuSurfaceScrollDriversInWindow:(uint64_t)windowId label:(NSString *)label drivers:(const zero_native_appkit_scroll_driver_t *)drivers count:(NSUInteger)count;
+- (BOOL)showContextMenuInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y token:(uint64_t)token items:(const zero_native_appkit_context_menu_item_t *)items count:(NSUInteger)count;
 - (BOOL)uploadGpuSurfaceImageWithId:(uint64_t)imageId width:(NSUInteger)width height:(NSUInteger)height rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
 - (BOOL)removeGpuSurfaceImageWithId:(uint64_t)imageId;
 - (BOOL)updateWidgetAccessibilityInWindow:(uint64_t)windowId label:(NSString *)label nodes:(const zero_native_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count;
@@ -1630,6 +1664,45 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
     return ok;
 }
 
+@implementation ZeroNativeScrollDriverDocumentView
+
+- (BOOL)isFlipped {
+    return YES;
+}
+
+@end
+
+@implementation ZeroNativeScrollDriverView
+
+- (NSView *)hitTest:(NSPoint)point {
+    // Scroll-wheel events route to the driver through the ordinary hit
+    // test so AppKit's own (responsive) scrolling machinery handles them
+    // — a programmatically forwarded scrollWheel: is ignored by that
+    // path. Everything else passes through to the canvas beneath, except
+    // the overlay scrollers themselves (the knob stays grabbable).
+    NSView *hit = [super hitTest:point];
+    if (!hit) return nil;
+    NSEvent *current = NSApp.currentEvent;
+    if (current && current.type == NSEventTypeScrollWheel) return hit;
+    NSView *candidate = hit;
+    while (candidate && candidate != self) {
+        if ([candidate isKindOfClass:[NSScroller class]]) return hit;
+        candidate = candidate.superview;
+    }
+    return nil;
+}
+
+@end
+
+@implementation ZeroNativeContextMenuTarget
+
+- (void)contextMenuItemClicked:(NSMenuItem *)item {
+    NSNumber *value = item.representedObject;
+    if ([value isKindOfClass:[NSNumber class]]) self.selectedItemId = value.unsignedIntValue;
+}
+
+@end
+
 @implementation ZeroNativeMetalSurfaceView
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
@@ -1680,6 +1753,7 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
 
 - (void)dealloc {
     [self stopDisplayTimer];
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     if (self.canvasColorSpace) {
         CGColorSpaceRelease(self.canvasColorSpace);
         self.canvasColorSpace = NULL;
@@ -2201,11 +2275,23 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
 - (void)mouseDown:(NSEvent *)event {
     [self emitQueuedPointerMotionInputEvent];
     [self.window makeFirstResponder:self];
+    if ((event.modifierFlags & NSEventModifierFlagControl) != 0) {
+        // macOS convention: ctrl-click is a context click. Report it as
+        // the secondary button so the runtime presents the context menu.
+        self.controlClickActive = YES;
+        [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DOWN event:event button:1 deltaX:0 deltaY:0];
+        return;
+    }
     [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_DOWN event:event button:0 deltaX:0 deltaY:0];
 }
 
 - (void)mouseUp:(NSEvent *)event {
     [self emitQueuedPointerMotionInputEvent];
+    if (self.controlClickActive) {
+        self.controlClickActive = NO;
+        [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_UP event:event button:1 deltaX:0 deltaY:0];
+        return;
+    }
     [self emitInputEventWithKind:ZERO_NATIVE_APPKIT_GPU_INPUT_POINTER_UP event:event button:0 deltaX:0 deltaY:0];
 }
 
@@ -2253,6 +2339,14 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
 }
 
 - (void)scrollWheel:(NSEvent *)event {
+    ZeroNativeScrollDriverView *driver = [self scrollDriverForWheelEvent:event];
+    if (driver) {
+        // The OS scroller owns input + physics for this region (momentum,
+        // rubber-band, overlay scroller); the resulting contentOffset
+        // flows back through the clip-view bounds-change notification.
+        [driver scrollWheel:event];
+        return;
+    }
     [self queueScrollInputEvent:event deltaX:-event.scrollingDeltaX deltaY:-event.scrollingDeltaY];
 }
 
@@ -2423,6 +2517,159 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
                           button:0
                           deltaX:deltaX
                           deltaY:deltaY];
+}
+
+// --- Native scroll drivers (#66) ---------------------------------------
+// Each scrollable canvas region gets an invisible NSScrollView subview
+// sized to the region and backed by a flipped document view sized to the
+// content extent. Wheel events over a region forward to its driver, so
+// the OS computes momentum + rubber-band and draws the overlay scroller;
+// the clip view's bounds origin y IS the canvas scroll offset, reported
+// back per frame interval through GPU_SURFACE_SCROLL_DRIVER events.
+
+- (void)setScrollDrivers:(const zero_native_appkit_scroll_driver_t *)drivers count:(NSUInteger)count {
+    if (!self.scrollDrivers) self.scrollDrivers = [[NSMutableArray alloc] init];
+    for (NSInteger index = (NSInteger)self.scrollDrivers.count - 1; index >= 0; index -= 1) {
+        ZeroNativeScrollDriverView *driver = self.scrollDrivers[(NSUInteger)index];
+        BOOL present = NO;
+        for (NSUInteger spec = 0; spec < count; spec += 1) {
+            if (drivers[spec].driver_id == driver.driverId) {
+                present = YES;
+                break;
+            }
+        }
+        if (present) continue;
+        [[NSNotificationCenter defaultCenter] removeObserver:self name:NSViewBoundsDidChangeNotification object:driver.contentView];
+        [driver removeFromSuperview];
+        [self.scrollDrivers removeObjectAtIndex:(NSUInteger)index];
+    }
+    for (NSUInteger spec = 0; spec < count; spec += 1) {
+        const zero_native_appkit_scroll_driver_t desired = drivers[spec];
+        ZeroNativeScrollDriverView *driver = nil;
+        for (ZeroNativeScrollDriverView *candidate in self.scrollDrivers) {
+            if (candidate.driverId == desired.driver_id) {
+                driver = candidate;
+                break;
+            }
+        }
+        BOOL created = NO;
+        if (!driver) {
+            created = YES;
+            driver = [[ZeroNativeScrollDriverView alloc] initWithFrame:NSMakeRect(0, 0, MAX(desired.width, 1), MAX(desired.height, 1))];
+            driver.driverId = desired.driver_id;
+            driver.drawsBackground = NO;
+            driver.hasVerticalScroller = YES;
+            driver.hasHorizontalScroller = NO;
+            driver.scrollerStyle = NSScrollerStyleOverlay;
+            driver.autohidesScrollers = YES;
+            driver.verticalScrollElasticity = NSScrollElasticityAllowed;
+            driver.horizontalScrollElasticity = NSScrollElasticityNone;
+            driver.automaticallyAdjustsContentInsets = NO;
+            ZeroNativeScrollDriverDocumentView *document = [[ZeroNativeScrollDriverDocumentView alloc] initWithFrame:NSMakeRect(0, 0, MAX(desired.content_width, 1), MAX(desired.content_height, 1))];
+            driver.documentView = document;
+            driver.contentView.postsBoundsChangedNotifications = YES;
+            [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(scrollDriverBoundsDidChange:) name:NSViewBoundsDidChangeNotification object:driver.contentView];
+            [self addSubview:driver];
+            [self.scrollDrivers addObject:driver];
+        }
+        // Reconcile against the live view state every push — comparing
+        // against anything but the actual frame races with relayout (#68).
+        NSRect target = NSMakeRect(desired.x, self.bounds.size.height - desired.y - desired.height, desired.width, desired.height);
+        if (!NSEqualRects(driver.frame, target)) driver.frame = target;
+        NSSize contentSize = NSMakeSize(MAX(desired.content_width, 1), MAX(desired.content_height, 1));
+        if (driver.documentView && !NSEqualSizes(driver.documentView.frame.size, contentSize)) {
+            [driver.documentView setFrameSize:contentSize];
+        }
+        if (created || desired.set_offset) [self applyScrollDriverOffset:driver offsetY:desired.offset_y];
+    }
+}
+
+- (void)applyScrollDriverOffset:(ZeroNativeScrollDriverView *)driver offsetY:(double)offsetY {
+    self.applyingScrollDriverOffset = YES;
+    [driver.contentView setBoundsOrigin:NSMakePoint(0, offsetY)];
+    [driver reflectScrolledClipView:driver.contentView];
+    self.applyingScrollDriverOffset = NO;
+}
+
+- (ZeroNativeScrollDriverView *)scrollDriverForPoint:(NSPoint)viewPoint {
+    // Driver specs arrive in layout pre-order, so the LAST hit is the
+    // deepest scroll region under the pointer.
+    ZeroNativeScrollDriverView *result = nil;
+    for (ZeroNativeScrollDriverView *driver in self.scrollDrivers) {
+        if (NSPointInRect(viewPoint, driver.frame)) result = driver;
+    }
+    return result;
+}
+
+- (ZeroNativeScrollDriverView *)scrollDriverForWheelEvent:(NSEvent *)event {
+    if (self.scrollDrivers.count == 0) return nil;
+    const BOOL legacy = event.phase == NSEventPhaseNone && event.momentumPhase == NSEventPhaseNone;
+    if (legacy) {
+        return [self scrollDriverForPoint:[self convertPoint:event.locationInWindow fromView:nil]];
+    }
+    if (event.phase == NSEventPhaseBegan || event.phase == NSEventPhaseMayBegin) {
+        // Lock the gesture to the region under the pointer so momentum
+        // keeps scrolling it after the pointer wanders.
+        self.activeWheelDriver = [self scrollDriverForPoint:[self convertPoint:event.locationInWindow fromView:nil]];
+    }
+    ZeroNativeScrollDriverView *driver = self.activeWheelDriver;
+    if (event.momentumPhase == NSEventPhaseEnded || event.momentumPhase == NSEventPhaseCancelled) {
+        self.activeWheelDriver = nil;
+    }
+    return driver;
+}
+
+- (void)scrollDriverBoundsDidChange:(NSNotification *)note {
+    if (self.applyingScrollDriverOffset) return;
+    NSClipView *clipView = note.object;
+    for (ZeroNativeScrollDriverView *driver in self.scrollDrivers) {
+        if (driver.contentView != clipView) continue;
+        [self queueScrollDriverEventWithId:driver.driverId offsetY:clipView.bounds.origin.y];
+        return;
+    }
+}
+
+- (void)queueScrollDriverEventWithId:(uint64_t)driverId offsetY:(double)offsetY {
+    if (!self.host || self.surfaceLabel.length == 0) return;
+    if (self.scrollDriverEventPending && self.pendingScrollDriverId != driverId) {
+        [self emitQueuedScrollDriverEvent];
+    }
+    self.pendingScrollDriverId = driverId;
+    self.pendingScrollDriverOffsetY = offsetY;
+    if (self.scrollDriverEventPending) return;
+    self.scrollDriverEventPending = YES;
+
+    const uint64_t now = ZeroNativeTimestampNanoseconds();
+    const uint64_t frameIntervalNs = ZeroNativeRetainedFrameIntervalNanoseconds(self.window.screen ?: NSScreen.mainScreen);
+    uint64_t delayNs = 0;
+    if (self.scrollDriverEventLastEmitNs > 0 && now < self.scrollDriverEventLastEmitNs + frameIntervalNs) {
+        delayNs = self.scrollDriverEventLastEmitNs + frameIntervalNs - now;
+    }
+    __weak ZeroNativeMetalSurfaceView *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delayNs), dispatch_get_main_queue(), ^{
+        ZeroNativeMetalSurfaceView *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf emitQueuedScrollDriverEvent];
+    });
+}
+
+- (void)emitQueuedScrollDriverEvent {
+    if (!self.scrollDriverEventPending) return;
+    const uint64_t driverId = self.pendingScrollDriverId;
+    const double offsetY = self.pendingScrollDriverOffsetY;
+    self.scrollDriverEventPending = NO;
+    if (!self.host || self.surfaceLabel.length == 0) return;
+    self.scrollDriverEventLastEmitNs = ZeroNativeTimestampNanoseconds();
+    const char *labelBytes = self.surfaceLabel.UTF8String ?: "";
+    [self.host emitEvent:(zero_native_appkit_event_t){
+        .kind = ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_SCROLL_DRIVER,
+        .window_id = self.windowId,
+        .view_label = labelBytes,
+        .view_label_len = [self.surfaceLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+        .timestamp_ns = ZeroNativeTimestampNanoseconds(),
+        .widget_id = driverId,
+        .scroll_driver_offset_y = offsetY,
+    }];
 }
 
 - (void)emitInputEventWithKind:(NSInteger)kind point:(NSPoint)point timestampNs:(uint64_t)timestampNs modifiers:(uint32_t)modifiers keyText:(NSString *)keyText inputText:(NSString *)inputText button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY {
@@ -3289,6 +3536,68 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
     NSView *view = self.nativeViews[key];
     if (![view isKindOfClass:[ZeroNativeMetalSurfaceView class]]) return NO;
     [(ZeroNativeMetalSurfaceView *)view requestRetainedCanvasFrame];
+    return YES;
+}
+
+- (BOOL)setGpuSurfaceScrollDriversInWindow:(uint64_t)windowId label:(NSString *)label drivers:(const zero_native_appkit_scroll_driver_t *)drivers count:(NSUInteger)count {
+    NSString *key = [self nativeViewKeyForWindow:windowId label:label];
+    NSView *view = self.nativeViews[key];
+    if (![view isKindOfClass:[ZeroNativeMetalSurfaceView class]]) return NO;
+    [(ZeroNativeMetalSurfaceView *)view setScrollDrivers:drivers count:count];
+    return YES;
+}
+
+- (BOOL)showContextMenuInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y token:(uint64_t)token items:(const zero_native_appkit_context_menu_item_t *)items count:(NSUInteger)count {
+    NSView *view = nil;
+    if (label.length > 0) view = self.nativeViews[[self nativeViewKeyForWindow:windowId label:label]];
+    if (!view) view = ((NSWindow *)self.windows[@(windowId)]).contentView;
+    if (!view || count == 0) return NO;
+
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@""];
+    menu.autoenablesItems = NO;
+    ZeroNativeContextMenuTarget *target = [[ZeroNativeContextMenuTarget alloc] init];
+    for (NSUInteger index = 0; index < count; index += 1) {
+        const zero_native_appkit_context_menu_item_t item = items[index];
+        if (item.separator) {
+            [menu addItem:[NSMenuItem separatorItem]];
+            continue;
+        }
+        NSString *title = item.label ? [[NSString alloc] initWithBytes:item.label length:item.label_len encoding:NSUTF8StringEncoding] : @"";
+        NSMenuItem *menuItem = [[NSMenuItem alloc] initWithTitle:title ?: @"" action:@selector(contextMenuItemClicked:) keyEquivalent:@""];
+        menuItem.target = target;
+        menuItem.enabled = item.enabled != 0;
+        menuItem.representedObject = @(item.item_id);
+        [menu addItem:menuItem];
+    }
+
+    // The runtime's point is view-local y-down; the presentation view is
+    // AppKit-unflipped unless it says otherwise.
+    NSPoint location = NSMakePoint(x, view.isFlipped ? y : view.bounds.size.height - y);
+    NSString *eventLabel = [label copy] ?: @"";
+    __weak ZeroNativeAppKitHost *weakSelf = self;
+    // Present on the next loop turn: the request arrives mid input
+    // dispatch and popUp runs its own nested tracking loop. The selection
+    // event is emitted one further turn later so a pending item action
+    // (delivered during menu teardown) always lands first.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ZeroNativeAppKitHost *presentSelf = weakSelf;
+        if (!presentSelf) return;
+        [menu popUpMenuPositioningItem:nil atLocation:location inView:view];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ZeroNativeAppKitHost *emitSelf = weakSelf;
+            if (!emitSelf) return;
+            const char *labelBytes = eventLabel.UTF8String ?: "";
+            [emitSelf emitEvent:(zero_native_appkit_event_t){
+                .kind = ZERO_NATIVE_APPKIT_EVENT_CONTEXT_MENU_ACTION,
+                .window_id = windowId,
+                .view_label = labelBytes,
+                .view_label_len = [eventLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+                .timestamp_ns = ZeroNativeTimestampNanoseconds(),
+                .widget_id = token,
+                .menu_item_id = target.selectedItemId,
+            }];
+        });
+    });
     return YES;
 }
 
@@ -4972,6 +5281,18 @@ int zero_native_appkit_request_gpu_surface_frame(zero_native_appkit_host_t *host
     ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     return [object requestGpuSurfaceFrameInWindow:window_id label:labelString ?: @""] ? 1 : 0;
+}
+
+int zero_native_appkit_set_gpu_surface_scroll_drivers(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const zero_native_appkit_scroll_driver_t *drivers, size_t count) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    return [object setGpuSurfaceScrollDriversInWindow:window_id label:labelString ?: @"" drivers:drivers count:count] ? 1 : 0;
+}
+
+int zero_native_appkit_show_context_menu(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, uint64_t token, const zero_native_appkit_context_menu_item_t *items, size_t count) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    return [object showContextMenuInWindow:window_id label:labelString ?: @"" x:x y:y token:token items:items count:count] ? 1 : 0;
 }
 
 int zero_native_appkit_upload_gpu_surface_image(zero_native_appkit_host_t *host, uint64_t image_id, size_t width, size_t height, const uint8_t *rgba8, size_t rgba8_len) {

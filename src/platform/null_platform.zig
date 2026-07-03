@@ -124,6 +124,11 @@ const GpuSurfaceInputEvent = types.GpuSurfaceInputEvent;
 const GpuSurfacePixels = types.GpuSurfacePixels;
 const GpuSurfacePacket = types.GpuSurfacePacket;
 const GpuSurfaceImagePixels = types.GpuSurfaceImagePixels;
+const max_gpu_surface_scroll_drivers = types.max_gpu_surface_scroll_drivers;
+const GpuSurfaceScrollDriver = types.GpuSurfaceScrollDriver;
+const max_context_menu_items = types.max_context_menu_items;
+const ContextMenuItem = types.ContextMenuItem;
+const ContextMenuRequest = types.ContextMenuRequest;
 const WidgetAccessibilityRole = types.WidgetAccessibilityRole;
 const WidgetAccessibilityActions = types.WidgetAccessibilityActions;
 const WidgetAccessibilityTextRange = types.WidgetAccessibilityTextRange;
@@ -304,6 +309,32 @@ pub const NullPlatform = struct {
     view_cursor_label_len: usize = 0,
     view_cursor: Cursor = .arrow,
     view_cursor_count: usize = 0,
+    /// Native scroll-driver recorder. Opt-in (like `gpu_surfaces`): tests
+    /// modelling a platform with native scroll drivers set this true;
+    /// everything else keeps the engine's wheel physics untouched.
+    gpu_surface_scroll_drivers: bool = false,
+    scroll_driver_window_id: WindowId = 0,
+    scroll_driver_label_storage: [max_view_label_bytes]u8 = undefined,
+    scroll_driver_label_len: usize = 0,
+    scroll_drivers: [max_gpu_surface_scroll_drivers]GpuSurfaceScrollDriver = undefined,
+    scroll_driver_count: usize = 0,
+    scroll_driver_set_count: usize = 0,
+    /// Lifetime count of driver entries pushed with `set_offset = true`
+    /// (the runtime forcing its offset into the native scroller).
+    scroll_driver_set_offset_count: usize = 0,
+    /// Native context-menu recorder: presentations record the request and
+    /// return; tests then feed the selection back as a
+    /// `.context_menu_action` platform event.
+    context_menu_request_count: usize = 0,
+    context_menu_window_id: WindowId = 0,
+    context_menu_label_storage: [max_view_label_bytes]u8 = undefined,
+    context_menu_label_len: usize = 0,
+    context_menu_point: geometry.PointF = .{},
+    context_menu_token: u64 = 0,
+    context_menu_items: [max_context_menu_items]ContextMenuItem = undefined,
+    context_menu_item_count: usize = 0,
+    context_menu_label_bytes: [max_context_menu_items * 64]u8 = undefined,
+    context_menu_label_bytes_len: usize = 0,
 
     pub fn init(surface_value: Surface) NullPlatform {
         return .{ .surface_value = surface_value };
@@ -378,6 +409,8 @@ pub const NullPlatform = struct {
                 .upload_gpu_surface_image_fn = uploadGpuSurfaceImage,
                 .remove_gpu_surface_image_fn = removeGpuSurfaceImage,
                 .decode_image_fn = decodeImage,
+                .set_gpu_surface_scroll_drivers_fn = setGpuSurfaceScrollDrivers,
+                .show_context_menu_fn = showContextMenu,
             },
             .app_info = self.app_info,
         };
@@ -404,6 +437,8 @@ pub const NullPlatform = struct {
             .app_activation_events,
             => true,
             .gpu_surfaces => self.gpu_surfaces,
+            .gpu_surface_scroll_drivers => self.gpu_surface_scroll_drivers,
+            .context_menus => true,
             .tray => self.web_engine == .system,
         };
     }
@@ -1378,6 +1413,65 @@ pub const NullPlatform = struct {
 
     pub fn configuredMenus(self: *const NullPlatform) []const Menu {
         return self.menus[0..self.menu_count];
+    }
+
+    fn setGpuSurfaceScrollDrivers(context: ?*anyopaque, window_id: WindowId, label: []const u8, drivers: []const GpuSurfaceScrollDriver) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (!self.gpu_surface_scroll_drivers) return error.UnsupportedService;
+        self.scroll_driver_set_count += 1;
+        self.scroll_driver_window_id = window_id;
+        const label_value = try copyInto(&self.scroll_driver_label_storage, label);
+        self.scroll_driver_label_len = label_value.len;
+        const count = @min(drivers.len, self.scroll_drivers.len);
+        @memcpy(self.scroll_drivers[0..count], drivers[0..count]);
+        self.scroll_driver_count = count;
+        for (drivers) |driver| {
+            if (driver.set_offset) self.scroll_driver_set_offset_count += 1;
+        }
+    }
+
+    fn showContextMenu(context: ?*anyopaque, request: ContextMenuRequest) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.context_menu_request_count += 1;
+        self.context_menu_window_id = request.window_id;
+        const label_value = try copyInto(&self.context_menu_label_storage, request.view_label);
+        self.context_menu_label_len = label_value.len;
+        self.context_menu_point = request.point;
+        self.context_menu_token = request.token;
+        self.context_menu_label_bytes_len = 0;
+        var count: usize = 0;
+        for (request.items) |item| {
+            if (count >= self.context_menu_items.len) break;
+            const start = self.context_menu_label_bytes_len;
+            const end = start + item.label.len;
+            if (end > self.context_menu_label_bytes.len) return error.NoSpaceLeft;
+            @memcpy(self.context_menu_label_bytes[start..end], item.label);
+            self.context_menu_label_bytes_len = end;
+            self.context_menu_items[count] = .{
+                .id = item.id,
+                .label = self.context_menu_label_bytes[start..end],
+                .enabled = item.enabled,
+                .separator = item.separator,
+            };
+            count += 1;
+        }
+        self.context_menu_item_count = count;
+    }
+
+    pub fn scrollDrivers(self: *const NullPlatform) []const GpuSurfaceScrollDriver {
+        return self.scroll_drivers[0..self.scroll_driver_count];
+    }
+
+    pub fn scrollDriverLabel(self: *const NullPlatform) []const u8 {
+        return self.scroll_driver_label_storage[0..self.scroll_driver_label_len];
+    }
+
+    pub fn contextMenuItems(self: *const NullPlatform) []const ContextMenuItem {
+        return self.context_menu_items[0..self.context_menu_item_count];
+    }
+
+    pub fn contextMenuLabel(self: *const NullPlatform) []const u8 {
+        return self.context_menu_label_storage[0..self.context_menu_label_len];
     }
 };
 

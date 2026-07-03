@@ -270,7 +270,10 @@ fn emitWidgetLayoutNodeContent(
             try builder.pushClip(.{ .id = widgetPartId(paint_widget.id, 1), .rect = paint_widget.frame });
             try emitWidgetLayoutChildren(builder, layout, node_index, tokens, state);
             try builder.popClip();
-            try widget_render_scroll.emitScrollViewScrollbar(builder, paint_widget.frame, widgetScrollSemantics(layout, node_index).metrics, tokens, paint_widget.id);
+            // Native scroll drivers own the (OS overlay) scrollbar (#66).
+            if (!paint_widget.native_scroll) {
+                try widget_render_scroll.emitScrollViewScrollbar(builder, paint_widget.frame, widgetScrollSemantics(layout, node_index).metrics, tokens, paint_widget.id);
+            }
             return;
         },
         .alert => try widget_render_surfaces.emitAlertWidgetChrome(builder, paint_widget, tokens),
@@ -325,7 +328,10 @@ fn emitWidgetLayoutScrollableChildren(
     try builder.pushClip(clip);
     try emitWidgetLayoutChildren(builder, layout, parent_index, tokens, state);
     try builder.popClip();
-    try widget_render_scroll.emitScrollViewScrollbar(builder, widget.frame, widgetScrollSemantics(layout, parent_index).metrics, tokens, widget.id);
+    // Native scroll drivers own the (OS overlay) scrollbar (#66).
+    if (!widget.native_scroll) {
+        try widget_render_scroll.emitScrollViewScrollbar(builder, widget.frame, widgetScrollSemantics(layout, parent_index).metrics, tokens, widget.id);
+    }
 }
 
 fn widgetOpacity(widget: Widget) f32 {
@@ -452,7 +458,10 @@ fn emitScrollViewWidget(builder: *Builder, widget: Widget, tokens: DesignTokens,
     try builder.pushClip(.{ .id = widgetPartId(widget.id, 1), .rect = widget.frame });
     try emitWidgetChildren(builder, widget.children, tokens, depth);
     try builder.popClip();
-    try widget_render_scroll.emitScrollViewScrollbar(builder, widget.frame, widget_render_scroll.widgetScrollMetricsForWidget(widget, tokens), tokens, widget.id);
+    // Native scroll drivers own the (OS overlay) scrollbar (#66).
+    if (!widget.native_scroll) {
+        try widget_render_scroll.emitScrollViewScrollbar(builder, widget.frame, widget_render_scroll.widgetScrollMetricsForWidget(widget, tokens), tokens, widget.id);
+    }
 }
 
 fn emitWidgetClippedChildren(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {

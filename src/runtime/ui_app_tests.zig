@@ -1569,3 +1569,97 @@ test "ui app status item installs a tray and dispatches its commands" {
     try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = 2 });
     try std.testing.expectEqual(@as(u32, 1), app_state.model.refresh_count);
 }
+
+const TaskModel = struct {
+    completed: u32 = 0,
+    deleted: u32 = 0,
+};
+
+const TaskMsg = union(enum) {
+    complete,
+    delete,
+};
+
+const TaskApp = ui_app_model.UiApp(TaskModel, TaskMsg);
+
+fn taskUpdate(model: *TaskModel, msg: TaskMsg) void {
+    switch (msg) {
+        .complete => model.completed += 1,
+        .delete => model.deleted += 1,
+    }
+}
+
+fn taskView(ui: *TaskApp.Ui, model: *const TaskModel) TaskApp.Ui.Node {
+    _ = model;
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.el(.list_item, .{
+            .text = "Ship the release",
+            .context_menu = &.{
+                .{ .label = "Complete", .msg = .complete },
+                .{ .separator = true },
+                .{ .label = "Delete", .msg = .delete },
+            },
+        }, .{}),
+    });
+}
+
+test "ui app dispatches native context menu selections as typed messages" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(TaskApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = TaskApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-context-menu",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = taskUpdate,
+        .view = taskView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // Right-click inside the row's retained frame.
+    const row_id = findIn(app_state.tree.?.root, .list_item, "Ship the release").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var row_frame: geometry.RectF = .{};
+    for (layout.nodes) |node| {
+        if (node.widget.id == row_id) row_frame = node.frame;
+    }
+    try std.testing.expect(!row_frame.isEmpty());
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 2_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
+    try std.testing.expectEqual(@as(u64, row_id), harness.null_platform.context_menu_token);
+    try std.testing.expectEqual(@as(usize, 3), harness.null_platform.contextMenuItems().len);
+
+    // Selecting "Delete" (item id 3 = third declared entry) dispatches
+    // the declared Msg through update.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = row_id,
+        .item_id = 3,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.deleted);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.completed);
+}

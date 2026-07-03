@@ -420,6 +420,15 @@ pub const WidgetSemantics = struct {
     focusable: bool = false,
 };
 
+/// One declared context-menu entry carried on a widget (label/enabled/
+/// separator only — the typed `Msg` mapping lives in the Ui handler
+/// table, keyed by widget id + item index).
+pub const WidgetContextMenuItem = struct {
+    label: []const u8 = "",
+    enabled: bool = true,
+    separator: bool = false,
+};
+
 pub const Widget = struct {
     id: ObjectId = 0,
     kind: WidgetKind,
@@ -454,6 +463,12 @@ pub const Widget = struct {
     size: WidgetSize = .default,
     style: WidgetStyle = .{},
     semantics: WidgetSemantics = .{},
+    /// App-declared native context menu for this widget (empty = none).
+    context_menu: []const WidgetContextMenuItem = &.{},
+    /// True when the runtime installed a native scroll driver for this
+    /// `.scroll_view`: the engine's drawn scrollbar and kinetic physics
+    /// stand down — the OS scroller owns feel and the overlay scroller.
+    native_scroll: bool = false,
     children: []const Widget = &.{},
 };
 

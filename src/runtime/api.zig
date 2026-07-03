@@ -115,6 +115,17 @@ pub const CanvasWidgetDragEvent = struct {
     route: []const canvas.WidgetEventRouteEntry = &.{},
 };
 
+/// The user selected an item from a widget's app-declared native context
+/// menu (`ElementOptions.context_menu`). `item_index` indexes the
+/// widget's declared items; `UiApp` maps it to the item's `Msg` through
+/// the tree's handler table (`Tree.msgForContextMenu`).
+pub const CanvasWidgetContextMenuEvent = struct {
+    window_id: platform.WindowId = 1,
+    view_label: []const u8,
+    target_id: canvas.ObjectId,
+    item_index: usize,
+};
+
 pub const InvalidationReason = enum {
     startup,
     surface_resize,
@@ -149,6 +160,7 @@ pub const Event = union(enum) {
     canvas_widget_scroll: CanvasWidgetScrollEvent,
     canvas_widget_file_drop: CanvasWidgetFileDropEvent,
     canvas_widget_drag: CanvasWidgetDragEvent,
+    canvas_widget_context_menu: CanvasWidgetContextMenuEvent,
 
     pub fn name(self: Event) []const u8 {
         return switch (self) {
@@ -167,6 +179,7 @@ pub const Event = union(enum) {
             .canvas_widget_scroll => "canvas_widget_scroll",
             .canvas_widget_file_drop => "canvas_widget_file_drop",
             .canvas_widget_drag => "canvas_widget_drag",
+            .canvas_widget_context_menu => "canvas_widget_context_menu",
         };
     }
 };

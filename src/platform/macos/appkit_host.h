@@ -29,6 +29,8 @@ typedef enum {
     ZERO_NATIVE_APPKIT_EVENT_APPEARANCE_CHANGED = 15,
     ZERO_NATIVE_APPKIT_EVENT_TIMER = 16,
     ZERO_NATIVE_APPKIT_EVENT_WAKE = 17,
+    ZERO_NATIVE_APPKIT_EVENT_GPU_SURFACE_SCROLL_DRIVER = 18,
+    ZERO_NATIVE_APPKIT_EVENT_CONTEXT_MENU_ACTION = 19,
 } zero_native_appkit_event_kind_t;
 
 typedef enum {
@@ -236,6 +238,12 @@ typedef struct {
     int reduce_motion;
     int high_contrast;
     uint64_t timer_id;
+    /* GPU_SURFACE_SCROLL_DRIVER / CONTEXT_MENU_ACTION payloads: widget_id
+     * carries the driver id / menu token; scroll_driver_offset_y the new
+     * content offset (canvas points, y-down, overscroll passes through);
+     * menu_item_id the selected context-menu item (0 = dismissed). */
+    double scroll_driver_offset_y;
+    uint32_t menu_item_id;
 } zero_native_appkit_event_t;
 
 typedef void (*zero_native_appkit_event_callback_t)(void *context, const zero_native_appkit_event_t *event);
@@ -350,6 +358,45 @@ typedef struct {
 } zero_native_appkit_message_dialog_opts_t;
 
 typedef void (*zero_native_appkit_tray_callback_t)(void *context, uint32_t item_id);
+
+/* One native scroll driver's desired state (see PlatformServices
+ * set_gpu_surface_scroll_drivers_fn). Frame coordinates are view-local
+ * canvas points (top-left origin, y-down); the host flips to AppKit
+ * coordinates itself. */
+typedef struct {
+    uint64_t driver_id;
+    double x;
+    double y;
+    double width;
+    double height;
+    double content_width;
+    double content_height;
+    double offset_y;
+    int set_offset;
+} zero_native_appkit_scroll_driver_t;
+
+/* One native context-menu entry. */
+typedef struct {
+    uint32_t item_id;
+    const char *label;
+    size_t label_len;
+    int enabled;
+    int separator;
+} zero_native_appkit_context_menu_item_t;
+
+/* Reconcile the gpu-surface view's native scroll drivers against the full
+ * desired set: create missing NSScrollViews, update frames / content
+ * extents / (when set_offset) offsets, remove drivers absent from the
+ * list. Idempotent; called every layout install and every presented
+ * frame. Returns 1 on success, 0 when the view does not exist. */
+int zero_native_appkit_set_gpu_surface_scroll_drivers(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const zero_native_appkit_scroll_driver_t *drivers, size_t count);
+
+/* Present a native context menu (NSMenu popUpMenuPositioningItem) at the
+ * view-local point on the next main-loop turn. The selection (or
+ * dismissal: menu_item_id 0) is emitted asynchronously as a
+ * CONTEXT_MENU_ACTION event echoing `token` in widget_id. Returns 1 when
+ * the request was queued, 0 when the window does not exist. */
+int zero_native_appkit_show_context_menu(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, uint64_t token, const zero_native_appkit_context_menu_item_t *items, size_t count);
 
 zero_native_appkit_open_dialog_result_t zero_native_appkit_show_open_dialog(zero_native_appkit_host_t *host, const zero_native_appkit_open_dialog_opts_t *opts, char *buffer, size_t buffer_len);
 size_t zero_native_appkit_show_save_dialog(zero_native_appkit_host_t *host, const zero_native_appkit_save_dialog_opts_t *opts, char *buffer, size_t buffer_len);

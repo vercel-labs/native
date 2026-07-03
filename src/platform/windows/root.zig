@@ -297,6 +297,11 @@ pub const WindowsPlatform = struct {
             .app_activation_events,
             .gpu_surfaces,
             => self.web_engine == .system,
+            // Native scroll drivers and native context menus are macOS-only
+            // today; Win32 keeps the engine's wheel physics (TrackPopupMenu
+            // is the natural future context-menu seam — the tray already
+            // uses it).
+            .gpu_surface_scroll_drivers, .context_menus => false,
         };
     }
 

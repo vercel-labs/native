@@ -42,6 +42,16 @@ fn expectSameTree(comptime MsgT: type, expected: canvas.Ui(MsgT).Tree, actual: c
             .input => |make| try testing.expectEqual(make, actual_handler.action.input),
             .value => |make| try testing.expectEqual(make, actual_handler.action.value),
             .scroll => |make| try testing.expectEqual(make, actual_handler.action.scroll),
+            // Context menus are builder-only (the closed markup grammar has
+            // no list-valued attributes), so parity trees never carry them.
+            .context_menu => |msgs| {
+                const actual_msgs = actual_handler.action.context_menu;
+                try testing.expectEqual(msgs.len, actual_msgs.len);
+                for (msgs, actual_msgs) |expected_msg, actual_msg| {
+                    try testing.expectEqual(expected_msg == null, actual_msg == null);
+                    if (expected_msg) |msg| try expectSameMsg(MsgT, msg, actual_msg.?);
+                }
+            },
         }
     }
 }

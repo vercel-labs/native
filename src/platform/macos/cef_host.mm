@@ -474,6 +474,22 @@ static const char *ZeroNativeCefBridgeScript() {
 @property(nonatomic, assign) uint32_t modifiers;
 @end
 
+/* Captures the selected item id of a context-menu popUp (NSMenuItem
+ * targets are weak; the presenter block keeps this alive). */
+@interface ZeroNativeChromiumContextMenuTarget : NSObject
+@property(nonatomic, assign) uint32_t selectedItemId;
+- (void)contextMenuItemClicked:(NSMenuItem *)item;
+@end
+
+@implementation ZeroNativeChromiumContextMenuTarget
+
+- (void)contextMenuItemClicked:(NSMenuItem *)item {
+    NSNumber *value = item.representedObject;
+    if ([value isKindOfClass:[NSNumber class]]) self.selectedItemId = value.unsignedIntValue;
+}
+
+@end
+
 @interface ZeroNativeChromiumHost : NSObject
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) NSView *browserContainer;
@@ -2270,4 +2286,54 @@ void zero_native_appkit_set_tray_callback(zero_native_appkit_host_t *host, zero_
     ZeroNativeChromiumHost *object = (__bridge ZeroNativeChromiumHost *)host;
     object.trayCallback = callback;
     object.trayContext = context;
+}
+
+/* Native context menu, CEF engine: same NSMenu presentation as the
+ * system-engine host, anchored to the window content view (gpu-surface
+ * views are system-engine-only, so `label` resolves to the window). */
+int zero_native_appkit_show_context_menu(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, uint64_t token, const zero_native_appkit_context_menu_item_t *items, size_t count) {
+    ZeroNativeChromiumHost *object = (__bridge ZeroNativeChromiumHost *)host;
+    NSWindow *window = object.windows[@(window_id)] ?: (window_id == 1 ? object.window : nil);
+    NSView *view = window.contentView;
+    if (!view || count == 0) return 0;
+
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@""];
+    menu.autoenablesItems = NO;
+    ZeroNativeChromiumContextMenuTarget *target = [[ZeroNativeChromiumContextMenuTarget alloc] init];
+    for (size_t index = 0; index < count; index += 1) {
+        const zero_native_appkit_context_menu_item_t item = items[index];
+        if (item.separator) {
+            [menu addItem:[NSMenuItem separatorItem]];
+            continue;
+        }
+        NSString *title = item.label ? [[NSString alloc] initWithBytes:item.label length:item.label_len encoding:NSUTF8StringEncoding] : @"";
+        NSMenuItem *menuItem = [[NSMenuItem alloc] initWithTitle:title ?: @"" action:@selector(contextMenuItemClicked:) keyEquivalent:@""];
+        menuItem.target = target;
+        menuItem.enabled = item.enabled != 0;
+        menuItem.representedObject = @(item.item_id);
+        [menu addItem:menuItem];
+    }
+
+    NSString *eventLabel = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    NSPoint location = NSMakePoint(x, view.isFlipped ? y : view.bounds.size.height - y);
+    __weak ZeroNativeChromiumHost *weakSelf = object;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ZeroNativeChromiumHost *presentSelf = weakSelf;
+        if (!presentSelf) return;
+        [menu popUpMenuPositioningItem:nil atLocation:location inView:view];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ZeroNativeChromiumHost *emitSelf = weakSelf;
+            if (!emitSelf) return;
+            const char *labelBytes = eventLabel.UTF8String ?: "";
+            [emitSelf emitEvent:(zero_native_appkit_event_t){
+                .kind = ZERO_NATIVE_APPKIT_EVENT_CONTEXT_MENU_ACTION,
+                .window_id = window_id,
+                .view_label = labelBytes,
+                .view_label_len = [eventLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+                .widget_id = token,
+                .menu_item_id = target.selectedItemId,
+            }];
+        });
+    });
+    return 1;
 }

@@ -15,8 +15,10 @@ const shell_layout = @import("shell_layout.zig");
 const canvas_frame_helpers = @import("canvas_frame.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const runtime_canvas_images = @import("canvas_images.zig");
+const runtime_canvas_widget_context_menu = @import("canvas_widget_context_menu.zig");
 const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
+const runtime_canvas_widget_scroll_drivers = @import("canvas_widget_scroll_drivers.zig");
 const runtime_canvas_widget_state = @import("canvas_widget_state.zig");
 const runtime_canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const runtime_gpu_surface_events = @import("gpu_surface_events.zig");
@@ -138,6 +140,7 @@ pub const CanvasWidgetAccessibilityActionKind = runtime_api.CanvasWidgetAccessib
 pub const CanvasWidgetAccessibilityAction = runtime_api.CanvasWidgetAccessibilityAction;
 pub const CanvasWidgetFileDropEvent = runtime_api.CanvasWidgetFileDropEvent;
 pub const CanvasWidgetDragEvent = runtime_api.CanvasWidgetDragEvent;
+pub const CanvasWidgetContextMenuEvent = runtime_api.CanvasWidgetContextMenuEvent;
 pub const InvalidationReason = runtime_api.InvalidationReason;
 pub const FrameDiagnostics = runtime_api.FrameDiagnostics;
 pub const Event = runtime_api.Event;
@@ -206,6 +209,10 @@ pub const Runtime = struct {
     automation_views: [automation.snapshot.max_views]platform.ViewInfo = undefined,
     automation_widgets: [automation.snapshot.max_widgets]automation.snapshot.Widget = undefined,
     widget_event_route_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined,
+    /// The in-flight native context-menu request (#67): set when the
+    /// platform is asked to present, resolved by the matching
+    /// `context_menu_action` event. At most one menu tracks at a time.
+    canvas_widget_context_menu_pending: ?runtime_canvas_widget_context_menu.PendingCanvasWidgetContextMenu = null,
     canvas_widget_display_list_refresh_batch_depth: usize = 0,
     // Scratch for setCanvasWidgetLayout's reconcile pass: too large for the
     // stack at the current node cap, and the event loop is single-threaded.

@@ -86,6 +86,27 @@ URL changes navigate; bumping `reload_token` reloads the same URL (the CenterPan
 } },
 ```
 
+### Native scrolling (macOS)
+
+Zero app code: on macOS every non-virtualized `scroll` region is driven by an invisible `NSScrollView` — OS momentum, rubber-band overscroll, and the system overlay scrollbar — while the engine renders the content. `widget.value` stays the offset of record, so the rebuild reconcile rule ("user offset survives rebuilds until the source offset changes"), automation snapshot offsets (`scroll=[offset=..]`), and `Options.sync` all work exactly as before; the engine-drawn scrollbar simply stops painting for natively driven regions. Programmatic scrolls still work: change the source offset (or scroll via keyboard/automation) and the runtime pushes it into the native scroller. GTK/Win32 and mobile embeds keep the engine's wheel physics unchanged. Nested-scroll saturation handoff (inner region exhausted, outer continues) is per-region native today: the inner region rubber-bands at its edge like a standalone scroller.
+
+### Native context menus
+
+`ElementOptions.context_menu` declares per-widget items in the chrome-menu shape with typed messages; right/ctrl-click presents the real OS menu (macOS `NSMenu`) at the pointer and dispatches the selected item's `Msg`:
+
+```zig
+ui.listItem(.{
+    .on_press = Msg{ .select = entry.index },
+    .context_menu = &.{
+        .{ .label = "Open Section", .msg = Msg{ .select = entry.index } },
+        .{ .separator = true },
+        .{ .label = "Refresh Dashboard", .msg = .refresh },
+    },
+}, entry.title)
+```
+
+The deepest declaring widget on the hit route wins; disabled items and separators are fine (`enabled = false`, `.separator = true`). Zero-code defaults need no declaration: editable text fields present the standard Cut / Copy / Paste / Select All menu wired to the existing clipboard actions, and a selected static text presents Copy. Builder-only by design — the closed markup grammar has no list-valued attributes, so markup apps attach menus from a wrapping Zig view function. macOS-only today (GTK popover menus and Win32 `TrackPopupMenu` are the documented future seams; unsupported platforms silently skip presentation). Touch long-press is design-noted for the mobile embeds: the iOS host's under-slop `Pending` touch state is the timer seam, pending a secondary-button leg in the embed ABI and `UIEditMenuInteraction` presentation. `examples/gpu-dashboard` nav rows carry a live menu; `zig build test-example-gpu-dashboard` and the runtime context-menu suite verify dispatch.
+
 ## Elements
 
 | Markup | Widget | Notes |

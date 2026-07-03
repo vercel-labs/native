@@ -726,6 +726,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .canvas_widget_pointer => |pointer_event| try self.handlePointer(runtime, pointer_event),
                 .canvas_widget_keyboard => |keyboard_event| try self.handleKeyboard(runtime, keyboard_event),
                 .canvas_widget_scroll => |scroll_event| try self.handleScroll(runtime, scroll_event),
+                .canvas_widget_context_menu => |menu_event| try self.handleContextMenu(runtime, menu_event),
                 else => {},
             }
         }
@@ -916,6 +917,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const tree = self.tree orelse return;
             if (tree.msgForScroll(scroll_event.id, scroll_event.scroll)) |msg| {
                 try self.dispatch(runtime, scroll_event.window_id, msg);
+            }
+        }
+
+        /// A native context-menu selection (#67): resolve the selected
+        /// item's declared `Msg` through the tree's handler table.
+        fn handleContextMenu(self: *Self, runtime: *Runtime, menu_event: core.CanvasWidgetContextMenuEvent) anyerror!void {
+            if (!std.mem.eql(u8, menu_event.view_label, self.options.canvas_label)) return;
+            const tree = self.tree orelse return;
+            if (tree.msgForContextMenu(menu_event.target_id, menu_event.item_index)) |msg| {
+                try self.dispatch(runtime, menu_event.window_id, msg);
             }
         }
     };

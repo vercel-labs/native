@@ -126,6 +126,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             self.widget_semantics_node_count = 0;
             self.widget_text_len = 0;
             self.widget_span_len = 0;
+            self.widget_context_menu_len = 0;
 
             for (layout.nodes, 0..) |node, layout_index| {
                 const text_reconciled = canvasWidgetLayoutNodeWithTextReconcileState(node, layout, layout_index, previous_text_states);
@@ -398,9 +399,29 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             copy.widget.spans = try self.copyWidgetSpans(node.widget.text, copy.widget.text, node.widget.spans);
             copy.widget.command = try self.copyWidgetText(node.widget.command);
             copy.widget.semantics.label = try self.copyWidgetText(node.widget.semantics.label);
+            copy.widget.context_menu = try self.copyWidgetContextMenu(node.widget.context_menu);
             copy = canvasWidgetLayoutNodeWithSourceSemantics(copy, source_semantics);
             copy.widget.children = &.{};
             return copy;
+        }
+
+        /// Retain a widget's declared context-menu items: the retained tree
+        /// owns its bytes (same rule as text / command / semantics labels),
+        /// so a right-click can never read a label from a reused app buffer.
+        pub fn copyWidgetContextMenu(self: *RuntimeView, items: []const canvas.WidgetContextMenuItem) anyerror![]const canvas.WidgetContextMenuItem {
+            if (items.len == 0) return &.{};
+            const end = self.widget_context_menu_len + items.len;
+            if (end > self.widget_context_menu_items.len) return error.WidgetContextMenuLimitReached;
+            const start = self.widget_context_menu_len;
+            for (items, self.widget_context_menu_items[start..end]) |item, *entry| {
+                entry.* = .{
+                    .label = try self.copyWidgetText(item.label),
+                    .enabled = item.enabled,
+                    .separator = item.separator,
+                };
+            }
+            self.widget_context_menu_len = end;
+            return self.widget_context_menu_items[start..end];
         }
 
         pub fn copyWidgetText(self: *RuntimeView, text: []const u8) anyerror![]const u8 {

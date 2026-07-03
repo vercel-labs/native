@@ -66,6 +66,9 @@ pub const max_canvas_widget_source_text_entries_per_view: usize = 256;
 // span is a small struct (style flags + slices into the widget text
 // bytes); per-paragraph capacity is `canvas.max_text_spans_per_paragraph`.
 pub const max_canvas_widget_spans_per_view: usize = 1024;
+// Declared native context-menu entries retained across all widgets of a
+// view (labels live in the widget text bytes).
+pub const max_canvas_widget_context_menu_items_per_view: usize = 128;
 pub const max_canvas_widget_invalidations_per_view: usize = max_canvas_widget_nodes_per_view * 2 + 1;
 // Scroll containers whose offset changed since the last app dispatch:
 // entries are node ids, deduped, and the dispatched event reads the
