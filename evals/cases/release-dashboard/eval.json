@@ -1,0 +1,86 @@
+{
+  "name": "release-dashboard",
+  "description": "Exercises the pipeline composites and markdown-in-markup: a release dashboard whose natural shape is <stepper> for the stage track, <timeline> for the event history, and a <markdown>-sourced notes panel with a GFM table.",
+  "prompt": "This workspace is a freshly scaffolded zero-native native-frontend app (see README.md; the view is src/app.zml, the logic src/main.zig). Replace the counter with a release pipeline dashboard.\n\nRequirements:\n- A stage track across the top showing the five pipeline stages, in order and named exactly \"Plan\", \"Build\", \"Canary\", \"Rollout\", and \"Done\", as a horizontal sequence: stages already finished are visually marked complete (a check), the current stage is emphasized, and upcoming stages are muted. The pipeline starts on \"Canary\" (the third stage).\n- Buttons named exactly \"Advance\" and \"Back\" move the pipeline one stage forward or back, clamped at both ends (Back on \"Plan\" and Advance on \"Done\" do nothing).\n- An event history: a vertical chronology of at least four seeded release events, each showing a leading marker connected by a thin vertical rail to the next event, a bold title, a supporting description, and a muted timestamp line; the rail ends at the final event. Two of the seeds must be exactly: title \"v2.4.0 tagged\" with timestamp \"2026-06-28 09:14\", and title \"Canary deployed\" with timestamp \"2026-06-30 16:02\".\n- A release notes panel whose content is a markdown document owned by the Zig side (a model field or function, not markup), containing a heading, at least one paragraph, and a two-column table whose header cells are exactly \"Environment\" and \"Version\" with data rows exactly: staging on v2.4.0 and production on v2.3.9. The panel must render the document as formatted rich text — headings, paragraph, and an aligned table — never as raw markdown source.\n- A status bar summarizing the pipeline as exactly \"Stage <n> of 5 · <stage name>\" (so \"Stage 3 of 5 · Canary\" at launch), updating live as the stage changes.\n- Keep all logic in src/main.zig (Model, Msg, update); the markup only binds values and dispatches messages.\n- Validate the markup with `zero-native markup check src/app.zml`, and keep `zig build test` green — extend src/tests.zig so the tests drive Advance and Back through the real dispatch path, including clamping at both ends, and assert the current stage and the status summary.\n\nWhen you are done, make sure `zig build test` passes and summarize what you built.",
+  "frontend": "native",
+  "timeoutMs": 1200000,
+  "maxTurns": 80,
+  "checks": [
+    {
+      "type": "build_test",
+      "args": [
+        "-Dplatform=null"
+      ]
+    },
+    {
+      "type": "markup_check"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.zml",
+      "pattern": "<stepper[\\s>]",
+      "expect": true,
+      "description": "the stage track is a <stepper>"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.zml",
+      "pattern": "<timeline[\\s>]",
+      "expect": true,
+      "description": "the event history is a <timeline>"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.zml",
+      "pattern": "<timeline-item[\\s>]",
+      "expect": true,
+      "description": "events are <timeline-item> leaves"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.zml",
+      "pattern": "<markdown[\\s>]",
+      "expect": true,
+      "description": "the notes panel renders through <markdown>"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.zml",
+      "pattern": "<for\\s+[^>]*each=",
+      "expect": true,
+      "description": "events render through a <for> loop from model data"
+    },
+    {
+      "type": "snapshot_grep",
+      "patterns": [
+        "role=list",
+        "role=listitem",
+        "name=\"Build \\(completed\\)\"",
+        "name=\"Canary \\(active\\)\"",
+        "name=\"Rollout \\(pending\\)\"",
+        "name=\"v2\\.4\\.0 tagged\"",
+        "name=\"Canary deployed\"",
+        "role=gridcell",
+        "name=\"Environment\"",
+        "name=\"staging\"",
+        "name=\"v2\\.3\\.9\"",
+        "name=\"Advance\"",
+        "name=\"Back\"",
+        "Stage 3 of 5 · Canary"
+      ],
+      "description": "live snapshot shows stepper stage states, timeline items by title, the markdown table cells, and the summary"
+    },
+    {
+      "type": "llm_judge",
+      "criteria": [
+        "The dashboard composes the framework's composites as designed: the stage track is a real stepper driven by a single model stage index (not a hand-rolled row of badges and separators), the history is a timeline whose items carry title/description/meta and whose connector rail ends on the final item, and the notes render through the markdown element — no ad-hoc reimplementation of any of the three.",
+        "Model/Msg/update follow The Elm Architecture idiomatically: one source-of-truth stage index, Advance/Back are messages whose clamping lives in update, events are model data, and nothing derivable (the stage name, the status summary, the 'n of 5' math) is stored in the model.",
+        "The markup stays declarative and shadcn-ish in composition: events render via <for> from model data, the markdown source is owned by Zig and bound, sections are laid out with cards/columns and design tokens rather than magic values, and no counting, formatting, or stage math is smuggled into the view.",
+        "Tests are meaningful: Advance and Back run through the real dispatch path, clamping is asserted at both ends (Plan and Done), and the current stage plus the status summary string are asserted — not merely that the code compiles."
+      ],
+      "minScore": 6,
+      "advisory": true,
+      "description": "quality of the dashboard composition beyond compliance"
+    }
+  ]
+}

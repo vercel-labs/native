@@ -1,0 +1,78 @@
+{
+  "name": "process-monitor",
+  "description": "Exercises the effects surface: a long-running local command spawned through the effects channel (update_fx + fx.spawn), streaming lines into a bounded list, cancel by key, status and counts derived from line/exit Msgs, and fake-executor tests.",
+  "prompt": "This workspace is a freshly scaffolded zero-native native-frontend app (see README.md; the view is src/app.zml, the logic src/main.zig). Replace the counter with a small process monitor app.\n\nRequirements:\n- The app runs exactly one local command when the user presses a button named exactly \"Start\": /bin/sh -c 'i=0; while [ $i -lt 40 ]; do i=$((i+1)); echo \"tick $i\"; sleep 0.25; done' — it prints \"tick 1\" through \"tick 40\", one line every 250ms, then exits 0. The UI must never block or freeze while it runs: the command runs in the background and its output arrives as messages the app reacts to.\n- Each output line appears in a scrolling list as it arrives, showing only the most recent 12 lines — older lines fall off the top. The counts described below must stay correct for the whole run even after lines have scrolled away.\n- A button named exactly \"Cancel\" stops the running command immediately. \"Start\" must not be usable while a run is active, and \"Cancel\" must not be usable while idle.\n- A status line with these exact strings: \"Status: idle\" before any run, \"Status: running\" while the command runs, \"Status: exited (code <code>)\" after a normal exit (so \"Status: exited (code 0)\" for this command), \"Status: cancelled\" after the user cancels, and \"Status: failed\" for any other outcome (the command could not start, was killed by a signal, ...).\n- A summary line exactly \"<received> lines · <dropped> dropped\" (so \"0 lines · 0 dropped\" before any run), updating live: <received> counts every line the app was delivered, and <dropped> must honestly reflect any lines the runtime reports it had to drop — never silently understate.\n- Pressing \"Start\" for a new run resets the counts, clears the list, and clears the previous outcome.\n- Keep all logic in src/main.zig (Model, Msg, update); the markup only binds values and dispatches messages, and the view never starts or stops the command itself.\n- Validate the markup with `zero-native markup check src/app.zml`, and keep `zig build test` green — extend src/tests.zig using the framework's deterministic fake effects executor (no real process is spawned) so the tests cover, through the real dispatch path: pressing Start records exactly one background command request with the right argv; feeding lines makes them visible and the list stays bounded at 12 while the counts keep counting; feeding a normal exit produces \"Status: exited (code 0)\"; and the cancel path produces \"Status: cancelled\".\n\nWhen you are done, make sure `zig build test` passes and summarize what you built.",
+  "frontend": "native",
+  "timeoutMs": 1200000,
+  "maxTurns": 80,
+  "checks": [
+    {
+      "type": "build_test",
+      "args": [
+        "-Dplatform=null"
+      ]
+    },
+    {
+      "type": "markup_check"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/main.zig",
+      "pattern": "\\.update_fx\\s*=",
+      "expect": true,
+      "description": "update takes the effects channel (.update_fx wiring)"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/main.zig",
+      "pattern": "fx\\.spawn\\(",
+      "expect": true,
+      "description": "the command runs through fx.spawn in update"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/main.zig",
+      "pattern": "fx\\.cancel\\(",
+      "expect": true,
+      "description": "cancel goes through fx.cancel with the model-owned key"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/tests.zig",
+      "pattern": "executor\\s*=\\s*\\.fake",
+      "expect": true,
+      "description": "tests use the deterministic fake effects executor"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.zig",
+      "pattern": "std\\.process\\.Child|std\\.Thread",
+      "expect": false,
+      "description": "no hand-rolled subprocess or threads — effects only"
+    },
+    {
+      "type": "snapshot_grep",
+      "patterns": [
+        "role=button",
+        "name=\"Start\"",
+        "name=\"Cancel\"",
+        "Status: idle",
+        "0 lines · 0 dropped"
+      ],
+      "description": "live snapshot shows the idle state: Start/Cancel controls, idle status, zeroed summary"
+    },
+    {
+      "type": "llm_judge",
+      "criteria": [
+        "Effect key discipline: the spawn key is a stable model-owned constant, a second Start while running is impossible (control disabled or guarded in update), and every exit reason — exited, cancelled, rejected, spawn_failed, signaled — lands in a coherent status; a rejected spawn is not silently ignored.",
+        "Nothing blocks: the command runs only through the effects channel, update never waits or sleeps, and line/exit payloads are copied out of the drain scratch in the update call that receives them — never stored as slices into runtime-owned memory.",
+        "Honest accounting: the received count keeps counting after lines scroll out of the bounded list, the dropped count incorporates what the runtime reports (dropped_before on lines, dropped_lines on the exit), and starting a new run resets counts, list, and outcome atomically.",
+        "Derive, don't store: the status line and the \"<received> lines · <dropped> dropped\" summary are derived at view time (arena-formatted model functions) from source state — a phase/last-exit plus integer counters — not preformatted strings cached in the model and maintained by hand in update.",
+        "Tests are meaningful: the fake executor path asserts the recorded spawn request (argv and key), feeds lines and an exit and drains them through the wake event, and asserts the visible list contents, the bounded length, the counts, and the status strings — including the cancel path — through the real dispatch path."
+      ],
+      "minScore": 6,
+      "advisory": true,
+      "description": "quality of the effects usage beyond compliance"
+    }
+  ]
+}

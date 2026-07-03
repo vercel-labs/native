@@ -572,6 +572,8 @@ main.update(&model, tree.msgForPointer(button.id, .up).?);        // dispatch ex
 // rebuild and assert: text updated, widget ids stable
 ```
 
+Two `msgForPointer` traps: a **disabled** control yields `null` (assert `== null` rather than unwrapping when testing disabled states), and the tree is a snapshot — after each dispatch, rebuild the view before pressing anything again.
+
 Runtime-integration tests use `zero_native.TestHarness()` on the null platform; heap-allocate both the harness and the app struct (they are multi-megabyte; stack allocation crashes).
 
 ## Verify live through the automation harness
