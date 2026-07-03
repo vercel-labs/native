@@ -56,6 +56,8 @@ Apps built without `-Dautomation=true` usually ignore automation files.
 
 ```bash
 zero-native automate wait
+zero-native automate assert 'gpu_nonblank=true' 'role=button name="Reset"'
+zero-native automate assert --absent 'error event='
 zero-native automate list
 zero-native automate snapshot
 zero-native automate reload
@@ -77,11 +79,29 @@ zig-out/bin/zero-native automate wait
 zig-out/bin/zero-native automate snapshot
 ```
 
+## Snapshot assertions (`automate assert`)
+
+Prefer `zero-native automate assert` over `snapshot | grep` chains: it polls, so no sleeps, and its failure output carries the evidence (each missing pattern plus the snapshot tail).
+
+```bash
+zero-native automate assert 'gpu_nonblank=true' 'role=button name="Reset"' 'count: 0'
+zero-native automate assert --timeout-ms 10000 '4 open'
+zero-native automate assert --absent 'error event=' 'dispatch_errors=[1-9]'
+```
+
+Semantics:
+
+- Every argument is a regex that must match somewhere in `snapshot.txt`. The command polls (100ms interval) until all match, then exits 0.
+- `--timeout-ms <n>` bounds the polling (default 30000). On timeout it prints `missing: <pattern>` for each unmatched pattern, the last 20 snapshot lines, and exits non-zero — CI-friendly, no wrapper script needed.
+- `--absent` inverts the whole invocation: every pattern must NOT match (poll until gone). Mix presence and absence by running two invocations.
+- Supported regex subset: literals, `.`, postfix `*` `+` `?`, line anchors `^`/`$`, classes `[a-z]`/`[^0-9]`, and `\d \w \s` (with uppercase negations). No groups or alternation — pass multiple patterns instead.
+- Quote patterns in single quotes so the shell leaves `"`, `$`, and `\d` alone.
+
 ## Standard workflow
 
 1. Start the app with automation enabled.
 2. Run `zero-native automate wait` to block until `snapshot.txt` contains `ready=true`.
-3. Run `zero-native automate snapshot` to confirm app/window/source metadata.
+3. Run `zero-native automate assert '<pattern>' ...` for state checks, or `zero-native automate snapshot` to eyeball app/window/source metadata.
 4. Run `zero-native automate list` to inspect window summaries.
 5. Run `zero-native automate bridge '...'` for bridge round-trip checks.
 6. Use `zero-native automate widget-action <view-label> <widget-id> <action> [value]` to exercise retained canvas widget actions. `set_text` routes through the SAME input path real typing uses (focus, select-all, then a text-input event), so a TEA app's `on_input` mirror receives the edits and model state stays consistent with the on-screen field — it is not a presentation-only write.
@@ -200,10 +220,12 @@ A good smoke test:
 1. Builds an example with `-Dautomation=true` and `-Djs-bridge=true`.
 2. Starts the app in a GUI-capable session.
 3. Waits for readiness.
-4. Verifies snapshot metadata.
+4. Verifies snapshot metadata (`automate assert` with the patterns that matter).
 5. Sends `native.ping`.
 6. Exercises builtin windows/WebViews if the app enables them.
 7. Fails on timeout or unexpected bridge response.
+
+Apps scaffolded by `zero-native init` ship this as `.github/workflows/ci.yml`: a null-platform `zig build test` job plus a Linux Xvfb smoke job that launches the binary, runs `automate wait`, asserts on the snapshot with `automate assert`, and checks a non-empty `automate screenshot` artifact. Extend that file rather than writing grep chains by hand.
 
 Do not use automation for exhaustive UI testing. It is a runtime and bridge smoke layer.
 

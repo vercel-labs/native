@@ -156,6 +156,10 @@ pub fn build(b: *std.Build) void {
     markup_lsp_mod.addImport("ui_markup", ui_markup_mod);
     const markup_lsp_tests = testArtifact(b, markup_lsp_mod);
 
+    const automation_cli_mod = module(b, target, optimize, "tools/zero-native/automation.zig");
+    automation_cli_mod.addImport("automation_protocol", automation_protocol_mod);
+    const automation_cli_tests = testArtifact(b, automation_cli_mod);
+
     const cli_mod = module(b, target, optimize, "tools/zero-native/main.zig");
     cli_mod.addImport("tooling", tooling_mod);
     cli_mod.addImport("automation_protocol", automation_protocol_mod);
@@ -225,6 +229,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(automation_protocol_tests).step);
     test_step.dependOn(&b.addRunArtifact(tooling_tests).step);
     test_step.dependOn(&b.addRunArtifact(markup_lsp_tests).step);
+    test_step.dependOn(&b.addRunArtifact(automation_cli_tests).step);
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-package-types", "Verify package TypeScript platform feature names", &.{
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "ZeroNativeCommandInfo" },
         .{ .path = "packages/zero-native/zero-native.d.ts", .pattern = "list(): Promise<ZeroNativeCommandInfo[]>" },
@@ -452,6 +457,7 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-canvas", "Run canvas display list tests", canvas_tests);
     addTestStep(b, "test-desktop", "Run zero-native framework tests", desktop_tests);
     addTestStep(b, "test-automation-protocol", "Run automation protocol tests", automation_protocol_tests);
+    addTestStep(b, "test-automation-cli", "Run zero-native automate CLI tests", automation_cli_tests);
     addTestStep(b, "test-tooling", "Run zero-native tooling tests", tooling_tests);
 
     const run_hello = b.addSystemCommand(&.{ "zig", "build", "run", b.fmt("-Dplatform={s}", .{platform_arg}), b.fmt("-Dtrace={s}", .{@tagName(trace_option)}) });

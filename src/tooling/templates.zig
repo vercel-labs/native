@@ -81,7 +81,10 @@ pub fn writeDefaultApp(allocator: std.mem.Allocator, io: std.Io, destination: []
     defer allocator.free(app_zon);
     const readme_md = try readme(allocator, names, framework_path, options.frontend);
     defer allocator.free(readme_md);
+    const ci_yaml = try frontendCiYaml(allocator, names);
+    defer allocator.free(ci_yaml);
 
+    try app_dir.createDirPath(io, ".github/workflows");
     try writeFile(app_dir, io, "build.zig", build_zig);
     try writeFile(app_dir, io, "build.zig.zon", build_zon);
     try writeFile(app_dir, io, "src/main.zig", main_zig);
@@ -90,6 +93,7 @@ pub fn writeDefaultApp(allocator: std.mem.Allocator, io: std.Io, destination: []
     const icon_bytes = readFile(allocator, io, "assets/icon.icns") catch fallback_icon_icns;
     defer if (icon_bytes.ptr != fallback_icon_icns.ptr) allocator.free(icon_bytes);
     try writeFile(app_dir, io, "assets/icon.icns", icon_bytes);
+    try writeFile(app_dir, io, ".github/workflows/ci.yml", ci_yaml);
     try writeFile(app_dir, io, "README.md", readme_md);
 
     try writeFrontendFiles(allocator, io, app_dir, names, options.frontend);
@@ -97,6 +101,7 @@ pub fn writeDefaultApp(allocator: std.mem.Allocator, io: std.Io, destination: []
 
 fn writeNativeApp(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames, framework_path: []const u8) !void {
     try app_dir.createDirPath(io, ".vscode");
+    try app_dir.createDirPath(io, ".github/workflows");
 
     const build_zig = try nativeBuildZig(allocator, names);
     defer allocator.free(build_zig);
@@ -110,6 +115,8 @@ fn writeNativeApp(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir,
     defer allocator.free(app_zon);
     const readme_md = try nativeReadme(allocator, names, framework_path);
     defer allocator.free(readme_md);
+    const ci_yaml = try nativeCiYaml(allocator, names, framework_path);
+    defer allocator.free(ci_yaml);
 
     try writeFile(app_dir, io, "build.zig", build_zig);
     try writeFile(app_dir, io, "build.zig.zon", build_zon);
@@ -121,6 +128,7 @@ fn writeNativeApp(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir,
     defer if (icon_bytes.ptr != fallback_icon_icns.ptr) allocator.free(icon_bytes);
     try writeFile(app_dir, io, "assets/icon.icns", icon_bytes);
     try writeFile(app_dir, io, ".vscode/settings.json", nativeVscodeSettings());
+    try writeFile(app_dir, io, ".github/workflows/ci.yml", ci_yaml);
     try writeFile(app_dir, io, ".gitignore", nativeGitignore());
     try writeFile(app_dir, io, "README.md", readme_md);
 }
@@ -538,6 +546,135 @@ fn nativeReadme(allocator: std.mem.Allocator, names: TemplateNames, framework_pa
         \\
         \\Edit `.dependencies.zero_native.path` in `build.zig.zon` if you move
         \\this app or the framework checkout.
+        \\
+    );
+    return out.toOwnedSlice(allocator);
+}
+
+/// GitHub Actions workflow for a native-rendered app: a null-platform
+/// logic-test job plus a Linux Xvfb automation smoke job that launches the
+/// real binary and asserts on the accessibility snapshot. The generated
+/// file belongs to the user, like everything init writes.
+fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_path: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator,
+        \\name: CI
+        \\
+        \\on:
+        \\  pull_request:
+        \\  push:
+        \\    branches:
+        \\      - main
+        \\
+        \\permissions:
+        \\  contents: read
+        \\
+        \\env:
+        \\  # build.zig.zon expects the zero-native framework checkout at this
+        \\  # path, relative to the repository root. Adjust both together if
+        \\  # your framework checkout lives elsewhere.
+        \\  ZERO_NATIVE_PATH:
+    );
+    try out.appendSlice(allocator, " ");
+    try appendEscapedString(&out, allocator, framework_path);
+    try out.appendSlice(allocator,
+        \\
+        \\
+        \\jobs:
+        \\  test:
+        \\    name: Logic Tests
+        \\    runs-on: ubuntu-latest
+        \\    steps:
+        \\      - uses: actions/checkout@v4
+        \\      - uses: mlugg/setup-zig@v2
+        \\        with:
+        \\          version: 0.16.0
+        \\      - name: Fetch zero-native
+        \\        run: |
+        \\          if [ ! -f "$ZERO_NATIVE_PATH/build.zig" ]; then
+        \\            git clone --depth 1 https://github.com/vercel-labs/zero-native.git "$ZERO_NATIVE_PATH"
+        \\          fi
+        \\      - run: zig build test -Dplatform=null
+        \\
+        \\  smoke:
+        \\    name: Automation Smoke (Linux)
+        \\    runs-on: ubuntu-latest
+        \\    steps:
+        \\      - uses: actions/checkout@v4
+        \\      - uses: mlugg/setup-zig@v2
+        \\        with:
+        \\          version: 0.16.0
+        \\      - name: Install GTK and Xvfb
+        \\        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev xvfb
+        \\      - name: Fetch zero-native
+        \\        run: |
+        \\          if [ ! -f "$ZERO_NATIVE_PATH/build.zig" ]; then
+        \\            git clone --depth 1 https://github.com/vercel-labs/zero-native.git "$ZERO_NATIVE_PATH"
+        \\          fi
+        \\      - name: Build the zero-native CLI
+        \\        run: cd "$ZERO_NATIVE_PATH" && zig build
+        \\      - name: Build and drive the app headless
+        \\        run: |
+        \\          set -euo pipefail
+        \\          cli="$ZERO_NATIVE_PATH/zig-out/bin/zero-native"
+        \\          zig build -Dplatform=linux -Dweb-engine=system -Dautomation=true
+        \\          rm -rf .zig-cache/zero-native-automation
+        \\          xvfb-run -a ./zig-out/bin/
+    );
+    try out.appendSlice(allocator, names.package_name);
+    try out.appendSlice(allocator,
+        \\ &
+        \\          pid=$!
+        \\          trap 'kill "$pid" >/dev/null 2>&1 || true' EXIT
+        \\          "$cli" automate wait
+        \\          "$cli" automate assert 'gpu_nonblank=true' 'role=button name="Reset"' 'count: 0'
+        \\          "$cli" automate screenshot main-canvas
+        \\          test -s .zig-cache/zero-native-automation/screenshot-main-canvas.png
+        \\
+    );
+    return out.toOwnedSlice(allocator);
+}
+
+/// GitHub Actions workflow for a web-frontend app: null-platform logic
+/// tests, pointing `-Dzero-native-path` at a framework checkout fetched in
+/// CI (web templates default to a machine-local path).
+fn frontendCiYaml(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 {
+    _ = names;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator,
+        \\name: CI
+        \\
+        \\on:
+        \\  pull_request:
+        \\  push:
+        \\    branches:
+        \\      - main
+        \\
+        \\permissions:
+        \\  contents: read
+        \\
+        \\env:
+        \\  # Where CI keeps the zero-native framework checkout; the build
+        \\  # override below points the app at it.
+        \\  ZERO_NATIVE_PATH: "../zero-native"
+        \\
+        \\jobs:
+        \\  test:
+        \\    name: Logic Tests
+        \\    runs-on: ubuntu-latest
+        \\    steps:
+        \\      - uses: actions/checkout@v4
+        \\      - uses: mlugg/setup-zig@v2
+        \\        with:
+        \\          version: 0.16.0
+        \\      - name: Fetch zero-native
+        \\        run: |
+        \\          if [ ! -f "$ZERO_NATIVE_PATH/build.zig" ]; then
+        \\            git clone --depth 1 https://github.com/vercel-labs/zero-native.git "$ZERO_NATIVE_PATH"
+        \\          fi
+        \\      - run: zig build test -Dplatform=null -Dzero-native-path="$ZERO_NATIVE_PATH"
         \\
     );
     return out.toOwnedSlice(allocator);
@@ -2588,6 +2725,15 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "for (restored_windows, 0..)") != null);
     try std.testing.expect(std.mem.indexOf(u8, package_json_text, "\"vite\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, main_js_text, "window.zero") != null);
+
+    const ci_yaml_text = try readTestFile(std.testing.allocator, std.testing.io, destination, ".github/workflows/ci.yml");
+    defer std.testing.allocator.free(ci_yaml_text);
+    try expectBasicYaml(ci_yaml_text);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "zig build test -Dplatform=null -Dzero-native-path=\"$ZERO_NATIVE_PATH\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "mlugg/setup-zig@v2") != null);
+    // Web-frontend workflows stop at logic tests: the automation smoke
+    // recipe is native-app specific.
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "smoke:") == null);
 }
 
 test "writeDefaultApp emits frontend-specific Next paths" {
@@ -2655,6 +2801,53 @@ test "writeDefaultApp emits native project files" {
     try std.testing.expect(std.mem.indexOf(u8, gitignore_text, "zig-out/") != null);
     try std.testing.expect(std.mem.indexOf(u8, readme_text, "zero-native markup check src/app.zml") != null);
     try std.testing.expect(std.mem.indexOf(u8, readme_text, "hot") != null or std.mem.indexOf(u8, readme_text, "Hot") != null);
+}
+
+test "writeDefaultApp emits a CI workflow for native apps" {
+    const destination = ".zig-cache/test-native-ci-template";
+    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native });
+
+    const ci_yaml_text = try readTestFile(std.testing.allocator, std.testing.io, destination, ".github/workflows/ci.yml");
+    defer std.testing.allocator.free(ci_yaml_text);
+
+    try expectBasicYaml(ci_yaml_text);
+    // Both jobs are present, sized for a user app.
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "jobs:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "  test:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "  smoke:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "mlugg/setup-zig@v2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "version: 0.16.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "zig build test -Dplatform=null") != null);
+    // The smoke job builds with automation, launches under Xvfb, and drives
+    // the snapshot: the binary name comes from the template context.
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "libgtk-4-dev libwebkitgtk-6.0-dev xvfb") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "zig build -Dplatform=linux -Dweb-engine=system -Dautomation=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "xvfb-run -a ./zig-out/bin/my-app &") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "automate wait") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "automate assert 'gpu_nonblank=true' 'role=button name=\"Reset\"' 'count: 0'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "automate screenshot main-canvas") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "test -s .zig-cache/zero-native-automation/screenshot-main-canvas.png") != null);
+    // The framework fetch step reuses the build.zig.zon dependency path.
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "ZERO_NATIVE_PATH:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "git clone --depth 1 https://github.com/vercel-labs/zero-native.git \"$ZERO_NATIVE_PATH\"") != null);
+}
+
+/// Structural sanity for generated workflows (the repo scaffold CI job runs
+/// a real YAML parse over the generated file): top-level keys present, no
+/// tabs, space indentation in even steps, no trailing whitespace.
+fn expectBasicYaml(text: []const u8) !void {
+    try std.testing.expect(std.mem.startsWith(u8, text, "name: CI\n"));
+    try std.testing.expect(std.mem.indexOf(u8, text, "\non:\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\njobs:\n") != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, text, '\t') == null);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        try std.testing.expect(!std.ascii.isWhitespace(line[line.len - 1]));
+        var indent: usize = 0;
+        while (indent < line.len and line[indent] == ' ') indent += 1;
+        try std.testing.expect(indent % 2 == 0);
+    }
 }
 
 fn normalizePackageName(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {

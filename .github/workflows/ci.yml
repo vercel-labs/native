@@ -205,6 +205,9 @@ jobs:
             rm -rf "$app"
             ./zig-out/bin/zero-native init "$app" --frontend "$frontend"
             (cd "$app" && zig build test -Dplatform=null && ../../zig-out/bin/zero-native validate app.zon)
+            # Every scaffold ships a CI workflow; parse it as real YAML.
+            test -s "$app/.github/workflows/ci.yml"
+            python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' "$app/.github/workflows/ci.yml"
           done
 
   evals-typecheck:

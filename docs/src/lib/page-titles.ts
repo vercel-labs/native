@@ -28,6 +28,7 @@ export const PAGE_TITLES: Record<string, string> = {
   "debugging/doctor": "zero-native doctor",
   automation: "Automation",
   testing: "Testing",
+  "testing/ci": "Testing in CI",
   extensions: "Extensions",
   embed: "Embedded App",
   "web-engines": "Web Engines",

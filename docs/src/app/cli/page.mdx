@@ -328,6 +328,10 @@ Core maintainers who need to build CEF before a zero-native runtime release exis
       <td>Wait for <code>ready=true</code> in the snapshot</td>
     </tr>
     <tr>
+      <td><code>automate assert [--absent] [--timeout-ms &lt;n&gt;] &lt;pattern&gt;...</code></td>
+      <td>Poll the snapshot until every regex pattern matches (or, with <code>--absent</code>, until none match); on timeout, prints the missing patterns plus the snapshot tail and exits non-zero</td>
+    </tr>
+    <tr>
       <td><code>automate bridge &lt;json&gt;</code></td>
       <td>Send a bridge command (origin <code>zero://inline</code>)</td>
     </tr>

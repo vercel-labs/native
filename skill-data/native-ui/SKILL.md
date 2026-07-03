@@ -587,3 +587,10 @@ zero-native automate widget-click <canvas-label> <id>   # id is the bare number 
 ```
 
 Snapshots expose the same structural widget ids your tests see, so live assertions are greps: click by id, re-read the snapshot, and check names/values/counts changed. Widget ids are stable across rebuilds, reorders, and hot reloads — asserting an id stayed constant while its bounds or state changed is the standard way to prove keyed identity.
+
+For scripted checks (and the CI workflow `zero-native init` scaffolds), replace grep-and-sleep with `zero-native automate assert`: each argument is a regex that must match the snapshot, polled up to `--timeout-ms` (default 30000), with `--absent` inverting the check. Failure names the missing patterns and prints the snapshot tail.
+
+```bash
+zero-native automate assert 'gpu_nonblank=true' 'role=button name="Reset"' 'count: 0'
+zero-native automate assert --absent 'error event='
+```

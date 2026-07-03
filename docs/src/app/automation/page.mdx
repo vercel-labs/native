@@ -142,6 +142,11 @@ The `zero-native automate` subcommand interacts with the automation directory:
 # Wait for the app to be ready (polls snapshot.txt for ready=true)
 zero-native automate wait
 
+# Assert on the snapshot: each argument is a regex that must match
+# (polls up to --timeout-ms, default 30000; --absent inverts)
+zero-native automate assert 'gpu_nonblank=true' 'role=button name="Reset"'
+zero-native automate assert --absent 'error event='
+
 # List running automation-enabled apps
 zero-native automate list
 
