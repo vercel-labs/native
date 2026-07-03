@@ -238,6 +238,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// current slider values and scroll offsets.
         pub fn dispatch(self: *Self, runtime: *Runtime, window_id: platform.WindowId, msg: MsgT) anyerror!void {
             self.effects.bindServices(&runtime.options.platform.services);
+            self.effects.bindEnviron(runtime.options.environ);
             self.syncModel(runtime, window_id);
             self.applyMsg(msg);
             try self.rebuild(runtime, window_id);
@@ -263,6 +264,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (!self.installed) return;
             if (!self.effects.hasPending()) return;
             self.effects.bindServices(&runtime.options.platform.services);
+            self.effects.bindEnviron(runtime.options.environ);
             self.syncModel(runtime, self.canvas_window_id);
             var dispatched = false;
             while (self.effects.takeMsg()) |msg| {

@@ -232,6 +232,7 @@ fn runNull(app: zero_native.App, options: RunOptions, init: std.process.Init) !v
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) zero_native.automation.Server.init(init.io, ".zig-cache/zero-native-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
+        .environ = init.minimal.environ,
     });
 
     try runtime.run(app);
@@ -278,6 +279,7 @@ fn runMacos(app: zero_native.App, options: RunOptions, init: std.process.Init) !
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) zero_native.automation.Server.init(init.io, ".zig-cache/zero-native-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
+        .environ = init.minimal.environ,
     });
 
     try runtime.run(app);
@@ -324,6 +326,7 @@ fn runLinux(app: zero_native.App, options: RunOptions, init: std.process.Init) !
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) zero_native.automation.Server.init(init.io, ".zig-cache/zero-native-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
+        .environ = init.minimal.environ,
     });
 
     try runtime.run(app);
@@ -370,6 +373,7 @@ fn runWindows(app: zero_native.App, options: RunOptions, init: std.process.Init)
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) zero_native.automation.Server.init(init.io, ".zig-cache/zero-native-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
+        .environ = init.minimal.environ,
     });
 
     try runtime.run(app);

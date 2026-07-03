@@ -28,6 +28,10 @@
 //!   `dropped_before` and the exit's `dropped_lines`; an over-long line
 //!   is delivered truncated with `truncated = true`; a response body over
 //!   `max_effect_body_bytes` arrives truncated with `truncated = true`.
+//! - Spawned children inherit the host process environment (HOME, PATH,
+//!   ...): the app runner threads it from `std.process.Init` through
+//!   `Runtime.Options.environ` into `bindEnviron`; hosts without a
+//!   process `Init` (embed/mobile) get `fallbackEnviron()`.
 //! - Cancel semantics: after `cancel(key)` returns, no further `on_line`
 //!   Msgs for that spawn are dispatched (already-queued lines are
 //!   discarded at drain), and exactly one `on_exit` Msg with reason
@@ -191,6 +195,25 @@ const SpinMutex = struct {
         self.inner.unlock();
     }
 };
+
+/// The spawned-child environment when the host never bound one through
+/// `bindEnviron` (embed and mobile hosts have no `std.process.Init` to
+/// take it from). Windows reads the live PEB block (`.global`); POSIX
+/// hosts that link libc read `std.c.environ`; anything else falls back
+/// to `.empty` — spawn and fetch still work, children just start with
+/// a clean environment.
+fn fallbackEnviron() std.process.Environ {
+    if (std.process.Environ.Block == std.process.Environ.GlobalBlock) {
+        return .{ .block = .global };
+    } else if (builtin.link_libc and std.process.Environ.Block == std.process.Environ.PosixBlock) {
+        const envp = std.c.environ;
+        var count: usize = 0;
+        while (envp[count] != null) : (count += 1) {}
+        return .{ .block = .{ .slice = envp[0..count :null] } };
+    } else {
+        return .empty;
+    }
+}
 
 /// Map a fetch-side error onto the delivered failure taxonomy. The
 /// worker refines `.cancelled` into `.timed_out` when the deadline (not
@@ -463,6 +486,12 @@ pub fn Effects(comptime Msg: type) type {
         /// workers call `services.wake()` through it (the one
         /// thread-safe PlatformServices entry).
         services: ?*const platform.PlatformServices = null,
+        /// The environment spawned children inherit and fetch honors
+        /// (PATH for `spawnPath`-style lookups, proxy variables).
+        /// Bound once from the loop thread before the first real
+        /// spawn/fetch; `null` means "resolve a fallback at first use"
+        /// (see `fallbackEnviron`).
+        environ: ?std.process.Environ = null,
         io_threaded: ?*std.Io.Threaded = null,
         shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
         next_generation: u32 = 1,
@@ -544,6 +573,16 @@ pub fn Effects(comptime Msg: type) type {
         /// runtime and is stable for its lifetime).
         pub fn bindServices(self: *Self, services: *const platform.PlatformServices) void {
             if (self.services == null) self.services = services;
+        }
+
+        /// Point spawned children at the host process environment (the
+        /// runner takes it from `std.process.Init`). Loop-thread only;
+        /// the first non-null bind sticks, and it must land before the
+        /// first real spawn/fetch creates the executor io — after that
+        /// the environment is frozen into `std.Io.Threaded`. Hosts that
+        /// never bind (embed/mobile) get `fallbackEnviron()`.
+        pub fn bindEnviron(self: *Self, environ: ?std.process.Environ) void {
+            if (self.environ == null) self.environ = environ;
         }
 
         // ------------------------------------------------------------- API
@@ -972,7 +1011,12 @@ pub fn Effects(comptime Msg: type) type {
         fn ensureIo(self: *Self) !std.Io {
             if (self.io_threaded == null) {
                 const threaded = try self.allocator.create(std.Io.Threaded);
-                threaded.* = std.Io.Threaded.init(self.allocator, .{});
+                // `environ` defaults to `.empty` in `InitOptions`, which
+                // would hand every spawned child a blank environment (no
+                // HOME, no PATH) — always pass the host environment.
+                threaded.* = std.Io.Threaded.init(self.allocator, .{
+                    .environ = self.environ orelse fallbackEnviron(),
+                });
                 self.io_threaded = threaded;
             }
             return self.io_threaded.?.io();

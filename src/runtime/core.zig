@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const geometry = @import("geometry");
 const trace = @import("trace");
 const json = @import("json");
@@ -586,6 +587,10 @@ pub fn TestHarness() type {
             Runtime.initAt(&self.runtime, .{
                 .platform = self.null_platform.platform(),
                 .trace_sink = self.trace_sink.sink(),
+                // Real-executor effect tests spawn processes that must
+                // see the parent environment (HOME, PATH), exactly as
+                // the app runner threads it from `std.process.Init`.
+                .environ = if (builtin.is_test) std.testing.environ else null,
             });
         }
 

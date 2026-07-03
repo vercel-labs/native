@@ -296,7 +296,7 @@ try app_state.effects.feedResponse(search_key, 200, "{\"ok\":true}");
 try harness.runtime.dispatchPlatformEvent(app, .wake);   // Msg{ .fetched = ... }
 ```
 
-The `.wake` platform event is how live platforms marshal worker completions onto the loop thread (macOS main-queue dispatch, GTK `g_idle_add`, Win32 `PostMessage`); dispatching it in tests exercises the same drain path. See `examples/effects-probe` for the complete pattern, including the live cancel flow.
+The `.wake` platform event is how live platforms marshal worker completions onto the loop thread (macOS main-queue dispatch, GTK `g_idle_add`, Win32 `PostMessage`); dispatching it in tests exercises the same drain path. Note that after `fx.cancel(key)` runs in `update`, a subsequent `feedExit(key)` correctly fails with `error.EffectNotFound` — the cancel already delivered the terminal `.cancelled` exit, so there is no active effect left to feed. See `examples/effects-probe` for the complete pattern, including the live cancel flow.
 
 ## Structure tags
 

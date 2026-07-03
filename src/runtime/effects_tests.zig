@@ -513,6 +513,32 @@ test "real executor cancels a long-running stream cleanly" {
     try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.activeCount());
 }
 
+test "real executor children inherit the parent environment" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var h = try Harness.create();
+    defer h.destroy();
+
+    // Regression: `ensureIo` once built its `std.Io.Threaded` with the
+    // default `.environ = .empty`, so every spawned child saw a blank
+    // environment (no HOME, no PATH) — `gh` inside an app reported "not
+    // logged in" despite the parent being authenticated. Assert the
+    // child actually sees both. POSIX-portable across the macOS and
+    // ubuntu runners; `${VAR:?}` makes a missing variable exit nonzero.
+    test_argv = &.{ "/bin/sh", "-c", "printf 'HOME=%s\\nPATH=%s\\n' \"${HOME:?}\" \"${PATH:?}\"" };
+    test_stdin = null;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try waitForRealCompletion(&h, sawExit);
+
+    try std.testing.expectEqual(@as(i32, 0), h.app_state.model.exit_code);
+    try std.testing.expectEqual(effects_mod.EffectExitReason.exited, h.app_state.model.exit_reason.?);
+    try std.testing.expectEqual(@as(usize, 2), h.app_state.model.line_count);
+    // Non-empty values, not just present-but-blank.
+    try std.testing.expect(h.app_state.model.lineAt(0).len > "HOME=".len);
+    try std.testing.expect(std.mem.startsWith(u8, h.app_state.model.lineAt(0), "HOME="));
+    try std.testing.expect(h.app_state.model.lineAt(1).len > "PATH=".len);
+    try std.testing.expect(std.mem.startsWith(u8, h.app_state.model.lineAt(1), "PATH="));
+}
+
 test "real executor reports unspawnable binaries as spawn_failed" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     var h = try Harness.create();

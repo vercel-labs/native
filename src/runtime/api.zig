@@ -1,3 +1,4 @@
+const std = @import("std");
 const trace = @import("trace");
 const canvas = @import("canvas");
 const automation = @import("../automation/root.zig");
@@ -210,4 +211,10 @@ pub const Options = struct {
     window_state_store: ?window_state.Store = null,
     js_window_api: bool = false,
     gpu_surface_frame_diagnostics: bool = true,
+    /// The process environment spawned effect children inherit (the app
+    /// runner threads it through from `std.process.Init`). `null` lets
+    /// the effect system resolve a fallback for hosts without a process
+    /// `Init` (embed/mobile): the libc/PEB environment where available,
+    /// `.empty` otherwise.
+    environ: ?std.process.Environ = null,
 };

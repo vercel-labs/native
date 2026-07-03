@@ -1475,6 +1475,7 @@ fn runnerZig() []const u8 {
     \\        .shortcuts = shortcuts,
     \\        .automation = if (build_options.automation) zero_native.automation.Server.init(init.io, ".zig-cache/zero-native-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
+    \\        .environ = init.minimal.environ,
     \\    });
     \\
     \\    try runtime.run(app);
@@ -1519,6 +1520,7 @@ fn runnerZig() []const u8 {
     \\        .shortcuts = shortcuts,
     \\        .automation = if (build_options.automation) zero_native.automation.Server.init(init.io, ".zig-cache/zero-native-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
+    \\        .environ = init.minimal.environ,
     \\    });
     \\
     \\    try runtime.run(app);
@@ -1563,6 +1565,7 @@ fn runnerZig() []const u8 {
     \\        .shortcuts = shortcuts,
     \\        .automation = if (build_options.automation) zero_native.automation.Server.init(init.io, ".zig-cache/zero-native-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
+    \\        .environ = init.minimal.environ,
     \\    });
     \\
     \\    try runtime.run(app);
@@ -1607,6 +1610,7 @@ fn runnerZig() []const u8 {
     \\        .shortcuts = shortcuts,
     \\        .automation = if (build_options.automation) zero_native.automation.Server.init(init.io, ".zig-cache/zero-native-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
+    \\        .environ = init.minimal.environ,
     \\    });
     \\
     \\    try runtime.run(app);
