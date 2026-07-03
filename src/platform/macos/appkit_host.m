@@ -1090,10 +1090,55 @@ static NSTextAlignment ZeroNativePacketTextAlignment(NSString *align) {
     return NSTextAlignmentNatural;
 }
 
+// Italicizes a resolved sans face for the reserved italic span font ids
+// (5 and 6). Prefers a real italic face from the same family via
+// NSFontManager (SF has one; Geist does not ship a sans italic), and falls
+// back to a sheared font matrix so the slant is always visible. The shear
+// leaves advance widths unchanged, keeping measured layout in step with the
+// upright face the estimator models.
+static NSFont *ZeroNativeItalicSansFont(NSFont *font) {
+    if (!font) return nil;
+    NSFontManager *manager = [NSFontManager sharedFontManager];
+    NSFont *converted = [manager convertFont:font toHaveTrait:NSItalicFontMask];
+    if (converted && ([manager traitsOfFont:converted] & NSItalicFontMask) != 0) return converted;
+    CGFloat size = font.pointSize;
+    NSAffineTransform *transform = [NSAffineTransform transform];
+    NSAffineTransformStruct shear = { size, 0, size * 0.2, size, 0, 0 };
+    transform.transformStruct = shear;
+    NSFont *oblique = [NSFont fontWithDescriptor:font.fontDescriptor textTransform:transform];
+    return oblique ?: font;
+}
+
+// Resolves the weighted sans faces behind the reserved span font ids 3
+// (medium) and 4/6 (bold): explicit weighted candidate names first (Geist
+// Medium / Geist Bold when installed), then an NSFontManager family
+// conversion from the resolved regular face, then the matching SF weight.
+// Never answers with the regular face — a weighted span id that draws at
+// regular weight is invisible, which defeats the id.
+static NSFont *ZeroNativeWeightedSansFont(NSArray<NSString *> *names, NSFont *base, NSFontWeight systemWeight, BOOL bold, CGFloat size) {
+    for (NSString *name in names) {
+        NSFont *font = [NSFont fontWithName:name size:size];
+        if (font) return font;
+    }
+    NSFontManager *manager = [NSFontManager sharedFontManager];
+    NSString *family = base.familyName;
+    if (family) {
+        NSFont *converted = [manager fontWithFamily:family traits:(bold ? NSBoldFontMask : 0) weight:(bold ? 9 : 6) size:size];
+        if (converted) {
+            BOOL heavier = bold ? ([manager traitsOfFont:converted] & NSBoldFontMask) != 0
+                                : [manager weightOfFont:converted] > [manager weightOfFont:base];
+            if (heavier) return converted;
+        }
+    }
+    return [NSFont systemFontOfSize:size weight:systemWeight];
+}
+
 // Resolves a canvas font id to the NSFont presentation draws with. Both
 // packet text drawing and zero_native_appkit_measure_text go through this
 // single function so measured layout and drawn glyphs share font
-// resolution. Resolved fonts are cached per (font id, size).
+// resolution. Ids 3-6 are the reserved sans span variants (medium, bold,
+// italic, bold italic); everything else keeps the regular sans/mono
+// candidates. Resolved fonts are cached per (font id, size).
 static NSFont *ZeroNativeFontForFontId(unsigned long long value, CGFloat size) {
     static NSCache<NSString *, NSFont *> *cache = nil;
     static dispatch_once_t onceToken;
@@ -1104,17 +1149,39 @@ static NSFont *ZeroNativeFontForFontId(unsigned long long value, CGFloat size) {
     NSString *key = [NSString stringWithFormat:@"%llu/%.3f", value, (double)size];
     NSFont *cached = [cache objectForKey:key];
     if (cached) return cached;
-    NSArray<NSString *> *candidates = value == 2
-        ? @[ @"Geist Mono", @"GeistMono-Regular", @"Geist Mono Regular" ]
-        : @[ @"Geist", @"Geist-Regular", @"Geist Sans", @"Geist Sans Regular" ];
     NSFont *font = nil;
-    for (NSString *name in candidates) {
-        font = [NSFont fontWithName:name size:size];
-        if (font) break;
-    }
-    if (!font) {
-        font = value == 2 ? [NSFont monospacedSystemFontOfSize:size weight:NSFontWeightRegular]
-                          : [NSFont systemFontOfSize:size];
+    if (value == 2) {
+        NSArray<NSString *> *candidates = @[ @"Geist Mono", @"GeistMono-Regular", @"Geist Mono Regular" ];
+        for (NSString *name in candidates) {
+            font = [NSFont fontWithName:name size:size];
+            if (font) break;
+        }
+        if (!font) font = [NSFont monospacedSystemFontOfSize:size weight:NSFontWeightRegular];
+    } else {
+        NSArray<NSString *> *candidates = @[ @"Geist", @"Geist-Regular", @"Geist Sans", @"Geist Sans Regular" ];
+        NSFont *base = nil;
+        for (NSString *name in candidates) {
+            base = [NSFont fontWithName:name size:size];
+            if (base) break;
+        }
+        if (!base) base = [NSFont systemFontOfSize:size];
+        switch (value) {
+        case 3:
+            font = ZeroNativeWeightedSansFont(@[ @"Geist-Medium", @"Geist Medium" ], base, NSFontWeightMedium, NO, size);
+            break;
+        case 4:
+            font = ZeroNativeWeightedSansFont(@[ @"Geist-Bold", @"Geist Bold" ], base, NSFontWeightBold, YES, size);
+            break;
+        case 5:
+            font = ZeroNativeItalicSansFont(base);
+            break;
+        case 6:
+            font = ZeroNativeItalicSansFont(ZeroNativeWeightedSansFont(@[ @"Geist-Bold", @"Geist Bold" ], base, NSFontWeightBold, YES, size));
+            break;
+        default:
+            font = base;
+            break;
+        }
     }
     if (font) [cache setObject:font forKey:key];
     return font;

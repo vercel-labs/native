@@ -374,6 +374,14 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "ZeroNativePacketPreferredFont(text, size)" },
         .{ .path = "src/tooling/templates.zig", .pattern = "app_mod.linkFramework(\"CoreText\", .{});" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-span-fonts", "Verify AppKit packet text resolves reserved span font ids to real weighted and italic faces", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static NSFont *ZeroNativeItalicSansFont(NSFont *font)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static NSFont *ZeroNativeWeightedSansFont(" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "ZeroNativeWeightedSansFont(@[ @\"Geist-Medium\", @\"Geist Medium\" ], base, NSFontWeightMedium, NO, size)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "ZeroNativeWeightedSansFont(@[ @\"Geist-Bold\", @\"Geist Bold\" ], base, NSFontWeightBold, YES, size)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "ZeroNativeItalicSansFont(base)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "ZeroNativeItalicSansFont(ZeroNativeWeightedSansFont(@[ @\"Geist-Bold\", @\"Geist Bold\" ], base, NSFontWeightBold, YES, size))" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-widget-cursor-bridge", "Verify AppKit GPU widgets apply retained cursor intent", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "zero_native_appkit_set_view_cursor" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "resetCursorRects" },
@@ -551,6 +559,13 @@ pub fn build(b: *std.Build) void {
         .{ .path = "examples/android/app/src/main/java/dev/zero_native/examples/android/MainActivity.kt", .pattern = "nativeWidgetSemanticsByIdFields" },
         .{ .path = "examples/android/app/src/main/cpp/zero_native_jni.c", .pattern = "zero_native_app_widget_semantics_by_id" },
         .{ .path = "examples/android/app/src/main/cpp/zero_native_jni.c", .pattern = "zero_native_app_scroll" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, mobile_examples_step, "test-example-mobile-canvas-span-fonts", "Verify the iOS embed shim measures reserved span font ids with the macOS face mapping", &.{
+        .{ .path = "examples/mobile-canvas/ios/main.m", .pattern = "static UIFont *ZeroNativeItalicSansFont(UIFont *font)" },
+        .{ .path = "examples/mobile-canvas/ios/main.m", .pattern = "static UIFont *ZeroNativeWeightedSansFont(" },
+        .{ .path = "examples/mobile-canvas/ios/main.m", .pattern = "ZeroNativeWeightedSansFont(@[ @\"Geist-Medium\", @\"Geist Medium\" ], UIFontWeightMedium, size)" },
+        .{ .path = "examples/mobile-canvas/ios/main.m", .pattern = "ZeroNativeWeightedSansFont(@[ @\"Geist-Bold\", @\"Geist Bold\" ], UIFontWeightBold, size)" },
+        .{ .path = "examples/mobile-canvas/ios/main.m", .pattern = "ZeroNativeItalicSansFont(ZeroNativeWeightedSansFont(@[ @\"Geist-Bold\", @\"Geist Bold\" ], UIFontWeightBold, size))" },
     });
 
     const build_mobile_canvas_lib = b.addSystemCommand(&.{ "zig", "build", "lib" });

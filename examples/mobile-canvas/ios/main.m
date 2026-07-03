@@ -63,9 +63,45 @@ const struct mach_header *_dyld_get_image_header_containing_address(const void *
 
 // ------------------------------------------------------------ text metrics
 
+// Italicizes a resolved sans face for the reserved italic span font ids
+// (5 and 6) — the iOS mirror of appkit_host.m's ZeroNativeItalicSansFont.
+// Prefers a real italic face from the same family via font descriptor
+// traits (SF has one; Geist does not ship a sans italic) and falls back to
+// a sheared descriptor matrix so a future draw path slants visibly. The
+// shear leaves advance widths unchanged, so measurement matches the
+// upright face either way.
+static UIFont *ZeroNativeItalicSansFont(UIFont *font) {
+    if (!font) return nil;
+    UIFontDescriptor *italic = [font.fontDescriptor fontDescriptorWithSymbolicTraits:
+        (font.fontDescriptor.symbolicTraits | UIFontDescriptorTraitItalic)];
+    if (italic) {
+        UIFont *converted = [UIFont fontWithDescriptor:italic size:font.pointSize];
+        if (converted && (converted.fontDescriptor.symbolicTraits & UIFontDescriptorTraitItalic) != 0) return converted;
+    }
+    UIFontDescriptor *oblique = [font.fontDescriptor fontDescriptorWithMatrix:CGAffineTransformMake(1, 0, 0.2, 1, 0, 0)];
+    UIFont *sheared = oblique ? [UIFont fontWithDescriptor:oblique size:font.pointSize] : nil;
+    return sheared ?: font;
+}
+
+// Resolves the weighted sans faces behind the reserved span font ids 3
+// (medium) and 4/6 (bold) — the iOS mirror of appkit_host.m's
+// ZeroNativeWeightedSansFont: explicit weighted candidate names first
+// (Geist Medium / Geist Bold when bundled), then the matching SF weight.
+// Never answers with the regular face, so weighted span ids always measure
+// (and will draw) heavier than regular.
+static UIFont *ZeroNativeWeightedSansFont(NSArray<NSString *> *names, UIFontWeight systemWeight, CGFloat size) {
+    for (NSString *name in names) {
+        UIFont *font = [UIFont fontWithName:name size:size];
+        if (font) return font;
+    }
+    return [UIFont systemFontOfSize:size weight:systemWeight];
+}
+
 // Resolves a canvas font id to the UIFont measurement uses — the iOS
 // mirror of appkit_host.m's ZeroNativeFontForFontId (Geist when bundled,
-// system fonts otherwise). Resolved fonts are cached per (font id, size).
+// system fonts otherwise). Ids 3-6 are the reserved sans span variants
+// (medium, bold, italic, bold italic); everything else keeps the regular
+// sans/mono candidates. Resolved fonts are cached per (font id, size).
 static UIFont *ZeroNativeFontForFontId(uint64_t value, CGFloat size) {
     static NSCache<NSString *, UIFont *> *cache = nil;
     static dispatch_once_t onceToken;
@@ -76,17 +112,39 @@ static UIFont *ZeroNativeFontForFontId(uint64_t value, CGFloat size) {
     NSString *key = [NSString stringWithFormat:@"%llu/%.3f", (unsigned long long)value, (double)size];
     UIFont *cached = [cache objectForKey:key];
     if (cached) return cached;
-    NSArray<NSString *> *candidates = value == 2
-        ? @[ @"Geist Mono", @"GeistMono-Regular", @"Geist Mono Regular" ]
-        : @[ @"Geist", @"Geist-Regular", @"Geist Sans", @"Geist Sans Regular" ];
     UIFont *font = nil;
-    for (NSString *name in candidates) {
-        font = [UIFont fontWithName:name size:size];
-        if (font) break;
-    }
-    if (!font) {
-        font = value == 2 ? [UIFont monospacedSystemFontOfSize:size weight:UIFontWeightRegular]
-                          : [UIFont systemFontOfSize:size];
+    if (value == 2) {
+        NSArray<NSString *> *candidates = @[ @"Geist Mono", @"GeistMono-Regular", @"Geist Mono Regular" ];
+        for (NSString *name in candidates) {
+            font = [UIFont fontWithName:name size:size];
+            if (font) break;
+        }
+        if (!font) font = [UIFont monospacedSystemFontOfSize:size weight:UIFontWeightRegular];
+    } else {
+        NSArray<NSString *> *candidates = @[ @"Geist", @"Geist-Regular", @"Geist Sans", @"Geist Sans Regular" ];
+        UIFont *base = nil;
+        for (NSString *name in candidates) {
+            base = [UIFont fontWithName:name size:size];
+            if (base) break;
+        }
+        if (!base) base = [UIFont systemFontOfSize:size];
+        switch (value) {
+        case 3:
+            font = ZeroNativeWeightedSansFont(@[ @"Geist-Medium", @"Geist Medium" ], UIFontWeightMedium, size);
+            break;
+        case 4:
+            font = ZeroNativeWeightedSansFont(@[ @"Geist-Bold", @"Geist Bold" ], UIFontWeightBold, size);
+            break;
+        case 5:
+            font = ZeroNativeItalicSansFont(base);
+            break;
+        case 6:
+            font = ZeroNativeItalicSansFont(ZeroNativeWeightedSansFont(@[ @"Geist-Bold", @"Geist Bold" ], UIFontWeightBold, size));
+            break;
+        default:
+            font = base;
+            break;
+        }
     }
     if (font) [cache setObject:font forKey:key];
     return font;
