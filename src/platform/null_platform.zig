@@ -122,6 +122,7 @@ const GpuSurfaceInputKind = types.GpuSurfaceInputKind;
 const GpuSurfaceInputEvent = types.GpuSurfaceInputEvent;
 const GpuSurfacePixels = types.GpuSurfacePixels;
 const GpuSurfacePacket = types.GpuSurfacePacket;
+const GpuSurfaceImagePixels = types.GpuSurfaceImagePixels;
 const WidgetAccessibilityRole = types.WidgetAccessibilityRole;
 const WidgetAccessibilityActions = types.WidgetAccessibilityActions;
 const WidgetAccessibilityTextRange = types.WidgetAccessibilityTextRange;
@@ -140,6 +141,18 @@ const Platform = types.Platform;
 const Backend = types.Backend;
 
 pub const max_null_timers: usize = 16;
+/// Matches the runtime image registry's slot count
+/// (`canvas_limits.max_registered_canvas_images`).
+pub const max_gpu_surface_images: usize = 16;
+
+/// One recorded side-channel image upload (see `gpu_surface_images`).
+pub const NullGpuSurfaceImage = struct {
+    id: u64 = 0,
+    width: usize = 0,
+    height: usize = 0,
+    byte_len: usize = 0,
+    sample_rgba: [4]u8 = .{ 0, 0, 0, 0 },
+};
 
 pub const NullTimer = struct {
     id: u64 = 0,
@@ -257,6 +270,22 @@ pub const NullPlatform = struct {
     gpu_surface_frame_request_label_storage: [max_view_label_bytes]u8 = undefined,
     gpu_surface_frame_request_label_len: usize = 0,
     gpu_surface_frame_request_count: usize = 0,
+    /// Binary image-upload side-channel recorder: mirrors a packet host's
+    /// host-wide texture store (create/replace on upload, drop on remove)
+    /// so tests assert the register → re-register → unregister lifecycle
+    /// without a real GPU. Disable `gpu_surface_image_uploads` to model a
+    /// platform without the seam (`error.UnsupportedService`).
+    gpu_surface_image_uploads: bool = true,
+    gpu_surface_images: [max_gpu_surface_images]NullGpuSurfaceImage = [_]NullGpuSurfaceImage{.{}} ** max_gpu_surface_images,
+    gpu_surface_image_count: usize = 0,
+    gpu_surface_image_upload_count: usize = 0,
+    gpu_surface_image_remove_count: usize = 0,
+    gpu_surface_image_upload_id: u64 = 0,
+    gpu_surface_image_upload_width: usize = 0,
+    gpu_surface_image_upload_height: usize = 0,
+    gpu_surface_image_upload_byte_len: usize = 0,
+    gpu_surface_image_upload_sample_rgba: [4]u8 = .{ 0, 0, 0, 0 },
+    gpu_surface_image_remove_id: u64 = 0,
     timers: [max_null_timers]NullTimer = [_]NullTimer{.{}} ** max_null_timers,
     timer_count: usize = 0,
     timer_start_count: usize = 0,
@@ -342,6 +371,8 @@ pub const NullPlatform = struct {
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
                 .present_gpu_surface_packet_fn = presentGpuSurfacePacket,
+                .upload_gpu_surface_image_fn = uploadGpuSurfaceImage,
+                .remove_gpu_surface_image_fn = removeGpuSurfaceImage,
                 .decode_image_fn = decodeImage,
             },
             .app_info = self.app_info,
@@ -1012,6 +1043,67 @@ pub const NullPlatform = struct {
         self.gpu_surface_packet_present_representable = packet.representable;
         self.gpu_surface_packet_present_json_len = packet.json.len;
         self.gpu_surface_packet_present_count += 1;
+    }
+
+    fn uploadGpuSurfaceImage(context: ?*anyopaque, image: GpuSurfaceImagePixels) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (!self.gpu_surfaces) return error.UnsupportedService;
+        if (!self.gpu_surface_image_uploads) return error.UnsupportedService;
+        const expected = image.expectedByteLen() orelse return error.InvalidGpuSurfaceImage;
+        if (image.rgba8.len != expected) return error.InvalidGpuSurfaceImage;
+
+        const index = self.findGpuSurfaceImageIndex(image.id) orelse blk: {
+            if (self.gpu_surface_image_count >= max_gpu_surface_images) return error.InvalidGpuSurfaceImage;
+            const index = self.gpu_surface_image_count;
+            self.gpu_surface_image_count += 1;
+            break :blk index;
+        };
+        const sample: [4]u8 = if (image.rgba8.len >= 4)
+            .{ image.rgba8[0], image.rgba8[1], image.rgba8[2], image.rgba8[3] }
+        else
+            .{ 0, 0, 0, 0 };
+        self.gpu_surface_images[index] = .{
+            .id = image.id,
+            .width = image.width,
+            .height = image.height,
+            .byte_len = image.rgba8.len,
+            .sample_rgba = sample,
+        };
+        self.gpu_surface_image_upload_id = image.id;
+        self.gpu_surface_image_upload_width = image.width;
+        self.gpu_surface_image_upload_height = image.height;
+        self.gpu_surface_image_upload_byte_len = image.rgba8.len;
+        self.gpu_surface_image_upload_sample_rgba = sample;
+        self.gpu_surface_image_upload_count += 1;
+    }
+
+    fn removeGpuSurfaceImage(context: ?*anyopaque, id: u64) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (!self.gpu_surfaces) return error.UnsupportedService;
+        if (!self.gpu_surface_image_uploads) return error.UnsupportedService;
+
+        self.gpu_surface_image_remove_id = id;
+        self.gpu_surface_image_remove_count += 1;
+        const index = self.findGpuSurfaceImageIndex(id) orelse return;
+        const last = self.gpu_surface_image_count - 1;
+        if (index != last) self.gpu_surface_images[index] = self.gpu_surface_images[last];
+        self.gpu_surface_images[last] = .{};
+        self.gpu_surface_image_count = last;
+    }
+
+    /// The recorded side-channel entry for `id`, or null when the id was
+    /// never uploaded (or has been removed) — the store a packet host
+    /// would consult on an upload cache action.
+    pub fn gpuSurfaceImage(self: *const NullPlatform, id: u64) ?NullGpuSurfaceImage {
+        const index = self.findGpuSurfaceImageIndex(id) orelse return null;
+        return self.gpu_surface_images[index];
+    }
+
+    fn findGpuSurfaceImageIndex(self: *const NullPlatform, id: u64) ?usize {
+        for (self.gpu_surface_images[0..self.gpu_surface_image_count], 0..) |image, index| {
+            if (image.id == id) return index;
+        }
+        return null;
     }
 
     fn findWindowIndex(self: *const NullPlatform, window_id: WindowId) ?usize {

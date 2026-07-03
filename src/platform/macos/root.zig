@@ -125,6 +125,8 @@ extern fn zero_native_appkit_cancel_timer(host: *AppKitHost, timer_id: u64) void
 extern fn zero_native_appkit_wake(host: *AppKitHost) void;
 extern fn zero_native_appkit_present_gpu_surface_pixels(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, width: usize, height: usize, scale: f64, has_dirty_rect: c_int, dirty_x: f64, dirty_y: f64, dirty_width: f64, dirty_height: f64, rgba8: [*]const u8, rgba8_len: usize) c_int;
 extern fn zero_native_appkit_present_gpu_surface_packet(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, surface_width: f64, surface_height: f64, scale: f64, clear_r: u8, clear_g: u8, clear_b: u8, clear_a: u8, requires_render: c_int, command_count: usize, unsupported_command_count: usize, representable: c_int, json: [*]const u8, json_len: usize) c_int;
+extern fn zero_native_appkit_upload_gpu_surface_image(host: *AppKitHost, image_id: u64, width: usize, height: usize, rgba8: [*]const u8, rgba8_len: usize) c_int;
+extern fn zero_native_appkit_remove_gpu_surface_image(host: *AppKitHost, image_id: u64) c_int;
 extern fn zero_native_appkit_update_widget_accessibility(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, nodes: [*]const AppKitWidgetAccessibilityNode, node_count: usize) c_int;
 extern fn zero_native_appkit_create_webview(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, transparent: c_int, bridge_enabled: c_int) c_int;
 extern fn zero_native_appkit_set_webview_frame(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
@@ -359,6 +361,8 @@ pub const MacPlatform = struct {
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
                 .present_gpu_surface_packet_fn = presentGpuSurfacePacket,
+                .upload_gpu_surface_image_fn = uploadGpuSurfaceImage,
+                .remove_gpu_surface_image_fn = removeGpuSurfaceImage,
                 .update_widget_accessibility_fn = updateWidgetAccessibility,
                 .measure_text_fn = measureText,
                 .decode_image_fn = decodeImage,
@@ -870,6 +874,25 @@ fn presentGpuSurfacePacket(context: ?*anyopaque, packet: platform_mod.GpuSurface
         -1 => return error.ViewNotFound,
         else => return error.InvalidGpuSurfacePacket,
     }
+}
+
+fn uploadGpuSurfaceImage(context: ?*anyopaque, image: platform_mod.GpuSurfaceImagePixels) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    if (zero_native_appkit_upload_gpu_surface_image(
+        self.host,
+        image.id,
+        image.width,
+        image.height,
+        image.rgba8.ptr,
+        image.rgba8.len,
+    ) == 0) return error.InvalidGpuSurfaceImage;
+}
+
+fn removeGpuSurfaceImage(context: ?*anyopaque, id: u64) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    if (zero_native_appkit_remove_gpu_surface_image(self.host, id) == 0) return error.InvalidGpuSurfaceImage;
 }
 
 fn updateWidgetAccessibility(context: ?*anyopaque, snapshot: platform_mod.WidgetAccessibilitySnapshot) anyerror!void {

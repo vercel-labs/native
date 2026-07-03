@@ -10,8 +10,13 @@
 //! into `CanvasFrameOptions.image_resources` for every view — the CPU
 //! reference renderer (presentation, screenshots, goldens) and the GPU
 //! packet planner (upload/retain/evict actions keyed by pixel
-//! fingerprint) both consume it with no further plumbing. Re-registering
-//! an id replaces its pixels: the content fingerprint changes, so caches
+//! fingerprint) both consume it with no further plumbing. Pixel bytes
+//! reach GPU packet hosts through the platform's binary upload
+//! side-channel (`uploadGpuSurfaceImage`, driven by packet upload cache
+//! actions at present time; `removeGpuSurfaceImage` at unregister) —
+//! packets carry only id + fingerprint references, so registered images
+//! never inflate packet JSON past its transport bound. Re-registering an
+//! id replaces its pixels: the content fingerprint changes, so caches
 //! re-upload without any explicit invalidation call.
 //!
 //! Capacities follow `canvas_limits`: `max_registered_canvas_images`
@@ -86,6 +91,13 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
                 .height = height,
                 .byte_len = byte_len,
             };
+            // No pixel push here: GPU packet hosts receive the bytes
+            // through the binary upload side-channel when a packet's
+            // upload cache action first references the new content
+            // fingerprint (`uploadCanvasPacketImages` on the packet
+            // present path), which also covers caller-supplied
+            // `image_resources` sets that never pass through this
+            // registry.
             noteCanvasImagesChanged(self);
         }
 
@@ -122,6 +134,12 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
             }
             self.canvas_image_entries[last] = .{};
             self.canvas_image_count = last;
+            // Best-effort drop of the platform-side texture: platforms
+            // without the upload seam report UnsupportedService, and a
+            // failed removal only costs the host a stale (unreferenced)
+            // texture until the id is re-uploaded — never a wrong frame,
+            // since packets key uploads by content fingerprint.
+            self.options.platform.services.removeGpuSurfaceImage(id) catch {};
             noteCanvasImagesChanged(self);
             return true;
         }

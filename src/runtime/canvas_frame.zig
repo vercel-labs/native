@@ -179,6 +179,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             var packet = try canvas_frame.gpuPacket(output);
             packet.scale = normalizedCanvasPresentationScale(packet_scale, canvas_frame.scale);
             if (!packet.requiresRender()) return packet;
+            try uploadCanvasPacketImages(self, packet);
             var writer = std.Io.Writer.fixed(packet_json_buffer);
             packet.writeJson(&writer) catch return error.UnsupportedService;
             try self.options.platform.services.presentGpuSurfacePacket(.{
@@ -237,6 +238,10 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 if (packet.fullyRepresentable()) {
                     var writer = std.Io.Writer.fixed(packet_json_buffer);
                     const packet_presented = blk: {
+                        uploadCanvasPacketImages(self, packet) catch |err| switch (err) {
+                            error.UnsupportedService => break :blk false,
+                            else => return err,
+                        };
                         packet.writeJson(&writer) catch break :blk false;
                         self.options.platform.services.presentGpuSurfacePacket(.{
                             .window_id = window_id,
@@ -336,6 +341,35 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const canvas_frame = try self.nextCanvasFrame(window_id, label, options, storage);
             try self.presentCanvasFramePixels(window_id, label, canvas_frame, pixels, scratch, clear_color);
             return canvas_frame;
+        }
+
+        /// Push the pixel bytes behind every `upload` image cache action
+        /// in `packet` through the platform's binary side-channel
+        /// (`uploadGpuSurfaceImage`) BEFORE the packet is presented, so
+        /// the host holds the texture when it applies the action. Packet
+        /// JSON carries only id + fingerprint references — pixel payloads
+        /// never ride it, so frames with registered images stay under the
+        /// packet JSON bound instead of falling back to the software
+        /// pixel path. Absent resources (a draw referencing an id that is
+        /// not registered — a legitimate transient state) upload nothing;
+        /// the host skips those draws exactly like the reference
+        /// renderer. `error.UnsupportedService` (platform without the
+        /// seam) propagates so callers take their existing pixel
+        /// fallback.
+        fn uploadCanvasPacketImages(self: *Runtime, packet: canvas.CanvasGpuPacket) anyerror!void {
+            for (packet.image_actions) |action| {
+                if (action.kind != .upload) continue;
+                const image_index = action.image_index orelse continue;
+                if (image_index >= packet.images.len) continue;
+                const image = packet.images[image_index];
+                if (image.width == 0 or image.height == 0 or image.pixels.len == 0) continue;
+                try self.options.platform.services.uploadGpuSurfaceImage(.{
+                    .id = image.image_id,
+                    .width = image.width,
+                    .height = image.height,
+                    .rgba8 = image.pixels,
+                });
+            }
         }
 
         fn recordCanvasClearColor(self: *Runtime, window_id: platform.WindowId, label: []const u8, clear_color: canvas.Color) void {

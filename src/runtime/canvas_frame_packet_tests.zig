@@ -528,6 +528,235 @@ test "runtime pixel fallback honors presentation scale without invalidating reta
     try std.testing.expect(!presented_frame.canvas_frame_requires_render);
 }
 
+test "runtime keeps frames with registered images on the packet path" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-image-packet", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 256, 160),
+    });
+
+    // A 128px avatar: 64 KiB of RGBA. Serialized as JSON byte arrays this
+    // used to blow the 128 KiB packet JSON bound and evict the WHOLE
+    // frame to the software pixel path (block glyphs live); as an id +
+    // fingerprint reference over the binary upload side-channel it stays
+    // on the packet path.
+    const avatar_side: usize = 128;
+    const avatar_bytes = avatar_side * avatar_side * 4;
+    const avatar = try std.testing.allocator.alloc(u8, avatar_bytes);
+    defer std.testing.allocator.free(avatar);
+    var offset: usize = 0;
+    while (offset < avatar.len) : (offset += 4) {
+        avatar[offset] = 200;
+        avatar[offset + 1] = 64;
+        avatar[offset + 2] = 32;
+        avatar[offset + 3] = 255;
+    }
+    try harness.runtime.registerCanvasImage(42, avatar_side, avatar_side, avatar);
+
+    const commands = [_]canvas.CanvasCommand{
+        .{ .fill_rect = .{
+            .id = 1,
+            .rect = geometry.RectF.init(0, 0, 256, 160),
+            .fill = .{ .color = canvas.Color.rgb8(20, 24, 32) },
+        } },
+        .{ .draw_image = .{
+            .id = 2,
+            .image_id = 42,
+            .dst = geometry.RectF.init(8, 8, 32, 32),
+        } },
+    };
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &commands });
+
+    var gpu_commands: [max_canvas_commands_per_view]canvas.CanvasGpuCommand = undefined;
+    const packet_json_buffer = try std.testing.allocator.alloc(u8, platform.max_gpu_surface_packet_json_bytes);
+    defer std.testing.allocator.free(packet_json_buffer);
+    const pixels = try std.testing.allocator.alloc(u8, 256 * 160 * 4);
+    defer std.testing.allocator.free(pixels);
+    const scratch = try std.testing.allocator.alloc(u8, 256 * 160 * 4);
+    defer std.testing.allocator.free(scratch);
+    const result = try harness.runtime.presentNextCanvasFrame(1, "canvas", .{
+        .frame_index = 30,
+        .timestamp_ns = 91_000,
+        .surface_size = geometry.SizeF.init(256, 160),
+        .scale = 1,
+    }, canvasFrameScratchStorage(&harness.runtime), &gpu_commands, packet_json_buffer, pixels, scratch, canvas.Color.rgb8(0, 0, 0), null);
+
+    // The frame presented as a packet — never the pixel fallback.
+    try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, result.mode);
+    try std.testing.expect(result.packet_representable);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_packet_present_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_present_count);
+
+    // The packet JSON stayed far below the transport bound and carries no
+    // pixel payload — only the id + fingerprint reference.
+    try std.testing.expect(harness.null_platform.gpu_surface_packet_present_json_len <= platform.max_gpu_surface_packet_json_bytes);
+    const presented_json = packet_json_buffer[0..harness.null_platform.gpu_surface_packet_present_json_len];
+    try std.testing.expect(std.mem.indexOf(u8, presented_json, "\"pixels\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, presented_json, "\"imageId\":42") != null);
+
+    // The pixel bytes rode the binary side-channel instead.
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_image_upload_count);
+    try std.testing.expectEqual(@as(u64, 42), harness.null_platform.gpu_surface_image_upload_id);
+    try std.testing.expectEqual(avatar_side, harness.null_platform.gpu_surface_image_upload_width);
+    try std.testing.expectEqual(avatar_side, harness.null_platform.gpu_surface_image_upload_height);
+    try std.testing.expectEqual(avatar_bytes, harness.null_platform.gpu_surface_image_upload_byte_len);
+    try std.testing.expectEqualDeep([4]u8{ 200, 64, 32, 255 }, harness.null_platform.gpuSurfaceImage(42).?.sample_rgba);
+
+    // A clean second frame retains the image (no re-upload) and skips.
+    const second = try harness.runtime.presentNextCanvasFrame(1, "canvas", .{
+        .frame_index = 31,
+        .timestamp_ns = 92_000,
+        .surface_size = geometry.SizeF.init(256, 160),
+        .scale = 1,
+    }, canvasFrameScratchStorage(&harness.runtime), &gpu_commands, packet_json_buffer, pixels, scratch, canvas.Color.rgb8(0, 0, 0), null);
+    try std.testing.expectEqual(CanvasPresentationMode.skipped, second.mode);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_image_upload_count);
+}
+
+test "runtime re-registration and unregister drive the image upload side-channel" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-image-lifecycle", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 8, 8),
+    });
+
+    const commands = [_]canvas.CanvasCommand{.{ .draw_image = .{
+        .id = 1,
+        .image_id = 9,
+        .dst = geometry.RectF.init(0, 0, 4, 4),
+        .sampling = .nearest,
+    } }};
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &commands });
+
+    var gpu_commands: [max_canvas_commands_per_view]canvas.CanvasGpuCommand = undefined;
+    var packet_json_buffer: [16 * 1024]u8 = undefined;
+    var pixels: [8 * 8 * 4]u8 = undefined;
+    var scratch: [8 * 8 * 4]u8 = undefined;
+
+    const present = struct {
+        fn frame(h: anytype, gpu: []canvas.CanvasGpuCommand, json_buffer: []u8, px: []u8, sc: []u8, frame_index: u64) !CanvasPresentationResult {
+            return h.runtime.presentNextCanvasFrame(1, "canvas", .{
+                .frame_index = frame_index,
+                .timestamp_ns = frame_index * 1_000,
+                .surface_size = geometry.SizeF.init(8, 8),
+                .scale = 1,
+            }, canvasFrameScratchStorage(&h.runtime), gpu, json_buffer, px, sc, canvas.Color.rgb8(0, 0, 0), null);
+        }
+    };
+
+    // Frame before registration: the draw references an absent id — the
+    // frame still presents as a packet (absent images skip, they never
+    // fail presentation) and nothing is uploaded.
+    const before = try present.frame(harness, &gpu_commands, &packet_json_buffer, &pixels, &scratch, 40);
+    try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, before.mode);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_image_upload_count);
+
+    // Register: the next frame's upload action pushes the bytes.
+    const red = [_]u8{ 255, 0, 0, 255 };
+    try harness.runtime.registerCanvasImage(9, 1, 1, &red);
+    _ = try present.frame(harness, &gpu_commands, &packet_json_buffer, &pixels, &scratch, 41);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_image_upload_count);
+    try std.testing.expectEqualDeep([4]u8{ 255, 0, 0, 255 }, harness.null_platform.gpuSurfaceImage(9).?.sample_rgba);
+
+    // Re-register with new pixels (the LRU-churn shape): the content
+    // fingerprint changes, so the next frame re-uploads.
+    const blue = [_]u8{ 0, 0, 255, 255 };
+    try harness.runtime.registerCanvasImage(9, 1, 1, &blue);
+    _ = try present.frame(harness, &gpu_commands, &packet_json_buffer, &pixels, &scratch, 42);
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.gpu_surface_image_upload_count);
+    try std.testing.expectEqualDeep([4]u8{ 0, 0, 255, 255 }, harness.null_platform.gpuSurfaceImage(9).?.sample_rgba);
+
+    // Unregister drops the platform-side entry; the next frame (stale
+    // tree still referencing the id) stays on the packet path with the
+    // absent-image skip and uploads nothing new.
+    try std.testing.expect(harness.runtime.unregisterCanvasImage(9));
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_image_remove_count);
+    try std.testing.expect(harness.null_platform.gpuSurfaceImage(9) == null);
+    const after = try present.frame(harness, &gpu_commands, &packet_json_buffer, &pixels, &scratch, 43);
+    try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, after.mode);
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.gpu_surface_image_upload_count);
+
+    // Unregistering an absent id never reaches the platform.
+    try std.testing.expect(!harness.runtime.unregisterCanvasImage(9));
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_image_remove_count);
+}
+
+test "runtime falls back to pixels when the platform lacks the image upload seam" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-image-no-seam", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_image_uploads = false;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 2, 2),
+    });
+
+    const commands = [_]canvas.CanvasCommand{.{ .draw_image = .{
+        .id = 1,
+        .image_id = 5,
+        .dst = geometry.RectF.init(0, 0, 1, 1),
+        .sampling = .nearest,
+    } }};
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &commands });
+    const green = [_]u8{ 0, 200, 0, 255 };
+    try harness.runtime.registerCanvasImage(5, 1, 1, &green);
+
+    var gpu_commands: [max_canvas_commands_per_view]canvas.CanvasGpuCommand = undefined;
+    var packet_json_buffer: [16 * 1024]u8 = undefined;
+    var pixels: [2 * 2 * 4]u8 = undefined;
+    var scratch: [2 * 2 * 4]u8 = undefined;
+    const result = try harness.runtime.presentNextCanvasFrame(1, "canvas", .{
+        .frame_index = 50,
+        .timestamp_ns = 95_000,
+        .surface_size = geometry.SizeF.init(2, 2),
+        .scale = 1,
+    }, canvasFrameScratchStorage(&harness.runtime), &gpu_commands, &packet_json_buffer, &pixels, &scratch, canvas.Color.rgb8(0, 0, 0), null);
+
+    // A packet host that cannot receive the pixels must not present a
+    // frame that references them: the software path renders the image.
+    try std.testing.expectEqual(CanvasPresentationMode.pixels, result.mode);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_packet_present_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_present_count);
+    try std.testing.expectEqualDeep([4]u8{ 0, 200, 0, 255 }, harness.null_platform.gpu_surface_present_sample_rgba);
+}
+
 test "runtime pixel fallback renders provided canvas image resources" {
     const TestApp = struct {
         fn app(self: *@This()) App {

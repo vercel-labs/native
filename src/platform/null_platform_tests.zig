@@ -504,6 +504,60 @@ test "null platform records gpu surface packet presentation" {
     }));
 }
 
+test "null platform records gpu surface image upload lifecycle" {
+    var null_platform = NullPlatform.init(.{});
+    const services = null_platform.platform().services;
+
+    // Without gpu surfaces, the seam reports UnsupportedService like the
+    // other gpu services.
+    const red = [_]u8{ 255, 0, 0, 255 };
+    try std.testing.expectError(error.UnsupportedService, services.uploadGpuSurfaceImage(.{
+        .id = 7,
+        .width = 1,
+        .height = 1,
+        .rgba8 = &red,
+    }));
+
+    null_platform.gpu_surfaces = true;
+
+    // Validation happens before the platform sees the call: id 0, zero
+    // dimensions, and mismatched byte lengths are loud.
+    try std.testing.expectError(error.InvalidGpuSurfaceImage, services.uploadGpuSurfaceImage(.{ .id = 0, .width = 1, .height = 1, .rgba8 = &red }));
+    try std.testing.expectError(error.InvalidGpuSurfaceImage, services.uploadGpuSurfaceImage(.{ .id = 7, .width = 0, .height = 1, .rgba8 = &red }));
+    try std.testing.expectError(error.InvalidGpuSurfaceImage, services.uploadGpuSurfaceImage(.{ .id = 7, .width = 2, .height = 1, .rgba8 = &red }));
+    try std.testing.expectError(error.InvalidGpuSurfaceImage, services.removeGpuSurfaceImage(0));
+    try std.testing.expectEqual(@as(usize, 0), null_platform.gpu_surface_image_upload_count);
+
+    // Upload creates the store entry.
+    try services.uploadGpuSurfaceImage(.{ .id = 7, .width = 1, .height = 1, .rgba8 = &red });
+    try std.testing.expectEqual(@as(usize, 1), null_platform.gpu_surface_image_upload_count);
+    try std.testing.expectEqual(@as(u64, 7), null_platform.gpu_surface_image_upload_id);
+    try std.testing.expectEqual(@as(usize, 1), null_platform.gpu_surface_image_upload_width);
+    try std.testing.expectEqual(@as(usize, 1), null_platform.gpu_surface_image_upload_height);
+    try std.testing.expectEqual(@as(usize, 4), null_platform.gpu_surface_image_upload_byte_len);
+    try std.testing.expectEqualDeep([4]u8{ 255, 0, 0, 255 }, null_platform.gpuSurfaceImage(7).?.sample_rgba);
+    try std.testing.expectEqual(@as(usize, 1), null_platform.gpu_surface_image_count);
+
+    // Re-upload replaces in place (the re-register path).
+    const blue = [_]u8{ 0, 0, 255, 255 };
+    try services.uploadGpuSurfaceImage(.{ .id = 7, .width = 1, .height = 1, .rgba8 = &blue });
+    try std.testing.expectEqual(@as(usize, 2), null_platform.gpu_surface_image_upload_count);
+    try std.testing.expectEqual(@as(usize, 1), null_platform.gpu_surface_image_count);
+    try std.testing.expectEqualDeep([4]u8{ 0, 0, 255, 255 }, null_platform.gpuSurfaceImage(7).?.sample_rgba);
+
+    // Remove drops the entry; removing an unknown id is a recorded no-op.
+    try services.removeGpuSurfaceImage(7);
+    try std.testing.expectEqual(@as(usize, 1), null_platform.gpu_surface_image_remove_count);
+    try std.testing.expect(null_platform.gpuSurfaceImage(7) == null);
+    try std.testing.expectEqual(@as(usize, 0), null_platform.gpu_surface_image_count);
+    try services.removeGpuSurfaceImage(7);
+    try std.testing.expectEqual(@as(usize, 2), null_platform.gpu_surface_image_remove_count);
+
+    // The seam can be disabled to model platforms without it.
+    null_platform.gpu_surface_image_uploads = false;
+    try std.testing.expectError(error.UnsupportedService, services.uploadGpuSurfaceImage(.{ .id = 7, .width = 1, .height = 1, .rgba8 = &red }));
+}
+
 test "null platform preserves shifted webview storage after close" {
     var null_platform = NullPlatform.init(.{});
     const services = null_platform.platform().services;

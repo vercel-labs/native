@@ -365,6 +365,11 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *windowLabels;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, WKWebView *> *childWebViews;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSView *> *nativeViews;
+/// Host-wide binary image-upload side-channel store: image id (decimal
+/// string, the packet image cache key namespace) → straight-alpha RGBA8
+/// NSImage. Uploaded out-of-band before packets reference the id, shared
+/// by every gpu-surface view, dropped on the unregister path.
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSImage *> *canvasImageStore;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *nativeViewCommands;
 @property(nonatomic, strong) NSMutableSet<NSString *> *nativeViewExplicitTextKeys;
 @property(nonatomic, strong) NSMutableSet<NSString *> *bridgeEnabledChildWebViewKeys;
@@ -414,6 +419,8 @@ static NSMutableDictionary *ZeroNativeCredentialQuery(NSString *service, NSStrin
 - (BOOL)presentGpuSurfacePixelsInWindow:(uint64_t)windowId label:(NSString *)label width:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
 - (NSInteger)presentGpuSurfacePacketInWindow:(uint64_t)windowId label:(NSString *)label surfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable json:(const uint8_t *)json byteLength:(NSUInteger)byteLength;
 - (BOOL)requestGpuSurfaceFrameInWindow:(uint64_t)windowId label:(NSString *)label;
+- (BOOL)uploadGpuSurfaceImageWithId:(uint64_t)imageId width:(NSUInteger)width height:(NSUInteger)height rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
+- (BOOL)removeGpuSurfaceImageWithId:(uint64_t)imageId;
 - (BOOL)updateWidgetAccessibilityInWindow:(uint64_t)windowId label:(NSString *)label nodes:(const zero_native_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count;
 - (BOOL)nativeView:(NSView *)candidate isInSubtreeRootedAt:(NSView *)root;
 - (NSArray<NSString *> *)nativeViewKeysInSubtreeForWindow:(uint64_t)windowId rootKey:(NSString *)rootKey;
@@ -1405,14 +1412,14 @@ static NSData *ZeroNativePacketImagePixelData(NSArray *pixels, NSUInteger byteLe
     return data;
 }
 
-static NSImage *ZeroNativePacketCreateImage(NSDictionary *image) {
-    if (!image) return nil;
-    NSUInteger width = (NSUInteger)llround(ZeroNativePacketNumber(image[@"width"], 0));
-    NSUInteger height = (NSUInteger)llround(ZeroNativePacketNumber(image[@"height"], 0));
+// Wrap tightly packed, straight-alpha RGBA8 pixel bytes as an NSImage
+// (kCGImageAlphaLast — the same convention the decode seam produces and
+// the reference renderer consumes). `pixelData` is retained by the
+// CGDataProvider, so callers may pass transient copies.
+static NSImage *ZeroNativeCreateRGBA8Image(NSUInteger width, NSUInteger height, NSData *pixelData) {
     if (width == 0 || height == 0 || width > 8192 || height > 8192) return nil;
     if (width > NSUIntegerMax / height || width * height > NSUIntegerMax / 4) return nil;
     NSUInteger byteLength = width * height * 4;
-    NSData *pixelData = ZeroNativePacketImagePixelData(ZeroNativePacketArray(image[@"pixels"], byteLength), byteLength);
     if (!pixelData || pixelData.length != byteLength) return nil;
 
     CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
@@ -1431,28 +1438,59 @@ static NSImage *ZeroNativePacketCreateImage(NSDictionary *image) {
     return result;
 }
 
-static BOOL ZeroNativePacketApplyImageActions(NSArray *actions, NSArray *images, NSMutableDictionary<NSString *, NSImage *> *imageCache) {
+// Legacy packet-embedded pixels: packets from this tree never carry pixel
+// payloads anymore (the binary upload side-channel owns them), but a
+// packet that does include them still decodes.
+static NSImage *ZeroNativePacketCreateImage(NSDictionary *image) {
+    if (!image) return nil;
+    NSUInteger width = (NSUInteger)llround(ZeroNativePacketNumber(image[@"width"], 0));
+    NSUInteger height = (NSUInteger)llround(ZeroNativePacketNumber(image[@"height"], 0));
+    if (width == 0 || height == 0) return nil;
+    if (width > NSUIntegerMax / height || width * height > NSUIntegerMax / 4) return nil;
+    NSUInteger byteLength = width * height * 4;
+    NSData *pixelData = ZeroNativePacketImagePixelData(ZeroNativePacketArray(image[@"pixels"], byteLength), byteLength);
+    return ZeroNativeCreateRGBA8Image(width, height, pixelData);
+}
+
+// Apply the packet's image cache actions onto the view's cache, resolving
+// upload pixels from the host-wide side-channel store (uploaded through
+// `zero_native_appkit_upload_gpu_surface_image` before the packet was
+// presented). Evictions run FIRST so an id re-registered under a new
+// content fingerprint (upload of the new key + evict of the old key in
+// one packet) keeps its freshly uploaded image — the per-view cache is
+// keyed by image id. An upload whose id has no store entry (and no legacy
+// embedded pixels) is an ABSENT resource — "not registered (yet/anymore)"
+// is a legitimate transient state — so the cache entry is dropped and
+// draws referencing the id skip, exactly like the CPU reference renderer.
+static BOOL ZeroNativePacketApplyImageActions(NSArray *actions, NSArray *images, NSMutableDictionary<NSString *, NSImage *> *imageCache, NSDictionary<NSString *, NSImage *> *imageStore) {
     if (!imageCache) return NO;
     for (id actionObject in actions ?: @[]) {
         NSDictionary *action = ZeroNativePacketDictionary(actionObject);
         if (!action) return NO;
         NSString *kind = [action[@"kind"] isKindOfClass:[NSString class]] ? action[@"kind"] : @"";
-        if ([kind isEqualToString:@"upload"]) {
-            NSInteger imageIndex = [action[@"imageIndex"] respondsToSelector:@selector(integerValue)] ? [action[@"imageIndex"] integerValue] : -1;
-            if (imageIndex < 0 || (NSUInteger)imageIndex >= images.count) return NO;
-            NSDictionary *image = ZeroNativePacketDictionary(images[(NSUInteger)imageIndex]);
-            NSString *cacheKey = ZeroNativePacketImageCacheKey(image[@"imageId"]);
-            NSImage *decoded = ZeroNativePacketCreateImage(image);
-            if (!cacheKey || !decoded) return NO;
-            imageCache[cacheKey] = decoded;
-        } else if ([kind isEqualToString:@"evict"]) {
+        if ([kind isEqualToString:@"evict"]) {
             NSDictionary *key = ZeroNativePacketDictionary(action[@"key"]);
             NSString *cacheKey = ZeroNativePacketImageCacheKey(key[@"imageId"]);
             if (cacheKey) [imageCache removeObjectForKey:cacheKey];
-        } else if ([kind isEqualToString:@"retain"]) {
-            continue;
-        } else {
+        } else if (![kind isEqualToString:@"upload"] && ![kind isEqualToString:@"retain"]) {
             return NO;
+        }
+    }
+    for (id actionObject in actions ?: @[]) {
+        NSDictionary *action = ZeroNativePacketDictionary(actionObject);
+        NSString *kind = [action[@"kind"] isKindOfClass:[NSString class]] ? action[@"kind"] : @"";
+        if (![kind isEqualToString:@"upload"]) continue;
+        NSInteger imageIndex = [action[@"imageIndex"] respondsToSelector:@selector(integerValue)] ? [action[@"imageIndex"] integerValue] : -1;
+        if (imageIndex < 0 || (NSUInteger)imageIndex >= images.count) return NO;
+        NSDictionary *image = ZeroNativePacketDictionary(images[(NSUInteger)imageIndex]);
+        NSString *cacheKey = ZeroNativePacketImageCacheKey(image[@"imageId"]);
+        if (!cacheKey) return NO;
+        NSImage *resolved = imageStore ? imageStore[cacheKey] : nil;
+        if (!resolved) resolved = ZeroNativePacketCreateImage(image);
+        if (resolved) {
+            imageCache[cacheKey] = resolved;
+        } else {
+            [imageCache removeObjectForKey:cacheKey];
         }
     }
     return YES;
@@ -1500,8 +1538,13 @@ static NSRect ZeroNativePacketImageDestinationRect(NSRect dst, NSRect src, NSStr
 static BOOL ZeroNativePacketDrawImage(NSDictionary *packetImage, NSDictionary<NSString *, NSImage *> *imageCache, CGFloat opacity) {
     if (!packetImage || !imageCache) return NO;
     NSString *cacheKey = ZeroNativePacketImageCacheKey(packetImage[@"image"]);
-    NSImage *image = cacheKey ? imageCache[cacheKey] : nil;
-    if (!image) return NO;
+    if (!cacheKey) return NO;
+    NSImage *image = imageCache[cacheKey];
+    // Absent image: the id is not registered (yet/anymore) — a legitimate
+    // transient state (avatar mid-fetch, LRU-evicted id in a stale tree).
+    // Skip the draw exactly like the CPU reference renderer instead of
+    // failing the whole packet back to the software pixel path.
+    if (!image) return YES;
     NSRect src = ZeroNativePacketImageSourceRect(packetImage, image);
     if (src.size.width <= 0 || src.size.height <= 0) return NO;
     NSString *fit = [packetImage[@"fit"] isKindOfClass:[NSString class]] ? packetImage[@"fit"] : @"stretch";
@@ -1813,7 +1856,7 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
     NSArray *images = ZeroNativePacketArray(packet[@"images"], 0) ?: @[];
     NSArray *imageActions = ZeroNativePacketArray(packet[@"imageActions"], 0) ?: @[];
     if (!self.canvasImageCache) self.canvasImageCache = [NSMutableDictionary dictionary];
-    if (!ZeroNativePacketApplyImageActions(imageActions, images, self.canvasImageCache)) return 0;
+    if (!ZeroNativePacketApplyImageActions(imageActions, images, self.canvasImageCache, self.host.canvasImageStore)) return 0;
     NSArray *scissor = ZeroNativePacketArray(packet[@"scissorBounds"], 4);
     BOOL hasScissor = scissor != nil;
     NSRect scissorRect = hasScissor ? ZeroNativePacketRect(scissor) : NSZeroRect;
@@ -2753,6 +2796,7 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
     self.windowLabels = [[NSMutableDictionary alloc] init];
     self.childWebViews = [[NSMutableDictionary alloc] init];
     self.nativeViews = [[NSMutableDictionary alloc] init];
+    self.canvasImageStore = [[NSMutableDictionary alloc] init];
     self.nativeViewCommands = [[NSMutableDictionary alloc] init];
     self.nativeViewExplicitTextKeys = [[NSMutableSet alloc] init];
     self.bridgeEnabledChildWebViewKeys = [[NSMutableSet alloc] init];
@@ -3245,6 +3289,29 @@ static BOOL ZeroNativePacketDrawCommand(NSDictionary *command, CGContextRef cont
     NSView *view = self.nativeViews[key];
     if (![view isKindOfClass:[ZeroNativeMetalSurfaceView class]]) return NO;
     [(ZeroNativeMetalSurfaceView *)view requestRetainedCanvasFrame];
+    return YES;
+}
+
+- (BOOL)uploadGpuSurfaceImageWithId:(uint64_t)imageId width:(NSUInteger)width height:(NSUInteger)height rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
+    if (imageId == 0 || !rgba8 || width == 0 || height == 0) return NO;
+    if (width > NSUIntegerMax / height || width * height > NSUIntegerMax / 4) return NO;
+    if (byteLength != width * height * 4) return NO;
+    // Copy the caller's bytes: the runtime's slot pool is reused on
+    // register/unregister, while the store's NSImage lives until the id
+    // is removed or replaced.
+    NSData *pixelData = [NSData dataWithBytes:rgba8 length:byteLength];
+    NSImage *image = ZeroNativeCreateRGBA8Image(width, height, pixelData);
+    if (!image) return NO;
+    if (!self.canvasImageStore) self.canvasImageStore = [[NSMutableDictionary alloc] init];
+    NSString *key = [NSString stringWithFormat:@"%llu", (unsigned long long)imageId];
+    self.canvasImageStore[key] = image;
+    return YES;
+}
+
+- (BOOL)removeGpuSurfaceImageWithId:(uint64_t)imageId {
+    if (imageId == 0) return NO;
+    NSString *key = [NSString stringWithFormat:@"%llu", (unsigned long long)imageId];
+    [self.canvasImageStore removeObjectForKey:key];
     return YES;
 }
 
@@ -4905,6 +4972,16 @@ int zero_native_appkit_request_gpu_surface_frame(zero_native_appkit_host_t *host
     ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     return [object requestGpuSurfaceFrameInWindow:window_id label:labelString ?: @""] ? 1 : 0;
+}
+
+int zero_native_appkit_upload_gpu_surface_image(zero_native_appkit_host_t *host, uint64_t image_id, size_t width, size_t height, const uint8_t *rgba8, size_t rgba8_len) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    return [object uploadGpuSurfaceImageWithId:image_id width:width height:height rgba8:rgba8 byteLength:rgba8_len] ? 1 : 0;
+}
+
+int zero_native_appkit_remove_gpu_surface_image(zero_native_appkit_host_t *host, uint64_t image_id) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    return [object removeGpuSurfaceImageWithId:image_id] ? 1 : 0;
 }
 
 int zero_native_appkit_update_widget_accessibility(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const zero_native_appkit_widget_accessibility_node_t *nodes, size_t node_count) {

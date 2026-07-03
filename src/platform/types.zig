@@ -63,6 +63,7 @@ pub const Error = error{
     TrayFieldTooLarge,
     InvalidGpuSurfacePixels,
     InvalidGpuSurfacePacket,
+    InvalidGpuSurfaceImage,
 };
 
 pub const WebEngine = enum {
@@ -168,6 +169,10 @@ pub const max_shortcut_id_bytes: usize = 64;
 pub const max_shortcut_key_bytes: usize = 32;
 pub const max_widget_accessibility_nodes: usize = 64;
 pub const max_gpu_surface_packet_json_bytes: usize = 128 * 1024;
+/// Per-image bound for the binary gpu-surface image upload side-channel;
+/// matches the runtime registry's per-slot bound
+/// (`canvas_limits.max_registered_canvas_image_pixel_bytes`).
+pub const max_gpu_surface_image_pixel_bytes: usize = 1024 * 1024;
 
 pub const ShortcutModifiers = struct {
     primary: bool = false,
@@ -1136,6 +1141,26 @@ pub const GpuSurfacePixels = struct {
     }
 };
 
+/// One runtime-registered canvas image's pixels for the binary upload
+/// side-channel (`upload_gpu_surface_image_fn`): tightly packed,
+/// row-major, straight-alpha RGBA8, exactly `width * height * 4` bytes.
+/// Uploads are keyed by `id` host-wide (not per view) — packets reference
+/// images by id + content fingerprint only and never carry pixel
+/// payloads, so registering an image can never push a frame over the
+/// packet JSON bound.
+pub const GpuSurfaceImagePixels = struct {
+    id: u64,
+    width: usize,
+    height: usize,
+    rgba8: []const u8,
+
+    pub fn expectedByteLen(self: GpuSurfaceImagePixels) ?usize {
+        if (self.id == 0 or self.width == 0 or self.height == 0) return null;
+        const pixels = std.math.mul(usize, self.width, self.height) catch return null;
+        return std.math.mul(usize, pixels, 4) catch return null;
+    }
+};
+
 pub const GpuSurfacePacket = struct {
     window_id: WindowId = 1,
     label: []const u8,
@@ -1406,6 +1431,16 @@ pub const PlatformServices = struct {
     wake_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     present_gpu_surface_pixels_fn: ?*const fn (context: ?*anyopaque, pixels: GpuSurfacePixels) anyerror!void = null,
     present_gpu_surface_packet_fn: ?*const fn (context: ?*anyopaque, packet: GpuSurfacePacket) anyerror!void = null,
+    /// Binary side-channel for gpu-surface image pixels: create or
+    /// replace the host texture for `image.id` out-of-band, so packets
+    /// carry only id + fingerprint references. Host-wide (not per view);
+    /// re-uploading an id replaces its texture. Null on platforms without
+    /// a packet renderer (GTK/Win32/null default) — the software pixel
+    /// path reads registered images from the frame plan instead.
+    upload_gpu_surface_image_fn: ?*const fn (context: ?*anyopaque, image: GpuSurfaceImagePixels) anyerror!void = null,
+    /// Drop the host texture for a previously uploaded image id (the
+    /// unregister path). Removing an unknown id is a no-op, not an error.
+    remove_gpu_surface_image_fn: ?*const fn (context: ?*anyopaque, id: u64) anyerror!void = null,
     update_widget_accessibility_fn: ?*const fn (context: ?*anyopaque, snapshot: WidgetAccessibilitySnapshot) anyerror!void = null,
     /// Single-line text measurement matching the fonts the platform draws
     /// with: returns the typographic width of `text` at `size` for
@@ -1706,6 +1741,20 @@ pub const PlatformServices = struct {
         if (packet.json.len == 0 or packet.json.len > max_gpu_surface_packet_json_bytes) return error.InvalidGpuSurfacePacket;
         const present_fn = self.present_gpu_surface_packet_fn orelse return error.UnsupportedService;
         return present_fn(self.context, packet);
+    }
+
+    pub fn uploadGpuSurfaceImage(self: PlatformServices, image: GpuSurfaceImagePixels) anyerror!void {
+        const expected = image.expectedByteLen() orelse return error.InvalidGpuSurfaceImage;
+        if (image.rgba8.len != expected) return error.InvalidGpuSurfaceImage;
+        if (image.rgba8.len > max_gpu_surface_image_pixel_bytes) return error.InvalidGpuSurfaceImage;
+        const upload_fn = self.upload_gpu_surface_image_fn orelse return error.UnsupportedService;
+        return upload_fn(self.context, image);
+    }
+
+    pub fn removeGpuSurfaceImage(self: PlatformServices, id: u64) anyerror!void {
+        if (id == 0) return error.InvalidGpuSurfaceImage;
+        const remove_fn = self.remove_gpu_surface_image_fn orelse return error.UnsupportedService;
+        return remove_fn(self.context, id);
     }
 
     pub fn updateWidgetAccessibility(self: PlatformServices, snapshot: WidgetAccessibilitySnapshot) anyerror!void {

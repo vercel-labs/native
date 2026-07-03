@@ -2316,7 +2316,10 @@ test "canvas gpu packet serializes image upload payloads" {
     try packet.writeJson(&packet_json_writer);
     const packet_json = packet_json_writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"images\":[{\"imageId\":42") != null);
-    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"width\":1,\"height\":1,\"pixels\":[11,22,33,255]") != null);
+    // Pixels never ride packet JSON — uploads travel the binary
+    // side-channel; the packet carries the id + fingerprint reference.
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"width\":1,\"height\":1,\"fingerprint\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"pixels\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"imageActions\":[{\"kind\":\"upload\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"image\":{\"image\":42") != null);
 

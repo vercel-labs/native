@@ -305,7 +305,7 @@ pub fn writeCanvasGpuPacketJson(packet: CanvasGpuPacket, writer: anytype) !void 
     try writer.writeAll(",\"images\":[");
     for (packet.images, 0..) |image, index| {
         if (index > 0) try writer.writeByte(',');
-        try writeRenderImagePacketJson(image, packetImageNeedsUploadPayload(packet.image_actions, index), writer);
+        try writeRenderImagePacketJson(image, writer);
     }
     try writer.writeAll("],\"imageActions\":[");
     for (packet.image_actions, 0..) |action, index| {
@@ -584,24 +584,18 @@ fn writeRenderImageJson(image: RenderImage, writer: anytype) !void {
     try writer.print(",\"width\":{d},\"height\":{d},\"pixelByteLength\":{d},\"fingerprint\":{d}}}", .{ image.width, image.height, image.pixels.len, image.fingerprint });
 }
 
-fn writeRenderImagePacketJson(image: RenderImage, include_pixels: bool, writer: anytype) !void {
+/// Packet images are references, never payloads: id + dimensions +
+/// content fingerprint. The pixel bytes travel out-of-band through the
+/// platform's binary image-upload side-channel
+/// (`PlatformServices.uploadGpuSurfaceImage`), so a registered image can
+/// never push a frame's packet JSON over the transport bound (which used
+/// to evict the whole frame to the software pixel path).
+fn writeRenderImagePacketJson(image: RenderImage, writer: anytype) !void {
     try writer.print("{{\"imageId\":{d},\"commandIndex\":{d},\"id\":", .{ image.image_id, image.command_index });
     try writeOptionalObjectIdJson(image.id, writer);
     try writer.print(",\"drawCount\":{d},\"bounds\":", .{image.draw_count});
     try writeRectJson(image.bounds, writer);
-    try writer.print(",\"width\":{d},\"height\":{d}", .{ image.width, image.height });
-    if (include_pixels) {
-        try writer.writeAll(",\"pixels\":");
-        try writeByteArrayJson(image.pixels, writer);
-    }
-    try writer.print(",\"fingerprint\":{d}}}", .{image.fingerprint});
-}
-
-fn packetImageNeedsUploadPayload(actions: []const RenderImageCacheAction, image_index: usize) bool {
-    for (actions) |action| {
-        if (action.kind == .upload and action.image_index != null and action.image_index.? == image_index) return true;
-    }
-    return false;
+    try writer.print(",\"width\":{d},\"height\":{d},\"fingerprint\":{d}}}", .{ image.width, image.height, image.fingerprint });
 }
 
 fn writeRenderImageCacheActionJson(action: RenderImageCacheAction, writer: anytype) !void {
@@ -832,15 +826,6 @@ fn writePointJson(point: geometry.PointF, writer: anytype) !void {
 
 fn writeColorJson(color: Color, writer: anytype) !void {
     try writer.print("[{d},{d},{d},{d}]", .{ color.r, color.g, color.b, color.a });
-}
-
-fn writeByteArrayJson(bytes: []const u8, writer: anytype) !void {
-    try writer.writeByte('[');
-    for (bytes, 0..) |byte, index| {
-        if (index > 0) try writer.writeByte(',');
-        try writer.print("{d}", .{byte});
-    }
-    try writer.writeByte(']');
 }
 
 fn writeRadiusJson(radius: Radius, writer: anytype) !void {

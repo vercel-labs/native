@@ -269,6 +269,15 @@ int zero_native_appkit_close_view(zero_native_appkit_host_t *host, uint64_t wind
 int zero_native_appkit_present_gpu_surface_pixels(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, size_t width, size_t height, double scale, int has_dirty_rect, double dirty_x, double dirty_y, double dirty_width, double dirty_height, const uint8_t *rgba8, size_t rgba8_len);
 int zero_native_appkit_present_gpu_surface_packet(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double surface_width, double surface_height, double scale, uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a, int requires_render, size_t command_count, size_t unsupported_command_count, int representable, const uint8_t *json, size_t json_len);
 int zero_native_appkit_request_gpu_surface_frame(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len);
+/* Binary image-upload side-channel: create or replace the host-wide image
+ * for `image_id` from tightly packed, row-major, straight-alpha RGBA8
+ * bytes (`rgba8_len` must equal width * height * 4). Packet upload cache
+ * actions resolve pixels from this store — packet JSON never carries pixel
+ * payloads. Returns 1 on success, 0 on invalid arguments. */
+int zero_native_appkit_upload_gpu_surface_image(zero_native_appkit_host_t *host, uint64_t image_id, size_t width, size_t height, const uint8_t *rgba8, size_t rgba8_len);
+/* Drop the host-wide image for `image_id` (the unregister path). Removing
+ * an unknown id is a no-op. Returns 1 on success, 0 on invalid arguments. */
+int zero_native_appkit_remove_gpu_surface_image(zero_native_appkit_host_t *host, uint64_t image_id);
 void zero_native_appkit_start_timer(zero_native_appkit_host_t *host, uint64_t timer_id, uint64_t interval_ns, int repeats);
 void zero_native_appkit_cancel_timer(zero_native_appkit_host_t *host, uint64_t timer_id);
 /* Thread-safe: nudges the main run loop to emit a WAKE event. May be
