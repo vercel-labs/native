@@ -27,6 +27,9 @@ pub const WidgetHit = struct {
     depth: usize,
     index: usize,
     state: WidgetState,
+    /// Semantic role of the hit widget (kind alone cannot distinguish a
+    /// link hotspot from plain text, and links want a pointer cursor).
+    role: WidgetRole = .none,
 };
 
 pub const WidgetPointerPhase = enum {

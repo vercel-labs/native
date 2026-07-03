@@ -252,6 +252,9 @@ pub fn mobileWidgetRole(role: canvas.WidgetRole) MobileWidgetRole {
         .none => .none,
         .group => .group,
         .text => .text,
+        // The mobile ABI predates the link role; expose links as pressable
+        // text until the ABI grows a dedicated value.
+        .link => .text,
         .image => .image,
         .button => .button,
         .textbox => .textbox,

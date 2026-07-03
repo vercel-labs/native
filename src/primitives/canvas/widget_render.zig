@@ -3,6 +3,7 @@ const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
 const text_model = @import("text.zig");
+const text_spans_model = @import("text_spans.zig");
 const token_model = @import("tokens.zig");
 const widget_model = @import("widgets.zig");
 const event_model = @import("events.zig");
@@ -467,6 +468,10 @@ fn emitWidgetLayoutClippedChildren(
 }
 
 fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (widget.spans.len > 0) return emitTextSpansWidget(builder, widget, tokens);
+    // Link hotspot children of a span paragraph are hit/semantics-only:
+    // the paragraph's runs already painted their text.
+    if (widget.semantics.role == .link and widget.text.len == 0) return;
     const text_size = widgetBodyTextSize(widget, tokens);
     try builder.drawText(.{
         .id = widgetPartId(widget.id, 1),
@@ -483,6 +488,86 @@ fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
             .measure = tokens.text_measure,
         },
     });
+}
+
+/// Draw a span paragraph: one single-line text command per laid-out run
+/// plus thin fill rects for underline/strikethrough decorations. Runs and
+/// decorations get stable hashed command ids derived from the widget id
+/// and their ordinal, so retained diffing works across frames.
+fn emitTextSpansWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const content = widget.frame.inset(widget.layout.padding);
+    var runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
+    const layout = text_spans_model.layoutTextSpans(
+        widget.spans,
+        widget_metrics.widgetTextSpanLayoutOptions(widget, tokens, content.width),
+        &runs,
+    );
+
+    var decoration_ordinal: usize = 0;
+    for (layout.runs, 0..) |run, ordinal| {
+        if (run.text.len == 0) continue;
+        const span = widget.spans[run.span_index];
+        const is_link = span.link.len > 0;
+        const color = if (span.color) |ref|
+            text_spans_model.textSpanColorValue(tokens.colors, ref)
+        else if (is_link)
+            widgetForegroundColor(widget, tokens, tokens.colors.accent)
+        else
+            widgetForegroundColor(widget, tokens, tokens.colors.text);
+        const origin = pixelSnapTextPoint(tokens, geometry.PointF.init(content.x + run.x, content.y + run.baseline));
+        try builder.drawText(.{
+            .id = textSpanRunCommandId(widget.id, ordinal),
+            .font_id = run.font_id,
+            .size = run.size,
+            .origin = origin,
+            .color = color,
+            .text = run.text,
+        });
+
+        const thickness = @max(1, tokens.stroke.hairline);
+        if (span.underline or is_link) {
+            try builder.fillRect(.{
+                .id = textSpanDecorationCommandId(widget.id, decoration_ordinal),
+                .rect = pixelSnapGeometryRect(tokens, geometry.RectF.init(
+                    content.x + run.x,
+                    content.y + run.baseline + @max(1, run.size * 0.1),
+                    run.width,
+                    thickness,
+                )),
+                .fill = colorFill(color),
+            });
+            decoration_ordinal += 1;
+        }
+        if (span.strikethrough) {
+            try builder.fillRect(.{
+                .id = textSpanDecorationCommandId(widget.id, decoration_ordinal),
+                .rect = pixelSnapGeometryRect(tokens, geometry.RectF.init(
+                    content.x + run.x,
+                    content.y + run.baseline - run.size * 0.3,
+                    run.width,
+                    thickness,
+                )),
+                .fill = colorFill(color),
+            });
+            decoration_ordinal += 1;
+        }
+    }
+}
+
+pub fn textSpanRunCommandId(widget_id: ObjectId, ordinal: usize) ObjectId {
+    return textSpanCommandId(0x5eed_59a2_0000_0001, widget_id, ordinal);
+}
+
+pub fn textSpanDecorationCommandId(widget_id: ObjectId, ordinal: usize) ObjectId {
+    return textSpanCommandId(0x5eed_59a2_0000_0002, widget_id, ordinal);
+}
+
+fn textSpanCommandId(seed: u64, widget_id: ObjectId, ordinal: usize) ObjectId {
+    var hasher = std.hash.Wyhash.init(seed);
+    hasher.update(std.mem.asBytes(&widget_id));
+    hasher.update(std.mem.asBytes(&@as(u64, ordinal)));
+    const value = hasher.final();
+    return if (value == 0) 1 else value;
 }
 
 fn emitIconWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {

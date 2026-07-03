@@ -1,5 +1,6 @@
 const token_model = @import("tokens.zig");
 const widget_model = @import("widgets.zig");
+const text_spans_model = @import("text_spans.zig");
 
 const Density = token_model.Density;
 const DesignTokens = token_model.DesignTokens;
@@ -29,6 +30,21 @@ pub fn widgetTypographySize(widget: Widget, base: f32) f32 {
 
 pub fn widgetLineHeight(text_size: f32) f32 {
     return text_size * 1.25;
+}
+
+/// The single source of truth for how a span paragraph (`.text` widget
+/// with `spans`) lays out: intrinsic sizing, wrapped-height reservation,
+/// link hit-area frames, and command emission all build their options
+/// here so they agree byte-for-byte.
+pub fn widgetTextSpanLayoutOptions(widget: Widget, tokens: DesignTokens, max_width: f32) text_spans_model.TextSpanLayoutOptions {
+    return .{
+        .size = widgetBodyTextSize(widget, tokens),
+        .max_width = max_width,
+        .wrap = .word,
+        .alignment = widget.text_alignment,
+        .typography = tokens.typography,
+        .measure = tokens.text_measure,
+    };
 }
 
 pub fn widgetControlHeight(widget: Widget, tokens: DesignTokens) f32 {

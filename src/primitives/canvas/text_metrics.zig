@@ -82,8 +82,19 @@ pub fn estimateTextWidthForFont(font_id: FontId, text: []const u8, size: f32) f3
 pub fn estimateTextAdvanceForBytes(font_id: FontId, bytes: []const u8, size: f32) f32 {
     if (bytes.len == 0) return 0;
     if (font_id == default_mono_font_id) return size * 0.6;
-    if (bytes.len > 1) return size * 0.65;
-    return size * geistSansAdvanceFactor(bytes[0]);
+    const weight = sansVariantWidthFactor(font_id);
+    if (bytes.len > 1) return size * 0.65 * weight;
+    return size * geistSansAdvanceFactor(bytes[0]) * weight;
+}
+
+/// Width factor for the reserved sans variant ids (span weight/slant).
+/// The regular id keeps factor 1 exactly, so existing single-style text
+/// measurements — and every golden derived from them — are unchanged.
+fn sansVariantWidthFactor(font_id: FontId) f32 {
+    if (font_id == canvas.default_sans_medium_font_id) return 1.02;
+    if (font_id == canvas.default_sans_bold_font_id) return 1.04;
+    if (font_id == canvas.default_sans_bold_italic_font_id) return 1.04;
+    return 1;
 }
 
 pub fn estimatedGlyphAdvance(glyph: Glyph, size: f32) f32 {

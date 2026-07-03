@@ -2,6 +2,7 @@ const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const text_model = @import("text.zig");
+const text_spans_model = @import("text_spans.zig");
 const token_model = @import("tokens.zig");
 
 const Error = canvas.Error;
@@ -12,6 +13,7 @@ const Affine = canvas.Affine;
 const ImageFit = canvas.ImageFit;
 const ImageSampling = canvas.ImageSampling;
 const TextAlign = text_model.TextAlign;
+const TextSpan = text_spans_model.TextSpan;
 const TextRange = text_model.TextRange;
 const TextSelection = text_model.TextSelection;
 const CanvasRenderAnimation = canvas.CanvasRenderAnimation;
@@ -174,6 +176,7 @@ pub const WidgetRole = enum {
     none,
     group,
     text,
+    link,
     image,
     button,
     textbox,
@@ -421,6 +424,13 @@ pub const Widget = struct {
     backdrop_blur: f32 = 0,
     backdrop_blur_token: ?BlurTokenRef = null,
     text: []const u8 = "",
+    /// Inline styled runs for `.text` widgets. Empty keeps the classic
+    /// single-style path byte-identical. When set, `text` should carry the
+    /// concatenated plain text (each span's `text` a subslice of it): the
+    /// semantics label falls back to it and retained-state copies rebase
+    /// span slices onto the copied buffer instead of duplicating bytes.
+    /// `Ui.paragraph` maintains this invariant for authors.
+    spans: []const TextSpan = &.{},
     placeholder: []const u8 = "",
     text_alignment: TextAlign = .start,
     command: []const u8 = "",

@@ -58,6 +58,15 @@ pub const FontId = u64;
 
 pub const default_sans_font_id: FontId = 1;
 pub const default_mono_font_id: FontId = 2;
+// Reserved sans variant ids for inline span styling. The deterministic
+// estimator applies per-variant width factors; hosts that have not mapped
+// these ids to real faces fall back to the regular sans face, and because
+// the measurement seam carries the same id, measured text always matches
+// drawn text.
+pub const default_sans_medium_font_id: FontId = 3;
+pub const default_sans_bold_font_id: FontId = 4;
+pub const default_sans_italic_font_id: FontId = 5;
+pub const default_sans_bold_italic_font_id: FontId = 6;
 pub const default_sans_font_family = FontFamily.geist;
 pub const default_mono_font_family = FontFamily.geist_mono;
 
@@ -326,6 +335,28 @@ pub const builtinSurfaceEnterOffset = widget_model.builtinSurfaceEnterOffset;
 
 pub const max_widget_depth = widget_runtime.max_widget_depth;
 pub const max_widget_text_range_rects = widget_runtime.max_widget_text_range_rects;
+
+// Inline styled text runs (mixed-weight/slant/mono/link spans within one
+// wrapped paragraph) live in `text_spans.zig`.
+pub const text_spans = @import("text_spans.zig");
+pub const TextSpan = text_spans.TextSpan;
+pub const TextSpanWeight = text_spans.TextSpanWeight;
+pub const TextSpanColor = text_spans.TextSpanColor;
+pub const TextSpanLayoutOptions = text_spans.TextSpanLayoutOptions;
+pub const TextSpanRun = text_spans.TextSpanRun;
+pub const TextSpanLayout = text_spans.TextSpanLayout;
+pub const layoutTextSpans = text_spans.layoutTextSpans;
+pub const textSpanFontId = text_spans.textSpanFontId;
+pub const textSpanBounds = text_spans.textSpanBounds;
+pub const textSpanRunBounds = text_spans.textSpanRunBounds;
+pub const textSpansEqual = text_spans.textSpansEqual;
+pub const max_text_spans_per_paragraph = text_spans.max_text_spans_per_paragraph;
+pub const max_text_span_runs_per_paragraph = text_spans.max_text_span_runs_per_paragraph;
+pub const max_text_span_lines_per_paragraph = text_spans.max_text_span_lines_per_paragraph;
+
+// GitHub-flavored-markdown mapper (markdown source -> widget tree + span
+// model) lives in `markdown.zig`; also exported as `zero_native.markdown`.
+pub const markdown = @import("markdown.zig");
 
 // Experimental markup front-end lives in `ui_markup.zig` / `ui_markup_view.zig`
 // (runtime parse + interpret: the dev/hot-reload engine) and

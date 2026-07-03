@@ -41,6 +41,7 @@ pub fn widgetRoleName(role: canvas.WidgetRole) []const u8 {
         .none => "none",
         .group => "group",
         .text => "text",
+        .link => "link",
         .image => "image",
         .button => "button",
         .textbox => "textbox",
@@ -67,6 +68,10 @@ pub fn platformWidgetAccessibilityRole(role: canvas.WidgetRole) platform.WidgetA
         .none => .none,
         .group => .group,
         .text => .text,
+        // The platform accessibility enum has no link role yet; a link is
+        // exposed as a pressable button, which keeps it activatable from
+        // assistive tech.
+        .link => .button,
         .image => .image,
         .button => .button,
         .textbox => .textbox,

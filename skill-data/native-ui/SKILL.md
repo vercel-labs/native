@@ -300,6 +300,43 @@ Rules and semantics:
 
 Both engines implement templates: the interpreter expands at build time, `CompiledMarkupView` inlines each use at comptime with the identical result. See `examples/kanban/src/board.zml`.
 
+## Rich text: inline spans and markdown (Zig views)
+
+Mixed-style text inside ONE wrapped paragraph is a Zig-builder feature (markup exposure is planned; the grammar is currently frozen):
+
+```zig
+const spans = [_]canvas.TextSpan{
+    .{ .text = "Ship the " },
+    .{ .text = "bold", .weight = .bold },
+    .{ .text = " parts, run " },
+    .{ .text = "zig build test", .monospace = true },
+    .{ .text = ", then read " },
+    .{ .text = "the guide", .link = "https://example.com/guide" },
+};
+ui.paragraph(.{ .on_link = Ui.linkMsg(.open_url) }, &spans)
+```
+
+- Each span carries `weight` (regular/medium/bold), `italic`, `monospace`, `color` (a `ColorTokens` field name), `underline`, `strikethrough`, `scale` (size multiplier vs the body token — how headings work), and `link`.
+- Wrapping is span-aware and measured with the same provider the platform draws with; a paragraph reserves its real wrapped height when stacked in a column.
+- Link spans are hit-testable: they appear in automation snapshots as `role=link` named by their visible text, show a pointer cursor, and pressing one dispatches `on_link(span.link)` — declare `open_url: []const u8` in `Msg` and pair with `Ui.linkMsg(.open_url)`.
+- Capacities: `canvas.max_text_spans_per_paragraph` (32) spans per paragraph; overflow truncates deterministically.
+
+Markdown (GitHub-flavored subset) maps onto the same widgets:
+
+```zig
+const Md = zero_native.markdown.Markdown(Msg);
+// inside view():
+Md.view(ui, model.body_markdown, .{
+    .on_link = Ui.linkMsg(.open_url),
+    .on_details = Md.detailsMsg(.toggle_details),   // Msg{ .toggle_details = usize }
+    .details_expanded = &model.details_expanded,     // caller-owned [N]bool
+})
+```
+
+- Supported: `#`–`###` headings, paragraphs with `**bold**`/`*italic*`/`` `code` ``/`~~strike~~`/`[links](url)`, bullet + ordered + task lists (task checkboxes are display-only, disabled), fenced code blocks, `> blockquotes`, `---` rules, `<details><summary>`.
+- Not in v1 (degrades to plain text, never fails): tables, reference links, raw HTML, footnotes, backslash escapes.
+- `<details>` state is elm-style: the CALLER owns the expanded flags. Keep a bounded `details_expanded: [8]bool` in the model, toggle it in `update` on the details message, and pass the slice back in.
+
 ## Validate without building
 
 `zero-native markup check src/view.zml` — instant grammar/structure validation with `file:line:column` errors. Binding paths and message tags are checked against your actual Model/Msg when the app builds (and on hot reload).

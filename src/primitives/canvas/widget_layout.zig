@@ -1,6 +1,7 @@
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const text_model = @import("text.zig");
+const text_spans_model = @import("text_spans.zig");
 const token_model = @import("tokens.zig");
 const widget_model = @import("widgets.zig");
 const event_model = @import("events.zig");
@@ -41,6 +42,7 @@ const widgetControlHeight = widget_metrics.widgetControlHeight;
 const widgetStatusBarPadding = widget_render.widgetStatusBarPadding;
 const controlStrokeWidth = widget_render.controlStrokeWidth;
 const componentControlVisualTokens = widget_render.componentControlVisualTokens;
+const widgetTextSpanLayoutOptions = widget_metrics.widgetTextSpanLayoutOptions;
 
 pub const max_widget_depth: usize = 32;
 
@@ -100,7 +102,8 @@ pub fn layoutWidgetDepth(
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len, tokens);
             }
         },
-        .text, .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .list_item, .data_cell, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner => {},
+        .text => try layoutTextSpanLinkChildren(widget, content, index, depth, output, len, tokens),
+        .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .list_item, .data_cell, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner => {},
     }
 
     return index;
@@ -141,7 +144,7 @@ fn layoutAxisChildren(
         if (grow > 0) {
             grow_total += grow;
         } else {
-            fixed_extent += preferredMainExtent(child, axis, tokens);
+            fixed_extent += preferredMainExtentInCross(child, axis, cross_extent, style.cross_alignment, tokens);
         }
     }
 
@@ -163,7 +166,7 @@ fn layoutAxisChildren(
         const main_extent = if (grow > 0 and grow_total > 0)
             @max(minMainExtent(child, axis), remaining * grow / grow_total)
         else
-            preferredMainExtent(child, axis, tokens);
+            preferredMainExtentInCross(child, axis, cross_extent, style.cross_alignment, tokens);
         const cross = preferredCrossExtent(child, axis, cross_extent, style.cross_alignment, tokens);
         const cross_origin = alignedCrossAxisOrigin(content, axis, cross_extent, cross, child, style.cross_alignment);
         const child_frame = switch (axis) {
@@ -172,6 +175,160 @@ fn layoutAxisChildren(
         };
         _ = try layoutWidgetDepth(child, child_frame, parent_index, depth + 1, output, len, tokens);
         cursor += main_extent + child_gap;
+    }
+}
+
+/// Main extent of a non-growing flex child, given the cross-axis space it
+/// will be offered. Identical to `preferredMainExtent` unless the child's
+/// subtree contains span paragraphs and the axis is vertical: those
+/// reserve their wrapped height at the width they will receive, so
+/// stacked markdown blocks do not overlap. Trees without spans keep the
+/// classic single-pass behavior byte-for-byte.
+fn preferredMainExtentInCross(
+    child: Widget,
+    axis: LayoutAxis,
+    cross_extent: f32,
+    alignment: WidgetCrossAlignment,
+    tokens: DesignTokens,
+) f32 {
+    if (axis == .vertical and child.frame.height <= 0 and widgetSubtreeHasTextSpans(child, 0)) {
+        const width = preferredCrossExtent(child, axis, cross_extent, alignment, tokens);
+        return @max(minMainExtent(child, axis), wrappedVerticalExtentForWidth(child, width, tokens, 0));
+    }
+    return preferredMainExtent(child, axis, tokens);
+}
+
+fn widgetSubtreeHasTextSpans(widget: Widget, depth: usize) bool {
+    if (depth >= max_widget_depth) return false;
+    if (widget.kind == .text and widget.spans.len > 0) return true;
+    for (widget.children) |child| {
+        if (widgetSubtreeHasTextSpans(child, depth + 1)) return true;
+    }
+    return false;
+}
+
+/// Wrapped vertical extent of a widget when it is laid out at `width`.
+/// This is the width-aware twin of `intrinsicWidgetSize` that span
+/// paragraphs need; it recurses through the container kinds markdown
+/// content composes from and falls back to the classic intrinsic extent
+/// everywhere else.
+fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignTokens, depth: usize) f32 {
+    if (depth >= max_widget_depth) return preferredMainExtent(widget, .vertical, tokens);
+    if (widget.frame.height > 0) return @max(minMainExtent(widget, .vertical), widget.frame.height);
+    const padding = widget.layout.padding;
+    const inner_width = @max(0, width - padding.left - padding.right);
+    const content_height: f32 = switch (widget.kind) {
+        .text => if (widget.spans.len > 0)
+            spanParagraphHeight(widget, inner_width, tokens)
+        else
+            return preferredMainExtent(widget, .vertical, tokens),
+        .column, .list, .data_grid, .table, .menu_surface, .dropdown_menu => blk: {
+            if (widget.layout.virtualized) return preferredMainExtent(widget, .vertical, tokens);
+            var sum: f32 = 0;
+            for (widget.children) |child| {
+                const child_width = if (child.frame.width > 0) child.frame.width else inner_width;
+                sum += wrappedVerticalExtentForWidth(child, child_width, tokens, depth + 1);
+            }
+            if (widget.children.len > 1) {
+                sum += nonNegative(widget.layout.gap) * @as(f32, @floatFromInt(widget.children.len - 1));
+            }
+            break :blk sum;
+        },
+        .stack, .panel, .card, .alert, .bubble, .resizable, .popover => blk: {
+            var max_height: f32 = 0;
+            for (widget.children) |child| {
+                const child_width = if (child.frame.width > 0) child.frame.width else inner_width;
+                max_height = @max(max_height, wrappedVerticalExtentForWidth(child, child_width, tokens, depth + 1));
+            }
+            break :blk max_height;
+        },
+        .row, .data_row, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group => blk: {
+            var max_height: f32 = 0;
+            for (widget.children, 0..) |child, index| {
+                max_height = @max(max_height, wrappedVerticalExtentForWidth(
+                    child,
+                    rowChildWidth(widget, inner_width, index, tokens),
+                    tokens,
+                    depth + 1,
+                ));
+            }
+            break :blk max_height;
+        },
+        else => return preferredMainExtent(widget, .vertical, tokens),
+    };
+    return @max(minMainExtent(widget, .vertical), content_height + padding.top + padding.bottom);
+}
+
+/// The width the `index`-th child of a horizontal container receives —
+/// the same fixed-vs-grow split `layoutAxisChildren` performs, replayed
+/// so wrapped heights inside rows (blockquotes, list items) are computed
+/// against real widths.
+fn rowChildWidth(row: Widget, available_width: f32, index: usize, tokens: DesignTokens) f32 {
+    const children = row.children;
+    if (children.len == 0) return available_width;
+    const total_gap = nonNegative(row.layout.gap) * @as(f32, @floatFromInt(children.len - 1));
+    var fixed_extent: f32 = 0;
+    var grow_total: f32 = 0;
+    for (children) |child| {
+        const grow = nonNegative(child.layout.grow);
+        if (grow > 0) {
+            grow_total += grow;
+        } else {
+            fixed_extent += preferredMainExtent(child, .horizontal, tokens);
+        }
+    }
+    const remaining = @max(0, available_width - fixed_extent - total_gap);
+    const child = children[index];
+    const grow = nonNegative(child.layout.grow);
+    if (grow > 0 and grow_total > 0) return @max(minMainExtent(child, .horizontal), remaining * grow / grow_total);
+    return preferredMainExtent(child, .horizontal, tokens);
+}
+
+fn spanParagraphHeight(widget: Widget, width: f32, tokens: DesignTokens) f32 {
+    return text_spans_model.textSpansWrappedHeight(
+        widget.spans,
+        widgetTextSpanLayoutOptions(widget, tokens, width),
+    );
+}
+
+/// Position a span paragraph's link hit-area children. By convention the
+/// children of a `.text` widget with spans are its link hotspots, one per
+/// link span in order (`Ui.paragraph` builds them). Each child gets the
+/// union frame of its span's laid-out runs; surplus children collapse to
+/// an empty frame (never hit-testable).
+fn layoutTextSpanLinkChildren(
+    widget: Widget,
+    content: geometry.RectF,
+    parent_index: usize,
+    depth: usize,
+    output: []WidgetLayoutNode,
+    len: *usize,
+    tokens: DesignTokens,
+) Error!void {
+    if (widget.children.len == 0) return;
+    if (widget.spans.len == 0) return;
+
+    var runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
+    const layout = text_spans_model.layoutTextSpans(
+        widget.spans,
+        widgetTextSpanLayoutOptions(widget, tokens, content.width),
+        &runs,
+    );
+
+    var child_index: usize = 0;
+    for (widget.spans, 0..) |span, span_index| {
+        if (span.link.len == 0) continue;
+        if (child_index >= widget.children.len) break;
+        const child = widget.children[child_index];
+        child_index += 1;
+        const frame = if (text_spans_model.textSpanBounds(layout, span_index)) |bounds|
+            geometry.RectF.init(content.x + bounds.x, content.y + bounds.y, bounds.width, bounds.height)
+        else
+            geometry.RectF.init(content.x, content.y, 0, 0);
+        _ = try layoutWidgetDepth(child, frame, parent_index, depth + 1, output, len, tokens);
+    }
+    while (child_index < widget.children.len) : (child_index += 1) {
+        _ = try layoutWidgetDepth(widget.children[child_index], geometry.RectF.init(content.x, content.y, 0, 0), parent_index, depth + 1, output, len, tokens);
     }
 }
 
@@ -547,6 +704,13 @@ fn paddedIntrinsicSize(widget: Widget, content: geometry.SizeF) geometry.SizeF {
 }
 
 fn intrinsicTextWidgetSize(widget: Widget, tokens: DesignTokens, text_size: f32) geometry.SizeF {
+    if (widget.kind == .text and widget.spans.len > 0) {
+        const options = widgetTextSpanLayoutOptions(widget, tokens, 0);
+        return geometry.SizeF.init(
+            text_spans_model.textSpansIntrinsicWidth(widget.spans, options),
+            widgetLineHeight(text_size * text_spans_model.textSpansMaxScale(widget.spans)),
+        );
+    }
     return geometry.SizeF.init(
         measuredTextWidth(tokens, widget.text, text_size),
         widgetLineHeight(text_size),

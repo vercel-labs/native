@@ -23,6 +23,14 @@ pub const max_canvas_text_layouts_per_view: usize = 512;
 
 pub const max_canvas_widget_nodes_per_view: usize = 256;
 pub const max_canvas_widget_semantics_per_view: usize = 256;
-pub const max_canvas_widget_text_bytes_per_view: usize = 2048;
+// Raised from 2048 with the inline-span/markdown work: a rendered document
+// retains its full plain text (paragraph bytes are stored once; span slices
+// rebase into them) plus link payloads, and 2048 bytes could not hold a
+// README-sized document. Sized to match max_canvas_text_bytes_per_view.
+pub const max_canvas_widget_text_bytes_per_view: usize = 16384;
 pub const max_canvas_widget_source_text_entries_per_view: usize = 64;
+// Inline styled runs retained across all `.text` widgets of a view. Each
+// span is a small struct (style flags + slices into the widget text
+// bytes); per-paragraph capacity is `canvas.max_text_spans_per_paragraph`.
+pub const max_canvas_widget_spans_per_view: usize = 256;
 pub const max_canvas_widget_invalidations_per_view: usize = max_canvas_widget_nodes_per_view * 2 + 1;

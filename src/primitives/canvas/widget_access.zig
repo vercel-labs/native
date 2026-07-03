@@ -15,6 +15,7 @@ const snapTextRange = text_model.snapTextRange;
 
 pub fn cursorForWidgetHit(hit: ?WidgetHit) WidgetCursor {
     const target = hit orelse return .arrow;
+    if (target.role == .link and !target.state.disabled) return .pointing_hand;
     return cursorForWidgetTarget(target.kind, target.state);
 }
 

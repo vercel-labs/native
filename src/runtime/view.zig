@@ -219,6 +219,8 @@ pub const RuntimeView = struct {
     canvas_widget_cursor: platform.Cursor = .arrow,
     widget_text_bytes: [max_canvas_widget_text_bytes_per_view]u8 = undefined,
     widget_text_len: usize = 0,
+    widget_span_entries: [canvas_limits.max_canvas_widget_spans_per_view]canvas.TextSpan = undefined,
+    widget_span_len: usize = 0,
     focused: bool = false,
     open: bool = false,
     label_storage: [platform.max_view_label_bytes]u8 = undefined,
@@ -345,6 +347,7 @@ pub const RuntimeView = struct {
     pub const canvasWidgetDirtyBounds = CanvasWidgetTreeMethods.canvasWidgetDirtyBounds;
     pub const copyWidgetLayoutNode = CanvasWidgetTreeMethods.copyWidgetLayoutNode;
     pub const copyWidgetText = CanvasWidgetTreeMethods.copyWidgetText;
+    pub const copyWidgetSpans = CanvasWidgetTreeMethods.copyWidgetSpans;
 
     pub fn info(self: RuntimeView) platform.ViewInfo {
         return .{

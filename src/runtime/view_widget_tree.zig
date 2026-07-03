@@ -35,6 +35,17 @@ const clampCanvasWidgetLayoutTextOffsets = canvas_widget_runtime.clampCanvasWidg
 
 const platformCursorFromCanvas = widget_bridge.platformCursorFromCanvas;
 
+/// Byte offset of `inner` within `outer` when it is a subslice, else null.
+fn subsliceOffset(outer: []const u8, inner: []const u8) ?usize {
+    if (inner.len == 0) return 0;
+    const outer_start = @intFromPtr(outer.ptr);
+    const inner_start = @intFromPtr(inner.ptr);
+    if (inner_start < outer_start) return null;
+    const offset = inner_start - outer_start;
+    if (offset + inner.len > outer.len) return null;
+    return offset;
+}
+
 pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
     return struct {
         pub fn widgetLayoutTree(self: *const RuntimeView) canvas.WidgetLayoutTree {
@@ -116,6 +127,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             self.widget_layout_node_count = 0;
             self.widget_semantics_node_count = 0;
             self.widget_text_len = 0;
+            self.widget_span_len = 0;
 
             for (layout.nodes, 0..) |node, layout_index| {
                 const text_reconciled = canvasWidgetLayoutNodeWithTextReconcileState(node, layout, layout_index, previous_text_states);
@@ -158,6 +170,9 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         pub fn canvasWidgetCursorForId(self: *const RuntimeView, id: canvas.ObjectId) platform.Cursor {
             const index = self.canvasWidgetNodeIndexById(id) orelse return .arrow;
             const node = self.widget_layout_nodes[index];
+            if (node.widget.semantics.role == .link and !node.widget.state.disabled) {
+                return platformCursorFromCanvas(.pointing_hand);
+            }
             return platformCursorFromCanvas(canvas.cursorForWidgetTarget(node.widget.kind, node.widget.state));
         }
 
@@ -382,6 +397,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             var copy = node;
             if (node.widget.command.len > 0) try validateCommandName(node.widget.command);
             copy.widget.text = try self.copyWidgetText(node.widget.text);
+            copy.widget.spans = try self.copyWidgetSpans(node.widget.text, copy.widget.text, node.widget.spans);
             copy.widget.command = try self.copyWidgetText(node.widget.command);
             copy.widget.semantics.label = try self.copyWidgetText(node.widget.semantics.label);
             copy = canvasWidgetLayoutNodeWithSourceSemantics(copy, source_semantics);
@@ -396,6 +412,32 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             @memcpy(self.widget_text_bytes[start..end], text);
             self.widget_text_len = end;
             return self.widget_text_bytes[start..end];
+        }
+
+        /// Retain a paragraph's inline spans. Span text that is a subslice
+        /// of the paragraph's source text (the `Ui.paragraph` invariant)
+        /// rebases onto the already-copied buffer; anything else copies
+        /// bytes. Link payloads always copy.
+        pub fn copyWidgetSpans(
+            self: *RuntimeView,
+            source_text: []const u8,
+            copied_text: []const u8,
+            spans: []const canvas.TextSpan,
+        ) anyerror![]const canvas.TextSpan {
+            if (spans.len == 0) return &.{};
+            const end = self.widget_span_len + spans.len;
+            if (end > self.widget_span_entries.len) return error.WidgetSpanLimitReached;
+            const start = self.widget_span_len;
+            for (spans, self.widget_span_entries[start..end]) |span, *entry| {
+                entry.* = span;
+                entry.text = if (subsliceOffset(source_text, span.text)) |offset|
+                    copied_text[offset .. offset + span.text.len]
+                else
+                    try self.copyWidgetText(span.text);
+                entry.link = try self.copyWidgetText(span.link);
+            }
+            self.widget_span_len = end;
+            return self.widget_span_entries[start..end];
         }
     };
 }

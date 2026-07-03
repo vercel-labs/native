@@ -76,6 +76,7 @@ fn widgetHitFromNode(node: WidgetLayoutNode, index: usize) WidgetHit {
         .depth = node.depth,
         .index = index,
         .state = node.widget.state,
+        .role = node.widget.semantics.role,
     };
 }
 

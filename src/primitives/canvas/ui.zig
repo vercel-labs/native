@@ -161,10 +161,17 @@ pub fn Ui(comptime Msg: type) type {
             /// Message constructor for value changes carrying the new value
             /// (slider steps, accessibility set-value). Pair with `valueMsg`.
             on_value: ?ValueMsgFn = null,
+            /// Message constructor for link presses inside a `paragraph`:
+            /// called at build time with each link span's payload, so a
+            /// click on the link hotspot dispatches the resulting message
+            /// through the ordinary press handler table. Pair with
+            /// `linkMsg`.
+            on_link: ?LinkMsgFn = null,
         };
 
         pub const InputMsgFn = *const fn (edit: canvas.TextInputEvent) Msg;
         pub const ValueMsgFn = *const fn (value: f32) Msg;
+        pub const LinkMsgFn = *const fn (link: []const u8) Msg;
 
         pub const Node = struct {
             widget: Widget = .{ .kind = .stack },
@@ -208,6 +215,18 @@ pub fn Ui(comptime Msg: type) type {
             return struct {
                 fn make(value: f32) Msg {
                     return @unionInit(Msg, @tagName(tag), value);
+                }
+            }.make;
+        }
+
+        /// Comptime message constructor for `on_link`: `linkMsg(.open_url)`
+        /// yields a function building `Msg{ .open_url = link }`. The link
+        /// slice lives in the view arena (or the caller's markdown source),
+        /// valid while the tree's handler table is.
+        pub fn linkMsg(comptime tag: std.meta.Tag(Msg)) LinkMsgFn {
+            return struct {
+                fn make(link: []const u8) Msg {
+                    return @unionInit(Msg, @tagName(tag), link);
                 }
             }.make;
         }
@@ -355,6 +374,59 @@ pub fn Ui(comptime Msg: type) type {
         pub fn text(self: *Self, options: ElementOptions, content: []const u8) Node {
             var node = self.el(.text, options, .{});
             node.widget.text = content;
+            return node;
+        }
+
+        /// A paragraph of inline styled spans (mixed weight/italic/mono/
+        /// color/underline/strikethrough/link runs in one wrapped text
+        /// block). The spans' bytes are concatenated into an arena buffer
+        /// (`widget.text`, the semantics label) and every stored span is
+        /// re-sliced into it, so retained-state copies rebase rather than
+        /// duplicate. Each link span also grows a hit-area child with
+        /// `role = link` semantics; with `options.on_link` set, pressing
+        /// it dispatches `on_link(span.link)` through the handler table.
+        pub fn paragraph(self: *Self, options: ElementOptions, spans: []const canvas.TextSpan) Node {
+            var node = self.el(.text, options, .{});
+
+            var text_len: usize = 0;
+            for (spans) |span| text_len += span.text.len;
+            const text_bytes = self.arena.alloc(u8, text_len) catch {
+                self.failed = true;
+                return node;
+            };
+            const stored = self.arena.dupe(canvas.TextSpan, spans) catch {
+                self.failed = true;
+                return node;
+            };
+            var offset: usize = 0;
+            for (stored) |*span| {
+                @memcpy(text_bytes[offset .. offset + span.text.len], span.text);
+                span.text = text_bytes[offset .. offset + span.text.len];
+                offset += span.text.len;
+            }
+            node.widget.text = text_bytes;
+            node.widget.spans = stored;
+
+            const link_count = canvas.text_spans.textSpanLinkCount(stored);
+            if (link_count == 0) return node;
+            const children = self.arena.alloc(Node, link_count) catch {
+                self.failed = true;
+                return node;
+            };
+            var child_index: usize = 0;
+            for (stored) |span| {
+                if (span.link.len == 0) continue;
+                children[child_index] = self.el(.text, .{
+                    .semantics = .{
+                        .role = .link,
+                        .label = span.text,
+                        .focusable = true,
+                    },
+                    .on_press = if (options.on_link) |make| make(span.link) else null,
+                }, .{});
+                child_index += 1;
+            }
+            node.nodes = children;
             return node;
         }
 

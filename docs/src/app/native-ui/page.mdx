@@ -157,6 +157,35 @@ The process runs on a worker thread the runtime owns; results post to a bounded 
 
 Failure and overflow are always visible: a spawn that cannot run delivers an exit Msg with reason `rejected`; dropped or truncated lines carry counts and flags; `cancel` kills and reaps the process and always ends in exactly one `cancelled` exit Msg, with no further line Msgs after it. Tests use the fake executor (`effects.executor = .fake`) to assert on spawn requests and feed synthetic lines and exits back deterministically — see `examples/effects-probe`.
 
+## Rich text: inline spans and markdown
+
+Mixed-style text inside one wrapped paragraph — bold, italic, inline code, color tokens, strikethrough, links — is available from the Zig builder as *spans*:
+
+```zig
+const spans = [_]canvas.TextSpan{
+    .{ .text = "Run " },
+    .{ .text = "zig build test", .monospace = true },
+    .{ .text = " then read " },
+    .{ .text = "the guide", .link = "https://example.com/guide" },
+};
+ui.paragraph(.{ .on_link = Ui.linkMsg(.open_url) }, &spans)
+```
+
+Wrapping and measurement are span-aware (the platform text provider measures every run with the font it draws with), stacked paragraphs reserve their real wrapped height, and link spans are first-class: they carry `role=link` semantics in automation snapshots, show a pointer cursor, and clicking one dispatches your `Msg` with the link payload.
+
+Markdown builds on the same model. `zero_native.markdown` maps a GitHub-flavored subset — headings, inline styles, links, bullet/ordered/task lists, fenced code blocks, blockquotes, rules, and `<details>` collapsibles — onto ordinary widgets:
+
+```zig
+const Md = zero_native.markdown.Markdown(Msg);
+Md.view(ui, issue.body, .{
+    .on_link = Ui.linkMsg(.open_url),
+    .on_details = Md.detailsMsg(.toggle_details),
+    .details_expanded = &model.details_expanded, // caller-owned flags, elm-style
+})
+```
+
+Malformed input degrades to plain text — the build fn never fails. Task-list checkboxes render as disabled (display-only) checkboxes, and `<details>` expansion is state the caller's model owns.
+
 ## Tooling
 
 - `zero-native markup check src/app.zml` — instant validation with `file:line:column` errors.
