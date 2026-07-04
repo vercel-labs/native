@@ -120,7 +120,7 @@ Default log file locations by platform:
 Override with `NATIVE_SDK_LOG_DIR`:
 
 ```bash
-NATIVE_SDK_LOG_DIR=/tmp/my-logs zig build run-webview
+NATIVE_SDK_LOG_DIR=/tmp/my-logs zig build run
 ```
 
 ## Panic capture
@@ -145,10 +145,10 @@ native_sdk.debug.installPanicCapture(io, log_setup.paths);
 
 ## Debug overlay
 
-Build with `-Ddebug-overlay=true` to enable a visual debugging overlay in the WebView. This shows frame timing, invalidation regions, and window metadata.
+For apps with [web content](/frontend), build with `-Ddebug-overlay=true` to enable a visual debugging overlay in the WebView. This shows frame timing, invalidation regions, and window metadata.
 
 ```bash
-zig build run-webview -Ddebug-overlay=true
+zig build run -Ddebug-overlay=true
 ```
 
 See also [native doctor](/debugging/doctor) for a full diagnostic tool reference.

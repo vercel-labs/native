@@ -1,6 +1,6 @@
 # Native Surfaces
 
-Native surfaces are the app-owned regions that the Native SDK composes inside a platform window. A surface can be a WebView, native chrome, a native utility panel, or a specialized drawing region. The key model is that WebView content is one surface in the window, not the whole app.
+Native surfaces are the app-owned regions that the Native SDK composes inside a platform window. A surface can be a GPU-rendered canvas, native chrome, a native utility panel, or an embedded WebView. The key model is that a window is a declared tree of surfaces — the default app is one `gpu_surface` canvas filling the window, and everything else composes around it.
 
 ## Surface Types
 
@@ -14,9 +14,9 @@ Native surfaces are the app-owned regions that the Native SDK composes inside a 
   </thead>
   <tbody>
     <tr>
-      <td>WebView</td>
-      <td>Rich product UI, frontend frameworks, documents, dashboards</td>
-      <td><code>ViewKind.webview</code>, <code>WebViewSource</code>, and the selected web engine</td>
+      <td>GPU surface</td>
+      <td>The canvas your <a href="/native-ui">native UI</a> renders into — plus custom drawing regions for editors, timelines, dashboards, and games</td>
+      <td>Metal-backed on macOS; software (CPU reference renderer) presentation on Linux and Windows system hosts</td>
     </tr>
     <tr>
       <td>Native chrome</td>
@@ -34,16 +34,35 @@ Native surfaces are the app-owned regions that the Native SDK composes inside a 
       <td>Guarded <code>PlatformServices</code>, runtime methods, and built-in bridge commands</td>
     </tr>
     <tr>
-      <td>GPU surface</td>
-      <td>Custom drawing regions for editors, timelines, dashboards, games, or canvas-like workflows</td>
-      <td>Metal-backed on macOS system WebView; other hosts report it unsupported</td>
+      <td>WebView</td>
+      <td><a href="/frontend">Embedded web content</a>: web frontends, documents, previews</td>
+      <td><code>ViewKind.webview</code>, <code>WebViewSource</code>, and the selected <a href="/web-engines">web engine</a></td>
     </tr>
   </tbody>
 </table>
 
+## The default shape: one canvas
+
+The generated app declares one window with one GPU surface, and the [`UiApp`](/app-model) loop renders the whole UI into it:
+
+```zig
+const shell_views = [_]native_sdk.ShellView{
+    .{ .label = "main-canvas", .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
+};
+const shell_windows = [_]native_sdk.ShellWindow{.{
+    .label = "main",
+    .title = "My App",
+    .width = 480,
+    .height = 320,
+    .views = &shell_views,
+}};
+```
+
+Everything below this section is composition around that canvas: platform chrome, split panes, and (when needed) web content.
+
 ## Window Shape
 
-Use `App.scene_fn` when a window should start with native structure around WebView content:
+Use `App.scene_fn` (or `UiApp`'s `scene` option) when a window should start with native structure, such as chrome around a WebView workspace:
 
 ```zig
 const shell_views = [_]native_sdk.ShellView{
@@ -142,7 +161,7 @@ Existing `App.source`, `runtime.createWebView(...)`, and `window.zero.webviews.*
 
 ## Platform Support
 
-macOS, Linux, and Windows system-WebView hosts support native views and controls today. The macOS system-WebView host also supports `gpu_surface` with a Metal-backed child view; see `examples/gpu-surface` for a minimal native controls plus WebView plus GPU surface composition. Chromium hosts and mobile hosts expose the same public vocabulary where useful, but unsupported operations reject explicitly instead of silently falling back to WebView-only behavior.
+macOS, Linux, and Windows system hosts support native views and controls today. The macOS host presents `gpu_surface` through a Metal-backed child view; Linux and Windows present it through the software reference renderer. See `examples/gpu-surface` for a minimal native controls plus WebView plus GPU surface composition. Chromium hosts and mobile hosts expose the same public vocabulary where useful, but unsupported operations reject explicitly instead of silently falling back.
 
 Use support checks before showing optional native affordances:
 

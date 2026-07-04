@@ -1,343 +1,107 @@
 # App Model
 
-A Native SDK app provides a name, optional WebView content, and optional lifecycle callbacks. The runtime owns the event loop, windows, native views, and native services; the platform owns the web engine and OS host.
+A Native SDK app is one loop with four parts:
 
-## The App struct
+- **Model** — a plain Zig struct holding all app state.
+- **Msg** — a tagged union of everything that can happen.
+- **update(model, msg)** — the only place state changes.
+- **View** — a `.zml` markup file (or a Zig view function) that derives the UI from the model.
 
-<table>
-  <thead>
-    <tr>
-      <th>Field</th>
-      <th>Type</th>
-      <th>Description</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><code>context</code></td>
-      <td><code>*anyopaque</code></td>
-      <td>Pointer to your app state (required)</td>
-    </tr>
-    <tr>
-      <td><code>name</code></td>
-      <td><code>[]const u8</code></td>
-      <td>App name used in traces and automation snapshots (required)</td>
-    </tr>
-    <tr>
-      <td><code>source</code></td>
-      <td><code>WebViewSource</code></td>
-      <td>Initial WebView content for compatibility startup windows; defaults to empty HTML</td>
-    </tr>
-    <tr>
-      <td><code>source_fn</code></td>
-      <td><code>?fn(*anyopaque) !WebViewSource</code></td>
-      <td>Dynamic source resolver (overrides <code>source</code> when set)</td>
-    </tr>
-    <tr>
-      <td><code>scene_fn</code></td>
-      <td><code>?fn(*anyopaque) !ShellConfig</code></td>
-      <td>Declarative native window and view tree; when set, startup uses the scene instead of the compatibility window list</td>
-    </tr>
-    <tr>
-      <td><code>start_fn</code></td>
-      <td><code>?fn(*anyopaque, *Runtime) !void</code></td>
-      <td>Called after the runtime starts, before startup scene or source loading</td>
-    </tr>
-    <tr>
-      <td><code>event_fn</code></td>
-      <td><code>?fn(*anyopaque, *Runtime, Event) !void</code></td>
-      <td>Called on every runtime event (lifecycle + commands)</td>
-    </tr>
-    <tr>
-      <td><code>stop_fn</code></td>
-      <td><code>?fn(*anyopaque, *Runtime) !void</code></td>
-      <td>Called before the runtime shuts down</td>
-    </tr>
-  </tbody>
-</table>
+The runtime owns everything else: window creation, GPU presentation, resize, pointer and keyboard dispatch, timers, accessibility, and hot reload. Your code never handles a raw event — input lands on a widget, the widget's bound message dispatches into `update`, the view rebuilds from the new model, and the engine repaints what changed.
 
-All callback fields are optional. A minimal app only needs `context` and `name`; provide `source` or `source_fn` when the app has WebView content, and `scene_fn` when startup should use a declarative native shell.
+## The loop in full
 
-## Startup shape
-
-Without `scene_fn`, the Native SDK uses the compatibility path: it loads `source` or `source_fn` into the configured startup window list.
-
-With `scene_fn`, the Native SDK materializes the returned `ShellConfig` as native shell windows and views. The first scene window adopts the startup native window; additional scene windows are created through the window service. `App.source` or `source_fn` still provides the main WebView content for those windows.
-
-Scene windows and views are kept as resize layout bindings, so return slices backed by static or app-owned storage that lives as long as the window.
+The generated counter app (`native init`) is the complete shape. State and transitions in `src/main.zig`:
 
 ```zig
-const shell_views = [_]native_sdk.ShellView{
-    .{ .label = "toolbar", .kind = .toolbar, .edge = .top, .height = 52 },
-    .{ .label = "refresh", .kind = .button, .parent = "toolbar", .text = "Refresh", .command = "app.refresh" },
-    .{ .label = "main", .kind = .webview, .url = "zero://inline", .fill = true },
-    .{ .label = "status", .kind = .statusbar, .edge = .bottom, .height = 28, .text = "Ready" },
+pub const Msg = union(enum) {
+    increment,
+    decrement,
+    reset,
 };
-const shell_windows = [_]native_sdk.ShellWindow{.{
-    .label = "main",
-    .title = "Acme",
-    .width = 1100,
-    .height = 760,
-    .views = &shell_views,
-}};
-const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
 
-fn scene(context: *anyopaque) anyerror!native_sdk.ShellConfig {
-    _ = context;
-    return shell_scene;
-}
+pub const Model = struct {
+    count: i64 = 0,
+};
 
-fn app(self: *AppState) native_sdk.App {
-    return .{
-        .context = self,
-        .name = "acme",
-        .source = native_sdk.WebViewSource.html("<main>Content</main>"),
-        .scene_fn = scene,
-        .event_fn = event,
-    };
+pub fn update(model: *Model, msg: Msg) void {
+    switch (msg) {
+        .increment => model.count += 1,
+        .decrement => model.count -= 1,
+        .reset => model.count = 0,
+    }
 }
 ```
 
-## WebViewSource
+The view in `src/app.zml` binds the model and names the messages:
 
-Three constructors for specifying what the WebView loads:
+```html
+<row gap="8" main="center" cross="center" grow="1">
+  <button variant="secondary" on-press="decrement">-</button>
+  <text>{count}</text>
+  <button variant="primary" on-press="increment">+</button>
+</row>
+```
 
-- **`.html(content)`** -- inline HTML string, served as `zero://inline`
-- **`.url(address)`** -- load a remote or local URL
-- **`.assets(options)`** -- serve a local file tree through a custom origin
+Markup can never mutate state. `{count}` is a read; `on-press="increment"` names a `Msg` variant. Every state change flows through `update`, which makes the app's behavior testable as a plain function — the generated `src/tests.zig` drives it with no GUI at all.
 
-The assets constructor takes a `WebViewAssetSource`:
+## Wiring
+
+`native_sdk.UiApp(Model, Msg)` ties the loop to the runtime. From the generated `main`:
 
 ```zig
-.source = native_sdk.WebViewSource.assets(.{
-    .root_path = "dist",
-    .entry = "index.html",      // default
-    .origin = "zero://app",     // default
-    .spa_fallback = true,       // default
-}),
+const CounterApp = native_sdk.UiApp(Model, Msg);
+
+pub fn main(init: std.process.Init) !void {
+    // `create` heap-allocates the multi-MB app struct and constructs the
+    // Model in place — neither ever rides the stack.
+    const app_state = try CounterApp.create(std.heap.page_allocator, .{
+        .name = "my_app",
+        .scene = shell_scene,             // one window, one gpu_surface view
+        .canvas_label = "main-canvas",    // must match the scene's view label
+        .update = update,
+        .markup = .{ .source = app_markup, .watch_path = "src/app.zml", .io = init.io },
+    });
+    defer app_state.destroy();
+    app_state.model = initialModel();     // boot state: assign through the pointer
+
+    try runner.runWithOptions(app_state.app(), .{ ... }, init);
+}
 ```
 
-<table>
-  <thead>
-    <tr>
-      <th>Field</th>
-      <th>Default</th>
-      <th>Description</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><code>root_path</code></td>
-      <td>required</td>
-      <td>Path to the directory containing frontend assets</td>
-    </tr>
-    <tr>
-      <td><code>entry</code></td>
-      <td><code>"index.html"</code></td>
-      <td>HTML entry point within the root path</td>
-    </tr>
-    <tr>
-      <td><code>origin</code></td>
-      <td><code>"zero://app"</code></td>
-      <td>Origin used for asset URLs</td>
-    </tr>
-    <tr>
-      <td><code>spa_fallback</code></td>
-      <td><code>true</code></td>
-      <td>Serve entry for unknown routes (SPA mode)</td>
-    </tr>
-  </tbody>
-</table>
+`create` requires every `Model` field to carry a default; the model starts as `.{}` and boot state is assigned through the returned pointer. The `scene` declares the native window and its GPU surface view — see [Windows](/windows) and [Native Surfaces](/native-surfaces) for multi-view scenes.
 
-## Lifecycle events
+## Rebuilds and widget identity
 
-The runtime dispatches `LifecycleEvent` values through your `event_fn`:
+After every `update`, the runtime rebuilds the view from the model. Rebuilds are cheap and safe by design:
 
-- **`start`** -- the app runtime has started and startup scene or source loading is about to run
-- **`activate`** -- the app became the active foreground app
-- **`deactivate`** -- the app resigned active foreground status
-- **`frame`** -- a frame has been requested (for animations or state updates)
-- **`stop`** -- the app is shutting down
+- **Widget identity is structural.** A widget keeps its id across rebuilds, reorders, and hot reloads, so engine-owned state — scroll offsets, text carets, focus — survives. List items carry `key` (or `global-key` for items that move between containers) to keep identity through reorders.
+- **The source wins.** Engine-retained state (a scroll offset, a toggle) survives rebuilds until the model asserts a different value; then the model's value applies. This is why controlled patterns echo runtime-applied values back through the model — see [State & Data Flow](/state).
+- **Errors degrade, they never crash.** A failing `update` arm is caught, recorded in a bounded error ring (visible in [automation](/automation) snapshots as `dispatch_errors=`), and the app keeps running.
 
-Native hosts also emit `app:activate` and `app:deactivate` to each open `window.zero` instance:
+## Hot reload in development
 
-```ts
-window.zero.on("app:activate", () => {
-  refreshForegroundState();
-});
-```
+With `watch_path` set, the runtime watches the `.zml` file while the app runs. Edits apply within about two seconds, preserving model state and widget identity. Parse failures keep the last good view on screen and record a diagnostic (`app_state.markup_diagnostic` carries line, column, and message).
 
-Native file drops dispatch `Event.files_dropped` to `event_fn` and emit `drop:files` to trusted `window.zero` instances:
+## Compile the markup for release
 
-```ts
-window.zero.on("drop:files", (event) => {
-  console.log(event.paths);
-});
-```
-
-## The runner pattern
-
-The generated `src/runner.zig` wires the runtime with platform services:
-
-1. Selects the platform (macOS, Linux, or null for headless tests)
-2. Sets up trace sinks (stdout + file) via `FanoutTraceSink`
-3. Installs panic capture so crashes write `last-panic.txt`
-4. Initializes window state persistence from `windows.zon`
-5. Creates the `Runtime` with all options and calls `runtime.run(app)`
+In release builds the markup compiles at comptime — no parser in the binary, and markup or binding mistakes become compile errors with line and column:
 
 ```zig
-var runtime = native_sdk.Runtime.init(.{
-    .platform = my_platform,
-    .trace_sink = fanout.sink(),
-    .bridge = my_app.bridge(),
-    .builtin_bridge = .{ .enabled = true, .commands = &builtin_policies },
-    .security = .{
-        .permissions = &app_permissions,
-        .navigation = .{ .allowed_origins = &.{ "zero://app" } },
-    },
-    .js_window_api = true,
-    .window_state_store = state_store,
-    .automation = if (build_options.automation) automation_server else null,
-});
-try runtime.run(my_app.app());
+const dev = @import("builtin").mode == .Debug;
+const App = native_sdk.UiAppWithFeatures(Model, Msg, .{ .runtime_markup = dev });
+const CompiledView = canvas.CompiledMarkupView(Model, Msg, @embedFile("app.zml"));
+// options:
+.view = CompiledView.build,
+.markup = if (dev) .{ .source = app_markup, .watch_path = "src/app.zml", .io = init.io } else null,
 ```
 
-## RuntimeOptions
+Both engines produce the identical widget tree — same structural ids, same typed handler table — so tests, automation scripts, and goldens hold across dev and release.
 
-<table>
-  <thead>
-    <tr>
-      <th>Field</th>
-      <th>Type</th>
-      <th>Default</th>
-      <th>Description</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><code>platform</code></td>
-      <td><code>Platform</code></td>
-      <td>required</td>
-      <td>Platform abstraction (macOS, Linux, or NullPlatform)</td>
-    </tr>
-    <tr>
-      <td><code>trace_sink</code></td>
-      <td><code>?trace.Sink</code></td>
-      <td><code>null</code></td>
-      <td>Destination for structured trace records</td>
-    </tr>
-    <tr>
-      <td><code>log_path</code></td>
-      <td><code>?[]const u8</code></td>
-      <td><code>null</code></td>
-      <td>Path for persistent log file</td>
-    </tr>
-    <tr>
-      <td><code>extensions</code></td>
-      <td><code>?ModuleRegistry</code></td>
-      <td><code>null</code></td>
-      <td>Extension modules with lifecycle hooks</td>
-    </tr>
-    <tr>
-      <td><code>bridge</code></td>
-      <td><code>?BridgeDispatcher</code></td>
-      <td><code>null</code></td>
-      <td>App-defined bridge commands and handlers</td>
-    </tr>
-    <tr>
-      <td><code>builtin_bridge</code></td>
-      <td><code>BridgePolicy</code></td>
-      <td><code>.{}</code></td>
-      <td>Policy for built-in commands (dialogs, windows)</td>
-    </tr>
-    <tr>
-      <td><code>security</code></td>
-      <td><code>SecurityPolicy</code></td>
-      <td><code>.{}</code></td>
-      <td>Navigation allowlist, external links, permissions</td>
-    </tr>
-    <tr>
-      <td><code>automation</code></td>
-      <td><code>?automation.Server</code></td>
-      <td><code>null</code></td>
-      <td>File-based automation server for testing</td>
-    </tr>
-    <tr>
-      <td><code>window_state_store</code></td>
-      <td><code>?window_state.Store</code></td>
-      <td><code>null</code></td>
-      <td>Persistent window geometry and state</td>
-    </tr>
-    <tr>
-      <td><code>js_window_api</code></td>
-      <td><code>bool</code></td>
-      <td><code>false</code></td>
-      <td>Expose built-in <code>window.zero</code> helper namespaces for trusted app chrome. Command helpers require origin and <code>command</code> checks, view helpers require origin and <code>view</code> checks, and window, WebView, and platform helpers require origin and <code>window</code> checks. Dialog, OS, clipboard, and credential helpers still require explicit <code>builtin_bridge</code> policy.</td>
-    </tr>
-  </tbody>
-</table>
+## Side effects
 
-## Runtime methods
+`update` stays pure by routing anything asynchronous — subprocesses, HTTP, file persistence, timers, clipboard — through the effects channel: declare `.update_fx` instead of `.update` and spawn from message arms; results come back as ordinary messages. Boot-time work goes in `.init_fx`, which runs exactly once before the first paint. See [Native UI: Effects](/native-ui#effects).
 
-<table>
-  <thead>
-    <tr>
-      <th>Method</th>
-      <th>Description</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><code>init(options) Runtime</code></td>
-      <td>Create a runtime</td>
-    </tr>
-    <tr>
-      <td><code>run(app) !void</code></td>
-      <td>Enter the platform event loop</td>
-    </tr>
-    <tr>
-      <td><code>createWindow(options) !WindowInfo</code></td>
-      <td>Open a new window</td>
-    </tr>
-    <tr>
-      <td><code>listWindows() []WindowInfo</code></td>
-      <td>List open windows</td>
-    </tr>
-    <tr>
-      <td><code>focusWindow(id) !void</code></td>
-      <td>Bring a window to front</td>
-    </tr>
-    <tr>
-      <td><code>closeWindow(id) !void</code></td>
-      <td>Close a window</td>
-    </tr>
-    <tr>
-      <td><code>invalidate()</code></td>
-      <td>Request a redraw</td>
-    </tr>
-    <tr>
-      <td><code>invalidateFor(reason, dirty_region)</code></td>
-      <td>Request a redraw with reason and optional dirty region</td>
-    </tr>
-    <tr>
-      <td><code>frameDiagnostics() FrameDiagnostics</code></td>
-      <td>Return stats from the last frame</td>
-    </tr>
-    <tr>
-      <td><code>setGpuSurfaceInputLatencyBudget(window_id, label, budget_ns)</code></td>
-      <td>Set the input-to-frame latency budget reported by GPU surface diagnostics</td>
-    </tr>
-    <tr>
-      <td><code>dispatchEvent(event)</code></td>
-      <td>Inject a synthetic event</td>
-    </tr>
-    <tr>
-      <td><code>dispatchPlatformEvent(app, event)</code></td>
-      <td>Forward a platform event</td>
-    </tr>
-    <tr>
-      <td><code>automationSnapshot()</code></td>
-      <td>Write state to automation directory</td>
-    </tr>
-  </tbody>
-</table>
+## Dropping down
+
+`UiApp` is a layer over the lower-level `App`/`Runtime` pair, which any app can use directly — for custom lifecycle callbacks, imperative window and view management, or embedding [web content](/frontend). The [App & Runtime](/runtime) reference documents that layer, and [Embedded App](/embed) covers driving the runtime from an existing host (including iOS and Android).

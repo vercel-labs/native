@@ -1,8 +1,8 @@
 # Multiple WebViews
 
-Zero models each native window as a stack of named WebViews. A WebView can fill the window, cover a panel-sized region, or sit above another WebView by setting its `frame` and `layer`.
+Apps that [embed web content](/frontend) can model a native window as a stack of named WebViews. A WebView can fill the window, cover a panel-sized region, or sit above another WebView by setting its `frame` and `layer`.
 
-This is the right model for browser chrome, dashboards, previews, auth flows, and any app that needs trusted UI next to isolated page content.
+This is the right model for browser chrome, dashboards, previews, auth flows, and any app that needs trusted web UI next to isolated page content. (Canvas-first apps that want one live web pane beside native-rendered widgets should use `web_panes` instead — see [Native Surfaces](/native-surfaces#canvas-webview-in-one-window).)
 
 The startup app source is the default trusted WebView named `main`. Simple apps can ignore this and keep using one page. Advanced apps can resize `main` and place isolated child WebViews beneath or above it. `main` is reserved; child WebViews cannot be created with that label.
 

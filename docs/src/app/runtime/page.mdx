@@ -1,0 +1,322 @@
+# App & Runtime
+
+`App` and `Runtime` are the layer underneath [`UiApp`](/app-model): the app describes what to run, the runtime owns the event loop, windows, native views, security checks, automation, tracing, and platform services. Most native-rendered apps never touch this layer directly — `UiApp` and the generated runner wire it for you. Reach for it when you need custom lifecycle callbacks, imperative window and view management, or a [WebView-based frontend](/frontend).
+
+## The App struct
+
+<table>
+  <thead>
+    <tr>
+      <th>Field</th>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>context</code></td>
+      <td><code>*anyopaque</code></td>
+      <td>Pointer to your app state (required)</td>
+    </tr>
+    <tr>
+      <td><code>name</code></td>
+      <td><code>[]const u8</code></td>
+      <td>App name used in traces and automation snapshots (required)</td>
+    </tr>
+    <tr>
+      <td><code>source</code></td>
+      <td><code>WebViewSource</code></td>
+      <td>Initial WebView content for compatibility startup windows; defaults to empty HTML</td>
+    </tr>
+    <tr>
+      <td><code>source_fn</code></td>
+      <td><code>?fn(*anyopaque) !WebViewSource</code></td>
+      <td>Dynamic source resolver (overrides <code>source</code> when set)</td>
+    </tr>
+    <tr>
+      <td><code>scene_fn</code></td>
+      <td><code>?fn(*anyopaque) !ShellConfig</code></td>
+      <td>Declarative native window and view tree; when set, startup uses the scene instead of the compatibility window list</td>
+    </tr>
+    <tr>
+      <td><code>start_fn</code></td>
+      <td><code>?fn(*anyopaque, *Runtime) !void</code></td>
+      <td>Called after the runtime starts, before startup scene or source loading</td>
+    </tr>
+    <tr>
+      <td><code>event_fn</code></td>
+      <td><code>?fn(*anyopaque, *Runtime, Event) !void</code></td>
+      <td>Called on every runtime event (lifecycle + commands)</td>
+    </tr>
+    <tr>
+      <td><code>stop_fn</code></td>
+      <td><code>?fn(*anyopaque, *Runtime) !void</code></td>
+      <td>Called before the runtime shuts down</td>
+    </tr>
+  </tbody>
+</table>
+
+All callback fields are optional. A minimal app only needs `context` and `name`; provide `scene_fn` when startup should build a declarative native shell, and `source` or `source_fn` only when the app has WebView content.
+
+## Startup shape
+
+With `scene_fn`, the runtime materializes the returned `ShellConfig` as native shell windows and views — this is the native-first path, and the shape `UiApp` uses through its `scene` option. The first scene window adopts the startup native window; additional scene windows are created through the window service.
+
+Scene windows and views are kept as resize layout bindings, so return slices backed by static or app-owned storage that lives as long as the window.
+
+```zig
+const shell_views = [_]native_sdk.ShellView{
+    .{ .label = "main-canvas", .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
+    .{ .label = "status", .kind = .statusbar, .edge = .bottom, .height = 28, .text = "Ready" },
+};
+const shell_windows = [_]native_sdk.ShellWindow{.{
+    .label = "main",
+    .title = "Acme",
+    .width = 1100,
+    .height = 760,
+    .views = &shell_views,
+}};
+const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
+
+fn scene(context: *anyopaque) anyerror!native_sdk.ShellConfig {
+    _ = context;
+    return shell_scene;
+}
+```
+
+Without `scene_fn`, the runtime uses the WebView compatibility path: it loads `source` or `source_fn` into the configured startup window list.
+
+## WebViewSource
+
+For apps that embed web content, three constructors specify what a WebView loads:
+
+- **`.html(content)`** -- inline HTML string, served as `zero://inline`
+- **`.url(address)`** -- load a remote or local URL
+- **`.assets(options)`** -- serve a local file tree through a custom origin
+
+The assets constructor takes a `WebViewAssetSource`:
+
+```zig
+.source = native_sdk.WebViewSource.assets(.{
+    .root_path = "dist",
+    .entry = "index.html",      // default
+    .origin = "zero://app",     // default
+    .spa_fallback = true,       // default
+}),
+```
+
+<table>
+  <thead>
+    <tr>
+      <th>Field</th>
+      <th>Default</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>root_path</code></td>
+      <td>required</td>
+      <td>Path to the directory containing frontend assets</td>
+    </tr>
+    <tr>
+      <td><code>entry</code></td>
+      <td><code>"index.html"</code></td>
+      <td>HTML entry point within the root path</td>
+    </tr>
+    <tr>
+      <td><code>origin</code></td>
+      <td><code>"zero://app"</code></td>
+      <td>Origin used for asset URLs</td>
+    </tr>
+    <tr>
+      <td><code>spa_fallback</code></td>
+      <td><code>true</code></td>
+      <td>Serve entry for unknown routes (SPA mode)</td>
+    </tr>
+  </tbody>
+</table>
+
+See [Frontend Projects](/frontend) for the dev-server/bundled-assets workflow.
+
+## Lifecycle events
+
+The runtime dispatches `LifecycleEvent` values through your `event_fn`:
+
+- **`start`** -- the app runtime has started and startup scene or source loading is about to run
+- **`activate`** -- the app became the active foreground app
+- **`deactivate`** -- the app resigned active foreground status
+- **`frame`** -- a frame has been requested (for animations or state updates)
+- **`stop`** -- the app is shutting down
+
+Native file drops dispatch `Event.files_dropped` to `event_fn`. Apps with WebView content also receive `app:activate`, `app:deactivate`, and `drop:files` on each trusted `window.zero` instance:
+
+```ts
+window.zero.on("drop:files", (event) => {
+  console.log(event.paths);
+});
+```
+
+## The runner pattern
+
+The generated `src/runner.zig` wires the runtime with platform services:
+
+1. Selects the platform (macOS, Linux, or null for headless tests)
+2. Sets up trace sinks (stdout + file) via `FanoutTraceSink`
+3. Installs panic capture so crashes write `last-panic.txt`
+4. Initializes window state persistence from `windows.zon`
+5. Creates the `Runtime` with all options and calls `runtime.run(app)`
+
+```zig
+var runtime = native_sdk.Runtime.init(.{
+    .platform = my_platform,
+    .trace_sink = fanout.sink(),
+    .security = .{
+        .permissions = &app_permissions,
+        .navigation = .{ .allowed_origins = &.{ "zero://app" } },
+    },
+    .window_state_store = state_store,
+    .automation = if (build_options.automation) automation_server else null,
+});
+try runtime.run(my_app.app());
+```
+
+## RuntimeOptions
+
+<table>
+  <thead>
+    <tr>
+      <th>Field</th>
+      <th>Type</th>
+      <th>Default</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>platform</code></td>
+      <td><code>Platform</code></td>
+      <td>required</td>
+      <td>Platform abstraction (macOS, Linux, or NullPlatform)</td>
+    </tr>
+    <tr>
+      <td><code>trace_sink</code></td>
+      <td><code>?trace.Sink</code></td>
+      <td><code>null</code></td>
+      <td>Destination for structured trace records</td>
+    </tr>
+    <tr>
+      <td><code>log_path</code></td>
+      <td><code>?[]const u8</code></td>
+      <td><code>null</code></td>
+      <td>Path for persistent log file</td>
+    </tr>
+    <tr>
+      <td><code>extensions</code></td>
+      <td><code>?ModuleRegistry</code></td>
+      <td><code>null</code></td>
+      <td>Extension modules with lifecycle hooks</td>
+    </tr>
+    <tr>
+      <td><code>bridge</code></td>
+      <td><code>?BridgeDispatcher</code></td>
+      <td><code>null</code></td>
+      <td>App-defined bridge commands and handlers (WebView apps; see <a href="/bridge">Bridge</a>)</td>
+    </tr>
+    <tr>
+      <td><code>builtin_bridge</code></td>
+      <td><code>BridgePolicy</code></td>
+      <td><code>.{}</code></td>
+      <td>Policy for built-in bridge commands (dialogs, windows)</td>
+    </tr>
+    <tr>
+      <td><code>security</code></td>
+      <td><code>SecurityPolicy</code></td>
+      <td><code>.{}</code></td>
+      <td>Navigation allowlist, external links, permissions</td>
+    </tr>
+    <tr>
+      <td><code>automation</code></td>
+      <td><code>?automation.Server</code></td>
+      <td><code>null</code></td>
+      <td>File-based automation server for testing</td>
+    </tr>
+    <tr>
+      <td><code>window_state_store</code></td>
+      <td><code>?window_state.Store</code></td>
+      <td><code>null</code></td>
+      <td>Persistent window geometry and state</td>
+    </tr>
+    <tr>
+      <td><code>js_window_api</code></td>
+      <td><code>bool</code></td>
+      <td><code>false</code></td>
+      <td>Expose built-in <code>window.zero</code> helper namespaces for trusted app chrome. Command helpers require origin and <code>command</code> checks, view helpers require origin and <code>view</code> checks, and window, WebView, and platform helpers require origin and <code>window</code> checks. Dialog, OS, clipboard, and credential helpers still require explicit <code>builtin_bridge</code> policy.</td>
+    </tr>
+  </tbody>
+</table>
+
+## Runtime methods
+
+<table>
+  <thead>
+    <tr>
+      <th>Method</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>init(options) Runtime</code></td>
+      <td>Create a runtime</td>
+    </tr>
+    <tr>
+      <td><code>run(app) !void</code></td>
+      <td>Enter the platform event loop</td>
+    </tr>
+    <tr>
+      <td><code>createWindow(options) !WindowInfo</code></td>
+      <td>Open a new window</td>
+    </tr>
+    <tr>
+      <td><code>listWindows() []WindowInfo</code></td>
+      <td>List open windows</td>
+    </tr>
+    <tr>
+      <td><code>focusWindow(id) !void</code></td>
+      <td>Bring a window to front</td>
+    </tr>
+    <tr>
+      <td><code>closeWindow(id) !void</code></td>
+      <td>Close a window</td>
+    </tr>
+    <tr>
+      <td><code>invalidate()</code></td>
+      <td>Request a redraw</td>
+    </tr>
+    <tr>
+      <td><code>invalidateFor(reason, dirty_region)</code></td>
+      <td>Request a redraw with reason and optional dirty region</td>
+    </tr>
+    <tr>
+      <td><code>frameDiagnostics() FrameDiagnostics</code></td>
+      <td>Return stats from the last frame</td>
+    </tr>
+    <tr>
+      <td><code>setGpuSurfaceInputLatencyBudget(window_id, label, budget_ns)</code></td>
+      <td>Set the input-to-frame latency budget reported by GPU surface diagnostics</td>
+    </tr>
+    <tr>
+      <td><code>dispatchEvent(event)</code></td>
+      <td>Inject a synthetic event</td>
+    </tr>
+    <tr>
+      <td><code>dispatchPlatformEvent(app, event)</code></td>
+      <td>Forward a platform event</td>
+    </tr>
+    <tr>
+      <td><code>automationSnapshot()</code></td>
+      <td>Write state to automation directory</td>
+    </tr>
+  </tbody>
+</table>

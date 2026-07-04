@@ -1,6 +1,6 @@
 # CLI Reference
 
-The `native` CLI provides project scaffolding, validation, packaging, and debugging tools.
+The `native` CLI provides project scaffolding, markup validation, automation, packaging, and debugging tools.
 
 ## Commands
 
@@ -63,6 +63,14 @@ The `native` CLI provides project scaffolding, validation, packaging, and debugg
     <tr>
       <td><code>native package-android</code></td>
       <td>Package shortcut for Android</td>
+    </tr>
+    <tr>
+      <td><code>native markup check &lt;file.zml&gt; [more files...]</code></td>
+      <td>Validate <code>.zml</code> markup without building; errors carry <code>file:line:column</code> and a teaching message</td>
+    </tr>
+    <tr>
+      <td><code>native markup lsp</code></td>
+      <td>Run the markup language server (diagnostics, completion, hover) for editor integration</td>
     </tr>
     <tr>
       <td><code>native automate &lt;command&gt;</code></td>
@@ -272,8 +280,8 @@ Core maintainers who need to build CEF before a Native SDK runtime release exist
       <td>Dump current app state</td>
     </tr>
     <tr>
-      <td><code>automate screenshot</code></td>
-      <td>Capture a screenshot</td>
+      <td><code>automate screenshot &lt;view-label&gt; [&lt;scale&gt;]</code></td>
+      <td>Render a <code>gpu_surface</code> view's canvas to <code>screenshot-&lt;view-label&gt;.png</code> through the deterministic CPU reference renderer</td>
     </tr>
     <tr>
       <td><code>automate reload</code></td>

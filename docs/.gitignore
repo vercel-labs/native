@@ -2,3 +2,4 @@ node_modules/
 .next/
 next-env.d.ts
 .next-gate/
+.next-agent/

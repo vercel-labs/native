@@ -1,6 +1,6 @@
 # Bridge
 
-The bridge connects JavaScript in the WebView to native Zig handlers via JSON messages.
+For apps that [embed web content](/frontend), the bridge connects JavaScript in the WebView to native Zig handlers via JSON messages. Native-rendered apps have no bridge — markup dispatches typed messages straight into `update` (see [App Model](/app-model)).
 
 ## Architecture
 

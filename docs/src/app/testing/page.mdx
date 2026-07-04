@@ -1,17 +1,35 @@
 # Testing
 
-The Native SDK provides headless testing tools for bridge and lifecycle coverage without a GUI, plus automation-based integration tests. For running these tiers on GitHub Actions — including the workflow `native init` scaffolds — see [Testing in CI](/testing/ci).
+Native SDK apps test headlessly by default: the view is a function of the model, dispatch is typed, and the layout engine runs without a window server. Unit tests drive the real loop, `TestHarness` covers runtime integration, and the [automation](/automation) harness drives the live app. For running these tiers on GitHub Actions — including the workflow `native init` scaffolds — see [Testing in CI](/testing/ci).
+
+## Full-loop UI tests
+
+The generated `src/tests.zig` shows the core pattern: build the real view from the markup, find a widget, dispatch its press exactly like the runtime would, and assert on the model and the rebuilt view:
+
+```zig
+var view = try canvas.MarkupView(Model, Msg).init(arena, main.app_markup);
+var ui = canvas.Ui(Msg).init(arena);
+const tree = try ui.finalize(try view.build(&ui, &model));
+
+const plus = findByText(tree.root, .button, "+").?;      // walk tree.root
+main.update(&model, tree.msgForPointer(plus.id, .up).?); // dispatch like the runtime
+try testing.expectEqual(@as(i64, 1), model.count);
+```
+
+Two `msgForPointer` traps: a disabled control yields `null` (assert `== null` rather than unwrapping when testing disabled states), and the tree is a snapshot — after each dispatch, rebuild the view before pressing anything again. Widget ids are stable across rebuilds, so asserting an id stayed constant while its text changed is the standard way to prove keyed identity.
+
+The same tests can push the tree through the layout engine (`canvas.layoutWidgetTree`) to assert real frames — see the generated `src/tests.zig` for both patterns. Effects-using apps swap in the fake executor (`app_state.effects.executor = .fake`) to assert on spawn/fetch/file requests and feed results back deterministically — see [Native UI: Effects](/native-ui#effects).
 
 ## TestHarness
 
 `TestHarness` provides a headless test driver using `NullPlatform` and a `BufferSink` for capturing trace records:
 
 ```zig
-var harness: native_sdk.TestHarness = undefined;
-harness.init(.{});
+const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+defer harness.destroy(std.testing.allocator);
 ```
 
-The harness provides a pre-configured runtime with `NullPlatform` and a trace sink that captures records in memory. Use it to test bridge handlers, lifecycle events, and command dispatch.
+The harness embeds the multi-megabyte `Runtime`, so create it on the heap (`create`/`destroy`) — stack instances overflow test threads, and the same rule applies to `UiApp` instances in tests (`App.create`/`destroy`). The harness provides a pre-configured runtime with `NullPlatform` and a trace sink that captures records in memory; handler and update errors propagate (fail the test) instead of degrading. Use it to test runtime integration: lifecycle events, command dispatch, and full `UiApp` frames.
 
 `TestHarness` is the same mechanism used by the framework's own test suite to verify bridge policy enforcement, window management, and lifecycle correctness.
 

@@ -1,13 +1,13 @@
 # Automation
 
-The automation server exposes runtime state and accepts commands via a file-based protocol. Use it for integration testing, CI smoke tests, and inspecting running apps.
+The automation server exposes runtime state and accepts commands via a file-based protocol. A running app publishes an accessibility snapshot — every widget with its id, role, name, bounds, and state — and accepts scripted clicks, keys, drags, and assertions against it. Use it for integration testing, CI smoke tests, inspecting running apps, and letting AI agents verify their own UI work.
 
 ## Enabling automation
 
 Build with the automation flag:
 
 ```bash
-zig build run-webview -Dautomation=true
+zig build -Dautomation=true
 ```
 
 In your runner, pass an `automation.Server` to `RuntimeOptions`:
@@ -47,8 +47,8 @@ When the runtime publishes a snapshot, it writes these files to the automation d
       <td>Window list: <code>window @w{"{id}"} "{"{title}"}" focused={"{bool}"}</code> per line</td>
     </tr>
     <tr>
-      <td><code>screenshot.ppm</code></td>
-      <td>Screenshot in PPM format (currently a 2x2 placeholder)</td>
+      <td><code>screenshot-&lt;view-label&gt;.png</code></td>
+      <td>Deterministic PNG of a <code>gpu_surface</code> view, rendered through the CPU reference renderer on <code>screenshot &lt;view-label&gt; [scale]</code></td>
     </tr>
     <tr>
       <td><code>command.txt</code></td>
@@ -157,8 +157,8 @@ native automate list
 # Dump the current snapshot
 native automate snapshot
 
-# Capture a screenshot
-native automate screenshot
+# Render a gpu_surface view to screenshot-main-canvas.png
+native automate screenshot main-canvas
 
 # Reload the WebView
 native automate reload

@@ -1,6 +1,6 @@
 # Security
 
-The Native SDK treats the WebView as untrusted by default. App authors opt into native power with explicit permissions, command policies, and navigation rules.
+Every app declares `permissions` and `capabilities` in `app.zon` — the runtime grants checked before native services run. Apps that [embed web content](/frontend) get further layers: the Native SDK treats the WebView as untrusted by default, and web content opts into native power only through explicit command policies and navigation rules. A native-rendered app with no WebView needs only the first section of this page.
 
 ## Permissions and capabilities
 

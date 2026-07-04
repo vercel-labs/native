@@ -243,7 +243,7 @@ For timestamps, the facade owns the clocks (Zig 0.16 puts `std.time` behind `std
 
 ## Images
 
-Image pixels are runtime-registered resources: the app registers decoded straight-alpha RGBA8 under a caller-chosen `ImageId` (a `u64` kept in the model, effect-key style; 0 is the "no image" sentinel), and `image`, `icon_button`, and `avatar` widgets reference the id. The framework bundles no image codecs — encoded bytes (PNG, JPEG, whatever the OS decodes) go through the platform decoder: CGImageSource on macOS, gdk-pixbuf on GTK, WIC on Windows.
+Image pixels are runtime-registered resources: the app registers decoded straight-alpha RGBA8 under a caller-chosen `ImageId` (a `u64` kept in the model, effect-key style; 0 is the "no image" sentinel), and `image`, `icon_button`, and `avatar` widgets reference the id. Native SDK bundles no image codecs — encoded bytes (PNG, JPEG, whatever the OS decodes) go through the platform decoder: CGImageSource on macOS, gdk-pixbuf on GTK, WIC on Windows.
 
 The fetch-avatar path is one update arm: fetch bytes, decode + register in one call, and write the id into the model only on success — so the avatar renders its initials while the image is loading and keeps them when the fetch or decode failed:
 
@@ -383,6 +383,6 @@ Charts are Zig-only in v1: markup's scalar bindings cannot carry series arrays (
 
 - `native markup check src/app.zml` — instant validation with `file:line:column` errors, including the font-coverage tofu guard: literal text with a codepoint outside the bundled face is a teaching error naming the character (it renders as a tofu box on the reference/screenshot and mobile paths — use a vector icon or plain words). Dynamic strings get the same lesson as a Debug-build diagnostic when the view builds.
 - `native markup lsp` — diagnostics, completion, and hover in your editor (see `editors/zml/` in the repo for VS Code, Helix, and Neovim setup).
-- The automation harness drives widgets and reads accessibility snapshots and screenshots headlessly — see [Automation](/debugging/automation).
+- The automation harness drives widgets and reads accessibility snapshots and screenshots headlessly — see [Automation](/automation).
 
 For the component catalog and styling model, see [Built-in Components](/built-in-components). For dropping down to the programmatic API, the `canvas.Ui(Msg)` builder produces exactly the same trees the markup compiles to.

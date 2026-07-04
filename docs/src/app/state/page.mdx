@@ -1,0 +1,141 @@
+# State & Data Flow
+
+The model stores source-of-truth state only: the raw items, the current filter, the draft text. Everything the view shows that is computable from those — counts, sums, filtered lists, formatted strings — is derived at view time, never stored. This page collects the data-flow patterns that keep a Native SDK app honest.
+
+## Derive, don't store
+
+A cached derivable must be re-maintained in every `update` arm and goes stale the moment one is missed; a derived method cannot go stale.
+
+```zig
+// WRONG: derived state cached in the model, maintained by hand in update()
+visible_count: usize,
+summary_storage: [64]u8,   // preformatted display string
+
+// RIGHT: the model keeps the sources; methods derive per rebuild
+pub fn visibleCount(model: *const Model) usize { ... }
+pub fn visibleCents(model: *const Model) u64 { ... }
+```
+
+Derived numbers need no allocation — bind the methods and let text interpolation compose the line:
+
+```html
+<status-bar>{habit_count} habits · {totalDays} total days</status-bar>
+```
+
+## How bindings resolve
+
+A path like `{h.streak}` resolves left to right, starting from the model or a `for` variable:
+
+- Struct fields bind directly: `{habit_count}`, `{h.done}`.
+- Zero-argument pub methods bind like fields: `{totalDays}` calls `pub fn totalDays(m: *const Model) usize`.
+- Arena-taking scalar methods bind the same way: `{summary}` calls `pub fn summary(m: *const Model, arena: std.mem.Allocator) []const u8` — format derived display strings straight into the build arena, which lives exactly one view build. Works anywhere a scalar binding does, except inside `{a == b}` equality (compare the source fields, or bind a `bool`-returning method).
+- Enums resolve to their tag name, so `{f}` renders `"active"`, `{f == filter}` compares tags, and `set_filter:{f}` coerces the tag back into an enum payload.
+- `for each="name"` resolves, in order: a model field that is a slice or array, a pub array/slice declaration, a pub fn taking `(*const Model)`, or a pub fn taking `(*const Model, std.mem.Allocator)` — the allocator variant is how filtered and derived lists work.
+- Item methods work too: `{h.name}` may be a field or `pub fn name(h: *const Habit) []const u8`.
+
+Bindings are zero-argument by design. A parameterized query (the cards of column X) becomes one model function per case, or a [template](/native-ui#templates) arg.
+
+## Format at view time, in the arena
+
+Computed strings — money, dates, percentages — are formatted into the build arena inside a derived-list function. Store amounts as integer cents; format when the view asks:
+
+```zig
+pub const VisibleExpense = struct { id: u32, date: []const u8, amount: []const u8 };
+
+pub fn visible(model: *const Model, arena: std.mem.Allocator) []const VisibleExpense {
+    const out = arena.alloc(VisibleExpense, model.expense_count) catch return &.{};
+    var count: usize = 0;
+    for (model.expenses[0..model.expense_count]) |*e| {
+        if (!model.matches(e.*)) continue;
+        out[count] = .{
+            .id = e.id,
+            .date = e.date(),
+            .amount = std.fmt.allocPrint(arena, "${d}.{d:0>2}", .{ e.amount_cents / 100, e.amount_cents % 100 }) catch "",
+        };
+        count += 1;
+    }
+    return out[0..count];
+}
+```
+
+A one-off formatted line is an arena-taking scalar function bound directly:
+
+```zig
+pub fn summary(model: *const Model, arena: std.mem.Allocator) []const u8 {
+    return std.fmt.allocPrint(arena, "{d} expenses · {s} total", .{
+        model.visibleCount(), formatCents(arena, model.visibleCents()),
+    }) catch "";
+}
+```
+
+```html
+<status-bar>{summary}</status-bar>
+```
+
+The arena lives for exactly one view build, so nothing is stored and nothing goes stale.
+
+For `<if test>`, prefer an explicit boolean predicate method over numeric truthiness: `test="{hasHabits}"` with `pub fn hasHabits(m: *const Model) bool` states the condition; `test="{habit_count}"` works (non-zero is truthy) but hides it.
+
+## Text fields: the mirror pattern
+
+The model applies every edit event and is the source of truth; the runtime keeps caret and selection while your source text matches, and a source-side change (like clearing on submit) wins:
+
+```html
+<text-field text="{draft}" placeholder="New task…" on-input="draft_edit" on-submit="add" grow="1" />
+```
+
+```zig
+draft: canvas.TextBuffer(64) = .{},                   // model field: text + selection + composition
+// in update:
+.draft_edit => |edit| model.draft.apply(edit),        // mirror every edit
+.add => { model.addTask(model.draft.text()); model.draft.clear(); },  // clearing the source clears the field
+```
+
+`on-input` names a `Msg` variant whose payload is `canvas.TextInputEvent`; `canvas.TextBuffer` applies each event and holds the text. Clipboard and selection come free: the runtime owns cmd/ctrl+C/X/V in editable text, cut and paste arrive as ordinary edit events, and the mirror stays consistent with zero extra code.
+
+## Echo runtime-applied values back
+
+Some state is applied by the runtime first — a scroll offset, a split-pane fraction — and delivered to `update` after the fact. The rule is the same everywhere: **the Msg carries the value the runtime already applied; store it in the model and echo it back through the element's `value`.** The echoed source value equals the runtime's, so the reconcile treats it as unchanged and rebuilds never fight live interaction.
+
+```html
+<split value="{sidebar_split}" on-resize="sidebar_resized">
+  <column min-width="150">…</column>
+  <column min-width="280">…</column>
+</split>
+```
+
+```zig
+.sidebar_resized => |fraction| model.sidebar_split = fraction,
+```
+
+`on-scroll` follows the same shape with a `canvas.ScrollState` payload — store `offset`, echo it through the scroll's `value`, and slide a bounded window from it when content is large. See [Native UI: Messages](/native-ui#messages).
+
+## Time: a testable seam
+
+Zig 0.16 puts `std.time` behind `std.Io`, which `update` never sees — do not call `clock_gettime` yourself. The facade owns the clocks:
+
+```zig
+native_sdk.nowMs()                  // wall ms since the Unix epoch (i64) — timestamps
+native_sdk.nowNanoseconds()         // wall ns (i128)
+native_sdk.monotonicMs()            // duration clock (u64, never goes backwards)
+native_sdk.monotonicNanoseconds()   // subtract two reads for an elapsed time
+```
+
+Time-dependent logic should hold the seam in the model instead of calling the free functions, so tests stay deterministic:
+
+```zig
+pub const Model = struct { clock: native_sdk.Clock = .system, ... };
+// in update:
+.step_started => model.entry.started_ms = model.clock.wallMs(),
+
+// in tests:
+var test_clock: native_sdk.TestClock = .{};
+model.clock = test_clock.clock();
+test_clock.advanceMs(1500);
+```
+
+Wall time answers "what time is it?" (it jumps with OS clock adjustments); monotonic time answers "how long did it take?". Don't subtract wall timestamps for durations.
+
+## Async state
+
+Anything that leaves the process — subprocesses, HTTP, files, timers — flows through the effects channel and back into `update` as ordinary messages, so the model remains the single source of truth even for in-flight work. Keep the in-flight marker (`loading: bool`, an effect key) in the model like any other state. See [Native UI: Effects](/native-ui#effects).

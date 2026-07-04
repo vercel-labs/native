@@ -1,6 +1,6 @@
 # Packaging
 
-The Native SDK provides tooling to bundle your app into distributable packages for macOS, Linux, and Windows. Chromium packaging is currently supported for macOS and includes the CEF runtime when `.web_engine = "chromium"` and the matching CEF layout is installed.
+The Native SDK provides tooling to bundle your app into distributable packages for macOS, Linux, and Windows. A native-rendered app packages as a single binary plus icons and metadata — no asset bundling, no browser runtime. The frontend-asset and CEF sections below apply only to apps that [embed web content](/frontend); Chromium packaging is currently supported for macOS and includes the CEF runtime when `.web_engine = "chromium"` and the matching CEF layout is installed.
 
 ## Quick start
 

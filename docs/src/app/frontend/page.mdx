@@ -1,6 +1,8 @@
 # Frontend Projects
 
-For apps with a build step (React, Vue, Svelte, etc.), the Native SDK provides helpers to switch between a dev server and bundled assets.
+A Native SDK app can embed a web frontend — an existing React, Vue, Svelte, or Next.js codebase running in a WebView inside the native shell. This is a secondary path next to the default [native-rendered UI](/native-ui): reach for it when you are bringing web UI along, not when starting fresh. Scaffold one with `native init my_app --frontend <next|vite|react|svelte|vue>`.
+
+For frontends with a build step, the Native SDK provides helpers to switch between a dev server during development and bundled assets in production.
 
 ## Dynamic source function
 

@@ -1,27 +1,27 @@
 # Quick Start
 
-Native SDK is the complete toolkit for building native desktop and mobile applications — with selectable web engines, native views, guarded bridge commands, and OS capabilities. Use a WebView for rich product UI, then add native shell surfaces where the operating system should own the interaction.
-
-## Beta scope
-
-System WebView builds are available on macOS, Linux, and Windows. Chromium/CEF builds and packages are currently supported on macOS only. Native controls are supported on macOS, Linux, and Windows system-WebView hosts.
+Native SDK is the complete toolkit for building native desktop and mobile applications. An app is a declarative markup view plus Zig logic, rendered by Native SDK's own engine into a real OS window — no browser in the binary, no npm in the loop.
 
 ## Prerequisites
 
 - [Zig 0.16.0+](https://ziglang.org/download/)
-- Node.js with npm for the generated frontend
 - macOS 11 or newer, Linux, or Windows
+- Node.js with npm (only for installing the CLI, and for apps that [embed web content](/frontend))
 
-## Track 1: Simple WebView App
+Install the `native` CLI:
 
 ```bash
-native init my_app --frontend next
+npm install -g @native-sdk/cli
+```
+
+## Create an app
+
+```bash
+native init my_app
 cd my_app
 ```
 
-Frontend options: `next`, `vite`, `react`, `svelte`, `vue`.
-
-This scaffolds a complete Native SDK project:
+This scaffolds a complete native-rendered project:
 
 <table>
   <thead>
@@ -32,32 +32,36 @@ This scaffolds a complete Native SDK project:
   </thead>
   <tbody>
     <tr>
-      <td><code>build.zig</code></td>
-      <td>Zig build graph with platform, trace, debug-overlay, automation, js-bridge, and web-engine options</td>
-    </tr>
-    <tr>
-      <td><code>build.zig.zon</code></td>
-      <td>Zig package manifest, declares the Native SDK dependency</td>
-    </tr>
-    <tr>
-      <td><code>app.zon</code></td>
-      <td>App metadata: name, icons, permissions, bridge commands, security policy, window definitions</td>
+      <td><code>src/app.zml</code></td>
+      <td>The entire UI: elements, layout, bindings, and message dispatch</td>
     </tr>
     <tr>
       <td><code>src/main.zig</code></td>
-      <td>App struct with <code>app()</code> and optional <code>bridge()</code> methods</td>
+      <td>The logic: <code>Model</code>, <code>Msg</code>, <code>update</code>, and the window scene</td>
     </tr>
     <tr>
-      <td><code>src/runner.zig</code></td>
-      <td>Platform wiring: trace sinks, file logging, panic capture, state store, runtime init</td>
+      <td><code>src/tests.zig</code></td>
+      <td>Full-loop UI tests that click buttons through typed dispatch — no GUI needed</td>
+    </tr>
+    <tr>
+      <td><code>app.zon</code></td>
+      <td>App manifest: identity, window and view declarations, permissions, security policy</td>
+    </tr>
+    <tr>
+      <td><code>build.zig</code>, <code>build.zig.zon</code></td>
+      <td>Build graph and the <code>native_sdk</code> dependency</td>
     </tr>
     <tr>
       <td><code>assets/icon.icns</code></td>
-      <td>App icon for macOS packages</td>
+      <td>App icon for packaging</td>
     </tr>
     <tr>
-      <td><code>frontend/</code></td>
-      <td>Frontend starter for the framework selected with <code>--frontend</code></td>
+      <td><code>.github/workflows/ci.yml</code></td>
+      <td>Ready-made CI: headless logic tests plus a Linux automation smoke job</td>
+    </tr>
+    <tr>
+      <td><code>.vscode/settings.json</code>, <code>.gitignore</code>, <code>README.md</code></td>
+      <td>Editor association for <code>.zml</code> (HTML highlighting), ignores, and project notes</td>
     </tr>
   </tbody>
 </table>
@@ -68,69 +72,108 @@ This scaffolds a complete Native SDK project:
 zig build run
 ```
 
-The first frontend build installs dependencies automatically. Your app opens a native window with a WebView rendering your HTML.
+A native window opens with a working counter. The whole view is `src/app.zml`:
 
-## Track 2: Native Shell App
-
-Use the native-shell example when you want native chrome around WebView content:
-
-```bash
-cd examples/native-shell
-zig build test
-zig build -Dplatform=macos -Dweb-engine=system
+```html
+<column gap="12" padding="16">
+  <row gap="8" cross="center">
+    <text grow="1">Counter</text>
+    <button size="sm" variant="ghost" on-press="reset">Reset</button>
+  </row>
+  <row gap="8" main="center" cross="center" grow="1">
+    <button variant="secondary" on-press="decrement">-</button>
+    <text>{count}</text>
+    <button variant="primary" on-press="increment">+</button>
+  </row>
+  <status-bar>count: {count}</status-bar>
+</column>
 ```
 
-The example builds a native toolbar, titlebar accessory, sidebar, statusbar, and WebView content area. Commands can come from native controls, menus, shortcuts, or the WebView bridge.
+The markup binds values (`{count}`) and dispatches messages (`on-press="increment"`); it can never mutate state. All logic lives in `src/main.zig`:
 
-## macOS package path
+```zig
+pub const Msg = union(enum) {
+    increment,
+    decrement,
+    reset,
+};
 
-Use this path when validating a signed macOS app:
+pub const Model = struct {
+    count: i64 = 0,
+};
+
+pub fn update(model: *Model, msg: Msg) void {
+    switch (msg) {
+        .increment => model.count += 1,
+        .decrement => model.count -= 1,
+        .reset => model.count = 0,
+    }
+}
+```
+
+That is the whole loop: the model holds state, messages describe what happened, `update` is the only place state changes, and the view re-derives from the model. [App Model](/app-model) walks through how the pieces connect.
+
+## Edit while it runs
+
+`src/app.zml` is embedded into the binary and watched during development. Edit it while the app runs — change a color token, add a button — and the window updates within about two seconds without losing the count. Parse failures keep the last good view on screen.
+
+Validate markup without building:
 
 ```bash
-native init my_app --frontend next
-cd my_app
-zig build run
-native cef install
-zig build run
-native package --target macos --signing identity --identity "Developer ID Application: Your Name"
+native markup check src/app.zml
+```
+
+Errors come back with `file:line:column` and a teaching message. `native markup lsp` provides the same diagnostics plus completion and hover in your editor.
+
+## Test it
+
+```bash
+zig build test
+```
+
+The generated `src/tests.zig` builds the real view from the markup, finds the `+` button, dispatches its press exactly like the runtime would, and asserts the model and the rebuilt view — headless, on any machine.
+
+## Drive it from the outside
+
+Build with automation enabled and the running app publishes an accessibility snapshot any script (or AI agent) can assert on:
+
+```bash
+zig build -Dautomation=true
+./zig-out/bin/my_app &
+native automate wait
+native automate assert 'role=button name="Reset"' 'count: 0'
+```
+
+The generated CI workflow runs exactly this flow headless under Xvfb on Linux — see [Testing in CI](/testing/ci).
+
+## Style with design tokens
+
+Color and radius attributes reference design tokens by name — `background="surface"`, `foreground="text_muted"`, `radius="md"` — validated at check/compile time and re-resolved live when the theme changes, so dark mode works without app code. See [Native UI](/native-ui#styling-with-design-tokens).
+
+## Package it
+
+```bash
+zig build package
 native doctor --manifest app.zon --strict
 ```
 
-Set `.web_engine = "chromium"` and `.cef = .{ .dir = "third_party/cef/macos", .auto_install = false }` in `app.zon` before the Chromium run. `-Dweb-engine` and `--web-engine` are still available for one-off overrides, but the normal app workflow reads the manifest.
+See [Packaging](/packaging) for platform targets and [Code Signing](/packaging/signing) for distribution.
 
-For frontend frameworks, run the frontend dev server through [Dev Server](/cli/dev) during development, then package the built assets for distribution.
+## Apps with web content
 
-## Hello world
+Native SDK can also embed web frontends — an existing React, Next.js, Svelte, or Vue app running in a WebView inside the native shell, with a guarded bridge to native code:
 
-The simplest Native SDK app provides a name and inline HTML:
-
-```zig
-const HelloApp = struct {
-    fn app(self: *@This()) native_sdk.App {
-        return .{
-            .context = self,
-            .name = "hello",
-            .source = native_sdk.WebViewSource.html(
-                \\<!doctype html>
-                \\<html>
-                \\<body style="font-family: system-ui; padding: 2rem;">
-                \\  <h1>Hello from Native SDK</h1>
-                \\</body>
-                \\</html>
-            ),
-        };
-    }
-};
+```bash
+native init my_app --frontend next
 ```
+
+Frontend options: `next`, `vite`, `react`, `svelte`, `vue`. This is a secondary path for teams bringing existing web UI along; see [Web Content](/frontend) for the full workflow.
 
 ## Next steps
 
-- [Web Engines](/web-engines) -- Choose between system WebView and Chromium (CEF)
-- [App Model](/app-model) -- How apps, sources, and lifecycle callbacks work
-- [Native Surfaces](/native-surfaces) -- How native chrome, WebViews, controls, and OS services compose
-- [Native Controls](/native-controls) -- Build native chrome and utility panels
-- [Capabilities](/capabilities) -- Use native OS services safely
-- [Platform Support](/platform-support) -- Check backend support by host
-- [Frontend Projects](/frontend) -- Use React, Vue, or Svelte with the Native SDK
-- [Bridge](/bridge) -- Call native Zig code from JavaScript
-- [Security](/security) -- Permissions, policies, and navigation rules
+- [App Model](/app-model) — the model/message/update loop, wiring, and hot reload
+- [Native UI](/native-ui) — every element, attribute, and pattern in the markup
+- [State & Data Flow](/state) — derive-don't-store, bindings, and text editing state
+- [Built-in Components](/built-in-components) — the component catalog
+- [Automation](/automation) — snapshots, assertions, and scripted interaction
+- [Platform Support](/platform-support) — what each host supports today

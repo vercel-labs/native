@@ -1,6 +1,20 @@
 # Windows
 
-The Native SDK supports multiple windows. The main window is created automatically; secondary windows can be created from Zig or JavaScript.
+The Native SDK supports multiple windows. A native-rendered app declares its windows as a scene — `ShellWindow` entries carrying titles, sizes, restore behavior, and view trees, the shape [`UiApp`](/app-model) takes through its `scene` option and `app.zon` takes through the [`shell` block](/app-zon#shell):
+
+```zig
+const shell_windows = [_]native_sdk.ShellWindow{.{
+    .label = "main",
+    .title = "My App",
+    .width = 480,
+    .height = 320,
+    .restore_state = false,
+    .views = &shell_views,
+}};
+const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
+```
+
+The first scene window adopts the startup window; additional scene windows are created through the window service. Secondary windows can also be created imperatively from Zig — or, in apps that [embed web content](/frontend), from trusted JavaScript.
 
 ## Creating windows from Zig
 

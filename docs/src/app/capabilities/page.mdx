@@ -1,6 +1,6 @@
 # Capabilities
 
-Native SDK capabilities are native OS services and app events exposed through `PlatformServices`, runtime methods, lifecycle events, and guarded bridge commands. Web content does not receive capability access by default.
+Native SDK capabilities are native OS services and app events exposed through `PlatformServices`, runtime methods, lifecycle events, and — for apps that [embed web content](/frontend) — guarded bridge commands. Native code reaches them directly; web content does not receive capability access by default. In a [`UiApp`](/app-model), clipboard access rides the effects channel (`fx.writeClipboard` / `fx.readClipboard`) so `update` never needs a runtime handle.
 
 ## Current capability pack
 

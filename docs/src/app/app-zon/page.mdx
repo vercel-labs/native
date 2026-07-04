@@ -1,8 +1,50 @@
 # app.zon Reference
 
-The `app.zon` manifest declares app metadata, permissions, bridge policies, security rules, and window layout. It is read by the CLI and tooling at build, package, and validation time.
+The `app.zon` manifest declares app metadata, permissions, security rules, window layout, and packaging inputs. It is read by the CLI and tooling at build, package, and validation time.
 
-## Example
+## Example: native-rendered app
+
+The manifest `native init` generates — identity, one shell window with a GPU surface view, and the minimal permission set:
+
+```zig
+.{
+    .id = "dev.native_sdk.my_app",
+    .name = "my_app",
+    .display_name = "My App",
+    .version = "0.1.0",
+    .icons = .{"assets/icon.icns"},
+    .platforms = .{"macos"},
+    .permissions = .{ "view", "command" },
+    .capabilities = .{ "native_views", "gpu_surfaces" },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "My App",
+                .width = 480,
+                .height = 320,
+                .restore_state = false,
+                .restore_policy = "center_on_primary",
+                .views = .{
+                    .{ .label = "main-canvas", .kind = "gpu_surface", .fill = true, .role = "Counter canvas", .accessibility_label = "Counter", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+}
+```
+
+## Example: app with web content, menus, and shortcuts
+
+A fuller manifest for an app that also [embeds web content](/frontend) and declares commands, shortcuts, menus, and packaging metadata:
 
 ```zig
 .{
