@@ -32,7 +32,7 @@ pub fn nowNanoseconds() i128 {
             const epoch_ns: i96 = @as(i96, std.time.epoch.windows) * std.time.ns_per_s;
             return @as(i96, std.os.windows.ntdll.RtlGetSystemTimePrecise()) * 100 + epoch_ns;
         },
-        .wasi => return 0,
+        .wasi, .freestanding, .emscripten => return 0,
         else => {
             var ts: std.posix.timespec = undefined;
             switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
@@ -63,7 +63,7 @@ pub fn monotonicNanoseconds() u64 {
             const ticks: u128 = @intCast(@max(counter, 0));
             return @intCast(ticks * std.time.ns_per_s / @as(u128, @intCast(frequency)));
         },
-        .wasi => return 0,
+        .wasi, .freestanding, .emscripten => return 0,
         else => {
             var ts: std.posix.timespec = undefined;
             switch (std.posix.errno(std.posix.system.clock_gettime(.MONOTONIC, &ts))) {

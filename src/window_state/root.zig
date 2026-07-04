@@ -10,6 +10,15 @@ pub const Error = error{
 
 pub const max_serialized_bytes: usize = 64 * 1024;
 
+/// Targets with no filesystem (freestanding wasm docs previews) skip
+/// persistence entirely — the same honest degradation the runtime
+/// clocks use on wasi. Comptime-known so `std.Io.Dir.cwd()` (posix)
+/// never gets analyzed on those targets.
+const has_filesystem = switch (@import("builtin").os.tag) {
+    .freestanding, .emscripten => false,
+    else => true,
+};
+
 pub const Store = struct {
     io: std.Io,
     state_dir: []const u8,
@@ -30,6 +39,7 @@ pub const Store = struct {
     }
 
     pub fn saveWindow(self: Store, state: platform.WindowState) !void {
+        if (!has_filesystem) return;
         if (state.label.len == 0) return;
         var cwd = std.Io.Dir.cwd();
         try cwd.createDirPath(self.io, self.state_dir);
@@ -370,6 +380,7 @@ fn hexValue(ch: u8) ?u8 {
 }
 
 fn readPath(io: std.Io, path: []const u8, buffer: []u8) ![]const u8 {
+    if (!has_filesystem) return error.InvalidState;
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     return buffer[0..try file.readPositionalAll(io, buffer, 0)];

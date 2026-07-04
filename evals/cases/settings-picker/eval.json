@@ -47,8 +47,8 @@
       "type": "snapshot_grep",
       "patterns": [
         "role=button",
-        "name=\"System\"",
-        "name=\"Blue\"",
+        "name=\"(System|Theme)\"",
+        "name=\"(Blue|Accent)\"",
         "Theme: System · Accent: Blue"
       ],
       "description": "live snapshot shows both closed pickers with their initial values and the summary"

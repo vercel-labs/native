@@ -113,7 +113,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
         fn currentProcessId() u32 {
             return switch (builtin.os.tag) {
                 .windows => std.os.windows.GetCurrentProcessId(),
-                .wasi => 0,
+                .wasi, .freestanding, .emscripten => 0,
                 else => @intCast(@max(0, std.posix.system.getpid())),
             };
         }

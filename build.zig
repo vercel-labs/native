@@ -235,6 +235,45 @@ pub fn build(b: *std.Build) void {
     const docs_previews_step = b.step("docs-component-previews", "Render built-in component previews and vocab JSON into docs/");
     docs_previews_step.dependOn(&run_docs_previews.step);
 
+    // Live docs previews: the same scene catalog compiled to
+    // wasm32-freestanding (tools/docs_wasm_preview.zig) so the docs
+    // upgrade the static webp tiles to interactive engine instances.
+    // ReleaseSmall + strip keep the module small enough to lazy-load.
+    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+    const wasm_optimize: std.builtin.OptimizeMode = .ReleaseSmall;
+    const wasm_geometry_mod = module(b, wasm_target, wasm_optimize, "src/primitives/geometry/root.zig");
+    const wasm_json_mod = module(b, wasm_target, wasm_optimize, "src/primitives/json/root.zig");
+    const wasm_canvas_mod = module(b, wasm_target, wasm_optimize, "src/primitives/canvas/root.zig");
+    wasm_canvas_mod.addImport("geometry", wasm_geometry_mod);
+    wasm_canvas_mod.addImport("json", wasm_json_mod);
+    const wasm_native_mod = module(b, wasm_target, wasm_optimize, "src/root.zig");
+    wasm_native_mod.addImport("geometry", wasm_geometry_mod);
+    wasm_native_mod.addImport("json", wasm_json_mod);
+    wasm_native_mod.addImport("canvas", wasm_canvas_mod);
+    wasm_native_mod.addImport("app_dirs", module(b, wasm_target, wasm_optimize, "src/primitives/app_dirs/root.zig"));
+    wasm_native_mod.addImport("assets", module(b, wasm_target, wasm_optimize, "src/primitives/assets/root.zig"));
+    wasm_native_mod.addImport("trace", module(b, wasm_target, wasm_optimize, "src/primitives/trace/root.zig"));
+    wasm_native_mod.addImport("app_manifest", module(b, wasm_target, wasm_optimize, "src/primitives/app_manifest/root.zig"));
+    wasm_native_mod.addImport("diagnostics", module(b, wasm_target, wasm_optimize, "src/primitives/diagnostics/root.zig"));
+    wasm_native_mod.addImport("platform_info", module(b, wasm_target, wasm_optimize, "src/primitives/platform_info/root.zig"));
+    const docs_wasm_preview_mod = module(b, wasm_target, wasm_optimize, "tools/docs_wasm_preview.zig");
+    docs_wasm_preview_mod.addImport("native_sdk", wasm_native_mod);
+    docs_wasm_preview_mod.strip = true;
+    const docs_wasm_preview_exe = b.addExecutable(.{
+        .name = "component-preview",
+        .root_module = docs_wasm_preview_mod,
+    });
+    docs_wasm_preview_exe.entry = .disabled;
+    docs_wasm_preview_exe.rdynamic = true;
+    // The engine trades heap for fixed capacity but still builds some
+    // sizable stack temporaries (NullPlatform alone is ~800 KB); the
+    // 1 MB wasm default overflows into linear memory silently.
+    docs_wasm_preview_exe.stack_size = 16 * 1024 * 1024;
+    const copy_docs_wasm_preview = b.addUpdateSourceFiles();
+    copy_docs_wasm_preview.addCopyFileToSource(docs_wasm_preview_exe.getEmittedBin(), "docs/public/wasm/component-preview.wasm");
+    const docs_wasm_preview_step = b.step("docs-wasm-preview", "Compile the live component-preview wasm module into docs/public/wasm/");
+    docs_wasm_preview_step.dependOn(&copy_docs_wasm_preview.step);
+
     const file_contains_checker_mod = module(b, host_target, optimize, "tools/check_file_contains.zig");
     const file_contains_checker = b.addExecutable(.{
         .name = "check-file-contains",

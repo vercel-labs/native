@@ -22,6 +22,28 @@ const ALLOWED_TOOLS = [
   "Bash(rm -rf zig-out*)",
 ].join(",");
 
+/**
+ * Deny rules for the agent-under-test. The workspace references the framework
+ * repo by path, so the whole repo — including this harness — is reachable from
+ * the agent's cwd; exploring framework source and examples is realistic (a
+ * real user has the repo), but the grading configs and prior results are
+ * contamination (observed: 3/20 runs of the 2026-07-04 suite read their own
+ * eval.json). Deny rules are checked before allow rules, including for
+ * already-allowed tools like Read and Bash(cat *).
+ */
+const DISALLOWED_TOOLS = [
+  "Read(//**/evals/cases/**)",
+  "Read(//**/evals/results/**)",
+  "Bash(cat *evals/cases*)",
+  "Bash(cat *evals/results*)",
+  // The cases are committed, so git plumbing can serve them without touching
+  // the filesystem (observed: `git show HEAD:evals/cases/<case>/eval.json`).
+  "Bash(git show*)",
+  "Bash(git cat-file*)",
+  "Bash(git grep*)",
+  "Bash(git log*)",
+].join(",");
+
 export function findGatewayKey(env: NodeJS.ProcessEnv): string | undefined {
   return env.AI_GATEWAY_API_KEY ?? env.VERCEL_AI_GATEWAY_API_KEY;
 }
@@ -96,6 +118,8 @@ export function buildInvocation(options: {
   } else {
     argv.push("--permission-mode", "acceptEdits", "--allowedTools", ALLOWED_TOOLS);
   }
+  // Deny rules apply in both permission modes.
+  argv.push("--disallowedTools", DISALLOWED_TOOLS);
   return { argv, cwd: options.workspace };
 }
 

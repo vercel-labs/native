@@ -3,6 +3,14 @@ const geometry = @import("geometry");
 const protocol = @import("protocol.zig");
 const snapshot = @import("snapshot.zig");
 
+/// The dropbox protocol is filesystem-backed; targets without one
+/// (freestanding wasm) publish and consume nothing. Comptime-known so
+/// `std.Io.Dir.cwd()` (posix) is never analyzed on those targets.
+const has_filesystem = switch (@import("builtin").os.tag) {
+    .freestanding, .emscripten => false,
+    else => true,
+};
+
 const snapshot_initial_capacity: usize = 16 * 1024;
 const windows_initial_capacity: usize = 1024;
 
@@ -16,6 +24,7 @@ pub const Server = struct {
     }
 
     pub fn publish(self: Server, input_value: snapshot.Input) !void {
+        if (!has_filesystem) return;
         var cwd = std.Io.Dir.cwd();
         try cwd.createDirPath(self.io, self.directory);
         var writer = try std.Io.Writer.Allocating.initCapacity(std.heap.page_allocator, snapshot_initial_capacity);
@@ -36,6 +45,7 @@ pub const Server = struct {
     }
 
     pub fn publishBridgeResponse(self: Server, response: []const u8) !void {
+        if (!has_filesystem) return;
         var cwd = std.Io.Dir.cwd();
         try cwd.createDirPath(self.io, self.directory);
         var path_buffer: [256]u8 = undefined;
@@ -46,6 +56,7 @@ pub const Server = struct {
     /// bytes land in a temporary file first and are renamed into place so
     /// pollers never observe a partially written PNG.
     pub fn publishScreenshot(self: Server, view_label: []const u8, png_bytes: []const u8) !void {
+        if (!has_filesystem) return;
         var cwd = std.Io.Dir.cwd();
         try cwd.createDirPath(self.io, self.directory);
         var name_buffer: [128]u8 = undefined;
@@ -61,6 +72,7 @@ pub const Server = struct {
     }
 
     pub fn takeCommand(self: Server, buffer: []u8) !?protocol.Command {
+        if (!has_filesystem) return null;
         var path_buffer: [256]u8 = undefined;
         const command_path = self.path("command.txt", &path_buffer);
         const bytes = readPath(self.io, command_path, buffer) catch return null;

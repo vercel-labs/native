@@ -68,7 +68,7 @@
       "type": "llm_judge",
       "criteria": [
         "The split follows the model-owned fraction loop: value binds a model field, on-resize stores the applied fraction back, min-width bounds both panes — no hand-rolled drag handling.",
-        "The tree is idiomatic: rows carry role=\"treeitem\" inside a <tree>, expandable rows bind expanded and dispatch on-toggle, collapsed subtrees are simply not rendered (the model owns visibility), and selection is single across the whole tree.",
+        "The tree is idiomatic: rows carry role=\"treeitem\" inside a <tree>, expandable rows bind expanded and dispatch on-toggle, collapsed subtrees are simply not rendered (the model owns visibility), and selection is single across the whole tree. NOTE: the Up/Down/Left/Right/Home/End keymap is ENGINE-provided for treeitem rows — correct keyboard support IS this wiring; do not expect app-side keyboard-navigation Msgs or penalize their absence.",
         "Model/Msg/update follow The Elm Architecture idiomatically: the tree structure, selection, and expansion state have one source of truth, visible rows / detail strings are derived rather than stored, and update handles every message.",
         "Tests are meaningful: selection, expand/collapse, and the divider fraction round-trip run through the real dispatch path with assertions on model state."
       ],
