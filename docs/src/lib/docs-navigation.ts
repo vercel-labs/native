@@ -1,3 +1,5 @@
+import { componentPages } from "./components-pages";
+
 export type NavItem = {
   name: string;
   href: string;
@@ -27,8 +29,14 @@ export const navSections: NavSection[] = [
     ],
   },
   {
+    // One entry per built-in component page, generated from the shared
+    // components-pages inventory (previews regenerate via
+    // `zig build docs-component-previews`).
     title: "Components",
-    items: [{ name: "Built-in Components", href: "/built-in-components" }],
+    items: [
+      { name: "Overview", href: "/components" },
+      ...componentPages.map((page) => ({ name: page.name, href: `/components/${page.slug}` })),
+    ],
   },
   {
     title: "Native Platform",

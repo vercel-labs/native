@@ -1,0 +1,83 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Drawer & Sheet
+
+Edge-anchored surfaces with the same contract as [dialog](/components/dialog): rendered in place, title via the `text` attribute, visibility model-owned behind an `if`, and `on-dismiss` dispatched on Escape or click-outside so `update` clears the open flag. The drawer slides in from the side; the sheet rises from the bottom. As with the dialog, the title chrome is engine-drawn and children stack over the full content box, so lead the body column with a fixed-height spacer.
+
+<ComponentPreview name="drawer" alt="A drawer surface rendered by the engine" caption="a side drawer with a title and stacked controls" />
+
+## Markup
+
+```html
+<column padding="24">
+  <button variant="outline" icon="menu" on-press="open_filters">Filters</button>
+  <if test="{filters_open}">
+    <drawer text="Filters" width="260" padding="24" on-dismiss="close_filters">
+      <column gap="12">
+        <spacer height="34"></spacer>
+        <checkbox checked="{only_unread}" on-toggle="toggle_unread">Only unread</checkbox>
+        <checkbox checked="{has_attachments}" on-toggle="toggle_attachments">Has attachments</checkbox>
+        <switch checked="{compact_rows}" on-toggle="toggle_compact">Compact rows</switch>
+      </column>
+    </drawer>
+  </if>
+</column>
+```
+
+## Zig builder
+
+```zig
+// Rendered only while model.filters_open is true; on_dismiss clears it in update.
+ui.el(.drawer, .{ .text = "Filters", .width = 260, .padding = 24, .on_dismiss = .close_filters }, .{
+    ui.column(.{ .gap = 12 }, .{
+        ui.column(.{ .height = 34 }, .{}), // clears the engine-drawn title line
+        ui.checkbox(.{ .text = "Only unread", .checked = model.only_unread, .on_toggle = .toggle_unread }),
+        ui.checkbox(.{ .text = "Has attachments", .checked = model.has_attachments, .on_toggle = .toggle_attachments }),
+        ui.el(.switch_control, .{ .text = "Compact rows", .checked = model.compact_rows, .on_toggle = .toggle_compact }, .{}),
+    }),
+})
+```
+
+## Sheet
+
+The sheet is the bottom-edge variant; size it with `height` and keep everything else identical.
+
+<ComponentPreview name="sheet" alt="A sheet surface rendered by the engine" caption="a bottom sheet with a title, body text, and an action row" />
+
+```html
+<column padding="24">
+  <button variant="outline" icon="external-link" on-press="open_share">Share</button>
+  <if test="{share_open}">
+    <sheet text="Share" height="190" padding="24" on-dismiss="close_share">
+      <column gap="12">
+        <spacer height="34"></spacer>
+        <text wrap="true" foreground="text_muted">Anyone with the link can view this board.</text>
+        <row gap="8">
+          <input text="{share_url}" grow="1"></input>
+          <button variant="secondary" icon="copy" on-press="copy_link">Copy</button>
+        </row>
+      </column>
+    </sheet>
+  </if>
+</column>
+```
+
+```zig
+ui.el(.sheet, .{ .text = "Share", .height = 190, .padding = 24, .on_dismiss = .close_share }, .{
+    ui.column(.{ .gap = 12 }, .{
+        ui.column(.{ .height = 34 }, .{}),
+        ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Anyone with the link can view this board."),
+        ui.row(.{ .gap = 8 }, .{
+            ui.el(.input, .{ .text = model.share_url, .grow = 1 }, .{}),
+            ui.button(.{ .variant = .secondary, .icon = "copy", .on_press = .copy_link }, "Copy"),
+        }),
+    }),
+})
+```
+
+## Attributes
+
+Both surfaces reject `gap` — they layer children like the other stacking surfaces; put a column (or row) inside for flow.
+
+<AttrTable attrs={["text", "width", "height", "padding", "on-dismiss"]} />

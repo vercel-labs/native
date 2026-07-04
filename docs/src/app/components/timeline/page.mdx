@@ -1,0 +1,40 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Timeline
+
+A timeline/ledger list container: a vertical column of `timeline-item` children (`for` and `if` work inside it). Each item pairs a leading indicator badge — `indicator` text or a small dot, colored by `variant` — with a title/description/meta content column, joined by a connector rail; set `connector="false"` on the last item to end the rail. Binding `on-press` makes the whole item pressable with a trailing chevron. For a horizontal stage indicator, see [stepper](/components/stepper).
+
+<ComponentPreview name="timeline" alt="A timeline rendered by the engine" caption="indicator badges, titles with descriptions and meta lines, and the connector rail" />
+
+## Markup
+
+```html
+<timeline gap="0">
+  <timeline-item indicator="1" variant="primary" title="Build" description="Compiled 214 files in 1.8s." meta="zig build · 1.8s"></timeline-item>
+  <timeline-item indicator="2" title="Test" description="Canvas and runtime suites passing." meta="zig build test · 42s" on-press="open_test_log"></timeline-item>
+  <timeline-item indicator="3" title="Package" connector="false"></timeline-item>
+</timeline>
+```
+
+## Zig builder
+
+The builder additionally takes an `icon` option that draws a registry icon inside the indicator badge (a vector check for finished steps).
+
+```zig
+ui.timeline(.{}, .{
+    ui.timelineItem(.{ .icon = "check", .variant = .primary, .title = "Build", .description = "Compiled 214 files in 1.8s.", .meta = "zig build · 1.8s" }),
+    ui.timelineItem(.{ .indicator = "2", .title = "Test", .description = "Canvas and runtime suites passing.", .meta = "zig build test · 42s", .on_press = .open_test_log }),
+    ui.timelineItem(.{ .indicator = "3", .title = "Package", .connector = false }),
+})
+```
+
+## Attributes
+
+<AttrTable element="timeline" attrs={["gap", "grow", "key", "global-key", "label"]} />
+
+### Items
+
+`title` is required on every item.
+
+<AttrTable element="timeline-item" attrs={["title", "description", "meta", "indicator", "variant", "connector", "selected", "on-press"]} />

@@ -1,0 +1,54 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Dialog
+
+A modal dialog surface rendered in place: the title comes from the `text` attribute, and visibility is model-owned — wrap the dialog in an `if` on an open flag. `on-dismiss` dispatches when Escape or a click outside dismisses the surface, so `update` clears the flag; the engine hides the surface immediately as an optimistic echo, and the source tree wins on the next rebuild. The title is drawn by the surface chrome and children stack over the full content box, so lead the body column with a fixed-height spacer that clears the title line. For edge-anchored surfaces with the same contract, see [Drawer & Sheet](/components/drawer).
+
+<ComponentPreview name="dialog" alt="A modal dialog rendered by the engine" caption="title chrome, body content, and a trailing action row" />
+
+## Markup
+
+```html
+<column padding="24">
+  <button variant="outline" on-press="open_rename">Rename note</button>
+  <if test="{rename_open}">
+    <dialog text="Rename note" width="380" height="240" padding="24" on-dismiss="close_rename">
+      <column gap="14">
+        <spacer height="34"></spacer>
+        <text wrap="true" foreground="text_muted">The new name shows up everywhere this note is linked.</text>
+        <input text="{draft_name}" on-input="name_edited" on-submit="confirm_rename"></input>
+        <row gap="8" main="end">
+          <button variant="ghost" on-press="close_rename">Cancel</button>
+          <button variant="primary" on-press="confirm_rename">Rename</button>
+        </row>
+      </column>
+    </dialog>
+  </if>
+</column>
+```
+
+## Zig builder
+
+The dialog is a plain element kind, so the builder form is `ui.el(.dialog, ...)`; build it only while the model's open flag is set.
+
+```zig
+// Rendered only while model.rename_open is true; on_dismiss clears it in update.
+ui.el(.dialog, .{ .text = "Rename note", .width = 380, .height = 240, .padding = 24, .on_dismiss = .close_rename }, .{
+    ui.column(.{ .gap = 14 }, .{
+        ui.column(.{ .height = 34 }, .{}), // clears the engine-drawn title line
+        ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "The new name shows up everywhere this note is linked."),
+        ui.el(.input, .{ .text = model.draft_name, .on_input = Ui.inputMsg(.name_edited), .on_submit = .confirm_rename }, .{}),
+        ui.row(.{ .gap = 8, .main = .end }, .{
+            ui.button(.{ .variant = .ghost, .on_press = .close_rename }, "Cancel"),
+            ui.button(.{ .variant = .primary, .on_press = .confirm_rename }, "Rename"),
+        }),
+    }),
+})
+```
+
+## Attributes
+
+Note that `gap` is rejected on the dialog itself — it layers children like the other stacking surfaces; put a column (or row) inside for flow.
+
+<AttrTable attrs={["text", "width", "height", "padding", "on-dismiss"]} />

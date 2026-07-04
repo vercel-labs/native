@@ -1,0 +1,34 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Stepper
+
+A stage stepper: `step` children joined by hairline connectors, with `active` naming the current step index — earlier steps render completed (a check indicator), later ones pending, and an index past the last step renders every step completed. Display-only: driving `active` belongs to the app model. Step children are text leaves only (the label supports `{}` interpolation); their completed/active/pending state derives entirely from the stepper's `active` index. For a vertical run ledger, see [timeline](/components/timeline).
+
+<ComponentPreview name="stepper" alt="A stage stepper rendered by the engine" caption="a completed step, the active step, and a pending step" />
+
+## Markup
+
+`active` is required — a number or one `{binding}`.
+
+```html
+<stepper active="{publish_step}">
+  <step>Draft</step>
+  <step>Review</step>
+  <step>Publish</step>
+</stepper>
+```
+
+## Zig builder
+
+```zig
+ui.stepper(.{ .active = model.publish_step }, &.{
+    .{ .label = "Draft" },
+    .{ .label = "Review" },
+    .{ .label = "Publish" },
+})
+```
+
+## Attributes
+
+<AttrTable element="stepper" attrs={["active", "key", "global-key", "label"]} />

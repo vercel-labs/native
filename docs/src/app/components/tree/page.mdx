@@ -1,0 +1,60 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Tree
+
+A disclosure-tree container. The rows are ordinary elements (usually [list items](/components/list)) carrying `role="treeitem"`, and every such descendant joins one roving keyboard focus set: Up/Down walk the visible rows, Left collapses a row or moves to its parent, Right expands or moves to the first child, Home/End jump to the edges. Expandable rows bind `expanded` and dispatch `on-toggle`; selection follows each row's `on-press`. The model owns both states — children of a collapsed row are simply not rendered.
+
+<ComponentPreview name="tree" alt="A file tree with an expanded folder and a selected row rendered by the engine" caption="an expanded folder, indented children, and a collapsed sibling" />
+
+## Markup
+
+```html
+<tree width="340" gap="2">
+  <list-item icon="folder-open" role="treeitem" expanded="{src_open}" on-toggle="toggle_src" on-press="select_src">src</list-item>
+  <if test="{src_open}">
+    <row>
+      <column width="20" />
+      <column gap="2" grow="1">
+        <list-item icon="file-text" role="treeitem" selected="{file == main}" on-press="select_main">main.zig</list-item>
+        <list-item icon="file-text" role="treeitem" selected="{file == view}" on-press="select_view">view.zig</list-item>
+      </column>
+    </row>
+  </if>
+  <list-item icon="folder" role="treeitem" expanded="{assets_open}" on-toggle="toggle_assets" on-press="select_assets">assets</list-item>
+</tree>
+```
+
+The indent is plain layout — a fixed-width spacer column beside the children. Omit `expanded` on leaf rows; only rows that bind it participate in Left/Right disclosure.
+
+## Zig builder
+
+```zig
+ui.tree(.{ .width = 340, .gap = 2 }, .{
+    ui.listItem(.{
+        .icon = "folder-open",
+        .expanded = model.src_open,
+        .on_toggle = .toggle_src,
+        .on_press = .select_src,
+        .semantics = .{ .role = .treeitem },
+    }, "src"),
+    if (model.src_open) ui.row(.{}, .{
+        ui.column(.{ .width = 20 }, .{}),
+        ui.column(.{ .gap = 2, .grow = 1 }, .{
+            ui.listItem(.{ .icon = "file-text", .selected = model.file == .main, .on_press = .select_main, .semantics = .{ .role = .treeitem } }, "main.zig"),
+            ui.listItem(.{ .icon = "file-text", .selected = model.file == .view, .on_press = .select_view, .semantics = .{ .role = .treeitem } }, "view.zig"),
+        }),
+    }) else ui.stack(.{}, .{}),
+    ui.listItem(.{
+        .icon = "folder",
+        .expanded = model.assets_open,
+        .on_toggle = .toggle_assets,
+        .on_press = .select_assets,
+        .semantics = .{ .role = .treeitem },
+    }, "assets"),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["role", "expanded", "selected", "on-toggle", "on-press", "gap", "label"]} />

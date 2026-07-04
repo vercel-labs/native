@@ -218,6 +218,23 @@ pub fn build(b: *std.Build) void {
         .name = "native",
         .root_module = host_cli_mod,
     });
+    // Docs component-preview generator: renders the built-in component
+    // catalog offscreen through the deterministic reference renderer and
+    // writes theme-aware webp pairs plus the markup vocabulary JSON into
+    // docs/. Regenerate with `zig build docs-component-previews`.
+    const docs_previews_mod = module(b, target, optimize, "tools/docs_component_previews.zig");
+    docs_previews_mod.addImport("native_sdk", desktop_mod);
+    const docs_previews_exe = b.addExecutable(.{
+        .name = "docs-component-previews",
+        .root_module = docs_previews_mod,
+    });
+    const run_docs_previews = b.addRunArtifact(docs_previews_exe);
+    run_docs_previews.addArg(b.pathFromRoot("docs/public/components"));
+    run_docs_previews.addArg(b.pathFromRoot("docs/src/lib/component-vocab.json"));
+    run_docs_previews.has_side_effects = true;
+    const docs_previews_step = b.step("docs-component-previews", "Render built-in component previews and vocab JSON into docs/");
+    docs_previews_step.dependOn(&run_docs_previews.step);
+
     const file_contains_checker_mod = module(b, host_target, optimize, "tools/check_file_contains.zig");
     const file_contains_checker = b.addExecutable(.{
         .name = "check-file-contains",

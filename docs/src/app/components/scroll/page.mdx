@@ -1,0 +1,44 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Scroll
+
+A scroll view: wrap multiple children in a single column inside it. The engine owns wheel, kinetic, and keyboard scrolling and draws the scrollbar while a scroll is in flight; `on-scroll` names a Msg variant with a `canvas.ScrollState` payload that delivers the post-scroll offset and viewport/content extents, so the model can observe position without owning it. Pair with [list](/components/list) for virtualized rows.
+
+<ComponentPreview name="scroll" alt="A scroll region rendered by the engine" caption="a fixed-height scroll region; the engine draws the scrollbar during scrolling" />
+
+## Markup
+
+```html
+<scroll height="240" padding="8" on-scroll="log_scrolled">
+  <column gap="2">
+    <list-item on-press="open_entry">Changelog entry 14</list-item>
+    <list-item on-press="open_entry">Changelog entry 13</list-item>
+    <list-item on-press="open_entry">Changelog entry 12</list-item>
+    <list-item on-press="open_entry">Changelog entry 11</list-item>
+    <list-item on-press="open_entry">Changelog entry 10</list-item>
+    <list-item on-press="open_entry">Changelog entry 9</list-item>
+    <list-item on-press="open_entry">Changelog entry 8</list-item>
+  </column>
+</scroll>
+```
+
+## Zig builder
+
+`on_scroll` pairs with `Ui.scrollMsg(.tag)`; the delivered offset is the value the runtime already applied, so echoing it back never fights the scroll reconcile.
+
+```zig
+ui.scroll(.{ .height = 240, .padding = 8, .on_scroll = Ui.scrollMsg(.log_scrolled) }, .{
+    ui.column(.{ .gap = 2 }, .{
+        ui.listItem(.{ .on_press = .open_entry }, "Changelog entry 14"),
+        ui.listItem(.{ .on_press = .open_entry }, "Changelog entry 13"),
+        ui.listItem(.{ .on_press = .open_entry }, "Changelog entry 12"),
+        ui.listItem(.{ .on_press = .open_entry }, "Changelog entry 11"),
+        ui.listItem(.{ .on_press = .open_entry }, "Changelog entry 10"),
+    }),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["on-scroll", "height", "width", "padding"]} />

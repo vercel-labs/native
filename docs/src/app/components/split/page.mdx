@@ -1,0 +1,70 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Split & Resizable
+
+`split` is a two-pane horizontal splitter with a draggable divider between exactly two element children. `value` binds the model-owned first-pane fraction, and `on-resize` names a Msg variant with an `f32` payload that delivers the applied fraction after every divider drag, keyboard adjustment, and assistive increment — echo it back into `value` in `update`, and the delivered fraction never fights the reconcile. `min-width` on the panes bounds the drag, `gap` sets the divider band thickness, and nesting splits gives you more panes.
+
+<ComponentPreview name="split" alt="A two-pane splitter rendered by the engine" caption="a sidebar/content split with a divider band" />
+
+## Markup
+
+```html
+<split value="{sidebar_fraction}" on-resize="sidebar_resized" gap="8" grow="1">
+  <panel padding="12" min-width="180">
+    <text foreground="text_muted">Sidebar</text>
+  </panel>
+  <panel padding="12" min-width="320">
+    <text foreground="text_muted">Content</text>
+  </panel>
+</split>
+```
+
+A `value` of 0 lays out at 0.5, so a fresh model starts centered. Put conditional or repeated content inside a pane container — the split itself takes exactly two children.
+
+## Zig builder
+
+`on_resize` pairs with `valueMsg`, which builds the `f32`-payload message constructor.
+
+```zig
+ui.split(.{
+    .value = model.sidebar_fraction,
+    .on_resize = Ui.valueMsg(.sidebar_resized),
+    .gap = 8,
+    .grow = 1,
+}, .{
+    ui.panel(.{ .padding = 12, .min_width = 180 }, .{
+        ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Sidebar"),
+    }),
+    ui.panel(.{ .padding = 12, .min_width = 320 }, .{
+        ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Content"),
+    }),
+})
+```
+
+And in `update`:
+
+```zig
+.sidebar_resized => |fraction| model.sidebar_fraction = fraction,
+```
+
+## Resizable
+
+For a single panel with an engine-managed drag handle (no fraction bookkeeping), use `resizable`: `width` sets the initial width and the engine owns the drag from there. It is a stacking surface — no `gap`; put a row or column inside.
+
+```html
+<row grow="1">
+  <resizable width="260">
+    <column padding="12">
+      <text foreground="text_muted">Sidebar</text>
+    </column>
+  </resizable>
+  <panel grow="1" padding="12">
+    <text>Content</text>
+  </panel>
+</row>
+```
+
+## Attributes
+
+<AttrTable attrs={["value", "min-width", "gap", "on-resize", "width"]} />

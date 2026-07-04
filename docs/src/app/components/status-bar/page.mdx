@@ -1,0 +1,36 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Status Bar
+
+A status bar text leaf: the content is the status text (with `{}` interpolation), and it takes no children — the engine renders the bar's own text rather than laying out a child tree. Pin it as the last child of the window's root column so it hugs the bottom edge.
+
+<ComponentPreview name="status-bar" alt="A status bar rendered by the engine" caption="a status bar pinned under the window content" />
+
+## Markup
+
+```html
+<column grow="1">
+  <column grow="1" padding="32" main="center" cross="center">
+    <text foreground="text_muted">Window content</text>
+  </column>
+  <status-bar>Ready — 3 notes synced</status-bar>
+</column>
+```
+
+## Zig builder
+
+The builder models it as a text leaf: `ui.statusBar(options, text)`.
+
+```zig
+ui.column(.{ .grow = 1 }, .{
+    ui.column(.{ .grow = 1, .padding = 32, .main = .center, .cross = .center }, .{
+        ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Window content"),
+    }),
+    ui.statusBar(.{}, "Ready — 3 notes synced"),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["text", "text-alignment"]} />

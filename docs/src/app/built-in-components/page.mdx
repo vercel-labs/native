@@ -1,63 +1,7 @@
 # Built-in Components
 
-The Native SDK includes a native-rendered component catalog with shadcn-style defaults. These components are owned by the Native SDK, rendered through the retained canvas/GPU surface, and styled by design tokens instead of platform widget skins.
+This page moved. The catalog now has a full [Components section](/components) — one page per component with engine-rendered light/dark previews, validated `.zml` markup, the Zig builder equivalent, and attribute tables generated from the markup vocabulary.
 
-The default visual language follows shadcn: neutral surfaces, sharp typography, subtle borders, focused states, compact density, and token-driven color, radius, shadow, blur, and motion. Geist is the default sans family and Geist Mono is the default mono family. Applications can override tokens globally or per widget when they need their own product language.
+The short version: the Native SDK ships a native-rendered component catalog with shadcn-style defaults — neutral surfaces, Geist typography, subtle borders, focus states, and token-driven color, radius, shadow, blur, and motion — owned by the SDK and rendered through the retained canvas surface, not platform widget skins. Every component is expressible in markup through its `.zml` element and programmatically through the `canvas.Ui` builder.
 
-Every component in the catalog is expressible in markup views through its `.zml` element (the table below; see [Native UI](/native-ui) for semantics and attributes); the same catalog is available programmatically through the `canvas.Ui` builder and `builtinComponentWidget`. Use these components for app UI that should be fast, composable, and visually consistent across platforms. Use WebViews when a feature is naturally web-shaped, such as a browser surface, document editor, rich preview, embedded web app, or third-party content.
-
-## Component Set
-
-<table>
-  <thead>
-    <tr>
-      <th>Component</th>
-      <th>Markup element</th>
-      <th>Default foundation</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr><td><code>Accordion</code></td><td><code>accordion</code></td><td>Accordion surface primitive</td></tr>
-    <tr><td><code>Alert</code></td><td><code>alert</code></td><td>Alert primitive</td></tr>
-    <tr><td><code>Avatar</code></td><td><code>avatar</code></td><td>Avatar primitive (circle-clipped image with initials fallback; the image side is Zig-only — `ui.avatar(.{ .image = id }, "ZN")` with a runtime-registered ImageId)</td></tr>
-    <tr><td><code>Badge</code></td><td><code>badge</code></td><td>Badge primitive</td></tr>
-    <tr><td><code>Breadcrumb</code></td><td><code>breadcrumb</code></td><td>Breadcrumb row primitive</td></tr>
-    <tr><td><code>Bubble</code></td><td><code>bubble</code></td><td>Bubble surface primitive</td></tr>
-    <tr><td><code>Button</code></td><td><code>button</code></td><td>Button primitive</td></tr>
-    <tr><td><code>Button Group</code></td><td><code>button-group</code></td><td>Button-group row primitive</td></tr>
-    <tr><td><code>Card</code></td><td><code>card</code></td><td>Card primitive</td></tr>
-    <tr><td><code>Checkbox</code></td><td><code>checkbox</code></td><td>Checkbox primitive</td></tr>
-    <tr><td><code>Combobox</code></td><td><code>combobox</code></td><td>Combobox trigger primitive</td></tr>
-    <tr><td><code>Dialog</code></td><td><code>dialog</code></td><td>Dialog surface primitive</td></tr>
-    <tr><td><code>Drawer</code></td><td><code>drawer</code></td><td>Drawer surface primitive</td></tr>
-    <tr><td><code>Dropdown Menu</code></td><td><code>dropdown-menu</code></td><td>Dropdown menu primitive</td></tr>
-    <tr><td><code>Input</code></td><td><code>input</code></td><td>Input primitive</td></tr>
-    <tr><td><code>Pagination</code></td><td><code>pagination</code></td><td>Pagination row primitive</td></tr>
-    <tr><td><code>Progress</code></td><td><code>progress</code></td><td>Progress primitive</td></tr>
-    <tr><td><code>Radio Group</code></td><td><code>radio-group</code></td><td>Radio-group row primitive</td></tr>
-    <tr><td><code>Resizable</code></td><td><code>resizable</code></td><td>Resizable surface primitive</td></tr>
-    <tr><td><code>Select</code></td><td><code>select</code></td><td>Select trigger primitive</td></tr>
-    <tr><td><code>Separator</code></td><td><code>separator</code></td><td>Separator primitive</td></tr>
-    <tr><td><code>Sheet</code></td><td><code>sheet</code></td><td>Sheet surface primitive</td></tr>
-    <tr><td><code>Skeleton</code></td><td><code>skeleton</code></td><td>Skeleton primitive</td></tr>
-    <tr><td><code>Slider</code></td><td><code>slider</code></td><td>Slider primitive</td></tr>
-    <tr><td><code>Spinner</code></td><td><code>spinner</code></td><td>Spinner primitive</td></tr>
-    <tr><td><code>Switch</code></td><td><code>switch</code></td><td>Switch primitive</td></tr>
-    <tr><td><code>Table</code></td><td><code>table</code> + <code>table-row</code>, <code>table-cell</code></td><td>Table primitive</td></tr>
-    <tr><td><code>Tabs</code></td><td><code>tabs</code></td><td>Tabs row primitive</td></tr>
-    <tr><td><code>Textarea</code></td><td><code>textarea</code></td><td>Textarea primitive</td></tr>
-    <tr><td><code>Toggle</code></td><td><code>toggle-button</code></td><td>Toggle button primitive</td></tr>
-    <tr><td><code>Toggle Group</code></td><td><code>toggle-group</code></td><td>Toggle-group row primitive</td></tr>
-    <tr><td><code>Tooltip</code></td><td><code>tooltip</code></td><td>Tooltip primitive</td></tr>
-  </tbody>
-</table>
-
-A markup element covers each component's declarative shape; anything that needs runtime geometry or asset references (anchored popovers, image content, data-grid cell templates) stays a Zig view function; built-in vector icons are declarative via `<icon name="..."/>` — see the exclusions note on [Native UI](/native-ui).
-
-Three composites build on the catalog rather than adding widget kinds: `Stepper` (`stepper` + `step`, or `ui.stepper`) renders a stage track with completed/active/pending indicators and connectors; `Timeline` (`timeline` + `timeline-item`, or `ui.timeline`/`ui.timelineItem`) renders ledger items with a status indicator, connector rail, title/description/meta, and an optional full-area press with chevron; and `ui.nav` (Zig-only) is the within-pane navigation stack. See [Pipeline components](/native-ui#pipeline-components-stepper-timeline-and-nav).
-
-## Runtime Contract
-
-The canonical catalog lives in `native_sdk.canvas.builtin_component_kinds` and `native_sdk.canvas.builtin_component_names`. Each descriptor reports its shadcn style, root widget kind, semantic role, and whether the component is composite.
-
-Use `native_sdk.canvas.builtinComponentWidget(...)` to create a default component foundation, then pass explicit children, layout, state, semantics, commands, or token overrides as needed. Composite components are still Native SDK components; they assemble retained primitives under the same token and accessibility model.
+The canonical catalog lives in `native_sdk.canvas.builtin_component_kinds` and `builtin_component_names`; each descriptor reports its style, root widget kind, semantic role, and composite flag, and `native_sdk.canvas.builtinComponentWidget(...)` constructs a component's default foundation directly. See [Native UI](/native-ui) for markup semantics and the runtime contract.

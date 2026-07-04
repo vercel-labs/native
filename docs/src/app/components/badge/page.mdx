@@ -1,0 +1,42 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Badge
+
+A text leaf for counts and statuses: the content is the label (with `{}` interpolation), `variant` picks the color treatment, and an optional `icon` draws a built-in vector icon inline before the text. Badges are not interactive — for a pressable chip see [toggle-button](/components/toggle) or [button](/components/button).
+
+<ComponentPreview name="badge" alt="Badge variants rendered by the engine" caption="default, secondary, outline, destructive, and icon badges" />
+
+## Markup
+
+```html
+<row gap="10" cross="center">
+  <badge>Badge</badge>
+  <badge variant="secondary">Secondary</badge>
+  <badge variant="outline">Outline</badge>
+  <badge variant="destructive">Destructive</badge>
+  <badge variant="secondary" icon="check">Verified</badge>
+</row>
+```
+
+## Zig builder
+
+```zig
+ui.row(.{ .gap = 10, .cross = .center }, .{
+    ui.el(.badge, .{ .text = "Badge" }, .{}),
+    ui.el(.badge, .{ .text = "Secondary", .variant = .secondary }, .{}),
+    ui.el(.badge, .{ .text = "Outline", .variant = .outline }, .{}),
+    ui.el(.badge, .{ .text = "Destructive", .variant = .destructive }, .{}),
+    ui.el(.badge, .{ .text = "Verified", .variant = .secondary, .icon = "check" }, .{}),
+})
+```
+
+## Attributes
+
+<AttrTable
+  attrs={[
+    "text",
+    "variant",
+    "icon",
+  ]}
+/>

@@ -1,0 +1,48 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Breadcrumb
+
+A row container for a hierarchy trail — children flow horizontally, and the trail is plain composition: muted `text` leaves for the ancestors, a muted `chevron-right` [icon](/components/icon) between them, and an unmuted leaf for the current page. Binding `on-press` on a text leaf makes it pressable, so each ancestor can navigate.
+
+<ComponentPreview name="breadcrumb" alt="A breadcrumb trail rendered by the engine" caption="muted ancestors, chevron separators, and the current page" />
+
+## Markup
+
+```html
+<breadcrumb gap="8" cross="center">
+  <text foreground="text_muted" on-press="open_home">Home</text>
+  <icon name="chevron-right" foreground="text_muted" />
+  <text foreground="text_muted" on-press="open_components">Components</text>
+  <icon name="chevron-right" foreground="text_muted" />
+  <text>Breadcrumb</text>
+</breadcrumb>
+```
+
+For a model-driven trail, loop the ancestors and dispatch a payload per crumb:
+
+```html
+<breadcrumb gap="8" cross="center">
+  <for each="crumbs" as="crumb" key="id">
+    <text foreground="text_muted" on-press="open_crumb:{crumb.id}">{crumb.title}</text>
+    <icon name="chevron-right" foreground="text_muted" />
+  </for>
+  <text>{current_title}</text>
+</breadcrumb>
+```
+
+## Zig builder
+
+```zig
+ui.el(.breadcrumb, .{ .gap = 8, .cross = .center }, .{
+    ui.text(.{ .style_tokens = .{ .foreground = .text_muted }, .on_press = .open_home }, "Home"),
+    ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "chevron-right"),
+    ui.text(.{ .style_tokens = .{ .foreground = .text_muted }, .on_press = .open_components }, "Components"),
+    ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "chevron-right"),
+    ui.text(.{}, "Breadcrumb"),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["gap", "cross", "on-press"]} />

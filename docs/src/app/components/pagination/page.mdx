@@ -1,0 +1,36 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Pagination
+
+A row container for page navigation — children flow horizontally and are ordinary [buttons](/components/button): `ghost` page numbers with `selected` marking the current page (`outline` in the preview), and `chevron-left`/`chevron-right` icon buttons for previous/next. Each button dispatches its own Msg through `on-press`; the model owns the current page.
+
+<ComponentPreview name="pagination" alt="A pagination row rendered by the engine" caption="previous/next chevrons around ghost page buttons, page 1 selected" />
+
+## Markup
+
+```html
+<pagination>
+  <button variant="ghost" icon="chevron-left" on-press="prev_page">Previous</button>
+  <for each="pages" as="p" key="number">
+    <button variant="outline" selected="{p.number == page}" on-press="open_page:{p.number}">{p.label}</button>
+  </for>
+  <button variant="ghost" icon="chevron-right" on-press="next_page">Next</button>
+</pagination>
+```
+
+## Zig builder
+
+```zig
+ui.el(.pagination, .{}, .{
+    ui.button(.{ .variant = .ghost, .icon = "chevron-left", .on_press = .prev_page }, "Previous"),
+    ui.button(.{ .variant = .outline, .selected = model.page == 1, .on_press = .{ .open_page = 1 } }, "1"),
+    ui.button(.{ .variant = .ghost, .selected = model.page == 2, .on_press = .{ .open_page = 2 } }, "2"),
+    ui.button(.{ .variant = .ghost, .selected = model.page == 3, .on_press = .{ .open_page = 3 } }, "3"),
+    ui.button(.{ .variant = .ghost, .icon = "chevron-right", .on_press = .next_page }, "Next"),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["selected", "on-press", "icon"]} />

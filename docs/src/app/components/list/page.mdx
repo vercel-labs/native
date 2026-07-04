@@ -1,0 +1,52 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# List
+
+A vertical stack of items. The rows are `list-item` text leaves — the label is the content, `icon` draws a leading vector icon, `selected` marks the current row (usually an equality), `disabled` grays a row out, and `on-press` dispatches the row's Msg. For long data, `virtualized` with a fixed `virtual-item-extent` lays out only the visible window.
+
+<ComponentPreview name="list" alt="A list with icons, a selected row, and a disabled row rendered by the engine" caption="icon rows with one selected and one disabled item" />
+
+## Markup
+
+```html
+<list width="340" gap="2">
+  <list-item icon="file-text" selected="{doc == report}" on-press="open_report">Quarterly report.md</list-item>
+  <list-item icon="file-text" selected="{doc == checklist}" on-press="open_checklist">Launch checklist.md</list-item>
+  <list-item icon="folder" on-press="open_archive">Archive</list-item>
+  <list-item icon="music" disabled="true">demo-track.wav</list-item>
+</list>
+```
+
+## Zig builder
+
+```zig
+ui.list(.{ .width = 340, .gap = 2 }, .{
+    ui.listItem(.{ .icon = "file-text", .selected = model.doc == .report, .on_press = .open_report }, "Quarterly report.md"),
+    ui.listItem(.{ .icon = "file-text", .selected = model.doc == .checklist, .on_press = .open_checklist }, "Launch checklist.md"),
+    ui.listItem(.{ .icon = "folder", .on_press = .open_archive }, "Archive"),
+    ui.listItem(.{ .icon = "music", .disabled = true }, "demo-track.wav"),
+})
+```
+
+## Virtualization
+
+For thousands of rows, turn on `virtualized` and give each row a fixed `virtual-item-extent` — the engine materializes only the rows in view. Loop the model data with a keyed `for` and dispatch a payload per row.
+
+```html
+<list virtualized="true" virtual-item-extent="28" grow="1">
+  <for each="rows" as="row" key="id">
+    <list-item on-press="open_row:{row.id}">{row.title}</list-item>
+  </for>
+</list>
+```
+
+## Attributes
+
+List:
+
+<AttrTable attrs={["virtualized", "virtual-item-extent", "gap"]} />
+
+List-item:
+
+<AttrTable attrs={["text", "icon", "selected", "disabled", "on-press"]} />

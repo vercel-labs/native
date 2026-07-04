@@ -1,0 +1,31 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Markdown
+
+Renders a markdown string (a GFM subset, pipe tables included) as native widgets through the same text pipeline as every other component — deterministic layout, selectable text. `source` is required and must be one `{binding}`; the element takes no children. Links dispatch `on-link` with the URL as payload (bare URLs autolink), `<details>` blocks toggle through `on-details` plus a model-owned `details-expanded` flag list, and `#123` references linkify through `issue-link-base`.
+
+<ComponentPreview name="markdown" alt="A markdown document rendered by the engine" caption="headings, emphasis, inline code, lists, links, and a code block" />
+
+## Markup
+
+```html
+<markdown source="{release_notes}" on-link="open_link" issue-link-base="https://github.com/native-sdk/native/issues/"></markdown>
+```
+
+## Zig builder
+
+The builder is the `canvas.markdown` module, parameterized over the app's Msg type; `on_link` pairs with `Ui.linkMsg(.tag)`.
+
+```zig
+const Md = native_sdk.canvas.markdown.Markdown(Msg);
+
+Md.view(ui, model.release_notes, .{
+    .on_link = Ui.linkMsg(.open_link),
+    .issue_link_base = "https://github.com/native-sdk/native/issues/",
+})
+```
+
+## Attributes
+
+<AttrTable element="markdown" attrs={["source", "on-link", "on-details", "details-expanded", "issue-link-base"]} />

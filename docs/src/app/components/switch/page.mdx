@@ -1,0 +1,39 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Switch
+
+An on/off switch control. The label is the element's content, the model binds `checked`, and `on-toggle` dispatches its Msg — same contract as [checkbox](/components/checkbox), rendered as a sliding thumb. In the Zig builder the widget kind is `.switch_control`.
+
+<ComponentPreview name="switch" alt="Switches rendered by the engine" caption="on, off, and disabled switches" />
+
+## Markup
+
+```html
+<column gap="12">
+  <switch checked="{airplane_mode}" on-toggle="toggle_airplane_mode">Airplane mode</switch>
+  <switch checked="{notifications}" on-toggle="toggle_notifications">Notifications</switch>
+  <switch checked="true" disabled="true">Managed setting</switch>
+</column>
+```
+
+## Zig builder
+
+```zig
+ui.column(.{ .gap = 12 }, .{
+    ui.el(.switch_control, .{ .text = "Airplane mode", .checked = model.airplane_mode, .on_toggle = .toggle_airplane_mode }, .{}),
+    ui.el(.switch_control, .{ .text = "Notifications", .checked = model.notifications, .on_toggle = .toggle_notifications }, .{}),
+    ui.el(.switch_control, .{ .text = "Managed setting", .checked = true, .disabled = true }, .{}),
+})
+```
+
+## Attributes
+
+<AttrTable
+  attrs={[
+    "text",
+    "checked",
+    "disabled",
+    "on-toggle",
+  ]}
+/>

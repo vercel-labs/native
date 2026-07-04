@@ -1,0 +1,76 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Tooltip & Bubble
+
+`tooltip` is a text leaf styled as a tooltip: its content (with `{}` interpolation) is the whole element, so showing one is ordinary conditional layout — render it under an `if` driven by the model. `bubble` is the chat-message surface: children stack inside, `variant` colors it (`primary` for the sent side), and like every stacking surface it rejects `gap` — put the content inside and size with `padding`.
+
+<ComponentPreview name="tooltip" alt="A tooltip above a button rendered by the engine" caption="a tooltip leaf above the control it annotates" />
+
+## Markup
+
+```html
+<column gap="8" cross="center">
+  <tooltip>Add to library</tooltip>
+  <button variant="outline" on-press="add_to_library">Hover</button>
+</column>
+```
+
+## Zig builder
+
+```zig
+ui.column(.{ .gap = 8, .cross = .center }, .{
+    ui.el(.tooltip, .{ .text = "Add to library" }, .{}),
+    ui.button(.{ .variant = .outline, .on_press = .add_to_library }, "Hover"),
+})
+```
+
+## Bubble
+
+Alternate sides with a `spacer` in a row: spacer-last pushes the bubble left (received), spacer-first pushes it right (sent).
+
+<ComponentPreview name="bubble" alt="Received and sent chat bubbles rendered by the engine" caption="a received bubble and a primary sent bubble" />
+
+```html
+<column gap="10" width="340">
+  <row>
+    <bubble padding="10">
+      <text wrap="true">Ready to ship the components page?</text>
+    </bubble>
+    <spacer grow="1" />
+  </row>
+  <row>
+    <spacer grow="1" />
+    <bubble padding="10" variant="primary">
+      <text wrap="true">Previews are rendering now.</text>
+    </bubble>
+  </row>
+</column>
+```
+
+```zig
+ui.column(.{ .gap = 10, .width = 340 }, .{
+    ui.row(.{}, .{
+        ui.el(.bubble, .{ .padding = 10 }, .{
+            ui.text(.{ .wrap = true }, "Ready to ship the components page?"),
+        }),
+        ui.spacer(1),
+    }),
+    ui.row(.{}, .{
+        ui.spacer(1),
+        ui.el(.bubble, .{ .padding = 10, .variant = .primary }, .{
+            ui.text(.{ .wrap = true }, "Previews are rendering now."),
+        }),
+    }),
+})
+```
+
+## Attributes
+
+Tooltip:
+
+<AttrTable attrs={["text"]} />
+
+Bubble:
+
+<AttrTable attrs={["padding", "variant"]} />

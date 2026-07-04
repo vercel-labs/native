@@ -1,0 +1,62 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Toggle
+
+Three related controls: `toggle` is a text-bearing toggle whose label is the element's content, `toggle-button` is its pressed-state chip variant, and `toggle-group` is a row container that groups toggle-buttons into one segmented strip. All of them dispatch `on-toggle`; the model owns the state and renders it back through `checked` (standalone toggles) or `selected` (usually a `{a == b}` equality inside a group).
+
+<ComponentPreview name="toggle-group" alt="A toggle group rendered by the engine" caption="toggle-buttons in a toggle-group; the model drives selected" />
+
+## Markup
+
+```html
+<toggle-group>
+  <toggle-button selected="{align == left}" on-toggle="align_left">Left</toggle-button>
+  <toggle-button selected="{align == center}" on-toggle="align_center">Center</toggle-button>
+  <toggle-button selected="{align == right}" on-toggle="align_right">Right</toggle-button>
+</toggle-group>
+```
+
+## Zig builder
+
+```zig
+ui.el(.toggle_group, .{}, .{
+    ui.el(.toggle_button, .{ .text = "Left", .selected = model.align == .left, .on_toggle = .align_left }, .{}),
+    ui.el(.toggle_button, .{ .text = "Center", .selected = model.align == .center, .on_toggle = .align_center }, .{}),
+    ui.el(.toggle_button, .{ .text = "Right", .selected = model.align == .right, .on_toggle = .align_right }, .{}),
+})
+```
+
+## Toggle
+
+The standalone `toggle` element carries its own label; bind `checked` and handle `on-toggle` exactly like a [checkbox](/components/checkbox).
+
+<ComponentPreview name="toggle" alt="Toggles rendered by the engine" caption="on, off, and disabled toggles" />
+
+```html
+<row gap="12" cross="center">
+  <toggle checked="{bold}" on-toggle="toggle_bold">Bold</toggle>
+  <toggle checked="{italic}" on-toggle="toggle_italic">Italic</toggle>
+  <toggle disabled="true" on-toggle="toggle_underline">Underline</toggle>
+</row>
+```
+
+```zig
+ui.row(.{ .gap = 12, .cross = .center }, .{
+    ui.el(.toggle, .{ .text = "Bold", .checked = model.bold, .on_toggle = .toggle_bold }, .{}),
+    ui.el(.toggle, .{ .text = "Italic", .checked = model.italic, .on_toggle = .toggle_italic }, .{}),
+    ui.el(.toggle, .{ .text = "Underline", .disabled = true, .on_toggle = .toggle_underline }, .{}),
+})
+```
+
+## Attributes
+
+<AttrTable
+  attrs={[
+    "text",
+    "checked",
+    "selected",
+    "disabled",
+    "on-toggle",
+  ]}
+/>

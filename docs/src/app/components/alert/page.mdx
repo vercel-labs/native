@@ -1,0 +1,32 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Alert
+
+An inline callout surface. The title comes from the `text` attribute, `variant` colors the surface (`destructive` for errors), and any children stack inside the surface. Like the other stacking surfaces it rejects `gap` — wrap extra content in a `column` if you need flow.
+
+<ComponentPreview name="alert" alt="Default and destructive alerts rendered by the engine" caption="default and destructive variants" />
+
+## Markup
+
+```html
+<column gap="12" width="380">
+  <alert text="A new version of the shell is available."></alert>
+  <alert text="Your session has expired. Sign in again." variant="destructive"></alert>
+</column>
+```
+
+## Zig builder
+
+```zig
+ui.column(.{ .gap = 12, .width = 380 }, .{
+    ui.el(.alert, .{ .text = "A new version of the shell is available." }, .{}),
+    ui.el(.alert, .{ .text = "Your session has expired. Sign in again.", .variant = .destructive }, .{}),
+})
+```
+
+For a message the user can dismiss, render the alert under an `if` and clear the flag from a button inside it — the model owns the visibility, as with every surface. For modal interruptions reach for [dialog, drawer, or sheet](/components/dialog) instead.
+
+## Attributes
+
+<AttrTable attrs={["text", "variant"]} />

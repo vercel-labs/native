@@ -1,0 +1,69 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Input
+
+Single-line text entry. `input` and `text-field` are the same foundation under two names: `text` and `placeholder` bind from the model, `on-input` names a Msg variant that receives every edit as a `canvas.TextInputEvent`, and `on-submit` dispatches on enter. `search-field` is the same control styled for search.
+
+<ComponentPreview name="input" alt="Text inputs rendered by the engine" caption="placeholder, bound text, and disabled states" />
+
+## Markup
+
+```html
+<column gap="12" width="280">
+  <input placeholder="Email address" text="{email}" on-input="email_edited" on-submit="subscribe" />
+  <text-field text="{project_name}" on-input="name_edited" />
+  <input placeholder="Disabled" disabled="true" />
+</column>
+```
+
+## Zig builder
+
+`on_input` takes a comptime message constructor: `Ui.inputMsg(.tag)` builds `Msg{ .tag = edit }` for each `canvas.TextInputEvent`.
+
+```zig
+ui.column(.{ .gap = 12, .width = 280 }, .{
+    ui.el(.input, .{
+        .placeholder = "Email address",
+        .text = model.email,
+        .on_input = Ui.inputMsg(.email_edited),
+        .on_submit = .subscribe,
+    }, .{}),
+    ui.textField(.{ .text = model.project_name, .on_input = Ui.inputMsg(.name_edited) }),
+    ui.el(.input, .{ .placeholder = "Disabled", .disabled = true }, .{}),
+})
+```
+
+## Search field
+
+`search-field` renders the search affordance but binds exactly like an input; pair it with a model-filtered list. For text entry that opens a menu of suggestions, see [combobox](/components/select).
+
+<ComponentPreview name="search-field" alt="A search field rendered by the engine" />
+
+```html
+<search-field width="280" placeholder="Search notes" text="{query}" on-input="query_edited" />
+```
+
+```zig
+ui.el(.search_field, .{
+    .width = 280,
+    .placeholder = "Search notes",
+    .text = model.query,
+    .on_input = Ui.inputMsg(.query_edited),
+}, .{})
+```
+
+## Attributes
+
+<AttrTable
+  attrs={[
+    "text",
+    "placeholder",
+    "value",
+    "disabled",
+    "autofocus",
+    "on-input",
+    "on-submit",
+    "on-change",
+  ]}
+/>

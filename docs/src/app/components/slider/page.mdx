@@ -1,0 +1,39 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Slider
+
+A draggable value control. The model owns `value` as a 0..1 fraction and renders it back on every rebuild; `on-change` dispatches when the user moves the thumb (drag, keyboard step, or accessibility set-value). In the Zig builder, bind `on_value = Ui.valueMsg(.tag)` instead — it delivers the applied value as the Msg's `f32` payload, which `update` echoes back into the model field. For a display-only bar, use [progress](/components/progress).
+
+<ComponentPreview name="slider" alt="Sliders rendered by the engine" caption="a bound slider and a disabled slider" />
+
+## Markup
+
+```html
+<column gap="20" width="280">
+  <slider value="{volume}" on-change="volume_changed" label="Volume" />
+  <slider value="0.7" disabled="true" />
+</column>
+```
+
+## Zig builder
+
+```zig
+ui.column(.{ .gap = 20, .width = 280 }, .{
+    ui.el(.slider, .{
+        .value = model.volume,
+        .on_value = Ui.valueMsg(.volume_changed),
+    }, .{}),
+    ui.el(.slider, .{ .value = 0.7, .disabled = true }, .{}),
+})
+```
+
+## Attributes
+
+<AttrTable
+  attrs={[
+    "value",
+    "disabled",
+    "on-change",
+  ]}
+/>

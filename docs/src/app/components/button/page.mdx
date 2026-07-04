@@ -1,0 +1,98 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Button
+
+A text-bearing press control. The label is the element's content, `on-press` dispatches its Msg, and an inline `icon` draws before the label as part of the same hit target. Six variants cover the shadcn palette; previews are rendered by the engine itself.
+
+<ComponentPreview name="button" alt="Button variants rendered by the engine" caption="default, primary, secondary, outline, ghost, and destructive variants" />
+
+## Markup
+
+```html
+<row gap="12" cross="center">
+  <button variant="primary" on-press="save">Save</button>
+  <button variant="secondary" on-press="duplicate">Duplicate</button>
+  <button variant="outline" on-press="preview">Preview</button>
+  <button variant="ghost" on-press="dismiss">Dismiss</button>
+  <button variant="destructive" on-press="delete_note">Delete</button>
+</row>
+```
+
+## Zig builder
+
+```zig
+ui.row(.{ .gap = 12, .cross = .center }, .{
+    ui.button(.{ .variant = .primary, .on_press = .save }, "Save"),
+    ui.button(.{ .variant = .secondary, .on_press = .duplicate }, "Duplicate"),
+    ui.button(.{ .variant = .outline, .on_press = .preview }, "Preview"),
+    ui.button(.{ .variant = .ghost, .on_press = .dismiss }, "Dismiss"),
+    ui.button(.{ .variant = .destructive, .on_press = .delete_note }, "Delete"),
+})
+```
+
+## Sizes
+
+Four sizes: `sm`, `default`, `lg`, and `icon` — the icon size renders a square, icon-only button (give it a `label` for accessibility).
+
+<ComponentPreview name="button-sizes" alt="Button sizes rendered by the engine" caption="sm, default, lg, and icon sizes" />
+
+```html
+<row gap="12" cross="center">
+  <button size="sm" variant="outline" on-press="zoom_out">Small</button>
+  <button variant="outline" on-press="reset_zoom">Default</button>
+  <button size="lg" variant="outline" on-press="zoom_in">Large</button>
+  <button size="icon" icon="plus" label="New note" on-press="create_note"></button>
+</row>
+```
+
+## Icons
+
+`icon` names a built-in vector icon (see the [icon registry](/components/icon)) drawn inline before the label — one hit target, one enabled/disabled tint.
+
+<ComponentPreview name="button-icons" alt="Buttons with inline icons rendered by the engine" />
+
+```html
+<row gap="12" cross="center">
+  <button variant="primary" icon="download" on-press="download">Download</button>
+  <button variant="outline" icon="git-branch" on-press="new_branch">New Branch</button>
+  <button disabled="{saving}" on-press="save">Save</button>
+</row>
+```
+
+## States
+
+Hover and press styling is engine-owned render state; `disabled` is a source attribute (a literal or a model binding).
+
+<ComponentPreview name="button-states" alt="Button default, hovered, and disabled states rendered by the engine" caption="default, hovered (engine render state), and disabled" />
+
+## Button Group
+
+`button-group` is a row container that visually attaches its buttons; drive the active segment with `selected`.
+
+<ComponentPreview name="button-group" alt="A button group rendered by the engine" />
+
+```html
+<button-group>
+  <button variant="outline" selected="{range == years}" on-press="show_years">Years</button>
+  <button variant="outline" selected="{range == months}" on-press="show_months">Months</button>
+  <button variant="outline" selected="{range == days}" on-press="show_days">Days</button>
+</button-group>
+```
+
+## Attributes
+
+<AttrTable
+  attrs={[
+    "text",
+    "variant",
+    "size",
+    "icon",
+    "disabled",
+    "selected",
+    "autofocus",
+    "label",
+    "on-press",
+    "on-hold",
+  ]}
+/>

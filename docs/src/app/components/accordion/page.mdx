@@ -1,0 +1,45 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Accordion
+
+A disclosure surface with a header. The header label comes from the `text` attribute, children show while `selected` is true, and a header press dispatches `on-toggle` — the model owns the open state, in the usual [TEA loop](/native-ui). The accordion has no intrinsic size: give it an explicit `height` for each state (header-only when closed, header plus body when open).
+
+<ComponentPreview name="accordion" alt="Open and closed accordion items rendered by the engine" caption="an open item and a closed one" />
+
+## Markup
+
+```html
+<column gap="8" width="380">
+  <accordion text="Is it accessible?" selected="{faq_open}" on-toggle="toggle_faq" height="116">
+    <column padding="14">
+      <text wrap="true" foreground="text_muted">Yes. Widgets carry semantic roles and one roving focus set.</text>
+    </column>
+  </accordion>
+  <accordion text="Is it styled?" height="44" on-toggle="toggle_styling" />
+</column>
+```
+
+## Zig builder
+
+```zig
+ui.column(.{ .gap = 8, .width = 380 }, .{
+    ui.el(.accordion, .{
+        .text = "Is it accessible?",
+        .selected = model.faq_open,
+        .on_toggle = .toggle_faq,
+        .height = if (model.faq_open) 116 else 44,
+    }, .{
+        ui.column(.{ .padding = 14 }, .{
+            ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Yes. Widgets carry semantic roles and one roving focus set."),
+        }),
+    }),
+    ui.el(.accordion, .{ .text = "Is it styled?", .height = 44, .on_toggle = .toggle_styling }, .{}),
+})
+```
+
+A one-open-at-a-time group is a model decision: store the open item's id and compute each item's `selected` from an equality, flipping it in `update`.
+
+## Attributes
+
+<AttrTable attrs={["text", "selected", "on-toggle", "height"]} />

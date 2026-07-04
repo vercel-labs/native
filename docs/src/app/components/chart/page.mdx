@@ -1,0 +1,36 @@
+import { ComponentPreview } from "@/components/component-preview";
+
+# Chart
+
+A data chart leaf: line (with optional area fill), bar, and band series over uniform x steps, drawn through the vector path pipeline with token-driven colors. Series are copied into the build arena and downsampled deterministically to the per-series point budget (index-bucket min/max, spikes preserved), so a 10k-point series renders instead of erroring. Display-only and not a hit target — presses fall through like text. Compose axis labels from `text` widgets around the plot; the widget itself draws no text.
+
+Chart is **builder-only**: there is no `chart` markup element, because series are float arrays that markup's scalar bindings cannot carry. Markup apps compose their chart from a wrapping Zig view.
+
+<ComponentPreview name="chart" alt="A chart rendered by the engine" caption="a filled line series and a bar series with gridlines and a baseline" />
+
+## Zig builder
+
+`ui.chart` takes `ChartOptions` and a slice of `canvas.ChartSeries` (kinds `.line`, `.bar`, `.band`; `fill` shades the area under a line, `color` names a color token per series).
+
+```zig
+ui.chart(.{ .width = 420, .height = 160, .grid_lines = 3, .baseline = true }, &.{
+    .{ .kind = .line, .fill = true, .label = "cpu", .values = model.cpu_samples },
+    .{ .kind = .bar, .color = .text_muted, .label = "jobs", .values = model.job_counts },
+})
+```
+
+## Options
+
+`ChartOptions` fields (the builder-side equivalent of an attributes table):
+
+| Option | Description |
+| --- | --- |
+| `width` | Definite plot width (same contract as `ElementOptions.width`); 0 keeps the intrinsic sparkline-sized default (160x48). |
+| `height` | Definite plot height (same contract as `ElementOptions.height`); 0 keeps the intrinsic sparkline-sized default. |
+| `grow` | Flex grow factor; flexes the plot instead of a definite size. |
+| `padding` | Uniform padding (plain number). |
+| `y_min` | Explicit y-domain minimum; null derives it from the data (bar series force 0 into a derived domain — bars always have an honest zero baseline). |
+| `y_max` | Explicit y-domain maximum; null derives it from the data. |
+| `grid_lines` | Horizontal token-hairline gridlines at even divisions (0 = none; gridlines are opt-in, never default). |
+| `baseline` | Hairline at the baseline (zero clamped into the domain). |
+| `stroke_width` | Line stroke width override (default 1.5). |

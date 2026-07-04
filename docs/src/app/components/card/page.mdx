@@ -1,0 +1,73 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Card & Panel
+
+Surface containers: `card` is the bordered, elevated surface and `panel` is the plain one (background, border, radius). Both are stacking containers — children layer on top of each other and `gap` is rejected — so put a single `column` (or `row`) inside for flow; `padding` applies on the surface itself. Binding `on-press` makes the whole surface pressable, the list-of-cards pattern.
+
+<ComponentPreview name="card" alt="A card rendered by the engine" />
+
+## Markup
+
+```html
+<card width="340">
+  <column gap="12" padding="4">
+    <text>Deploy your app</text>
+    <text wrap="true" foreground="text_muted">The runtime packages your views, commands, and assets into one native binary.</text>
+    <row gap="8">
+      <button variant="primary" on-press="deploy">Deploy</button>
+      <button variant="ghost" on-press="cancel">Cancel</button>
+    </row>
+  </column>
+</card>
+```
+
+## Zig builder
+
+```zig
+ui.el(.card, .{ .width = 340 }, .{
+    ui.column(.{ .gap = 12, .padding = 4 }, .{
+        ui.text(.{}, "Deploy your app"),
+        ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "The runtime packages your views, commands, and assets into one native binary."),
+        ui.row(.{ .gap = 8 }, .{
+            ui.button(.{ .variant = .primary, .on_press = .deploy }, "Deploy"),
+            ui.button(.{ .variant = .ghost, .on_press = .cancel }, "Cancel"),
+        }),
+    }),
+})
+```
+
+## Panel
+
+Same stacking contract, plainer chrome — the workhorse surface for sidebars, wells, and status areas. See [/native-ui](/native-ui) for how surfaces pick up color tokens.
+
+<ComponentPreview name="panel" alt="A panel rendered by the engine" />
+
+```html
+<panel width="340" padding="16">
+  <column gap="6">
+    <text>Build output</text>
+    <text wrap="true" foreground="text_muted">Warm cache, 214 modules, 1.8s.</text>
+  </column>
+</panel>
+```
+
+```zig
+ui.panel(.{ .width = 340, .padding = 16 }, .{
+    ui.column(.{ .gap = 6 }, .{
+        ui.text(.{}, "Build output"),
+        ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Warm cache, 214 modules, 1.8s."),
+    }),
+})
+```
+
+## Attributes
+
+<AttrTable
+  attrs={[
+    "text",
+    "padding",
+    "width",
+    "on-press",
+  ]}
+/>

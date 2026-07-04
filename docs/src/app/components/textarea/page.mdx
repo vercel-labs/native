@@ -1,0 +1,38 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Textarea
+
+Multi-line text entry. Like [input](/components/input), `text` and `placeholder` bind from the model and `on-input` names a Msg variant that receives every edit as a `canvas.TextInputEvent`; enter inserts a newline instead of submitting. Give it a definite `width` and `height` (or a `grow`) to size the editing box.
+
+<ComponentPreview name="textarea" alt="A textarea rendered by the engine" />
+
+## Markup
+
+```html
+<textarea width="320" height="96" placeholder="Write a release note" text="{draft}" on-input="draft_edited" />
+```
+
+## Zig builder
+
+```zig
+ui.el(.textarea, .{
+    .width = 320,
+    .height = 96,
+    .placeholder = "Write a release note",
+    .text = model.draft,
+    .on_input = Ui.inputMsg(.draft_edited),
+}, .{})
+```
+
+## Attributes
+
+<AttrTable
+  attrs={[
+    "text",
+    "placeholder",
+    "disabled",
+    "autofocus",
+    "on-input",
+  ]}
+/>

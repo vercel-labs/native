@@ -1,0 +1,74 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Dropdown Menu
+
+A vertical menu surface whose children are `menu-item` elements. Setting `anchor="below"` (or `above`) floats the surface against its parent's frame instead of the flow: it paints in a late z-pass above the whole tree, is clipped only by the window (never by a scroll pane), and auto-flips to the other side when it does not fit. The sanctioned shape is a `stack` that wraps the trigger and, under an `if`, the anchored dropdown as its sibling — the model owns the open flag, and `on-dismiss` closes it on Escape or a click outside.
+
+<ComponentPreview name="dropdown-menu" alt="An open dropdown menu anchored below its trigger button" caption="an open menu anchored below its trigger" />
+
+## Markup
+
+```html
+<stack>
+  <button variant="outline" icon="chevron-down" on-press="toggle_actions">Actions</button>
+  <if test="{actions_open}">
+    <dropdown-menu anchor="below" min-width="200" on-dismiss="close_actions">
+      <menu-item text="Duplicate" icon="copy" on-press="duplicate_note" />
+      <menu-item text="Rename" icon="edit" on-press="rename_note" />
+      <menu-item text="Download" icon="download" on-press="download_note" />
+      <separator />
+      <menu-item text="Delete" icon="trash" on-press="delete_note" />
+    </dropdown-menu>
+  </if>
+</stack>
+```
+
+Handle the item's Msg in `update` and clear the open flag there — a menu press does not dismiss implicitly. [Select and combobox](/components/select) build their option lists from exactly this pattern (with `anchor-alignment="stretch"` for the select-menu width).
+
+## Zig builder
+
+```zig
+ui.stack(.{}, .{
+    ui.button(.{ .variant = .outline, .icon = "chevron-down", .on_press = .toggle_actions }, "Actions"),
+    if (model.actions_open) ui.el(.dropdown_menu, .{
+        .anchor = .below,
+        .min_width = 200,
+        .on_dismiss = .close_actions,
+    }, .{
+        ui.el(.menu_item, .{ .text = "Duplicate", .icon = "copy", .on_press = .duplicate_note }, .{}),
+        ui.el(.menu_item, .{ .text = "Rename", .icon = "edit", .on_press = .rename_note }, .{}),
+        ui.el(.menu_item, .{ .text = "Download", .icon = "download", .on_press = .download_note }, .{}),
+        ui.separator(.{}),
+        ui.el(.menu_item, .{ .text = "Delete", .icon = "trash", .on_press = .delete_note }, .{}),
+    }) else ui.stack(.{}, .{}),
+})
+```
+
+## Static menu surface
+
+The builder also has `menu_surface`, an in-flow (non-floating) menu panel with the same `menu_item` children — useful for command palettes and always-visible menus. It is a documented markup exclusion: write it as a Zig view.
+
+<ComponentPreview name="menu" alt="A static menu surface with menu items rendered by the engine" caption="a static menu_surface with icons, a disabled item, and a separator" />
+
+```zig
+ui.el(.menu_surface, .{ .min_width = 220 }, .{
+    ui.el(.menu_item, .{ .text = "Cut", .icon = "edit", .on_press = .cut_selection }, .{}),
+    ui.el(.menu_item, .{ .text = "Copy", .icon = "copy", .on_press = .copy_selection }, .{}),
+    ui.el(.menu_item, .{ .text = "Paste", .icon = "file-text", .disabled = true }, .{}),
+    ui.separator(.{}),
+    ui.el(.menu_item, .{ .text = "Select All", .on_press = .select_all }, .{}),
+})
+```
+
+Native right-click context menus (macOS `NSMenu`) are a separate, builder-only channel: the `context_menu` option on any element presents OS menu items whose selection dispatches a Msg — see [Menus](/menus).
+
+## Attributes
+
+Dropdown-menu:
+
+<AttrTable element="dropdown-menu" attrs={["anchor", "anchor-alignment", "anchor-offset", "on-dismiss", "min-width"]} />
+
+Menu-item:
+
+<AttrTable attrs={["text", "icon", "disabled", "on-press"]} />

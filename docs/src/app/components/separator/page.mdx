@@ -1,0 +1,48 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Separator & Spacer
+
+Two layout leaves. The separator draws a line: a horizontal rule in a column, a thin vertical divider in a row (give the vertical form an explicit `width` and `height`). The spacer is flexible empty space between siblings — give it a `grow` and it soaks up the leftover main-axis room, which is how toolbars push actions to the far edge.
+
+<ComponentPreview name="separator" alt="Separators rendered by the engine" caption="a horizontal rule in a column and thin vertical dividers in a row" />
+
+## Markup
+
+```html
+<column gap="12" width="300">
+  <text>Native SDK</text>
+  <text foreground="text_muted">A component catalog rendered by the engine.</text>
+  <separator></separator>
+  <row gap="12" cross="center" height="20">
+    <text>Docs</text>
+    <separator width="1" height="16"></separator>
+    <text>Source</text>
+    <spacer grow="1"></spacer>
+    <button size="sm" variant="ghost" on-press="open_changelog">Changelog</button>
+  </row>
+</column>
+```
+
+## Zig builder
+
+`ui.spacer(1)` is the builder shorthand for a grow-1 spacer.
+
+```zig
+ui.column(.{ .gap = 12, .width = 300 }, .{
+    ui.text(.{}, "Native SDK"),
+    ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "A component catalog rendered by the engine."),
+    ui.separator(.{}),
+    ui.row(.{ .gap = 12, .cross = .center, .height = 20 }, .{
+        ui.text(.{}, "Docs"),
+        ui.separator(.{ .width = 1, .height = 16 }),
+        ui.text(.{}, "Source"),
+        ui.spacer(1),
+        ui.button(.{ .size = .sm, .variant = .ghost, .on_press = .open_changelog }, "Changelog"),
+    }),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["width", "height", "grow"]} />

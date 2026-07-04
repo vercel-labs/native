@@ -1,0 +1,56 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Skeleton & Spinner
+
+Loading states. The skeleton is a placeholder block — size it with `width` and `height` to sketch the shape of the content it stands in for, and swap it for the real widgets (behind an `if`) when the data lands. The spinner is an indeterminate progress leaf for work with no measurable fraction; when there is one, use [progress](/components/progress) instead.
+
+<ComponentPreview name="skeleton" alt="Skeleton placeholders rendered by the engine" caption="an avatar-and-two-lines skeleton, the shape of the loaded row" />
+
+## Markup
+
+```html
+<row gap="12" width="320">
+  <skeleton width="44" height="44"></skeleton>
+  <column gap="8" grow="1" main="center">
+    <skeleton height="14"></skeleton>
+    <skeleton height="14" width="180"></skeleton>
+  </column>
+</row>
+```
+
+## Zig builder
+
+Skeleton and spinner have no sugar method; use `ui.el` with the element kind.
+
+```zig
+ui.row(.{ .gap = 12, .width = 320 }, .{
+    ui.el(.skeleton, .{ .width = 44, .height = 44 }, .{}),
+    ui.column(.{ .gap = 8, .grow = 1, .main = .center }, .{
+        ui.el(.skeleton, .{ .height = 14 }, .{}),
+        ui.el(.skeleton, .{ .height = 14, .width = 180 }, .{}),
+    }),
+})
+```
+
+## Spinner
+
+<ComponentPreview name="spinner" alt="An indeterminate spinner rendered by the engine" />
+
+```html
+<row gap="12" cross="center">
+  <spinner></spinner>
+  <text foreground="text_muted">Loading notes…</text>
+</row>
+```
+
+```zig
+ui.row(.{ .gap = 12, .cross = .center }, .{
+    ui.el(.spinner, .{}, .{}),
+    ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Loading notes…"),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["width", "height"]} />

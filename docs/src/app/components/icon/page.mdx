@@ -1,0 +1,45 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+import { IconGallery } from "@/components/icon-gallery";
+
+# Icon
+
+A built-in vector icon leaf: `name` selects one of the curated Lucide-style icons, tint comes from the `foreground` color token, and size from `width`/`height` (square by default). `name` is a literal, not a binding — the markup compiler and the Zig builder both validate it at comptime against the registry, so icon references never rot. The same names power the inline `icon` attribute on [button](/components/button), toggle-button, list-item, menu-item, and badge, where the icon draws as part of the control's single hit target. Apps can register their own icons at boot with `canvas.icons.registerAppIcons` (comptime-parse the SVG with `canvas.svg_icon.parseComptime`).
+
+<ComponentPreview name="icon" alt="Built-in vector icons rendered by the engine" caption="a row of registry icons at the default size and tint" />
+
+## Markup
+
+```html
+<row gap="20" cross="center">
+  <icon name="play"></icon>
+  <icon name="search" foreground="text_muted"></icon>
+  <icon name="git-branch" width="28" height="28"></icon>
+  <icon name="check-circle" foreground="success"></icon>
+</row>
+```
+
+## Zig builder
+
+`ui.icon` takes the name as a comptime argument — an unknown name is a compile error pointing at `canvas.icons.known_icon_names`.
+
+```zig
+ui.row(.{ .gap = 20, .cross = .center }, .{
+    ui.icon(.{}, "play"),
+    ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "search"),
+    ui.icon(.{ .width = 28, .height = 28 }, "git-branch"),
+    ui.icon(.{ .style_tokens = .{ .foreground = .success } }, "check-circle"),
+})
+```
+
+## Registry
+
+The full built-in set (`canvas.icons.known_icon_names`), rendered by the engine.
+
+<IconGallery />
+
+## Attributes
+
+`name` is the icon element's own required attribute: a literal registry name, comptime-validated (not part of the shared attribute vocabulary). The rest are the shared sizing and tint attributes:
+
+<AttrTable attrs={["width", "height", "foreground", "label"]} />

@@ -1,0 +1,57 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Table
+
+A vertical table container: children are `table-row` elements, and each row's children are `table-cell` text leaves. Cells only live in rows and rows only live in tables — the validator enforces the nesting. Column sizing is flex: give each cell a `grow` factor and the columns line up across rows. `selected` highlights a row, and cells dispatch `on-press`.
+
+<ComponentPreview name="table" alt="An invoice table with a selected row rendered by the engine" caption="a header row, data rows, and one selected row" />
+
+## Markup
+
+```html
+<table width="420">
+  <table-row>
+    <table-cell grow="1">Invoice</table-cell>
+    <table-cell grow="1">Status</table-cell>
+    <table-cell grow="1">Amount</table-cell>
+  </table-row>
+  <for each="invoices" as="invoice" key="id">
+    <table-row selected="{invoice.id == selected_invoice}">
+      <table-cell grow="1" on-press="open_invoice:{invoice.id}">{invoice.number}</table-cell>
+      <table-cell grow="1">{invoice.status}</table-cell>
+      <table-cell grow="1">{invoice.amount}</table-cell>
+    </table-row>
+  </for>
+</table>
+```
+
+## Zig builder
+
+The builder names differ from the markup: rows are `.data_row` and cells are `.data_cell` (the underlying widget kinds).
+
+```zig
+ui.el(.table, .{ .width = 420 }, .{
+    ui.el(.data_row, .{}, .{
+        ui.el(.data_cell, .{ .text = "Invoice", .grow = 1 }, .{}),
+        ui.el(.data_cell, .{ .text = "Status", .grow = 1 }, .{}),
+        ui.el(.data_cell, .{ .text = "Amount", .grow = 1 }, .{}),
+    }),
+    ui.el(.data_row, .{}, .{
+        ui.el(.data_cell, .{ .text = "INV-001", .grow = 1, .on_press = .{ .open_invoice = 1 } }, .{}),
+        ui.el(.data_cell, .{ .text = "Paid", .grow = 1 }, .{}),
+        ui.el(.data_cell, .{ .text = "$250.00", .grow = 1 }, .{}),
+    }),
+    ui.el(.data_row, .{ .selected = true }, .{
+        ui.el(.data_cell, .{ .text = "INV-002", .grow = 1, .on_press = .{ .open_invoice = 2 } }, .{}),
+        ui.el(.data_cell, .{ .text = "Pending", .grow = 1 }, .{}),
+        ui.el(.data_cell, .{ .text = "$150.00", .grow = 1 }, .{}),
+    }),
+})
+```
+
+For icon rows and single-column data prefer [list](/components/list); tables earn their keep once columns need to align.
+
+## Attributes
+
+<AttrTable attrs={["grow", "selected", "on-press"]} />
