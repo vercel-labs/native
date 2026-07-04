@@ -65,7 +65,7 @@ const MobileHostApp = struct {
     last_command_name: [max_mobile_command_name_bytes + 1]u8 = [_]u8{0} ** (max_mobile_command_name_bytes + 1),
 
     fn create() !*MobileHostApp {
-        const allocator = std.heap.page_allocator;
+        const allocator = std.heap.c_allocator;
         const self = try allocator.create(MobileHostApp);
         self.null_platform = platform.NullPlatform.init(.{});
         self.last_error = null;
@@ -149,7 +149,7 @@ pub fn zero_native_app_create() ?*anyopaque {
 
 pub fn zero_native_app_destroy(app: ?*anyopaque) void {
     const self = mobileApp(app) orelse return;
-    std.heap.page_allocator.destroy(self);
+    std.heap.c_allocator.destroy(self);
 }
 
 pub fn zero_native_app_start(app: ?*anyopaque) void {

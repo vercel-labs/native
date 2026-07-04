@@ -118,19 +118,6 @@ pub fn printDiagnostic(stats: PackageStats) void {
     }
 }
 
-pub fn createLocalPackage(io: std.Io, output_path: []const u8) !PackageStats {
-    const metadata: manifest_tool.Metadata = .{
-        .id = "dev.zero_native.local",
-        .name = "zero-native-local",
-        .version = "0.1.0",
-    };
-    return createMacosApp(std.heap.page_allocator, io, .{
-        .metadata = metadata,
-        .output_path = output_path,
-        .binary_path = null,
-    });
-}
-
 pub fn createMacosApp(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions) !PackageStats {
     var cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(io, options.output_path);

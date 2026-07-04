@@ -7,9 +7,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     if (args.len == 0) return usage();
     const command = args[0];
     if (std.mem.eql(u8, command, "list")) {
-        try printFile(io, "windows.txt");
+        try printFile(allocator, io, "windows.txt");
     } else if (std.mem.eql(u8, command, "snapshot")) {
-        try printFile(io, "snapshot.txt");
+        try printFile(allocator, io, "snapshot.txt");
     } else if (std.mem.eql(u8, command, "screenshot")) {
         std.debug.print("screenshot capture is not available for this backend\n", .{});
         return error.UnsupportedCommand;
@@ -91,10 +91,10 @@ fn sendCommand(allocator: std.mem.Allocator, io: std.Io, action: []const u8, val
     std.debug.print("queued {s}\n", .{action});
 }
 
-fn printFile(io: std.Io, name: []const u8) !void {
+fn printFile(allocator: std.mem.Allocator, io: std.Io, name: []const u8) !void {
     var file_path: [256]u8 = undefined;
-    const bytes = readFile(std.heap.page_allocator, io, path(&file_path, name)) catch return fail("no app connected");
-    defer std.heap.page_allocator.free(bytes);
+    const bytes = readFile(allocator, io, path(&file_path, name)) catch return fail("no app connected");
+    defer allocator.free(bytes);
     std.debug.print("{s}", .{bytes});
 }
 
