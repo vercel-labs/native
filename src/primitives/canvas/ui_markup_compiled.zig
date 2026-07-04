@@ -947,6 +947,13 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
                     };
                 },
                 .bool => @field(options, zig_field) = evalExpr(node, entries, raw, ui, model, scope).truthy(),
+                .int => {
+                    comptime requireVariant(variant, &.{.integer}, node, "expected a whole number");
+                    @field(options, zig_field) = switch (evalExpr(node, entries, raw, ui, model, scope)) {
+                        .integer => |int| if (int < 0) runtimeFail(FieldType, ui) else @intCast(int),
+                        else => runtimeFail(FieldType, ui),
+                    };
+                },
                 .@"enum" => {
                     comptime requireVariant(variant, &.{.string}, node, "expected an option name");
                     const expression = comptime markup.parseAttrExpression(raw).?;

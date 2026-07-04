@@ -22,6 +22,7 @@ const GlyphAtlasEntry = text_model.GlyphAtlasEntry;
 const GlyphAtlasCacheAction = text_model.GlyphAtlasCacheAction;
 const GlyphAtlasKey = text_model.GlyphAtlasKey;
 const TextLayoutOptions = text_model.TextLayoutOptions;
+const TextLine = text_model.TextLine;
 const TextLayoutPlan = text_model.TextLayoutPlan;
 const TextLayoutCacheAction = text_model.TextLayoutCacheAction;
 const TextLayoutKey = text_model.TextLayoutKey;
@@ -468,10 +469,52 @@ fn writeCanvasGpuTextJson(text: ?CanvasGpuText, writer: anytype) !void {
     try writer.writeAll(",\"layout\":");
     if (value.text_layout) |options| {
         try writeTextLayoutOptionsJson(options, writer);
+        try writer.writeAll(",\"lines\":");
+        try writeCanvasGpuTextLinesJson(value, options, writer);
     } else {
         try writer.writeAll("null");
     }
     try writer.writeByte('}');
+}
+
+/// Line budget for packet text lines; matches the reference renderer's
+/// `max_reference_text_layout_lines` so both paths degrade at the same
+/// depth.
+const max_packet_text_layout_lines: usize = 64;
+
+/// The engine's measured line breaks for a packet text command. The packet
+/// host draws these lines verbatim instead of re-breaking the text with its
+/// own line breaker, so drawn line breaks can never disagree with the
+/// layout that measured the box — host-side re-wrapping broke tight
+/// intrinsic single-line boxes mid-word (friction #80). Uses the same
+/// `layoutTextRun` the reference renderer and selection geometry draw from,
+/// including the injected measure provider carried by the layout options.
+/// Serializes `null` when the run exceeds the line budget, which keeps the
+/// host's legacy wrapping fallback.
+fn writeCanvasGpuTextLinesJson(value: CanvasGpuText, options: TextLayoutOptions, writer: anytype) !void {
+    var lines: [max_packet_text_layout_lines]TextLine = undefined;
+    const layout = text_model.layoutTextRun(.{
+        .font_id = value.font_id,
+        .size = value.size,
+        .origin = value.origin,
+        .color = value.color,
+        .text = value.text,
+        .glyphs = value.glyphs,
+        .text_layout = options,
+    }, options, &lines) catch {
+        try writer.writeAll("null");
+        return;
+    };
+    try writer.writeByte('[');
+    for (layout.lines, 0..) |line, index| {
+        if (index > 0) try writer.writeByte(',');
+        const start = @min(line.text_start, value.text.len);
+        const end = @min(value.text.len, start + line.text_len);
+        try writer.print("{{\"x\":{d},\"baseline\":{d},\"text\":", .{ line.bounds.x, line.baseline });
+        try json.writeString(writer, value.text[start..end]);
+        try writer.writeByte('}');
+    }
+    try writer.writeByte(']');
 }
 
 fn writeCanvasGpuEffectJson(effect: CanvasGpuEffect, writer: anytype) !void {

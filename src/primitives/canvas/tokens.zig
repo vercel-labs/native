@@ -72,6 +72,15 @@ pub const ColorTokens = struct {
     success_text: Color = Color.rgb8(250, 250, 250),
     warning: Color = Color.rgb8(217, 119, 6),
     warning_text: Color = Color.rgb8(250, 250, 250),
+    /// The fourth semantic hue: violet, for identity states that are not
+    /// ok/warn/fail — a merged PR badge, a "new" chip, an informational
+    /// callout. Named `info` because that is the slot every component
+    /// vocabulary ships (Bootstrap/MUI/Ant all have one; GitHub's Primer
+    /// calls the same role `done`); colored violet rather than blue
+    /// because the violet identity hue is the one GitHub-shaped apps
+    /// actually need, and nothing else in the palette competes with it.
+    info: Color = Color.rgb8(124, 58, 237),
+    info_text: Color = Color.rgb8(250, 250, 250),
     focus_ring: Color = Color.rgb8(24, 24, 27),
     shadow: Color = Color.rgba8(0, 0, 0, 26),
     disabled: Color = Color.rgb8(244, 244, 245),
@@ -110,6 +119,8 @@ pub const ColorTokens = struct {
             .success_text = Color.rgb8(9, 9, 11),
             .warning = Color.rgb8(245, 158, 11),
             .warning_text = Color.rgb8(9, 9, 11),
+            .info = Color.rgb8(167, 139, 250),
+            .info_text = Color.rgb8(9, 9, 11),
             .focus_ring = Color.rgb8(212, 212, 216),
             .shadow = Color.rgba8(0, 0, 0, 150),
             .disabled = Color.rgb8(39, 39, 42),
@@ -133,6 +144,8 @@ pub const ColorTokens = struct {
             .success_text = Color.rgb8(255, 255, 255),
             .warning = Color.rgb8(120, 53, 15),
             .warning_text = Color.rgb8(255, 255, 255),
+            .info = Color.rgb8(76, 29, 149),
+            .info_text = Color.rgb8(255, 255, 255),
             .focus_ring = Color.rgb8(0, 84, 197),
             .shadow = Color.rgba8(0, 0, 0, 96),
             .disabled = Color.rgb8(156, 163, 175),
@@ -156,6 +169,8 @@ pub const ColorTokens = struct {
             .success_text = Color.rgb8(0, 0, 0),
             .warning = Color.rgb8(252, 211, 77),
             .warning_text = Color.rgb8(0, 0, 0),
+            .info = Color.rgb8(196, 181, 253),
+            .info_text = Color.rgb8(0, 0, 0),
             .focus_ring = Color.rgb8(147, 197, 253),
             .shadow = Color.rgba8(0, 0, 0, 180),
             .disabled = Color.rgb8(82, 82, 82),
@@ -580,6 +595,8 @@ pub const ColorTokenOverrides = struct {
     success_text: ?Color = null,
     warning: ?Color = null,
     warning_text: ?Color = null,
+    info: ?Color = null,
+    info_text: ?Color = null,
     focus_ring: ?Color = null,
     shadow: ?Color = null,
     disabled: ?Color = null,

@@ -67,8 +67,23 @@ pub const max_canvas_widget_source_text_entries_per_view: usize = 256;
 // bytes); per-paragraph capacity is `canvas.max_text_spans_per_paragraph`.
 pub const max_canvas_widget_spans_per_view: usize = 1024;
 // Declared native context-menu entries retained across all widgets of a
-// view (labels live in the widget text bytes).
-pub const max_canvas_widget_context_menu_items_per_view: usize = 128;
+// view (labels live in the widget text bytes). Raised for friction #83
+// (confirmed by #89): the budget sums across every widget of the view,
+// and a real desktop view hit 128 fast — a 24-row sidebar with 4 items +
+// separator per row, a detail-pane menu, and per-step ledger menus
+// measured 124/128 before the app was finished. Quadrupled (128 -> 512)
+// so declared menus scale with the 1024-node budget instead of becoming
+// the next design-effort cliff. Memory cost is one 24-byte entry (a
+// 16-byte label slice + enabled/separator flags) per slot: 24 B x 512 =
+// 12 KiB per view (was 3 KiB at 128), x 32 view slots = 384 KiB total
+// (was 96 KiB) of fixed-capacity address space; label bytes come out of
+// the existing widget-text budget, and pages are only touched as views
+// declare menus. Distinct from the platform's `max_context_menu_items`
+// (32), which caps ONE presented menu (a single NSMenu popped at the
+// pointer, truncated at presentation) — that stays small deliberately
+// because a menu nobody can scan is a design bug, while this budget
+// bounds the retained declarations across all widgets of the view.
+pub const max_canvas_widget_context_menu_items_per_view: usize = 512;
 pub const max_canvas_widget_invalidations_per_view: usize = max_canvas_widget_nodes_per_view * 2 + 1;
 // Scroll containers whose offset changed since the last app dispatch:
 // entries are node ids, deduped, and the dispatched event reads the

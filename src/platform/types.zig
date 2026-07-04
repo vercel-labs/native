@@ -651,6 +651,10 @@ pub const ViewInfo = struct {
     widget_revision: u64 = 0,
     widget_node_count: usize = 0,
     widget_semantics_count: usize = 0,
+    /// Declared context-menu entries retained across all widgets of the
+    /// view (the runtime's per-view budget headroom rides in automation
+    /// snapshots as `context_menu_items=declared/budget`).
+    widget_context_menu_item_count: usize = 0,
     cursor: Cursor = .arrow,
     focused: bool = false,
     open: bool = true,

@@ -32,6 +32,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                     .source = self.loaded_source,
                     .widget_node_budget = canvas_limits.max_canvas_widget_nodes_per_view,
                     .widget_semantics_budget = canvas_limits.max_canvas_widget_semantics_per_view,
+                    .widget_context_menu_item_budget = canvas_limits.max_canvas_widget_context_menu_items_per_view,
                 };
             }
             var view_count: usize = 0;
@@ -58,6 +59,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                 .source = self.loaded_source,
                 .widget_node_budget = canvas_limits.max_canvas_widget_nodes_per_view,
                 .widget_semantics_budget = canvas_limits.max_canvas_widget_semantics_per_view,
+                .widget_context_menu_item_budget = canvas_limits.max_canvas_widget_context_menu_items_per_view,
             };
         }
 

@@ -10,10 +10,12 @@ const std = support.std;
 const geometry = support.geometry;
 const canvas = support.canvas;
 const platform = support.platform;
+const automation = support.automation;
 const App = support.App;
 const Runtime = support.Runtime;
 const Event = support.Event;
 const TestHarness = support.TestHarness;
+const canvas_limits = @import("canvas_limits.zig");
 
 const MenuTestApp = struct {
     pointer_count: u32 = 0,
@@ -256,4 +258,69 @@ test "right click with no menu target presents nothing" {
     // A stray action event with no pending request is a no-op.
     try harness.runtime.dispatchPlatformEvent(app, menuAction(2, 1));
     try std.testing.expectEqual(@as(u32, 0), app_state.menu_count);
+}
+
+test "automation snapshots report per-view context-menu item headroom" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    const items = [_]canvas.WidgetContextMenuItem{
+        .{ .label = "Complete" },
+        .{ .separator = true },
+        .{ .label = "Delete" },
+    };
+    const row = canvas.Widget{
+        .id = 2,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(10, 10, 200, 40),
+        .text = "Task",
+        .context_menu = &items,
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{row} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    const info = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // Separators count against the budget: they occupy retained slots.
+    try std.testing.expectEqual(@as(usize, 3), info.widget_context_menu_item_count);
+
+    // The gpu_surface view line reports declared/budget headroom (#83) so
+    // authors watch the cliff without overflowing.
+    var buffer: [16384]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try automation.snapshot.writeText(harness.runtime.automationSnapshot("Menus"), &writer);
+    const expected = std.fmt.comptimePrint("context_menu_items=3/{d}", .{canvas_limits.max_canvas_widget_context_menu_items_per_view});
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), expected) != null);
+}
+
+test "context-menu declarations sum across widgets to the budget and overflow loudly one past it" {
+    const budget = canvas_limits.max_canvas_widget_context_menu_items_per_view;
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    const bulk = [_]canvas.WidgetContextMenuItem{.{ .label = "Op" }} ** (budget - 1);
+    const pair = [_]canvas.WidgetContextMenuItem{ .{ .label = "A" }, .{ .label = "B" } };
+    var nodes = [_]canvas.WidgetLayoutNode{
+        .{
+            .widget = .{ .id = 2, .kind = .list_item, .text = "Bulk", .context_menu = &bulk },
+            .frame = geometry.RectF.init(0, 0, 200, 40),
+            .depth = 0,
+        },
+        .{
+            .widget = .{ .id = 3, .kind = .list_item, .text = "Tail", .context_menu = pair[0..1] },
+            .frame = geometry.RectF.init(0, 40, 200, 40),
+            .depth = 0,
+        },
+    };
+
+    // Exactly at the budget: the layout retains every declared item.
+    const info = try harness.runtime.setCanvasWidgetLayout(1, "canvas", .{ .nodes = &nodes });
+    try std.testing.expectEqual(budget, info.widget_context_menu_item_count);
+
+    // One extra declared item anywhere in the view overflows loudly.
+    nodes[1].widget.context_menu = &pair;
+    try std.testing.expectError(error.WidgetContextMenuLimitReached, harness.runtime.setCanvasWidgetLayout(1, "canvas", .{ .nodes = &nodes }));
 }

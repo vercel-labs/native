@@ -167,6 +167,20 @@ fn automationDirDescription(io: std.Io, buffer: []u8) []const u8 {
     return std.fmt.bufPrint(buffer, "{s}/{s}", .{ cwd_buffer[0..cwd_len], automation_dir }) catch automation_dir;
 }
 
+/// Payloads a script exists to parse — snapshot/window-list text, wait
+/// output, bridge responses, screenshot artifact paths — go to STDOUT so
+/// `automate snapshot > file` and `| grep` work; diagnostics and progress
+/// stay on stderr (std.debug.print) throughout this file.
+fn emitPayload(io: std.Io, chunks: []const []const u8) error{AutomationCommandFailed}!void {
+    var buffer: [4096]u8 = undefined;
+    // Streaming, not positional: the default `writer` pwrite()s from offset
+    // 0, so consecutive invocations sharing one redirected stdout (e.g. a
+    // smoke script's `{ ...; } > log`) would clobber each other's payloads.
+    var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
+    for (chunks) |chunk| writer.interface.writeAll(chunk) catch return error.AutomationCommandFailed;
+    writer.interface.flush() catch return error.AutomationCommandFailed;
+}
+
 fn printFile(io: std.Io, name: []const u8) !void {
     var file_path: [256]u8 = undefined;
     const bytes = readFile(std.heap.page_allocator, io, path(&file_path, name)) catch {
@@ -175,7 +189,7 @@ fn printFile(io: std.Io, name: []const u8) !void {
         return error.AutomationCommandFailed;
     };
     defer std.heap.page_allocator.free(bytes);
-    std.debug.print("{s}", .{bytes});
+    try emitPayload(io, &.{bytes});
 }
 
 fn waitForFile(allocator: std.mem.Allocator, io: std.Io, name: []const u8, marker: []const u8) !void {
@@ -190,9 +204,8 @@ fn waitForFile(allocator: std.mem.Allocator, io: std.Io, name: []const u8, marke
             continue;
         };
         if (marker.len == 0 or std.mem.indexOf(u8, bytes, marker) != null) {
-            std.debug.print("{s}", .{bytes});
-            allocator.free(bytes);
-            return;
+            defer allocator.free(bytes);
+            return emitPayload(io, &.{bytes});
         }
         allocator.free(bytes);
         try std.Io.sleep(io, std.Io.Duration.fromNanoseconds(100 * std.time.ns_per_ms), .awake);
@@ -211,8 +224,7 @@ fn waitForScreenshot(io: std.Io, name: []const u8) !void {
         if (std.Io.Dir.cwd().openFile(io, screenshot_path, .{})) |opened| {
             var file = opened;
             file.close(io);
-            std.debug.print("{s}\n", .{screenshot_path});
-            return;
+            return emitPayload(io, &.{ screenshot_path, "\n" });
         } else |_| {}
         try std.Io.sleep(io, std.Io.Duration.fromNanoseconds(100 * std.time.ns_per_ms), .awake);
     }

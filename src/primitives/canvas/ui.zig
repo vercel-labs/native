@@ -200,6 +200,14 @@ pub fn Ui(comptime Msg: type) type {
             /// reserving its real wrapped height in columns. Off keeps
             /// the classic single-line text path byte-identical.
             wrap: bool = false,
+            /// Horizontal alignment of the widget's text content within
+            /// its box: `.text` leaves (plain and wrapped/paragraph),
+            /// status bars, and surface titles consume it. Controls that
+            /// own their label placement (buttons, badges) ignore it.
+            text_alignment: canvas.TextAlign = .start,
+            /// Fixed column count for `grid` containers. 0 (the default)
+            /// keeps the derived near-square column count.
+            columns: usize = 0,
             virtualized: bool = false,
             virtual_item_extent: f32 = 0,
             style: canvas.WidgetStyle = .{},
@@ -1141,6 +1149,7 @@ pub fn Ui(comptime Msg: type) type {
                 .transform = options.transform,
                 .text = options.text,
                 .placeholder = options.placeholder,
+                .text_alignment = options.text_alignment,
                 .image_id = options.image,
                 .value = options.value,
                 .variant = options.variant,
@@ -1160,6 +1169,7 @@ pub fn Ui(comptime Msg: type) type {
                     .grow = options.grow,
                     .main_alignment = options.main,
                     .cross_alignment = options.cross,
+                    .columns = options.columns,
                     .virtualized = options.virtualized,
                     .virtual_item_extent = options.virtual_item_extent,
                     .min_size = .{ .width = options.width, .height = options.height },

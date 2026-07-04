@@ -1699,3 +1699,113 @@ test "avatar image misuse fails the build with the teaching messages" {
         try testing.expect(view.diagnostic.line > 0);
     }
 }
+
+// -------------------------------- text alignment and grid columns (#84)
+
+pub const AlignMsg = union(enum) { refresh };
+
+pub const AlignModel = struct {
+    duration: []const u8 = "4:33",
+    column_count: usize = 3,
+};
+
+pub const align_markup_source =
+    \\<column gap="8" width="360">
+    \\  <text text-alignment="center" foreground="info">{duration}</text>
+    \\  <grid columns="4" gap="6">
+    \\    <text>a</text>
+    \\    <text>b</text>
+    \\  </grid>
+    \\  <grid columns="{column_count}">
+    \\    <text>c</text>
+    \\  </grid>
+    \\</column>
+;
+
+pub const AlignUi = canvas.Ui(AlignMsg);
+
+pub fn handAlignView(ui: *AlignUi, model: *const AlignModel) AlignUi.Node {
+    return ui.column(.{ .gap = 8, .width = 360 }, .{
+        ui.text(.{ .text_alignment = .center, .style_tokens = .{ .foreground = .info } }, model.duration),
+        ui.el(.grid, .{ .columns = 4, .gap = 6 }, .{
+            ui.text(.{}, "a"),
+            ui.text(.{}, "b"),
+        }),
+        ui.el(.grid, .{ .columns = model.column_count }, .{
+            ui.text(.{}, "c"),
+        }),
+    });
+}
+
+test "text-alignment and grid columns build the hand-written tree" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = AlignModel{};
+    const AlignMarkup = markup_view.MarkupView(AlignModel, AlignMsg);
+
+    var view = try AlignMarkup.init(arena, align_markup_source);
+    var markup_ui = AlignUi.init(arena);
+    const markup_tree = try markup_ui.finalize(try view.build(&markup_ui, &model));
+
+    var hand_ui = AlignUi.init(arena);
+    const hand_tree = try hand_ui.finalize(handAlignView(&hand_ui, &model));
+
+    var markup_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer markup_ids.deinit(testing.allocator);
+    var hand_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer hand_ids.deinit(testing.allocator);
+    try collectIds(markup_tree.root, &markup_ids, testing.allocator);
+    try collectIds(hand_tree.root, &hand_ids, testing.allocator);
+    try testing.expectEqualSlices(canvas.ObjectId, hand_ids.items, markup_ids.items);
+
+    // text-alignment lands on the widget; the default stays .start.
+    const aligned = markup_tree.root.children[0];
+    try testing.expectEqual(canvas.TextAlign.center, aligned.text_alignment);
+    // The info token resolves like any other ColorTokens field (#85).
+    try testing.expectEqualDeep((canvas.DesignTokens{}).colors.info, aligned.style.foreground.?);
+
+    // columns lands in the grid layout, from a literal and from a binding.
+    try testing.expectEqual(@as(usize, 4), markup_tree.root.children[1].layout.columns);
+    try testing.expectEqual(@as(usize, 3), markup_tree.root.children[2].layout.columns);
+    // The inner texts keep the .start default.
+    try testing.expectEqual(canvas.TextAlign.start, markup_tree.root.children[1].children[0].text_alignment);
+
+    // The source validates cleanly.
+    var parser = canvas.ui_markup.Parser.init(arena, align_markup_source);
+    try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(try parser.parse()));
+}
+
+test "columns off grid and misshapen alignment values fail with teaching messages" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The validator scopes columns to grid (the only layout that reads it).
+    var parser = canvas.ui_markup.Parser.init(arena, "<column columns=\"3\">\n  <text>x</text>\n</column>");
+    const info = canvas.ui_markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(canvas.ui_markup.grid_columns_element_message, info.message);
+    try testing.expect(info.line > 0);
+
+    // The interpreter rejects bad values with its generic option messages.
+    const model = AlignModel{};
+    const AlignMarkup = markup_view.MarkupView(AlignModel, AlignMsg);
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        .{
+            .source = "<column>\n  <text text-alignment=\"middle\">x</text>\n</column>",
+            .message = "unknown option value",
+        },
+        .{
+            .source = "<column>\n  <grid columns=\"{duration}\"><text>x</text></grid>\n</column>",
+            .message = "expected a whole number",
+        },
+    };
+    for (cases) |case| {
+        var view = try AlignMarkup.init(arena, case.source);
+        var ui = AlignUi.init(arena);
+        try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
+        try testing.expectEqualStrings(case.message, view.diagnostic.message);
+        try testing.expect(view.diagnostic.line > 0);
+    }
+}

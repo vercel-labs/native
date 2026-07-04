@@ -1348,6 +1348,27 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
         return YES;
     }
 
+    // Engine-measured line breaks: the packet carries the exact lines the
+    // layout already broke the text into (the same breaks the reference
+    // renderer draws and intrinsic sizing measured), so draw them verbatim.
+    // Re-breaking here with AppKit's own line breaker disagreed with the
+    // engine on tight boxes and wrapped single-line labels mid-word
+    // (friction #80). Wrap, alignment, line height, and max width are all
+    // baked into each line's text slice and pen position.
+    NSArray *packetLines = [text[@"lines"] isKindOfClass:[NSArray class]] ? text[@"lines"] : nil;
+    if (packetLines) {
+        for (id lineObject in packetLines) {
+            NSDictionary *line = NativeSdkPacketDictionary(lineObject);
+            if (!line) return NO;
+            NSString *lineText = [line[@"text"] isKindOfClass:[NSString class]] ? line[@"text"] : @"";
+            if (lineText.length == 0) continue;
+            CGFloat lineX = NativeSdkPacketNumber(line[@"x"], origin.x);
+            CGFloat baseline = NativeSdkPacketNumber(line[@"baseline"], origin.y);
+            [lineText drawAtPoint:NSMakePoint(lineX, baseline - size) withAttributes:baseAttributes];
+        }
+        return YES;
+    }
+
     NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
     NSString *wrap = [layout[@"wrap"] isKindOfClass:[NSString class]] ? layout[@"wrap"] : @"word";
     NSString *align = [layout[@"align"] isKindOfClass:[NSString class]] ? layout[@"align"] : @"start";

@@ -138,6 +138,7 @@ pub const Input = struct {
     /// `widget_nodes=current/budget` headroom.
     widget_node_budget: usize = 0,
     widget_semantics_budget: usize = 0,
+    widget_context_menu_item_budget: usize = 0,
     /// The most recent degraded dispatch errors, oldest first (bounded
     /// ring; `diagnostics.dispatch_error_count` is the lifetime total).
     errors: []const DispatchError = &.{},
@@ -288,16 +289,19 @@ pub fn writeText(input: Input, writer: anytype) !void {
                 view.canvas_frame_budget_exceeded_count,
                 view.canvas_frame_budget_ok,
             });
-            // Widget budget headroom telemetry (#62): current retained
-            // node/semantics counts against the per-view budget, so
-            // authors see the cliff coming instead of bisecting overflow
-            // by hand. `widget_node_budget` rides on Input because this
-            // module cannot import the runtime's canvas_limits.
-            try writer.print(" widget_nodes={d}/{d} widget_semantics={d}/{d}", .{
+            // Widget budget headroom telemetry (#62, context menus #83):
+            // current retained node/semantics/context-menu-item counts
+            // against the per-view budgets, so authors see the cliff
+            // coming instead of bisecting overflow by hand. The budgets
+            // ride on Input because this module cannot import the
+            // runtime's canvas_limits.
+            try writer.print(" widget_nodes={d}/{d} widget_semantics={d}/{d} context_menu_items={d}/{d}", .{
                 view.widget_node_count,
                 input.widget_node_budget,
                 view.widget_semantics_count,
                 input.widget_semantics_budget,
+                view.widget_context_menu_item_count,
+                input.widget_context_menu_item_budget,
             });
             if (view.canvas_frame_dirty_bounds) |dirty| {
                 try writer.print(" canvas_frame_dirty=({d},{d} {d}x{d})", .{ dirty.x, dirty.y, dirty.width, dirty.height });
@@ -682,11 +686,13 @@ test "snapshot emits GPU surface frame proof" {
         .canvas_frame_profile_surface_area = 57600,
         .canvas_frame_profile_dirty_area = 32000,
         .canvas_frame_profile_dirty_ratio = 0.5555556,
+        .widget_context_menu_item_count = 124,
         .cursor = .text,
     }};
     try writeText(.{
         .windows = &windows,
         .views = &views,
+        .widget_context_menu_item_budget = 512,
     }, &writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_size=320x180") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_scale=2") != null);
@@ -763,6 +769,7 @@ test "snapshot emits GPU surface frame proof" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_frame_profile_risk=high") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_frame_profile_surface_area=57600") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_frame_profile_dirty_area=32000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "context_menu_items=124/512") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "widget_cursor=text") != null);
 }
 

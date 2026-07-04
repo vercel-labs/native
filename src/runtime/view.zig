@@ -501,6 +501,7 @@ pub const RuntimeView = struct {
             .widget_revision = self.widget_revision,
             .widget_node_count = self.widget_layout_node_count,
             .widget_semantics_count = self.widget_semantics_node_count,
+            .widget_context_menu_item_count = self.widget_context_menu_len,
             .cursor = self.canvas_widget_cursor,
             .focused = self.focused,
             .open = self.open,

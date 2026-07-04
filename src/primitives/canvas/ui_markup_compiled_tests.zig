@@ -883,3 +883,37 @@ test "compiled wrap attribute matches the interpreter and the hand-written view"
     try testing.expectEqual(@as(f32, 360), compiled.root.layout.min_size.width);
     try testing.expectEqual(@as(f32, 360), compiled.root.layout.max_size.width);
 }
+
+// --------------------------- text alignment and grid columns parity (#84)
+
+const AlignUi = fixture.AlignUi;
+const AlignInterpreter = markup_view.MarkupView(fixture.AlignModel, fixture.AlignMsg);
+const AlignCompiled = canvas.CompiledMarkupView(fixture.AlignModel, fixture.AlignMsg, fixture.align_markup_source);
+
+test "compiled text-alignment and grid columns match the interpreter and the hand-written view" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = fixture.AlignModel{};
+
+    var view = try AlignInterpreter.init(arena, fixture.align_markup_source);
+    var interpreted_ui = AlignUi.init(arena);
+    const interpreted = try interpreted_ui.finalize(try view.build(&interpreted_ui, &model));
+
+    var compiled_ui = AlignUi.init(arena);
+    const compiled = try compiled_ui.finalize(AlignCompiled.build(&compiled_ui, &model));
+
+    var hand_ui = AlignUi.init(arena);
+    const hand = try hand_ui.finalize(fixture.handAlignView(&hand_ui, &model));
+
+    try expectSameTree(fixture.AlignMsg, hand, interpreted);
+    try expectSameTree(fixture.AlignMsg, hand, compiled);
+    try expectSameTexts(interpreted.root, compiled.root);
+
+    // Both engines land the alignment and the column counts.
+    try testing.expectEqual(canvas.TextAlign.center, compiled.root.children[0].text_alignment);
+    try testing.expectEqualDeep((canvas.DesignTokens{}).colors.info, compiled.root.children[0].style.foreground.?);
+    try testing.expectEqual(@as(usize, 4), compiled.root.children[1].layout.columns);
+    try testing.expectEqual(@as(usize, 3), compiled.root.children[2].layout.columns);
+}

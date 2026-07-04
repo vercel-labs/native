@@ -884,6 +884,13 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     else => return self.failVoid(node, "expected a number"),
                 },
                 .bool => @field(options, field) = value.truthy(),
+                .int => @field(options, field) = switch (value) {
+                    .integer => |int| if (int < 0)
+                        return self.failVoid(node, "expected a non-negative whole number")
+                    else
+                        @intCast(int),
+                    else => return self.failVoid(node, "expected a whole number"),
+                },
                 .@"enum" => {
                     const text = switch (value) {
                         .string => |text| text,
@@ -1161,6 +1168,8 @@ pub const attr_names: []const AttrName = &.{
     .{ .markup = "main", .zig = "main" },
     .{ .markup = "cross", .zig = "cross" },
     .{ .markup = "wrap", .zig = "wrap" },
+    .{ .markup = "text-alignment", .zig = "text_alignment" },
+    .{ .markup = "columns", .zig = "columns" },
     .{ .markup = "virtualized", .zig = "virtualized" },
     .{ .markup = "virtual-item-extent", .zig = "virtual_item_extent" },
 };

@@ -536,7 +536,6 @@ fn emitStaticTextSelection(builder: *Builder, widget: Widget, tokens: DesignToke
 /// decorations get stable hashed command ids derived from the widget id
 /// and their ordinal, so retained diffing works across frames.
 fn emitTextSpansWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    try emitStaticTextSelection(builder, widget, tokens);
     const content = widget.frame.inset(widget.layout.padding);
     var runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
     const layout = text_spans_model.layoutTextSpans(
@@ -544,6 +543,29 @@ fn emitTextSpansWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
         widget_metrics.widgetTextSpanLayoutOptions(widget, tokens, content.width),
         &runs,
     );
+
+    // Span background highlights (intra-line diff emphasis, #86): one
+    // full-line-height rect per run, the same geometry selection rects
+    // use, painted before selection and glyphs. Edge-snapped rects of
+    // adjacent runs share their boundary, so equal backgrounds abut
+    // without seams.
+    for (layout.runs, 0..) |run, ordinal| {
+        if (run.text.len == 0) continue;
+        const background = widget.spans[run.span_index].background orelse continue;
+        const bounds = text_spans_model.textSpanRunBounds(layout, run);
+        try builder.fillRect(.{
+            .id = textSpanBackgroundCommandId(widget.id, ordinal),
+            .rect = pixelSnapGeometryRect(tokens, geometry.RectF.init(
+                content.x + bounds.x,
+                content.y + bounds.y,
+                bounds.width,
+                bounds.height,
+            )),
+            .fill = colorFill(text_spans_model.textSpanColorValue(tokens.colors, background)),
+        });
+    }
+
+    try emitStaticTextSelection(builder, widget, tokens);
 
     var decoration_ordinal: usize = 0;
     for (layout.runs, 0..) |run, ordinal| {
@@ -602,6 +624,10 @@ pub fn textSpanRunCommandId(widget_id: ObjectId, ordinal: usize) ObjectId {
 
 pub fn textSpanDecorationCommandId(widget_id: ObjectId, ordinal: usize) ObjectId {
     return textSpanCommandId(0x5eed_59a2_0000_0002, widget_id, ordinal);
+}
+
+pub fn textSpanBackgroundCommandId(widget_id: ObjectId, ordinal: usize) ObjectId {
+    return textSpanCommandId(0x5eed_59a2_0000_0004, widget_id, ordinal);
 }
 
 pub fn textSelectionCommandId(widget_id: ObjectId, ordinal: usize) ObjectId {

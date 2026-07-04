@@ -15,7 +15,12 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "help")) {
         return usage();
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "version")) {
-        std.debug.print("native {s}\n", .{version});
+        // Payload, not a diagnostic: scripts parse `native version`, so it
+        // belongs on stdout (see automation.zig's emitPayload contract).
+        var stdout_buffer: [64]u8 = undefined;
+        var stdout_writer = std.Io.File.stdout().writerStreaming(init.io, &stdout_buffer);
+        try stdout_writer.interface.print("native {s}\n", .{version});
+        try stdout_writer.interface.flush();
     } else if (std.mem.eql(u8, command, "init")) {
         const destination = positionalArg(args[2..]) orelse ".";
         const frontend_str = flagValue(args, "--frontend") catch fail("--frontend requires a value: native, next, vite, react, svelte, vue") orelse "native";

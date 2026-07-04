@@ -2263,6 +2263,93 @@ test "canvas gpu packet skips clean passes and reports output overflow" {
     try std.testing.expectError(error.CanvasGpuCommandListFull, pass.gpuPacket(&no_gpu_commands));
 }
 
+test "canvas gpu packet text serializes engine measured line breaks" {
+    // Tight intrinsic box: max_width equals the engine-measured width, so
+    // the engine keeps one line and the packet must carry it unbroken —
+    // the host draws these lines verbatim instead of re-wrapping with its
+    // own line breaker (friction #80).
+    const tight_width = estimateTextWidth("Songs", 12);
+    // 70 explicit lines exceed the packet line budget (64): the serializer
+    // must fall back to `null` so the host keeps its wrapping fallback.
+    const overflow_text = "a\n" ** 70;
+    const commands = [_]CanvasGpuCommand{
+        .{
+            .command_index = 0,
+            .kind = .draw_text,
+            .pipeline = .glyph_run,
+            .text = .{
+                .font_id = 1,
+                .size = 12,
+                .origin = geometry.PointF.init(4, 40),
+                .color = Color.rgb8(0, 0, 0),
+                .text = "Songs",
+                .text_layout = .{ .max_width = tight_width, .line_height = 16 },
+            },
+            .uses_glyph_atlas = true,
+            .uses_text_layout = true,
+        },
+        .{
+            .command_index = 1,
+            .kind = .draw_text,
+            .pipeline = .glyph_run,
+            .text = .{
+                .font_id = 1,
+                .size = 12,
+                .origin = geometry.PointF.init(4, 40),
+                .color = Color.rgb8(0, 0, 0),
+                .text = "Song s",
+                .text_layout = .{ .max_width = estimateTextWidth("Song", 12) + 1, .line_height = 16 },
+            },
+            .uses_glyph_atlas = true,
+            .uses_text_layout = true,
+        },
+        .{
+            .command_index = 2,
+            .kind = .draw_text,
+            .pipeline = .glyph_run,
+            .text = .{
+                .font_id = 1,
+                .size = 12,
+                .origin = geometry.PointF.init(4, 40),
+                .color = Color.rgb8(0, 0, 0),
+                .text = overflow_text,
+                .text_layout = .{ .line_height = 16 },
+            },
+            .uses_glyph_atlas = true,
+            .uses_text_layout = true,
+        },
+        .{
+            .command_index = 3,
+            .kind = .draw_text,
+            .pipeline = .glyph_run,
+            .text = .{
+                .font_id = 1,
+                .size = 12,
+                .origin = geometry.PointF.init(4, 40),
+                .color = Color.rgb8(0, 0, 0),
+                .text = "Free",
+            },
+            .uses_glyph_atlas = true,
+        },
+    };
+    const packet = CanvasGpuPacket{ .load_action = .clear, .commands = &commands };
+
+    var packet_json_buffer: [16384]u8 = undefined;
+    var packet_json_writer = std.Io.Writer.fixed(&packet_json_buffer);
+    try packet.writeJson(&packet_json_writer);
+    const packet_json = packet_json_writer.buffered();
+
+    // Exact-fit box: exactly one line, the full text, at the pen origin.
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"lines\":[{\"x\":4,\"baseline\":40,\"text\":\"Songs\"}]") != null);
+    // Engine word wrap carries through: the trailing break is trimmed and
+    // the second line advances one line height.
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"lines\":[{\"x\":4,\"baseline\":40,\"text\":\"Song\"},{\"x\":4,\"baseline\":56,\"text\":\"s\"}]") != null);
+    // Line-budget overflow degrades to null (host wrapping fallback).
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"lines\":null") != null);
+    // No layout options -> no lines key at all.
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, packet_json, "\"lines\":"));
+}
+
 test "canvas gpu packet serializes image upload payloads" {
     const image_pixels = [_]u8{ 11, 22, 33, 255 };
     const image_resources = [_]ReferenceImage{.{

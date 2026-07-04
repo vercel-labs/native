@@ -67,6 +67,13 @@ pub const TextSpan = struct {
     /// paragraph foreground. Link spans with no explicit color render with
     /// the accent color.
     color: ?TextSpanColor = null,
+    /// Background highlight as a design-token reference. Null draws no
+    /// background. Renderers fill the run's full line-box rect (the same
+    /// geometry selection highlights use) behind the glyphs, so adjacent
+    /// runs of the same background abut without seams. Purely visual:
+    /// backgrounds never affect measurement or layout (#86, intra-line
+    /// diff emphasis).
+    background: ?TextSpanColor = null,
     underline: bool = false,
     strikethrough: bool = false,
     /// Relative size multiplier against the paragraph base size; 0 means
@@ -675,6 +682,7 @@ pub fn textSpansEqual(a: []const TextSpan, b: []const TextSpan) bool {
         if (left.italic != right.italic) return false;
         if (left.monospace != right.monospace) return false;
         if (left.color != right.color) return false;
+        if (left.background != right.background) return false;
         if (left.underline != right.underline) return false;
         if (left.strikethrough != right.strikethrough) return false;
         if (left.scale != right.scale) return false;

@@ -138,7 +138,7 @@ Not markup-expressible (deliberately — write these as Zig view functions with 
 
 ## Attributes
 
-Layout: `gap` (flow containers only — stacking containers `stack`/`panel`/`card`/`alert`/`bubble`/`dialog`/`drawer`/`sheet`/`resizable` layer their children, so `gap` there is a validation error, not silence: wrap the children in a `column`/`row` inside), `padding` (uniform), `grow`, `width`, `height` (definite: the element is exactly that size — intrinsic content neither shrinks nor silently overflows it; `resizable` treats `width` as the initial width), `wrap` (`text` only: `wrap="true"` word-wraps at the width the element receives and reserves the wrapped height in columns; default is single-line), `main` (start|center|end|space_between), `cross` (stretch|start|center|end), `virtualized`, `virtual-item-extent`.
+Layout: `gap` (flow containers only — stacking containers `stack`/`panel`/`card`/`alert`/`bubble`/`dialog`/`drawer`/`sheet`/`resizable` layer their children, so `gap` there is a validation error, not silence: wrap the children in a `column`/`row` inside), `padding` (uniform), `grow`, `width`, `height` (definite: the element is exactly that size — intrinsic content neither shrinks nor silently overflows it; `resizable` treats `width` as the initial width), `wrap` (`text` only: `wrap="true"` word-wraps at the width the element receives and reserves the wrapped height in columns; default is single-line), `text-alignment` (start|center|end — text leaves, status bars, surface titles; controls that own their label placement ignore it), `columns` (`grid` only: fixed column count, omit for the derived near-square grid; a teaching error elsewhere), `main` (start|center|end|space_between), `cross` (stretch|start|center|end), `virtualized`, `virtual-item-extent`.
 Appearance/state: `variant` (default|primary|secondary|outline|ghost|destructive), `size` (default|sm|lg|icon), `disabled`, `checked`, `selected`, `value`, `placeholder`.
 Semantics: `role` (listitem, button, ...), `label` (accessible name).
 Identity: `key` (sibling-scoped), `global-key` (parent-independent — use for items that move between containers, e.g. board cards; ids then survive reparenting).
@@ -162,9 +162,28 @@ The chip pattern — an exclusive group where the model owns which one is active
 
 A `toggle-button` whose source asserts `selected` (this rebuild or the previous one) is model-driven: the source wins over the runtime's retained toggle on every rebuild, so exactly the model's selection is active — pressing a chip dispatches the Msg, the model moves the selection, and the old chip deactivates. Without a `selected=` that ever asserts, a `toggle-button` is uncontrolled: the runtime retains its pressed state across rebuilds (the multi-select formatting-bar case — bold/italic chips with zero app wiring). `button` with `selected=` is always model-driven (buttons never retain state) and dispatches `on-press`; `toggle-button` dispatches `on-toggle` (its activation is the toggle intent — an `on-press` there never fires). Model-driven chips need a handler that actually moves the model: a chip whose Msg is ignored keeps its retained press until the model asserts its `selected=`.
 
+### Pickers: select is presentation-only — compose the options
+
+`select` and `combobox` are trigger controls, not complete pickers: `select` renders the closed dropdown shape (current value as content, `placeholder` while empty, `on-press` to open) and `combobox` is a text entry with a menu chevron — neither owns an options list or a floating panel. There is no `options=` attribute (the closed grammar has no list-valued attributes, same as `context_menu`). The sanctioned pattern is model-owned open state plus a composed options surface — `dropdown-menu` of `menu-item`s under an `if`, inside a `stack` when it should overlay instead of reflow:
+
+```html
+<stack>
+  <select placeholder="Pick a repo" text="{current_repo}" on-press="toggle_repo_picker"/>
+  <if test="{repo_picker_open}">
+    <dropdown-menu>
+      <for each="repos" key="name" as="r">
+        <menu-item on-press="pick_repo:{r.name}">{r.name}</menu-item>
+      </for>
+    </dropdown-menu>
+  </if>
+</stack>
+```
+
+The model closes the picker in `pick_repo` (and `toggle_repo_picker` flips it). A true anchored popup that escapes the container (the native `NSPopUpButton` feel) is not expressible yet — that presentation channel is design-noted alongside context menus.
+
 ## Widget budgets and virtualization
 
-Every view has fixed per-view capacities (`src/runtime/canvas_limits.zig`): **1024 retained widget nodes** (`max_canvas_widget_nodes_per_view` — the budget that matters for tree design; semantics and spans match it), 64 KiB retained widget text, and per-frame content budgets (2048 commands, 8192 glyphs, 32 KiB frame text). Overflow is loud: `error.WidgetLayoutListFull` / `error.WidgetNodeLimitReached` fail tests under the harness's propagate policy and log a teaching diagnostic naming the budget in production (the app degrades to the previous frame). Watch headroom without overflowing: automation snapshots report `widget_nodes=N/1024 widget_semantics=N/1024` on every gpu_surface view line.
+Every view has fixed per-view capacities (`src/runtime/canvas_limits.zig`): **1024 retained widget nodes** (`max_canvas_widget_nodes_per_view` — the budget that matters for tree design; semantics and spans match it), 64 KiB retained widget text, **512 declared context-menu items** summed across all widgets of the view (`max_canvas_widget_context_menu_items_per_view` — separators count as items), and per-frame content budgets (2048 commands, 8192 glyphs, 32 KiB frame text). Overflow is loud: `error.WidgetLayoutListFull` / `error.WidgetNodeLimitReached` / `error.WidgetContextMenuLimitReached` fail tests under the harness's propagate policy and log a teaching diagnostic naming the budget in production (the app degrades to the previous frame). Watch headroom without overflowing: automation snapshots report `widget_nodes=N/1024 widget_semantics=N/1024 context_menu_items=N/512` on every gpu_surface view line.
 
 Budget rules of thumb: 1024 nodes is roomy for a three-pane desktop app (~500 nodes measured for a dense sidebar + markdown detail + run surface), but node count scales with what is MOUNTED, not what is visible — so bound every unbounded collection:
 
@@ -176,7 +195,7 @@ Budget rules of thumb: 1024 nodes is roomy for a three-pane desktop app (~500 no
 
 Color and radius come from the design tokens, referenced by token NAME — literals only, no bindings, no raw colors (dynamic styling stays in Zig via `ElementOptions.style`):
 
-- Color attributes: `background`, `foreground`, `accent`, `accent-foreground`, `border-color`, `focus-ring`. Values are `canvas.ColorTokens` field names — the complete list: `background`, `surface`, `surface_subtle`, `surface_pressed`, `text`, `text_muted`, `border`, `accent`, `accent_text`, `destructive`, `destructive_text`, `success`, `success_text`, `warning`, `warning_text`, `focus_ring`, `shadow`, `disabled`. (`border-color`, not bare `border` — that name is reserved for a future width shorthand.)
+- Color attributes: `background`, `foreground`, `accent`, `accent-foreground`, `border-color`, `focus-ring`. Values are `canvas.ColorTokens` field names — the complete list: `background`, `surface`, `surface_subtle`, `surface_pressed`, `text`, `text_muted`, `border`, `accent`, `accent_text`, `destructive`, `destructive_text`, `success`, `success_text`, `warning`, `warning_text`, `info`, `info_text`, `focus_ring`, `shadow`, `disabled`. `info` is the violet identity hue beside the status trio (merged PR badges, "new" chips). (`border-color`, not bare `border` — that name is reserved for a future width shorthand.)
 - `radius` — `canvas.RadiusTokens` field names: `sm`, `md`, `lg`, `xl`.
 
 ```html

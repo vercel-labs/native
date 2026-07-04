@@ -279,6 +279,69 @@ test "widget-authored transform and opacity survive into the presented packet JS
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"transform\":[1,0,0,1,8,4]") != null);
 }
 
+test "packet text carries engine line breaks so tight single-line boxes never re-wrap" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-packet-text-lines", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 96, 48),
+    });
+
+    // A text widget whose box is exactly as wide as the engine measured
+    // the text (the tight intrinsic case from friction #80): the packet
+    // must carry the engine's single unbroken line so the host draws it
+    // verbatim instead of re-wrapping with its own measurement.
+    const label = "Songs";
+    const body_size: f32 = 14; // default TypographyTokens.body_size
+    const label_width = canvas.estimateTextWidthForFont(canvas.default_sans_font_id, label, body_size);
+    const TextMsg = union(enum) { none };
+    const TextUi = canvas.Ui(TextMsg);
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var ui = TextUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.text(.{
+        .frame = geometry.RectF.init(4, 4, label_width, 20),
+    }, label));
+
+    var widget_commands: [8]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&widget_commands);
+    try canvas.emitWidgetTree(&builder, tree.root, .{});
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", builder.displayList());
+
+    var gpu_commands: [max_canvas_commands_per_view]canvas.CanvasGpuCommand = undefined;
+    var packet_json_buffer: [16 * 1024]u8 = undefined;
+    const packet = try harness.runtime.presentNextCanvasGpuPacket(1, "canvas", .{
+        .frame_index = 5,
+        .timestamp_ns = 21_000,
+        .surface_size = geometry.SizeF.init(96, 48),
+        .scale = 2,
+    }, canvasFrameScratchStorage(&harness.runtime), canvas.Color.rgb8(247, 249, 252), &gpu_commands, &packet_json_buffer);
+
+    try std.testing.expect(packet.requiresRender());
+    try std.testing.expect(packet.fullyRepresentable());
+
+    const packet_json = packet_json_buffer[0..harness.null_platform.gpu_surface_packet_present_json_len];
+    // The draw_text command ships explicit engine lines next to its layout
+    // options...
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"lines\":[{") != null);
+    // ...and the tight box stays one unbroken line ("Songs" never splits
+    // into "Song" + "s").
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"text\":\"Songs\"}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"text\":\"Song\"") == null);
+}
+
 test "runtime presents canvas GPU packet with separate presentation scale" {
     const TestApp = struct {
         fn app(self: *@This()) App {

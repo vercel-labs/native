@@ -542,10 +542,10 @@ pub const known_text_leaf_element_names = [_][]const u8{
 };
 
 pub const known_option_attrs = [_][]const u8{
-    "text",    "placeholder", "value", "checked", "selected",    "disabled",
-    "variant", "size",        "width", "height",  "grow",        "gap",
-    "padding", "main",        "cross", "wrap",    "virtualized", "virtual-item-extent",
-    "key",     "global-key",  "role",  "label",
+    "text",           "placeholder", "value",       "checked",             "selected", "disabled",
+    "variant",        "size",        "width",       "height",              "grow",     "gap",
+    "padding",        "main",        "cross",       "wrap",                "key",      "global-key",
+    "text-alignment", "columns",     "virtualized", "virtual-item-extent", "role",     "label",
 };
 
 pub const known_events = [_][]const u8{ "press", "toggle", "change", "submit", "input", "scroll" };
@@ -586,6 +586,8 @@ pub const known_stack_container_element_names = [_][]const u8{
 
 pub const stack_container_gap_message = "gap does nothing here: this container layers its children on top of each other - wrap them in a column (or row) inside it for flow, or drop the gap";
 
+pub const grid_columns_element_message = "columns is only supported on grid - it fixes the grid's column count (omit it for the derived near-square grid)";
+
 pub const avatar_image_message = "image takes one {binding} to a u64 ImageId the app registered at runtime (fx.registerImageBytes) - runtime image ids are model data, not markup literals; 0 renders the initials fallback";
 pub const avatar_image_element_message = "image is only supported on avatar - the other image-bearing widgets (image, icon-button) stay Zig views (ui.image with ElementOptions.image)";
 
@@ -594,10 +596,10 @@ pub const avatar_image_element_message = "image is only supported on avatar - th
 /// registry); a test in ui_markup_view_tests.zig keeps the two in
 /// lockstep so a new icon cannot ship without its markup name.
 pub const known_icon_names = [_][]const u8{
-    "alert",        "arrow-right",   "check",    "chevron-down", "chevron-left",
-    "chevron-right", "chevron-up",   "copy",     "download",     "edit",
-    "external-link", "info",         "menu",     "pause",        "play",
-    "plus",          "search",       "settings", "trash",        "x",
+    "alert",         "arrow-right", "check",    "chevron-down", "chevron-left",
+    "chevron-right", "chevron-up",  "copy",     "download",     "edit",
+    "external-link", "info",        "menu",     "pause",        "play",
+    "plus",          "search",      "settings", "trash",        "x",
 };
 
 pub const icon_name_message = "name takes a literal built-in icon name (see canvas.icons.known_icon_names, e.g. search, plus, x, check, chevron-down, settings, trash)";
@@ -620,15 +622,15 @@ pub const known_color_token_names = [_][]const u8{
     "background",   "surface",     "surface_subtle",   "surface_pressed",
     "text",         "text_muted",  "border",           "accent",
     "accent_text",  "destructive", "destructive_text", "success",
-    "success_text", "warning",     "warning_text",     "focus_ring",
-    "shadow",       "disabled",
+    "success_text", "warning",     "warning_text",     "info",
+    "info_text",    "focus_ring",  "shadow",           "disabled",
 };
 
 /// The field names of `canvas.RadiusTokens` (same sync test).
 pub const known_radius_token_names = [_][]const u8{ "sm", "md", "lg", "xl" };
 
 pub const style_token_literal_message = "style token attributes take a literal token name - dynamic styling stays in Zig";
-pub const unknown_color_token_message = "unknown color token: color style attributes take a canvas ColorTokens field name (background, surface, surface_subtle, surface_pressed, text, text_muted, border, accent, accent_text, destructive, destructive_text, success, success_text, warning, warning_text, focus_ring, shadow, disabled)";
+pub const unknown_color_token_message = "unknown color token: color style attributes take a canvas ColorTokens field name (background, surface, surface_subtle, surface_pressed, text, text_muted, border, accent, accent_text, destructive, destructive_text, success, success_text, warning, warning_text, info, info_text, focus_ring, shadow, disabled)";
 pub const unknown_radius_token_message = "unknown radius token: radius takes a canvas RadiusTokens field name (sm, md, lg, xl)";
 
 pub const for_children_message = "for takes one or more element children (elements, use, if/else, or a nested for) - text content is only allowed inside text-bearing elements";
@@ -1025,6 +1027,12 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                 }
                 if (std.mem.eql(u8, attribute.name, "gap") and nameInList(node.name, &known_stack_container_element_names)) {
                     return .{ .line = attribute.line, .column = attribute.column, .message = stack_container_gap_message };
+                }
+                if (std.mem.eql(u8, attribute.name, "columns") and !std.mem.eql(u8, node.name, "grid")) {
+                    // Only the grid layout reads a column count; anywhere
+                    // else it would silently do nothing (same policy as
+                    // gap on stacking containers).
+                    return .{ .line = attribute.line, .column = attribute.column, .message = grid_columns_element_message };
                 }
                 if (!nameInList(attribute.name, &known_option_attrs)) {
                     return .{ .line = attribute.line, .column = attribute.column, .message = "unknown attribute" };

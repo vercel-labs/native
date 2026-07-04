@@ -114,6 +114,63 @@ test "layout measures per-run through an injected provider" {
     try testing.expectEqual(@as(usize, 1), result.runs[1].line_index);
 }
 
+fn expectSameSpanLayout(a: text_spans.TextSpanLayout, b: text_spans.TextSpanLayout) !void {
+    try testing.expectEqual(a.line_count, b.line_count);
+    try testing.expectEqual(a.line_height, b.line_height);
+    try testing.expectEqual(a.size.width, b.size.width);
+    try testing.expectEqual(a.size.height, b.size.height);
+    try testing.expectEqual(a.truncated, b.truncated);
+    try testing.expectEqual(a.runs.len, b.runs.len);
+    for (a.runs, b.runs) |left, right| {
+        try testing.expectEqual(left.span_index, right.span_index);
+        try testing.expectEqualStrings(left.text, right.text);
+        try testing.expectEqual(left.line_index, right.line_index);
+        try testing.expectEqual(left.x, right.x);
+        try testing.expectEqual(left.width, right.width);
+        try testing.expectEqual(left.baseline, right.baseline);
+        try testing.expectEqual(left.size, right.size);
+        try testing.expectEqual(left.font_id, right.font_id);
+    }
+}
+
+test "background is measurement-neutral in both measure paths" {
+    const plain = [_]TextSpan{
+        .{ .text = "alpha " },
+        .{ .text = "beta gamma", .monospace = true },
+    };
+    var tinted = plain;
+    tinted[0].background = .success;
+    tinted[1].background = .warning;
+
+    // Estimator path (no injected provider).
+    var estimator_plain: [text_spans.max_text_span_runs_per_paragraph]TextSpanRun = undefined;
+    var estimator_tinted: [text_spans.max_text_span_runs_per_paragraph]TextSpanRun = undefined;
+    const estimator_options = text_spans.TextSpanLayoutOptions{ .size = 14, .max_width = 60 };
+    try expectSameSpanLayout(
+        layout(&plain, estimator_options, &estimator_plain),
+        layout(&tinted, estimator_options, &estimator_tinted),
+    );
+    try testing.expectEqual(
+        text_spans.textSpansIntrinsicWidth(&plain, estimator_options),
+        text_spans.textSpansIntrinsicWidth(&tinted, estimator_options),
+    );
+
+    // Injected provider path.
+    var fake = FakeMeasure{};
+    const provider = text_metrics.TextMeasureProvider{ .context = &fake, .measure_fn = FakeMeasure.measure };
+    var provider_plain: [text_spans.max_text_span_runs_per_paragraph]TextSpanRun = undefined;
+    var provider_tinted: [text_spans.max_text_span_runs_per_paragraph]TextSpanRun = undefined;
+    const provider_options = text_spans.TextSpanLayoutOptions{ .size = 14, .max_width = 60, .measure = &provider };
+    try expectSameSpanLayout(
+        layout(&plain, provider_options, &provider_plain),
+        layout(&tinted, provider_options, &provider_tinted),
+    );
+    try testing.expectEqual(
+        text_spans.textSpansIntrinsicWidth(&plain, provider_options),
+        text_spans.textSpansIntrinsicWidth(&tinted, provider_options),
+    );
+}
+
 test "explicit newlines break lines and empty spans are skipped" {
     const spans = [_]TextSpan{
         .{ .text = "one\ntwo" },
@@ -190,6 +247,9 @@ test "textSpansEqual compares style, text, and link bytes" {
     b[0].link = "https://b";
     try testing.expect(!text_spans.textSpansEqual(&a, &b));
     b[0] = .{ .text = "x", .weight = .bold };
+    try testing.expect(!text_spans.textSpansEqual(&a, &b));
+    b = a;
+    b[0].background = .success;
     try testing.expect(!text_spans.textSpansEqual(&a, &b));
 }
 
@@ -306,6 +366,71 @@ test "span paragraphs emit one text command per run plus link underlines" {
     try testing.expectEqual(@as(usize, 5), text_commands);
     try testing.expectEqual(@as(usize, 2), underlines);
     try testing.expectEqual(@as(usize, 2), accent_texts);
+}
+
+test "span backgrounds fill seamless full-line rects behind the glyphs" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = SpanUi.init(arena_state.allocator());
+
+    // A diff-style line: "middle" is one word whose two pieces carry the
+    // same background but different styles, so it lays out as two abutting
+    // runs (the intra-line diff shape from friction #86).
+    const spans = [_]TextSpan{
+        .{ .text = "left " },
+        .{ .text = "mid", .background = .success },
+        .{ .text = "dle", .background = .success, .weight = .bold },
+        .{ .text = " right" },
+    };
+    const tree = try ui.finalize(ui.column(.{}, .{ui.paragraph(.{}, &spans)}));
+
+    var nodes: [32]canvas.WidgetLayoutNode = undefined;
+    const tokens = canvas.DesignTokens{};
+    const tree_layout = try canvas.layoutWidgetTreeWithTokens(tree.root, geometry.RectF.init(0, 0, 400, 200), tokens, &nodes);
+
+    var commands: [64]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try canvas.emitWidgetLayout(&builder, tree_layout, tokens);
+    const list = builder.displayList();
+
+    var rects: [4]geometry.RectF = undefined;
+    var rect_len: usize = 0;
+    var last_rect_index: usize = 0;
+    var first_text_index: ?usize = null;
+    var tinted_text: ?canvas.DrawText = null;
+    for (list.commands, 0..) |command, index| {
+        switch (command) {
+            .fill_rect => |value| {
+                try testing.expectEqual(tokens.colors.success, value.fill.color);
+                rects[rect_len] = value.rect;
+                rect_len += 1;
+                last_rect_index = index;
+            },
+            .draw_text => |value| {
+                if (first_text_index == null) first_text_index = index;
+                if (std.mem.eql(u8, value.text, "mid")) tinted_text = value;
+            },
+            else => {},
+        }
+    }
+
+    // One background rect per tinted run, all before any glyphs.
+    try testing.expectEqual(@as(usize, 2), rect_len);
+    try testing.expect(last_rect_index < first_text_index.?);
+
+    // Same-background neighbors share their snapped edge and line box:
+    // no horizontal seam, identical top and height.
+    try testing.expectEqual(rects[0].maxX(), rects[1].x);
+    try testing.expectEqual(rects[0].y, rects[1].y);
+    try testing.expectEqual(rects[0].height, rects[1].height);
+
+    // The rect is the run's full line box: it starts at the tinted run's
+    // origin and spans the whole line height around the baseline.
+    const text = tinted_text.?;
+    try testing.expectApproxEqAbs(text.origin.x, rects[0].x, 1);
+    try testing.expect(rects[0].y <= text.origin.y - text.size * 0.5);
+    try testing.expect(rects[0].maxY() >= text.origin.y);
+    try testing.expect(rects[0].height >= text.size);
 }
 
 test "single-style text widgets keep their classic single-command path" {
