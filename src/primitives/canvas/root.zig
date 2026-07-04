@@ -259,7 +259,7 @@ pub const vector = @import("vector.zig");
 // glyph outlines to the reference renderer's text painting.
 pub const font_ttf = @import("font_ttf.zig");
 
-// SVG icon-subset parser (the common stroke-icon dialect, comptime-
+// SVG icon-subset parser (the stroke-icon dialect/Feather/Tabler dialect, comptime-
 // parseable) and the curated built-in icon registry behind
 // `<icon name="..."/>` and `Ui.icon`.
 pub const svg_icon = @import("svg_icon.zig");
@@ -348,6 +348,7 @@ pub const BuiltinSurfaceBackdropOptions = widget_model.BuiltinSurfaceBackdropOpt
 pub const BuiltinStatusBarOptions = widget_model.BuiltinStatusBarOptions;
 pub const BuiltinSurfaceEnterAnimationOptions = widget_model.BuiltinSurfaceEnterAnimationOptions;
 pub const builtinComponentWidget = widget_model.builtinComponentWidget;
+pub const widgetKindDefaultLayout = widget_model.widgetKindDefaultLayout;
 pub const widgetCommandPartId = widget_model.widgetCommandPartId;
 pub const builtinSurfaceBackdropWidget = widget_model.builtinSurfaceBackdropWidget;
 pub const builtinStatusBarWidget = widget_model.builtinStatusBarWidget;

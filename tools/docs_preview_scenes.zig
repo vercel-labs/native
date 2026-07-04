@@ -9,16 +9,61 @@
 //!   WebAssembly so the docs upgrade those images to live, interactive
 //!   engine instances in the browser (`zig build docs-wasm-preview`).
 //!
-//! Scenes are plain retained widget trees (no Model/Msg app): the
-//! runtime owns hover, focus, toggle, text-edit, slider, and scroll
-//! state, which is exactly the interactivity the live previews expose.
+//! Scenes are retained widget trees. Most are stateless: the runtime
+//! owns hover, focus, toggle, text-edit, slider, and scroll state, which
+//! is exactly the interactivity those previews expose. Scenes whose
+//! honest demo needs MODEL-owned state (accordion expansion, tab panel
+//! switching, dialog dismiss/reopen, the select's anchored dropdown)
+//! declare a tiny shared mini-model (`SceneModel`) and build from it;
+//! the wasm host routes the REAL widget event dispatch (press, toggle,
+//! dismiss, keyboard activation) through each scene tree's typed
+//! handler table into `update`, exactly like a real app's loop.
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 
 const canvas = native_sdk.canvas;
 
-pub const Msg = union(enum) { noop };
+pub const Msg = union(enum) {
+    noop,
+    /// Flip one of the model's boolean slots (accordion items).
+    toggle_flag: u8,
+    /// Select one of the model's indexed options (tab triggers).
+    select_index: u8,
+    /// Open or close the model's single open surface (dialog).
+    set_open: bool,
+    /// Toggle the open surface (the select trigger).
+    toggle_open,
+    /// Pick option `i` AND close the open surface (select menu items).
+    choose: u8,
+};
+
+/// The mini-model every model-driven scene shares: a few boolean slots,
+/// one selected index, one open flag. Deliberately tiny — scenes are
+/// demos, and the seam exists so the live previews respond through the
+/// same update/rebuild loop a real app runs, not to model real apps.
+pub const SceneModel = struct {
+    flags: [4]bool = .{ false, false, false, false },
+    index: u8 = 0,
+    open: bool = false,
+};
+
+pub fn update(model: *SceneModel, msg: Msg) void {
+    switch (msg) {
+        .noop => {},
+        .toggle_flag => |slot| {
+            if (slot < model.flags.len) model.flags[slot] = !model.flags[slot];
+        },
+        .select_index => |index| model.index = index,
+        .set_open => |open| model.open = open,
+        .toggle_open => model.open = !model.open,
+        .choose => |index| {
+            model.index = index;
+            model.open = false;
+        },
+    }
+}
+
 pub const Ui = canvas.Ui(Msg);
 pub const Node = Ui.Node;
 const Md = canvas.markdown.Markdown(Msg);
@@ -42,58 +87,74 @@ pub const Scene = struct {
     name: []const u8,
     height: f32,
     width: f32 = tile_width,
-    build: *const fn (ui: *Ui) Node,
+    /// Every scene builds from the mini-model; stateless scenes wrap
+    /// their plain builder in `stateless` and ignore it. The static
+    /// pipeline renders `model` as-is; the live host feeds it through
+    /// `update` on dispatched events and rebuilds.
+    build: *const fn (ui: *Ui, model: *const SceneModel) Node,
+    /// The scene's initial model state (the static previews render it).
+    model: SceneModel = .{},
     hover: ?Hover = null,
 };
 
+/// Adapt a model-less builder to the scene signature.
+fn stateless(comptime build_fn: fn (ui: *Ui) Node) *const fn (ui: *Ui, model: *const SceneModel) Node {
+    return struct {
+        fn build(ui: *Ui, model: *const SceneModel) Node {
+            _ = model;
+            return build_fn(ui);
+        }
+    }.build;
+}
+
 pub const scenes = [_]Scene{
-    .{ .name = "button", .height = 160, .build = buildButton },
-    .{ .name = "button-sizes", .height = 160, .build = buildButtonSizes },
-    .{ .name = "button-icons", .height = 160, .build = buildButtonIcons },
-    .{ .name = "button-states", .height = 160, .build = buildButtonStates, .hover = .{ .kind = .button, .index = 1 } },
-    .{ .name = "button-group", .height = 160, .build = buildButtonGroup },
-    .{ .name = "toggle", .height = 160, .build = buildToggle },
-    .{ .name = "toggle-group", .height = 160, .build = buildToggleGroup },
-    .{ .name = "input", .height = 260, .build = buildInput },
-    .{ .name = "search-field", .height = 160, .build = buildSearchField },
-    .{ .name = "textarea", .height = 220, .build = buildTextarea },
-    .{ .name = "select", .height = 180, .build = buildSelect },
-    .{ .name = "combobox", .height = 160, .build = buildCombobox },
-    .{ .name = "dropdown-menu", .height = 300, .build = buildDropdownMenu },
-    .{ .name = "checkbox", .height = 180, .build = buildCheckbox },
-    .{ .name = "radio-group", .height = 180, .build = buildRadioGroup },
-    .{ .name = "switch", .height = 160, .build = buildSwitch },
-    .{ .name = "slider", .height = 180, .build = buildSlider },
-    .{ .name = "progress", .height = 140, .build = buildProgress },
-    .{ .name = "badge", .height = 140, .build = buildBadge },
-    .{ .name = "avatar", .height = 160, .build = buildAvatar },
-    .{ .name = "card", .height = 300, .build = buildCard },
-    .{ .name = "panel", .height = 180, .build = buildPanel },
-    .{ .name = "alert", .height = 220, .build = buildAlert },
-    .{ .name = "accordion", .height = 240, .build = buildAccordion },
-    .{ .name = "tabs", .height = 160, .build = buildTabs },
-    .{ .name = "menu", .height = 280, .build = buildMenu },
-    .{ .name = "tooltip", .height = 160, .build = buildTooltip },
-    .{ .name = "bubble", .height = 200, .build = buildBubble },
-    .{ .name = "breadcrumb", .height = 140, .build = buildBreadcrumb },
-    .{ .name = "pagination", .height = 150, .build = buildPagination },
-    .{ .name = "list", .height = 260, .build = buildList },
-    .{ .name = "table", .height = 240, .build = buildTable },
-    .{ .name = "tree", .height = 280, .build = buildTree },
-    .{ .name = "split", .height = 240, .build = buildSplit },
-    .{ .name = "scroll", .height = 240, .build = buildScroll },
-    .{ .name = "dialog", .height = 310, .build = buildDialog },
-    .{ .name = "drawer", .height = 300, .build = buildDrawer },
-    .{ .name = "sheet", .height = 300, .build = buildSheet },
-    .{ .name = "separator", .height = 200, .build = buildSeparator },
-    .{ .name = "skeleton", .height = 200, .build = buildSkeleton },
-    .{ .name = "spinner", .height = 140, .build = buildSpinner },
-    .{ .name = "markdown", .height = 440, .build = buildMarkdown },
-    .{ .name = "icon", .height = 150, .build = buildIconHero },
-    .{ .name = "chart", .height = 260, .build = buildChart },
-    .{ .name = "status-bar", .height = 170, .build = buildStatusBar },
-    .{ .name = "stepper", .height = 160, .build = buildStepper },
-    .{ .name = "timeline", .height = 320, .build = buildTimeline },
+    .{ .name = "button", .height = 160, .build = stateless(buildButton) },
+    .{ .name = "button-sizes", .height = 160, .build = stateless(buildButtonSizes) },
+    .{ .name = "button-icons", .height = 160, .build = stateless(buildButtonIcons) },
+    .{ .name = "button-states", .height = 160, .build = stateless(buildButtonStates), .hover = .{ .kind = .button, .index = 1 } },
+    .{ .name = "button-group", .height = 160, .build = stateless(buildButtonGroup) },
+    .{ .name = "toggle", .height = 160, .build = stateless(buildToggle) },
+    .{ .name = "toggle-group", .height = 160, .build = stateless(buildToggleGroup) },
+    .{ .name = "input", .height = 260, .build = stateless(buildInput) },
+    .{ .name = "search-field", .height = 160, .build = stateless(buildSearchField) },
+    .{ .name = "textarea", .height = 220, .build = stateless(buildTextarea) },
+    .{ .name = "select", .height = 280, .build = buildSelect },
+    .{ .name = "combobox", .height = 160, .build = stateless(buildCombobox) },
+    .{ .name = "dropdown-menu", .height = 300, .build = stateless(buildDropdownMenu) },
+    .{ .name = "checkbox", .height = 180, .build = stateless(buildCheckbox) },
+    .{ .name = "radio-group", .height = 180, .build = stateless(buildRadioGroup) },
+    .{ .name = "switch", .height = 160, .build = stateless(buildSwitch) },
+    .{ .name = "slider", .height = 180, .build = stateless(buildSlider) },
+    .{ .name = "progress", .height = 140, .build = stateless(buildProgress) },
+    .{ .name = "badge", .height = 140, .build = stateless(buildBadge) },
+    .{ .name = "avatar", .height = 160, .build = stateless(buildAvatar) },
+    .{ .name = "card", .height = 300, .build = stateless(buildCard) },
+    .{ .name = "panel", .height = 180, .build = stateless(buildPanel) },
+    .{ .name = "alert", .height = 220, .build = stateless(buildAlert) },
+    .{ .name = "accordion", .height = 240, .build = buildAccordion, .model = .{ .flags = .{ true, false, false, false } } },
+    .{ .name = "tabs", .height = 230, .build = buildTabs },
+    .{ .name = "menu", .height = 280, .build = stateless(buildMenu) },
+    .{ .name = "tooltip", .height = 160, .build = stateless(buildTooltip) },
+    .{ .name = "bubble", .height = 200, .build = stateless(buildBubble) },
+    .{ .name = "breadcrumb", .height = 140, .build = stateless(buildBreadcrumb) },
+    .{ .name = "pagination", .height = 150, .build = stateless(buildPagination) },
+    .{ .name = "list", .height = 260, .build = stateless(buildList) },
+    .{ .name = "table", .height = 240, .build = stateless(buildTable) },
+    .{ .name = "tree", .height = 280, .build = stateless(buildTree) },
+    .{ .name = "split", .height = 240, .build = stateless(buildSplit) },
+    .{ .name = "scroll", .height = 240, .build = stateless(buildScroll) },
+    .{ .name = "dialog", .height = 310, .build = buildDialog, .model = .{ .open = true } },
+    .{ .name = "drawer", .height = 300, .build = stateless(buildDrawer) },
+    .{ .name = "sheet", .height = 300, .build = stateless(buildSheet) },
+    .{ .name = "separator", .height = 200, .build = stateless(buildSeparator) },
+    .{ .name = "skeleton", .height = 200, .build = stateless(buildSkeleton) },
+    .{ .name = "spinner", .height = 140, .build = stateless(buildSpinner) },
+    .{ .name = "markdown", .height = 440, .build = stateless(buildMarkdown) },
+    .{ .name = "icon", .height = 150, .build = stateless(buildIconHero) },
+    .{ .name = "chart", .height = 260, .build = stateless(buildChart) },
+    .{ .name = "status-bar", .height = 170, .build = stateless(buildStatusBar) },
+    .{ .name = "stepper", .height = 160, .build = stateless(buildStepper) },
+    .{ .name = "timeline", .height = 320, .build = stateless(buildTimeline) },
 };
 
 pub fn sceneByName(name: []const u8) ?*const Scene {
@@ -105,7 +166,7 @@ pub fn sceneByName(name: []const u8) ?*const Scene {
 
 // ------------------------------------------------------------- scenes
 
-/// Padded, centered preview tile on the background token — the docs-
+/// Padded, centered preview tile on the background token — the house style
 /// component-preview framing.
 fn tile(ui: *Ui, children: anytype) Node {
     return ui.column(.{ .padding = 32, .main = .center, .cross = .center, .grow = 1 }, children);
@@ -212,10 +273,37 @@ fn buildTextarea(ui: *Ui) Node {
     });
 }
 
-fn buildSelect(ui: *Ui) Node {
-    return tile(ui, .{
+const select_options = [_][]const u8{ "Production", "Staging", "Preview" };
+
+/// Model-driven select: the trigger toggles the anchored dropdown open,
+/// a menu item picks its option and closes, Escape/click-outside
+/// dismisses — the sanctioned picker shape (stack wraps the trigger,
+/// the anchored dropdown_menu is its sibling, rendered only while open).
+fn buildSelect(ui: *Ui, model: *const SceneModel) Node {
+    const active: usize = @min(model.index, select_options.len - 1);
+    const trigger = ui.el(.select, .{
+        .text = select_options[active],
+        .selected = model.open,
+        .on_press = .toggle_open,
+    }, .{});
+    const picker = if (model.open)
+        ui.stack(.{}, .{
+            trigger,
+            ui.el(.dropdown_menu, .{
+                .anchor = .below,
+                .anchor_alignment = .stretch,
+                .on_dismiss = .{ .set_open = false },
+            }, .{
+                ui.el(.menu_item, .{ .text = select_options[0], .selected = active == 0, .on_press = .{ .choose = 0 } }, .{}),
+                ui.el(.menu_item, .{ .text = select_options[1], .selected = active == 1, .on_press = .{ .choose = 1 } }, .{}),
+                ui.el(.menu_item, .{ .text = select_options[2], .selected = active == 2, .on_press = .{ .choose = 2 } }, .{}),
+            }),
+        })
+    else
+        ui.stack(.{}, .{trigger});
+    return ui.column(.{ .padding = 32, .main = .center, .cross = .center, .grow = 1 }, .{
         ui.column(.{ .gap = 12, .width = 240 }, .{
-            ui.el(.select, .{ .text = "Production" }, .{}),
+            picker,
             ui.el(.select, .{ .text = "Staging", .disabled = true }, .{}),
         }),
     });
@@ -310,9 +398,11 @@ fn buildAvatar(ui: *Ui) Node {
 }
 
 fn buildCard(ui: *Ui) Node {
+    // No hand-added inset: the card composite carries the house 24px
+    // content padding by default.
     return tile(ui, .{
         ui.el(.card, .{ .width = 340 }, .{
-            ui.column(.{ .gap = 12, .padding = 4 }, .{
+            ui.column(.{ .gap = 12 }, .{
                 ui.text(.{}, "Deploy your app"),
                 ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "The runtime packages your views, commands, and assets into one native binary."),
                 ui.row(.{ .gap = 8 }, .{
@@ -338,35 +428,84 @@ fn buildPanel(ui: *Ui) Node {
 fn buildAlert(ui: *Ui) Node {
     return tile(ui, .{
         ui.column(.{ .gap = 12, .width = 380 }, .{
-            ui.el(.alert, .{ .text = "A new version of the shell is available." }, .{}),
+            // Title + description: children hang under the title, past
+            // the icon column (the standard callout grid).
+            ui.el(.alert, .{ .text = "A new version of the shell is available." }, .{
+                ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Restart the app to finish updating."),
+            }),
             ui.el(.alert, .{ .text = "Your session has expired. Sign in again.", .variant = .destructive }, .{}),
         }),
     });
 }
 
-fn buildAccordion(ui: *Ui) Node {
+/// Model-driven accordion: each item's expansion lives in a model flag,
+/// flipped through the item's real `on_toggle` dispatch — items size
+/// themselves (header band collapsed, header + content expanded), so a
+/// toggle reflows the column exactly like a real app.
+fn buildAccordion(ui: *Ui, model: *const SceneModel) Node {
     return tile(ui, .{
-        ui.column(.{ .gap = 8, .width = 380 }, .{
-            ui.el(.accordion, .{ .text = "Is it accessible?", .selected = true, .height = 116, .gap = 4 }, .{
-                ui.column(.{ .padding = 14 }, .{
-                    ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Yes. Widgets carry semantic roles and one roving focus set."),
+        ui.column(.{ .width = 380 }, .{
+            accordionItem(ui, model, 0, "Is it accessible?", "Yes. Widgets carry semantic roles and one roving focus set."),
+            accordionItem(ui, model, 1, "Is it styled?", "Yes. Components default to the house look, driven by design tokens."),
+        }),
+    });
+}
+
+fn accordionItem(ui: *Ui, model: *const SceneModel, comptime slot: u8, title: []const u8, body: []const u8) Node {
+    return ui.el(.accordion, .{
+        .text = title,
+        .selected = model.flags[slot],
+        .on_toggle = .{ .toggle_flag = slot },
+    }, .{
+        ui.column(.{}, .{
+            ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, body),
+            // The house content inset: breathing room above the item's
+            // hairline separator.
+            ui.column(.{ .height = 14 }, .{}),
+        }),
+    });
+}
+
+const tab_labels = [_][]const u8{ "Account", "Password", "Team" };
+const tab_bodies = [_][]const u8{
+    "Make changes to your account here.",
+    "Change your password here.",
+    "Invite and manage your team here.",
+};
+
+/// Model-driven tabs: the triggers sit in the tabs component's own
+/// TabsList container; pressing one selects its index and the panel
+/// below re-renders from the model.
+fn buildTabs(ui: *Ui, model: *const SceneModel) Node {
+    const active: usize = @min(model.index, tab_labels.len - 1);
+    return tile(ui, .{
+        ui.column(.{ .gap = 12, .width = 340 }, .{
+            // A row wrapper lets the TabsList hug its triggers (w-fit)
+            // while the panel below stretches to the column width.
+            ui.row(.{}, .{
+                ui.el(.tabs, .{}, .{
+                    tabTrigger(ui, model, 0),
+                    tabTrigger(ui, model, 1),
+                    tabTrigger(ui, model, 2),
                 }),
+                ui.spacer(1),
             }),
-            ui.el(.accordion, .{ .text = "Is it styled?", .height = 44 }, .{
-                ui.text(.{}, ""),
+            ui.panel(.{ .padding = 16 }, .{
+                ui.column(.{ .gap = 4 }, .{
+                    ui.text(.{}, tab_labels[active]),
+                    ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, tab_bodies[active]),
+                }),
             }),
         }),
     });
 }
 
-fn buildTabs(ui: *Ui) Node {
-    return tile(ui, .{
-        ui.el(.tabs, .{}, .{
-            ui.el(.segmented_control, .{ .text = "Account", .selected = true }, .{}),
-            ui.el(.segmented_control, .{ .text = "Password" }, .{}),
-            ui.el(.segmented_control, .{ .text = "Team" }, .{}),
-        }),
-    });
+fn tabTrigger(ui: *Ui, model: *const SceneModel, comptime index: u8) Node {
+    return ui.el(.segmented_control, .{
+        .text = tab_labels[index],
+        .selected = model.index == index,
+        .on_press = .{ .select_index = index },
+    }, .{});
 }
 
 fn buildMenu(ui: *Ui) Node {
@@ -435,7 +574,7 @@ fn buildPagination(ui: *Ui) Node {
 
 fn buildList(ui: *Ui) Node {
     return tile(ui, .{
-        ui.list(.{ .width = 340, .gap = 2 }, .{
+        ui.list(.{ .width = 340 }, .{
             ui.listItem(.{ .icon = "file-text" }, "Quarterly report.md"),
             ui.listItem(.{ .icon = "file-text", .selected = true }, "Launch checklist.md"),
             ui.listItem(.{ .icon = "folder" }, "Archive"),
@@ -528,9 +667,17 @@ fn surfaceTitleSpacer(ui: *Ui) Node {
     return ui.column(.{ .height = 34 }, .{});
 }
 
-fn buildDialog(ui: *Ui) Node {
+/// Model-driven dialog: Escape/click-outside dismisses through
+/// `on_dismiss` (the model owns the close), and the reopen button the
+/// closed state renders brings it back — the full open/close loop.
+fn buildDialog(ui: *Ui, model: *const SceneModel) Node {
+    if (!model.open) {
+        return tile(ui, .{
+            ui.button(.{ .variant = .outline, .on_press = .{ .set_open = true } }, "Reopen dialog"),
+        });
+    }
     return tile(ui, .{
-        ui.el(.dialog, .{ .text = "Rename note", .width = 380, .height = 240, .padding = 24 }, .{
+        ui.el(.dialog, .{ .text = "Rename note", .width = 380, .height = 240, .padding = 24, .on_dismiss = .{ .set_open = false } }, .{
             ui.column(.{ .gap = 14 }, .{
                 surfaceTitleSpacer(ui),
                 ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "The new name shows up everywhere this note is linked."),

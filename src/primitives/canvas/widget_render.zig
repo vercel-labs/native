@@ -194,14 +194,16 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
-        .stack, .row, .column, .grid, .data_grid, .table, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .data_row, .split, .tree => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
+        .stack, .row, .column, .grid, .data_grid, .table, .list, .breadcrumb, .button_group, .pagination, .radio_group, .toggle_group, .data_row, .split, .tree => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
+        .tabs => try emitTabsWidget(builder, paint_widget, tokens, depth),
         .scroll_view => try emitScrollViewWidget(builder, paint_widget, tokens, depth),
         .alert => try emitAlertWidget(builder, paint_widget, tokens, depth),
         .card => try emitCardWidget(builder, paint_widget, tokens, depth),
         .dialog => try emitDialogSurfaceWidget(builder, paint_widget, tokens, depth),
         .drawer => try emitDrawerSurfaceWidget(builder, paint_widget, tokens, depth),
         .sheet => try emitSheetSurfaceWidget(builder, paint_widget, tokens, depth),
-        .accordion, .bubble, .resizable, .panel => try emitPanelWidget(builder, paint_widget, tokens, depth),
+        .accordion => try emitAccordionWidget(builder, paint_widget, tokens, depth),
+        .bubble, .resizable, .panel => try emitPanelWidget(builder, paint_widget, tokens, depth),
         .popover => try emitPopoverWidget(builder, paint_widget, tokens, depth),
         .menu_surface, .dropdown_menu => try emitMenuSurfaceWidget(builder, paint_widget, tokens, depth),
         .text => try emitTextWidget(builder, paint_widget, tokens),
@@ -216,7 +218,12 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         .search_field, .combobox => try widget_render_controls.emitSearchFieldWidget(builder, paint_widget, tokens),
         .tooltip => try widget_render_controls.emitTooltipWidget(builder, paint_widget, tokens),
         .menu_item => try widget_render_controls.emitMenuItemWidget(builder, paint_widget, tokens),
-        .list_item => try widget_render_controls.emitListItemWidget(builder, paint_widget, tokens),
+        .list_item => {
+            try widget_render_controls.emitListItemWidget(builder, paint_widget, tokens);
+            // Custom row content (the list-row composite): children flow
+            // inside the flat wash chrome.
+            try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
+        },
         .data_cell => try emitDataCellContent(builder, paint_widget, tokens),
         .status_bar => try emitStatusBarWidget(builder, paint_widget, tokens),
         .segmented_control => try widget_render_controls.emitSegmentedControlWidget(builder, paint_widget, tokens),
@@ -310,7 +317,8 @@ fn emitWidgetLayoutNodeContent(
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
-        .stack, .row, .column, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .data_row, .split, .tree => {},
+        .stack, .row, .column, .breadcrumb, .button_group, .pagination, .radio_group, .toggle_group, .data_row, .split, .tree => {},
+        .tabs => try widget_render_surfaces.emitTabsListWidgetChrome(builder, paint_widget, tokens),
         .grid, .data_grid, .table, .list => if (paint_widget.layout.virtualized) {
             try emitWidgetLayoutScrollableChildren(builder, layout, node_index, tokens, state, paint_widget);
             return;
@@ -330,7 +338,8 @@ fn emitWidgetLayoutNodeContent(
         .dialog => try widget_render_surfaces.emitDialogSurfaceWidgetChrome(builder, paint_widget, tokens),
         .drawer => try widget_render_surfaces.emitDrawerSurfaceWidgetChrome(builder, paint_widget, tokens),
         .sheet => try widget_render_surfaces.emitSheetSurfaceWidgetChrome(builder, paint_widget, tokens),
-        .accordion, .bubble, .resizable, .panel => try widget_render_surfaces.emitPanelWidgetChrome(builder, paint_widget, tokens),
+        .accordion => try widget_render_surfaces.emitAccordionWidgetChrome(builder, paint_widget, tokens),
+        .bubble, .resizable, .panel => try widget_render_surfaces.emitPanelWidgetChrome(builder, paint_widget, tokens),
         .popover => try widget_render_surfaces.emitPopoverWidgetChrome(builder, paint_widget, tokens),
         .menu_surface, .dropdown_menu => try widget_render_surfaces.emitMenuSurfaceWidgetChrome(builder, paint_widget, tokens),
         .text => try emitTextWidget(builder, paint_widget, tokens),
@@ -456,7 +465,8 @@ fn widgetContentClip(widget: Widget, tokens: DesignTokens) Clip {
 fn widgetContentClipRadius(widget: Widget, tokens: DesignTokens) Radius {
     if (!widget.layout.clip_content) return .{};
     return switch (widget.kind) {
-        .accordion, .alert, .bubble, .card, .resizable, .panel, .menu_surface, .dropdown_menu => Radius.all(tokens.radius.lg),
+        .alert, .bubble, .card, .resizable, .panel, .menu_surface, .dropdown_menu => Radius.all(tokens.radius.lg),
+        .accordion => .{},
         .dialog, .popover => Radius.all(tokens.radius.xl),
         .drawer, .sheet => Radius.all(tokens.radius.lg),
         .tooltip => Radius.all(tokens.radius.md),
@@ -491,7 +501,17 @@ fn emitSheetSurfaceWidget(builder: *Builder, widget: Widget, tokens: DesignToken
 
 fn emitPanelWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
     try widget_render_surfaces.emitPanelWidgetChrome(builder, widget, tokens);
+    try emitWidgetClippedChildren(builder, widget, tokens, depth);
+}
+
+fn emitAccordionWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
+    try widget_render_surfaces.emitAccordionWidgetChrome(builder, widget, tokens);
     if (!accordionChildrenVisible(widget)) return;
+    try emitWidgetClippedChildren(builder, widget, tokens, depth);
+}
+
+fn emitTabsWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
+    try widget_render_surfaces.emitTabsListWidgetChrome(builder, widget, tokens);
     try emitWidgetClippedChildren(builder, widget, tokens, depth);
 }
 

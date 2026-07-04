@@ -384,7 +384,7 @@ pub fn Ui(comptime Msg: type) type {
             /// Press-and-hold Msg: a pointer held down on this element
             /// for ~350 ms dispatches it (the release then presses
             /// nothing), while a quick click dispatches `on_press` as
-            /// usual — the click-acts, hold-reveals menu-button shape. A
+            /// usual — the SwiftUI Menu + primaryAction shape. A
             /// secondary click (right/ctrl-click) with no context menu on
             /// the route dispatches it immediately, the desktop
             /// alternative. Like `on_press`, binding it makes the element
@@ -843,7 +843,7 @@ pub fn Ui(comptime Msg: type) type {
             return self.el(.checkbox, options, .{});
         }
 
-        /// Avatar: a pill-clipped image with an initials
+        /// house-style avatar: a pill-clipped image with an initials
         /// fallback. With `options.image` set to a registered ImageId the
         /// engine clips the image to the avatar circle (`cover` fit);
         /// with no image (0) it renders `initials` centered — so an app
@@ -1040,7 +1040,7 @@ pub fn Ui(comptime Msg: type) type {
             return .pending;
         }
 
-        /// Stage stepper (house stepper conventions: item + indicator +
+        /// Stage stepper (the house stepper conventions: item + indicator +
         /// title joined by separators): a horizontal row of steps whose
         /// completed/active/pending states derive from `options.active`.
         /// Indicators are badges — a check for completed steps, the step
@@ -1111,7 +1111,7 @@ pub fn Ui(comptime Msg: type) type {
             semantics: canvas.WidgetSemantics = .{},
         };
 
-        /// Timeline/ledger list (house timeline conventions: item +
+        /// Timeline/ledger list (the house timeline conventions: item +
         /// indicator + separator + title/description/meta): a column of
         /// `timelineItem` nodes.
         pub fn timeline(self: *Self, options: TimelineOptions, items: anytype) Node {
@@ -1542,10 +1542,26 @@ pub fn Ui(comptime Msg: type) type {
             return nodes;
         }
 
+        /// The ergonomic per-kind layout defaults
+        /// (`canvas.widgetKindDefaultLayout`): a bare `.card` carries
+        /// the house content padding, a bare `.tabs` hugs its triggers
+        /// like a TabsList. Only padding/gap (and a non-stretch cross
+        /// default) apply, and only when the author left them at zero —
+        /// explicit spacing always wins.
+        fn applyKindDefaultLayout(kind: WidgetKind, options: ElementOptions, layout: *canvas.WidgetLayoutStyle) void {
+            if (options.padding != 0 or options.gap != 0) return;
+            const defaults = canvas.widgetKindDefaultLayout(kind, options.size) orelse return;
+            layout.padding = defaults.padding;
+            layout.gap = defaults.gap;
+            if (layout.cross_alignment == .stretch and defaults.cross_alignment != .stretch) {
+                layout.cross_alignment = defaults.cross_alignment;
+            }
+        }
+
         fn widgetFromOptions(kind: WidgetKind, options: ElementOptions) Widget {
             warnStackContainerGap(kind, options.gap);
             warnUnknownIconName(options.icon);
-            return .{
+            var widget: Widget = .{
                 .kind = kind,
                 .frame = options.frame,
                 .opacity = options.opacity,
@@ -1594,6 +1610,8 @@ pub fn Ui(comptime Msg: type) type {
                 .semantics = options.semantics,
                 .window_drag = options.window_drag,
             };
+            applyKindDefaultLayout(kind, options, &widget.layout);
+            return widget;
         }
 
         /// The synthesized drag handle between a split's panes: the ARIA

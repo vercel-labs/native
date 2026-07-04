@@ -650,7 +650,7 @@
     },
     "select": {
       "width": 1120,
-      "height": 360
+      "height": 560
     },
     "combobox": {
       "width": 1120,
@@ -706,7 +706,7 @@
     },
     "tabs": {
       "width": 1120,
-      "height": 320
+      "height": 460
     },
     "menu": {
       "width": 1120,

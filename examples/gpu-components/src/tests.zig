@@ -597,14 +597,21 @@ test "gpu components display list renders stable reference snapshot" {
     // Regenerated 2026-07-04: layout measures with the bundled face's real
     // advance table (estimator wave); sub-pixel text shifts only,
     // spot-reviewed against the previous render — no layout change.
-    // Regenerated 2026-07-04 (component fidelity sweep): default palette is
-    // the neutral + blue-violet house preset; switch is a borderless
+    // Regenerated 2026-07-04 (the component fidelity sweep): default palette is
+    // the house neutral + blue-violet preset; switch is a borderless
     // 44x24 pill with a 20px thumb; checkbox/radio are 16px; slider has a
     // 6px track and primary-ringed thumb; the progress track is
     // primary/20; tabs select by elevation instead of accent fill; the
     // search magnifier is the vector icon. Reviewed against before/after
     // captures at 1x and 2x in light, dark, and high-contrast.
-    try std.testing.expectEqual(@as(u64, 15323564732161785260), referenceSurfaceSignature(pixels));
+    // Regenerated 2026-07-04 (docs-preview review round 2): the tabs list
+    // is one muted container with transparent inactive triggers, the
+    // accordion is borderless with the registry chevron, the alert wears
+    // the registry info mark aligned to its first text line, and the
+    // catalog cards pin their compact 16px inset explicitly (the card
+    // component default is now the component default of 24). Spot-reviewed via a full
+    // reference render dump before blessing.
+    try std.testing.expectEqual(@as(u64, 15979582546869592762), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));

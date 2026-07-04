@@ -696,7 +696,7 @@ pub fn builtinComponentWidget(kind: BuiltinComponentKind, options: BuiltinCompon
         .value = options.value,
         .layer = options.layer,
         .state = options.state,
-        .layout = builtinComponentLayout(kind, options.layout),
+        .layout = builtinComponentLayout(kind, options.size orelse builtinComponentDefaultSize(kind), options.layout),
         .variant = options.variant orelse builtinComponentDefaultVariant(kind),
         .size = options.size orelse builtinComponentDefaultSize(kind),
         .style = options.style,
@@ -904,21 +904,49 @@ fn builtinComponentSemantics(descriptor: BuiltinComponentDescriptor, semantics: 
     return next;
 }
 
-fn builtinComponentLayout(kind: BuiltinComponentKind, layout: WidgetLayoutStyle) WidgetLayoutStyle {
-    if (!widgetLayoutStyleIsDefault(layout)) return layout;
-
+/// Ergonomic per-kind layout defaults for the composite surfaces whose
+/// house reference carries built-in content spacing, shared by EVERY
+/// authoring path — `builtinComponentWidget` and (via the ui builder,
+/// which both markup engines build through) `Ui.el` — so a bare `.card`
+/// never renders children flush against its border. Consulted only when
+/// the author left the relevant layout fields untouched; any explicit
+/// spacing wins.
+pub fn widgetKindDefaultLayout(kind: WidgetKind, size: WidgetSize) ?WidgetLayoutStyle {
     return switch (kind) {
-        .alert,
-        .bubble,
-        .card,
-        => .{
+        // house cards carry 24px of content padding (16 compact).
+        .card => .{
+            .padding = geometry.InsetsF.all(if (size == .sm) 16 else 24),
+            .gap = 12,
+            .clip_content = true,
+        },
+        .alert, .bubble => .{
             .padding = geometry.InsetsF.all(16),
             .gap = 12,
             .clip_content = true,
         },
-        .accordion,
-        .resizable,
-        => .{
+        // The house TabsList: one muted rounded container hugging its
+        // triggers with 3px of padding; the active trigger lifts to the
+        // surface, so the container itself provides the wash and the
+        // triggers need no gap between them.
+        .tabs => .{
+            .padding = geometry.InsetsF.all(3),
+            .cross_alignment = .center,
+        },
+        // house accordion items are borderless rows — trigger band and
+        // hairline separator are chrome-drawn, so the item carries no
+        // inset of its own and content spacing belongs to the content
+        // column the author supplies.
+        .accordion => null,
+        else => null,
+    };
+}
+
+fn builtinComponentLayout(kind: BuiltinComponentKind, size: WidgetSize, layout: WidgetLayoutStyle) WidgetLayoutStyle {
+    if (!widgetLayoutStyleIsDefault(layout)) return layout;
+    if (widgetKindDefaultLayout(builtinComponentDescriptor(kind).root_widget_kind, size)) |defaults| return defaults;
+
+    return switch (kind) {
+        .resizable => .{
             .padding = geometry.InsetsF.all(12),
             .gap = 8,
             .clip_content = true,
@@ -940,11 +968,13 @@ fn builtinComponentLayout(kind: BuiltinComponentKind, layout: WidgetLayoutStyle)
         .button_group,
         .pagination,
         .radio_group,
-        .tabs,
         .toggle_group,
         => .{
             .gap = 4,
             .cross_alignment = .center,
+        },
+        .accordion => .{
+            .clip_content = true,
         },
         .table => .{
             .clip_content = true,

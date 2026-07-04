@@ -3,7 +3,7 @@ import { AttrTable } from "@/components/attr-table";
 
 # Card & Panel
 
-Surface containers: `card` is the bordered, elevated surface and `panel` is the plain one (background, border, radius). Both are stacking containers — children layer on top of each other and `gap` is rejected — so put a single `column` (or `row`) inside for flow; `padding` applies on the surface itself. Binding `on-press` makes the whole surface pressable, the list-of-cards pattern.
+Surface containers: `card` is the bordered, elevated surface and `panel` is the plain one (background, border, radius). Both are stacking containers — children layer on top of each other and `gap` is rejected — so put a single `column` (or `row`) inside for flow. Cards carry 24px of content padding by default (the house inset; 16 at `size="sm"`) — set `padding` explicitly to override it. Binding `on-press` makes the whole surface pressable, the list-of-cards pattern.
 
 <ComponentPreview name="card" alt="A card rendered by the engine" />
 
@@ -11,7 +11,7 @@ Surface containers: `card` is the bordered, elevated surface and `panel` is the 
 
 ```html
 <card width="340">
-  <column gap="12" padding="4">
+  <column gap="12">
     <text>Deploy your app</text>
     <text wrap="true" foreground="text_muted">The runtime packages your views, commands, and assets into one native binary.</text>
     <row gap="8">
@@ -26,7 +26,7 @@ Surface containers: `card` is the bordered, elevated surface and `panel` is the 
 
 ```zig
 ui.el(.card, .{ .width = 340 }, .{
-    ui.column(.{ .gap = 12, .padding = 4 }, .{
+    ui.column(.{ .gap = 12 }, .{
         ui.text(.{}, "Deploy your app"),
         ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "The runtime packages your views, commands, and assets into one native binary."),
         ui.row(.{ .gap = 8 }, .{

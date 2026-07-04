@@ -13,10 +13,13 @@
 //! list actually changed so an idle preview never repaints.
 //!
 //! Everything is fixed-capacity and single-threaded, exactly like the
-//! engine on every other target. Effects never run here: scenes are
-//! retained widget trees with no Model/Msg app behind them, so the
-//! interactivity is precisely the engine-owned control state (hover,
-//! focus, toggles, radios, text editing, sliders, scroll).
+//! engine on every other target. Effects never run here. Interactivity
+//! is the engine-owned control state (hover, focus, toggles, radios,
+//! text editing, sliders, scroll) PLUS each scene's mini-model: widget
+//! events (press, toggle, dismiss, keyboard activation) route through
+//! the scene tree's typed handler table into `preview_scenes.update`,
+//! and the changed model rebuilds the tree — the same dispatch loop a
+//! real UiApp runs, shrunk to the scene catalog's needs.
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
@@ -53,10 +56,19 @@ fn noopLog(
 const Preview = struct {
     null_platform: platform.NullPlatform,
     runtime: native_sdk.Runtime,
-    arena: std.heap.ArenaAllocator,
+    /// Two build arenas, swapped on every rebuild (the UiApp shape): the
+    /// previous tree's handler table must stay valid while an event from
+    /// it is still being dispatched.
+    arenas: [2]std.heap.ArenaAllocator,
+    arena_index: usize = 0,
     /// Layout scratch: the widget tree nodes live here for the
     /// instance's lifetime (the runtime reconciles from them on install).
     layout_nodes: [native_sdk.runtime.max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode,
+    scene: *const preview_scenes.Scene,
+    /// The scene's mini-model; widget events update it and rebuild.
+    model: preview_scenes.SceneModel = .{},
+    /// The current tree's typed handler table (msgFor* dispatch).
+    tree: ?preview_scenes.Ui.Tree = null,
     width: f32 = 0,
     height: f32 = 0,
     dark: bool = false,
@@ -75,9 +87,36 @@ const Preview = struct {
             .context = self,
             .name = "docs-live-preview",
             .source = platform.WebViewSource.html("<h1>preview</h1>"),
+            .event_fn = previewEventFn,
         };
     }
 };
+
+/// The mini-model dispatch loop: resolve runtime widget events through
+/// the scene tree's typed handler table — the same seams `UiApp` uses —
+/// update the model, and rebuild. Scenes without handlers never resolve
+/// a Msg, so stateless previews cost nothing here.
+fn previewEventFn(context: *anyopaque, runtime: *native_sdk.Runtime, event: native_sdk.runtime.Event) anyerror!void {
+    const self: *Preview = @ptrCast(@alignCast(context));
+    _ = runtime;
+    const tree = &(self.tree orelse return);
+    const msg: ?preview_scenes.Msg = switch (event) {
+        .canvas_widget_pointer => |pointer_event| blk: {
+            const target = pointer_event.press_target orelse break :blk null;
+            break :blk tree.msgForPointer(target.id, pointer_event.pointer.phase);
+        },
+        .canvas_widget_keyboard => |keyboard_event| blk: {
+            const target = keyboard_event.target orelse break :blk null;
+            break :blk tree.msgForKeyboard(target.id, keyboard_event.keyboard);
+        },
+        .canvas_widget_dismiss => |dismiss_event| tree.msgForDismiss(dismiss_event.id),
+        else => null,
+    };
+    if (msg) |value| {
+        preview_scenes.update(&self.model, value);
+        rebuildScene(self) catch {};
+    }
+}
 
 fn tokensForScheme(dark: bool) canvas.DesignTokens {
     return canvas.DesignTokens.theme(.{ .color_scheme = if (dark) .dark else .light });
@@ -126,7 +165,14 @@ export fn preview_create(name_ptr: ?[*]const u8, name_len: usize, dark: u32) ?*P
 
     self.null_platform = platform.NullPlatform.init(.{ .size = geometry.SizeF.init(scene.width, scene.height) });
     self.null_platform.gpu_surfaces = true;
-    self.arena = std.heap.ArenaAllocator.init(allocator);
+    self.arenas = .{
+        std.heap.ArenaAllocator.init(allocator),
+        std.heap.ArenaAllocator.init(allocator),
+    };
+    self.arena_index = 0;
+    self.scene = scene;
+    self.model = scene.model;
+    self.tree = null;
     self.width = scene.width;
     self.height = scene.height;
     self.dark = dark != 0;
@@ -136,15 +182,16 @@ export fn preview_create(name_ptr: ?[*]const u8, name_len: usize, dark: u32) ?*P
     self.rendered_animating = false;
     native_sdk.Runtime.initAt(&self.runtime, .{ .platform = self.null_platform.platform() });
 
-    installScene(self, scene) catch {
-        self.arena.deinit();
+    installScene(self) catch {
+        self.arenas[0].deinit();
+        self.arenas[1].deinit();
         allocator.destroy(self);
         return null;
     };
     return self;
 }
 
-fn installScene(self: *Preview, scene: *const preview_scenes.Scene) !void {
+fn installScene(self: *Preview) !void {
     const app = self.app();
     try self.runtime.dispatchPlatformEvent(app, .app_start);
     try self.runtime.dispatchPlatformEvent(app, .{ .surface_resized = self.null_platform.surface_value });
@@ -153,20 +200,34 @@ fn installScene(self: *Preview, scene: *const preview_scenes.Scene) !void {
         .window_id = 1,
         .label = view_label,
         .kind = .gpu_surface,
-        .frame = geometry.RectF.init(0, 0, scene.width, scene.height),
+        .frame = geometry.RectF.init(0, 0, self.width, self.height),
     });
 
+    try rebuildScene(self);
+}
+
+/// Build the scene from its mini-model, hand the layout to the runtime
+/// (which reconciles engine-owned control state by id), and re-emit the
+/// display list with the current theme's tokens. Runs on install, on
+/// every dispatched Msg, and on theme swaps (token-resolved styles like
+/// muted text re-resolve here).
+fn rebuildScene(self: *Preview) !void {
     const tokens = tokensForScheme(self.dark);
-    var ui = Ui.init(self.arena.allocator());
-    const tree = try ui.finalizeWithTokens(scene.build(&ui), tokens);
-    const layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, scene.width, scene.height), &self.layout_nodes);
+    const next_index = self.arena_index ^ 1;
+    _ = self.arenas[next_index].reset(.retain_capacity);
+    var ui = Ui.init(self.arenas[next_index].allocator());
+    const tree = try ui.finalizeWithTokens(self.scene.build(&ui, &self.model), tokens);
+    const layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, self.width, self.height), &self.layout_nodes);
     _ = try self.runtime.setCanvasWidgetLayout(1, view_label, layout);
     _ = try self.runtime.emitCanvasWidgetDisplayList(1, view_label, tokens);
+    self.tree = tree;
+    self.arena_index = next_index;
 }
 
 export fn preview_destroy(self: ?*Preview) void {
     const p = self orelse return;
-    p.arena.deinit();
+    p.arenas[0].deinit();
+    p.arenas[1].deinit();
     allocator.destroy(p);
 }
 
@@ -178,14 +239,17 @@ export fn preview_logical_height(self: ?*Preview) f32 {
     return (self orelse return 0).height;
 }
 
-/// Re-skin the retained scene for the docs theme. Control state
-/// (focus, toggles, typed text) is retained across the re-emit.
+/// Re-skin the retained scene for the docs theme: a full rebuild, so
+/// token-resolved widget styles (muted text resolved at finalize time)
+/// re-resolve against the new scheme. Engine-owned control state
+/// (focus, toggles, typed text) is retained through the layout
+/// reconcile.
 export fn preview_set_theme(self: ?*Preview, dark: u32) u32 {
     const p = self orelse return 0;
     const wants_dark = dark != 0;
     if (p.dark == wants_dark) return 1;
     p.dark = wants_dark;
-    _ = p.runtime.emitCanvasWidgetDisplayList(1, view_label, tokensForScheme(wants_dark)) catch return 0;
+    rebuildScene(p) catch return 0;
     // Theme swaps must repaint even if the revision bookkeeping ever
     // treats a pure re-emit as clean.
     p.rendered_revision = std.math.maxInt(u64);
@@ -304,6 +368,20 @@ export fn preview_text_input_active(self: ?*Preview) u32 {
     const view = &p.runtime.views[0];
     if (!view.open or view.canvas_widget_focused_id == 0) return 0;
     return if (view.canEditCanvasWidgetText(view.canvas_widget_focused_id)) 1 else 0;
+}
+
+/// The engine's cursor channel for the pointer's current hover target
+/// (I-beam over text fields, pointer over pressable controls, resize
+/// over sliders/dividers), so the page can mirror it onto the canvas's
+/// CSS cursor. 0 default, 1 pointer, 2 text, 3 col-resize.
+export fn preview_cursor(self: ?*Preview) u32 {
+    const p = self orelse return 0;
+    return switch (p.runtime.views[0].canvas_widget_cursor) {
+        .arrow => 0,
+        .pointing_hand => 1,
+        .text => 2,
+        .resize_horizontal => 3,
+    };
 }
 
 /// Synthesize the per-tick `gpu_surface_frame` event a platform display

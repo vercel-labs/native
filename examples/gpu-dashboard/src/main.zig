@@ -34,13 +34,17 @@ const max_dashboard_commands: usize = native_sdk.runtime.max_canvas_commands_per
 const max_dashboard_glyphs: usize = native_sdk.runtime.max_canvas_glyphs_per_view;
 const max_dashboard_widgets: usize = 64;
 const dashboard_chrome_prefix_commands: usize = 6;
-// 69 after the house control sweep: the switch track dropped its
+// 69 after the component control sweep: the switch track dropped its
 // default border stroke and the inactive tab segments dropped theirs
 // (selection reads by elevation now), while the search field's magnifier
 // became a vector icon (5 hand-drawn lines -> transform + 2 stroked
 // paths + inverse transform).
-const expected_dashboard_command_count: usize = 69;
-const expected_dashboard_interaction_command_count: usize = 69;
+// Regenerated 2026-07-04 for the house tab-strip treatment treatment: an
+// UNSELECTED segmented control is transparent (its muted wash moved to
+// the tabs-list container), so the toolbar's mode trigger paints one
+// fewer fill.
+const expected_dashboard_command_count: usize = 68;
+const expected_dashboard_interaction_command_count: usize = 68;
 // Regenerated 2026-07-04: layout measures with the bundled face's real
 // advance table (estimator wave); spot-reviewed before/after — sub-pixel
 // text shifts only, no layout change.
@@ -52,7 +56,9 @@ const expected_dashboard_interaction_command_count: usize = 69;
 // primary-ringed thumb, and the search magnifier is the vector icon.
 // Reviewed via the gpu-components before/after captures (same emitters,
 // same reference renderer).
-const expected_dashboard_reference_signature: u64 = 17305926010706285595;
+// Regenerated 2026-07-04 with the same sweep (transparent unselected
+// tab trigger); reviewed via the docs tabs before/after captures.
+const expected_dashboard_reference_signature: u64 = 15711892093832014950;
 const expected_dashboard_widget_node_count: usize = 48;
 const expected_dashboard_snapshot_widget_count: usize = 48;
 const refresh_command = "dashboard.refresh";

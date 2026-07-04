@@ -35,6 +35,7 @@ interface PreviewExports {
   preview_text(handle: number, textPtr: number, textLen: number): void;
   preview_set_focused(handle: number, focused: number): void;
   preview_text_input_active(handle: number): number;
+  preview_cursor(handle: number): number;
   preview_frame(handle: number): void;
   preview_pixel_width(handle: number, scale: number): number;
   preview_pixel_height(handle: number, scale: number): number;
@@ -138,6 +139,25 @@ export class LivePreview {
   textInputActive(): boolean {
     if (this.destroyed) return false;
     return this.exports.preview_text_input_active(this.handle) !== 0;
+  }
+
+  /**
+   * The engine's cursor for the pointer's current hover target, mapped
+   * to a CSS cursor keyword: I-beam over text entry, pointer over
+   * pressable controls, col-resize over sliders and split dividers.
+   */
+  cursor(): string {
+    if (this.destroyed) return "default";
+    switch (this.exports.preview_cursor(this.handle)) {
+      case 1:
+        return "pointer";
+      case 2:
+        return "text";
+      case 3:
+        return "col-resize";
+      default:
+        return "default";
+    }
   }
 
   /**

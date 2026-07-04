@@ -678,11 +678,11 @@ test "runtime moves focus within house grouped component controls" {
         .{ .id = 52, .kind = .radio, .text = "List" },
     };
     const top_children = [_]canvas.Widget{
-        .{ .id = 10, .kind = .button_group, .frame = geometry.RectF.init(12, 12, 180, 34), .layout = builtinHouseGroupLayout(), .children = &button_group_buttons },
-        .{ .id = 20, .kind = .pagination, .frame = geometry.RectF.init(12, 56, 220, 34), .layout = builtinHouseGroupLayout(), .children = &pagination_buttons },
-        .{ .id = 30, .kind = .toggle_group, .frame = geometry.RectF.init(12, 100, 160, 34), .layout = builtinHouseGroupLayout(), .children = &toggle_buttons },
-        .{ .id = 40, .kind = .tabs, .frame = geometry.RectF.init(12, 144, 180, 34), .layout = builtinHouseGroupLayout(), .children = &tab_buttons },
-        .{ .id = 50, .kind = .radio_group, .frame = geometry.RectF.init(12, 188, 180, 34), .layout = builtinHouseGroupLayout(), .children = &radio_buttons },
+        .{ .id = 10, .kind = .button_group, .frame = geometry.RectF.init(12, 12, 180, 34), .layout = builtinShadcnGroupLayout(), .children = &button_group_buttons },
+        .{ .id = 20, .kind = .pagination, .frame = geometry.RectF.init(12, 56, 220, 34), .layout = builtinShadcnGroupLayout(), .children = &pagination_buttons },
+        .{ .id = 30, .kind = .toggle_group, .frame = geometry.RectF.init(12, 100, 160, 34), .layout = builtinShadcnGroupLayout(), .children = &toggle_buttons },
+        .{ .id = 40, .kind = .tabs, .frame = geometry.RectF.init(12, 144, 180, 34), .layout = builtinShadcnGroupLayout(), .children = &tab_buttons },
+        .{ .id = 50, .kind = .radio_group, .frame = geometry.RectF.init(12, 188, 180, 34), .layout = builtinShadcnGroupLayout(), .children = &radio_buttons },
         .{ .id = 90, .kind = .button, .frame = geometry.RectF.init(248, 12, 84, 34), .text = "Alone" },
     };
     var nodes: [24]canvas.WidgetLayoutNode = undefined;
@@ -718,7 +718,7 @@ test "runtime moves focus within house grouped component controls" {
     try std.testing.expectEqual(@as(canvas.ObjectId, 90), harness.runtime.views[0].canvas_widget_focused_id);
 }
 
-fn builtinHouseGroupLayout() canvas.WidgetLayoutStyle {
+fn builtinShadcnGroupLayout() canvas.WidgetLayoutStyle {
     return .{ .gap = 4, .cross_alignment = .center };
 }
 

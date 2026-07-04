@@ -184,8 +184,9 @@ fn songsView(ui: *Ui, model: *const Model) Ui.Node {
 // ------------------------------------------------------------- track rows
 
 fn trackList(ui: *Ui, rows: []const model_mod.TrackRow, label: []const u8) Ui.Node {
+    // Flat house rows: no inter-row gaps — the rows' washes are the only
+    // separation.
     return ui.el(.list, .{
-        .gap = 2,
         .semantics = .{ .role = .list, .label = label },
     }, ui.each(rows, trackKey, trackRowView));
 }
@@ -194,14 +195,20 @@ fn trackKey(row: *const model_mod.TrackRow) canvas.UiKey {
     return canvas.uiKey(row.id);
 }
 
-/// One pressable track row. The native context menu is the Zig-only piece:
-/// right/ctrl-click presents the OS menu and each item dispatches a typed
-/// Msg exactly like a press.
+/// One pressable track row: a FLAT list row (the list_item composite —
+/// no border, no card chrome; hover and the now-playing selection are
+/// full-width washes), with custom children flowing horizontally inside
+/// the wash. The native context menu is the Zig-only piece: right/ctrl-
+/// click presents the OS menu and each item dispatches a typed Msg
+/// exactly like a press.
 fn trackRowView(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
-    return ui.panel(.{
+    return ui.el(.list_item, .{
         .global_key = canvas.uiKey(@as(u32, row.id)),
         .height = 44,
         .padding = 10,
+        .gap = 12,
+        .cross = .center,
+        .selected = row.now,
         .on_press = Msg{ .play_track = row.id },
         // Two items per row on purpose: the per-view context-menu budget is
         // 128 items (canvas_limits), and the all-songs list mounts 48 rows.
@@ -209,12 +216,8 @@ fn trackRowView(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
             .{ .label = "Play Next", .msg = Msg{ .queue_track = row.id } },
             .{ .label = "Copy Title", .msg = Msg{ .copy_title = row.id } },
         },
-        .style_tokens = if (row.now)
-            .{ .background = .surface_subtle, .radius = .md }
-        else
-            .{ .radius = .md },
         .semantics = .{ .role = .listitem, .label = row.title },
-    }, ui.row(.{ .gap = 12, .cross = .center }, .{
+    }, .{
         trackIndicator(ui, row),
         if (row.subtitle.len == 0)
             ui.text(.{ .grow = 1, .style_tokens = if (row.now) .{ .foreground = .accent } else .{} }, row.title)
@@ -228,7 +231,7 @@ fn trackRowView(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
         else
             ui.el(.stack, .{}, .{}),
         durationText(ui, row.duration),
-    }));
+    });
 }
 
 /// The leading track-row slot: a vector play icon on the playing row, a

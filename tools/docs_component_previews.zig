@@ -51,7 +51,8 @@ fn renderScenePng(
     width: f32,
     height: f32,
     scheme: canvas.ColorScheme,
-    build: *const fn (ui: *Ui) Node,
+    build: *const fn (ui: *Ui, model: *const preview_scenes.SceneModel) Node,
+    model: preview_scenes.SceneModel,
     hover: ?Hover,
     png_path: []const u8,
 ) !void {
@@ -73,7 +74,7 @@ fn renderScenePng(
     defer arena_state.deinit();
     const tokens = canvas.DesignTokens.theme(.{ .color_scheme = scheme });
     var ui = Ui.init(arena_state.allocator());
-    const tree = try ui.finalizeWithTokens(build(&ui), tokens);
+    const tree = try ui.finalizeWithTokens(build(&ui, &model), tokens);
 
     const nodes = try gpa.alloc(canvas.WidgetLayoutNode, native_sdk.runtime.max_canvas_widget_nodes_per_view);
     defer gpa.free(nodes);
@@ -266,7 +267,7 @@ pub fn main(init: std.process.Init) !void {
             if (std.c.getenv("DOCS_PREVIEWS_TRACE") != null) std.debug.print("scene {s} ({s})\n", .{ scene.name, schemeName(scheme) });
             const png_path = try std.fmt.allocPrint(arena, "{s}/{s}-{s}.png", .{ png_cache_dir, scene.name, schemeName(scheme) });
             const webp_path = try std.fmt.allocPrint(arena, "{s}/{s}-{s}.webp", .{ out_dir, scene.name, schemeName(scheme) });
-            try renderScenePng(gpa, io, scene.width, scene.height, scheme, scene.build, scene.hover, png_path);
+            try renderScenePng(gpa, io, scene.width, scene.height, scheme, scene.build, scene.model, scene.hover, png_path);
             try encodeWebp(io, png_path, webp_path);
             rendered += 1;
         }
@@ -275,14 +276,15 @@ pub fn main(init: std.process.Init) !void {
     // The icon gallery: one small tile per registry icon, named after it.
     inline for (canvas.icons.known_icon_names) |icon_name| {
         const Builder = struct {
-            fn build(ui: *Ui) Node {
+            fn build(ui: *Ui, model: *const preview_scenes.SceneModel) Node {
+                _ = model;
                 return ui.column(.{ .main = .center, .cross = .center, .grow = 1 }, .{ui.icon(.{}, icon_name)});
             }
         };
         for (schemes) |scheme| {
             const png_path = try std.fmt.allocPrint(arena, "{s}/icon-{s}-{s}.png", .{ png_cache_dir, icon_name, schemeName(scheme) });
             const webp_path = try std.fmt.allocPrint(arena, "{s}/icons/{s}-{s}.webp", .{ out_dir, icon_name, schemeName(scheme) });
-            try renderScenePng(gpa, io, icon_tile_size, icon_tile_size, scheme, Builder.build, null, png_path);
+            try renderScenePng(gpa, io, icon_tile_size, icon_tile_size, scheme, Builder.build, .{}, null, png_path);
             try encodeWebp(io, png_path, webp_path);
             rendered += 1;
         }

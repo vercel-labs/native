@@ -82,6 +82,11 @@ pub fn layoutWidgetDepth(
         else
             try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
         .data_row => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
+        // A list row with custom content: children flow horizontally
+        // (gap-consuming, like a row) inside the flat wash chrome, so
+        // apps compose indicator/title/meta rows without reaching for
+        // bordered card surfaces. Text/icon-only items stay leaves.
+        .list_item => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
         .scroll_view => if (widget.layout.virtualized)
             try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens)
         else
@@ -102,7 +107,17 @@ pub fn layoutWidgetDepth(
                 }
             }
         },
-        .stack, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover => {
+        .alert => {
+            // Alert children (the description under a chrome-drawn
+            // title) hang past the icon column and start under the
+            // title line — the standard callout grid.
+            const child_content = alertContentFrame(widget, content, tokens);
+            for (widget.children) |child| {
+                if (child.layout.anchor != null) continue;
+                _ = try layoutWidgetDepth(child, stackChildFrame(child_content, child), index, depth + 1, output, len, tokens);
+            }
+        },
+        .stack, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover => {
             for (widget.children) |child| {
                 if (child.layout.anchor != null) continue;
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len, tokens);
@@ -111,7 +126,7 @@ pub fn layoutWidgetDepth(
         // Span paragraphs and span-carrying table cells share the link
         // hotspot child convention (no spans or no children is a no-op).
         .text, .data_cell => try layoutTextSpanLinkChildren(widget, content, index, depth, output, len, tokens),
-        .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .list_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner, .chart, .split_divider => {},
+        .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner, .chart, .split_divider => {},
     }
 
     // Anchored floating children are excluded from every flow above (they
@@ -385,7 +400,7 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
             }
             break :blk sum;
         },
-        .stack, .panel, .card, .alert, .bubble, .resizable, .popover => blk: {
+        .stack, .panel, .card, .bubble, .resizable, .popover => blk: {
             var max_height: f32 = 0;
             for (widget.children) |child| {
                 if (child.layout.anchor != null) continue;
@@ -393,6 +408,46 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
                 max_height = @max(max_height, wrappedVerticalExtentForWidth(child, child_width, tokens, depth + 1));
             }
             break :blk max_height;
+        },
+        // Alert children hang past the icon column and start under the
+        // title line (`alertContentFrame`), so wrapped descriptions
+        // measure at the indented width with the title's line reserved.
+        .alert => blk: {
+            const text_size = widgetBodyTextSize(widget, tokens);
+            const inset = widgetControlInset(widget, tokens, tokens.spacing.lg);
+            const icon_size = widgetSizedDensityValue(widget, tokens, 16);
+            const text_gap = widgetControlInset(widget, tokens, tokens.spacing.md);
+            const indent = if (widget.text.len > 0) icon_size + text_gap else 0;
+            var max_height: f32 = 0;
+            for (widget.children) |child| {
+                if (child.layout.anchor != null) continue;
+                const child_width = if (child.frame.width > 0) child.frame.width else @max(0, inner_width - indent);
+                max_height = @max(max_height, wrappedVerticalExtentForWidth(child, child_width, tokens, depth + 1));
+            }
+            var content = max_height;
+            if (widget.text.len > 0) {
+                const title_gap = widgetControlInset(widget, tokens, tokens.spacing.xs);
+                content = widgetLineHeight(text_size) + (if (max_height > 0) title_gap + max_height else 0);
+            }
+            // The same floor `intrinsicAlertWidgetSize` keeps, so wrapped
+            // and intrinsic measurements agree for short alerts.
+            const chrome_floor = @max(widgetSizedDensityValue(widget, tokens, 52), widgetLineHeight(text_size) + inset * 2);
+            break :blk @max(content, chrome_floor - padding.top - padding.bottom);
+        },
+        // Accordion content sits below the header band; wrapped content
+        // measures at the item's width so an expanded item reserves its
+        // real wrapped height.
+        .accordion => blk: {
+            const header_height = accordionHeaderHeight(widget, tokens);
+            if (!accordionChildrenVisible(widget)) break :blk header_height;
+            var max_height: f32 = 0;
+            for (widget.children) |child| {
+                if (child.layout.anchor != null) continue;
+                const child_width = if (child.frame.width > 0) child.frame.width else inner_width;
+                max_height = @max(max_height, wrappedVerticalExtentForWidth(child, child_width, tokens, depth + 1));
+            }
+            const gap = if (max_height > 0) nonNegative(widget.layout.gap) else 0;
+            break :blk header_height + gap + max_height;
         },
         .row, .data_row, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group => blk: {
             var max_height: f32 = 0;
@@ -880,10 +935,32 @@ fn accordionContentFrame(widget: Widget, content: geometry.RectF, tokens: Design
     return geometry.RectF.init(content.x, y, content.width, @max(0, content.maxY() - y));
 }
 
-fn accordionHeaderHeight(widget: Widget, tokens: DesignTokens) f32 {
+pub fn accordionHeaderHeight(widget: Widget, tokens: DesignTokens) f32 {
+    // The house trigger band: the label line with py-4 — a spacing.lg
+    // inset above and below it (density/size scaled).
     const text_size = widgetBodyTextSize(widget, tokens);
-    const inset = widgetControlInset(widget, tokens, tokens.spacing.md);
-    return @max(widgetControlHeight(widget, tokens), text_size + inset * 2);
+    const inset = widgetControlInset(widget, tokens, tokens.spacing.lg);
+    return @max(widgetControlHeight(widget, tokens), widgetLineHeight(text_size) + inset * 2);
+}
+
+/// Alert children start under the chrome-drawn title line and hang past
+/// the icon column (the standard callout grid: icon in column one, title and
+/// description stacked in column two). Text-less alerts keep the full
+/// content box.
+fn alertContentFrame(widget: Widget, content: geometry.RectF, tokens: DesignTokens) geometry.RectF {
+    if (widget.kind != .alert or widget.text.len == 0) return content;
+    const text_size = widgetBodyTextSize(widget, tokens);
+    const icon_size = widgetSizedDensityValue(widget, tokens, 16);
+    const text_gap = widgetControlInset(widget, tokens, tokens.spacing.md);
+    const title_gap = widgetControlInset(widget, tokens, tokens.spacing.xs);
+    const indent = @min(content.width, icon_size + text_gap);
+    const y = @min(content.maxY(), content.y + widgetLineHeight(text_size) + title_gap);
+    return geometry.RectF.init(
+        content.x + indent,
+        y,
+        @max(0, content.width - indent),
+        @max(0, content.maxY() - y),
+    );
 }
 
 pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
@@ -903,7 +980,13 @@ fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) 
         .search_field, .combobox => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 200), widgetControlHeight(widget, tokens)),
         .textarea => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 200), widgetSizedDensityValue(widget, tokens, 80)),
         .tooltip => intrinsicPaddedTextWidgetSize(widget, tokens, widgetLabelTextSize(widget, tokens), widgetControlInset(widget, tokens, tokens.spacing.sm)),
-        .menu_item, .list_item => intrinsicRowTextWidgetSize(widget, tokens),
+        .menu_item => intrinsicRowTextWidgetSize(widget, tokens),
+        .list_item => blk: {
+            const base = intrinsicRowTextWidgetSize(widget, tokens);
+            if (widget.children.len == 0) break :blk base;
+            const flow = intrinsicAxisChildrenSize(widget, tokens, .horizontal, depth);
+            break :blk geometry.SizeF.init(@max(base.width, flow.width), @max(base.height, flow.height));
+        },
         // A span-carrying cell (markdown tables) measures like a padded
         // span paragraph; classic cells keep the single-line row metric.
         .data_cell => if (widget.spans.len > 0)
@@ -925,8 +1008,9 @@ fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) 
         // sparkline-friendly box, and definite `width`/`height` (or flex
         // grow) size real charts.
         .chart => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 160), widgetSizedDensityValue(widget, tokens, 48)),
-        .alert => intrinsicAlertWidgetSize(widget, tokens),
-        .card => intrinsicCardWidgetSize(widget, tokens),
+        .alert => intrinsicAlertWidgetSize(widget, tokens, depth),
+        .card => intrinsicCardWidgetSize(widget, tokens, depth),
+        .accordion => intrinsicAccordionWidgetSize(widget, tokens, depth),
         .dialog, .drawer, .sheet => intrinsicModalSurfaceWidgetSize(widget, tokens),
         // Containers measure their children (matching the stacking axis the
         // layout pass uses), bounded by the widget depth cap. Scroll
@@ -949,7 +1033,7 @@ fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) 
         .split_divider => geometry.SizeF.init(splitDividerExtent(widget), 0),
         // A split fills the space it is given (panes partition it);
         // like scroll viewports it reports no intrinsic size of its own.
-        .scroll_view, .accordion, .image, .split => geometry.SizeF.zero(),
+        .scroll_view, .image, .split => geometry.SizeF.zero(),
     };
 }
 
@@ -1081,26 +1165,77 @@ fn intrinsicStatusBarWidgetSize(widget: Widget, tokens: DesignTokens) geometry.S
     return geometry.SizeF.init(text.width + padding.horizontal(), @max(widgetSizedDensityValue(widget, tokens, 32), text.height + padding.vertical()));
 }
 
-fn intrinsicAlertWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
+fn intrinsicAlertWidgetSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
     const text_size = widgetBodyTextSize(widget, tokens);
     const inset = widgetControlInset(widget, tokens, tokens.spacing.lg);
-    const icon_size = @max(widgetSizedDensityValue(widget, tokens, 12), text_size - 1);
+    // The chrome's fixed 16px icon (`emitAlertWidgetChrome`).
+    const icon_size = widgetSizedDensityValue(widget, tokens, 16);
     const text_gap = widgetControlInset(widget, tokens, tokens.spacing.md);
     const text = intrinsicTextWidgetSize(widget, tokens, text_size);
-    return geometry.SizeF.init(
+    var size = geometry.SizeF.init(
         @max(widgetSizedDensityValue(widget, tokens, 240), text.width + inset * 2 + icon_size + text_gap),
         @max(widgetSizedDensityValue(widget, tokens, 52), widgetLineHeight(text_size) + inset * 2),
     );
+    // A description column under the title (`alertContentFrame`) grows
+    // the alert instead of overflowing it.
+    const children = intrinsicStackedChildrenSize(widget, tokens, depth);
+    if (children.height > 0 and widget.text.len > 0) {
+        const title_gap = widgetControlInset(widget, tokens, tokens.spacing.xs);
+        size.height = @max(size.height, widgetLineHeight(text_size) + title_gap + children.height + inset * 2);
+        size.width = @max(size.width, children.width + icon_size + text_gap + inset * 2);
+    } else if (children.height > 0) {
+        size.height = @max(size.height, children.height + inset * 2);
+        size.width = @max(size.width, children.width + inset * 2);
+    }
+    return size;
 }
 
-fn intrinsicCardWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
+/// The overlay max of a stacking surface's flow children, WITHOUT the
+/// widget's own padding or min-size floors (callers fold those in).
+fn intrinsicStackedChildrenSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
+    if (depth >= max_widget_depth) return geometry.SizeF.zero();
+    var width_max: f32 = 0;
+    var height_max: f32 = 0;
+    for (widget.children) |child| {
+        if (child.layout.anchor != null) continue;
+        const size = intrinsicChildSize(child, tokens, depth + 1);
+        width_max = @max(width_max, size.width);
+        height_max = @max(height_max, size.height);
+    }
+    return geometry.SizeF.init(width_max, height_max);
+}
+
+fn intrinsicAccordionWidgetSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
+    // Header band always; expanded content (plus the header-to-content
+    // gap the accordion consumes) only while disclosed — so accordion
+    // items size themselves and a toggle reflows the column around them.
+    const header_height = accordionHeaderHeight(widget, tokens);
+    var content = geometry.SizeF.zero();
+    if (accordionChildrenVisible(widget)) {
+        content = intrinsicStackedChildrenSize(widget, tokens, depth);
+    }
+    const gap = if (content.height > 0) nonNegative(widget.layout.gap) else 0;
+    return paddedIntrinsicSize(widget, geometry.SizeF.init(content.width, header_height + gap + content.height));
+}
+
+fn intrinsicCardWidgetSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
     const title_size = widgetTypographySize(widget, tokens.typography.body_size + 1);
     const inset = widgetControlInset(widget, tokens, tokens.spacing.lg);
     const text = intrinsicTextWidgetSize(widget, tokens, title_size);
-    return geometry.SizeF.init(
+    var size = geometry.SizeF.init(
         @max(widgetSizedDensityValue(widget, tokens, 240), text.width + inset * 2),
         @max(widgetSizedDensityValue(widget, tokens, 120), if (widget.text.len > 0) widgetLineHeight(title_size) + inset * 2 else 0),
     );
+    // Content-bearing cards grow around their children plus the card's
+    // own padding (the default 24px house inset) instead of clipping
+    // them against the 120pt floor.
+    const children = intrinsicStackedChildrenSize(widget, tokens, depth);
+    if (children.height > 0) {
+        const padding = widget.layout.padding;
+        size.height = @max(size.height, children.height + padding.top + padding.bottom);
+        size.width = @max(size.width, children.width + padding.left + padding.right);
+    }
+    return size;
 }
 
 fn intrinsicModalSurfaceWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {

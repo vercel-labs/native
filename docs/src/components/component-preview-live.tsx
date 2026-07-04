@@ -124,6 +124,15 @@ export function ComponentPreviewLive({
   const isDarkRef = useRef(isDark);
   isDarkRef.current = isDark;
 
+  /** Mirror the engine's cursor channel onto the canvas's CSS cursor. */
+  const syncCursor = useCallback(() => {
+    const preview = previewRef.current;
+    const canvas = canvasRef.current;
+    if (!preview || !canvas) return;
+    const cursor = preview.cursor();
+    if (canvas.style.cursor !== cursor) canvas.style.cursor = cursor;
+  }, []);
+
   const blit = useCallback(() => {
     const preview = previewRef.current;
     const canvas = canvasRef.current;
@@ -158,13 +167,14 @@ export function ComponentPreviewLive({
       if (!preview || !visibleRef.current || document.hidden) return;
       preview.setNow(time);
       preview.frame();
+      syncCursor();
       if (blit()) lastActivityRef.current = time;
       if (time - lastActivityRef.current < idle_park_ms) {
         rafRef.current = requestAnimationFrame(tick);
       }
     };
     rafRef.current = requestAnimationFrame(tick);
-  }, [blit]);
+  }, [blit, syncCursor]);
 
   const deactivate = useCallback(() => {
     stopLoop();
@@ -298,9 +308,10 @@ export function ComponentPreviewLive({
       if (!preview || !point) return;
       preview.setNow(performance.now());
       preview.pointer(kind, point.x, point.y);
+      syncCursor();
       wake();
     },
-    [toLogical, wake],
+    [syncCursor, toLogical, wake],
   );
 
   // The generated vocab records the 2x FILE pixel dimensions; the tile
@@ -344,7 +355,7 @@ export function ComponentPreviewLive({
           aria-label={`${alt} — interactive WASM preview`}
           aria-roledescription="Interactive component preview rendered by the Native SDK engine. Press Escape to leave."
           tabIndex={0}
-          className={`absolute inset-0 h-full w-full cursor-default touch-none outline-none focus-visible:ring-2 focus-visible:ring-blue-700 ${
+          className={`absolute inset-0 h-full w-full touch-none outline-none focus-visible:ring-2 focus-visible:ring-blue-700 ${
             painted ? "opacity-100" : "opacity-0"
           }`}
           onPointerDown={(event) => {

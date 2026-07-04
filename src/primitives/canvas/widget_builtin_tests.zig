@@ -645,7 +645,7 @@ test "design tokens provide theme and contrast palettes" {
     try std.testing.expectEqual(default_mono_font_family, light.typography.mono_font_family);
     try std.testing.expectEqualStrings("Geist", light.typography.bodyFamilyName());
     try std.testing.expectEqualStrings("Geist Mono", light.typography.monoFamilyName());
-    // The default palette is the neutral + blue house preset (see
+    // The default palette is the house neutral + blue preset (see
     // ColorTokens): near-black foreground, blue-violet primary, mid-gray
     // ring.
     try std.testing.expectEqualDeep(Color.rgb8(10, 10, 10), light.colors.text);
@@ -676,7 +676,7 @@ test "design tokens provide theme and contrast palettes" {
     try std.testing.expectEqual(Easing.linear, reduced_motion.motion.easing);
 }
 
-test "built-in component catalog covers the built-in component set" {
+test "built-in component catalog covers house component set" {
     const expected_names = [_][]const u8{
         "Accordion",
         "Alert",
@@ -813,11 +813,13 @@ test "built-in component factory applies house composite defaults" {
         .children = &button_children,
     });
     try std.testing.expectEqual(WidgetKind.card, card.kind);
-    try std.testing.expectEqual(@as(f32, 16), card.layout.padding.top);
-    try std.testing.expectEqual(@as(f32, 16), card.layout.padding.right);
-    try std.testing.expectEqual(@as(f32, 16), card.layout.padding.bottom);
-    try std.testing.expectEqual(@as(f32, 16), card.layout.padding.left);
+    // house cards carry 24px of content padding (16 compact).
+    try std.testing.expectEqual(@as(f32, 24), card.layout.padding.top);
+    try std.testing.expectEqual(@as(f32, 24), card.layout.padding.right);
+    try std.testing.expectEqual(@as(f32, 24), card.layout.padding.bottom);
+    try std.testing.expectEqual(@as(f32, 24), card.layout.padding.left);
     try std.testing.expectEqual(@as(f32, 12), card.layout.gap);
+    try std.testing.expectEqual(@as(f32, 16), builtinComponentWidget(.card, .{ .size = .sm }).layout.padding.top);
     try std.testing.expect(card.layout.clip_content);
     try std.testing.expectEqual(@as(usize, 2), card.children.len);
 
@@ -826,8 +828,8 @@ test "built-in component factory applies house composite defaults" {
     try std.testing.expectEqual(@as(f32, 4), button_group.layout.gap);
     try std.testing.expectEqual(WidgetCrossAlignment.center, button_group.layout.cross_alignment);
 
-    const row_components = [_]BuiltinComponentKind{ .breadcrumb, .pagination, .radio_group, .tabs, .toggle_group };
-    const row_kinds = [_]WidgetKind{ .breadcrumb, .pagination, .radio_group, .tabs, .toggle_group };
+    const row_components = [_]BuiltinComponentKind{ .breadcrumb, .pagination, .radio_group, .toggle_group };
+    const row_kinds = [_]WidgetKind{ .breadcrumb, .pagination, .radio_group, .toggle_group };
     for (row_components, row_kinds) |kind, widget_kind| {
         const component = builtinComponentWidget(kind, .{});
         try std.testing.expectEqual(widget_kind, component.kind);
@@ -835,6 +837,15 @@ test "built-in component factory applies house composite defaults" {
         try std.testing.expectEqual(WidgetCrossAlignment.center, component.layout.cross_alignment);
         try std.testing.expectEqual(WidgetRole.group, component.semantics.role);
     }
+
+    // The house TabsList: a muted rounded container hugging its
+    // triggers with 3px of padding and no gap between them.
+    const tabs = builtinComponentWidget(.tabs, .{});
+    try std.testing.expectEqual(WidgetKind.tabs, tabs.kind);
+    try std.testing.expectEqual(@as(f32, 3), tabs.layout.padding.top);
+    try std.testing.expectEqual(@as(f32, 0), tabs.layout.gap);
+    try std.testing.expectEqual(WidgetCrossAlignment.center, tabs.layout.cross_alignment);
+    try std.testing.expectEqual(WidgetRole.group, tabs.semantics.role);
 
     const panel_components = [_]BuiltinComponentKind{ .accordion, .bubble, .resizable };
     const panel_kinds = [_]WidgetKind{ .accordion, .bubble, .resizable };
@@ -844,7 +855,9 @@ test "built-in component factory applies house composite defaults" {
         try std.testing.expect(component.layout.clip_content);
         try std.testing.expectEqual(WidgetRole.group, component.semantics.role);
     }
-    try std.testing.expectEqual(@as(f32, 12), builtinComponentWidget(.accordion, .{}).layout.padding.top);
+    // house accordion items are borderless rows: no built-in inset —
+    // the chrome draws the trigger band and hairline separator.
+    try std.testing.expectEqual(@as(f32, 0), builtinComponentWidget(.accordion, .{}).layout.padding.top);
     try std.testing.expectEqual(@as(f32, 16), builtinComponentWidget(.bubble, .{}).layout.padding.top);
 
     const custom_card = builtinComponentWidget(.card, .{
@@ -890,28 +903,40 @@ test "built-in accordion renders house disclosure chrome and toggle semantics" {
             },
         },
     };
-    var commands: [8]CanvasCommand = undefined;
+    var commands: [12]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, accordion, tokens);
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 8), display_list.commandCount());
-    switch (display_list.findCommandById(widgetPartId(45, 2)).?.command) {
+    // Background fill (themed token), hairline separator, trigger text,
+    // the chevron-down icon (flip transform pair around the icon's own
+    // transform pair plus its stroke path — the item is expanded), the
+    // focus ring, and the content clip push/pop.
+    try std.testing.expectEqual(@as(usize, 11), display_list.commandCount());
+    switch (display_list.findCommandById(widgetPartId(45, 1)).?.command) {
         .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(14, 20, 26), fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.findCommandById(widgetPartId(45, 4)).?.command) {
+    switch (display_list.findCommandById(widgetPartId(45, 2)).?.command) {
         .draw_line => |line| {
-            try std.testing.expect(line.to.y > line.from.y);
-            try expectFillColor(Color.rgb8(230, 236, 242), line.stroke.fill);
+            // The hairline separator on the item's bottom edge.
+            try std.testing.expect(line.to.x > line.from.x);
+            try std.testing.expectEqual(line.from.y, line.to.y);
+            try std.testing.expectEqual(@as(f32, 64), line.from.y);
+            try std.testing.expectEqual(@as(f32, 1.25), line.stroke.width);
+            try expectFillColor(Color.rgb8(64, 74, 84), line.stroke.fill);
         },
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.findCommandById(widgetPartId(45, 5)).?.command) {
-        .draw_line => |line| try std.testing.expect(line.to.y < line.from.y),
+        // The registry chevron-down: a stroke path, not text glyphs.
+        .stroke_path => {},
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.findCommandById(widgetPartId(45, 6)).?.command) {
-        .draw_text => |text| try std.testing.expectEqualStrings("Advanced options", text.text),
+        .draw_text => |text| {
+            try std.testing.expectEqualStrings("Advanced options", text.text);
+            try std.testing.expectEqualDeep(Color.rgb8(230, 236, 242), text.color);
+        },
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expect(display_list.findCommandById(widgetPartId(45, 7)) != null);
@@ -1063,11 +1088,14 @@ test "built-in alert renders house surface chrome and text" {
             },
         },
     };
-    var commands: [8]CanvasCommand = undefined;
+    var commands: [12]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, alert, tokens);
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 8), display_list.commandCount());
+    // Surface fill, hairline border, the info icon (transform pair
+    // around three stroke paths), the title text, and the content clip
+    // push/pop.
+    try std.testing.expectEqual(@as(usize, 10), display_list.commandCount());
     switch (display_list.findCommandById(widgetPartId(40, 1)).?.command) {
         .fill_rounded_rect => |fill| {
             try std.testing.expectEqualDeep(Radius.all(10), fill.radius);
@@ -1082,11 +1110,12 @@ test "built-in alert renders house surface chrome and text" {
         },
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.findCommandById(widgetPartId(40, 3)).?.command) {
-        .stroke_rect => |stroke| try expectFillColor(Color.rgb8(235, 240, 245), stroke.stroke.fill),
+    switch (display_list.findCommandById(widgetPartId(40, 4)).?.command) {
+        // The registry info icon: stroke paths, tinted like the text.
+        .stroke_path => |path| try expectFillColor(Color.rgb8(235, 240, 245), path.stroke.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.findCommandById(widgetPartId(40, 6)).?.command) {
+    switch (display_list.findCommandById(widgetPartId(40, 10)).?.command) {
         .draw_text => |text| {
             try std.testing.expectEqualStrings("Heads up: this workflow is native-rendered.", text.text);
             try std.testing.expectEqualDeep(Color.rgb8(235, 240, 245), text.color);
@@ -1102,7 +1131,7 @@ test "built-in card renders house surface chrome and title" {
         .text = "Revenue pulse",
     });
     try std.testing.expectEqual(WidgetKind.card, card.kind);
-    try std.testing.expectEqual(@as(f32, 16), card.layout.padding.top);
+    try std.testing.expectEqual(@as(f32, 24), card.layout.padding.top);
     try std.testing.expectEqual(@as(f32, 12), card.layout.gap);
     try std.testing.expect(card.layout.clip_content);
 

@@ -667,18 +667,25 @@ pub fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: Des
     const text_size = widgetLabelTextSize(widget, tokens);
     const text_inset = widgetControlInset(widget, tokens, tokens.spacing.md);
     // The tab-trigger treatment: the active segment lifts to the page
-    // surface with a hairline border, inactive segments sit on the muted
-    // wash with muted text — selection reads by elevation, not by an
-    // accent fill.
-    try builder.fillRoundedRect(.{
-        .id = widgetPartId(widget.id, 1),
-        .rect = widget.frame,
-        .radius = radius,
-        .fill = if (selected)
-            colorFill(widgetAccentColor(widget, visual.active_background orelse tokens.colors.surface))
-        else
-            colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, false, widget.state.hovered, tokens.colors.surface_subtle))),
-    });
+    // surface with a hairline border; inactive segments stay TRANSPARENT
+    // with muted text, so the muted TabsList container behind them
+    // (`emitTabsListWidgetChrome`) provides the wash — selection reads
+    // by elevation, not by an accent fill.
+    if (selected) {
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = widget.frame,
+            .radius = radius,
+            .fill = colorFill(widgetAccentColor(widget, visual.active_background orelse tokens.colors.surface)),
+        });
+    } else if (widget.style.background orelse visual.background) |background| {
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = widget.frame,
+            .radius = radius,
+            .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, false, widget.state.hovered, background))),
+        });
+    }
     if (selected) {
         try builder.strokeRect(.{
             .id = widgetPartId(widget.id, 2),
