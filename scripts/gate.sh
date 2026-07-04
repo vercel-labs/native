@@ -156,7 +156,9 @@ skip_step() { # name reason
 
 docs_check() {
   run_step "docs-install" pnpm --dir docs install --frozen-lockfile
-  run_step "docs-check" pnpm --dir docs check
+  # Build into a gate-owned dist dir so the check never corrupts a running
+  # dev server's .next cache.
+  run_step "docs-check" env NEXT_DIST_DIR=.next-gate pnpm --dir docs check
 }
 
 is_macos=false
