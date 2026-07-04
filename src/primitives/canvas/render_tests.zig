@@ -612,7 +612,9 @@ test "render batch plan groups adjacent commands by pipeline and state" {
     try std.testing.expectEqual(@as(usize, 2), batch_plan.batches[1].command_start);
     try std.testing.expectEqual(RenderPipelineKind.glyph_run, batch_plan.batches[2].pipeline);
     try std.testing.expectEqual(@as(usize, 3), batch_plan.batches[2].command_start);
-    try expectRectApprox(geometry.RectF.init(0, 0, 83.448, 21), batch_plan.bounds);
+    // Text command bounds carry the ink allowance (right 0.35em,
+    // bottom/left 0.1em) past the metric box.
+    try expectRectApprox(geometry.RectF.init(0, 0, 87.648, 22.2), batch_plan.bounds);
 }
 
 test "render batch plan respects clip opacity and output limits" {
@@ -2331,6 +2333,25 @@ test "canvas gpu packet text serializes engine measured line breaks" {
             },
             .uses_glyph_atlas = true,
         },
+        // Multibyte exact fit: every byte of a UTF-8-heavy string rides one
+        // unbroken line — the live-window shape of the system-monitor
+        // "drops one trailing glyph per multibyte codepoint" finding, whose
+        // packet leg was the host re-wrapping tight boxes.
+        .{
+            .command_index = 4,
+            .kind = .draw_text,
+            .pipeline = .glyph_run,
+            .text = .{
+                .font_id = 1,
+                .size = 12,
+                .origin = geometry.PointF.init(4, 40),
+                .color = Color.rgb8(0, 0, 0),
+                .text = "Live \xc2\xb7 every 2 s",
+                .text_layout = .{ .max_width = estimateTextWidth("Live \xc2\xb7 every 2 s", 12), .line_height = 16 },
+            },
+            .uses_glyph_atlas = true,
+            .uses_text_layout = true,
+        },
     };
     const packet = CanvasGpuPacket{ .load_action = .clear, .commands = &commands };
 
@@ -2346,8 +2367,10 @@ test "canvas gpu packet text serializes engine measured line breaks" {
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"lines\":[{\"x\":4,\"baseline\":40,\"text\":\"Song\"},{\"x\":4,\"baseline\":56,\"text\":\"s\"}]") != null);
     // Line-budget overflow degrades to null (host wrapping fallback).
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"lines\":null") != null);
+    // Multibyte exact fit: one line, all bytes present, tail intact.
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"lines\":[{\"x\":4,\"baseline\":40,\"text\":\"Live \xc2\xb7 every 2 s\"}]") != null);
     // No layout options -> no lines key at all.
-    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, packet_json, "\"lines\":"));
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, packet_json, "\"lines\":"));
 }
 
 test "canvas gpu packet serializes image upload payloads" {

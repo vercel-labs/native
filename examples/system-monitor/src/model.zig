@@ -188,17 +188,12 @@ pub const Model = struct {
         return model.pending_kill != null;
     }
 
-    // Trailing "  " on derived strings below: the glyph pipeline drops
-    // one trailing glyph per multibyte codepoint in the string (the "·"
-    // separators — framework friction, reported with this example);
-    // trailing spaces absorb the drop invisibly.
-
     /// Header status: what the monitor is doing right now.
     pub fn headerStatus(model: *const Model, arena: std.mem.Allocator) []const u8 {
         if (!sampler.supported) return "Sampling is not supported on this OS";
         if (model.paused) return "Paused";
         if (model.samples_taken == 0) return "Sampling…";
-        return std.fmt.allocPrint(arena, "Live · every {d} s  ", .{sample_interval_ms / 1000}) catch "";
+        return std.fmt.allocPrint(arena, "Live · every {d} s", .{sample_interval_ms / 1000}) catch "";
     }
 
     // Tile values, derived per rebuild.
@@ -220,7 +215,7 @@ pub const Model = struct {
 
     pub fn memDetail(model: *const Model, arena: std.mem.Allocator) []const u8 {
         if (model.mem_total_bytes == 0) return "in use";
-        return std.fmt.allocPrint(arena, "of {s} · {d:.0}%  ", .{
+        return std.fmt.allocPrint(arena, "of {s} · {d:.0}%", .{
             formatBytes(arena, model.mem_total_bytes),
             model.memFraction() * 100,
         }) catch "";
@@ -287,9 +282,6 @@ pub const Model = struct {
             if (model.parse_failures > 0) appendPart(buffer, &len, " · {d} parse failures", .{model.parse_failures});
         }
         if (model.note_len > 0) appendPart(buffer, &len, " · {s}", .{model.note()});
-        // Absorb the per-multibyte-codepoint tail drop (each "·" above
-        // costs one trailing glyph; see the headerStatus note).
-        appendPart(buffer, &len, "    ", .{});
         return buffer[0..len];
     }
 

@@ -391,7 +391,10 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
         /// software presentation uses (`presentCanvasFramePixels`) — without
         /// presenting or mutating presentation state. The frame is planned
         /// as a full repaint at the view's last frame timestamp, cleared
-        /// with the last presented clear color. `pixels` (and optionally
+        /// with the view's declared clear color — recorded by presents AND
+        /// by widget display-list emissions (from live tokens), so a theme
+        /// change screenshots correctly without an intervening present.
+        /// `pixels` (and optionally
         /// `scratch`, for layer effects) must hold
         /// `canvasScreenshotPixelSize(...).byte_len` bytes.
         pub fn renderCanvasScreenshot(

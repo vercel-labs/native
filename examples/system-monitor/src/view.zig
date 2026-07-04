@@ -149,9 +149,7 @@ fn uptimeTile(ui: *Ui, model: *const Model) Ui.Node {
         }),
         ui.text(.{ .width = spark_width, .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "since boot (pid 1 elapsed time)"),
         ui.column(.{ .height = spark_height, .main = .end, .gap = 3 }, .{
-            // Trailing spaces absorb the pipeline's per-multibyte-glyph
-            // tail drop (see model.zig headerStatus note).
-            ui.text(.{ .width = spark_width, .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, ui.fmt("{d} samples kept · {d} s cadence  ", .{
+            ui.text(.{ .width = spark_width, .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, ui.fmt("{d} samples kept · {d} s cadence", .{
                 model_mod.history_len, model_mod.sample_interval_ms / 1000,
             })),
         }),
@@ -333,7 +331,7 @@ fn tableHeading(ui: *Ui, model: *const Model, shown: usize) Ui.Node {
         }),
         ui.el(.badge, .{ .variant = .secondary, .text = ui.fmt("{d} of {d}", .{ shown, matches }) }, .{}),
         ui.spacer(1),
-        rightAlignedHint(ui, "right-click a row for SIGTERM (confirmed first) "),
+        rightAlignedHint(ui, "right-click a row for SIGTERM (confirmed first)"),
     });
 }
 

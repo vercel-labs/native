@@ -402,7 +402,10 @@ test "dev-2 README renders through the mapper and the reference renderer" {
 // table instead of paragraphs.
 // Regenerated 2026-07-03: the reference renderer paints real Geist
 // outlines instead of block glyphs (vector core + bundled TTF parser).
-const dev2_readme_reference_signature: u64 = 3000945620529366733;
+// Regenerated for the text-bounds ink allowance (2026-07-04): 27 pixels
+// changed, all additive — previously bounds-clipped tail-glyph edges (the
+// final stroke of trailing 'N's, a heading marker's leading edge) now ink.
+const dev2_readme_reference_signature: u64 = 2891846887944972153;
 
 
 test "bare URLs autolink at word boundaries with trailing punctuation trimmed" {

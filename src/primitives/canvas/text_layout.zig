@@ -137,7 +137,26 @@ pub fn layoutTextRunPlan(text: DrawText, options: TextLayoutOptions, output: []T
     };
 }
 
+/// Conservative ink allowance around a text run's metric box. Command
+/// bounds must cover everything a command may ink (stroke bounds inflate
+/// by stroke width, blur bounds by the radius); text metrics only cover
+/// advances, and real glyph outlines overhang them: a wide glyph behind
+/// the flat 0.65em multibyte estimate (arrows, dingbats) pokes up to
+/// ~0.3em past the last advance, descenders plus anti-aliasing spill a
+/// hair below the 0.25em descent box, and italic or negative-LSB glyphs
+/// lean slightly left of the pen. Renderers clip to command bounds, so a
+/// metric-tight box visibly shaved tail glyphs off reference screenshots.
+fn textInkInsets(size: f32) geometry.InsetsF {
+    const em = @max(0, size);
+    return geometry.InsetsF.init(0, em * 0.35, em * 0.1, em * 0.1);
+}
+
 pub fn textBounds(value: DrawText) ?geometry.RectF {
+    const metric = metricTextBounds(value) orelse return null;
+    return metric.inflate(textInkInsets(value.size));
+}
+
+fn metricTextBounds(value: DrawText) ?geometry.RectF {
     if (value.glyphs.len == 0 and value.text.len == 0) return null;
     if (value.text_layout) |options| {
         var lines: [max_text_bounds_layout_lines]TextLine = undefined;

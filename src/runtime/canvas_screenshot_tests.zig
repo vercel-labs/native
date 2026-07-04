@@ -170,3 +170,49 @@ test "automation screenshot command publishes a parseable png artifact" {
     try std.testing.expectEqual(@as(usize, 480), scaled_decoded.width);
     try std.testing.expectEqual(@as(usize, 280), scaled_decoded.height);
 }
+
+test "screenshots clear with live widget tokens without an intervening present" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-screenshot-clear-color", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    try installScreenshotWidgets(harness);
+
+    const pixel_size = try harness.runtime.canvasScreenshotPixelSize(1, "canvas", null);
+    const pixels = try std.testing.allocator.alloc(u8, pixel_size.byte_len);
+    defer std.testing.allocator.free(pixels);
+    const scratch = try std.testing.allocator.alloc(u8, pixel_size.byte_len);
+    defer std.testing.allocator.free(scratch);
+
+    // The light emission declared the light background; nothing has ever
+    // been presented.
+    const channel = struct {
+        fn byte(value: f32) u8 {
+            return @intFromFloat(@round(std.math.clamp(value, 0, 1) * 255));
+        }
+    };
+    const light_background = (canvas.DesignTokens{}).colors.background;
+    var shot = try harness.runtime.renderCanvasScreenshot(1, "canvas", null, pixels, scratch);
+    const corner = (shot.height - 3) * shot.width * 4 + (shot.width - 3) * 4;
+    try std.testing.expectEqual(channel.byte(light_background.r), shot.rgba8[corner]);
+    try std.testing.expectEqual(channel.byte(light_background.g), shot.rgba8[corner + 1]);
+    try std.testing.expectEqual(channel.byte(light_background.b), shot.rgba8[corner + 2]);
+
+    // A theme change re-emits the display list (every rebuild does) but
+    // presents nothing; the screenshot must clear with the LIVE tokens'
+    // background, not the last presented frame's.
+    const dark_tokens = canvas.DesignTokens{ .colors = canvas.ColorTokens.dark() };
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", dark_tokens);
+    shot = try harness.runtime.renderCanvasScreenshot(1, "canvas", null, pixels, scratch);
+    try std.testing.expectEqual(channel.byte(dark_tokens.colors.background.r), shot.rgba8[corner]);
+    try std.testing.expectEqual(channel.byte(dark_tokens.colors.background.g), shot.rgba8[corner + 1]);
+    try std.testing.expectEqual(channel.byte(dark_tokens.colors.background.b), shot.rgba8[corner + 2]);
+}

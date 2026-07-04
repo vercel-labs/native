@@ -742,35 +742,23 @@ test "render showcase screenshots from replayed real samples (env-gated)" {
     try testing.expectEqual(@as(usize, model_mod.history_len), model.cpu_history_len);
 
     // Dark, then light, each into its own artifact directory; scale 2 for
-    // crisp pixels. Each theme change presents one frame first: the
-    // screenshot clears with the last PRESENTED clear color, and only a
-    // frame event carries the re-derived tokens into presentation.
+    // crisp pixels. No present between theme change and capture on
+    // purpose: a dispatch re-emits the display list with the re-derived
+    // tokens, and offscreen screenshots clear with those LIVE tokens (the
+    // old contract cleared with the last PRESENTED color and needed a
+    // frame per theme; this test now proves the fix).
     try live.dispatch(.{ .set_theme = .dark });
-    try presentFrame(live, 2);
     live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/system-monitor-shots/dark-artifacts", "System Monitor");
     try live.harness.runtime.dispatchAutomationCommand(live.app, "screenshot monitor-canvas 2");
 
     try live.dispatch(.{ .set_theme = .light });
-    try presentFrame(live, 3);
     live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/system-monitor-shots/light-artifacts", "System Monitor");
     try live.harness.runtime.dispatchAutomationCommand(live.app, "screenshot monitor-canvas 2");
 
     // The SIGTERM confirmation over the live table (its own artifact).
     try live.dispatch(.{ .request_kill = model.rows[0].pid });
-    try presentFrame(live, 4);
     live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/system-monitor-shots/dialog-artifacts", "System Monitor");
     try live.harness.runtime.dispatchAutomationCommand(live.app, "screenshot monitor-canvas 2");
-}
-
-fn presentFrame(live: LiveApp, frame_index: u64) !void {
-    try live.harness.runtime.dispatchPlatformEvent(live.app, .{ .gpu_surface_frame = .{
-        .label = main.canvas_label,
-        .size = surface_size,
-        .scale_factor = 1,
-        .frame_index = frame_index,
-        .timestamp_ns = frame_index * 1_000_000,
-        .nonblank = true,
-    } });
 }
 
 fn readWholeFile(io: std.Io, path: []const u8) ![]u8 {

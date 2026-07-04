@@ -73,6 +73,12 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             self.views[index].canvas_widget_display_list_reserved_count = chrome.reserved_command_count;
             _ = try refreshCanvasWidgetDisplayList(self, index);
             self.views[index].canvas_display_list_widget_owned = true;
+            // The declared clear color: every widget app presents its
+            // tokens' background (UiApp derives it the same way), so a
+            // display-list emission — a rebuild, including a theme change
+            // that never presents — keeps offscreen screenshots clearing
+            // with LIVE tokens instead of the last presented frame's color.
+            self.views[index].canvas_clear_color = self.views[index].widget_tokens.colors.background;
             try publishCanvasWidgetAccessibility(self, index);
             return self.views[index].info();
         }

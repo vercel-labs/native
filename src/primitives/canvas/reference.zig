@@ -34,7 +34,7 @@ const CanvasRenderPass = frame_model.CanvasRenderPass;
 const layoutTextRun = text_model.layoutTextRun;
 const textLineBounds = text_model.textLineBounds;
 const estimatedGlyphAdvance = text_model.estimatedGlyphAdvance;
-const estimateTextAdvanceForBytes = text_model.estimateTextAdvanceForBytes;
+const measureTextAdvance = text_model.measureTextAdvance;
 const nextTextOffset = text_model.nextTextOffset;
 
 const reference_blur = @import("reference_blur.zig");
@@ -431,16 +431,20 @@ pub const ReferenceRenderSurface = struct {
         }
 
         // Without shaped glyphs the pen walks the same per-cluster
-        // estimator advances layout measured with, so painted lines end
-        // exactly at their measured bounds (the historical block painter
-        // stepped a fixed 0.5em per scalar and could overrun them).
+        // advances layout measured with — the injected provider when the
+        // run carries one, the deterministic estimator otherwise — so
+        // painted lines end exactly at their measured bounds. Walking the
+        // raw estimator here while a provider measured the line dropped
+        // one tail glyph per multibyte codepoint: the flat 0.65em
+        // multibyte estimate overshot the provider's real advances and
+        // pushed the tail past the measured clip bounds.
+        const measure = if (value.text_layout) |options| options.measure else null;
         const end = @min(value.text.len, line.text_start + line.text_len);
         var text_offset: usize = line.text_start;
         var x = line.bounds.x;
         while (text_offset < end) {
             const next_offset = nextTextOffset(value.text, text_offset);
-            const cluster = value.text[text_offset..next_offset];
-            const advance = estimateTextAdvanceForBytes(value.font_id, cluster, value.size);
+            const advance = measureTextAdvance(measure, value.font_id, value.size, value.text, line.text_start, text_offset, next_offset);
             defer {
                 text_offset = next_offset;
                 x += advance;

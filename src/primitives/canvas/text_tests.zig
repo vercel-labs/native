@@ -686,7 +686,9 @@ test "text edit state tracks ime composition ranges" {
 }
 
 test "text bounds follow utf8 scalar fallback and shaped y offsets" {
-    try expectRectApprox(geometry.RectF.init(2, 8, 15.78, 12.5), textBounds(.{
+    // Metric boxes inflate by the ink allowance (left/bottom 0.1em,
+    // right 0.35em) so real glyph outlines never clip at the bounds.
+    try expectRectApprox(geometry.RectF.init(1, 8, 20.28, 13.5), textBounds(.{
         .font_id = 1,
         .size = 10,
         .origin = geometry.PointF.init(2, 18),
@@ -698,7 +700,7 @@ test "text bounds follow utf8 scalar fallback and shaped y offsets" {
         .{ .id = 1, .x = 0, .y = -2, .advance = 6 },
         .{ .id = 2, .x = 8, .y = 3, .advance = 5 },
     };
-    try expectRect(geometry.RectF.init(4, 8, 13, 17.5), textBounds(.{
+    try expectRect(geometry.RectF.init(3, 8, 17.5, 18.5), textBounds(.{
         .font_id = 1,
         .size = 10,
         .origin = geometry.PointF.init(4, 20),
@@ -716,13 +718,14 @@ test "text bounds and reference renderer honor per-run wrapping" {
         .text = "ABCD",
         .text_layout = .{ .max_width = 10, .line_height = 12, .wrap = .character },
     };
-    try expectRectApprox(geometry.RectF.init(0, 0, 7.01, 48), textBounds(text));
+    // Metric box (0, 0, 7.01, 48) plus the ink allowance.
+    try expectRectApprox(geometry.RectF.init(-1, 0, 11.51, 49), textBounds(text));
 
     const commands = [_]CanvasCommand{.{ .draw_text = text }};
     var render_commands: [1]RenderCommand = undefined;
     const render_plan = try (DisplayList{ .commands = &commands }).renderPlan(&render_commands);
     try std.testing.expectEqual(@as(usize, 1), render_plan.commandCount());
-    try expectRectApprox(geometry.RectF.init(0, 0, 7.01, 48), render_plan.commands[0].bounds);
+    try expectRectApprox(geometry.RectF.init(-1, 0, 11.51, 49), render_plan.commands[0].bounds);
 
     var pixels: [16 * 32 * 4]u8 = [_]u8{0} ** (16 * 32 * 4);
     const surface = try ReferenceRenderSurface.init(16, 32, &pixels);
@@ -1570,4 +1573,154 @@ test "injected measure provider drives line breaking and caret geometry" {
     // Hit testing agrees with the provider-measured advances.
     const hit = textOffsetForLayoutPoint(measured_text, measured_layout, geometry.PointF.init(39, 5)).?;
     try std.testing.expectEqual(@as(usize, 2), hit);
+}
+
+// ------------------------------------------------------------------
+// Regression: the reference pen must walk the same measurement seam
+// layout used. A CoreText-like provider measures multibyte codepoints
+// narrower than the estimator's flat 0.65em multibyte advance; walking
+// the raw estimator while the provider measured the line's bounds and
+// clip dropped one tail glyph per multibyte codepoint in every
+// automation screenshot of a live macOS app (system-monitor friction).
+fn coretextLikeMeasureForTests(context: ?*anyopaque, font_id: FontId, size: f32, text: []const u8) f32 {
+    _ = context;
+    var width: f32 = 0;
+    var index: usize = 0;
+    while (index < text.len) {
+        const next = @min(text.len, index + text_model.utf8SequenceLength(text[index]));
+        const cluster = text[index..next];
+        width += if (cluster.len > 1) size * 0.3 else estimateTextAdvanceForBytes(font_id, cluster, size);
+        index = next;
+    }
+    return width;
+}
+
+const coretext_like_measure = support.TextMeasureProvider{ .measure_fn = coretextLikeMeasureForTests };
+
+fn tailInkDroppedByBoundsClip(comptime body: []const u8, text_layout: ?TextLayoutOptions) !usize {
+    const size: f32 = 16;
+    const text = DrawText{
+        .font_id = 1,
+        .size = size,
+        .origin = geometry.PointF.init(4, 20),
+        .color = Color.rgb8(255, 255, 255),
+        .text = body,
+        .text_layout = text_layout,
+    };
+    const commands = [_]CanvasCommand{.{ .draw_text = text }};
+    var render_commands: [1]RenderCommand = undefined;
+    const render_plan = try (DisplayList{ .commands = &commands }).renderPlan(&render_commands);
+
+    const width = 360;
+    const height = 40;
+    var clipped_pixels: [width * height * 4]u8 = [_]u8{0} ** (width * height * 4);
+    var unclipped_pixels: [width * height * 4]u8 = [_]u8{0} ** (width * height * 4);
+
+    const clipped = try ReferenceRenderSurface.init(width, height, &clipped_pixels);
+    try clipped.renderPass(.{
+        .commands = render_plan.commands,
+        .surface_size = geometry.SizeF.init(width, height),
+        .full_repaint = true,
+    }, Color.rgb8(0, 0, 0));
+
+    // The same command with surface-wide bounds: every pixel the glyph
+    // outlines would ink with no bounds clip at all.
+    var widened = render_plan.commands[0];
+    widened.bounds = geometry.RectF.init(0, 0, width, height);
+    widened.local_bounds = widened.bounds;
+    const widened_commands = [_]RenderCommand{widened};
+    const unclipped = try ReferenceRenderSurface.init(width, height, &unclipped_pixels);
+    try unclipped.renderPass(.{
+        .commands = &widened_commands,
+        .surface_size = geometry.SizeF.init(width, height),
+        .full_repaint = true,
+    }, Color.rgb8(0, 0, 0));
+
+    var dropped: usize = 0;
+    for (0..height) |y| for (0..width) |x| {
+        const index = (y * width + x) * 4;
+        if (clipped_pixels[index] != unclipped_pixels[index]) dropped += 1;
+    };
+    return dropped;
+}
+
+test "provider-measured runs keep their multibyte tails inside command bounds" {
+    const size: f32 = 16;
+    // One exact-fit line per string, measured by the provider — the shape
+    // every tight intrinsic text box produces on a live macOS app.
+    inline for ([_][]const u8{
+        "Live \xc2\xb7 every 2 s",
+        "12 kept \xc2\xb7 2 s \xc2\xb7 ok",
+        "caf\xc3\xa9 r\xc3\xa9sum\xc3\xa9",
+        "go \xe2\x86\x92 done \xe2\x86\x92 end",
+        "\xe4\xb8\xad\xe6\x96\x87 label",
+    }) |body| {
+        const provider_width = coretextLikeMeasureForTests(null, 1, size, body);
+        const options = TextLayoutOptions{
+            .max_width = provider_width,
+            .line_height = size * 1.25,
+            .wrap = .word,
+            .measure = &coretext_like_measure,
+        };
+        // Exact fit stays one line under the provider's own widths.
+        const text = DrawText{
+            .font_id = 1,
+            .size = size,
+            .origin = geometry.PointF.init(4, 20),
+            .color = Color.rgb8(255, 255, 255),
+            .text = body,
+            .text_layout = options,
+        };
+        var lines: [4]TextLine = undefined;
+        const layout = try layoutTextRun(text, options, &lines);
+        try std.testing.expectEqual(@as(usize, 1), layout.lineCount());
+        try std.testing.expectEqual(body.len, layout.lines[0].text_len);
+
+        // And every inked pixel stays inside the command bounds: nothing
+        // the renderer would draw unbounded is lost to the bounds clip.
+        try std.testing.expectEqual(@as(usize, 0), try tailInkDroppedByBoundsClip(body, options));
+    }
+}
+
+test "estimator-measured exact-fit multibyte strings keep every byte on one line" {
+    const size: f32 = 13;
+    inline for ([_][]const u8{
+        "Live \xc2\xb7 every 2 s",
+        "of 32.0 GB \xc2\xb7 47%",
+        "caf\xc3\xa9 \xc2\xb7 r\xc3\xa9sum\xc3\xa9 \xc2\xb7 na\xc3\xafve",
+        "next \xe2\x86\x92 prev",
+        "\xe4\xb8\xad\xe6\x96\x87\xe6\xb8\xac\xe8\xa9\xa6 row",
+    }) |body| {
+        const options = TextLayoutOptions{
+            .max_width = estimateTextWidth(body, size),
+            .line_height = size * 1.25,
+            .wrap = .word,
+        };
+        const text = DrawText{
+            .font_id = 1,
+            .size = size,
+            .origin = geometry.PointF.init(0, 16),
+            .color = Color.rgb8(0, 0, 0),
+            .text = body,
+            .text_layout = options,
+        };
+        var lines: [4]TextLine = undefined;
+        const layout = try layoutTextRun(text, options, &lines);
+        try std.testing.expectEqual(@as(usize, 1), layout.lineCount());
+        try std.testing.expectEqual(@as(usize, 0), layout.lines[0].text_start);
+        try std.testing.expectEqual(body.len, layout.lines[0].text_len);
+    }
+}
+
+test "text command bounds cover glyph ink overhang past metric advances" {
+    // Wide real outlines behind narrow metric advances historically
+    // clipped at the bounds edge: the flat 0.65em multibyte estimate
+    // under an \u{2192} arrow, and mono glyphs inking wider than the flat
+    // 0.6em mono advance (the notes-build "tail clip" screenshot
+    // artifact). With the ink allowance on textBounds nothing inks
+    // outside the command bounds.
+    try std.testing.expectEqual(@as(usize, 0), try tailInkDroppedByBoundsClip("go \xe2\x86\x92", null));
+    try std.testing.expectEqual(@as(usize, 0), try tailInkDroppedByBoundsClip("mono tail mm", null));
+    try std.testing.expectEqual(@as(usize, 0), try tailInkDroppedByBoundsClip("gravity plummets", null));
+    try std.testing.expectEqual(@as(usize, 0), try tailInkDroppedByBoundsClip("Grocery run notes\xe2\x80\xa6", null));
 }
