@@ -306,6 +306,7 @@ There is NO `!=`, `<`, `>`, arithmetic, function calls with arguments, or ternar
 
 A path like `{h.streak}` resolves left to right, starting from the model or a `for` variable:
 
+- everything bindable is declared INSIDE the Model struct: fields, and `pub fn` METHODS in the struct body. A file-scope `pub fn visibleRows(model: *const Model, ...)` written NEXT TO the struct is invisible to bindings and `for each` — `native markup check` still passes (it is grammar-only), and the view then fails at test/run time with "each does not name an iterable". If a binding or `each` cannot find your fn, first check it lives inside `pub const Model = struct { ... }`
 - struct fields bind directly: `{habit_count}`, `{h.done}`
 - zero-arg pub methods bind like fields: `{totalDays}` calls `pub fn totalDays(m: *const Model) usize`
 - arena-taking scalar methods bind the same way: `{summary}` calls `pub fn summary(m: *const Model, arena: std.mem.Allocator) []const u8` — format derived display strings straight into the build arena (it lives exactly one view build). Works anywhere a scalar binding does — text interpolation, attribute values, message payloads — EXCEPT inside `{a == b}` equality, which rejects arena-computed values with a teaching error: compare the source fields, or bind a `pub fn ... bool`
@@ -340,6 +341,8 @@ Computed strings (money, dates, percentages) are formatted into the BUILD ARENA 
 ```zig
 pub const VisibleExpense = struct { id: u32, date: []const u8, amount: []const u8 };
 
+// A METHOD — declared inside `pub const Model = struct { ... }`. Bindings and
+// `for each` resolve Model decls only; the same fn at file scope is invisible.
 pub fn visible(model: *const Model, arena: std.mem.Allocator) []const VisibleExpense {
     const out = arena.alloc(VisibleExpense, model.expense_count) catch return &.{};
     var count: usize = 0;
@@ -882,6 +885,8 @@ main.update(&model, tree.msgForPointer(button.id, .up).?);        // dispatch ex
 ```
 
 Two `msgForPointer` traps: a **disabled** control yields `null` (assert `== null` rather than unwrapping when testing disabled states), and the tree is a snapshot — after each dispatch, rebuild the view before pressing anything again.
+
+`msgForPointer` has a sibling for every handler channel — use the one matching the interaction under test, all on the finalized `Tree`: `msgForKeyboard(id, keyboard_event)` (activation keys, slider steps, enter-to-submit, text edits), `msgForResize(id, fraction)` (the split-divider round-trip: dispatch the fraction, assert the model stored it, rebuild, assert the `value` echo), `msgForDismiss(id)` (an anchored surface's `on-dismiss`), `msgForHold(id)` (`on-hold`), `msgForTextEdit(id, edit)` / `msgForValue(id, value)` (text entry, sliders), `msgForScroll(id, state)`, and `msgForContextMenu(id, item_index)`. For tree keyboard NAVIGATION there is nothing app-side to unit test: Up/Down/Left/Right/Home/End run engine-side over `role="treeitem"` rows and dispatch the landed row's `on-press`/`on-toggle` — assert those Msgs (via `msgForPointer`/`msgFor(id, .toggle)`) and the model transitions; the keymap itself is runtime behavior (drive it live with `native automate widget-key`).
 
 Runtime-integration tests use `native_sdk.TestHarness()` on the null platform; heap-allocate both the harness and the app struct (they are multi-megabyte; stack allocation crashes).
 
