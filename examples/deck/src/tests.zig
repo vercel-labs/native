@@ -1,8 +1,11 @@
-//! deck tests: typed dispatch through the composed tree (markup status
-//! strip + Zig chrome), playback simulation through the fake effects
-//! executor (timers, the pbcopy spawn), spectrum determinism, the
-//! dark-only theming contract, markup engine parity, automation
-//! click-through on the transport, and layout/widget budgets.
+//! deck tests: typed dispatch through both windows' trees (the fixed
+//! player and the model-declared playlist rack), playback simulation
+//! through the fake effects executor (timers, the pbcopy spawn), spectrum
+//! and marquee determinism, the texture image channel (strict decode,
+//! codec-less fallback, the chrome's draw_image), the playlist window's
+//! full round-trip through real dispatch, the dark-only theming contract,
+//! markup engine parity, automation click-through on the transport, and
+//! layout/widget budgets at the fixed window sizes.
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
@@ -26,6 +29,11 @@ const App = main.DeckApp;
 fn buildTree(arena: std.mem.Allocator, model: *const Model) !Ui.Tree {
     var ui = Ui.init(arena);
     return ui.finalizeWithTokens(view_mod.rootView(&ui, model), main.tokensFromModel(model));
+}
+
+fn buildPlaylistTree(arena: std.mem.Allocator, model: *const Model) !Ui.Tree {
+    var ui = Ui.init(arena);
+    return ui.finalizeWithTokens(view_mod.playlistView(&ui, model), main.tokensFromModel(model));
 }
 
 fn findByLabel(widget: canvas.Widget, label: []const u8) ?canvas.Widget {
@@ -71,15 +79,17 @@ fn apply(model: *Model, msg: Msg) void {
 // -------------------------------------------------------------- app utils
 
 const surface_size = geometry.SizeF.init(main.window_width, main.window_height);
+const playlist_size = geometry.SizeF.init(view_mod.playlist_width, view_mod.playlist_height);
 
 const LiveApp = struct {
     harness: *native_sdk.TestHarness(),
     app_state: *App,
 
-    fn start() !LiveApp {
+    fn start(image_decode: bool) !LiveApp {
         const harness = try native_sdk.TestHarness().create(testing.allocator, .{ .size = surface_size });
         errdefer harness.destroy(testing.allocator);
         harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.image_decode = image_decode;
 
         const app_state = try testing.allocator.create(App);
         errdefer testing.allocator.destroy(app_state);
@@ -111,8 +121,8 @@ const LiveApp = struct {
         try self.harness.runtime.dispatchPlatformEvent(self.app_state.app(), .wake);
     }
 
-    fn widgetIdByLabel(self: LiveApp, kind: canvas.WidgetKind, label: []const u8) !canvas.ObjectId {
-        const layout = try self.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+    fn widgetIdByLabel(self: LiveApp, canvas_label: []const u8, window_id: u64, kind: canvas.WidgetKind, label: []const u8) !canvas.ObjectId {
+        const layout = try self.harness.runtime.canvasWidgetLayout(window_id, canvas_label);
         for (layout.nodes) |node| {
             if (node.widget.kind != kind) continue;
             if (std.mem.eql(u8, node.widget.semantics.label, label)) return node.widget.id;
@@ -120,17 +130,47 @@ const LiveApp = struct {
         return error.WidgetNotFound;
     }
 
-    fn widgetAction(self: LiveApp, id: canvas.ObjectId, verb: []const u8) !void {
+    fn widgetAction(self: LiveApp, canvas_label: []const u8, id: canvas.ObjectId, verb: []const u8) !void {
         var command_buffer: [96]u8 = undefined;
-        const line = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} {s}", .{ main.canvas_label, id, verb });
+        const line = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} {s}", .{ canvas_label, id, verb });
         try self.harness.runtime.dispatchAutomationCommand(self.app_state.app(), line);
+    }
+
+    /// The pointer path for widgets that are pressable but not focus
+    /// targets (the ledger's panel rows).
+    fn widgetClick(self: LiveApp, canvas_label: []const u8, id: canvas.ObjectId) !void {
+        var command_buffer: [96]u8 = undefined;
+        const line = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ canvas_label, id });
+        try self.harness.runtime.dispatchAutomationCommand(self.app_state.app(), line);
+    }
+
+    fn playlistWindowInfo(self: LiveApp) ?native_sdk.WindowInfo {
+        var buffer: [16]native_sdk.WindowInfo = undefined;
+        for (self.harness.runtime.listWindows(&buffer)) |info| {
+            if (std.mem.eql(u8, info.label, main.playlist_window_label)) return info;
+        }
+        return null;
+    }
+
+    /// Install the playlist canvas (its first gpu frame): declared
+    /// windows render nothing until their surface reports in.
+    fn installPlaylistCanvas(self: LiveApp, window_id: u64, frame_index: u64) !void {
+        try self.harness.runtime.dispatchPlatformEvent(self.app_state.app(), .{ .gpu_surface_frame = .{
+            .window_id = window_id,
+            .label = main.playlist_canvas_label,
+            .size = playlist_size,
+            .scale_factor = 1,
+            .frame_index = frame_index,
+            .timestamp_ns = frame_index * 1_000_000,
+            .nonblank = true,
+        } });
     }
 };
 
 // ------------------------------------------------------------------ tests
 
 test "play, pause, and seek drive the progress timer effect" {
-    const live = try LiveApp.start();
+    const live = try LiveApp.start(true);
     defer live.stop();
     const app_state = live.app_state;
 
@@ -161,22 +201,22 @@ test "play, pause, and seek drive the progress timer effect" {
     // slider, `on-change` dispatches `.seeked`, and the sync hook mirrors
     // the reconciled value into the model before update reads it. The
     // deck has two sliders — the label disambiguates.
-    const seek_id = try live.widgetIdByLabel(.slider, "Seek");
-    try live.widgetAction(seek_id, "increment");
+    const seek_id = try live.widgetIdByLabel(main.canvas_label, 1, .slider, "Seek");
+    try live.widgetAction(main.canvas_label, seek_id, "increment");
     try testing.expect(app_state.model.seek_fraction > 0);
     const duration: f32 = @floatFromInt(model_mod.trackById(1).duration_ms);
     const expected = app_state.model.seek_fraction * duration;
     try testing.expectApproxEqAbs(expected, @as(f32, @floatFromInt(app_state.model.elapsed_ms)), 1);
 
     // The volume fader mirrors through the same sync hook.
-    const volume_id = try live.widgetIdByLabel(.slider, "Volume");
+    const volume_id = try live.widgetIdByLabel(main.canvas_label, 1, .slider, "Volume");
     const volume_before = app_state.model.volume_fraction;
-    try live.widgetAction(volume_id, "increment");
+    try live.widgetAction(main.canvas_label, volume_id, "increment");
     try testing.expect(app_state.model.volume_fraction > volume_before);
 }
 
 test "track end auto-advances; the play-next queue wins over album order" {
-    const live = try LiveApp.start();
+    const live = try LiveApp.start(true);
     defer live.stop();
     const app_state = live.app_state;
 
@@ -210,7 +250,7 @@ test "track end auto-advances; the play-next queue wins over album order" {
 }
 
 test "copy title spawns pbcopy with the track title on stdin" {
-    const live = try LiveApp.start();
+    const live = try LiveApp.start(true);
     defer live.stop();
     const app_state = live.app_state;
 
@@ -238,8 +278,10 @@ test "the rail and the search both narrow the ledger through typed dispatch" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
+    // The library moved into the playlist rack: these trees are the
+    // secondary window's view, dispatched through the same typed path.
     var model = Model{};
-    var tree = try buildTree(arena, &model);
+    var tree = try buildPlaylistTree(arena, &model);
     // 9 rail cells (ALL + 8 albums) + 48 ledger rows.
     try testing.expectEqual(@as(usize, model_mod.albums.len + 1 + model_mod.tracks.len), countListItems(tree.root));
 
@@ -247,18 +289,18 @@ test "the rail and the search both narrow the ledger through typed dispatch" {
     const channel = findByLabel(tree.root, "Glass Horizon").?;
     apply(&model, tree.msgForPointer(channel.id, .up).?);
     try testing.expectEqual(@as(u8, 2), model.selected_album);
-    tree = try buildTree(arena, &model);
+    tree = try buildPlaylistTree(arena, &model);
     try testing.expectEqual(@as(usize, model_mod.albums.len + 1 + model_mod.tracks_per_album), countListItems(tree.root));
     try testing.expect(findByLabel(tree.root, "Sea of Static") != null);
 
     // Type into the status-strip search field (the markup-declared
     // on-input handler): matches narrow across title/artist/album.
     apply(&model, .{ .select_album = 0 });
-    tree = try buildTree(arena, &model);
+    tree = try buildPlaylistTree(arena, &model);
     const field = findByKind(tree.root, .search_field).?;
     apply(&model, tree.msgForTextEdit(field.id, .{ .insert_text = "velvet" }).?);
     try testing.expectEqualStrings("velvet", model.search());
-    tree = try buildTree(arena, &model);
+    tree = try buildPlaylistTree(arena, &model);
     try testing.expectEqual(@as(usize, model_mod.albums.len + 1 + model_mod.tracks_per_album), countListItems(tree.root));
 
     // The markup clear button (icon-only) resets the query.
@@ -270,79 +312,184 @@ test "the rail and the search both narrow the ledger through typed dispatch" {
 
     // No matches renders the NO SIGNAL plate instead of a list.
     model.search_buffer = canvas.TextBuffer(model_mod.max_search).init("polka");
-    tree = try buildTree(arena, &model);
+    tree = try buildPlaylistTree(arena, &model);
     try testing.expect(findByLabel(tree.root, "No tracks match") != null);
     try testing.expect(findByLabel(tree.root, "Track ledger") == null);
 }
 
-test "a full session: load from the ledger, queue via the context menu" {
+test "a full session: load from the playlist ledger, queue via the context menu" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
     var model = Model{};
-    var tree = try buildTree(arena, &model);
+    var playlist = try buildPlaylistTree(arena, &model);
 
-    // Press a ledger row: the track loads and plays; the VFD lights up.
-    const row = findByLabel(tree.root, "Glass").?;
-    apply(&model, tree.msgForPointer(row.id, .up).?);
+    // Press a ledger row: the track loads and plays; the player's VFD
+    // lights up (marquee live, pause icon on the play key, RUN lamp).
+    const row = findByLabel(playlist.root, "Glass").?;
+    apply(&model, playlist.msgForPointer(row.id, .up).?);
     try testing.expectEqual(@as(?u8, 7), model.now);
     try testing.expect(model.playing);
-    tree = try buildTree(arena, &model);
-    try testing.expect(findByText(tree.root, .text, "GLASS") != null);
-    try testing.expectEqualStrings("pause", findByLabel(tree.root, "Play or pause").?.icon);
-    try testing.expectEqualStrings("skip-back", findByLabel(tree.root, "Previous track").?.icon);
-    try testing.expectEqualStrings("skip-forward", findByLabel(tree.root, "Next track").?.icon);
+    var player = try buildTree(arena, &model);
+    const marquee = findByLabel(player.root, "Marquee").?;
+    try testing.expect(std.mem.indexOf(u8, marquee.text, "GLASS") != null);
+    try testing.expectEqualStrings("pause", findByLabel(player.root, "Play or pause").?.icon);
+    try testing.expectEqualStrings("skip-back", findByLabel(player.root, "Previous track").?.icon);
+    try testing.expectEqualStrings("skip-forward", findByLabel(player.root, "Next track").?.icon);
 
     // Pressing the loaded row again toggles pause; the power lamp drops
     // back to standby.
-    const same_row = findByLabel(tree.root, "Glass").?;
-    apply(&model, tree.msgForPointer(same_row.id, .up).?);
+    playlist = try buildPlaylistTree(arena, &model);
+    const same_row = findByLabel(playlist.root, "Glass").?;
+    apply(&model, playlist.msgForPointer(same_row.id, .up).?);
     try testing.expect(!model.playing);
-    tree = try buildTree(arena, &model);
-    try testing.expect(findByText(tree.root, .text, "STBY") != null);
-    try testing.expectEqualStrings("play", findByLabel(tree.root, "Play or pause").?.icon);
+    player = try buildTree(arena, &model);
+    try testing.expect(findByText(player.root, .text, "STBY") != null);
+    try testing.expectEqualStrings("play", findByLabel(player.root, "Play or pause").?.icon);
 
     // Context-menu items dispatch typed messages: Play Next queues (the
-    // amber Q plate appears), indexes past the declared items are inert.
-    const undertow = findByLabel(tree.root, "Undertow").?;
-    apply(&model, tree.msgForContextMenu(undertow.id, 0).?);
+    // amber Q plate appears in the ledger, the cue strip names the
+    // track, the player's queue badge counts it), indexes past the
+    // declared items are inert.
+    playlist = try buildPlaylistTree(arena, &model);
+    const undertow = findByLabel(playlist.root, "Undertow").?;
+    apply(&model, playlist.msgForContextMenu(undertow.id, 0).?);
     try testing.expectEqual(@as(usize, 1), model.queue_len);
     try testing.expectEqual(@as(u8, 12), model.queue[0]);
-    try testing.expect(tree.msgForContextMenu(undertow.id, 2) == null);
-    tree = try buildTree(arena, &model);
-    try testing.expect(findByText(tree.root, .badge, "Q") != null);
-    try testing.expect(findByText(tree.root, .badge, "QUEUE 1") != null);
-
-    // The PERF face shows the queue as cue plates.
-    apply(&model, .show_performance);
-    tree = try buildTree(arena, &model);
-    try testing.expect(findByLabel(tree.root, "Performance face") != null);
-    try testing.expect(findByLabel(tree.root, "Track ledger") == null);
-    try testing.expect(findByText(tree.root, .badge, "12 UNDERTOW") != null);
-    apply(&model, .show_library);
-    tree = try buildTree(arena, &model);
-    try testing.expect(findByLabel(tree.root, "Track ledger") != null);
+    try testing.expect(playlist.msgForContextMenu(undertow.id, 2) == null);
+    playlist = try buildPlaylistTree(arena, &model);
+    try testing.expect(findByText(playlist.root, .badge, "Q") != null);
+    try testing.expect(findByText(playlist.root, .badge, "QUEUE 1") != null);
+    try testing.expect(findByText(playlist.root, .badge, "12 UNDERTOW") != null);
+    player = try buildTree(arena, &model);
+    try testing.expect(findByText(player.root, .badge, "QUEUE 1") != null);
 }
 
-test "shortcut commands map to transport and face messages" {
+test "shortcut commands map to transport and playlist messages" {
     // The command table is the keyboard map (app.zon holds the same ids).
     try testing.expectEqual(Msg.toggle_play, main.command(main.cmd_play_pause).?);
     try testing.expectEqual(Msg.next_track, main.command(main.cmd_next).?);
     try testing.expectEqual(Msg.prev_track, main.command(main.cmd_prev).?);
-    try testing.expectEqual(Msg.toggle_face, main.command(main.cmd_toggle_face).?);
+    try testing.expectEqual(Msg.toggle_playlist, main.command(main.cmd_playlist).?);
     try testing.expectEqual(Msg.clear_search, main.command(main.cmd_dismiss).?);
     try testing.expect(main.command("deck.unknown") == null);
 
-    // toggle_face flips LIB <-> PERF both ways; escape clears the query.
+    // primary+L racks the playlist in and out; escape clears the query.
     var model = Model{};
-    apply(&model, main.command(main.cmd_toggle_face).?);
-    try testing.expectEqual(model_mod.View.performance, model.view);
-    apply(&model, main.command(main.cmd_toggle_face).?);
-    try testing.expectEqual(model_mod.View.library, model.view);
+    apply(&model, main.command(main.cmd_playlist).?);
+    try testing.expect(model.playlist_open);
+    apply(&model, main.command(main.cmd_playlist).?);
+    try testing.expect(!model.playlist_open);
     model.search_buffer = canvas.TextBuffer(model_mod.max_search).init("aurora");
     apply(&model, main.command(main.cmd_dismiss).?);
     try testing.expectEqualStrings("", model.search());
+}
+
+test "the playlist window round-trips through real dispatch" {
+    const live = try LiveApp.start(true);
+    defer live.stop();
+    const app_state = live.app_state;
+    try testing.expect(live.playlistWindowInfo() == null);
+
+    // Open through the REAL press path: the PL key via the automation
+    // widget verb. The windows_fn reconcile creates the window.
+    const pl_id = try live.widgetIdByLabel(main.canvas_label, 1, .toggle_button, "Playlist window");
+    try live.widgetAction(main.canvas_label, pl_id, "toggle");
+    try testing.expect(app_state.model.playlist_open);
+    const info = live.playlistWindowInfo() orelse return error.TestUnexpectedResult;
+    try testing.expect(info.open);
+    try testing.expectEqualStrings("Deck Playlist", info.title);
+
+    // The playlist canvas installs on its own first frame; the ledger
+    // then answers automation verbs addressed at its canvas label —
+    // loading a track from the rack drives the player (one model).
+    try live.installPlaylistCanvas(info.id, 2);
+    const row_id = try live.widgetIdByLabel(main.playlist_canvas_label, info.id, .panel, "First Light");
+    try live.widgetClick(main.playlist_canvas_label, row_id);
+    try testing.expectEqual(@as(?u8, 1), app_state.model.now);
+    try testing.expect(app_state.model.playing);
+
+    // Close by Msg (the PL key again): the model stops declaring the
+    // window and the reconcile closes it — no user-close Msg fires.
+    const pl_again = try live.widgetIdByLabel(main.canvas_label, 1, .toggle_button, "Playlist window");
+    try live.widgetAction(main.canvas_label, pl_again, "toggle");
+    try testing.expect(!app_state.model.playlist_open);
+    const closed = live.playlistWindowInfo();
+    try testing.expect(closed == null or !closed.?.open);
+
+    // Reopen (same label), then close as the USER (the fake host tears
+    // the window down like the real delegates do and reports it gone):
+    // the open=false event dispatches `.playlist_closed` and the model
+    // clears its flag — the window stays closed.
+    try live.dispatch(.toggle_playlist);
+    try testing.expect(app_state.model.playlist_open);
+    const reopened = live.playlistWindowInfo() orelse return error.TestUnexpectedResult;
+    const close_event = live.harness.null_platform.userCloseWindow(reopened.id).?;
+    try live.harness.runtime.dispatchPlatformEvent(live.app_state.app(), close_event);
+    try testing.expect(!app_state.model.playlist_open);
+    const user_closed = live.playlistWindowInfo();
+    try testing.expect(user_closed == null or !user_closed.?.open);
+}
+
+test "boot registers both textures; the chrome and the rack draw them" {
+    const live = try LiveApp.start(true);
+    defer live.stop();
+    const app_state = live.app_state;
+
+    // init_fx ran on the installing frame; both strict-subset PNGs
+    // decoded and registered.
+    try testing.expectEqual(@as(usize, 2), live.harness.runtime.registeredCanvasImageCount());
+    try testing.expectEqual(main.plate_texture_id, app_state.model.texture_plate);
+    try testing.expectEqual(main.weave_texture_id, app_state.model.texture_weave);
+
+    // The chrome pass carries the plate texture as an onscreen
+    // draw_image (offscreen while unregistered or in high contrast).
+    var commands: [1024]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try chrome.build(&app_state.model, &builder, surface_size, main.tokensFromModel(&app_state.model));
+    var plate_draws: usize = 0;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .draw_image => |draw| {
+                try testing.expectEqual(main.plate_texture_id, draw.image_id);
+                try testing.expect(draw.dst.x < main.window_width);
+                plate_draws += 1;
+            },
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), plate_draws);
+
+    // The playlist rack's backdrop is an image leaf wearing the weave.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const tree = try buildPlaylistTree(arena_state.allocator(), &app_state.model);
+    const backdrop = findByLabel(tree.root, "Weave backdrop").?;
+    try testing.expectEqual(canvas.WidgetKind.image, backdrop.kind);
+    try testing.expectEqual(main.weave_texture_id, backdrop.image_id);
+}
+
+test "a codec-less platform keeps the chrome pure vector, never broken" {
+    const live = try LiveApp.start(false);
+    defer live.stop();
+    const app_state = live.app_state;
+
+    try testing.expectEqual(@as(usize, 0), live.harness.runtime.registeredCanvasImageCount());
+    try testing.expectEqual(@as(canvas.ImageId, 0), app_state.model.texture_plate);
+    try testing.expectEqual(@as(canvas.ImageId, 0), app_state.model.texture_weave);
+
+    // Fixed-count contract: the texture command still exists, offscreen.
+    var commands: [1024]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try chrome.build(&app_state.model, &builder, surface_size, main.tokensFromModel(&app_state.model));
+    try testing.expectEqual(chrome.prefix_commands + chrome.suffix_commands, builder.displayList().commands.len);
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .draw_image => |draw| try testing.expect(draw.dst.x >= main.window_width),
+            else => {},
+        }
+    }
 }
 
 test "the spectrum is a deterministic function of the playback clock" {
@@ -396,8 +543,41 @@ test "the spectrum is a deterministic function of the playback clock" {
     try testing.expectEqual(@as(?f32, 1), chart.chart.y_max);
 }
 
+test "the marquee is a deterministic scroller on the playback clock" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Idle: the no-signal readout, static.
+    var model = Model{};
+    try testing.expectEqualStrings("NO SIGNAL", model.marqueeText(arena));
+
+    // Loaded: a fixed window of the rotating TITLE /// ARTIST /// ALBUM
+    // line — pure over (track id, elapsed ms), like the spectrum.
+    apply(&model, .{ .play_track = 7 });
+    const at_zero = model.marqueeText(arena);
+    try testing.expectEqual(@as(usize, model_mod.marquee_window), at_zero.len);
+    try testing.expect(std.mem.startsWith(u8, at_zero, "GLASS /// AURORA FIELD"));
+    try testing.expectEqualStrings(at_zero, model.marqueeText(arena));
+
+    // One marquee step rotates by exactly one character.
+    model.elapsed_ms = model_mod.marquee_step_ms;
+    const at_one = model.marqueeText(arena);
+    try testing.expect(!std.mem.eql(u8, at_zero, at_one));
+    try testing.expectEqualStrings(at_zero[1..], at_one[0 .. at_one.len - 1]);
+
+    // Pause freezes the scroll (the clock stops with it).
+    apply(&model, .toggle_play);
+    try testing.expectEqualStrings(at_one, model.marqueeText(arena));
+
+    // The rotation wraps: a full line length of steps returns home.
+    const line_len = "GLASS /// AURORA FIELDS /// GLASS HORIZON  ".len;
+    model.elapsed_ms = @intCast(model_mod.marquee_step_ms * line_len);
+    try testing.expectEqualStrings(at_zero, model.marqueeText(arena));
+}
+
 test "the skin is dark-only; high contrast abandons it for the framework palette" {
-    const live = try LiveApp.start();
+    const live = try LiveApp.start(true);
     defer live.stop();
     const app_state = live.app_state;
 
@@ -455,77 +635,78 @@ fn collectIds(widget: canvas.Widget, ids: *std.ArrayListUnmanaged(canvas.ObjectI
 }
 
 test "automation click-through: the transport drives the deck" {
-    const live = try LiveApp.start();
+    const live = try LiveApp.start(true);
     defer live.stop();
     const app_state = live.app_state;
 
     // Press play through the real automation path: focus + key dispatch
     // through the widget route, exactly what `native automate` does.
-    const play_id = try live.widgetIdByLabel(.button, "Play or pause");
-    try live.widgetAction(play_id, "press");
+    const play_id = try live.widgetIdByLabel(main.canvas_label, 1, .button, "Play or pause");
+    try live.widgetAction(main.canvas_label, play_id, "press");
     try testing.expect(app_state.model.playing);
     try testing.expectEqual(@as(?u8, 1), app_state.model.now);
 
     // Next/prev through the same path (ids can change across rebuilds:
     // re-resolve after each dispatch).
-    try live.widgetAction(try live.widgetIdByLabel(.button, "Next track"), "press");
+    try live.widgetAction(main.canvas_label, try live.widgetIdByLabel(main.canvas_label, 1, .button, "Next track"), "press");
     try testing.expectEqual(@as(?u8, 2), app_state.model.now);
-    try live.widgetAction(try live.widgetIdByLabel(.button, "Previous track"), "press");
+    try live.widgetAction(main.canvas_label, try live.widgetIdByLabel(main.canvas_label, 1, .button, "Previous track"), "press");
     try testing.expectEqual(@as(?u8, 1), app_state.model.now);
 
     // Pause through the play key again.
-    try live.widgetAction(try live.widgetIdByLabel(.button, "Play or pause"), "press");
+    try live.widgetAction(main.canvas_label, try live.widgetIdByLabel(main.canvas_label, 1, .button, "Play or pause"), "press");
     try testing.expect(!app_state.model.playing);
-
-    // The status strip's PERF chip switches faces through the toggle path.
-    const perf_id = try live.widgetIdByLabel(.toggle_button, "Performance face");
-    try live.widgetAction(perf_id, "toggle");
-    try testing.expectEqual(model_mod.View.performance, app_state.model.view);
-    const lib_id = try live.widgetIdByLabel(.toggle_button, "Library face");
-    try live.widgetAction(lib_id, "toggle");
-    try testing.expectEqual(model_mod.View.library, app_state.model.view);
 }
 
 test "the chrome pass holds its exact command counts across model states" {
     // The chrome contract requires exactly prefix+suffix commands per
     // build; state-dependent marks move offscreen instead of dropping
-    // out. Rebuild across the states that steer the pass: idle, playing
-    // mid-song, PERF face, and high contrast.
-    var states = [_]Model{ .{}, .{}, .{}, .{} };
+    // out. Rebuild across the states that steer the pass: idle (no
+    // textures yet), playing mid-song with textures registered, and
+    // high contrast.
+    var states = [_]Model{ .{}, .{}, .{} };
     states[1].now = 7;
     states[1].playing = true;
     states[1].elapsed_ms = 84_500;
-    states[2].now = 43;
-    states[2].view = .performance;
-    states[3].appearance = .{ .high_contrast = true };
+    states[1].texture_plate = main.plate_texture_id;
+    states[1].texture_weave = main.weave_texture_id;
+    states[2].appearance = .{ .high_contrast = true };
+    states[2].texture_plate = main.plate_texture_id;
 
     for (&states) |*model| {
         var commands: [1024]canvas.CanvasCommand = undefined;
         var builder = canvas.Builder.init(&commands);
-        try chrome.build(model, &builder, geometry.SizeF.init(main.window_width, main.window_height), main.tokensFromModel(model));
+        try chrome.build(model, &builder, surface_size, main.tokensFromModel(model));
         try testing.expectEqual(chrome.prefix_commands + chrome.suffix_commands, builder.displayList().commands.len);
     }
 }
 
-test "every face lays out within the canvas and the widget budget" {
+test "both windows lay out within their fixed canvases and the widget budget" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
 
     var model = Model{};
     apply(&model, .{ .play_track = 1 });
     apply(&model, .{ .queue_track = 43 });
+    model.playlist_open = true;
 
-    const cases = [_]struct { view: model_mod.View, album: u8 }{
-        .{ .view = .library, .album = 0 },
-        .{ .view = .library, .album = 2 },
-        .{ .view = .performance, .album = 0 },
-    };
-    for (cases) |case| {
-        model.view = case.view;
-        model.selected_album = case.album;
+    // The player: a dense fixed 460x180 chassis.
+    {
         const tree = try buildTree(arena_state.allocator(), &model);
         var nodes: [1024]canvas.WidgetLayoutNode = undefined;
         const layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, main.window_width, main.window_height), &nodes);
+        try testing.expect(layout.nodes.len > 0);
+        try testing.expect(layout.nodes.len < 128); // just the player
+        _ = arena_state.reset(.retain_capacity);
+    }
+
+    // The playlist rack: full ledger and narrowed, at 460x440.
+    const albums = [_]u8{ 0, 2 };
+    for (albums) |album| {
+        model.selected_album = album;
+        const tree = try buildPlaylistTree(arena_state.allocator(), &model);
+        var nodes: [1024]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, view_mod.playlist_width, view_mod.playlist_height), &nodes);
         try testing.expect(layout.nodes.len > 0);
         try testing.expect(layout.nodes.len < 768); // three quarters of the 1024 budget
         _ = arena_state.reset(.retain_capacity);
@@ -542,36 +723,38 @@ test "render deck screenshots (env-gated)" {
     if (std.c.getenv("DECK_SHOTS") == null) return error.SkipZigTest;
     const io = testing.io;
 
-    const live = try LiveApp.start();
+    const live = try LiveApp.start(true);
     defer live.stop();
 
-    // Hero: the full ledger, a track playing mid-song, one queued cue.
-    // The mid-song position comes from REAL seek steps on the fader
-    // (the widget keyboard path), so the fader, the VFD progress strip,
-    // and the timecode all agree.
+    // The live macOS chrome inset (traffic lights on the gold band):
+    // the offscreen renderer has no host to deliver it, so the shots
+    // dispatch the same Msg `on_chrome` would.
+    try live.dispatch(.{ .set_chrome_leading = 70 });
+
+    // Idle player: STBY lamp, dashed segments, noise-floor spectrum.
+    try presentShotFrame(live, 2);
+    live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/deck-shots/deck-idle-artifacts", "Deck");
+    try live.harness.runtime.dispatchAutomationCommand(live.app_state.app(), "screenshot deck-canvas 2");
+
+    // Playing mid-song, one queued cue. The mid-song position comes from
+    // REAL seek steps on the fader (the widget keyboard path), so the
+    // fader, the VFD progress strip, and the timecode all agree.
     try live.dispatch(.{ .play_track = 7 });
     try live.dispatch(.{ .queue_track = 12 });
-    const seek_id = try live.widgetIdByLabel(.slider, "Seek");
-    for (0..8) |_| try live.widgetAction(seek_id, "increment");
-    try live.dispatch(.{ .select_album = 0 });
-    try presentShotFrame(live, 2);
-    live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/deck-shots/deck-library-artifacts", "Deck");
-    try live.harness.runtime.dispatchAutomationCommand(live.app_state.app(), "screenshot deck-canvas 2");
-
-    // A search narrowing the ledger (the dispatch after the buffer write
-    // forces the rebuild the direct model mutation skipped).
-    live.app_state.model.search_buffer = canvas.TextBuffer(model_mod.max_search).init("light");
-    try live.dispatch(.show_library);
+    const seek_id = try live.widgetIdByLabel(main.canvas_label, 1, .slider, "Seek");
+    for (0..8) |_| try live.widgetAction(main.canvas_label, seek_id, "increment");
     try presentShotFrame(live, 3);
-    live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/deck-shots/deck-search-artifacts", "Deck");
+    live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/deck-shots/deck-playing-artifacts", "Deck");
     try live.harness.runtime.dispatchAutomationCommand(live.app_state.app(), "screenshot deck-canvas 2");
 
-    // PERF face: the analyzer fills the deck.
-    live.app_state.model.search_buffer = .{};
-    try live.dispatch(.show_performance);
-    try presentShotFrame(live, 4);
-    live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/deck-shots/deck-perf-artifacts", "Deck");
-    try live.harness.runtime.dispatchAutomationCommand(live.app_state.app(), "screenshot deck-canvas 2");
+    // The playlist rack, racked in through the real toggle.
+    try live.dispatch(.toggle_playlist);
+    const info = live.playlistWindowInfo() orelse return error.TestUnexpectedResult;
+    try live.installPlaylistCanvas(info.id, 4);
+    try presentShotFrame(live, 5);
+    try live.installPlaylistCanvas(info.id, 6);
+    live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/deck-shots/deck-playlist-artifacts", "Deck");
+    try live.harness.runtime.dispatchAutomationCommand(live.app_state.app(), "screenshot playlist-canvas 2");
 }
 
 // Env-gated homepage screenshot renderer (skipped by default, never in
@@ -586,7 +769,7 @@ test "render homepage screenshots (env-gated)" {
     if (std.c.getenv("HOMEPAGE_SHOTS") == null) return error.SkipZigTest;
     const io = testing.io;
 
-    const live = try LiveApp.start();
+    const live = try LiveApp.start(true);
     defer live.stop();
 
     // The hero state: the full ledger, a track playing mid-song, one
@@ -595,8 +778,8 @@ test "render homepage screenshots (env-gated)" {
     // progress strip, and the timecode all agree.
     try live.dispatch(.{ .play_track = 7 });
     try live.dispatch(.{ .queue_track = 12 });
-    const seek_id = try live.widgetIdByLabel(.slider, "Seek");
-    for (0..8) |_| try live.widgetAction(seek_id, "increment");
+    const seek_id = try live.widgetIdByLabel(main.canvas_label, 1, .slider, "Seek");
+    for (0..8) |_| try live.widgetAction(main.canvas_label, seek_id, "increment");
     try live.dispatch(.{ .select_album = 0 });
     try presentShotFrame(live, 2);
     live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/deck-dark-artifacts", "Deck");

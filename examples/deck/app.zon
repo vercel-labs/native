@@ -2,7 +2,7 @@
     .id = "dev.native_sdk.deck",
     .name = "deck",
     .display_name = "Deck",
-    .version = "0.1.0",
+    .version = "0.2.0",
     .icons = .{"assets/icon.icns"},
     .platforms = .{"macos"},
     .permissions = .{ "view", "command" },
@@ -11,7 +11,7 @@
         .{ .id = "deck.play-pause", .key = "p", .modifiers = .{"primary"} },
         .{ .id = "deck.next", .key = "arrowright", .modifiers = .{"primary"} },
         .{ .id = "deck.prev", .key = "arrowleft", .modifiers = .{"primary"} },
-        .{ .id = "deck.toggle-face", .key = "k", .modifiers = .{"primary"} },
+        .{ .id = "deck.playlist", .key = "l", .modifiers = .{"primary"} },
         .{ .id = "deck.dismiss", .key = "escape" },
     },
     .shell = .{
@@ -19,8 +19,10 @@
             .{
                 .label = "main",
                 .title = "Native SDK Deck",
-                .width = 960,
-                .height = 640,
+                .width = 460,
+                .height = 180,
+                .resizable = false,
+                .titlebar = "hidden_inset",
                 .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .views = .{

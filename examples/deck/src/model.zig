@@ -1,6 +1,6 @@
 //! deck model: the same fixed local music library as `examples/soundboard`
 //! (the "same app, different identity" contrast is the point) plus the
-//! playback, queue, search, and view state the deck's chrome binds to.
+//! playback, queue, search, and playlist-window state the deck binds to.
 //!
 //! Playback is an honest simulation, soundboard's contract: pressing play
 //! starts a repeating runtime timer effect (`fx.startTimer`) and each fire
@@ -138,6 +138,12 @@ pub const max_queue = 16;
 pub const max_search = 48;
 pub const tick_ms: u32 = 500;
 pub const spectrum_bands = 32;
+/// Marquee geometry: visible window in mono characters, and how much
+/// playback time advances the scroll by one character. 22 characters of
+/// bold mono at scale 1.0 fill the VFD's text column with clear glass to
+/// spare on both sides (24 ran flush against the right bevel).
+pub const marquee_window = 22;
+pub const marquee_step_ms: u32 = 500;
 
 /// Effect keys, model-owned identity (effect-key style).
 pub const progress_timer_key: u64 = 1;
@@ -145,16 +151,19 @@ pub const copy_key: u64 = 2;
 
 // ------------------------------------------------------------------- model
 
-pub const View = enum { library, performance };
-
 pub const Msg = union(enum) {
     /// Album rail selection; 0 selects the whole library.
     select_album: u8,
-    show_library,
-    show_performance,
-    /// Keyboard face switch (`primary+K`): flips LIB <-> PERF.
-    toggle_face,
+    /// The PL key (and `primary+L`): the playlist window's open flag
+    /// flips, and the windows_fn reconcile creates or closes the window.
+    toggle_playlist,
+    /// The USER closed the playlist window (titlebar close): the window
+    /// is already gone as an optimistic echo; the model agrees here.
+    playlist_closed,
     set_appearance: native_sdk.Appearance,
+    /// Chrome overlay insets changed (hidden-inset titlebar): the cap
+    /// band's leading pad follows the traffic lights.
+    set_chrome_leading: f32,
     search_edit: canvas.TextInputEvent,
     clear_search,
     play_track: u8,
@@ -179,10 +188,16 @@ pub const Msg = union(enum) {
 
 pub const Model = struct {
     // Source-of-truth state only; everything else is derived per rebuild.
-    view: View = .library,
+    /// The playlist window's visibility channel: `windows_fn` declares
+    /// the window exactly while this is set (presence IS visibility).
+    playlist_open: bool = false,
     /// Album rail selection; 0 = the whole library.
     selected_album: u8 = 0,
     appearance: native_sdk.Appearance = .{},
+    /// Chrome overlay insets (hidden-inset titlebar): the cap band pads
+    /// its leading edge by this so the brand engraving clears the
+    /// traffic lights. Delivered through `on_chrome` before first build.
+    chrome_leading: f32 = 0,
     now: ?u8 = null, // loaded track id
     playing: bool = false,
     elapsed_ms: u32 = 0,
@@ -197,6 +212,13 @@ pub const Model = struct {
     /// Copy-to-clipboard bookkeeping: how many pbcopy spawns finished ok.
     copies_done: u32 = 0,
     copy_failed: bool = false,
+    /// Registered texture ImageIds (0 while unregistered): the brushed
+    /// plate the main-window chrome lays under its machining and the
+    /// carbon weave behind the playlist rack. Registered once in `boot`;
+    /// a failed decode leaves the id 0 and the chrome stays pure vector —
+    /// a bad asset can never break presentation.
+    texture_plate: canvas.ImageId = 0,
+    texture_weave: canvas.ImageId = 0,
 
     // ------------------------------------------------------------- queries
 
@@ -208,12 +230,8 @@ pub const Model = struct {
         return model.search().len > 0;
     }
 
-    pub fn libraryShowing(model: *const Model) bool {
-        return model.view == .library;
-    }
-
-    pub fn performanceShowing(model: *const Model) bool {
-        return model.view == .performance;
+    pub fn playlistShowing(model: *const Model) bool {
+        return model.playlist_open;
     }
 
     pub fn nowTrack(model: *const Model) ?*const Track {
@@ -238,22 +256,38 @@ pub const Model = struct {
         return std.fmt.allocPrint(arena, "{d}/{d} TRK", .{ model.visibleTracks(arena).len, tracks.len }) catch "";
     }
 
-    pub fn nowPlayingTitle(model: *const Model) []const u8 {
-        const track = model.nowTrack() orelse return "NO SIGNAL";
-        return track.title;
-    }
-
-    pub fn nowPlayingArtist(model: *const Model) []const u8 {
-        const track = model.nowTrack() orelse return "load a track from the ledger";
-        return albumById(track.album).artist;
-    }
-
-    /// VFD channel readout: "TRK 07 · GLASS HORIZON".
+    /// VFD channel readout: "TRK 07". Short by design — the album is
+    /// already in the marquee, and the timecode rides the same line
+    /// (round 1 caught the long form wrapping over the progress strip).
     pub fn channelLabel(model: *const Model, arena: std.mem.Allocator) []const u8 {
         const track = model.nowTrack() orelse return "TRK --";
+        return std.fmt.allocPrint(arena, "TRK {d:0>2}", .{track.id}) catch "";
+    }
+
+    /// The VFD marquee: title, artist, and album on one rotating line —
+    /// the classic scroller, derived (never stored) as a pure function
+    /// of the loaded track and the progress clock. The composed line
+    /// rotates one step every `marquee_step_ms` of PLAYBACK time, so
+    /// pause freezes it exactly like the spectrum (the clock stops) and
+    /// the same model state always yields the same window of text.
+    pub fn marqueeText(model: *const Model, arena: std.mem.Allocator) []const u8 {
+        const track = model.nowTrack() orelse return "NO SIGNAL";
         const album = albumById(track.album);
-        var upper_buffer: [64]u8 = undefined;
-        return std.fmt.allocPrint(arena, "TRK {d:0>2} · {s}", .{ track.id, upperTo(&upper_buffer, album.title) }) catch "";
+        // ASCII-only composition: the rotation slices bytes, so a
+        // multi-byte separator could split mid-codepoint at the seam.
+        var compose_buffer: [128]u8 = undefined;
+        var upper_buffer: [128]u8 = undefined;
+        const line = std.fmt.bufPrint(&compose_buffer, "{s} /// {s} /// {s}  ", .{
+            track.title, album.artist, album.title,
+        }) catch return track.title;
+        const full = upperTo(&upper_buffer, line);
+        if (full.len <= marquee_window) return arena.dupe(u8, std.mem.trimEnd(u8, full, " /")) catch "";
+        const offset = (model.elapsed_ms / marquee_step_ms) % full.len;
+        const out = arena.alloc(u8, marquee_window) catch return "";
+        for (out, 0..) |*byte, index| {
+            byte.* = full[(offset + index) % full.len];
+        }
+        return out;
     }
 
     pub fn progressFraction(model: *const Model) f32 {
@@ -350,7 +384,7 @@ pub const Model = struct {
         return out[0..count];
     }
 
-    /// Up-next rows for the PERF face, in queue order.
+    /// Up-next rows for the playlist window's cue strip, in queue order.
     pub fn queueRows(model: *const Model, arena: std.mem.Allocator) []const TrackRow {
         const out = arena.alloc(TrackRow, model.queue_len) catch return &.{};
         for (model.queue[0..model.queue_len], 0..) |id, slot| {
@@ -468,10 +502,10 @@ fn upperTo(buffer: []u8, source: []const u8) []const u8 {
 pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     switch (msg) {
         .select_album => |id| model.selected_album = id,
-        .show_library => model.view = .library,
-        .show_performance => model.view = .performance,
-        .toggle_face => model.view = if (model.view == .library) .performance else .library,
+        .toggle_playlist => model.playlist_open = !model.playlist_open,
+        .playlist_closed => model.playlist_open = false,
         .set_appearance => |appearance| model.appearance = appearance,
+        .set_chrome_leading => |leading| model.chrome_leading = leading,
         .search_edit => |edit| model.search_buffer.apply(edit),
         .clear_search => model.search_buffer.apply(.clear),
         .play_track => |id| {
