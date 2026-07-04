@@ -14,6 +14,11 @@ export function DocsMobileNav() {
     return allDocsPages.find((page) => page.href === pathname) ?? allDocsPages[0];
   }, [pathname]);
 
+  // The homepage is a full-width landing page without the docs chrome.
+  if (pathname === "/") {
+    return null;
+  }
+
   return (
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetTrigger

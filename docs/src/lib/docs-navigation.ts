@@ -12,7 +12,7 @@ export const navSections: NavSection[] = [
   {
     title: "Getting Started",
     items: [
-      { name: "Introduction", href: "/" },
+      { name: "Home", href: "/" },
       { name: "Quick Start", href: "/quick-start" },
       { name: "App Model", href: "/app-model" },
       { name: "Native UI", href: "/native-ui" },

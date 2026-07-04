@@ -41,6 +41,13 @@ function Sidebar() {
 }
 
 export function DocsNav({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+
+  // The homepage is a full-width landing page without the docs sidebar.
+  if (pathname === "/") {
+    return <main>{children}</main>;
+  }
+
   return (
     <div className="mx-auto max-w-5xl px-6 py-8 lg:py-12">
       <div className="flex gap-12">

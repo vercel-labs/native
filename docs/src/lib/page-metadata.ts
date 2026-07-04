@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { PAGE_TITLES } from "./page-titles";
 
 const DESCRIPTION =
-  "Build native apps with Zig, secure WebView surfaces, native controls, and OS capabilities.";
+  "Cross-platform native UI: declarative markup views, design-token styling, and Zig logic on an Elm-style loop — rendered into real OS windows with no browser in the binary.";
 
 export function pageMetadata(slug: string): Metadata {
   const title = PAGE_TITLES[slug];

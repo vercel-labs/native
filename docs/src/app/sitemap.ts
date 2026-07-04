@@ -13,7 +13,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
 }
 
 function lastModifiedFor(href: string): Date {
-  const relative = href === "/" ? "page.mdx" : path.join(href.slice(1), "page.mdx");
+  const relative = href === "/" ? "page.tsx" : path.join(href.slice(1), "page.mdx");
   try {
     return statSync(path.join(process.cwd(), "src", "app", relative)).mtime;
   } catch {

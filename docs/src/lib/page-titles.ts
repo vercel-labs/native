@@ -1,5 +1,5 @@
 export const PAGE_TITLES: Record<string, string> = {
-  "": "Build Native Apps\nwith Zig, Web, and OS Surfaces",
+  "": "Write Markup.\nShip Native Pixels.",
   "quick-start": "Quick Start",
   "app-model": "App Model",
   frontend: "Frontend Projects",

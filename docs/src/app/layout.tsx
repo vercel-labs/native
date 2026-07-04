@@ -12,26 +12,26 @@ import "./globals.css";
 export const metadata: Metadata = {
   metadataBase: new URL("https://zero-native.dev"),
   title: {
-    default: "zero-native | Native Apps with Zig, Web, and OS Surfaces",
+    default: "zero-native | Write Markup. Ship Native Pixels.",
     template: "%s | zero-native",
   },
   description:
-    "Build native apps with Zig, secure WebView surfaces, native controls, and OS capabilities.",
+    "Cross-platform native UI: declarative markup views, design-token styling, and Zig logic on an Elm-style loop — rendered into real OS windows with no browser in the binary.",
   openGraph: {
     type: "website",
     locale: "en_US",
     url: "https://zero-native.dev",
     siteName: "zero-native",
-    title: "zero-native | Native Apps with Zig, Web, and OS Surfaces",
+    title: "zero-native | Write Markup. Ship Native Pixels.",
     description:
-      "Build native apps with Zig, secure WebView surfaces, native controls, and OS capabilities.",
+      "Cross-platform native UI: declarative markup views, design-token styling, and Zig logic on an Elm-style loop — rendered into real OS windows with no browser in the binary.",
     images: [{ url: "/og", width: 1200, height: 630, alt: "zero-native" }],
   },
   twitter: {
     card: "summary_large_image",
-    title: "zero-native | Native Apps with Zig, Web, and OS Surfaces",
+    title: "zero-native | Write Markup. Ship Native Pixels.",
     description:
-      "Build native apps with Zig, secure WebView surfaces, native controls, and OS capabilities.",
+      "Cross-platform native UI: declarative markup views, design-token styling, and Zig logic on an Elm-style loop — rendered into real OS windows with no browser in the binary.",
     images: ["/og"],
   },
 };
