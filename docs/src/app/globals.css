@@ -458,33 +458,28 @@ button {
   cursor: pointer;
 }
 
-/* Homepage hero entrance: a staggered CSS-only fade-up, disabled when the
-   visitor prefers reduced motion. */
-@keyframes hero-rise {
-  from {
-    opacity: 0;
-    transform: translateY(14px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+/* Homepage hero pointer highlight: a barely-there neutral bloom that follows
+   the cursor. Only exists for hover-capable pointers with no reduced-motion
+   preference; invisible in screenshots, alive under the mouse. */
+.hero-pointer {
+  display: none;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .hero-rise {
-    animation: hero-rise 0.7s cubic-bezier(0.175, 0.885, 0.32, 1.1) both;
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .hero-pointer {
+    display: block;
+    background: radial-gradient(
+      22rem circle at var(--pointer-x, 50%) var(--pointer-y, 50%),
+      rgba(0, 0, 0, 0.035),
+      transparent 70%
+    );
   }
-  .hero-rise-1 {
-    animation-delay: 0.06s;
-  }
-  .hero-rise-2 {
-    animation-delay: 0.12s;
-  }
-  .hero-rise-3 {
-    animation-delay: 0.18s;
-  }
-  .hero-rise-4 {
-    animation-delay: 0.26s;
+
+  .dark .hero-pointer {
+    background: radial-gradient(
+      22rem circle at var(--pointer-x, 50%) var(--pointer-y, 50%),
+      rgba(255, 255, 255, 0.05),
+      transparent 70%
+    );
   }
 }

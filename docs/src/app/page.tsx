@@ -3,7 +3,8 @@ import Image from "next/image";
 import { Code } from "@/components/code";
 import { Showcase } from "@/components/home/showcase";
 import { CopyCommand } from "@/components/home/copy-command";
-import { HeroCollage } from "@/components/home/hero-collage";
+import { HeroWindow } from "@/components/home/hero-window";
+import { HeroPointer } from "@/components/home/hero-pointer";
 import { githubUrl, npmCli, siteName } from "@/lib/site";
 
 // ---------------------------------------------------------------- samples
@@ -209,29 +210,22 @@ export default function HomePage() {
     <div>
       {/* Hero */}
       <section className="relative overflow-hidden">
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle,var(--ds-gray-500)_1px,transparent_1px)] [background-size:22px_22px] [mask-image:radial-gradient(ellipse_75%_55%_at_50%_0%,black_25%,transparent_75%)] dark:bg-[radial-gradient(circle,var(--ds-gray-400)_1px,transparent_1px)]"
-        />
-        <div
-          aria-hidden
-          className="pointer-events-none absolute left-1/2 top-[-16rem] h-[36rem] w-[80rem] -translate-x-1/2 rounded-[100%] bg-gradient-to-b from-gray-200/80 to-transparent blur-3xl dark:from-blue-600/[0.28] dark:via-blue-600/[0.12]"
-        />
+        <HeroPointer />
         <div className="relative mx-auto max-w-[1200px] px-6 pt-16 text-center sm:pt-24">
-          <p className="hero-rise font-mono text-[11px] font-medium uppercase tracking-[0.18em] text-gray-900 sm:text-xs sm:tracking-[0.25em]">
+          <p className="font-mono text-[11px] font-medium uppercase tracking-[0.18em] text-gray-900 sm:text-xs sm:tracking-[0.25em]">
             macOS · Linux · Windows · iOS · Android
           </p>
-          <h1 className="hero-rise hero-rise-1 mx-auto mt-4 max-w-5xl heading-40 text-gray-1000 sm:heading-64 lg:heading-72">
+          <h1 className="mx-auto mt-4 max-w-5xl heading-40 text-gray-1000 sm:heading-64 lg:heading-72">
             The complete toolkit
             <br />
             for native apps.
           </h1>
-          <p className="hero-rise hero-rise-2 mx-auto mt-4 max-w-2xl copy-16 text-gray-900 sm:copy-18">
+          <p className="mx-auto mt-4 max-w-2xl copy-16 text-gray-900 sm:copy-18">
             {siteName} builds native desktop and mobile applications from one codebase. Views are
             markup. Styling is tokens. Logic is Zig. The pixels come from its own engine — no
             browser, no JS runtime, one small binary.
           </p>
-          <div className="hero-rise hero-rise-3 mx-auto mt-8 flex max-w-2xl flex-col items-center justify-center gap-3 sm:flex-row">
+          <div className="mx-auto mt-8 flex max-w-2xl flex-col items-center justify-center gap-3 sm:flex-row">
             <div className="w-full max-w-xs sm:w-auto sm:min-w-[21rem]">
               <CopyCommand lines={[installCommand]} />
             </div>
@@ -253,8 +247,8 @@ export default function HomePage() {
             </div>
           </div>
         </div>
-        <div className="hero-rise hero-rise-4 relative mt-8 pb-16 sm:mt-10 sm:pb-24">
-          <HeroCollage />
+        <div className="relative mt-8 pb-16 sm:mt-10 sm:pb-24">
+          <HeroWindow />
         </div>
       </section>
 
@@ -481,7 +475,7 @@ export default function HomePage() {
       <section className="relative overflow-hidden border-t border-gray-alpha-400">
         <div
           aria-hidden
-          className="pointer-events-none absolute left-1/2 bottom-[-14rem] h-[28rem] w-[64rem] -translate-x-1/2 rounded-[100%] bg-gradient-to-t from-gray-200/70 to-transparent blur-3xl dark:from-blue-700/[0.14]"
+          className="pointer-events-none absolute left-1/2 bottom-[-14rem] h-[28rem] w-[64rem] -translate-x-1/2 rounded-[100%] bg-gradient-to-t from-gray-200/70 to-transparent blur-3xl dark:from-white/[0.04]"
         />
         <div className="relative mx-auto max-w-[1200px] px-6 py-16 text-center sm:py-24">
           <h2 className="heading-32 text-gray-1000 sm:heading-40">Build something native</h2>
