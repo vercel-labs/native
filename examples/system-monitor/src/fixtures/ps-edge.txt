@@ -1,0 +1,6 @@
+    1   0.0  0.1  25824 3-02:49:06 /sbin/launchd
+  842 100.0  4.2 1048576 12-23:59:59 /usr/local/bin/renderfarm-worker
+  977   2.5  0.3  81234 00:42 /System/Library/CoreServices/Software Update.app/Contents/Resources/suhelperd
+ 1204   0.4  0.0   1024 1:02:03 Core Audio Driver (Example.driver)
+this line is not a ps row and must be counted as skipped
+ 2048   0.0  0.0      0 05:00 /usr/libexec/idle-daemon

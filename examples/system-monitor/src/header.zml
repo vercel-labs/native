@@ -1,0 +1,18 @@
+<!-- The monitor header: brand, the live/paused status line, and the
+     model-driven exclusive theme chips. Compiled at comptime
+     (canvas.CompiledMarkupView) and composed under the Zig root view;
+     the sampling toggle, search, and sort controls live in the Zig
+     toolbar because they pair vector icons with press handlers. -->
+<column>
+  <row height="54" padding="12" gap="12" cross="center" background="surface" label="Monitor header">
+    <badge variant="primary">System Monitor</badge>
+    <text size="sm" width="220" foreground="text_muted" label="Sampling status">{headerStatus}</text>
+    <spacer grow="1" />
+    <toggle-group gap="2" label="Theme">
+      <for each="theme_prefs" as="p">
+        <toggle-button size="sm" selected="{p == theme_pref}" on-toggle="set_theme:{p}">{p}</toggle-button>
+      </for>
+    </toggle-group>
+  </row>
+  <separator />
+</column>
