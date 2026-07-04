@@ -47,10 +47,12 @@ pub const InitOptions = struct {
 };
 
 pub fn writeDefaultApp(allocator: std.mem.Allocator, io: std.Io, destination: []const u8, options: InitOptions) !void {
-    const names = try TemplateNames.init(allocator, options.app_name);
-    defer names.deinit(allocator);
-    const framework_path = try defaultFrameworkPath(allocator, io, destination, options.framework_path);
-    defer allocator.free(framework_path);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const names = try TemplateNames.init(scratch, options.app_name);
+    const framework_path = try defaultFrameworkPath(scratch, io, destination, options.framework_path);
 
     var cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(io, destination);
@@ -60,24 +62,18 @@ pub fn writeDefaultApp(allocator: std.mem.Allocator, io: std.Io, destination: []
     try app_dir.createDirPath(io, "src");
     try app_dir.createDirPath(io, "assets");
 
-    const build_zig = try buildZig(allocator, names, framework_path, options.frontend);
-    defer allocator.free(build_zig);
-    const build_zon = try buildZon(allocator, names);
-    defer allocator.free(build_zon);
-    const main_zig = try mainZig(allocator, names, options.frontend);
-    defer allocator.free(main_zig);
-    const app_zon = try appZon(allocator, names, options.frontend);
-    defer allocator.free(app_zon);
-    const readme_md = try readme(allocator, names, framework_path, options.frontend);
-    defer allocator.free(readme_md);
+    const build_zig = try buildZig(scratch, names, framework_path, options.frontend);
+    const build_zon = try buildZon(scratch, names);
+    const main_zig = try mainZig(scratch, names, options.frontend);
+    const app_zon = try appZon(scratch, names, options.frontend);
+    const readme_md = try readme(scratch, names, framework_path, options.frontend);
 
     try writeFile(app_dir, io, "build.zig", build_zig);
     try writeFile(app_dir, io, "build.zig.zon", build_zon);
     try writeFile(app_dir, io, "src/main.zig", main_zig);
     try writeFile(app_dir, io, "src/runner.zig", runnerZig());
     try writeFile(app_dir, io, "app.zon", app_zon);
-    const icon_bytes = readFile(allocator, io, "assets/icon.icns") catch fallback_icon_icns;
-    defer if (icon_bytes.ptr != fallback_icon_icns.ptr) allocator.free(icon_bytes);
+    const icon_bytes = readFile(scratch, io, "assets/icon.icns") catch fallback_icon_icns;
     try writeFile(app_dir, io, "assets/icon.icns", icon_bytes);
     try writeFile(app_dir, io, "README.md", readme_md);
 
@@ -1279,27 +1275,30 @@ fn writeFrontendFiles(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.
 }
 
 fn writeNextFrontend(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
     try app_dir.createDirPath(io, "frontend/app");
-    const package_json = try nextPackageJson(allocator, names);
-    defer allocator.free(package_json);
+    const package_json = try nextPackageJson(scratch, names);
     try writeFile(app_dir, io, "frontend/package.json", package_json);
     try writeFile(app_dir, io, "frontend/next.config.js", nextConfig());
     try writeFile(app_dir, io, "frontend/tsconfig.json", nextTsconfig());
-    const layout = try nextLayout(allocator, names);
-    defer allocator.free(layout);
+    const layout = try nextLayout(scratch, names);
     try writeFile(app_dir, io, "frontend/app/layout.tsx", layout);
-    const page = try nextPage(allocator, names);
-    defer allocator.free(page);
+    const page = try nextPage(scratch, names);
     try writeFile(app_dir, io, "frontend/app/page.tsx", page);
     try writeFile(app_dir, io, "frontend/app/globals.css", frontendStylesCss());
 }
 
 fn writeViteFrontend(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
     try app_dir.createDirPath(io, "frontend/src");
-    const package_json = try vitePackageJson(allocator, names);
-    defer allocator.free(package_json);
-    const index_html = try viteIndexHtml(allocator, names);
-    defer allocator.free(index_html);
+    const package_json = try vitePackageJson(scratch, names);
+    const index_html = try viteIndexHtml(scratch, names);
     try writeFile(app_dir, io, "frontend/package.json", package_json);
     try writeFile(app_dir, io, "frontend/index.html", index_html);
     try writeFile(app_dir, io, "frontend/src/main.js", viteMainJs());
@@ -1307,13 +1306,14 @@ fn writeViteFrontend(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.D
 }
 
 fn writeReactFrontend(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
     try app_dir.createDirPath(io, "frontend/src");
-    const package_json = try reactPackageJson(allocator, names);
-    defer allocator.free(package_json);
-    const index_html = try reactIndexHtml(allocator, names);
-    defer allocator.free(index_html);
-    const app_tsx = try reactAppTsx(allocator, names);
-    defer allocator.free(app_tsx);
+    const package_json = try reactPackageJson(scratch, names);
+    const index_html = try reactIndexHtml(scratch, names);
+    const app_tsx = try reactAppTsx(scratch, names);
     try writeFile(app_dir, io, "frontend/package.json", package_json);
     try writeFile(app_dir, io, "frontend/vite.config.js", reactViteConfig());
     try writeFile(app_dir, io, "frontend/index.html", index_html);
@@ -1323,11 +1323,13 @@ fn writeReactFrontend(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.
 }
 
 fn writeSvelteFrontend(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
     try app_dir.createDirPath(io, "frontend/src");
-    const package_json = try sveltePackageJson(allocator, names);
-    defer allocator.free(package_json);
-    const index_html = try svelteIndexHtml(allocator, names);
-    defer allocator.free(index_html);
+    const package_json = try sveltePackageJson(scratch, names);
+    const index_html = try svelteIndexHtml(scratch, names);
     try writeFile(app_dir, io, "frontend/package.json", package_json);
     try writeFile(app_dir, io, "frontend/svelte.config.js", svelteConfig());
     try writeFile(app_dir, io, "frontend/vite.config.js", svelteViteConfig());
@@ -1338,11 +1340,13 @@ fn writeSvelteFrontend(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io
 }
 
 fn writeVueFrontend(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
     try app_dir.createDirPath(io, "frontend/src");
-    const package_json = try vuePackageJson(allocator, names);
-    defer allocator.free(package_json);
-    const index_html = try vueIndexHtml(allocator, names);
-    defer allocator.free(index_html);
+    const package_json = try vuePackageJson(scratch, names);
+    const index_html = try vueIndexHtml(scratch, names);
     try writeFile(app_dir, io, "frontend/package.json", package_json);
     try writeFile(app_dir, io, "frontend/vite.config.js", vueViteConfig());
     try writeFile(app_dir, io, "frontend/index.html", index_html);

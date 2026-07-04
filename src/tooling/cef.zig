@@ -329,21 +329,21 @@ fn resolveDir(dir: []const u8, platform: Platform) []const u8 {
 }
 
 fn installPrepared(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map, options: InstallOptions, platform: Platform, existing: LayoutReport) !InstallResult {
-    const cache_path = try cacheDir(allocator, env_map);
-    defer allocator.free(cache_path);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const cache_path = try cacheDir(scratch, env_map);
     try std.Io.Dir.cwd().createDirPath(io, cache_path);
 
     var archive_name_buffer: [256]u8 = undefined;
     const archive_name = try preparedArchiveName(&archive_name_buffer, options.version, platform);
     const archive_path = try std.fs.path.join(allocator, &.{ cache_path, archive_name });
     errdefer allocator.free(archive_path);
-    const sha_path = try std.fmt.allocPrint(allocator, "{s}.sha256", .{archive_path});
-    defer allocator.free(sha_path);
+    const sha_path = try std.fmt.allocPrint(scratch, "{s}.sha256", .{archive_path});
 
-    const url = try preparedArchiveUrl(allocator, options.download_url orelse default_prepared_download_url, options.version, platform);
-    defer allocator.free(url);
-    const sha_url = try std.fmt.allocPrint(allocator, "{s}.sha256", .{url});
-    defer allocator.free(sha_url);
+    const url = try preparedArchiveUrl(scratch, options.download_url orelse default_prepared_download_url, options.version, platform);
+    const sha_url = try std.fmt.allocPrint(scratch, "{s}.sha256", .{url});
 
     if (options.force or !pathExists(io, archive_path)) {
         downloadFile(io, archive_path, url) catch |err| {
@@ -357,11 +357,9 @@ fn installPrepared(allocator: std.mem.Allocator, io: std.Io, env_map: *std.proce
     }
     try verifyArchiveChecksum(allocator, io, cache_path, archive_name);
 
-    const tmp_dir = try std.fs.path.join(allocator, &.{ cache_path, "extract-tmp" });
-    defer allocator.free(tmp_dir);
+    const tmp_dir = try std.fs.path.join(scratch, &.{ cache_path, "extract-tmp" });
     runCommand(io, &.{ "rm", "-rf", tmp_dir }) catch {};
-    const layout_dir = try std.fs.path.join(allocator, &.{ tmp_dir, "layout" });
-    defer allocator.free(layout_dir);
+    const layout_dir = try std.fs.path.join(scratch, &.{ tmp_dir, "layout" });
     try std.Io.Dir.cwd().createDirPath(io, layout_dir);
     try runCommand(io, &.{ "tar", "-xzf", archive_path, "-C", layout_dir });
 
@@ -388,34 +386,32 @@ fn installOfficial(allocator: std.mem.Allocator, io: std.Io, env_map: *std.proce
         return error.WrapperBuildFailed;
     }
 
-    const cache_path = try cacheDir(allocator, env_map);
-    defer allocator.free(cache_path);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const cache_path = try cacheDir(scratch, env_map);
     try std.Io.Dir.cwd().createDirPath(io, cache_path);
 
     var archive_name_buffer: [256]u8 = undefined;
     const archive_name = try archiveName(&archive_name_buffer, options.version, platform);
     const archive_path = try std.fs.path.join(allocator, &.{ cache_path, archive_name });
     errdefer allocator.free(archive_path);
-    const sha_path = try std.fmt.allocPrint(allocator, "{s}.sha256", .{archive_path});
-    defer allocator.free(sha_path);
+    const sha_path = try std.fmt.allocPrint(scratch, "{s}.sha256", .{archive_path});
 
-    const url = try archiveUrl(allocator, options.download_url orelse default_official_download_url, options.version, platform);
-    defer allocator.free(url);
-    const sha_url = try std.fmt.allocPrint(allocator, "{s}.sha256", .{url});
-    defer allocator.free(sha_url);
+    const url = try archiveUrl(scratch, options.download_url orelse default_official_download_url, options.version, platform);
+    const sha_url = try std.fmt.allocPrint(scratch, "{s}.sha256", .{url});
 
     if (options.force or !pathExists(io, archive_path)) try downloadFile(io, archive_path, url);
     if (options.force or !pathExists(io, sha_path)) try downloadFile(io, sha_path, sha_url);
     try verifyArchiveChecksum(allocator, io, cache_path, archive_name);
 
-    const tmp_dir = try std.fs.path.join(allocator, &.{ cache_path, "extract-tmp" });
-    defer allocator.free(tmp_dir);
+    const tmp_dir = try std.fs.path.join(scratch, &.{ cache_path, "extract-tmp" });
     runCommand(io, &.{ "rm", "-rf", tmp_dir }) catch {};
     try std.Io.Dir.cwd().createDirPath(io, tmp_dir);
     try runCommand(io, &.{ "tar", "-xjf", archive_path, "-C", tmp_dir });
 
-    const extracted_root = try std.fs.path.join(allocator, &.{ tmp_dir, archive_name[0 .. archive_name.len - ".tar.bz2".len] });
-    defer allocator.free(extracted_root);
+    const extracted_root = try std.fs.path.join(scratch, &.{ tmp_dir, archive_name[0 .. archive_name.len - ".tar.bz2".len] });
     if (!pathExists(io, extracted_root)) return error.CommandFailed;
 
     if (pathExists(io, options.dir)) {
@@ -435,16 +431,17 @@ fn installOfficial(allocator: std.mem.Allocator, io: std.Io, env_map: *std.proce
 }
 
 fn verifyArchiveChecksum(allocator: std.mem.Allocator, io: std.Io, cache_path: []const u8, archive_name: []const u8) !void {
-    const quoted_cache = try shellQuote(allocator, cache_path);
-    defer allocator.free(quoted_cache);
-    const quoted_archive = try shellQuote(allocator, archive_name);
-    defer allocator.free(quoted_archive);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const quoted_cache = try shellQuote(scratch, cache_path);
+    const quoted_archive = try shellQuote(scratch, archive_name);
     const command = try std.fmt.allocPrint(
-        allocator,
+        scratch,
         "cd {s} && expected=$(tr -d '[:space:]' < {s}.sha256) && actual=$(" ++ sha256_shell_snippet ++ " {s} | awk '{{print $1}}') && if [ \"$expected\" != \"$actual\" ]; then echo \"CEF archive checksum mismatch\" >&2; exit 1; fi",
         .{ quoted_cache, quoted_archive, quoted_archive },
     );
-    defer allocator.free(command);
     try runCommand(io, &.{ "sh", "-c", command });
 }
 
@@ -454,41 +451,43 @@ pub fn prepareRelease(allocator: std.mem.Allocator, io: std.Io, options: Prepare
     try ensureLayoutFor(io, platform, dir);
     try std.Io.Dir.cwd().createDirPath(io, options.output_dir);
 
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
     var archive_name_buffer: [256]u8 = undefined;
     const name = try preparedArchiveName(&archive_name_buffer, options.version, platform);
     const archive_path = try std.fs.path.join(allocator, &.{ options.output_dir, name });
     errdefer allocator.free(archive_path);
 
-    const quoted_dir = try shellQuote(allocator, dir);
-    defer allocator.free(quoted_dir);
-    const quoted_output = try shellQuote(allocator, options.output_dir);
-    defer allocator.free(quoted_output);
-    const quoted_name = try shellQuote(allocator, name);
-    defer allocator.free(quoted_name);
+    const quoted_dir = try shellQuote(scratch, dir);
+    const quoted_output = try shellQuote(scratch, options.output_dir);
+    const quoted_name = try shellQuote(scratch, name);
     const force_local = if (builtin.target.os.tag == .windows) " --force-local" else "";
     const command = try std.fmt.allocPrint(
-        allocator,
+        scratch,
         "output_dir=$(cd {s} && pwd) && cd {s} && tar -czf" ++ force_local ++ " \"$output_dir\"/{s} include Release libcef_dll_wrapper $(test -d Resources && echo Resources) $(test -d locales && echo locales)",
         .{ quoted_output, quoted_dir, quoted_name },
     );
-    defer allocator.free(command);
     try runCommand(io, &.{ "sh", "-c", command });
 
     const sha_command = try std.fmt.allocPrint(
-        allocator,
+        scratch,
         "cd {s} && " ++ sha256_shell_snippet ++ " {s} | awk '{{print $1}}' > {s}.sha256",
         .{ quoted_output, quoted_name, quoted_name },
     );
-    defer allocator.free(sha_command);
     try runCommand(io, &.{ "sh", "-c", sha_command });
 
     return archive_path;
 }
 
 fn ensureWrapperArchive(allocator: std.mem.Allocator, io: std.Io, platform: Platform, dir: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
     const wrapper_name = platform.wrapperLibraryName();
-    const wrapper_path = try std.fs.path.join(allocator, &.{ dir, "libcef_dll_wrapper", wrapper_name });
-    defer allocator.free(wrapper_path);
+    const wrapper_path = try std.fs.path.join(scratch, &.{ dir, "libcef_dll_wrapper", wrapper_name });
     if (pathExists(io, wrapper_path)) return;
 
     if (!commandAvailable(io, "cmake")) {
@@ -496,14 +495,12 @@ fn ensureWrapperArchive(allocator: std.mem.Allocator, io: std.Io, platform: Plat
         return error.WrapperBuildFailed;
     }
 
-    const build_dir = try std.fs.path.join(allocator, &.{ dir, "build", "libcef_dll_wrapper" });
-    defer allocator.free(build_dir);
+    const build_dir = try std.fs.path.join(scratch, &.{ dir, "build", "libcef_dll_wrapper" });
     try std.Io.Dir.cwd().createDirPath(io, build_dir);
     try runCommand(io, &.{ "cmake", "-S", dir, "-B", build_dir });
     try runCommand(io, &.{ "cmake", "--build", build_dir, "--target", "libcef_dll_wrapper", "--config", "Release" });
 
-    const built = try findFileNamed(allocator, io, build_dir, wrapper_name);
-    defer allocator.free(built);
+    const built = try findFileNamed(scratch, io, build_dir, wrapper_name);
     try std.Io.Dir.copyFile(std.Io.Dir.cwd(), built, std.Io.Dir.cwd(), wrapper_path, io, .{ .make_path = true, .replace = true });
 }
 

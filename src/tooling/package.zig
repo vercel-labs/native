@@ -132,6 +132,10 @@ pub fn createLocalPackage(io: std.Io, output_path: []const u8) !PackageStats {
 }
 
 pub fn createMacosApp(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions) !PackageStats {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
     var cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(io, options.output_path);
     var package_dir = try cwd.openDir(io, options.output_path, .{});
@@ -141,21 +145,18 @@ pub fn createMacosApp(allocator: std.mem.Allocator, io: std.Io, options: Package
 
     const executable_name = std.fs.path.basename(options.metadata.name);
     if (options.binary_path) |binary_path| {
-        const executable_subpath = try std.fmt.allocPrint(allocator, "Contents/MacOS/{s}", .{executable_name});
-        defer allocator.free(executable_subpath);
+        const executable_subpath = try std.fmt.allocPrint(scratch, "Contents/MacOS/{s}", .{executable_name});
         try copyFileToDir(allocator, io, package_dir, binary_path, executable_subpath);
         try makeExecutable(package_dir, io, executable_subpath);
     } else {
         try writeFile(package_dir, io, "Contents/MacOS/README.txt", "No app binary was supplied for this local package.\n");
     }
 
-    const info_plist = try macosInfoPlist(allocator, options.metadata, executable_name);
-    defer allocator.free(info_plist);
+    const info_plist = try macosInfoPlist(scratch, options.metadata, executable_name);
     try writeFile(package_dir, io, "Contents/Info.plist", info_plist);
     try writeFile(package_dir, io, "Contents/PkgInfo", "APPL????");
     try writeFile(package_dir, io, "Contents/Resources/README.txt", "Unsigned local zero-native macOS app bundle.\n");
-    const assets_output = try assetOutputPath(allocator, options.output_path, "Contents/Resources", options);
-    defer allocator.free(assets_output);
+    const assets_output = try assetOutputPath(scratch, options.output_path, "Contents/Resources", options);
     const bundle_stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);
     try copyMacosIcon(allocator, io, package_dir, options);
     try copyMacosDocumentIcons(allocator, io, package_dir, options.metadata);
