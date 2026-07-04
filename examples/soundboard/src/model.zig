@@ -259,10 +259,6 @@ pub const Model = struct {
         return albumById(track.album).artist;
     }
 
-    pub fn playPauseLabel(model: *const Model) []const u8 {
-        return if (model.playing) "Pause" else "Play";
-    }
-
     pub fn progressFraction(model: *const Model) f32 {
         const track = model.nowTrack() orelse return 0;
         if (track.duration_ms == 0) return 0;

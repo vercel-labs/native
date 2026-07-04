@@ -275,8 +275,12 @@ test "search filters albums and songs through typed dispatch" {
     tree = try buildTree(arena, &model);
     try testing.expectEqual(@as(usize, model_mod.tracks_per_album), countListItems(tree.root));
 
-    // Clear restores the full library.
-    const clear = findByText(tree.root, .button, "Clear").?;
+    // Clear restores the full library. The clear control is an icon
+    // button: the ghost button carries the accessible label and an "x"
+    // vector icon (kind .icon, text = registry name) overlays it.
+    try testing.expect(findByText(tree.root, .icon, "x") != null);
+    const clear = findByLabel(tree.root, "Clear search").?;
+    try testing.expectEqual(canvas.WidgetKind.button, clear.kind);
     apply(&model, tree.msgForPointer(clear.id, .up).?);
     try testing.expectEqualStrings("", model.search());
     tree = try buildTree(arena, &model);
@@ -307,16 +311,24 @@ test "a full session: open an album, play it, and use the context menus" {
     try testing.expect(findByLabel(tree.root, "Album detail") != null);
     try testing.expectEqual(@as(usize, model_mod.tracks_per_album), countListItems(tree.root));
 
-    // Play album starts track 7 (the record's first track).
-    const play_button = findByText(tree.root, .button, "Play album").?;
+    // Play album starts track 7 (the record's first track). The button is
+    // an icon+text overlay: the button widget carries the label and the
+    // press handling; the play icon over it is decoration.
+    const play_button = findByLabel(tree.root, "Play album").?;
+    try testing.expectEqual(canvas.WidgetKind.button, play_button.kind);
     apply(&model, tree.msgForPointer(play_button.id, .up).?);
     try testing.expectEqual(@as(?u8, 7), model.now);
     try testing.expect(model.playing);
 
-    // The now-playing bar reflects it.
+    // The now-playing bar reflects it: the transport shows the pause
+    // vector icon (kind .icon, text = registry name) over the primary
+    // button, and the playing track row gets the play indicator icon.
     tree = try buildTree(arena, &model);
     try testing.expect(findByText(tree.root, .text, "Glass") != null);
-    try testing.expect(findByText(tree.root, .button, "Pause") != null);
+    try testing.expect(findByText(tree.root, .icon, "pause") != null);
+    try testing.expect(findByText(tree.root, .icon, "play") != null);
+    try testing.expect(findByText(tree.root, .icon, "chevron-left") != null);
+    try testing.expect(findByText(tree.root, .icon, "chevron-right") != null);
 
     // Pressing a different track row switches to it; pressing the playing
     // row toggles pause.
@@ -341,9 +353,11 @@ test "a full session: open an album, play it, and use the context menus" {
     tree = try buildTree(arena, &model);
     try testing.expect(findByText(tree.root, .badge, "Up next") != null);
 
-    // Back returns to the grid; the playing album is badged there.
+    // Back returns to the grid; the playing album is badged there. Back
+    // is a chevron-left icon+text overlay whose button carries the label.
     apply(&model, .toggle_play);
-    const back = findByText(tree.root, .button, "Back to albums").?;
+    const back = findByLabel(tree.root, "Back to albums").?;
+    try testing.expectEqual(canvas.WidgetKind.button, back.kind);
     apply(&model, tree.msgForPointer(back.id, .up).?);
     tree = try buildTree(arena, &model);
     try testing.expect(findByLabel(tree.root, "Album grid") != null);

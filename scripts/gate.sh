@@ -79,7 +79,7 @@ affected_examples=""   # space-separated example dir names
 mobile_affected=false
 
 # Examples with a root `test-example-<name>` step (see build.zig).
-registered_examples="canvas-preview capabilities command-app effects-probe gpu-components gpu-dashboard gpu-surface habits kanban markdown-viewer native-panels native-shell next react svelte ui-inbox vue"
+registered_examples="calculator canvas-preview capabilities command-app effects-probe gpu-components gpu-dashboard gpu-surface habits kanban markdown-viewer native-panels native-shell next notes react soundboard svelte ui-inbox vue"
 # Examples whose suite is their own in-dir `zig build test`.
 indir_examples="browser hello webview"
 # Mobile example projects, covered as a group by test-examples-mobile.

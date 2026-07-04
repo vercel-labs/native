@@ -155,6 +155,10 @@ test "the initial tree renders the welcome sample in editor and preview" {
     try testing.expect(save.state.disabled);
     try testing.expect(findByText(tree.root, .button, "Save As") != null);
 
+    // The editor pane heading carries the built-in "edit" vector icon
+    // (kind .icon with the registry name as its text/semantics).
+    try testing.expect(findByText(tree.root, .icon, "edit") != null);
+
     // The editor mirrors the sample source; the preview rendered it as
     // widgets (the H1 becomes a span paragraph, the table becomes cells).
     const editor = findByKind(tree.root, .textarea).?;

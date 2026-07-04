@@ -1,7 +1,11 @@
 <!-- The now-playing transport bar. The circular cover is the one image
      binding markup carries (the avatar's u64 ImageId); progress is a seek
      slider whose reconciled value reaches update through the sync hook.
-     Playback is simulated by a repeating timer effect — see model.zig. -->
+     Playback is simulated by a repeating timer effect — see model.zig.
+     The transport is icon buttons built with the overlay idiom (the
+     mirror of the hotspot idiom): the button is the hit target and the
+     visual, and a centered <icon> stacked over it is pure decoration —
+     icons are never hit-tested, so a press anywhere lands on the button. -->
 <column>
   <separator />
   <row height="76" padding="12" gap="14" cross="center" background="surface" label="Now playing bar">
@@ -11,9 +15,25 @@
       <text size="sm" foreground="text_muted">{nowPlayingArtist}</text>
     </column>
     <row gap="6" cross="center">
-      <button size="sm" variant="ghost" disabled="{idle}" on-press="prev_track" label="Previous track">Prev</button>
-      <button variant="primary" width="72" on-press="toggle_play" label="Play or pause">{playPauseLabel}</button>
-      <button size="sm" variant="ghost" disabled="{idle}" on-press="next_track" label="Next track">Next</button>
+      <stack width="32" height="28">
+        <button size="sm" variant="ghost" disabled="{idle}" on-press="prev_track" label="Previous track"></button>
+        <row main="center" cross="center"><icon name="chevron-left" width="15" height="15" foreground="text_muted" /></row>
+      </stack>
+      <stack width="44" height="34">
+        <button variant="primary" on-press="toggle_play" label="Play or pause"></button>
+        <row main="center" cross="center">
+          <if test="{playing}">
+            <icon name="pause" width="17" height="17" foreground="accent_text" />
+          </if>
+          <else>
+            <icon name="play" width="17" height="17" foreground="accent_text" />
+          </else>
+        </row>
+      </stack>
+      <stack width="32" height="28">
+        <button size="sm" variant="ghost" disabled="{idle}" on-press="next_track" label="Next track"></button>
+        <row main="center" cross="center"><icon name="chevron-right" width="15" height="15" foreground="text_muted" /></row>
+      </stack>
     </row>
     <text size="sm" foreground="text_muted" width="34">{elapsedLabel}</text>
     <slider grow="1" value="{progressFraction}" disabled="{idle}" on-change="seeked" label="Seek" />

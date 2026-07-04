@@ -120,7 +120,7 @@ fn albumDetailView(ui: *Ui, model: *const Model, album_id: u8) Ui.Node {
     const rows = model.albumTrackRows(ui.arena, album_id);
     return ui.scroll(.{ .grow = 1, .semantics = .{ .label = "Album detail" } }, ui.column(.{ .padding = content_padding, .gap = 18 }, .{
         ui.row(.{}, .{
-            ui.button(.{ .variant = .ghost, .size = .sm, .on_press = .close_album, .semantics = .{ .label = "Back to albums" } }, "Back to albums"),
+            backButton(ui),
             ui.spacer(1),
         }),
         ui.row(.{ .gap = 20 }, .{
@@ -138,13 +138,41 @@ fn albumDetailView(ui: *Ui, model: *const Model, album_id: u8) Ui.Node {
                 }),
                 ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, ui.fmt("{s} · {d} · {d} tracks", .{ album.artist, album.year, rows.len })),
                 ui.row(.{ .gap = 8, .cross = .center }, .{
-                    ui.button(.{ .variant = .primary, .on_press = Msg{ .play_album = album.id }, .semantics = .{ .label = "Play album" } }, "Play album"),
+                    playAlbumButton(ui, album.id),
                     ui.spacer(1),
                 }),
             }),
         }),
         trackList(ui, rows, "Album tracks"),
     }));
+}
+
+/// Icon+text buttons via the overlay idiom (the mirror of the hotspot
+/// idiom notes uses): the button is the visual and the labeled hit
+/// target, and a centered row of icon + text is stacked over it. Icons
+/// and layout rows are never hit-tested, so presses there fall through
+/// to the button; the label TEXT is a hit target, so it carries the same
+/// on_press — either way the one message dispatches. The stack and text
+/// widths carry slack over the tight text measure for the macOS packet
+/// rasterizer's own font metrics (durationText's idiom).
+fn backButton(ui: *Ui) Ui.Node {
+    return ui.el(.stack, .{ .width = 156, .height = 28 }, .{
+        ui.button(.{ .variant = .ghost, .size = .sm, .on_press = .close_album, .semantics = .{ .label = "Back to albums" } }, ""),
+        ui.row(.{ .main = .center, .cross = .center, .gap = 6 }, .{
+            ui.icon(.{ .width = 14, .height = 14, .style_tokens = .{ .foreground = .text_muted } }, "chevron-left"),
+            ui.text(.{ .size = .sm, .width = 104, .on_press = .close_album }, "Back to albums"),
+        }),
+    });
+}
+
+fn playAlbumButton(ui: *Ui, album_id: u8) Ui.Node {
+    return ui.el(.stack, .{ .width = 148, .height = 34 }, .{
+        ui.button(.{ .variant = .primary, .on_press = Msg{ .play_album = album_id }, .semantics = .{ .label = "Play album" } }, ""),
+        ui.row(.{ .main = .center, .cross = .center, .gap = 7 }, .{
+            ui.icon(.{ .width = 14, .height = 14, .style_tokens = .{ .foreground = .accent_text } }, "play"),
+            ui.text(.{ .size = .sm, .width = 86, .on_press = Msg{ .play_album = album_id }, .style_tokens = .{ .foreground = .accent_text } }, "Play album"),
+        }),
+    });
 }
 
 // ------------------------------------------------------------------ songs
@@ -191,7 +219,7 @@ fn trackRowView(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
             .{ .radius = .md },
         .semantics = .{ .role = .listitem, .label = row.title },
     }, ui.row(.{ .gap = 12, .cross = .center }, .{
-        ui.text(.{ .width = 24, .size = .sm, .style_tokens = .{ .foreground = if (row.playing) .accent else .text_muted } }, if (row.playing) "▶" else row.number),
+        trackIndicator(ui, row),
         if (row.subtitle.len == 0)
             ui.text(.{ .grow = 1, .style_tokens = if (row.now) .{ .foreground = .accent } else .{} }, row.title)
         else
@@ -205,6 +233,23 @@ fn trackRowView(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
             ui.el(.stack, .{}, .{}),
         durationText(ui, row.duration),
     }));
+}
+
+/// The leading track-row slot: a vector play icon on the playing row, a
+/// muted pause icon on the loaded-but-paused row, and the track number
+/// everywhere else. Icons are decoration (never hit-tested), so the row's
+/// press handling is untouched; the fixed 24px slot keeps the number
+/// column's alignment.
+fn trackIndicator(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
+    if (!row.now) {
+        return ui.text(.{ .width = 24, .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, row.number);
+    }
+    return ui.row(.{ .width = 24, .cross = .center }, .{
+        if (row.playing)
+            ui.icon(.{ .width = 14, .height = 14, .style_tokens = .{ .foreground = .accent } }, "play")
+        else
+            ui.icon(.{ .width = 14, .height = 14, .style_tokens = .{ .foreground = .text_muted } }, "pause"),
+    });
 }
 
 /// Right-aligned fixed-width duration. The width carries slack on purpose:

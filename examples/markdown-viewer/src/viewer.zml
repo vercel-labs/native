@@ -34,7 +34,10 @@
     </column>
     <separator />
     <column grow="1" padding="10" gap="6">
-      <text foreground="text_muted">Editor</text>
+      <row gap="6" cross="center">
+        <icon name="edit" width="13" height="13" foreground="text_muted" />
+        <text foreground="text_muted">Editor</text>
+      </row>
       <textarea text="{document}" on-input="edit" grow="1" placeholder="# Start writing…" label="Markdown source" />
     </column>
     <separator />

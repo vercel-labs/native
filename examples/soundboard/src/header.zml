@@ -13,7 +13,13 @@
     <spacer grow="1" />
     <search-field text="{search}" placeholder="Search albums, artists, songs…" width="280" on-input="search_edit" label="Search library" />
     <if test="{searching}">
-      <button size="sm" variant="ghost" on-press="clear_search" label="Clear search">Clear</button>
+      <!-- Icon button via the overlay idiom: the ghost button is the hit
+           target, the x icon stacked over it is decoration (never
+           hit-tested), so the press lands on the button. -->
+      <stack width="28" height="28">
+        <button size="sm" variant="ghost" on-press="clear_search" label="Clear search"></button>
+        <row main="center" cross="center"><icon name="x" width="14" height="14" foreground="text_muted" /></row>
+      </stack>
     </if>
     <!-- Model-driven exclusive chips (#81): a toggle-button whose
          selected= comes from the model is source-owned across rebuilds,

@@ -1,0 +1,1 @@
+fix: **Fast gate covers the newest examples**: `scripts/gate.sh`'s registered-example list had fallen behind build.zig, so a diff touching soundboard, calculator, or notes skipped that example's suite with "no test suite registered"; the list now matches the registered `test-example-<name>` steps.

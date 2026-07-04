@@ -154,10 +154,13 @@ pub const Model = struct {
         return "Untitled";
     }
 
+    /// Plain words on purpose: the half-circle dingbats this used to carry
+    /// ("◑"/"◐") have no glyph in the bundled font and rendered as tofu,
+    /// and the built-in icon set has no sun/moon yet (registry gap).
     pub fn themeLabel(model: *const Model) []const u8 {
         return switch (model.effectiveScheme()) {
-            .light => "◑ Dark",
-            .dark => "◐ Light",
+            .light => "Dark mode",
+            .dark => "Light mode",
         };
     }
 
