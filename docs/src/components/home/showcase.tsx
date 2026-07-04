@@ -103,10 +103,10 @@ export function Showcase() {
               role="tab"
               aria-selected={selected}
               onClick={() => setActiveId(app.id)}
-              className={`shrink-0 rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${
+              className={`inline-flex h-8 shrink-0 items-center rounded-full px-4 button-14 transition-colors ${
                 selected
-                  ? "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900"
-                  : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-900 dark:hover:text-neutral-100"
+                  ? "bg-gray-1000 text-background-100"
+                  : "text-gray-900 hover:bg-gray-alpha-100 hover:text-gray-1000"
               }`}
             >
               {app.name}
@@ -117,16 +117,16 @@ export function Showcase() {
 
       {/* Framed screenshot: the light and dark captures are the same app
           state rendered per scheme; the site theme picks which one shows. */}
-      <div className="mt-6 overflow-hidden rounded-2xl border border-neutral-200 bg-neutral-50 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.18)] dark:border-neutral-800 dark:bg-neutral-900/60 dark:shadow-[0_24px_48px_-24px_rgba(0,0,0,0.7)]">
-        <div className="flex items-center gap-1.5 border-b border-neutral-200 px-4 py-2.5 dark:border-neutral-800">
-          <span className="h-2.5 w-2.5 rounded-full bg-neutral-300 dark:bg-neutral-700" />
-          <span className="h-2.5 w-2.5 rounded-full bg-neutral-300 dark:bg-neutral-700" />
-          <span className="h-2.5 w-2.5 rounded-full bg-neutral-300 dark:bg-neutral-700" />
-          <span className="ml-3 font-mono text-xs text-neutral-500 dark:text-neutral-400">
+      <div className="mt-6 overflow-hidden rounded-md border border-gray-alpha-400 bg-background-200 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.18)] dark:bg-gray-alpha-100 dark:shadow-[0_24px_48px_-24px_rgba(0,0,0,0.7)]">
+        <div className="flex items-center gap-1.5 border-b border-gray-alpha-400 px-4 py-2.5">
+          <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
+          <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
+          <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
+          <span className="ml-3 font-mono label-12 text-gray-900">
             examples/{active.id}
           </span>
         </div>
-        <div className={`relative ${active.portrait ? "flex justify-center bg-neutral-100 py-8 dark:bg-neutral-900" : ""}`}>
+        <div className={`relative ${active.portrait ? "flex justify-center bg-gray-100 py-8" : ""}`}>
           {(["light", "dark"] as const).map((scheme) => (
             <Image
               key={`${active.id}-${scheme}`}
@@ -136,7 +136,7 @@ export function Showcase() {
               height={active.height}
               quality={90}
               loading="eager"
-              className={`h-auto ${active.portrait ? "w-64 rounded-xl border border-neutral-200 shadow-lg sm:w-72 dark:border-neutral-800" : "w-full"} ${
+              className={`h-auto ${active.portrait ? "w-64 rounded-md border border-gray-alpha-400 shadow-modal sm:w-72" : "w-full"} ${
                 scheme === "light" ? "dark:hidden" : "hidden dark:block"
               }`}
             />
@@ -147,23 +147,23 @@ export function Showcase() {
       {/* Caption */}
       <div className="mx-auto mt-6 flex max-w-3xl flex-col items-start gap-4 sm:flex-row sm:items-baseline sm:justify-between">
         <div>
-          <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100">{active.tagline}</p>
-          <p className="mt-2 text-sm leading-relaxed text-neutral-600 dark:text-neutral-400">{active.detail}</p>
+          <p className="label-14 font-medium text-gray-1000">{active.tagline}</p>
+          <p className="mt-2 copy-14 text-gray-900">{active.detail}</p>
         </div>
         <div className="flex shrink-0 flex-col gap-1 sm:items-end">
           {active.facts.map((fact) => (
             <div key={fact.label} className="flex items-baseline gap-2 sm:flex-row-reverse">
-              <span className="text-xs uppercase tracking-wider text-neutral-400 dark:text-neutral-500">{fact.label}</span>
-              <span className="font-mono text-sm text-neutral-900 dark:text-neutral-100">{fact.value}</span>
+              <span className="label-12 uppercase tracking-wider text-gray-900">{fact.label}</span>
+              <span className="font-mono label-14 tabular-nums text-gray-1000">{fact.value}</span>
             </div>
           ))}
           <a
             href={`${githubUrl}/tree/main/examples/${active.id}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="mt-1 text-sm font-medium text-neutral-900 hover:underline dark:text-neutral-100"
+            className="mt-1 button-14 text-gray-1000 hover:underline"
           >
-            Browse the source →
+            Browse the Source →
           </a>
         </div>
       </div>

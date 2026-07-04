@@ -4,52 +4,410 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono:
-    ui-monospace, "SF Mono", "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace;
+    var(--font-geist-mono), ui-monospace, "SF Mono", "Cascadia Mono", "Segoe UI Mono", Menlo,
+    Consolas, monospace;
 
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-border: var(--border);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-sidebar: var(--sidebar);
+  /* Geist scales, exposed as Tailwind color utilities. The underlying custom
+     properties flip per theme, so one class covers light and dark. */
+  --color-background-100: var(--ds-background-100);
+  --color-background-200: var(--ds-background-200);
+
+  --color-gray-100: var(--ds-gray-100);
+  --color-gray-200: var(--ds-gray-200);
+  --color-gray-300: var(--ds-gray-300);
+  --color-gray-400: var(--ds-gray-400);
+  --color-gray-500: var(--ds-gray-500);
+  --color-gray-600: var(--ds-gray-600);
+  --color-gray-700: var(--ds-gray-700);
+  --color-gray-800: var(--ds-gray-800);
+  --color-gray-900: var(--ds-gray-900);
+  --color-gray-1000: var(--ds-gray-1000);
+
+  --color-gray-alpha-100: var(--ds-gray-alpha-100);
+  --color-gray-alpha-200: var(--ds-gray-alpha-200);
+  --color-gray-alpha-300: var(--ds-gray-alpha-300);
+  --color-gray-alpha-400: var(--ds-gray-alpha-400);
+  --color-gray-alpha-500: var(--ds-gray-alpha-500);
+  --color-gray-alpha-600: var(--ds-gray-alpha-600);
+  --color-gray-alpha-700: var(--ds-gray-alpha-700);
+  --color-gray-alpha-800: var(--ds-gray-alpha-800);
+  --color-gray-alpha-900: var(--ds-gray-alpha-900);
+  --color-gray-alpha-1000: var(--ds-gray-alpha-1000);
+
+  --color-blue-100: var(--ds-blue-100);
+  --color-blue-200: var(--ds-blue-200);
+  --color-blue-300: var(--ds-blue-300);
+  --color-blue-400: var(--ds-blue-400);
+  --color-blue-500: var(--ds-blue-500);
+  --color-blue-600: var(--ds-blue-600);
+  --color-blue-700: var(--ds-blue-700);
+  --color-blue-800: var(--ds-blue-800);
+  --color-blue-900: var(--ds-blue-900);
+  --color-blue-1000: var(--ds-blue-1000);
+
+  --color-red-100: var(--ds-red-100);
+  --color-red-200: var(--ds-red-200);
+  --color-red-300: var(--ds-red-300);
+  --color-red-400: var(--ds-red-400);
+  --color-red-500: var(--ds-red-500);
+  --color-red-600: var(--ds-red-600);
+  --color-red-700: var(--ds-red-700);
+  --color-red-800: var(--ds-red-800);
+  --color-red-900: var(--ds-red-900);
+  --color-red-1000: var(--ds-red-1000);
+
+  --color-amber-100: var(--ds-amber-100);
+  --color-amber-200: var(--ds-amber-200);
+  --color-amber-300: var(--ds-amber-300);
+  --color-amber-400: var(--ds-amber-400);
+  --color-amber-500: var(--ds-amber-500);
+  --color-amber-600: var(--ds-amber-600);
+  --color-amber-700: var(--ds-amber-700);
+  --color-amber-800: var(--ds-amber-800);
+  --color-amber-900: var(--ds-amber-900);
+  --color-amber-1000: var(--ds-amber-1000);
+
+  --color-green-100: var(--ds-green-100);
+  --color-green-200: var(--ds-green-200);
+  --color-green-300: var(--ds-green-300);
+  --color-green-400: var(--ds-green-400);
+  --color-green-500: var(--ds-green-500);
+  --color-green-600: var(--ds-green-600);
+  --color-green-700: var(--ds-green-700);
+  --color-green-800: var(--ds-green-800);
+  --color-green-900: var(--ds-green-900);
+  --color-green-1000: var(--ds-green-1000);
+
+  /* Semantic aliases used by shared components. */
+  --color-background: var(--ds-background-100);
+  --color-foreground: var(--ds-gray-1000);
+  --color-border: var(--ds-gray-alpha-400);
+  --color-muted: var(--ds-gray-100);
+  --color-muted-foreground: var(--ds-gray-900);
+  --color-primary: var(--ds-gray-1000);
+  --color-primary-foreground: var(--ds-background-100);
+  --color-sidebar: var(--ds-background-200);
+
+  /* Geist elevation: tonal surfaces + borders first, shadows soft. */
+  --shadow-card: var(--ds-shadow-card);
+  --shadow-popover:
+    0 1px 1px rgba(0, 0, 0, 0.02), 0 4px 8px -4px rgba(0, 0, 0, 0.04),
+    0 16px 24px -8px rgba(0, 0, 0, 0.06);
+  --shadow-modal:
+    0 1px 1px rgba(0, 0, 0, 0.02), 0 8px 16px -4px rgba(0, 0, 0, 0.04),
+    0 24px 32px -8px rgba(0, 0, 0, 0.06);
+
+  /* Geist easing for state transitions. */
+  --ease-geist: cubic-bezier(0.175, 0.885, 0.32, 1.1);
 }
 
+/* ------------------------------------------------------------------ tokens
+   Geist color tokens (vercel.com/design.md). Step semantics: 100/200/300
+   default/hover/active backgrounds, 400/500/600 borders, 700/800 solid
+   fills, 900/1000 secondary/primary text. */
+
 :root {
-  --background: #fff;
-  --foreground: #171717;
-  --border: #e5e5e5;
-  --muted: #f5f5f5;
-  --muted-foreground: #737373;
-  --primary: #171717;
-  --primary-foreground: #fff;
-  --sidebar: #f5f5f5;
+  --ds-background-100: #ffffff;
+  --ds-background-200: #fafafa;
+
+  --ds-gray-100: #f2f2f2;
+  --ds-gray-200: #ebebeb;
+  --ds-gray-300: #e6e6e6;
+  --ds-gray-400: #eaeaea;
+  --ds-gray-500: #c9c9c9;
+  --ds-gray-600: #a8a8a8;
+  --ds-gray-700: #8f8f8f;
+  --ds-gray-800: #7d7d7d;
+  --ds-gray-900: #4d4d4d;
+  --ds-gray-1000: #171717;
+
+  --ds-gray-alpha-100: #0000000d;
+  --ds-gray-alpha-200: #00000015;
+  --ds-gray-alpha-300: #0000001a;
+  --ds-gray-alpha-400: #00000014;
+  --ds-gray-alpha-500: #00000036;
+  --ds-gray-alpha-600: #0000003d;
+  --ds-gray-alpha-700: #00000070;
+  --ds-gray-alpha-800: #00000082;
+  --ds-gray-alpha-900: #000000b3;
+  --ds-gray-alpha-1000: #000000e8;
+
+  --ds-blue-100: #f0f7ff;
+  --ds-blue-200: #e9f4ff;
+  --ds-blue-300: #dfefff;
+  --ds-blue-400: #cae7ff;
+  --ds-blue-500: #94ccff;
+  --ds-blue-600: #48aeff;
+  --ds-blue-700: #006bff;
+  --ds-blue-800: #0059ec;
+  --ds-blue-900: #005ff2;
+  --ds-blue-1000: #002359;
+
+  --ds-red-100: #ffeeef;
+  --ds-red-200: #ffe8ea;
+  --ds-red-300: #ffe3e4;
+  --ds-red-400: #ffd7d6;
+  --ds-red-500: #ffb1b3;
+  --ds-red-600: #ff676d;
+  --ds-red-700: #fc0035;
+  --ds-red-800: #ea001d;
+  --ds-red-900: #d8001b;
+  --ds-red-1000: #47000c;
+
+  --ds-amber-100: #fff6de;
+  --ds-amber-200: #fff4cf;
+  --ds-amber-300: #fff1c1;
+  --ds-amber-400: #ffdc73;
+  --ds-amber-500: #ffc543;
+  --ds-amber-600: #ffa600;
+  --ds-amber-700: #ffae00;
+  --ds-amber-800: #ff9300;
+  --ds-amber-900: #aa4d00;
+  --ds-amber-1000: #561900;
+
+  --ds-green-100: #ecfdec;
+  --ds-green-200: #e5fce7;
+  --ds-green-300: #d3fad1;
+  --ds-green-400: #b9f5bc;
+  --ds-green-500: #82eb8d;
+  --ds-green-600: #4ce15e;
+  --ds-green-700: #28a948;
+  --ds-green-800: #279141;
+  --ds-green-900: #107d32;
+  --ds-green-1000: #003a00;
+
+  /* Focus: two-layer ring — a surface-colored gap, then blue. */
+  --ds-focus-color: #006bff;
+
+  --ds-shadow-card: 0 2px 2px rgba(0, 0, 0, 0.04);
 }
 
 .dark {
-  --background: #0a0a0a;
-  --foreground: #f5f5f5;
-  --border: #262626;
-  --muted: #262626;
-  --muted-foreground: #a3a3a3;
-  --primary: #f5f5f5;
-  --primary-foreground: #0a0a0a;
-  --sidebar: #171717;
+  --ds-background-100: #000000;
+  --ds-background-200: #000000;
+
+  --ds-gray-100: #1a1a1a;
+  --ds-gray-200: #1f1f1f;
+  --ds-gray-300: #292929;
+  --ds-gray-400: #2e2e2e;
+  --ds-gray-500: #454545;
+  --ds-gray-600: #878787;
+  --ds-gray-700: #8f8f8f;
+  --ds-gray-800: #7d7d7d;
+  --ds-gray-900: #a0a0a0;
+  --ds-gray-1000: #ededed;
+
+  --ds-gray-alpha-100: #ffffff12;
+  --ds-gray-alpha-200: #ffffff17;
+  --ds-gray-alpha-300: #ffffff21;
+  --ds-gray-alpha-400: #ffffff24;
+  --ds-gray-alpha-500: #ffffff3d;
+  --ds-gray-alpha-600: #ffffff82;
+  --ds-gray-alpha-700: #ffffff8a;
+  --ds-gray-alpha-800: #ffffff78;
+  --ds-gray-alpha-900: #ffffff9c;
+  --ds-gray-alpha-1000: #ffffffeb;
+
+  --ds-blue-100: #06193a;
+  --ds-blue-200: #022248;
+  --ds-blue-300: #002f62;
+  --ds-blue-400: #003674;
+  --ds-blue-500: #00418b;
+  --ds-blue-600: #0090ff;
+  --ds-blue-700: #006efe;
+  --ds-blue-800: #005be7;
+  --ds-blue-900: #47a8ff;
+  --ds-blue-1000: #eaf6ff;
+
+  --ds-red-100: #330a11;
+  --ds-red-200: #440d13;
+  --ds-red-300: #5d0e17;
+  --ds-red-400: #6f101b;
+  --ds-red-500: #88151f;
+  --ds-red-600: #f32e40;
+  --ds-red-700: #f13242;
+  --ds-red-800: #e2162a;
+  --ds-red-900: #ff565f;
+  --ds-red-1000: #ffe9ed;
+
+  --ds-amber-100: #2a1700;
+  --ds-amber-200: #361900;
+  --ds-amber-300: #502800;
+  --ds-amber-400: #5b3000;
+  --ds-amber-500: #703e00;
+  --ds-amber-600: #ed9a00;
+  --ds-amber-700: #ffae00;
+  --ds-amber-800: #ff9300;
+  --ds-amber-900: #ff9300;
+  --ds-amber-1000: #fff3d5;
+
+  --ds-green-100: #002608;
+  --ds-green-200: #00320b;
+  --ds-green-300: #003a0e;
+  --ds-green-400: #004615;
+  --ds-green-500: #006717;
+  --ds-green-600: #00952d;
+  --ds-green-700: #00ac3a;
+  --ds-green-800: #009432;
+  --ds-green-900: #00ca50;
+  --ds-green-1000: #d8ffe4;
+
+  --ds-focus-color: #47a8ff;
+
+  --ds-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.16);
 }
+
+/* -------------------------------------------------------------- typography
+   Geist type ramp. Headings are weight 600 with tracking that tightens as
+   size grows; copy is weight 400 with taller line-height; buttons and
+   labels are single-line. */
+
+@utility heading-72 {
+  font-size: 72px;
+  line-height: 72px;
+  letter-spacing: -4.32px;
+  font-weight: 600;
+}
+
+@utility heading-64 {
+  font-size: 64px;
+  line-height: 64px;
+  letter-spacing: -3.84px;
+  font-weight: 600;
+}
+
+@utility heading-56 {
+  font-size: 56px;
+  line-height: 56px;
+  letter-spacing: -3.36px;
+  font-weight: 600;
+}
+
+@utility heading-48 {
+  font-size: 48px;
+  line-height: 56px;
+  letter-spacing: -2.88px;
+  font-weight: 600;
+}
+
+@utility heading-40 {
+  font-size: 40px;
+  line-height: 48px;
+  letter-spacing: -2.4px;
+  font-weight: 600;
+}
+
+@utility heading-32 {
+  font-size: 32px;
+  line-height: 40px;
+  letter-spacing: -1.28px;
+  font-weight: 600;
+}
+
+@utility heading-24 {
+  font-size: 24px;
+  line-height: 32px;
+  letter-spacing: -0.96px;
+  font-weight: 600;
+}
+
+@utility heading-20 {
+  font-size: 20px;
+  line-height: 26px;
+  letter-spacing: -0.4px;
+  font-weight: 600;
+}
+
+@utility heading-16 {
+  font-size: 16px;
+  line-height: 24px;
+  letter-spacing: -0.32px;
+  font-weight: 600;
+}
+
+@utility heading-14 {
+  font-size: 14px;
+  line-height: 20px;
+  letter-spacing: -0.28px;
+  font-weight: 600;
+}
+
+@utility copy-18 {
+  font-size: 18px;
+  line-height: 28px;
+  font-weight: 400;
+}
+
+@utility copy-16 {
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+}
+
+@utility copy-14 {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 400;
+}
+
+@utility copy-13 {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 400;
+}
+
+@utility label-14 {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 400;
+}
+
+@utility label-13 {
+  font-size: 13px;
+  line-height: 16px;
+  font-weight: 400;
+}
+
+@utility label-12 {
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 400;
+}
+
+@utility button-16 {
+  font-size: 16px;
+  line-height: 20px;
+  font-weight: 500;
+}
+
+@utility button-14 {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+}
+
+@utility button-12 {
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+}
+
+/* ------------------------------------------------------------------- base */
 
 ::selection {
-  background-color: #000;
-  color: #fff;
+  background-color: var(--ds-gray-1000);
+  color: var(--ds-background-100);
 }
 
-@media (prefers-color-scheme: dark) {
-  ::selection {
-    background-color: #fff;
-    color: #000;
-  }
+/* Geist focus ring: a 2px surface-colored gap plus a 2px blue ring. Never
+   removed — only ever replaced by a component's own visible treatment. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--ds-background-100),
+    0 0 0 4px var(--ds-focus-color);
 }
 
 article table {
@@ -60,46 +418,28 @@ article table {
 }
 
 article th {
-  border-bottom: 1px solid #e5e5e5;
+  border-bottom: 1px solid var(--ds-gray-alpha-400);
   padding: 0.5rem 0.75rem;
   text-align: left;
   font-size: 0.75rem;
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #737373;
+  color: var(--ds-gray-900);
 }
 
 article td {
-  border-bottom: 1px solid #f5f5f5;
+  border-bottom: 1px solid var(--ds-gray-alpha-200);
   padding: 0.5rem 0.75rem;
-  color: #525252;
-}
-
-:is(.dark) article th {
-  border-bottom-color: #262626;
-  color: #a3a3a3;
-}
-
-:is(.dark) article td {
-  border-bottom-color: rgba(38, 38, 38, 0.5);
-  color: #a3a3a3;
+  color: var(--ds-gray-900);
 }
 
 .diff-add {
-  color: #00952d;
+  color: var(--ds-green-700);
 }
 
 .diff-remove {
-  color: #f32e40;
-}
-
-.dark .diff-add {
-  color: #00ca50;
-}
-
-.dark .diff-remove {
-  color: #f32e40;
+  color: var(--ds-red-700);
 }
 
 .shiki,
@@ -133,7 +473,7 @@ button {
 
 @media (prefers-reduced-motion: no-preference) {
   .hero-rise {
-    animation: hero-rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation: hero-rise 0.7s cubic-bezier(0.175, 0.885, 0.32, 1.1) both;
   }
   .hero-rise-1 {
     animation-delay: 0.06s;

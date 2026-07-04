@@ -17,19 +17,19 @@ export function CopyCommand({ lines }: { lines: string[] }) {
   }
 
   return (
-    <div className="group relative rounded-xl border border-neutral-200 bg-white/70 text-left backdrop-blur-sm dark:border-neutral-800 dark:bg-neutral-950/70">
-      <pre className="overflow-x-auto px-4 py-3.5 font-mono text-[13px] leading-relaxed text-neutral-800 dark:text-neutral-200">
+    <div className="group relative rounded-md border border-gray-alpha-400 bg-background-100/70 text-left backdrop-blur-sm">
+      <pre className="overflow-x-auto px-4 py-2.5 font-mono text-[13px] leading-5 text-gray-1000">
         {lines.map((line) => (
           <span key={line} className="block">
-            <span className="select-none text-neutral-400 dark:text-neutral-600">$ </span>
+            <span className="select-none text-gray-700">$ </span>
             {line}
           </span>
         ))}
       </pre>
       <button
         onClick={copy}
-        aria-label={copied ? "Copied" : "Copy commands"}
-        className="absolute right-2.5 top-2.5 rounded-md border border-neutral-200 bg-white p-1.5 text-neutral-500 opacity-0 transition-opacity hover:text-neutral-900 focus-visible:opacity-100 group-hover:opacity-100 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-100"
+        aria-label={copied ? "Copied" : "Copy Command"}
+        className="absolute right-1.5 top-1.5 rounded-md border border-gray-alpha-400 bg-background-100 p-1.5 text-gray-900 opacity-0 transition-opacity hover:text-gray-1000 focus-visible:opacity-100 group-hover:opacity-100"
       >
         {copied ? (
           <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">

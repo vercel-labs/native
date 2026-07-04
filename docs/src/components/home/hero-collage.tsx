@@ -16,12 +16,12 @@ const right: Shot = { id: "notes", name: "Notes", width: 2360, height: 1520 };
 
 function AppWindow({ shot, priority = false }: { shot: Shot; priority?: boolean }) {
   return (
-    <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-[0_32px_64px_-24px_rgba(0,0,0,0.35)] dark:border-neutral-700/80 dark:bg-neutral-950 dark:shadow-[0_32px_80px_-16px_rgba(0,0,0,0.9)]">
-      <div className="flex items-center gap-1.5 border-b border-neutral-200 bg-neutral-50 px-3.5 py-2 dark:border-neutral-800 dark:bg-neutral-900">
-        <span className="h-2.5 w-2.5 rounded-full bg-neutral-300 dark:bg-neutral-700" />
-        <span className="h-2.5 w-2.5 rounded-full bg-neutral-300 dark:bg-neutral-700" />
-        <span className="h-2.5 w-2.5 rounded-full bg-neutral-300 dark:bg-neutral-700" />
-        <span className="ml-2.5 font-mono text-[11px] text-neutral-500 dark:text-neutral-400">
+    <div className="overflow-hidden rounded-md border border-gray-alpha-400 bg-background-100 shadow-[0_32px_64px_-24px_rgba(0,0,0,0.35)] dark:border-gray-alpha-500 dark:shadow-[0_32px_80px_-16px_rgba(0,0,0,0.9)]">
+      <div className="flex items-center gap-1.5 border-b border-gray-alpha-400 bg-background-200 px-3.5 py-2 dark:bg-gray-alpha-100">
+        <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
+        <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
+        <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
+        <span className="ml-2.5 font-mono text-[11px] leading-4 text-gray-900">
           examples/{shot.id}
         </span>
       </div>
@@ -50,7 +50,7 @@ function AppWindow({ shot, priority = false }: { shot: Shot; priority?: boolean 
 export function HeroCollage() {
   return (
     <div className="relative mx-auto max-w-6xl px-6">
-      <div className="pointer-events-none absolute left-1/2 top-1/2 h-[120%] w-[130%] -translate-x-1/2 -translate-y-1/2 rounded-[100%] bg-gradient-to-b from-neutral-200/50 via-transparent to-transparent blur-3xl dark:from-indigo-500/[0.14] dark:via-transparent" />
+      <div className="pointer-events-none absolute left-1/2 top-1/2 h-[120%] w-[130%] -translate-x-1/2 -translate-y-1/2 rounded-[100%] bg-gradient-to-b from-gray-200/50 via-transparent to-transparent blur-3xl dark:from-blue-700/[0.14] dark:via-transparent" />
       <div className="relative">
         <div className="absolute -left-4 top-14 hidden w-[38%] -rotate-[1.5deg] opacity-90 lg:block">
           <AppWindow shot={left} />

@@ -9,10 +9,10 @@ function Sidebar() {
 
   return (
     <aside className="hidden w-56 shrink-0 lg:block">
-      <nav className="fixed top-14 w-56 h-[calc(100vh-3.5rem)] overflow-y-auto py-8 pr-4 space-y-6">
+      <nav className="fixed top-16 w-56 h-[calc(100vh-4rem)] overflow-y-auto py-8 pr-4 space-y-6">
         {navSections.map((section) => (
           <div key={section.title}>
-            <div className="mb-2 px-3 text-xs font-medium uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
+            <div className="mb-2 px-3 label-12 font-medium uppercase tracking-wider text-gray-900">
               {section.title}
             </div>
             <div className="space-y-0.5">
@@ -24,8 +24,8 @@ function Sidebar() {
                     href={href}
                     className={`block rounded-md px-3 py-1.5 text-sm transition-colors ${
                       active
-                        ? "bg-neutral-100 font-medium text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100"
-                        : "text-neutral-600 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-100"
+                        ? "bg-gray-alpha-100 font-medium text-gray-1000"
+                        : "text-gray-900 hover:text-gray-1000"
                     }`}
                   >
                     {name}

@@ -63,7 +63,7 @@ pub fn update(model: *Model, msg: Msg) void {
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <p className="text-center font-mono text-xs font-medium uppercase tracking-[0.2em] text-neutral-400 dark:text-neutral-500">
+    <p className="text-center font-mono label-12 font-medium uppercase tracking-[0.2em] text-gray-900">
       {children}
     </p>
   );
@@ -71,28 +71,22 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
-    <h2 className="mt-3 text-center text-3xl font-semibold tracking-tight text-neutral-900 sm:text-4xl dark:text-neutral-100">
-      {children}
-    </h2>
+    <h2 className="mt-3 text-center heading-32 text-gray-1000 sm:heading-40">{children}</h2>
   );
 }
 
 function SectionLede({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="mx-auto mt-4 max-w-2xl text-center text-base leading-relaxed text-neutral-600 dark:text-neutral-400">
-      {children}
-    </p>
-  );
+  return <p className="mx-auto mt-4 max-w-2xl text-center copy-16 text-gray-900">{children}</p>;
 }
 
 function CodePane({ title, lang, code }: { title: string; lang: string; code: string }) {
   return (
-    <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-sm dark:border-neutral-800 dark:bg-neutral-950">
-      <div className="flex items-center gap-1.5 border-b border-neutral-200 bg-neutral-50 px-4 py-2.5 dark:border-neutral-800 dark:bg-neutral-900">
-        <span className="h-2.5 w-2.5 rounded-full bg-neutral-300 dark:bg-neutral-700" />
-        <span className="h-2.5 w-2.5 rounded-full bg-neutral-300 dark:bg-neutral-700" />
-        <span className="h-2.5 w-2.5 rounded-full bg-neutral-300 dark:bg-neutral-700" />
-        <span className="ml-3 font-mono text-xs text-neutral-500 dark:text-neutral-400">{title}</span>
+    <div className="overflow-hidden rounded-md border border-gray-alpha-400 bg-background-100 shadow-card">
+      <div className="flex items-center gap-1.5 border-b border-gray-alpha-400 bg-background-200 px-4 py-2.5 dark:bg-gray-alpha-100">
+        <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
+        <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
+        <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
+        <span className="ml-3 font-mono label-12 text-gray-900">{title}</span>
       </div>
       <div className="[&>div]:my-0! [&>div]:rounded-none! [&>div]:border-none! [&>div]:bg-transparent!">
         <Code lang={lang}>{code}</Code>
@@ -103,14 +97,14 @@ function CodePane({ title, lang, code }: { title: string; lang: string; code: st
 
 function Terminal({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white text-left shadow-sm dark:border-neutral-800 dark:bg-neutral-950">
-      <div className="flex items-center gap-1.5 border-b border-neutral-200 bg-neutral-50 px-4 py-2.5 dark:border-neutral-800 dark:bg-neutral-900">
-        <span className="h-2.5 w-2.5 rounded-full bg-neutral-300 dark:bg-neutral-700" />
-        <span className="h-2.5 w-2.5 rounded-full bg-neutral-300 dark:bg-neutral-700" />
-        <span className="h-2.5 w-2.5 rounded-full bg-neutral-300 dark:bg-neutral-700" />
-        <span className="ml-3 font-mono text-xs text-neutral-500 dark:text-neutral-400">{title}</span>
+    <div className="overflow-hidden rounded-md border border-gray-alpha-400 bg-background-100 text-left shadow-card">
+      <div className="flex items-center gap-1.5 border-b border-gray-alpha-400 bg-background-200 px-4 py-2.5 dark:bg-gray-alpha-100">
+        <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
+        <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
+        <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
+        <span className="ml-3 font-mono label-12 text-gray-900">{title}</span>
       </div>
-      <pre className="overflow-x-auto px-4 py-4 font-mono text-[13px] leading-relaxed text-neutral-800 dark:text-neutral-200">
+      <pre className="overflow-x-auto px-4 py-4 font-mono text-[13px] leading-5 text-gray-1000">
         {children}
       </pre>
     </div>
@@ -120,21 +114,19 @@ function Terminal({ title, children }: { title: string; children: React.ReactNod
 function Prompt({ children }: { children: React.ReactNode }) {
   return (
     <span className="block">
-      <span className="select-none text-neutral-400 dark:text-neutral-600">$ </span>
+      <span className="select-none text-gray-700">$ </span>
       {children}
     </span>
   );
 }
 
 function Muted({ children }: { children: React.ReactNode }) {
-  return <span className="block text-neutral-500 dark:text-neutral-400">{children}</span>;
+  return <span className="block text-gray-900">{children}</span>;
 }
 
 function InlineCode({ children }: { children: React.ReactNode }) {
   return (
-    <code className="rounded bg-neutral-100 px-1.5 py-0.5 text-[14px] dark:bg-neutral-800">
-      {children}
-    </code>
+    <code className="rounded-md bg-gray-100 px-1.5 py-0.5 text-[14px]">{children}</code>
   );
 }
 
@@ -150,7 +142,7 @@ const stats = [
   },
   {
     value: "0",
-    label: "JS engines, browsers, or interpreters inside a canvas app's binary.",
+    label: "JS engines, browsers, or interpreters inside a canvas app’s binary.",
   },
   {
     value: "918",
@@ -219,69 +211,67 @@ export default function HomePage() {
       <section className="relative overflow-hidden">
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle,#d4d4d4_1px,transparent_1px)] [background-size:22px_22px] [mask-image:radial-gradient(ellipse_75%_55%_at_50%_0%,black_25%,transparent_75%)] dark:bg-[radial-gradient(circle,#2e2e2e_1px,transparent_1px)]"
+          className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle,var(--ds-gray-500)_1px,transparent_1px)] [background-size:22px_22px] [mask-image:radial-gradient(ellipse_75%_55%_at_50%_0%,black_25%,transparent_75%)] dark:bg-[radial-gradient(circle,var(--ds-gray-400)_1px,transparent_1px)]"
         />
         <div
           aria-hidden
-          className="pointer-events-none absolute left-1/2 top-[-16rem] h-[36rem] w-[80rem] -translate-x-1/2 rounded-[100%] bg-gradient-to-b from-neutral-200/80 to-transparent blur-3xl dark:from-indigo-500/[0.28] dark:via-indigo-500/[0.08]"
+          className="pointer-events-none absolute left-1/2 top-[-16rem] h-[36rem] w-[80rem] -translate-x-1/2 rounded-[100%] bg-gradient-to-b from-gray-200/80 to-transparent blur-3xl dark:from-blue-600/[0.28] dark:via-blue-600/[0.12]"
         />
-        <div className="relative mx-auto max-w-6xl px-6 pt-16 text-center sm:pt-20">
-          <p className="hero-rise font-mono text-[11px] font-medium uppercase tracking-[0.18em] text-neutral-400 sm:text-xs sm:tracking-[0.25em] dark:text-neutral-500">
+        <div className="relative mx-auto max-w-[1200px] px-6 pt-16 text-center sm:pt-24">
+          <p className="hero-rise font-mono text-[11px] font-medium uppercase tracking-[0.18em] text-gray-900 sm:text-xs sm:tracking-[0.25em]">
             macOS · Linux · Windows · iOS · Android
           </p>
-          <h1 className="hero-rise hero-rise-1 mx-auto mt-4 max-w-5xl text-4xl font-semibold tracking-tight text-neutral-900 sm:text-6xl lg:text-7xl dark:text-neutral-100">
+          <h1 className="hero-rise hero-rise-1 mx-auto mt-4 max-w-5xl heading-40 text-gray-1000 sm:heading-64 lg:heading-72">
             The complete toolkit
             <br />
             for native apps.
           </h1>
-          <p className="hero-rise hero-rise-2 mx-auto mt-5 max-w-2xl text-base leading-relaxed text-neutral-600 sm:text-lg dark:text-neutral-400">
+          <p className="hero-rise hero-rise-2 mx-auto mt-4 max-w-2xl copy-16 text-gray-900 sm:copy-18">
             {siteName} builds native desktop and mobile applications from one codebase. Views are
             markup. Styling is tokens. Logic is Zig. The pixels come from its own engine — no
             browser, no JS runtime, one small binary.
           </p>
-          <div className="hero-rise hero-rise-3 mx-auto mt-7 flex max-w-2xl flex-col items-center justify-center gap-3 sm:flex-row">
+          <div className="hero-rise hero-rise-3 mx-auto mt-8 flex max-w-2xl flex-col items-center justify-center gap-3 sm:flex-row">
             <div className="w-full max-w-xs sm:w-auto sm:min-w-[21rem]">
               <CopyCommand lines={[installCommand]} />
             </div>
             <div className="flex items-center gap-3">
               <Link
                 href="/quick-start"
-                className="rounded-full bg-neutral-900 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-neutral-700 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
+                className="inline-flex h-10 items-center justify-center rounded-md bg-gray-1000 px-4 button-14 text-background-100 transition-colors hover:bg-gray-1000/85"
               >
-                Get started
+                Get Started
               </Link>
               <a
                 href={githubUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="rounded-full border border-neutral-300 bg-white/60 px-5 py-2.5 text-sm font-medium text-neutral-900 backdrop-blur-sm transition-colors hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-950/60 dark:text-neutral-100 dark:hover:bg-neutral-900"
+                className="inline-flex h-10 items-center justify-center rounded-md border border-gray-alpha-400 bg-background-100/60 px-4 button-14 text-gray-1000 backdrop-blur-sm transition-colors hover:bg-gray-100"
               >
                 GitHub
               </a>
             </div>
           </div>
         </div>
-        <div className="hero-rise hero-rise-4 relative mt-10 pb-20 sm:mt-12 sm:pb-24">
+        <div className="hero-rise hero-rise-4 relative mt-8 pb-16 sm:mt-10 sm:pb-24">
           <HeroCollage />
         </div>
       </section>
 
       {/* Numbers */}
-      <section className="border-t border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-900/40">
-        <div className="mx-auto max-w-6xl px-6 py-14 sm:py-16">
+      <section className="border-t border-gray-alpha-400 bg-background-200 dark:bg-gray-alpha-100">
+        <div className="mx-auto max-w-[1200px] px-6 py-16">
           <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-4">
             {stats.map((stat) => (
               <div key={stat.value} className="text-center lg:text-left">
-                <div className="font-mono text-5xl font-semibold tracking-tight text-neutral-900 sm:text-6xl dark:text-neutral-100">
+                <div className="font-mono text-5xl font-semibold tabular-nums text-gray-1000 sm:text-[56px] sm:leading-[56px]">
                   {stat.value}
                 </div>
-                <p className="mt-3 text-sm leading-relaxed text-neutral-600 dark:text-neutral-400">
-                  {stat.label}
-                </p>
+                <p className="mt-3 copy-14 text-gray-900">{stat.label}</p>
               </div>
             ))}
           </div>
-          <p className="mt-10 text-center text-xs text-neutral-400 dark:text-neutral-500">
+          <p className="mt-10 text-center copy-13 text-gray-900">
             Measured in this repository: <code>zig build -Doptimize=ReleaseFast</code> on macOS
             arm64; line counts are app source with tests excluded.
           </p>
@@ -289,8 +279,8 @@ export default function HomePage() {
       </section>
 
       {/* The loop */}
-      <section className="border-t border-neutral-200 dark:border-neutral-800">
-        <div className="mx-auto max-w-6xl px-6 py-20 sm:py-24">
+      <section className="border-t border-gray-alpha-400">
+        <div className="mx-auto max-w-[1200px] px-6 py-16 sm:py-24">
           <SectionLabel>The architecture</SectionLabel>
           <SectionTitle>One view. One update. Real pixels.</SectionTitle>
           <SectionLede>
@@ -299,13 +289,13 @@ export default function HomePage() {
             at comptime — view mistakes are compile errors with line and column — and in dev you
             edit the view while the app runs, keeping model state.
           </SectionLede>
-          <div className="mt-12 grid gap-6 lg:grid-cols-2">
+          <div className="mt-10 grid gap-6 lg:grid-cols-2">
             <CodePane title="src/inbox.zml" lang="html" code={zmlSample} />
             <CodePane title="src/main.zig" lang="zig" code={zigSample} />
           </div>
           <figure className="mt-6">
-            <div className="mx-auto max-w-4xl rounded-2xl border border-neutral-200/70 bg-gradient-to-b from-neutral-100 to-neutral-50 p-6 sm:p-12 dark:border-neutral-800 dark:from-neutral-900 dark:to-neutral-950">
-              <div className="mx-auto max-w-2xl overflow-hidden rounded-xl border border-neutral-200 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.3)] dark:border-neutral-700 dark:shadow-[0_24px_48px_-16px_rgba(0,0,0,0.9)]">
+            <div className="mx-auto max-w-4xl rounded-md border border-gray-alpha-400 bg-gradient-to-b from-gray-100 to-background-200 p-6 sm:p-8 dark:from-gray-alpha-100 dark:to-background-100">
+              <div className="mx-auto max-w-2xl overflow-hidden rounded-md border border-gray-alpha-400 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.3)] dark:shadow-[0_24px_48px_-16px_rgba(0,0,0,0.9)]">
                 <Image
                   src="/home/ui-inbox-macos.png"
                   alt="The ui-inbox example app running in a native macOS window: a task inbox with a text field, filter tabs, a checklist of tasks, and a status bar"
@@ -315,42 +305,42 @@ export default function HomePage() {
                 />
               </div>
             </div>
-            <figcaption className="mx-auto mt-4 max-w-3xl text-center text-sm text-neutral-500 dark:text-neutral-500">
+            <figcaption className="mx-auto mt-4 max-w-3xl text-center copy-14 text-gray-900">
               Built from the source above and captured running on macOS. The pixels come from{" "}
-              {siteName}&apos;s engine; the window and scroll physics come from the OS.
+              {siteName}’s engine; the window and scroll physics come from the OS.
             </figcaption>
           </figure>
         </div>
       </section>
 
       {/* Showcase */}
-      <section className="border-t border-neutral-200 dark:border-neutral-800" id="showcase">
-        <div className="mx-auto max-w-6xl px-6 py-20 sm:py-24">
+      <section className="border-t border-gray-alpha-400" id="showcase">
+        <div className="mx-auto max-w-[1200px] px-6 py-16 sm:py-24">
           <SectionLabel>Showcase</SectionLabel>
           <SectionTitle>Five real apps, in the repo</SectionTitle>
           <SectionLede>
-            Every screenshot is rendered by {siteName}&apos;s deterministic engine from the example
-            apps in <InlineCode>examples/</InlineCode> — the same state captured once per color
-            scheme. Flip the site theme and the apps flip with it.
+            Every screenshot is rendered by {siteName}’s deterministic engine from the example apps
+            in <InlineCode>examples/</InlineCode> — the same state captured once per color scheme.
+            Flip the site theme and the apps flip with it.
           </SectionLede>
-          <div className="mt-12">
+          <div className="mt-10">
             <Showcase />
           </div>
         </div>
       </section>
 
       {/* Native feel */}
-      <section className="border-t border-neutral-200 dark:border-neutral-800">
-        <div className="mx-auto max-w-6xl px-6 py-20 sm:py-24">
-          <div className="grid items-center gap-12 lg:grid-cols-2">
+      <section className="border-t border-gray-alpha-400">
+        <div className="mx-auto max-w-[1200px] px-6 py-16 sm:py-24">
+          <div className="grid items-center gap-10 lg:grid-cols-2">
             <div>
-              <p className="font-mono text-xs font-medium uppercase tracking-[0.2em] text-neutral-400 dark:text-neutral-500">
+              <p className="font-mono label-12 font-medium uppercase tracking-[0.2em] text-gray-900">
                 Native feel
               </p>
-              <h2 className="mt-3 text-3xl font-semibold tracking-tight text-neutral-900 sm:text-4xl dark:text-neutral-100">
+              <h2 className="mt-3 heading-32 text-gray-1000 sm:heading-40">
                 Feels native because it is
               </h2>
-              <p className="mt-5 text-base leading-relaxed text-neutral-600 dark:text-neutral-400">
+              <p className="mt-4 copy-16 text-gray-900">
                 One engine renders every widget into real OS windows — Metal presentation on
                 macOS, lean software paths on Linux and Windows. The parts users touch stay with
                 the operating system: scrolling carries OS momentum, menus are real menus, and the
@@ -358,23 +348,16 @@ export default function HomePage() {
               </p>
               <Link
                 href="/native-ui"
-                className="mt-6 inline-block text-sm font-medium text-neutral-900 hover:underline dark:text-neutral-100"
+                className="mt-6 inline-block button-14 text-gray-1000 hover:underline"
               >
-                Native UI guide →
+                Native UI Guide →
               </Link>
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               {nativeFeel.map((item) => (
-                <div
-                  key={item.name}
-                  className="rounded-xl border border-neutral-200 p-4 dark:border-neutral-800"
-                >
-                  <div className="text-sm font-medium text-neutral-900 dark:text-neutral-100">
-                    {item.name}
-                  </div>
-                  <p className="mt-1 text-sm leading-relaxed text-neutral-500 dark:text-neutral-400">
-                    {item.detail}
-                  </p>
+                <div key={item.name} className="rounded-md border border-gray-alpha-400 p-4">
+                  <div className="heading-14 text-gray-1000">{item.name}</div>
+                  <p className="mt-1 copy-14 text-gray-900">{item.detail}</p>
                 </div>
               ))}
             </div>
@@ -383,9 +366,9 @@ export default function HomePage() {
       </section>
 
       {/* Agents */}
-      <section className="border-t border-neutral-200 dark:border-neutral-800">
-        <div className="mx-auto max-w-6xl px-6 py-20 sm:py-24">
-          <div className="grid items-center gap-12 lg:grid-cols-2">
+      <section className="border-t border-gray-alpha-400">
+        <div className="mx-auto max-w-[1200px] px-6 py-16 sm:py-24">
+          <div className="grid items-center gap-10 lg:grid-cols-2">
             <div className="order-2 lg:order-1">
               <Terminal title="any agent, any running app">
                 <Prompt>native automate wait</Prompt>
@@ -397,13 +380,13 @@ export default function HomePage() {
               </Terminal>
             </div>
             <div className="order-1 lg:order-2">
-              <p className="font-mono text-xs font-medium uppercase tracking-[0.2em] text-neutral-400 dark:text-neutral-500">
+              <p className="font-mono label-12 font-medium uppercase tracking-[0.2em] text-gray-900">
                 Agents first
               </p>
-              <h2 className="mt-3 text-3xl font-semibold tracking-tight text-neutral-900 sm:text-4xl dark:text-neutral-100">
+              <h2 className="mt-3 heading-32 text-gray-1000 sm:heading-40">
                 Built to be written by AI agents
               </h2>
-              <p className="mt-5 text-base leading-relaxed text-neutral-600 dark:text-neutral-400">
+              <p className="mt-4 copy-16 text-gray-900">
                 Declarative markup and one typed update function make a surface agents author
                 reliably — and the repository ships an agent skill that teaches all of it. Every
                 app embeds an automation server, so any agent can see and drive the running window:
@@ -413,7 +396,7 @@ export default function HomePage() {
               </p>
               <Link
                 href="/automation"
-                className="mt-6 inline-block text-sm font-medium text-neutral-900 hover:underline dark:text-neutral-100"
+                className="mt-6 inline-block button-14 text-gray-1000 hover:underline"
               >
                 Automation →
               </Link>
@@ -423,27 +406,27 @@ export default function HomePage() {
       </section>
 
       {/* One binary */}
-      <section className="border-t border-neutral-200 dark:border-neutral-800">
-        <div className="mx-auto max-w-6xl px-6 py-20 sm:py-24">
-          <div className="grid items-center gap-12 lg:grid-cols-2">
+      <section className="border-t border-gray-alpha-400">
+        <div className="mx-auto max-w-[1200px] px-6 py-16 sm:py-24">
+          <div className="grid items-center gap-10 lg:grid-cols-2">
             <div>
-              <p className="font-mono text-xs font-medium uppercase tracking-[0.2em] text-neutral-400 dark:text-neutral-500">
+              <p className="font-mono label-12 font-medium uppercase tracking-[0.2em] text-gray-900">
                 One binary
               </p>
-              <h2 className="mt-3 text-3xl font-semibold tracking-tight text-neutral-900 sm:text-4xl dark:text-neutral-100">
+              <h2 className="mt-3 heading-32 text-gray-1000 sm:heading-40">
                 The whole app is one small file
               </h2>
-              <p className="mt-5 text-base leading-relaxed text-neutral-600 dark:text-neutral-400">
+              <p className="mt-4 copy-16 text-gray-900">
                 Markup compiles into the executable, so release builds carry no parser, no
                 interpreter, and no JS engine — just your logic and the engine, linking the
-                system&apos;s own frameworks. Effects run HTTP fetches, process spawns, file I/O,
-                and timers off the loop; results come back into <InlineCode>update</InlineCode> as
+                system’s own frameworks. Effects run HTTP fetches, process spawns, file I/O, and
+                timers off the loop; results come back into <InlineCode>update</InlineCode> as
                 plain messages. And when part of your product is the web, WebView panes coexist
                 with the canvas in the same window.
               </p>
               <Link
                 href="/packaging"
-                className="mt-6 inline-block text-sm font-medium text-neutral-900 hover:underline dark:text-neutral-100"
+                className="mt-6 inline-block button-14 text-gray-1000 hover:underline"
               >
                 Packaging →
               </Link>
@@ -462,56 +445,47 @@ export default function HomePage() {
       </section>
 
       {/* Platforms */}
-      <section className="border-t border-neutral-200 dark:border-neutral-800">
-        <div className="mx-auto max-w-6xl px-6 py-20 sm:py-24">
+      <section className="border-t border-gray-alpha-400">
+        <div className="mx-auto max-w-[1200px] px-6 py-16 sm:py-24">
           <SectionLabel>Cross-platform</SectionLabel>
           <SectionTitle>Platforms, honestly</SectionTitle>
           <SectionLede>
             One codebase compiles for macOS, Linux, Windows, iOS, and Android. These statuses
             describe what ships and is verified today — not a roadmap.
           </SectionLede>
-          <div className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {platforms.map((platform) => (
-              <div
-                key={platform.name}
-                className="rounded-xl border border-neutral-200 p-5 dark:border-neutral-800"
-              >
+              <div key={platform.name} className="rounded-md border border-gray-alpha-400 p-6">
                 <div className="flex items-baseline justify-between gap-2">
-                  <h3 className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
-                    {platform.name}
-                  </h3>
-                  <span className="text-xs font-medium uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
+                  <h3 className="heading-14 text-gray-1000">{platform.name}</h3>
+                  <span className="label-12 font-medium uppercase tracking-wider text-gray-900">
                     {platform.status}
                   </span>
                 </div>
-                <p className="mt-2 text-sm leading-relaxed text-neutral-600 dark:text-neutral-400">
-                  {platform.detail}
-                </p>
+                <p className="mt-2 copy-14 text-gray-900">{platform.detail}</p>
               </div>
             ))}
           </div>
           <p className="mt-8 text-center">
             <Link
               href="/platform-support"
-              className="text-sm font-medium text-neutral-900 hover:underline dark:text-neutral-100"
+              className="button-14 text-gray-1000 hover:underline"
             >
-              Full support matrix →
+              Full Support Matrix →
             </Link>
           </p>
         </div>
       </section>
 
       {/* Footer CTA */}
-      <section className="relative overflow-hidden border-t border-neutral-200 dark:border-neutral-800">
+      <section className="relative overflow-hidden border-t border-gray-alpha-400">
         <div
           aria-hidden
-          className="pointer-events-none absolute left-1/2 bottom-[-14rem] h-[28rem] w-[64rem] -translate-x-1/2 rounded-[100%] bg-gradient-to-t from-neutral-200/70 to-transparent blur-3xl dark:from-indigo-500/[0.14]"
+          className="pointer-events-none absolute left-1/2 bottom-[-14rem] h-[28rem] w-[64rem] -translate-x-1/2 rounded-[100%] bg-gradient-to-t from-gray-200/70 to-transparent blur-3xl dark:from-blue-700/[0.14]"
         />
-        <div className="relative mx-auto max-w-6xl px-6 py-20 text-center sm:py-28">
-          <h2 className="text-3xl font-semibold tracking-tight text-neutral-900 sm:text-4xl dark:text-neutral-100">
-            Build something native
-          </h2>
-          <p className="mx-auto mt-4 max-w-xl text-base leading-relaxed text-neutral-600 dark:text-neutral-400">
+        <div className="relative mx-auto max-w-[1200px] px-6 py-16 text-center sm:py-24">
+          <h2 className="heading-32 text-gray-1000 sm:heading-40">Build something native</h2>
+          <p className="mx-auto mt-4 max-w-xl copy-16 text-gray-900">
             Scaffold an app, open a real window, and edit the view while it runs.
           </p>
           <div className="mx-auto mt-8 max-w-md">
@@ -525,44 +499,42 @@ export default function HomePage() {
           <div className="mt-8 flex items-center justify-center gap-3">
             <Link
               href="/quick-start"
-              className="rounded-full bg-neutral-900 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-neutral-700 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
+              className="inline-flex h-10 items-center justify-center rounded-md bg-gray-1000 px-4 button-14 text-background-100 transition-colors hover:bg-gray-1000/85"
             >
               Quick Start
             </Link>
             <Link
               href="/native-ui"
-              className="rounded-full border border-neutral-300 px-5 py-2.5 text-sm font-medium text-neutral-900 transition-colors hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-100 dark:hover:bg-neutral-900"
+              className="inline-flex h-10 items-center justify-center rounded-md border border-gray-alpha-400 bg-background-100 px-4 button-14 text-gray-1000 transition-colors hover:bg-gray-100"
             >
-              Native UI guide
+              Native UI Guide
             </Link>
           </div>
         </div>
       </section>
 
       {/* Footer */}
-      <footer className="border-t border-neutral-200 dark:border-neutral-800">
-        <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-4 px-6 py-10 text-sm text-neutral-500 sm:flex-row dark:text-neutral-400">
-          <p>
-            {siteName} · Apache-2.0 licensed
-          </p>
+      <footer className="border-t border-gray-alpha-400">
+        <div className="mx-auto flex max-w-[1200px] flex-col items-center justify-between gap-4 px-6 py-10 label-14 text-gray-900 sm:flex-row">
+          <p>{siteName} · Apache-2.0 licensed</p>
           <nav className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2">
-            <Link href="/quick-start" className="hover:text-neutral-900 dark:hover:text-neutral-100">
+            <Link href="/quick-start" className="transition-colors hover:text-gray-1000">
               Quick Start
             </Link>
-            <Link href="/native-ui" className="hover:text-neutral-900 dark:hover:text-neutral-100">
+            <Link href="/native-ui" className="transition-colors hover:text-gray-1000">
               Native UI
             </Link>
-            <Link href="/automation" className="hover:text-neutral-900 dark:hover:text-neutral-100">
+            <Link href="/automation" className="transition-colors hover:text-gray-1000">
               Automation
             </Link>
-            <Link href="/platform-support" className="hover:text-neutral-900 dark:hover:text-neutral-100">
+            <Link href="/platform-support" className="transition-colors hover:text-gray-1000">
               Platforms
             </Link>
             <a
               href={githubUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="hover:text-neutral-900 dark:hover:text-neutral-100"
+              className="transition-colors hover:text-gray-1000"
             >
               GitHub
             </a>

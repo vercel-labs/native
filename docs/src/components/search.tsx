@@ -117,7 +117,7 @@ export function Search() {
     <>
       <button
         onClick={() => setOpen(true)}
-        className="hidden sm:flex items-center gap-2 rounded-md border border-border/50 bg-muted/50 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:border-foreground/25 transition-colors"
+        className="hidden sm:flex h-8 items-center gap-2 rounded-md border border-gray-alpha-400 bg-background-200 px-3 label-14 text-gray-900 hover:text-gray-1000 hover:border-gray-alpha-500 transition-colors"
       >
         <svg
           xmlns="http://www.w3.org/2000/svg"
@@ -133,15 +133,15 @@ export function Search() {
           <circle cx="11" cy="11" r="8" />
           <path d="m21 21-4.3-4.3" />
         </svg>
-        Search docs
-        <kbd className="pointer-events-none ml-1 inline-flex items-center gap-0.5 rounded border border-border/50 bg-background px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+        Search docs…
+        <kbd className="pointer-events-none ml-1 inline-flex items-center gap-0.5 rounded border border-gray-alpha-400 bg-background-100 px-1.5 py-0.5 font-mono text-[10px] text-gray-900">
           <span>&#8984;</span>K
         </kbd>
       </button>
 
       <button
         onClick={() => setOpen(true)}
-        className="sm:hidden flex items-center text-muted-foreground hover:text-foreground transition-colors"
+        className="sm:hidden flex items-center text-gray-900 hover:text-gray-1000 transition-colors"
         aria-label="Search docs"
       >
         <svg
@@ -163,7 +163,7 @@ export function Search() {
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent showCloseButton={false} className="gap-0 p-0 sm:max-w-lg">
           <DialogTitle className="sr-only">Search documentation</DialogTitle>
-          <div className="flex items-center gap-2 border-b border-border/50 px-3">
+          <div className="flex items-center gap-2 border-b border-gray-alpha-400 px-3">
             <svg
               xmlns="http://www.w3.org/2000/svg"
               width="16"
@@ -184,8 +184,8 @@ export function Search() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Search docs..."
-              className="flex-1 bg-transparent py-3 text-sm outline-none placeholder:text-muted-foreground"
+              placeholder="Search docs…"
+              className="flex-1 bg-transparent py-3 label-14 outline-none placeholder:text-gray-900 focus-visible:shadow-none"
             />
             {query && (
               <button
@@ -219,7 +219,7 @@ export function Search() {
               <p className="py-6 text-center text-sm text-muted-foreground">No results found.</p>
             ) : !hasQuery ? (
               <p className="py-6 text-center text-sm text-muted-foreground">
-                Type to search documentation...
+                Type to search documentation…
               </p>
             ) : (
               results.map((item, i) => (
