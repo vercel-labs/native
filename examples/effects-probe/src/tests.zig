@@ -112,6 +112,37 @@ test "cancel stops the stream: queued lines are discarded, exit reports cancelle
     try testing.expectEqual(@as(usize, 0), app_state.effects.pendingSpawnCount());
 }
 
+test "copy status writes the clipboard through the effects channel" {
+    const harness = try native_sdk.TestHarness().create(testing.allocator, .{ .size = geometry.SizeF.init(560, 480) });
+    defer harness.destroy(testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try testing.allocator.create(ProbeApp);
+    defer testing.allocator.destroy(app_state);
+    app_state.* = ProbeApp.init(std.heap.page_allocator, .{}, probeOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = "probe-canvas",
+        .size = geometry.SizeF.init(560, 480),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Real executor against the null platform's clipboard store: the
+    // text lands through the PlatformServices pasteboard seam (no
+    // pbcopy spawn) and one terminal ok Msg drains back.
+    try app_state.dispatch(&harness.runtime, 1, .copy_status);
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try testing.expectEqual(native_sdk.EffectClipboardOutcome.ok, app_state.model.copied.?);
+    try testing.expectEqualStrings("text/plain", harness.null_platform.lastClipboardMimeType());
+    try testing.expectEqualStrings("effects-probe: 0 lines total, 0 dropped", harness.null_platform.lastClipboardData());
+    try testing.expectEqual(@as(usize, 0), app_state.effects.pendingSpawnCount());
+}
+
 test "the probe view lays out through the canvas engine" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

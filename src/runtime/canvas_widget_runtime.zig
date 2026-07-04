@@ -105,6 +105,54 @@ pub const CanvasWidgetSourceTextEntry = struct {
     text_hash: u64 = 0,
 };
 
+/// The SOURCE-side selected state of one control on the previous
+/// rebuild, kept per view so the control reconcile can tell a
+/// model-driven (controlled) widget from an uncontrolled one (#81).
+pub const CanvasWidgetSourceControlEntry = struct {
+    id: canvas.ObjectId = 0,
+    kind: canvas.WidgetKind = .toggle_button,
+    selected: bool = false,
+};
+
+/// Which control kinds track their SOURCE selected state across
+/// rebuilds. Only `toggle_button` today: chips are the one boolean
+/// control whose retained toggle fights model-driven exclusive groups
+/// (#81); toggles/checkboxes/list selections keep the retained-wins
+/// contract locked by the control reconcile tests.
+pub fn canvasWidgetSourceControlKind(kind: canvas.WidgetKind) bool {
+    return kind == .toggle_button;
+}
+
+pub fn canvasWidgetSourceControlSelectedById(
+    entries: []const CanvasWidgetSourceControlEntry,
+    id: canvas.ObjectId,
+    kind: canvas.WidgetKind,
+) ?bool {
+    if (id == 0) return null;
+    for (entries) |entry| {
+        if (entry.id == id and entry.kind == kind) return entry.selected;
+    }
+    return null;
+}
+
+pub fn collectCanvasWidgetSourceControlEntries(
+    nodes: []const canvas.WidgetLayoutNode,
+    output: []CanvasWidgetSourceControlEntry,
+) []const CanvasWidgetSourceControlEntry {
+    var len: usize = 0;
+    for (nodes) |node| {
+        if (node.widget.id == 0 or !canvasWidgetSourceControlKind(node.widget.kind)) continue;
+        if (len >= output.len) break;
+        output[len] = .{
+            .id = node.widget.id,
+            .kind = node.widget.kind,
+            .selected = canvasWidgetBooleanSelected(node.widget),
+        };
+        len += 1;
+    }
+    return output[0..len];
+}
+
 pub fn canvasWidgetInteractionTargetExists(layout: canvas.WidgetLayoutTree, id: canvas.ObjectId) bool {
     const index = canvasWidgetLayoutNodeIndexById(layout, id) orelse return false;
     if (canvasWidgetLayoutNodeHidden(layout, index)) return false;
@@ -393,6 +441,7 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
     layout: canvas.WidgetLayoutTree,
     node_index: usize,
     previous: []const CanvasWidgetControlReconcileEntry,
+    previous_source_controls: []const CanvasWidgetSourceControlEntry,
 ) canvas.WidgetLayoutNode {
     var copy = node;
     if (copy.widget.id == 0 or !canvasWidgetRuntimeControlKind(copy.widget.kind)) return copy;
@@ -401,7 +450,29 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
     for (previous) |entry| {
         if (entry.id != copy.widget.id or entry.kind != copy.widget.kind) continue;
         switch (copy.widget.kind) {
-            .accordion, .checkbox, .switch_control, .toggle, .toggle_button => {
+            .toggle_button => {
+                // Chips (#81): a toggle-button whose SOURCE asserts
+                // selected — on this rebuild, or on the previous one
+                // (tracked in the view's source control entries) — is
+                // model-driven, and the source wins over the retained
+                // toggle, so an exclusive chip group shows exactly the
+                // model's selection instead of every chip ever pressed.
+                // Only a toggle-button whose source has stayed
+                // unselected keeps the retained (uncontrolled) state.
+                const source_selected = canvasWidgetBooleanSelected(copy.widget);
+                const previously_selected = canvasWidgetSourceControlSelectedById(
+                    previous_source_controls,
+                    copy.widget.id,
+                    copy.widget.kind,
+                ) orelse false;
+                const selected = if (source_selected or previously_selected)
+                    source_selected
+                else
+                    entry.state.selected or entry.value >= 0.5;
+                copy.widget.state.selected = selected;
+                copy.widget.value = if (selected) 1 else 0;
+            },
+            .accordion, .checkbox, .switch_control, .toggle => {
                 const selected = entry.state.selected or entry.value >= 0.5;
                 copy.widget.state.selected = selected;
                 copy.widget.value = if (selected) 1 else 0;
@@ -473,6 +544,7 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
     source_semantics: []const canvas.WidgetSemanticsNode,
     previous_source_text_entries: []const CanvasWidgetSourceTextEntry,
     previous_source_scroll_entries: []const CanvasWidgetSourceScrollEntry,
+    previous_source_control_entries: []const CanvasWidgetSourceControlEntry,
     node_buffer: []canvas.WidgetLayoutNode,
     control_entries: []CanvasWidgetControlReconcileEntry,
     scroll_offset_entries: []CanvasWidgetSourceScrollEntry,
@@ -501,7 +573,7 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
 
     for (next.nodes, 0..) |node, index| {
         const text_copy = canvasWidgetLayoutNodeWithTextReconcileState(node, next, index, previous_text_states);
-        const control_copy = canvasWidgetLayoutNodeWithControlReconcileState(text_copy, next, index, previous_control_states);
+        const control_copy = canvasWidgetLayoutNodeWithControlReconcileState(text_copy, next, index, previous_control_states, previous_source_control_entries);
         const scroll_copy = canvasWidgetLayoutNodeWithScrollReconcileState(control_copy, previous_runtime_offsets, previous_source_scroll_entries);
         node_buffer[index] = canvasWidgetLayoutNodeWithSourceSemantics(scroll_copy, source_semantics);
     }

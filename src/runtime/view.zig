@@ -227,6 +227,12 @@ pub const RuntimeView = struct {
     widget_source_text_count: usize = 0,
     widget_source_scroll_entries: [canvas_limits.max_canvas_widget_nodes_per_view]CanvasWidgetSourceScrollEntry = undefined,
     widget_source_scroll_count: usize = 0,
+    /// SOURCE-side selected state per control on the previous rebuild
+    /// (#81): the control reconcile reads it to tell model-driven
+    /// toggle-buttons (source wins) from uncontrolled ones (retained
+    /// state wins).
+    widget_source_control_entries: [canvas_limits.max_canvas_widget_nodes_per_view]canvas_widget_runtime.CanvasWidgetSourceControlEntry = undefined,
+    widget_source_control_count: usize = 0,
     /// Native scroll-driver tracking (#66): each installed driver's id and
     /// the last offset it reported (or was pushed), so the sync only
     /// forces `set_offset` when a non-driver source moved the offset.
@@ -354,6 +360,8 @@ pub const RuntimeView = struct {
     pub const copyCanvasWidgetSourceText = CanvasWidgetTreeMethods.copyCanvasWidgetSourceText;
     pub const widgetSourceScrollEntries = CanvasWidgetTreeMethods.widgetSourceScrollEntries;
     pub const copyCanvasWidgetSourceScroll = CanvasWidgetTreeMethods.copyCanvasWidgetSourceScroll;
+    pub const widgetSourceControlEntries = CanvasWidgetTreeMethods.widgetSourceControlEntries;
+    pub const copyCanvasWidgetSourceControls = CanvasWidgetTreeMethods.copyCanvasWidgetSourceControls;
     pub const copyWidgetLayoutTree = CanvasWidgetTreeMethods.copyWidgetLayoutTree;
     pub const canvasWidgetCursorForId = CanvasWidgetTreeMethods.canvasWidgetCursorForId;
     pub const canvasWidgetRenderState = CanvasWidgetTreeMethods.canvasWidgetRenderState;

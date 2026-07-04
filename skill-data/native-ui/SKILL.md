@@ -147,6 +147,20 @@ Numbers are plain (`gap="12"`), booleans are `true`/`false` or a binding.
 
 When children's minimum sizes exceed their container, debug builds log a `zero_canvas_layout` diagnostic naming the container, axis, and overflow in pixels — flex overflow is never silent. In Zig views, `.gap` on a stacking kind (`ui.panel(.{ .gap = 8 }, ...)`) logs a `zero_canvas_ui` warning in debug builds with the same lesson — it never fails the build.
 
+### Chips: exclusive selection with `selected=`
+
+The chip pattern — an exclusive group where the model owns which one is active — is a `toggle-group` of `toggle-button`s (or plain `button`s) whose `selected=` binds the model:
+
+```html
+<toggle-group gap="2" label="Theme">
+  <for each="theme_prefs" as="p">
+    <toggle-button size="sm" selected="{p == theme_pref}" on-toggle="set_theme:{p}">{p}</toggle-button>
+  </for>
+</toggle-group>
+```
+
+A `toggle-button` whose source asserts `selected` (this rebuild or the previous one) is model-driven: the source wins over the runtime's retained toggle on every rebuild, so exactly the model's selection is active — pressing a chip dispatches the Msg, the model moves the selection, and the old chip deactivates. Without a `selected=` that ever asserts, a `toggle-button` is uncontrolled: the runtime retains its pressed state across rebuilds (the multi-select formatting-bar case — bold/italic chips with zero app wiring). `button` with `selected=` is always model-driven (buttons never retain state) and dispatches `on-press`; `toggle-button` dispatches `on-toggle` (its activation is the toggle intent — an `on-press` there never fires). Model-driven chips need a handler that actually moves the model: a chip whose Msg is ignored keeps its retained press until the model asserts its `selected=`.
+
 ## Widget budgets and virtualization
 
 Every view has fixed per-view capacities (`src/runtime/canvas_limits.zig`): **1024 retained widget nodes** (`max_canvas_widget_nodes_per_view` — the budget that matters for tree design; semantics and spans match it), 64 KiB retained widget text, and per-frame content budgets (2048 commands, 8192 glyphs, 32 KiB frame text). Overflow is loud: `error.WidgetLayoutListFull` / `error.WidgetNodeLimitReached` fail tests under the harness's propagate policy and log a teaching diagnostic naming the budget in production (the app degrades to the previous frame). Watch headroom without overflowing: automation snapshots report `widget_nodes=N/1024 widget_semantics=N/1024` on every gpu_surface view line.
@@ -286,7 +300,7 @@ See `examples/ui-inbox` for the complete pattern.
 
 The runtime owns cmd/ctrl+C/X/V in editable text: copy writes the current selection to the system clipboard, cut copies then delivers the removal to your `on-input` handler as an `insert_text ""` edit, and paste arrives as an ordinary `insert_text` edit — the TEA mirror above stays consistent with zero extra code. Paste is clamped to the view's text capacity: when bytes were dropped, the keyboard event carries `edit_truncated = true` and your `TextBuffer` mirror sets its own `truncated` flag (check it if lost paste bytes matter to your UX; `TextBuffer` clamps oversized insertions at a UTF-8 boundary rather than dropping the edit). Shift+arrows/home/end extend the selection from the keyboard.
 
-Static text is selectable too: click-drag inside one `text` leaf or `paragraph` (markdown bodies included) selects with a highlight, cmd/ctrl+C copies it, and pressing anywhere else clears it. Selection is per-widget by design — there is no document model ordering text across widgets, so a drag cannot span two paragraphs (copy per paragraph). The selection survives rebuilds while that widget's text bytes are unchanged, and shows up in semantics/automation snapshots as `selection=a..b` on the widget line. Direct clipboard access for app logic is `runtime.readClipboard(&buffer)` / `runtime.writeClipboard(text)`.
+Static text is selectable too: click-drag inside one `text` leaf or `paragraph` (markdown bodies included) selects with a highlight, cmd/ctrl+C copies it, and pressing anywhere else clears it. Selection is per-widget by design — there is no document model ordering text across widgets, so a drag cannot span two paragraphs (copy per paragraph). The selection survives rebuilds while that widget's text bytes are unchanged, and shows up in semantics/automation snapshots as `selection=a..b` on the widget line. Clipboard access from `update` is `fx.writeClipboard` / `fx.readClipboard` on the effects channel (see Effects) — never a `pbcopy` spawn; `runtime.readClipboard(&buffer)` / `runtime.writeClipboard(text)` remain for code that holds the runtime.
 
 ## Effects: subprocesses and HTTP from update
 
@@ -430,6 +444,28 @@ File rules:
 - `result.outcome` is explicit: `.ok` (a read's whole content in `result.bytes`; a write fully on disk), `.not_found` (reads only — writes create the path, parent directories included), `.io_failed` (permissions, path is a directory, disk), `.truncated` (the file exceeds the 1 MiB `max_effect_file_bytes`; `result.bytes` is the first bound bytes — its own outcome, not a flag, because a cut JSON snapshot must not parse as whole), `.rejected` (never ran: slots busy, duplicate key, empty/over-long path, write bytes over the bound — an over-bound WRITE is rejected outright since a partial write would corrupt the file), `.cancelled`.
 - Writes replace the file whole; `writeFile` bytes are copied at call time so the caller's buffer is immediately reusable. Reads deliver drain-scratch bytes — copy what the model keeps.
 - In the fake executor: `pendingFileAt(0)` records `key`/`op`/`path`/`bytes` for assertions; `feedFileResult(key, .ok, "{...}")` answers a read (over-bound content is cut and rewritten to `.truncated`, mirroring the real reader), `feedFileResult(key, .ok, "")` acknowledges a write; failure outcomes pass through as fed.
+
+`fx.writeClipboard` / `fx.readClipboard` put text on (and read it from) the system clipboard through the platform pasteboard — the same seam the runtime's cmd+C copy uses. Never spawn `pbcopy`/`pbpaste`/`xclip` for this. Same discipline: key-based (shared key space and 16 slots), exactly one terminal Msg with an explicit outcome. The pasteboard call is synchronous on the loop thread (no worker), but the result still arrives as an ordinary Msg on the next drain:
+
+```zig
+pub const Msg = union(enum) {
+    share,
+    copied: native_sdk.EffectClipboardResult,   // the fixed payload type
+};
+
+.share => fx.writeClipboard(.{
+    .key = share_key,
+    .text = model.shareLine(),             // ≤ 64 KiB, copied at call time
+    .on_result = Effects.clipboardMsg(.copied),
+}),
+.copied => |result| model.noteCopied(result.outcome),
+```
+
+Clipboard rules:
+
+- `result.outcome` is explicit: `.ok` (a write is on the clipboard whole; a read's content is in `result.text` — drain scratch, copy what the model keeps), `.failed` (the platform refused: no clipboard service on the host, read content over the 64 KiB `max_effect_clipboard_bytes`, pasteboard error — a read never arrives cut), `.rejected` (never ran: slots busy, duplicate key, write text over the bound), `.cancelled`.
+- Writes are text/plain and replace the clipboard whole; rich-data clipboard stays on the runtime API (`runtime.writeClipboardData`).
+- In the fake executor: `pendingClipboardAt(0)` records `key`/`op`/`text` for assertions; `feedClipboardResult(key, .ok, "pasted")` answers a read, `feedClipboardResult(key, .ok, "")` acknowledges a write; failure outcomes pass through as fed. Under the real executor the test harness's null platform records the write — assert `harness.null_platform.lastClipboardData()`.
 
 `fx.startTimer` / `fx.cancelTimer` are key-based timers on the same channel — an auto-refresh, a poll, a debounce — one-shot or repeating, each fire delivered as one `on_fire` Msg. Timers are their own fixed table (16, `max_effect_timers`) and their own key namespace: they consume none of the 16 effect slots and never collide with spawn/fetch/file keys:
 

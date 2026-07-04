@@ -48,6 +48,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 source_semantics,
                 self.views[index].widgetSourceTextEntries(),
                 self.views[index].widgetSourceScrollEntries(),
+                self.views[index].widgetSourceControlEntries(),
                 reconciled_nodes,
                 &self.canvas_widget_reconcile_control_entries,
                 &self.canvas_widget_reconcile_scroll_entries,
@@ -73,6 +74,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             try self.views[index].copyWidgetLayoutTree(reconciled_layout, &self.canvas_widget_copy_scratch);
             try self.views[index].copyCanvasWidgetSourceText(layout);
             self.views[index].copyCanvasWidgetSourceScroll(layout);
+            self.views[index].copyCanvasWidgetSourceControls(layout);
             // Push the reconciled regions (frames, content extents,
             // diverged offsets) to the native scroll drivers.
             ScrollDriverMethods(Runtime).syncCanvasWidgetScrollDriversForView(self, index);

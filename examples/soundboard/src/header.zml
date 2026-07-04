@@ -15,12 +15,12 @@
     <if test="{searching}">
       <button size="sm" variant="ghost" on-press="clear_search" label="Clear search">Clear</button>
     </if>
-    <!-- Plain buttons, not toggle-buttons: the runtime retains a
-         toggle-button's on state across rebuilds, so a model-driven
-         exclusive group would show every chip ever pressed as active. -->
+    <!-- Model-driven exclusive chips (#81): a toggle-button whose
+         selected= comes from the model is source-owned across rebuilds,
+         so exactly the model's selection is active. -->
     <toggle-group gap="2" label="Theme">
       <for each="theme_prefs" as="p">
-        <button size="sm" variant="ghost" selected="{p == theme_pref}" on-press="set_theme:{p}">{p}</button>
+        <toggle-button size="sm" selected="{p == theme_pref}" on-toggle="set_theme:{p}">{p}</toggle-button>
       </for>
     </toggle-group>
   </row>

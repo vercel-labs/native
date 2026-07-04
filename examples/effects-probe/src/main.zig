@@ -2,8 +2,10 @@
 //!
 //! One Start button spawns a long-running shell stream through
 //! `fx.spawn`; each stdout line arrives as a typed Msg and lands in the
-//! list; Cancel kills the process mid-stream through `fx.cancel`. The
-//! view never spawns anything — effects are update-side only.
+//! list; Cancel kills the process mid-stream through `fx.cancel`; Copy
+//! status puts the counters on the system clipboard through
+//! `fx.writeClipboard` (no pbcopy spawn). The view never spawns
+//! anything — effects are update-side only.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -35,6 +37,7 @@ const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
 // ------------------------------------------------------------------ model
 
 pub const stream_key: u64 = 1;
+pub const clipboard_key: u64 = 2;
 const max_visible_lines = 24;
 const max_line_bytes = 64;
 
@@ -63,6 +66,8 @@ pub const Model = struct {
     dropped_lines: u32 = 0,
     streaming: bool = false,
     last_exit: ?native_sdk.EffectExit = null,
+    /// Terminal outcome of the last clipboard copy (`fx.writeClipboard`).
+    copied: ?native_sdk.EffectClipboardOutcome = null,
 
     /// Copy the payload: the line slice is drain scratch and dies with
     /// this update call.
@@ -104,8 +109,10 @@ pub const Model = struct {
 pub const Msg = union(enum) {
     start,
     cancel,
+    copy_status,
     line: native_sdk.EffectLine,
     exited: native_sdk.EffectExit,
+    copied: native_sdk.EffectClipboardResult,
 };
 
 const ProbeApp = native_sdk.UiApp(Model, Msg);
@@ -127,11 +134,25 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             });
         },
         .cancel => fx.cancel(stream_key),
+        // Copy the status line to the system clipboard through the
+        // effects channel (friction #82) — no pbcopy spawn: the
+        // pasteboard is a platform service, and the terminal outcome
+        // arrives as one `.copied` Msg.
+        .copy_status => {
+            var buffer: [96]u8 = undefined;
+            const text = std.fmt.bufPrint(&buffer, "effects-probe: {d} lines total, {d} dropped", .{ model.total_lines, model.dropped_lines }) catch "effects-probe";
+            fx.writeClipboard(.{
+                .key = clipboard_key,
+                .text = text,
+                .on_result = Effects.clipboardMsg(.copied),
+            });
+        },
         .line => |line| model.recordLine(line),
         .exited => |exit| {
             model.streaming = false;
             model.last_exit = exit;
         },
+        .copied => |result| model.copied = result.outcome,
     }
 }
 
@@ -144,6 +165,10 @@ pub fn view(ui: *ProbeUi, model: *const Model) ProbeUi.Node {
         ui.row(.{ .gap = 8, .cross = .center }, .{
             ui.button(.{ .variant = .primary, .on_press = .start, .disabled = model.streaming }, "Start stream"),
             ui.button(.{ .variant = .destructive, .on_press = .cancel, .disabled = !model.streaming }, "Cancel"),
+            ui.button(.{ .on_press = .copy_status }, if (model.copied) |outcome| switch (outcome) {
+                .ok => "Copied",
+                else => "Copy failed",
+            } else "Copy status"),
             ui.spacer(1),
             ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, model.statusText(ui.arena)),
         }),

@@ -708,6 +708,154 @@ test "runtime reconciles canvas control state across layout replacement" {
     try std.testing.expectEqual(@as(?f32, 1), canvasWidgetSemanticsById(semantics, 17).?.value);
 }
 
+test "model-driven exclusive toggle-button chips follow the source across rebuilds" {
+    // Friction #81: `toggle_button` retained its pressed state
+    // unconditionally, so a model-driven exclusive chip group
+    // (`selected="{p == theme_pref}"`) showed every chip ever pressed
+    // as active. A toggle-button whose SOURCE asserts selected — now,
+    // or on the previous rebuild — is model-driven: source wins.
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-chip-reconcile", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const Chips = struct {
+        fn layout(selected_index: ?usize, nodes: []canvas.WidgetLayoutNode) !canvas.WidgetLayoutTree {
+            var chips = [_]canvas.Widget{
+                .{ .id = 21, .kind = .toggle_button, .frame = geometry.RectF.init(0, 0, 72, 30), .text = "system" },
+                .{ .id = 22, .kind = .toggle_button, .frame = geometry.RectF.init(80, 0, 72, 30), .text = "light" },
+                .{ .id = 23, .kind = .toggle_button, .frame = geometry.RectF.init(160, 0, 72, 30), .text = "dark" },
+            };
+            if (selected_index) |index| chips[index].state = .{ .selected = true };
+            const group = [_]canvas.Widget{.{
+                .id = 20,
+                .kind = .toggle_group,
+                .frame = geometry.RectF.init(10, 10, 240, 30),
+                .children = &chips,
+            }};
+            return canvas.layoutWidgetTree(.{ .kind = .stack, .children = &group }, geometry.RectF.init(0, 0, 280, 120), nodes);
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 280, 120),
+    });
+
+    // Rebuild 1: the model selects "system".
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Chips.layout(0, &nodes));
+
+    // The user presses "dark": the runtime retains the toggle
+    // immediately (press feedback before the app's rebuild lands).
+    try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 23, .action = .toggle });
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(21).?.widget.state.selected);
+    try std.testing.expect(retained.findById(23).?.widget.state.selected);
+
+    // Rebuild 2: the model moved the selection to "dark". The source
+    // wins for BOTH chips — exactly one active, not every chip ever
+    // pressed.
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Chips.layout(2, &nodes));
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(!retained.findById(21).?.widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(21).?.widget.value);
+    try std.testing.expect(!retained.findById(22).?.widget.state.selected);
+    try std.testing.expect(retained.findById(23).?.widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 1), retained.findById(23).?.widget.value);
+
+    // Rebuild 3 (an unrelated Msg replays the same source): still
+    // exactly one active.
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Chips.layout(2, &nodes));
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(!retained.findById(21).?.widget.state.selected);
+    try std.testing.expect(!retained.findById(22).?.widget.state.selected);
+    try std.testing.expect(retained.findById(23).?.widget.state.selected);
+
+    // Pressing the ACTIVE chip toggles the retained state off, but the
+    // model keeps the selection: the rebuild re-asserts it (a chip the
+    // source has ever selected stays model-driven).
+    try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 23, .action = .toggle });
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Chips.layout(2, &nodes));
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(23).?.widget.state.selected);
+    try std.testing.expect(!retained.findById(21).?.widget.state.selected);
+    try std.testing.expect(!retained.findById(22).?.widget.state.selected);
+
+    // The model clears the selection entirely: no chip stays active.
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Chips.layout(null, &nodes));
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(!retained.findById(21).?.widget.state.selected);
+    try std.testing.expect(!retained.findById(22).?.widget.state.selected);
+    try std.testing.expect(!retained.findById(23).?.widget.state.selected);
+}
+
+test "uncontrolled toggle-buttons keep their retained state across rebuilds" {
+    // The other half of the #81 contract: a toggle-button whose source
+    // never asserts selected stays runtime-owned — multi-select
+    // formatting chips keep working with zero app wiring.
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-chip-uncontrolled", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 280, 120),
+    });
+
+    const chips = [_]canvas.Widget{
+        .{ .id = 31, .kind = .toggle_button, .frame = geometry.RectF.init(0, 0, 60, 30), .text = "B" },
+        .{ .id = 32, .kind = .toggle_button, .frame = geometry.RectF.init(64, 0, 60, 30), .text = "I" },
+    };
+    const group = [_]canvas.Widget{.{
+        .id = 30,
+        .kind = .toggle_group,
+        .frame = geometry.RectF.init(10, 10, 160, 30),
+        .children = &chips,
+    }};
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &group }, geometry.RectF.init(0, 0, 280, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 31, .action = .toggle });
+    try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 32, .action = .toggle });
+
+    // A rebuild with the same (never-selected) source keeps both
+    // retained toggles — multi-select survives.
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(31).?.widget.state.selected);
+    try std.testing.expect(retained.findById(32).?.widget.state.selected);
+
+    // Toggling one off is retained too.
+    try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 32, .action = .toggle });
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(31).?.widget.state.selected);
+    try std.testing.expect(!retained.findById(32).?.widget.state.selected);
+}
+
 test "runtime drives retained settings and data grid workflow" {
     const TestApp = struct {
         fn app(self: *@This()) App {

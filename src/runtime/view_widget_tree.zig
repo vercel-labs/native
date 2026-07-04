@@ -72,6 +72,18 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             self.widget_source_scroll_count = entries.len;
         }
 
+        pub fn widgetSourceControlEntries(self: *const RuntimeView) []const canvas_widget_runtime.CanvasWidgetSourceControlEntry {
+            return self.widget_source_control_entries[0..self.widget_source_control_count];
+        }
+
+        pub fn copyCanvasWidgetSourceControls(self: *RuntimeView, layout: canvas.WidgetLayoutTree) void {
+            const entries = canvas_widget_runtime.collectCanvasWidgetSourceControlEntries(
+                layout.nodes,
+                &self.widget_source_control_entries,
+            );
+            self.widget_source_control_count = entries.len;
+        }
+
         pub fn copyCanvasWidgetSourceText(self: *RuntimeView, layout: canvas.WidgetLayoutTree) anyerror!void {
             var entries: [max_canvas_widget_source_text_entries_per_view]CanvasWidgetSourceTextEntry = undefined;
             var entry_count: usize = 0;
@@ -131,7 +143,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             for (layout.nodes, 0..) |node, layout_index| {
                 const text_reconciled = canvasWidgetLayoutNodeWithTextReconcileState(node, layout, layout_index, previous_text_states);
                 const text_copy = try self.copyWidgetLayoutNode(text_reconciled, source_semantics);
-                const copy = canvasWidgetLayoutNodeWithControlReconcileState(text_copy, layout, layout_index, previous_control_states);
+                const copy = canvasWidgetLayoutNodeWithControlReconcileState(text_copy, layout, layout_index, previous_control_states, self.widgetSourceControlEntries());
                 self.widget_layout_nodes[self.widget_layout_node_count] = copy;
                 self.widget_scroll_states[self.widget_layout_node_count] = canvasWidgetScrollStateForLayoutNode(copy, previous_scroll_states);
                 self.widget_layout_node_count += 1;

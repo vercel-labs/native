@@ -11,6 +11,7 @@ test {
     _ = @import("effects_tests.zig");
     _ = @import("effects_fetch_tests.zig");
     _ = @import("effects_file_tests.zig");
+    _ = @import("effects_clipboard_tests.zig");
     _ = @import("clock.zig");
     _ = @import("markdown_app_tests.zig");
     _ = @import("platform_bridge_tests.zig");

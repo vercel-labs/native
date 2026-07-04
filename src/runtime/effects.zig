@@ -13,7 +13,11 @@
 //! operation, one terminal Msg with an explicit outcome
 //! (ok / not_found / io_failed / truncated / rejected / cancelled) —
 //! TEA-friendly persistence without smuggling an `Io` handle into
-//! `update`. The model is
+//! `update`. Clipboard effects (`writeClipboard`/`readClipboard`) keep
+//! the same shape over the platform pasteboard — the seam the
+//! runtime's cmd+C copy uses — executed synchronously on the loop
+//! thread (pasteboards are main-thread services), so apps stop
+//! spawning `pbcopy`. The model is
 //! never touched off-thread: workers post
 //! fixed-size completion records into a bounded MPSC queue, nudge the
 //! platform loop through `PlatformServices.wake_fn`, and the loop thread
@@ -144,6 +148,13 @@ pub const max_effect_file_path_bytes: usize = 1024;
 /// write would corrupt the file on disk, which truncation flags cannot
 /// undo.
 pub const max_effect_file_bytes: usize = 1024 * 1024;
+
+/// Maximum clipboard-effect payload: what one `writeClipboard` writes
+/// and the most one `readClipboard` delivers — the platform clipboard
+/// bound (`platform.max_clipboard_data_bytes`). Over-bound writes are
+/// rejected outright, mirroring `writeFile` (a cut clipboard string
+/// must never pass for the whole one).
+pub const max_effect_clipboard_bytes: usize = platform.max_clipboard_data_bytes;
 
 /// The exit `code` reported for every non-`.exited` reason.
 pub const effect_error_exit_code: i32 = -1;
@@ -343,6 +354,50 @@ pub const EffectFileResult = struct {
     dropped_before: u32 = 0,
 };
 
+/// Which clipboard operation a clipboard effect performs.
+pub const EffectClipboardOp = enum { read, write };
+
+/// The terminal outcome of one clipboard effect. Every started
+/// clipboard effect delivers exactly one Msg carrying one of these —
+/// failure is never silent. The taxonomy is deliberately small: the
+/// pasteboard is one bounded synchronous platform call, so everything
+/// the OS refuses (no clipboard service on the host, content over the
+/// read bound, a pasteboard error) is one explicit `.failed`.
+pub const EffectClipboardOutcome = enum {
+    /// The operation completed: a write's text is on the system
+    /// clipboard whole; a read's content is in `text`.
+    ok,
+    /// The platform clipboard refused or is absent: a host without a
+    /// clipboard service, clipboard content over
+    /// `max_effect_clipboard_bytes` on read, or a pasteboard error.
+    failed,
+    /// The request never ran: all slots busy, a duplicate active key,
+    /// write text over `max_effect_clipboard_bytes`, or no platform
+    /// services bound.
+    rejected,
+    /// `cancel(key)` ended it before the result was delivered. The
+    /// operation itself may still have completed (real clipboard ops
+    /// run synchronously at request time).
+    cancelled,
+};
+
+/// Payload for clipboard-effect Msg constructors. Exactly one is
+/// delivered per `writeClipboard`/`readClipboard` — terminal, nothing
+/// for that key after it. `text` is a read's clipboard content, valid
+/// only during the `update` call that receives it — copy what the
+/// model keeps. Writes always deliver empty `text`.
+pub const EffectClipboardResult = struct {
+    key: u64,
+    op: EffectClipboardOp = .write,
+    outcome: EffectClipboardOutcome = .ok,
+    /// Read contents for `.ok`; `""` otherwise (and always for writes).
+    text: []const u8 = "",
+    /// Loop-side terminal notices evicted from the pending ring to make
+    /// room before this one (only under extreme rejection bursts).
+    /// Never silently zero when something was lost.
+    dropped_before: u32 = 0,
+};
+
 /// Maximum concurrently armed fx timers per app. Timers are their own
 /// fixed table: they do NOT consume `max_effects` slots or worker
 /// threads (a timer is a platform service arm, not a blocking effect),
@@ -463,6 +518,7 @@ pub fn Effects(comptime Msg: type) type {
         pub const ExitMsgFn = *const fn (exit: EffectExit) Msg;
         pub const ResponseMsgFn = *const fn (response: EffectResponse) Msg;
         pub const FileMsgFn = *const fn (result: EffectFileResult) Msg;
+        pub const ClipboardMsgFn = *const fn (result: EffectClipboardResult) Msg;
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
 
         /// Comptime Msg constructor for `on_line`, following
@@ -507,6 +563,18 @@ pub fn Effects(comptime Msg: type) type {
         pub fn fileMsg(comptime tag: std.meta.Tag(Msg)) FileMsgFn {
             return struct {
                 fn make(result: EffectFileResult) Msg {
+                    return @unionInit(Msg, @tagName(tag), result);
+                }
+            }.make;
+        }
+
+        /// Comptime Msg constructor for `on_result` of clipboard
+        /// effects: `clipboardMsg(.copied)` builds
+        /// `Msg{ .copied = result }` — the variant's payload type must
+        /// be `native_sdk.EffectClipboardResult`.
+        pub fn clipboardMsg(comptime tag: std.meta.Tag(Msg)) ClipboardMsgFn {
+            return struct {
+                fn make(result: EffectClipboardResult) Msg {
                     return @unionInit(Msg, @tagName(tag), result);
                 }
             }.make;
@@ -650,6 +718,38 @@ pub fn Effects(comptime Msg: type) type {
             bytes: []const u8 = "",
         };
 
+        pub const WriteClipboardOptions = struct {
+            /// Caller-chosen identity, stored in the model. Shares the
+            /// key space and the `max_effects` slots with spawns,
+            /// fetches, and file effects.
+            key: u64,
+            /// The text to place on the system clipboard, at most
+            /// `max_effect_clipboard_bytes` — larger is rejected
+            /// outright (a cut clipboard string must never pass for the
+            /// whole one). Copied at call time; the caller's buffer may
+            /// be reused immediately.
+            text: []const u8,
+            on_result: ?ClipboardMsgFn = null,
+        };
+
+        pub const ReadClipboardOptions = struct {
+            /// Caller-chosen identity, stored in the model. Shares the
+            /// key space and the `max_effects` slots with spawns,
+            /// fetches, and file effects.
+            key: u64,
+            on_result: ?ClipboardMsgFn = null,
+        };
+
+        /// A recorded clipboard request, exposed by the fake executor
+        /// for test assertions. `text` points into slot storage and
+        /// stays valid until the result is fed and drained.
+        pub const ClipboardRequest = struct {
+            key: u64,
+            op: EffectClipboardOp,
+            /// The text a `writeClipboard` would write; `""` for reads.
+            text: []const u8 = "",
+        };
+
         pub const StartTimerOptions = struct {
             /// Caller-chosen identity, stored in the model. Timer keys
             /// are their own namespace: they never collide with (and are
@@ -691,9 +791,9 @@ pub fn Effects(comptime Msg: type) type {
         /// thereby retires) it.
         const SlotState = enum(u8) { idle, running, done, draining };
 
-        const SlotKind = enum(u8) { spawn, fetch, file };
+        const SlotKind = enum(u8) { spawn, fetch, file, clipboard };
 
-        const EntryKind = enum(u8) { line, exit, response, file };
+        const EntryKind = enum(u8) { line, exit, response, file, clipboard };
 
         const Entry = struct {
             kind: EntryKind = .line,
@@ -717,6 +817,12 @@ pub fn Effects(comptime Msg: type) type {
             /// `line_len`.
             file_op: EffectFileOp = .read,
             file_outcome: EffectFileOutcome = .ok,
+            /// `.clipboard` entries: the operation and its terminal
+            /// outcome. A read's text stays in the slot's heap buffer
+            /// (taken at drain, like a fetch body) with its length in
+            /// `line_len`.
+            clipboard_op: EffectClipboardOp = .write,
+            clipboard_outcome: EffectClipboardOutcome = .ok,
             /// `.exit` entries of `.collect` spawns: the collected stdout
             /// stays in the slot's heap buffer (taken at drain, like a
             /// fetch body); the stderr tail rides in `line_bytes` with
@@ -729,6 +835,7 @@ pub fn Effects(comptime Msg: type) type {
             exit_fn: ?ExitMsgFn = null,
             response_fn: ?ResponseMsgFn = null,
             file_fn: ?FileMsgFn = null,
+            clipboard_fn: ?ClipboardMsgFn = null,
             /// `.line` entries whose payload exceeds the inline buffer
             /// (a raised `max_line_bytes` bound): the bytes ride in this
             /// heap allocation instead of `line_bytes`. Owned by the
@@ -745,6 +852,7 @@ pub fn Effects(comptime Msg: type) type {
             exit: struct { exit: EffectExit, exit_fn: ?ExitMsgFn },
             response: struct { response: EffectResponse, response_fn: ?ResponseMsgFn },
             file: struct { result: EffectFileResult, file_fn: ?FileMsgFn },
+            clipboard: struct { result: EffectClipboardResult, clipboard_fn: ?ClipboardMsgFn },
             timer: struct { timer: EffectTimer, timer_fn: ?TimerMsgFn },
 
             fn addDropped(pending: *PendingMsg, count: u32) void {
@@ -752,6 +860,7 @@ pub fn Effects(comptime Msg: type) type {
                     .exit => |*entry| entry.exit.dropped_lines +|= count,
                     .response => |*entry| entry.response.dropped_before +|= count,
                     .file => |*entry| entry.result.dropped_before +|= count,
+                    .clipboard => |*entry| entry.result.dropped_before +|= count,
                     // EffectTimer carries no drop counter; a repeating
                     // timer's next fire replaces the lost one anyway.
                     .timer => {},
@@ -763,6 +872,7 @@ pub fn Effects(comptime Msg: type) type {
                     .exit => |entry| entry.exit.dropped_lines,
                     .response => |entry| entry.response.dropped_before,
                     .file => |entry| entry.result.dropped_before,
+                    .clipboard => |entry| entry.result.dropped_before,
                     .timer => 0,
                 };
             }
@@ -778,6 +888,7 @@ pub fn Effects(comptime Msg: type) type {
             on_exit: ?ExitMsgFn = null,
             on_response: ?ResponseMsgFn = null,
             on_file: ?FileMsgFn = null,
+            on_clipboard: ?ClipboardMsgFn = null,
             /// Set by `cancel` before any kill attempt; read by the
             /// worker so a cancel that lands before the process spawns
             /// still kills it.
@@ -829,6 +940,8 @@ pub fn Effects(comptime Msg: type) type {
             stderr_total: usize = 0,
             // ---- file-only fields (kind == .file) ----
             file_op: EffectFileOp = .read,
+            // ---- clipboard-only fields (kind == .clipboard) ----
+            clipboard_op: EffectClipboardOp = .write,
             // ---- fetch/file fields ----
             /// `.stream` frames the response body into line entries;
             /// `.buffered` delivers it whole on the terminal entry.
@@ -1380,6 +1493,135 @@ pub fn Effects(comptime Msg: type) type {
             thread.detach();
         }
 
+        /// Put text on the system clipboard through the platform
+        /// pasteboard — the same seam the runtime's cmd+C copy uses —
+        /// and deliver exactly one terminal Msg with an explicit
+        /// outcome (`.ok` / `.failed` / `.rejected`). TEA apps stop
+        /// spawning `pbcopy`: the write is one bounded synchronous
+        /// platform call on the loop thread (pasteboards are
+        /// main-thread services), so no worker thread is involved; the
+        /// Msg still arrives through the ordinary drain, keeping the
+        /// effect contract uniform. Never fails from the caller's view:
+        /// requests that cannot run (slots busy, duplicate active key,
+        /// text over `max_effect_clipboard_bytes`) are reported with
+        /// outcome `.rejected` on the next drain. Clipboard effects
+        /// share the `max_effects` slots and the key space with spawns,
+        /// fetches, and file effects.
+        pub fn writeClipboard(self: *Self, options: WriteClipboardOptions) void {
+            if (options.text.len > max_effect_clipboard_bytes) {
+                return self.rejectClipboard(options.key, .write, options.on_result);
+            }
+            self.startClipboard(options.key, .write, options.text, options.on_result);
+        }
+
+        /// Read the system clipboard's text and deliver it as exactly
+        /// one terminal Msg: `.ok` with the content in
+        /// `EffectClipboardResult.text` (drain scratch — copy what the
+        /// model keeps), or `.failed` when the platform refuses (no
+        /// clipboard service, content over
+        /// `max_effect_clipboard_bytes`, pasteboard error). Synchronous
+        /// like `writeClipboard`; same slots, same key space.
+        pub fn readClipboard(self: *Self, options: ReadClipboardOptions) void {
+            self.startClipboard(options.key, .read, "", options.on_result);
+        }
+
+        fn startClipboard(self: *Self, key: u64, op: EffectClipboardOp, text: []const u8, on_result: ?ClipboardMsgFn) void {
+            self.reclaimSlots();
+            const fake = self.executor == .fake;
+            // Services are bound before init_fx/update ever run; a null
+            // here means a host without the platform clipboard arm.
+            if (!fake and self.services == null) return self.rejectClipboard(key, op, on_result);
+            if (self.findActiveSlot(key) != null) return self.rejectClipboard(key, op, on_result);
+            const slot_index = self.findIdleSlot() orelse return self.rejectClipboard(key, op, on_result);
+
+            const slot = &self.slots[slot_index];
+            // A write's buffer holds its text copy; a read's holds the
+            // clipboard content space.
+            const buffer_len = if (op == .write) text.len else max_effect_clipboard_bytes;
+            const buffer = self.allocator.alloc(u8, buffer_len) catch {
+                return self.rejectClipboard(key, op, on_result);
+            };
+            slot.generation = self.next_generation;
+            self.next_generation +%= 1;
+            if (self.next_generation == 0) self.next_generation = 1;
+            slot.key = key;
+            slot.kind = .clipboard;
+            slot.clipboard_op = op;
+            slot.on_line = null;
+            slot.on_exit = null;
+            slot.on_response = null;
+            slot.on_file = null;
+            slot.on_clipboard = on_result;
+            slot.cancel_requested.store(false, .release);
+            // `cancelled_generation` stays sticky, exactly as in `spawn`.
+            slot.child_id = null;
+            slot.reaping = false;
+            slot.dropped_pending = 0;
+            slot.dropped_total = 0;
+            slot.url_len = 0;
+            if (slot.line_buffer) |old| {
+                self.allocator.free(old);
+                slot.line_buffer = null;
+            }
+            if (slot.fetch_buffer) |old| self.allocator.free(old);
+            slot.fetch_buffer = buffer;
+            if (op == .write) {
+                @memcpy(buffer[0..text.len], text);
+                slot.payload_len = text.len;
+            } else {
+                slot.payload_len = 0;
+            }
+            slot.body_len = 0;
+            slot.fake = fake;
+            slot.state.store(.running, .release);
+
+            if (fake) return;
+
+            // Real mode: one bounded synchronous pasteboard call, right
+            // here on the loop thread (the platform clipboard is a
+            // loop-thread service — the cmd+C seam). The terminal entry
+            // still rides the queue so delivery, cancel rewriting, and
+            // payload lifetime are uniform with every other effect.
+            const services = self.services.?;
+            var outcome: EffectClipboardOutcome = .ok;
+            var read_len: usize = 0;
+            switch (op) {
+                .write => services.writeClipboard(slot.fetchPayload()) catch {
+                    outcome = .failed;
+                },
+                .read => {
+                    if (services.readClipboard(buffer)) |content| {
+                        read_len = content.len;
+                    } else |_| {
+                        outcome = .failed;
+                    }
+                },
+            }
+            slot.body_len = read_len;
+            var entry: Entry = .{
+                .kind = .clipboard,
+                .slot_index = @intCast(slot_index),
+                .generation = slot.generation,
+                .key = key,
+                .line_len = @intCast(read_len),
+                .clipboard_op = op,
+                .clipboard_outcome = outcome,
+                .clipboard_fn = on_result,
+            };
+            slot.state.store(.draining, .release);
+            if (!self.enqueue(&entry)) {
+                // A read whose bytes were lost to a full queue reports
+                // `.failed`, never a silent empty `.ok`.
+                self.releaseFetchSlot(slot);
+                self.deliverLoopClipboard(.{
+                    .key = key,
+                    .op = op,
+                    .outcome = if (op == .read and outcome == .ok and read_len > 0) .failed else outcome,
+                }, on_result);
+            }
+            self.wakeHost();
+        }
+
         /// Cancel a running effect by key. After this returns, no
         /// further `on_line` Msgs for that spawn are dispatched; one
         /// `on_exit` Msg with reason `.cancelled` follows once the
@@ -1419,6 +1661,16 @@ pub fn Effects(comptime Msg: type) type {
                     const key_copy = slot.key;
                     self.releaseFetchSlot(slot);
                     self.deliverLoopFile(.{ .key = key_copy, .op = op, .outcome = .cancelled }, file_fn);
+                    return;
+                }
+                if (slot.kind == .clipboard) {
+                    // No pasteboard call happened: retire the slot and
+                    // surface the terminal result now.
+                    const clipboard_fn = slot.on_clipboard;
+                    const op = slot.clipboard_op;
+                    const key_copy = slot.key;
+                    self.releaseFetchSlot(slot);
+                    self.deliverLoopClipboard(.{ .key = key_copy, .op = op, .outcome = .cancelled }, clipboard_fn);
                     return;
                 }
                 // No process: retire the slot and surface the exit now.
@@ -1543,6 +1795,10 @@ pub fn Effects(comptime Msg: type) type {
                         .file => |entry| {
                             const file_fn = entry.file_fn orelse continue;
                             return file_fn(entry.result);
+                        },
+                        .clipboard => |entry| {
+                            const clipboard_fn = entry.clipboard_fn orelse continue;
+                            return clipboard_fn(entry.result);
                         },
                         .timer => |entry| {
                             const timer_fn = entry.timer_fn orelse continue;
@@ -1671,6 +1927,33 @@ pub fn Effects(comptime Msg: type) type {
                             .op = entry.file_op,
                             .outcome = entry.file_outcome,
                             .bytes = bytes,
+                            .dropped_before = entry.dropped_before,
+                        });
+                    },
+                    .clipboard => {
+                        // One terminal per clipboard occupancy, mirroring
+                        // `.file`: a mismatched generation means the
+                        // occupant was already retired.
+                        if (entry.generation != slot.generation) continue;
+                        // Take buffer ownership so the slot can be
+                        // reused while `update` still reads the text.
+                        if (self.drain_fetch_body) |old| self.allocator.free(old);
+                        self.drain_fetch_body = slot.fetch_buffer;
+                        slot.fetch_buffer = null;
+                        const payload_len = slot.payload_len;
+                        const clipboard_fn = entry.clipboard_fn orelse continue;
+                        if (cancelled) {
+                            return clipboard_fn(.{ .key = entry.key, .op = entry.clipboard_op, .outcome = .cancelled });
+                        }
+                        const text: []const u8 = if (self.drain_fetch_body) |buffer|
+                            buffer[payload_len .. payload_len + entry.line_len]
+                        else
+                            "";
+                        return clipboard_fn(.{
+                            .key = entry.key,
+                            .op = entry.clipboard_op,
+                            .outcome = entry.clipboard_outcome,
+                            .text = text,
                             .dropped_before = entry.dropped_before,
                         });
                     },
@@ -1946,6 +2229,83 @@ pub fn Effects(comptime Msg: type) type {
             self.wakeHost();
         }
 
+        /// Number of recorded (still-active) fake clipboard requests.
+        pub fn pendingClipboardCount(self: *Self) usize {
+            var count: usize = 0;
+            for (&self.slots) |*slot| {
+                if (slot.fake and slot.kind == .clipboard and slot.state.load(.acquire) == .running) count += 1;
+            }
+            return count;
+        }
+
+        /// The `index`-th recorded fake clipboard request (slot order).
+        pub fn pendingClipboardAt(self: *Self, index: usize) ?ClipboardRequest {
+            var seen: usize = 0;
+            for (&self.slots) |*slot| {
+                if (!(slot.fake and slot.kind == .clipboard and slot.state.load(.acquire) == .running)) continue;
+                if (seen == index) {
+                    return .{
+                        .key = slot.key,
+                        .op = slot.clipboard_op,
+                        .text = if (slot.clipboard_op == .write) slot.fetchPayload() else "",
+                    };
+                }
+                seen += 1;
+            }
+            return null;
+        }
+
+        /// Feed the synthetic terminal for the fake clipboard effect
+        /// with `key`, retiring its slot. `text` is a read's clipboard
+        /// content, delivered with outcome `.ok`; content over
+        /// `max_effect_clipboard_bytes` rewrites the outcome to
+        /// `.failed` with empty text, mirroring the real reader (which
+        /// fails whole rather than cutting — a cut clipboard string
+        /// must never pass for the clipboard). `text` is ignored for
+        /// writes and for failure outcomes. If the completion queue is
+        /// somehow full, the terminal still lands through the pending
+        /// ring — a read whose bytes were lost that way reports
+        /// `.failed`, never silently.
+        pub fn feedClipboardResult(self: *Self, key: u64, outcome: EffectClipboardOutcome, text: []const u8) error{EffectNotFound}!void {
+            const slot_index = self.findActiveFakeSlot(key, .clipboard) orelse return error.EffectNotFound;
+            const slot = &self.slots[slot_index];
+            const buffer = slot.fetch_buffer orelse return error.EffectNotFound;
+            var delivered_len: usize = 0;
+            var delivered_outcome = outcome;
+            if (slot.clipboard_op == .read and outcome == .ok) {
+                const capacity = @min(buffer.len, max_effect_clipboard_bytes);
+                if (text.len > capacity) {
+                    delivered_outcome = .failed;
+                } else {
+                    delivered_len = text.len;
+                    @memcpy(buffer[0..delivered_len], text[0..delivered_len]);
+                }
+            }
+            slot.body_len = delivered_len;
+            var entry: Entry = .{
+                .kind = .clipboard,
+                .slot_index = @intCast(slot_index),
+                .generation = slot.generation,
+                .key = slot.key,
+                .line_len = @intCast(delivered_len),
+                .clipboard_op = slot.clipboard_op,
+                .clipboard_outcome = delivered_outcome,
+                .clipboard_fn = slot.on_clipboard,
+            };
+            slot.state.store(.draining, .release);
+            if (!self.enqueue(&entry)) {
+                const clipboard_fn = slot.on_clipboard;
+                const op = slot.clipboard_op;
+                self.releaseFetchSlot(slot);
+                self.deliverLoopClipboard(.{
+                    .key = entry.key,
+                    .op = op,
+                    .outcome = if (op == .read and delivered_len > 0) .failed else delivered_outcome,
+                }, clipboard_fn);
+            }
+            self.wakeHost();
+        }
+
         /// Number of recorded (still-armed) fake fx timers.
         pub fn pendingTimerCount(self: *Self) usize {
             var count: usize = 0;
@@ -2030,6 +2390,22 @@ pub fn Effects(comptime Msg: type) type {
                 .op = op,
                 .outcome = .rejected,
             }, file_fn);
+        }
+
+        fn rejectClipboard(self: *Self, key: u64, op: EffectClipboardOp, clipboard_fn: ?ClipboardMsgFn) void {
+            self.deliverLoopClipboard(.{
+                .key = key,
+                .op = op,
+                .outcome = .rejected,
+            }, clipboard_fn);
+        }
+
+        /// Queue a terminal clipboard result produced on the loop
+        /// thread (rejections, fake cancels, feed fallbacks) for the
+        /// next drain. Text here is always empty.
+        fn deliverLoopClipboard(self: *Self, result: EffectClipboardResult, clipboard_fn: ?ClipboardMsgFn) void {
+            if (clipboard_fn == null) return;
+            self.deliverPending(.{ .clipboard = .{ .result = result, .clipboard_fn = clipboard_fn } });
         }
 
         fn rejectTimer(self: *Self, options: StartTimerOptions) void {

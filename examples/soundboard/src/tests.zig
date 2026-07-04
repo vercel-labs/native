@@ -374,6 +374,74 @@ test "theme preference and system appearance derive the custom tokens" {
     try testing.expectEqualDeep(canvas.ColorTokens.highContrastDark(), (try live.harness.runtime.canvasWidgetDesignTokens(1, main.canvas_label)).colors);
 }
 
+test "theme chips are a model-driven exclusive group across rebuilds" {
+    // Friction #81: the header's theme chips are real toggle-buttons
+    // whose selected= comes from the model. Pressing chips through the
+    // real widget path must always leave exactly the model's selection
+    // active — never every chip ever pressed.
+    const live = try LiveApp.start(true);
+    defer live.stop();
+    const app_state = live.app_state;
+
+    const ThemeChips = struct {
+        fn chipId(layout: canvas.WidgetLayoutTree, label: []const u8) ?canvas.ObjectId {
+            for (layout.nodes) |node| {
+                if (node.widget.kind != .toggle_button) continue;
+                if (std.mem.eql(u8, node.widget.text, label)) return node.widget.id;
+            }
+            return null;
+        }
+
+        fn expectExactlyOneActive(layout: canvas.WidgetLayoutTree, label: []const u8) !void {
+            var active: usize = 0;
+            var active_matches = false;
+            for (layout.nodes) |node| {
+                if (node.widget.kind != .toggle_button) continue;
+                if (!node.widget.state.selected) continue;
+                active += 1;
+                if (std.mem.eql(u8, node.widget.text, label)) active_matches = true;
+            }
+            try testing.expectEqual(@as(usize, 1), active);
+            try testing.expect(active_matches);
+        }
+    };
+
+    // Default preference is auto: exactly one chip active.
+    var layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+    try ThemeChips.expectExactlyOneActive(layout, "auto");
+
+    // Press "dark" through the real widget path (runtime toggle +
+    // dispatched Msg + rebuild): exactly one active chip.
+    var command_buffer: [96]u8 = undefined;
+    const dark_id = ThemeChips.chipId(layout, "dark").?;
+    const press_dark = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} toggle", .{ main.canvas_label, dark_id });
+    try live.harness.runtime.dispatchAutomationCommand(app_state.app(), press_dark);
+    try testing.expectEqual(model_mod.ThemePref.dark, app_state.model.theme_pref);
+    layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+    try ThemeChips.expectExactlyOneActive(layout, "dark");
+
+    // Then "light": the previously active chip deactivates.
+    const light_id = ThemeChips.chipId(layout, "light").?;
+    const press_light = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} toggle", .{ main.canvas_label, light_id });
+    try live.harness.runtime.dispatchAutomationCommand(app_state.app(), press_light);
+    try testing.expectEqual(model_mod.ThemePref.light, app_state.model.theme_pref);
+    layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+    try ThemeChips.expectExactlyOneActive(layout, "light");
+
+    // Pressing the ACTIVE chip keeps the model's selection: the
+    // runtime toggle is overridden by the model-driven rebuild.
+    try live.harness.runtime.dispatchAutomationCommand(app_state.app(), press_light);
+    try testing.expectEqual(model_mod.ThemePref.light, app_state.model.theme_pref);
+    layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+    try ThemeChips.expectExactlyOneActive(layout, "light");
+
+    // An unrelated rebuild (search edit) never resurrects old chips.
+    apply(&app_state.model, .{ .play_track = 1 });
+    try live.dispatch(.toggle_play);
+    layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+    try ThemeChips.expectExactlyOneActive(layout, "light");
+}
+
 test "the track-change animation window opens on play and closes after" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
