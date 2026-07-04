@@ -1,0 +1,33 @@
+.{
+    .id = "dev.zero_native.markdown_viewer",
+    .name = "markdown-viewer",
+    .display_name = "Markdown Viewer",
+    .version = "0.1.0",
+    .icons = .{"assets/icon.icns"},
+    .platforms = .{"macos"},
+    .permissions = .{ "view", "command" },
+    .capabilities = .{ "native_views", "gpu_surfaces" },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "zero-native Markdown",
+                .width = 1200,
+                .height = 760,
+                .restore_state = false,
+                .restore_policy = "center_on_primary",
+                .views = .{
+                    .{ .label = "viewer-canvas", .kind = "gpu_surface", .fill = true, .role = "Markdown viewer canvas", .accessibility_label = "Markdown viewer", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+}

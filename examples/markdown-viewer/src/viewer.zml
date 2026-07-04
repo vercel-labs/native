@@ -1,0 +1,53 @@
+<!-- The markdown viewer: toolbar, sidebar library, split editor/preview.
+     Embedded into the binary and hot-reloaded in dev: edit this file while
+     the app runs and the window updates without losing document state. -->
+<column background="background">
+  <row gap="8" padding="10" cross="center" background="surface">
+    <text foreground="text_muted">{docTitle}</text>
+    <spacer width="16" />
+    <text-field text="{path}" placeholder="/path/to/document.md" on-input="edit_path" on-submit="open_doc" grow="1" label="Document path" />
+    <button size="sm" variant="outline" on-press="open_doc" disabled="{pathEmpty}">Open</button>
+    <button size="sm" variant="outline" on-press="save_doc" disabled="{cannotSave}">Save</button>
+    <button size="sm" variant="outline" on-press="save_as" disabled="{pathEmpty}">Save As</button>
+    <button size="sm" variant="ghost" on-press="toggle_theme">{themeLabel}</button>
+  </row>
+  <separator />
+  <row grow="1">
+    <column width="216" gap="8" padding="10" background="surface">
+      <text foreground="text_muted">Library</text>
+      <column gap="2">
+        <for each="samples" key="id" as="s">
+          <list-item on-press="load_sample:{s.id}" selected="{s.id == active_sample_id}">{s.title}</list-item>
+        </for>
+      </column>
+      <spacer height="6" />
+      <text foreground="text_muted">Recent</text>
+      <column gap="2">
+        <for each="recentDocs" key="index" as="r">
+          <list-item on-press="open_recent:{r.index}" label="{r.path}">{r.name}</list-item>
+        </for>
+        <else>
+          <text foreground="text_muted">Nothing opened yet</text>
+        </else>
+      </column>
+      <spacer grow="1" />
+    </column>
+    <separator />
+    <column grow="1" padding="10" gap="6">
+      <text foreground="text_muted">Editor</text>
+      <textarea text="{document}" on-input="edit" grow="1" placeholder="# Start writing…" label="Markdown source" />
+    </column>
+    <separator />
+    <column grow="1">
+      <row padding="10" cross="center">
+        <text foreground="text_muted" grow="1">Preview</text>
+      </row>
+      <scroll grow="1">
+        <column padding="24">
+          <markdown source="{document}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" />
+        </column>
+      </scroll>
+    </column>
+  </row>
+  <status-bar>{statusLine}</status-bar>
+</column>
