@@ -428,6 +428,8 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 /// adoption): container key → adopted view. Kept alongside `nativeViews`
 /// so close paths can drop the adoption bookkeeping with the container.
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSView *> *adoptedViewSurfaces;
+/// Reclaims keyboard focus for adopted surfaces on click (see adoptViewSurfaceInWindow).
+@property(nonatomic, strong) id adoptedSurfaceClickMonitor;
 /// Host-wide binary image-upload side-channel store: image id (decimal
 /// string, the packet image cache key namespace) → straight-alpha RGBA8
 /// NSImage. Uploaded out-of-band before packets reference the id, shared
@@ -497,6 +499,8 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (BOOL)closeNativeViewInWindow:(uint64_t)windowId label:(NSString *)label;
 - (void)closeNativeViewsInWindow:(uint64_t)windowId;
 - (BOOL)adoptViewSurfaceInWindow:(uint64_t)windowId label:(NSString *)label surface:(NSView *)surface;
+- (BOOL)viewIsAdoptedSurfaceDescendant:(NSView *)view;
+- (void)installAdoptedSurfaceClickMonitor;
 - (BOOL)releaseViewSurfaceInWindow:(uint64_t)windowId label:(NSString *)label;
 - (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled;
 - (BOOL)setNativeViewCursorInWindow:(uint64_t)windowId label:(NSString *)label cursor:(NSInteger)cursor;
@@ -4747,8 +4751,39 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     surface.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [container addSubview:surface positioned:NSWindowAbove relativeTo:nil];
     self.adoptedViewSurfaces[key] = surface;
+    // The adopted view owns keyboard input while it has focus (a VM display,
+    // a video view): hand it first responder at adoption, and reclaim on
+    // clicks inside it (plain NSViews never claim focus on mouseDown, so
+    // without this the canvas keeps the keyboard forever).
+    [container.window makeFirstResponder:surface];
+    [self installAdoptedSurfaceClickMonitor];
     [self scheduleFrame];
     return YES;
+}
+
+- (BOOL)viewIsAdoptedSurfaceDescendant:(NSView *)view {
+    for (NSView *candidate = view; candidate; candidate = candidate.superview) {
+        for (NSView *surface in self.adoptedViewSurfaces.allValues) {
+            if (candidate == surface) return YES;
+        }
+    }
+    return NO;
+}
+
+- (void)installAdoptedSurfaceClickMonitor {
+    if (self.adoptedSurfaceClickMonitor) return;
+    __weak NativeSdkAppKitHost *weakSelf = self;
+    self.adoptedSurfaceClickMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown handler:^NSEvent *(NSEvent *event) {
+        NativeSdkAppKitHost *strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.adoptedViewSurfaces.count == 0) return event;
+        NSWindow *window = event.window;
+        if (!window || !window.contentView) return event;
+        NSView *hit = [window.contentView hitTest:[window.contentView convertPoint:event.locationInWindow fromView:nil]];
+        if (hit && [strongSelf viewIsAdoptedSurfaceDescendant:hit] && window.firstResponder != hit) {
+            [window makeFirstResponder:hit];
+        }
+        return event;
+    }];
 }
 
 - (BOOL)releaseViewSurfaceInWindow:(uint64_t)windowId label:(NSString *)label {
@@ -5457,7 +5492,12 @@ static NSURL *NativeSdkAssetEntryURL(NSString *origin, NSString *entryPath) {
         __weak NativeSdkAppKitHost *weakSelf = self;
         self.shortcutEventMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
             NativeSdkAppKitHost *strongSelf = weakSelf;
-            if (strongSelf && [strongSelf handleShortcutEvent:event]) return nil;
+            if (!strongSelf) return event;
+            // An adopted surface with the keyboard (a VM display) gets raw
+            // keys; app shortcuts resume when focus returns to app chrome.
+            NSResponder *first = event.window.firstResponder;
+            if ([first isKindOfClass:[NSView class]] && [strongSelf viewIsAdoptedSurfaceDescendant:(NSView *)first]) return event;
+            if ([strongSelf handleShortcutEvent:event]) return nil;
             return event;
         }];
     }
