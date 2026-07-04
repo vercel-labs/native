@@ -511,6 +511,7 @@ pub fn build(b: *std.Build) void {
     addExampleTestStep(b, native_examples_step, "test-example-soundboard", "Run soundboard example tests", "examples/soundboard");
     addExampleTestStep(b, native_examples_step, "test-example-markdown-viewer", "Run markdown viewer example tests", "examples/markdown-viewer");
     addExampleTestStep(b, native_examples_step, "test-example-calculator", "Run calculator example tests", "examples/calculator");
+    addExampleTestStep(b, native_examples_step, "test-example-notes", "Run notes example tests", "examples/notes");
     addExampleTestStep(b, native_examples_step, "test-example-effects-probe", "Run effects probe example tests", "examples/effects-probe");
     addExampleTestStep(b, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview");
     addExampleTestStep(b, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities");

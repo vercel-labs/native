@@ -1,0 +1,131 @@
+<!-- The notes daily driver: header with search, folders sidebar, note
+     list, editor, and the folder dialog as a stack overlay. Embedded into
+     the binary and hot-reloaded in dev: edit this file while the app runs
+     and the window updates without losing notes. -->
+<stack>
+  <column background="background">
+    <row height="56" padding="12" gap="10" cross="center" background="surface" label="Notes header">
+      <badge variant="primary">Notes</badge>
+      <text size="sm" width="76" foreground="text_muted">Native SDK</text>
+      <spacer grow="1" />
+      <search-field text="{search}" placeholder="Search all notes…" width="300" on-input="search_edit" label="Search notes" />
+      <if test="{searching}">
+        <button size="sm" variant="ghost" on-press="clear_search" label="Clear search">Clear</button>
+      </if>
+      <button size="sm" variant="ghost" on-press="toggle_theme" label="Toggle color scheme">{themeLabel}</button>
+      <button variant="primary" on-press="new_note" label="New note">New note</button>
+    </row>
+    <separator />
+    <row grow="1">
+      <column width="216" gap="8" padding="10" background="surface">
+        <text size="sm" foreground="text_muted">Folders</text>
+        <column gap="2">
+          <!-- Pressable rows use the framework's hotspot idiom (the same
+               one timeline items use): the panel is the visual, and an
+               empty text leaf stacked over it carries the press handler,
+               so a click anywhere on the row dispatches — hit testing
+               resolves the deepest widget, which is this overlay. -->
+          <for each="folderRows" key="id" as="f">
+            <stack>
+              <panel selected="{f.selected}" padding="8">
+                <row gap="8" cross="center">
+                  <text grow="1">{f.name}</text>
+                  <badge variant="secondary">{f.count}</badge>
+                </row>
+              </panel>
+              <text on-press="select_folder:{f.id}" selected="{f.selected}" role="listitem" label="{f.label}"></text>
+            </stack>
+          </for>
+        </column>
+        <spacer grow="1" />
+        <column gap="4">
+          <button size="sm" variant="outline" on-press="open_create_folder" disabled="{foldersFull}" label="New folder">New Folder</button>
+          <button size="sm" variant="ghost" on-press="open_rename_folder" disabled="{renameDisabled}" label="Rename folder">Rename</button>
+        </column>
+      </column>
+      <separator />
+      <column width="304" gap="8" padding="10">
+        <row gap="8" cross="center">
+          <text size="sm" foreground="text_muted" grow="1">{listTitle}</text>
+          <badge variant="secondary">{noteCount}</badge>
+        </row>
+        <scroll grow="1" label="Note list">
+          <column gap="4">
+            <for each="noteRows" key="id" as="n">
+              <stack>
+                <panel selected="{n.active}" padding="10">
+                  <column gap="4">
+                    <text>{n.title}</text>
+                    <row gap="8" cross="center">
+                      <text size="sm" foreground="text_muted" width="36">{n.time}</text>
+                      <text size="sm" foreground="text_muted" grow="1">{n.snippet}</text>
+                    </row>
+                  </column>
+                </panel>
+                <text on-press="open_note:{n.id}" selected="{n.active}" role="listitem" label="{n.title}"></text>
+              </stack>
+            </for>
+            <else>
+              <panel padding="14" label="Empty note list">
+                <column gap="4">
+                  <text>{emptyTitle}</text>
+                  <text size="sm" foreground="text_muted">{emptyHint}</text>
+                </column>
+              </panel>
+            </else>
+          </column>
+        </scroll>
+      </column>
+      <separator />
+      <column grow="1">
+        <if test="{hasActiveNote}">
+          <row padding="10" gap="8" cross="center">
+            <text size="sm" foreground="text_muted" grow="1">{editorMeta}</text>
+            <button size="sm" variant="outline" on-press="copy_note" label="Copy note text">Copy</button>
+            <button size="sm" variant="ghost" on-press="delete_note" label="Delete note">Delete</button>
+          </row>
+          <column grow="1" padding="10">
+            <textarea text="{editorText}" on-input="edit" grow="1" placeholder="Start writing — the first line becomes the title" label="Note editor" />
+          </column>
+        </if>
+        <else>
+          <column grow="1" padding="24" main="center" cross="center" gap="10">
+            <text>No note selected</text>
+            <text size="sm" foreground="text_muted">Create one with Cmd+N, or pick a note from the list.</text>
+            <spacer height="8" />
+            <column gap="3" width="320">
+              <for each="shortcut_hints" as="s">
+                <row gap="10">
+                  <text size="sm" foreground="text_muted" width="130">{s.keys}</text>
+                  <text size="sm" grow="1">{s.action}</text>
+                </row>
+              </for>
+            </column>
+          </column>
+        </else>
+      </column>
+    </row>
+    <status-bar>{statusLine}</status-bar>
+  </column>
+  <if test="{dialogOpen}">
+    <panel background="shadow" on-press="close_dialog" label="Dialog backdrop">
+      <column main="center" cross="center">
+        <dialog width="380" height="190" label="{dialogTitle}">
+          <column padding="18" gap="10">
+            <text>{dialogTitle}</text>
+            <text-field text="{folderName}" placeholder="Folder name" on-input="folder_field_edit" on-submit="confirm_dialog" label="Folder name" />
+            <if test="{dialog_hint}">
+              <text size="sm" foreground="destructive">{dialog_hint}</text>
+            </if>
+            <spacer grow="1" />
+            <row gap="8" cross="center">
+              <text size="sm" foreground="text_muted" grow="1">Enter confirms · Esc cancels</text>
+              <button size="sm" variant="ghost" on-press="close_dialog" label="Cancel dialog">Cancel</button>
+              <button size="sm" variant="primary" on-press="confirm_dialog" disabled="{dialogNameEmpty}" label="Confirm dialog">{dialogConfirmLabel}</button>
+            </row>
+          </column>
+        </dialog>
+      </column>
+    </panel>
+  </if>
+</stack>

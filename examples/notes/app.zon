@@ -1,0 +1,50 @@
+.{
+    .id = "dev.native_sdk.notes",
+    .name = "notes",
+    .display_name = "Notes",
+    .version = "0.1.0",
+    .icons = .{"assets/icon.icns"},
+    .platforms = .{"macos"},
+    .permissions = .{ "view", "command" },
+    .capabilities = .{ "native_views", "gpu_surfaces", "shortcuts" },
+    .shortcuts = .{
+        .{ .id = "notes.new-note", .key = "n", .modifiers = .{"primary"} },
+        .{ .id = "notes.new-folder", .key = "n", .modifiers = .{ "primary", "shift" } },
+        .{ .id = "notes.rename-folder", .key = "r", .modifiers = .{ "primary", "shift" } },
+        .{ .id = "notes.delete-note", .key = "backspace", .modifiers = .{"primary"} },
+        .{ .id = "notes.copy-note", .key = "c", .modifiers = .{ "primary", "shift" } },
+        .{ .id = "notes.prev-note", .key = "arrowup", .modifiers = .{ "primary", "option" } },
+        .{ .id = "notes.next-note", .key = "arrowdown", .modifiers = .{ "primary", "option" } },
+        .{ .id = "notes.dismiss", .key = "escape" },
+        .{ .id = "notes.folder-1", .key = "1", .modifiers = .{"primary"} },
+        .{ .id = "notes.folder-2", .key = "2", .modifiers = .{"primary"} },
+        .{ .id = "notes.folder-3", .key = "3", .modifiers = .{"primary"} },
+        .{ .id = "notes.folder-4", .key = "4", .modifiers = .{"primary"} },
+        .{ .id = "notes.folder-5", .key = "5", .modifiers = .{"primary"} },
+        .{ .id = "notes.folder-6", .key = "6", .modifiers = .{"primary"} },
+        .{ .id = "notes.folder-7", .key = "7", .modifiers = .{"primary"} },
+    },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Native SDK Notes",
+                .width = 1180,
+                .height = 760,
+                .restore_state = false,
+                .restore_policy = "center_on_primary",
+                .views = .{
+                    .{ .label = "notes-canvas", .kind = "gpu_surface", .fill = true, .role = "Notes canvas", .accessibility_label = "Notes", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+}

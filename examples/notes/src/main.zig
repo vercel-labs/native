@@ -1,0 +1,240 @@
+//! notes: the daily-driver shape — folders sidebar, note list, editor —
+//! authored in markup + Zig.
+//!
+//! The whole view lives in `src/notes.zml` (compiled at comptime, hot
+//! reloaded in dev); `src/model.zig` is the logic: folders and notes as
+//! model-owned tables, titles/snippets/relative-times derived per rebuild,
+//! and persistence as one store file through the effects channel with a
+//! debounced autosave. This file is the app wiring — shell scene, the
+//! paper/evergreen theme, the store path, and the keyboard map.
+//!
+//! Keyboard-first: every mutation the buttons reach is also a registered
+//! app shortcut (declared in app.zon, delivered as command events through
+//! `on_command`) — new note/folder, rename, delete, copy, next/prev note,
+//! cmd+digit folder jumps, and Escape to dismiss.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const runner = @import("runner");
+const native_sdk = @import("native_sdk");
+
+pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
+
+const canvas = native_sdk.canvas;
+const geometry = native_sdk.geometry;
+const app_dirs = native_sdk.app_dirs;
+
+const model_mod = @import("model.zig");
+
+pub const Model = model_mod.Model;
+pub const Msg = model_mod.Msg;
+pub const update = model_mod.update;
+
+pub const canvas_label = "notes-canvas";
+pub const window_width: f32 = 1180;
+pub const window_height: f32 = 760;
+
+const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
+const shell_views = [_]native_sdk.ShellView{
+    .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .role = "Notes canvas", .accessibility_label = "Notes", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
+};
+const shell_windows = [_]native_sdk.ShellWindow{.{
+    .label = "main",
+    .title = "Native SDK Notes",
+    .width = window_width,
+    .height = window_height,
+    .restore_state = false,
+    .views = &shell_views,
+}};
+pub const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
+
+// --------------------------------------------------------------- commands
+
+// Shortcut command ids: registered in app.zon (`.shortcuts`), delivered
+// as command events, mapped to Msgs here. One spelling, three homes:
+// app.zon, this table, and the on-screen keyboard reference.
+pub const cmd_new_note = "notes.new-note"; // primary+N
+pub const cmd_new_folder = "notes.new-folder"; // primary+shift+N
+pub const cmd_rename_folder = "notes.rename-folder"; // primary+shift+R
+pub const cmd_delete_note = "notes.delete-note"; // primary+backspace
+pub const cmd_copy_note = "notes.copy-note"; // primary+shift+C
+pub const cmd_prev_note = "notes.prev-note"; // primary+option+arrowup
+pub const cmd_next_note = "notes.next-note"; // primary+option+arrowdown
+pub const cmd_dismiss = "notes.dismiss"; // escape
+/// `notes.folder-1` … `notes.folder-7`: primary+digit jumps to the
+/// sidebar position (1 = All Notes, 2… = folders in creation order).
+pub const folder_command_prefix = "notes.folder-";
+
+pub fn command(name: []const u8) ?Msg {
+    if (std.mem.eql(u8, name, cmd_new_note)) return .new_note;
+    if (std.mem.eql(u8, name, cmd_new_folder)) return .open_create_folder;
+    if (std.mem.eql(u8, name, cmd_rename_folder)) return .open_rename_folder;
+    if (std.mem.eql(u8, name, cmd_delete_note)) return .delete_note;
+    if (std.mem.eql(u8, name, cmd_copy_note)) return .copy_note;
+    if (std.mem.eql(u8, name, cmd_prev_note)) return .prev_note;
+    if (std.mem.eql(u8, name, cmd_next_note)) return .next_note;
+    if (std.mem.eql(u8, name, cmd_dismiss)) return .dismiss;
+    if (std.mem.startsWith(u8, name, folder_command_prefix)) {
+        const digit = std.fmt.parseInt(usize, name[folder_command_prefix.len..], 10) catch return null;
+        if (digit == 0) return null;
+        return .{ .select_folder_at = digit - 1 };
+    }
+    return null;
+}
+
+// -------------------------------------------------------------------- app
+
+/// Debug builds keep the runtime markup engine for hot reload; release
+/// builds compile it out entirely.
+const dev_markup_reload = builtin.mode == .Debug;
+
+const NotesApp = native_sdk.UiAppWithFeatures(Model, Msg, .{ .runtime_markup = dev_markup_reload });
+pub const Effects = NotesApp.Effects;
+
+/// TEA init: restore the persisted store before the first paint, and
+/// start the repeating tick that keeps relative timestamps honest.
+pub fn boot(model: *Model, fx: *Effects) void {
+    if (model.store_path_len > 0) {
+        fx.readFile(.{
+            .key = model_mod.store_read_key,
+            .path = model.storePath(),
+            .on_result = Effects.fileMsg(.store_done),
+        });
+    }
+    fx.startTimer(.{
+        .key = model_mod.refresh_timer_key,
+        .interval_ms = model_mod.refresh_interval_ms,
+        .mode = .repeating,
+        .on_fire = Effects.timerMsg(.refresh_tick),
+    });
+}
+
+// ------------------------------------------------------------------- theme
+
+/// A paper-and-evergreen palette derived per rebuild from the model's
+/// scheme; the runtime stamps the surface scale afterwards. The shadow
+/// token is deliberately stronger than usual: it draws the dialog's drop
+/// shadow AND fills the dialog backdrop scrim (the markup paints the
+/// backdrop panel with `background="shadow"`), and nothing else in this
+/// app casts shadows.
+pub fn notesTokens(model: *const Model) canvas.DesignTokens {
+    const scheme = model.effectiveScheme();
+    var tokens = canvas.DesignTokens.theme(.{ .color_scheme = scheme });
+    tokens.colors = switch (scheme) {
+        .light => .{
+            .background = canvas.Color.rgb8(250, 250, 248),
+            .surface = canvas.Color.rgb8(255, 255, 255),
+            .surface_subtle = canvas.Color.rgb8(242, 242, 238),
+            .surface_pressed = canvas.Color.rgb8(228, 230, 223),
+            .text = canvas.Color.rgb8(28, 27, 23),
+            .text_muted = canvas.Color.rgb8(124, 121, 110),
+            .border = canvas.Color.rgb8(230, 230, 223),
+            .accent = canvas.Color.rgb8(15, 118, 110),
+            .accent_text = canvas.Color.rgb8(250, 253, 252),
+            .destructive = canvas.Color.rgb8(190, 48, 42),
+            .destructive_text = canvas.Color.rgb8(253, 250, 250),
+            .success = canvas.Color.rgb8(22, 138, 90),
+            .success_text = canvas.Color.rgb8(248, 253, 250),
+            .warning = canvas.Color.rgb8(178, 120, 12),
+            .warning_text = canvas.Color.rgb8(255, 252, 245),
+            .focus_ring = canvas.Color.rgb8(15, 118, 110),
+            .shadow = canvas.Color.rgba8(30, 32, 28, 88),
+            .disabled = canvas.Color.rgb8(240, 240, 235),
+        },
+        .dark => .{
+            .background = canvas.Color.rgb8(19, 21, 20),
+            .surface = canvas.Color.rgb8(27, 30, 28),
+            .surface_subtle = canvas.Color.rgb8(36, 40, 37),
+            .surface_pressed = canvas.Color.rgb8(48, 54, 50),
+            .text = canvas.Color.rgb8(238, 240, 236),
+            .text_muted = canvas.Color.rgb8(152, 158, 150),
+            .border = canvas.Color.rgb8(42, 47, 44),
+            .accent = canvas.Color.rgb8(84, 199, 176),
+            .accent_text = canvas.Color.rgb8(10, 30, 26),
+            .destructive = canvas.Color.rgb8(240, 112, 102),
+            .destructive_text = canvas.Color.rgb8(42, 12, 10),
+            .success = canvas.Color.rgb8(96, 206, 152),
+            .success_text = canvas.Color.rgb8(9, 28, 19),
+            .warning = canvas.Color.rgb8(235, 182, 80),
+            .warning_text = canvas.Color.rgb8(35, 25, 6),
+            .focus_ring = canvas.Color.rgb8(96, 210, 190),
+            .shadow = canvas.Color.rgba8(0, 0, 0, 170),
+            .disabled = canvas.Color.rgb8(38, 42, 39),
+        },
+    };
+    tokens.radius = .{ .sm = 6, .md = 8, .lg = 11, .xl = 14 };
+    return tokens;
+}
+
+/// System appearance flows into the model; an explicit header override
+/// keeps winning because `effectiveScheme` consults it first.
+pub fn onAppearance(appearance: native_sdk.Appearance) ?Msg {
+    return .{ .system_scheme = switch (appearance.color_scheme) {
+        .light => .light,
+        .dark => .dark,
+    } };
+}
+
+// -------------------------------------------------------------------- view
+
+pub const NotesUi = canvas.Ui(Msg);
+pub const notes_markup = @embedFile("notes.zml");
+
+/// The comptime-compiled engine: same tree, ids, and handlers as the
+/// interpreter, no parser in the binary.
+pub const CompiledNotesView = canvas.CompiledMarkupView(Model, Msg, notes_markup);
+
+// -------------------------------------------------------------------- main
+
+pub fn main(init: std.process.Init) !void {
+    const app_state = try std.heap.page_allocator.create(NotesApp);
+    defer std.heap.page_allocator.destroy(app_state);
+
+    var model = model_mod.initialModel(.system);
+    // Resolve where the store persists: the per-app data directory
+    // (~/Library/Application Support/notes on macOS). Failure just
+    // disables persistence — never a startup error.
+    var dir_buffer: [model_mod.max_path_bytes]u8 = undefined;
+    var file_buffer: [model_mod.max_path_bytes]u8 = undefined;
+    const env = native_sdk.debug.envFromMap(init.environ_map);
+    const platform_value = app_dirs.currentPlatform();
+    if (app_dirs.resolveOne(.{ .name = "notes" }, platform_value, env, .data, &dir_buffer)) |data_dir| {
+        if (app_dirs.join(platform_value, &file_buffer, &.{ data_dir, "store.txt" })) |store_path| {
+            model.setStorePath(store_path);
+        } else |_| {}
+    } else |_| {}
+
+    app_state.* = NotesApp.init(std.heap.page_allocator, model, .{
+        .name = "notes",
+        .scene = shell_scene,
+        .canvas_label = canvas_label,
+        .update_fx = update,
+        .init_fx = boot,
+        .tokens_fn = notesTokens,
+        .on_appearance = onAppearance,
+        .on_command = command,
+        .view = CompiledNotesView.build,
+        .markup = if (dev_markup_reload)
+            .{ .source = notes_markup, .watch_path = "src/notes.zml", .io = init.io }
+        else
+            null,
+    });
+    defer app_state.deinit();
+    try runner.runWithOptions(app_state.app(), .{
+        .app_name = "notes",
+        .window_title = "Native SDK Notes",
+        .bundle_id = "dev.native_sdk.notes",
+        .icon_path = "assets/icon.icns",
+        .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
+        .restore_state = false,
+        .js_window_api = false,
+        .security = .{
+            .permissions = &app_permissions,
+            .navigation = .{ .allowed_origins = &.{ "zero://inline", "zero://app" } },
+        },
+    }, init);
+}
+
+test {
+    _ = @import("tests.zig");
+}

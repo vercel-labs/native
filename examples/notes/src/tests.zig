@@ -1,0 +1,714 @@
+const std = @import("std");
+const native_sdk = @import("native_sdk");
+const main = @import("main.zig");
+const model_mod = @import("model.zig");
+
+const canvas = native_sdk.canvas;
+const geometry = native_sdk.geometry;
+const testing = std.testing;
+
+const Model = main.Model;
+const Msg = main.Msg;
+const NotesUi = main.NotesUi;
+const NotesApp = native_sdk.UiApp(Model, Msg);
+const NotesMarkup = canvas.MarkupView(Model, Msg);
+
+/// A fixed, plausible wall clock for deterministic relative labels.
+const test_wall_ms: i64 = 1_700_000_000_000;
+
+fn testClock(clock: *native_sdk.TestClock) native_sdk.Clock {
+    clock.setWallMs(test_wall_ms);
+    return clock.clock();
+}
+
+const shell_views = [_]native_sdk.ShellView{
+    .{ .label = "notes-canvas", .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
+};
+const shell_windows = [_]native_sdk.ShellWindow{.{
+    .label = "main",
+    .title = "Notes",
+    .width = 1180,
+    .height = 760,
+    .views = &shell_views,
+}};
+const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
+
+fn notesOptions() NotesApp.Options {
+    return .{
+        .name = "notes",
+        .scene = shell_scene,
+        .canvas_label = "notes-canvas",
+        .update_fx = main.update,
+        .init_fx = main.boot,
+        .tokens_fn = main.notesTokens,
+        .on_command = main.command,
+        .view = main.CompiledNotesView.build,
+    };
+}
+
+// ------------------------------------------------------------ tree helpers
+
+fn buildTree(arena: std.mem.Allocator, model: *const Model) !NotesUi.Tree {
+    var ui = NotesUi.init(arena);
+    return ui.finalize(main.CompiledNotesView.build(&ui, model));
+}
+
+fn interpretTree(arena: std.mem.Allocator, model: *const Model) !NotesUi.Tree {
+    var view = try NotesMarkup.init(arena, main.notes_markup);
+    var ui = NotesUi.init(arena);
+    return ui.finalize(try view.build(&ui, model));
+}
+
+fn findByText(widget: canvas.Widget, kind: canvas.WidgetKind, text: []const u8) ?canvas.Widget {
+    if (widget.kind == kind and std.mem.eql(u8, widget.text, text)) return widget;
+    for (widget.children) |child| {
+        if (findByText(child, kind, text)) |found| return found;
+    }
+    return null;
+}
+
+fn findByKind(widget: canvas.Widget, kind: canvas.WidgetKind) ?canvas.Widget {
+    if (widget.kind == kind) return widget;
+    for (widget.children) |child| {
+        if (findByKind(child, kind)) |found| return found;
+    }
+    return null;
+}
+
+fn findByLabel(widget: canvas.Widget, label: []const u8) ?canvas.Widget {
+    if (std.mem.eql(u8, widget.semantics.label, label)) return widget;
+    for (widget.children) |child| {
+        if (findByLabel(child, label)) |found| return found;
+    }
+    return null;
+}
+
+fn subtreeHasText(widget: canvas.Widget, text: []const u8) bool {
+    if (std.mem.indexOf(u8, widget.text, text) != null) return true;
+    for (widget.children) |child| {
+        if (subtreeHasText(child, text)) return true;
+    }
+    return false;
+}
+
+fn collectIds(widget: canvas.Widget, ids: *std.ArrayListUnmanaged(canvas.ObjectId), allocator: std.mem.Allocator) !void {
+    try ids.append(allocator, widget.id);
+    for (widget.children) |child| try collectIds(child, ids, allocator);
+}
+
+// --------------------------------------------------------- harness helpers
+
+fn snapshotWidgetNamed(snapshot: native_sdk.automation.snapshot.Input, role: []const u8, name: []const u8) ?native_sdk.automation.snapshot.Widget {
+    for (snapshot.widgets) |widget| {
+        if (std.mem.eql(u8, widget.role, role) and std.mem.eql(u8, widget.name, name)) return widget;
+    }
+    return null;
+}
+
+const Harness = struct {
+    harness: *native_sdk.TestHarness(),
+    app_state: *NotesApp,
+    app: native_sdk.App,
+
+    fn create(model: Model) !Harness {
+        const harness = try native_sdk.TestHarness().create(testing.allocator, .{ .size = geometry.SizeF.init(1180, 760) });
+        errdefer harness.destroy(testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+
+        const app_state = try testing.allocator.create(NotesApp);
+        errdefer testing.allocator.destroy(app_state);
+        app_state.* = NotesApp.init(std.heap.page_allocator, model, notesOptions());
+        app_state.effects.executor = .fake;
+        const app = app_state.app();
+        try harness.start(app);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .label = "notes-canvas",
+            .size = geometry.SizeF.init(1180, 760),
+            .scale_factor = 2,
+            .frame_index = 1,
+            .timestamp_ns = 1_000_000,
+            .nonblank = true,
+        } });
+        return .{ .harness = harness, .app_state = app_state, .app = app };
+    }
+
+    fn destroy(self: *Harness) void {
+        self.app_state.deinit();
+        testing.allocator.destroy(self.app_state);
+        self.harness.destroy(testing.allocator);
+    }
+
+    fn dispatch(self: *Harness, msg: Msg) !void {
+        try self.app_state.dispatch(&self.harness.runtime, 1, msg);
+    }
+
+    fn wake(self: *Harness) !void {
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .wake);
+    }
+
+    fn shortcut(self: *Harness, id: []const u8) !void {
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .shortcut = .{ .id = id, .key = "", .window_id = 1 } });
+    }
+
+    fn snapshot(self: *Harness) native_sdk.automation.snapshot.Input {
+        return self.harness.runtime.automationSnapshot("Notes");
+    }
+
+    fn clickWidget(self: *Harness, id: u64) !void {
+        var command_buffer: [96]u8 = undefined;
+        const command = try std.fmt.bufPrint(&command_buffer, "widget-click notes-canvas {d}", .{id});
+        try self.harness.runtime.dispatchAutomationCommand(self.app, command);
+    }
+
+    /// A raw pointer click at a canvas point — for targets whose center
+    /// is covered by something else (the dialog backdrop scrim).
+    fn clickPoint(self: *Harness, x: f32, y: f32) !void {
+        for ([_]native_sdk.platform.GpuSurfaceInputKind{ .pointer_down, .pointer_up }) |kind| {
+            try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
+                .window_id = 1,
+                .label = "notes-canvas",
+                .kind = kind,
+                .timestamp_ns = 2_000_000,
+                .x = x,
+                .y = y,
+                .button = 0,
+            } });
+        }
+    }
+};
+
+// -------------------------------------------------------------- pure model
+
+test "titles, snippets, and relative times derive from note bodies" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Title: first non-empty line, trimmed; empty bodies are Untitled.
+    try testing.expectEqualStrings("Groceries", model_mod.displayTitle(arena, "Groceries\n\n- Coffee\n"));
+    try testing.expectEqualStrings("Second line first", model_mod.displayTitle(arena, "\n  \nSecond line first\nrest"));
+    try testing.expectEqualStrings("Untitled", model_mod.displayTitle(arena, ""));
+    try testing.expectEqualStrings("Untitled", model_mod.displayTitle(arena, "  \n \n"));
+
+    // Long titles cut at a UTF-8 boundary with an ellipsis.
+    const long_title = model_mod.displayTitle(arena, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa é tail");
+    try testing.expect(std.mem.endsWith(u8, long_title, "…"));
+    try testing.expect(std.unicode.utf8ValidateSlice(long_title));
+
+    // Snippet: everything after the title, whitespace collapsed.
+    try testing.expectEqualStrings("- Coffee - Milk", model_mod.displaySnippet(arena, "Groceries\n\n- Coffee\n- Milk\n"));
+    try testing.expectEqualStrings("—", model_mod.displaySnippet(arena, "Just a title"));
+    try testing.expectEqualStrings("—", model_mod.displaySnippet(arena, ""));
+
+    // Relative labels bucket by age.
+    const now = test_wall_ms;
+    try testing.expectEqualStrings("now", model_mod.relativeTimeLabel(arena, now, now - 30 * std.time.ms_per_s));
+    try testing.expectEqualStrings("5m", model_mod.relativeTimeLabel(arena, now, now - 5 * std.time.ms_per_min));
+    try testing.expectEqualStrings("3h", model_mod.relativeTimeLabel(arena, now, now - 3 * std.time.ms_per_hour));
+    try testing.expectEqualStrings("6d", model_mod.relativeTimeLabel(arena, now, now - 6 * std.time.ms_per_day));
+    try testing.expectEqualStrings("2w", model_mod.relativeTimeLabel(arena, now, now - 15 * std.time.ms_per_day));
+    try testing.expectEqualStrings("1y", model_mod.relativeTimeLabel(arena, now, now - 400 * std.time.ms_per_day));
+}
+
+test "the store serializes and restores losslessly, and rejects garbage" {
+    var clock = native_sdk.TestClock{};
+    var model = model_mod.initialModel(testClock(&clock));
+
+    var buffer: [model_mod.max_store_bytes]u8 = undefined;
+    const bytes = model.serializeStore(&buffer);
+    try testing.expect(std.mem.startsWith(u8, bytes, model_mod.store_header));
+
+    var restored = Model{ .clock = clock.clock() };
+    try testing.expect(restored.restoreStore(bytes));
+    try testing.expectEqual(model.folder_count, restored.folder_count);
+    try testing.expectEqual(model.note_count, restored.note_count);
+    try testing.expectEqual(model.next_folder_id, restored.next_folder_id);
+    try testing.expectEqual(model.next_note_id, restored.next_note_id);
+    for (model.folders[0..model.folder_count], restored.folders[0..restored.folder_count]) |*expected, *actual| {
+        try testing.expectEqual(expected.id, actual.id);
+        try testing.expectEqualStrings(expected.name(), actual.name());
+    }
+    for (model.notes[0..model.note_count], restored.notes[0..restored.note_count]) |*expected, *actual| {
+        try testing.expectEqual(expected.id, actual.id);
+        try testing.expectEqual(expected.folder, actual.folder);
+        try testing.expectEqual(expected.created_ms, actual.created_ms);
+        try testing.expectEqual(expected.updated_ms, actual.updated_ms);
+        try testing.expectEqualStrings(expected.body.text(), actual.body.text());
+    }
+    // The restore pointed the editor at the newest note.
+    try testing.expect(restored.active_note != 0);
+
+    // Garbage, an empty store, and a header-only store all keep the
+    // current content (restore reports false).
+    var untouched = model_mod.initialModel(clock.clock());
+    try testing.expect(!untouched.restoreStore("not a store"));
+    try testing.expect(!untouched.restoreStore(""));
+    try testing.expect(!untouched.restoreStore(model_mod.store_header ++ "\n"));
+    try testing.expectEqual(model.note_count, untouched.note_count);
+
+    // A note whose folder record was lost files under the first folder.
+    const orphan = model_mod.store_header ++ "\nfolder 1 Inbox\nnote 9 42 5 5 2\nhi\n";
+    var adopted = Model{ .clock = clock.clock() };
+    try testing.expect(adopted.restoreStore(orphan));
+    try testing.expectEqual(@as(u32, 1), adopted.notes[0].folder);
+}
+
+test "visible notes are folder-scoped, search-filtered, and newest first" {
+    var clock = native_sdk.TestClock{};
+    var model = model_mod.initialModel(testClock(&clock));
+
+    var indexes: [model_mod.max_notes]usize = undefined;
+    var count = model.visibleNoteIndexes(&indexes);
+    try testing.expectEqual(@as(usize, 7), count);
+    // Newest first: the welcome note (2m) leads, Piranesi (8d) trails.
+    try testing.expect(std.mem.startsWith(u8, model.notes[indexes[0]].body.text(), "Welcome to Notes"));
+    try testing.expect(std.mem.startsWith(u8, model.notes[indexes[count - 1]].body.text(), "Piranesi"));
+
+    // Folder scope: Ideas holds two notes.
+    model.selected_folder = 2;
+    count = model.visibleNoteIndexes(&indexes);
+    try testing.expectEqual(@as(usize, 2), count);
+    try testing.expect(std.mem.startsWith(u8, model.notes[indexes[0]].body.text(), "Field recorder"));
+
+    // Search is case-insensitive over the full body, across all folders.
+    model.selected_folder = model_mod.all_folder_id;
+    model.search_buffer.set("ROTOSCOPING");
+    count = model.visibleNoteIndexes(&indexes);
+    try testing.expectEqual(@as(usize, 1), count);
+    try testing.expect(std.mem.startsWith(u8, model.notes[indexes[0]].body.text(), "The Making of Prince of Persia"));
+
+    model.search_buffer.set("no such phrase anywhere");
+    try testing.expectEqual(@as(usize, 0), model.visibleNoteIndexes(&indexes));
+}
+
+// ------------------------------------------------------------------- views
+
+test "the initial tree renders folders, the note list, and the editor" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var clock = native_sdk.TestClock{};
+    var model = model_mod.initialModel(testClock(&clock));
+    const tree = try buildTree(arena, &model);
+
+    // Sidebar: All Notes + the three seeded folders, counts as badges,
+    // the selection on All Notes.
+    try testing.expect(findByText(tree.root, .text, "All Notes") != null);
+    try testing.expect(findByText(tree.root, .text, "Inbox") != null);
+    try testing.expect(findByText(tree.root, .text, "Ideas") != null);
+    try testing.expect(findByText(tree.root, .text, "Reading") != null);
+    const all_row = findByLabel(tree.root, "All Notes folder").?;
+    try testing.expect(all_row.state.selected);
+    try testing.expect(!findByLabel(tree.root, "Inbox folder").?.state.selected);
+    try testing.expect(findByText(tree.root, .badge, "7") != null); // All Notes count
+    try testing.expect(findByText(tree.root, .badge, "3") != null); // Inbox count
+
+    // Note list: titles, snippets, and relative times derive per row;
+    // the newest note is selected for the editor.
+    try testing.expect(findByText(tree.root, .text, "Welcome to Notes") != null);
+    try testing.expect(findByText(tree.root, .text, "Groceries") != null);
+    try testing.expect(subtreeHasText(tree.root, "2m"));
+    try testing.expect(subtreeHasText(tree.root, "3h"));
+    try testing.expect(subtreeHasText(tree.root, "1w"));
+    const active_row = findByLabel(tree.root, "Welcome to Notes").?;
+    try testing.expect(active_row.state.selected);
+
+    // Editor: the textarea mirrors the active note; the meta line and
+    // status bar derive from the same truth.
+    const editor = findByKind(tree.root, .textarea).?;
+    try testing.expect(std.mem.startsWith(u8, editor.text, "Welcome to Notes"));
+    try testing.expect(subtreeHasText(tree.root, "Edited 2m ago"));
+    const status = findByKind(tree.root, .status_bar).?;
+    try testing.expect(std.mem.startsWith(u8, status.text, "7 notes · 7 shown"));
+
+    // No dialog until one is requested.
+    try testing.expect(findByKind(tree.root, .dialog) == null);
+}
+
+test "the idle editor pane shows the keyboard reference" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var clock = native_sdk.TestClock{};
+    var model = model_mod.initialModel(testClock(&clock));
+    model.active_note = 0;
+    const tree = try buildTree(arena, &model);
+
+    try testing.expect(findByKind(tree.root, .textarea) == null);
+    try testing.expect(findByText(tree.root, .text, "No note selected") != null);
+    try testing.expect(subtreeHasText(tree.root, "Cmd+Shift+N"));
+    try testing.expect(subtreeHasText(tree.root, "Cmd+1 … Cmd+7"));
+}
+
+test "the compiled view and the hot-reload interpreter build the same tree" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var clock = native_sdk.TestClock{};
+    var model = model_mod.initialModel(testClock(&clock));
+
+    // Parity with the dialog closed and open (the conditional surface).
+    for ([_]model_mod.DialogMode{ .closed, .create_folder }) |mode| {
+        model.dialog = mode;
+        const compiled = try buildTree(arena, &model);
+        const interpreted = try interpretTree(arena, &model);
+
+        var compiled_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+        defer compiled_ids.deinit(testing.allocator);
+        var interpreted_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+        defer interpreted_ids.deinit(testing.allocator);
+        try collectIds(compiled.root, &compiled_ids, testing.allocator);
+        try collectIds(interpreted.root, &interpreted_ids, testing.allocator);
+        try testing.expectEqualSlices(canvas.ObjectId, interpreted_ids.items, compiled_ids.items);
+        try testing.expectEqual(interpreted.handlers.len, compiled.handlers.len);
+    }
+}
+
+test "the notes app lays out three panes through the canvas engine" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var clock = native_sdk.TestClock{};
+    var model = model_mod.initialModel(testClock(&clock));
+    const tree = try buildTree(arena_state.allocator(), &model);
+
+    var nodes: [1024]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, 1180, 760), &nodes);
+    try testing.expect(layout.nodes.len > 0);
+
+    const editor = findByKind(tree.root, .textarea).?;
+    var editor_frame: ?geometry.RectF = null;
+    var scroll_frame: ?geometry.RectF = null;
+    for (layout.nodes) |node| {
+        if (node.widget.id == editor.id) editor_frame = node.frame;
+        if (node.widget.kind == .scroll_view and scroll_frame == null) scroll_frame = node.frame;
+    }
+    // The editor gets the space beside the two fixed rails.
+    try testing.expect(editor_frame.?.width > 500);
+    try testing.expect(editor_frame.?.height > 500);
+    // The note list scrolls inside its fixed-width rail.
+    try testing.expect(scroll_frame.?.width > 250);
+    try testing.expect(scroll_frame.?.width < 320);
+}
+
+// ---------------------------------------------------------------- dispatch
+
+test "editing the active note re-titles, re-sorts, and arms the autosave" {
+    var clock = native_sdk.TestClock{};
+    var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    const model = &h.app_state.model;
+    model.setStorePath("/tmp/zn-notes-test/store.txt");
+
+    // Open an older note and edit it: the body mutates in place, the
+    // edit time bumps, and the note jumps to the top of the list.
+    const groceries_id = blk: {
+        var indexes: [model_mod.max_notes]usize = undefined;
+        const count = model.visibleNoteIndexes(&indexes);
+        try testing.expectEqual(@as(usize, 7), count);
+        break :blk model.notes[indexes[1]].id; // Groceries (3h)
+    };
+    try h.dispatch(.{ .open_note = groceries_id });
+    clock.advanceMs(std.time.ms_per_min);
+    try h.dispatch(.{ .edit = .{ .move_caret = .{ .direction = .end } } });
+    try h.dispatch(.{ .edit = .{ .insert_text = "\n- Basil" } });
+
+    const note = model.noteById(groceries_id).?;
+    try testing.expect(std.mem.endsWith(u8, note.body.text(), "- Basil"));
+    try testing.expectEqual(test_wall_ms + std.time.ms_per_min, note.updated_ms);
+    var indexes: [model_mod.max_notes]usize = undefined;
+    _ = model.visibleNoteIndexes(&indexes);
+    try testing.expectEqual(groceries_id, model.notes[indexes[0]].id);
+
+    // The edit armed the one-shot save debounce; firing it writes the
+    // whole serialized store to the store path.
+    var timer_found = false;
+    var timer_index: usize = 0;
+    while (fx.pendingTimerAt(timer_index)) |request| : (timer_index += 1) {
+        if (request.key == model_mod.save_timer_key) {
+            try testing.expectEqual(model_mod.save_debounce_ms, request.interval_ms);
+            timer_found = true;
+        }
+    }
+    try testing.expect(timer_found);
+    try fx.fireTimer(model_mod.save_timer_key);
+    try h.wake();
+    const write_request = fx.pendingFileAt(0).?;
+    try testing.expectEqual(model_mod.store_write_key, write_request.key);
+    try testing.expectEqual(native_sdk.EffectFileOp.write, write_request.op);
+    try testing.expectEqualStrings("/tmp/zn-notes-test/store.txt", write_request.path);
+    try testing.expect(std.mem.startsWith(u8, write_request.bytes, model_mod.store_header));
+    try testing.expect(std.mem.indexOf(u8, write_request.bytes, "- Basil") != null);
+
+    // A save requested while the write is in flight re-persists on the
+    // acknowledgement — the newest state always reaches disk.
+    try h.dispatch(.{ .edit = .{ .insert_text = "\n- Thyme" } });
+    try fx.fireTimer(model_mod.save_timer_key);
+    try h.wake();
+    try testing.expect(model.save_pending);
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+    const rewrite = fx.pendingFileAt(0).?;
+    try testing.expectEqual(model_mod.store_write_key, rewrite.key);
+    try testing.expect(std.mem.indexOf(u8, rewrite.bytes, "- Thyme") != null);
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+    try testing.expectEqualStrings("Saved", model.status());
+}
+
+test "boot restores the persisted store before the first paint" {
+    var clock = native_sdk.TestClock{};
+    var donor = model_mod.initialModel(testClock(&clock));
+    donor.folder_count = 0;
+    donor.note_count = 0;
+    donor.next_folder_id = 1;
+    donor.next_note_id = 1;
+    const projects = donor.addFolder("Projects").?;
+    _ = donor.addNote(projects, test_wall_ms - std.time.ms_per_hour, "Restored plan\n\nShip the notes example.");
+    var store_buffer: [model_mod.max_store_bytes]u8 = undefined;
+    const store_bytes = donor.serializeStore(&store_buffer);
+
+    var boot_clock = native_sdk.TestClock{};
+    var model = model_mod.initialModel(testClock(&boot_clock));
+    model.setStorePath("/tmp/zn-notes-test/store.txt");
+    var h = try Harness.create(model);
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    // init_fx issued the read on the installing frame.
+    const read_request = fx.pendingFileAt(0).?;
+    try testing.expectEqual(model_mod.store_read_key, read_request.key);
+    try testing.expectEqual(native_sdk.EffectFileOp.read, read_request.op);
+    try testing.expectEqualStrings("/tmp/zn-notes-test/store.txt", read_request.path);
+
+    try fx.feedFileResult(model_mod.store_read_key, .ok, store_bytes);
+    try h.wake();
+    try testing.expectEqual(@as(usize, 1), h.app_state.model.note_count);
+    try testing.expectEqualStrings("Projects", h.app_state.model.folders[0].name());
+    try testing.expect(std.mem.indexOf(u8, h.app_state.model.status(), "Loaded 1 notes") != null);
+
+    // The restored note reached the widgets.
+    const snapshot = h.snapshot();
+    try testing.expect(snapshotWidgetNamed(snapshot, "listitem", "Restored plan") != null);
+    try testing.expect(snapshotWidgetNamed(snapshot, "listitem", "Projects folder") != null);
+
+    // A missing store (first run) keeps the seeds, quietly.
+    var fresh_clock = native_sdk.TestClock{};
+    var fresh_model = model_mod.initialModel(testClock(&fresh_clock));
+    fresh_model.setStorePath("/tmp/zn-notes-test/none.txt");
+    var fresh = try Harness.create(fresh_model);
+    defer fresh.destroy();
+    try fresh.app_state.effects.feedFileResult(model_mod.store_read_key, .not_found, "");
+    try fresh.wake();
+    try testing.expectEqual(@as(usize, 7), fresh.app_state.model.note_count);
+    try testing.expectEqual(@as(usize, 0), fresh.app_state.model.status().len);
+}
+
+test "the folder dialog creates and renames through real widget clicks" {
+    var clock = native_sdk.TestClock{};
+    var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    const model = &h.app_state.model;
+    model.setStorePath("/tmp/zn-notes-test/store.txt");
+
+    // The sidebar button opens the create dialog.
+    var snapshot = h.snapshot();
+    const new_folder_button = snapshotWidgetNamed(snapshot, "button", "New folder").?;
+    try h.clickWidget(new_folder_button.id);
+    try testing.expectEqual(model_mod.DialogMode.create_folder, model.dialog);
+    snapshot = h.snapshot();
+    try testing.expect(snapshotWidgetNamed(snapshot, "dialog", "New Folder") != null);
+
+    // Confirm is disabled while the name is empty; typing enables it.
+    const disabled_confirm = snapshotWidgetNamed(snapshot, "button", "Confirm dialog").?;
+    try testing.expect(!disabled_confirm.enabled);
+    try h.dispatch(.{ .folder_field_edit = .{ .insert_text = "Projects" } });
+    snapshot = h.snapshot();
+    const confirm = snapshotWidgetNamed(snapshot, "button", "Confirm dialog").?;
+    try testing.expect(confirm.enabled);
+    try h.clickWidget(confirm.id);
+
+    // The folder exists, is selected, and the store persisted.
+    try testing.expectEqual(model_mod.DialogMode.closed, model.dialog);
+    try testing.expectEqual(@as(usize, 4), model.folder_count);
+    try testing.expectEqualStrings("Projects", model.listTitle());
+    try testing.expect(std.mem.indexOf(u8, model.status(), "Created folder Projects") != null);
+    const write_request = fx.pendingFileAt(0).?;
+    try testing.expect(std.mem.indexOf(u8, write_request.bytes, "folder 4 Projects") != null);
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+
+    // Duplicate names are refused with an inline hint, dialog stays up.
+    try h.dispatch(.open_create_folder);
+    try h.dispatch(.{ .folder_field_edit = .{ .insert_text = "inbox" } });
+    try h.dispatch(.confirm_dialog);
+    try testing.expectEqual(model_mod.DialogMode.create_folder, model.dialog);
+    try testing.expect(model.dialog_hint.len > 0);
+    snapshot = h.snapshot();
+    try testing.expect(snapshotWidgetNamed(snapshot, "text", "That name is already taken.") != null);
+    try h.dispatch(.close_dialog);
+
+    // Rename prefills the selected folder's name and applies in place.
+    try h.dispatch(.{ .select_folder = 2 });
+    try h.dispatch(.open_rename_folder);
+    try testing.expectEqualStrings("Ideas", model.folderName());
+    try h.dispatch(.{ .folder_field_edit = .clear });
+    try h.dispatch(.{ .folder_field_edit = .{ .insert_text = "Sketches" } });
+    try h.dispatch(.confirm_dialog);
+    try testing.expectEqual(model_mod.DialogMode.closed, model.dialog);
+    try testing.expectEqualStrings("Sketches", model.folderById(2).?.name());
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+
+    // Clicking the scrim (any point outside the centered dialog — here
+    // over the sidebar it covers) closes without applying.
+    try h.dispatch(.open_create_folder);
+    try h.clickPoint(60, 400);
+    try testing.expectEqual(model_mod.DialogMode.closed, model.dialog);
+
+    // Capacity binds loudly: at six folders the button disables and the
+    // shortcut path reports instead of opening.
+    try testing.expectEqual(@as(u32, 5), model.addFolder("Archive").?);
+    try testing.expectEqual(@as(u32, 6), model.addFolder("Someday").?);
+    try testing.expect(model.foldersFull());
+    try h.dispatch(.open_create_folder);
+    try testing.expectEqual(model_mod.DialogMode.closed, model.dialog);
+    try testing.expect(std.mem.indexOf(u8, model.status(), "Folder limit reached") != null);
+    snapshot = h.snapshot();
+    try testing.expect(!snapshotWidgetNamed(snapshot, "button", "New folder").?.enabled);
+}
+
+test "the keyboard map drives the whole app through shortcut commands" {
+    var clock = native_sdk.TestClock{};
+    var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    const model = &h.app_state.model;
+    model.setStorePath("/tmp/zn-notes-test/store.txt");
+
+    // Cmd+2 jumps to the first real folder (position 1 = Inbox).
+    try h.shortcut(main.folder_command_prefix ++ "2");
+    try testing.expectEqual(@as(u32, 1), model.selected_folder);
+    try testing.expectEqualStrings("Inbox", model.listTitle());
+
+    // Cmd+Opt+Down/Up walk the visible ordering.
+    const first = model.active_note;
+    try h.shortcut(main.cmd_next_note);
+    try testing.expect(model.active_note != first);
+    try h.shortcut(main.cmd_prev_note);
+    try testing.expectEqual(first, model.active_note);
+    try h.shortcut(main.cmd_prev_note); // clamps at the top
+    try testing.expectEqual(first, model.active_note);
+
+    // Cmd+N creates an empty note in the selected folder and opens it.
+    try h.shortcut(main.cmd_new_note);
+    try testing.expectEqual(@as(usize, 8), model.note_count);
+    const created = model.activeNote().?;
+    try testing.expectEqual(@as(u32, 1), created.folder);
+    try testing.expectEqual(@as(usize, 0), created.body.text().len);
+    try testing.expect(std.mem.indexOf(u8, model.status(), "New note in Inbox") != null);
+    const write_request = fx.pendingFileAt(0).?;
+    try testing.expectEqual(model_mod.store_write_key, write_request.key);
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+
+    // Cmd+Backspace deletes it and the selection falls to the next note.
+    try h.shortcut(main.cmd_delete_note);
+    try testing.expectEqual(@as(usize, 7), model.note_count);
+    try testing.expect(std.mem.indexOf(u8, model.status(), "Deleted \"Untitled\"") != null);
+    try testing.expectEqual(first, model.active_note);
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+
+    // Cmd+Shift+N opens the dialog; Escape dismisses it.
+    try h.shortcut(main.cmd_new_folder);
+    try testing.expectEqual(model_mod.DialogMode.create_folder, model.dialog);
+    try h.shortcut(main.cmd_dismiss);
+    try testing.expectEqual(model_mod.DialogMode.closed, model.dialog);
+
+    // Escape with no dialog clears the search instead.
+    try h.dispatch(.{ .search_edit = .{ .insert_text = "piranesi" } });
+    try testing.expect(model.searching());
+    try h.shortcut(main.cmd_dismiss);
+    try testing.expect(!model.searching());
+
+    // Cmd+Shift+C copies the active note through the clipboard effect.
+    try h.shortcut(main.cmd_copy_note);
+    try testing.expectEqual(@as(usize, 1), fx.pendingClipboardCount());
+    const copy_request = fx.pendingClipboardAt(0).?;
+    try testing.expectEqual(model_mod.copy_key, copy_request.key);
+    try testing.expectEqualStrings(model.activeNote().?.body.text(), copy_request.text);
+    try fx.feedClipboardResult(model_mod.copy_key, .ok, "");
+    try h.wake();
+    try testing.expectEqualStrings("Copied to clipboard", model.status());
+}
+
+test "search filters live and the empty state explains itself" {
+    var clock = native_sdk.TestClock{};
+    var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
+    defer h.destroy();
+    const model = &h.app_state.model;
+
+    try h.dispatch(.{ .search_edit = .{ .insert_text = "coffee" } });
+    var snapshot = h.snapshot();
+    try testing.expect(snapshotWidgetNamed(snapshot, "listitem", "Groceries") != null);
+    try testing.expect(snapshotWidgetNamed(snapshot, "listitem", "Piranesi") == null);
+    try testing.expect(snapshotWidgetNamed(snapshot, "button", "Clear search") != null);
+
+    try h.dispatch(.{ .search_edit = .{ .insert_text = " nowhere" } });
+    snapshot = h.snapshot();
+    try testing.expect(snapshotWidgetNamed(snapshot, "text", "No matches") != null);
+
+    try h.dispatch(.clear_search);
+    try testing.expect(!model.searching());
+    snapshot = h.snapshot();
+    try testing.expect(snapshotWidgetNamed(snapshot, "listitem", "Piranesi") != null);
+    try testing.expect(snapshotWidgetNamed(snapshot, "button", "Clear search") == null);
+}
+
+test "folder and note rows dispatch selection through real clicks" {
+    var clock = native_sdk.TestClock{};
+    var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
+    defer h.destroy();
+    const model = &h.app_state.model;
+
+    // Clicking a folder row scopes the list and re-targets the editor at
+    // that folder's newest note.
+    var snapshot = h.snapshot();
+    const ideas_row = snapshotWidgetNamed(snapshot, "listitem", "Ideas folder").?;
+    try h.clickWidget(ideas_row.id);
+    try testing.expectEqual(@as(u32, 2), model.selected_folder);
+    try testing.expect(std.mem.startsWith(u8, model.activeNote().?.body.text(), "Field recorder"));
+
+    // Clicking a note row opens it in the editor.
+    snapshot = h.snapshot();
+    const queue_row = snapshotWidgetNamed(snapshot, "listitem", "Reading queue mechanics").?;
+    try h.clickWidget(queue_row.id);
+    try testing.expect(std.mem.startsWith(u8, model.activeNote().?.body.text(), "Reading queue mechanics"));
+}
+
+test "the theme toggle flips the derived tokens and the system scheme flows in" {
+    var fx = NotesApp.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    var clock = native_sdk.TestClock{};
+    var model = model_mod.initialModel(testClock(&clock));
+    const light_tokens = main.notesTokens(&model);
+    main.update(&model, .toggle_theme, &fx);
+    const dark_tokens = main.notesTokens(&model);
+    try testing.expect(!std.meta.eql(light_tokens.colors.background, dark_tokens.colors.background));
+    try testing.expectEqual(canvas.ColorScheme.dark, model.effectiveScheme());
+
+    // The system scheme flows in but the explicit override keeps winning.
+    main.update(&model, .{ .system_scheme = .light }, &fx);
+    try testing.expectEqual(canvas.ColorScheme.dark, model.effectiveScheme());
+    main.update(&model, .toggle_theme, &fx);
+    try testing.expectEqual(canvas.ColorScheme.light, model.effectiveScheme());
+}
+
