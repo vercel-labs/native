@@ -215,6 +215,13 @@ fn frameworkRootFromExecutable(allocator: std.mem.Allocator, io: std.Io) !?[]con
 fn hasFrameworkRoot(allocator: std.mem.Allocator, io: std.Io, root: []const u8) !bool {
     const root_zig = try std.fs.path.join(allocator, &.{ root, "src", "root.zig" });
     defer allocator.free(root_zig);
+    
+    if (std.fs.path.isAbsolute(root_zig)) {
+        var file = std.Io.Dir.openFileAbsolute(io, root_zig, .{}) catch return false;
+        defer file.close(io);
+        return true;
+    }
+    
     var file = std.Io.Dir.cwd().openFile(io, root_zig, .{}) catch return false;
     defer file.close(io);
     return true;
