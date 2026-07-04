@@ -16,7 +16,7 @@
 //! - Stroke-to-outline: every segment, join, and cap becomes a
 //!   consistently oriented polygon piece and the union is filled with the
 //!   nonzero rule. Caps: butt or round. Joins: miter (with limit,
-//!   falling back to bevel) or round — Lucide-style icons need round.
+//!   falling back to bevel) or round — the built-in stroke icons need round.
 //!
 //! The path model is the existing wire model (`drawing.PathElement`:
 //! move/line/quad/cubic/close). Arcs are a *builder-level* verb lowered to
@@ -150,7 +150,7 @@ pub fn PathBuilder(comptime capacity: usize) type {
 
         /// SVG endpoint arc (the `A`/`a` path command), lowered to cubic
         /// Beziers. `x_rotation_deg` is the ellipse x-axis rotation in
-        /// degrees; when it is zero (every Lucide icon) the lowering is
+        /// degrees; when it is zero (every built-in icon) the lowering is
         /// sqrt-only and fully deterministic. A nonzero rotation uses
         /// `@cos`/`@sin` once and is the sole non-sqrt code path in this
         /// module.

@@ -56,8 +56,8 @@ pub const ThemeOptions = struct {
     reduce_motion: bool = false,
 };
 
-/// The default palette is the shadcn/ui "neutral + blue" preset,
-/// converted from its published oklch values to sRGB hex (D65, standard
+/// The default palette is the house "neutral + blue" preset, specified
+/// in oklch and converted to sRGB hex (D65, standard
 /// oklch -> linear sRGB -> gamma-encoded; conversions are exact to the
 /// nearest 8-bit channel). Neutral gray scale for surfaces and text, a
 /// blue-violet primary for accents, translucent-white hairlines in dark
@@ -97,8 +97,8 @@ pub const ColorTokens = struct {
     /// The fourth semantic hue: violet, for identity states that are not
     /// ok/warn/fail — a merged PR badge, a "new" chip, an informational
     /// callout. Named `info` because that is the slot every component
-    /// vocabulary ships (Bootstrap/MUI/Ant all have one; GitHub's Primer
-    /// calls the same role `done`); colored violet rather than blue
+    /// vocabulary ships (most established component systems carry the
+    /// slot, some under the name `done`); colored violet rather than blue
     /// because the violet identity hue is the one GitHub-shaped apps
     /// actually need, and nothing else in the palette competes with it.
     info: Color = Color.rgb8(124, 58, 237),
@@ -273,9 +273,9 @@ pub const SpacingTokens = struct {
     xl: f32 = 24,
 };
 
-/// Derived from a 10px base radius the way shadcn/ui derives from
-/// `--radius`: lg is the base, md steps down 2, sm steps down 4, and xl
-/// steps up 4. Buttons and inputs sit on md; cards and surfaces on lg.
+/// Derived from a 10px base radius: lg is the base, md steps down 2,
+/// sm steps down 4, and xl steps up 4. Buttons and inputs sit on md;
+/// cards and surfaces on lg.
 pub const RadiusTokens = struct {
     sm: f32 = 6,
     md: f32 = 8,

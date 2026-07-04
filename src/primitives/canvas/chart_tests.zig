@@ -452,7 +452,7 @@ test "chart golden: line + bar + band render byte-identically in light and dark"
 // Pinned after pixel review of the CHART_GOLDEN_DUMP artifacts (line +
 // area fill + gridlines in accent, zero-baseline bars in success, band
 // envelope in info; both themes clear with their background token).
-// Regenerated for the shadcn default palette: the accent series is now
+// Regenerated for the house default palette: the accent series is now
 // the blue-violet primary and the gridline/border neutrals moved to the
 // neutral scale; geometry is unchanged.
 const golden_light_signature: u64 = 8077067691017829510;

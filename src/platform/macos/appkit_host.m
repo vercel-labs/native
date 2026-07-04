@@ -3909,7 +3909,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (resizable) {
         styleMask |= NSWindowStyleMaskResizable;
     }
-    // titlebarStyle 1 = hidden_inset (the VS Code/Linear shape): the
+    // titlebarStyle 1 = hidden_inset (the modern editor-app shape): the
     // content view extends under a transparent titlebar with the title
     // hidden; the traffic lights stay. titlebarStyle 2 = hidden_inset_tall:
     // the same shape with the unified-toolbar-height band (the Notes

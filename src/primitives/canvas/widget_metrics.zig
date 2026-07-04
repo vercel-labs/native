@@ -50,8 +50,8 @@ pub fn widgetTextSpanLayoutOptions(widget: Widget, tokens: DesignTokens, max_wid
     };
 }
 
-/// 36px default control height — the h-9 metric shadcn/ui buttons,
-/// inputs, and select triggers share (sm/lg step through the size scale).
+/// 36px default control height — the metric buttons, inputs, and
+/// select triggers share (sm/lg step through the size scale).
 pub fn widgetControlHeight(widget: Widget, tokens: DesignTokens) f32 {
     return widgetSizedDensityValue(widget, tokens, 36);
 }

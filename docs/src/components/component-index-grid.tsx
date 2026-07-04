@@ -6,7 +6,7 @@ import { componentPages } from "@/lib/components-pages";
 const previews = vocab.previews as Record<string, { width: number; height: number }>;
 
 /**
- * The Components index: a shadcn-docs-style grid of engine-rendered
+ * The Components index: a docs-catalog grid of engine-rendered
  * preview tiles, one per component page, driven by the shared
  * components-pages inventory.
  */

@@ -70,7 +70,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "combobox", .doc = "Text entry with menu affordance (no options attribute); edits via on-input, open via on-press — compose the options like select's anchored dropdown-menu pattern (filter the for-each source from the model as the user types)." },
     .{ .name = "skeleton", .doc = "Loading placeholder block; size with width and height." },
     .{ .name = "spinner", .doc = "Indeterminate progress spinner leaf." },
-    .{ .name = "icon", .doc = "Built-in vector icon leaf: name selects one of the curated Lucide-style icons (comptime-validated), tint via foreground, size with width/height or size." },
+    .{ .name = "icon", .doc = "Built-in vector icon leaf: name selects one of the curated built-in stroke icons (comptime-validated), tint via foreground, size with width/height or size." },
     .{ .name = "markdown", .doc = "Renders a markdown string (GFM subset, pipe tables included) as widgets; source is one {binding}, links dispatch on-link (bare URLs autolink), <details> blocks toggle via on-details + details-expanded, #123 refs linkify via issue-link-base." },
     .{ .name = "stepper", .doc = "Stage stepper: step children joined by connectors; active names the current step index (earlier steps render completed, later ones pending)." },
     .{ .name = "step", .doc = "One stepper stage; only allowed inside a stepper, the label is the text content (supports {} interpolation), state derives from the stepper's active index." },

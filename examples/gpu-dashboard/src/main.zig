@@ -34,7 +34,7 @@ const max_dashboard_commands: usize = native_sdk.runtime.max_canvas_commands_per
 const max_dashboard_glyphs: usize = native_sdk.runtime.max_canvas_glyphs_per_view;
 const max_dashboard_widgets: usize = 64;
 const dashboard_chrome_prefix_commands: usize = 6;
-// 69 after the shadcn control sweep: the switch track dropped its
+// 69 after the house control sweep: the switch track dropped its
 // default border stroke and the inactive tab segments dropped theirs
 // (selection reads by elevation now), while the search field's magnifier
 // became a vector icon (5 hand-drawn lines -> transform + 2 stroked
@@ -46,7 +46,7 @@ const expected_dashboard_interaction_command_count: usize = 69;
 // text shifts only, no layout change.
 // Regenerated 2026-07-03: reference text paints real Geist outlines
 // (vector core + bundled TTF parser) instead of block glyphs.
-// Regenerated 2026-07-04 for the shadcn default palette + control sweep:
+// Regenerated 2026-07-04 for the house default palette + control sweep:
 // primary accents moved to the blue-violet preset, the switch/tab chrome
 // lost default track borders, the slider grew to a 6px track with a
 // primary-ringed thumb, and the search magnifier is the vector icon.

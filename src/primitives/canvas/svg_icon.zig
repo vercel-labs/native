@@ -1,5 +1,5 @@
-//! SVG icon-subset parser: exactly the closed dialect stroke-icon sets
-//! (Lucide, Feather, Tabler, Heroicons-outline) are written in, parseable
+//! SVG icon-subset parser: exactly the closed dialect the popular open
+//! 24x24 stroke-icon sets are written in, parseable
 //! at comptime (`parseComptime`) or runtime (`parse` into caller
 //! buffers), std-only and allocation-free.
 //!
@@ -14,7 +14,7 @@
 //! Explicitly NOT SVG: no CSS, no `style=""`, no gradients, no filters,
 //! no text, no animation, no transforms, no `use`. Unknown elements
 //! (`<title>`, `<desc>`, metadata) are skipped; unknown attributes are
-//! ignored — a real Lucide file drops in unchanged.
+//! ignored — a stock icon-set file drops in unchanged.
 //!
 //! Shapes are lowered to the wire path model (`drawing.PathElement`) via
 //! `vector.PathBuilder`, so an icon is just ranges of packet-compatible

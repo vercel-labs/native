@@ -288,7 +288,7 @@ pub const WidgetRole = enum {
 };
 
 pub const BuiltinComponentStyle = enum {
-    shadcn,
+    house,
 };
 
 pub const BuiltinComponentKind = enum {
@@ -401,7 +401,7 @@ pub const BuiltinComponentDescriptor = struct {
     name: []const u8,
     root_widget_kind: WidgetKind,
     role: WidgetRole,
-    style: BuiltinComponentStyle = .shadcn,
+    style: BuiltinComponentStyle = .house,
     composite: bool = false,
 };
 
@@ -461,7 +461,7 @@ fn builtinComponent(
         .name = builtinComponentName(kind),
         .root_widget_kind = root_widget_kind,
         .role = role,
-        .style = .shadcn,
+        .style = .house,
         .composite = composite,
     };
 }

@@ -210,7 +210,7 @@
     },
     {
       "name": "icon",
-      "doc": "Built-in vector icon leaf: name selects one of the curated Lucide-style icons (comptime-validated), tint via foreground, size with width/height or size."
+      "doc": "Built-in vector icon leaf: name selects one of the curated built-in stroke icons (comptime-validated), tint via foreground, size with width/height or size."
     },
     {
       "name": "markdown",

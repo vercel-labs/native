@@ -75,7 +75,7 @@
       "criteria": [
         "The dashboard composes the framework's composites as designed: the stage track is a real stepper driven by a single model stage index (not a hand-rolled row of badges and separators), the history is a timeline whose items carry title/description/meta and whose connector rail ends on the final item, and the notes render through the markdown element — no ad-hoc reimplementation of any of the three.",
         "Model/Msg/update follow The Elm Architecture idiomatically: one source-of-truth stage index, Advance/Back are messages whose clamping lives in update, events are model data, and nothing derivable (the stage name, the status summary, the 'n of 5' math) is stored in the model.",
-        "The markup stays declarative and shadcn-ish in composition: events render via <for> from model data, the markdown source is owned by Zig and bound, sections are laid out with cards/columns and design tokens rather than magic values, and no counting, formatting, or stage math is smuggled into the view.",
+        "The markup stays declarative and house-style in composition: events render via <for> from model data, the markdown source is owned by Zig and bound, sections are laid out with cards/columns and design tokens rather than magic values, and no counting, formatting, or stage math is smuggled into the view.",
         "Tests are meaningful: Advance and Back run through the real dispatch path, clamping is asserted at both ends (Plan and Done), and the current stage plus the status summary string are asserted — not merely that the code compiles."
       ],
       "minScore": 6,

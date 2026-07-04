@@ -1,7 +1,7 @@
 //! deck chrome: the sculpted hardware layer, drawn through the sanctioned
 //! `ChromeOptions` display-list pass (`UiApp.chrome`) — the same seam the
 //! gpu-dashboard example uses for its hero gradient, pushed to the
-//! Winamp-era extreme on a SMALL, FIXED window (460x180, resizable =
+//! classic hardware-player-era extreme on a SMALL, FIXED window (460x180, resizable =
 //! false), so every coordinate below is absolute machining:
 //!
 //!   prefix (behind the widgets): the chassis fill, the AI-generated

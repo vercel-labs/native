@@ -63,7 +63,7 @@ The Native SDK is pre-release. Native-rendered apps run on macOS 11+ (Metal) and
 
 `ShellConfig` declares native-first windows and view trees: toolbars, sidebars, status bars, split panes, stacks, controls, WebViews, GPU surfaces, and future surface kinds.
 
-`canvas.builtin_component_kinds` declares Native SDK's built-in component catalog. The defaults follow shadcn's look and feel, use Geist and Geist Mono typography, and render through Native SDK's retained canvas/GPU surface.
+`canvas.builtin_component_kinds` declares Native SDK's built-in component catalog. The defaults follow the house component design language, use Geist and Geist Mono typography, and render through Native SDK's retained canvas/GPU surface.
 
 `WebViewSource` tells the runtime what a WebView should load: inline HTML, a URL, or packaged frontend assets served from a local app origin.
 
@@ -131,7 +131,7 @@ Native-first examples are available too:
 - `examples/native-shell` - native toolbar/sidebar/statusbar chrome around WebView content
 - `examples/native-panels` - split/stack native panel composition with WebView content
 - `examples/gpu-surface` - Metal-backed GPU surface composed beside native controls and WebView content
-- `examples/gpu-components` - shadcn-style built-in component lab rendered through the retained GPU canvas
+- `examples/gpu-components` - built-in component lab rendered through the retained GPU canvas
 - `examples/capabilities` - guarded OS services such as notifications, clipboard, dialogs, credentials, file drops, and recent documents
 - `examples/mobile-shell` - shared metadata for the iOS and Android native shell hosts
 

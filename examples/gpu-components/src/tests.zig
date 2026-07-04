@@ -597,8 +597,8 @@ test "gpu components display list renders stable reference snapshot" {
     // Regenerated 2026-07-04: layout measures with the bundled face's real
     // advance table (estimator wave); sub-pixel text shifts only,
     // spot-reviewed against the previous render — no layout change.
-    // Regenerated 2026-07-04 (shadcn fidelity sweep): default palette is
-    // the shadcn neutral + blue-violet preset; switch is a borderless
+    // Regenerated 2026-07-04 (component fidelity sweep): default palette is
+    // the neutral + blue-violet house preset; switch is a borderless
     // 44x24 pill with a 20px thumb; checkbox/radio are 16px; slider has a
     // 6px track and primary-ringed thumb; the progress track is
     // primary/20; tabs select by elevation instead of accent fill; the

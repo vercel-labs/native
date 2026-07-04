@@ -186,10 +186,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             resizable: bool = true,
             /// Titlebar chrome: `.hidden_inset` extends content under a
             /// transparent titlebar with the title hidden (macOS keeps
-            /// the traffic lights) — the VS Code/Linear pattern —
+            /// the traffic lights) — the modern editor-app pattern —
             /// and `.hidden_inset_tall` is the same shape with the
             /// unified-toolbar-height band (traffic lights vertically
-            /// centered, the Notes look). Drag regions and
+            /// centered, the tall unified-toolbar look). Drag regions and
             /// traffic-light-aware header layout are the dedicated
             /// titlebar-control channel's scope, not this field's.
             /// Platforms without the concept keep standard chrome.

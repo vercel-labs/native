@@ -889,7 +889,7 @@ test "widget text fields expose textbox semantics and render focused chrome" {
     }
 }
 
-test "widget inputs expose textbox semantics and render shadcn input tokens" {
+test "widget inputs expose textbox semantics and render house input tokens" {
     const input = Widget{
         .id = 18,
         .kind = .input,
@@ -1668,7 +1668,7 @@ test "widget menu surface groups menu items semantically" {
     try std.testing.expect(semantics[2].actions.select);
 }
 
-test "widget dropdown menus expose menu semantics with shadcn surface chrome" {
+test "widget dropdown menus expose menu semantics with house surface chrome" {
     const items = [_]Widget{
         .{
             .id = 12,

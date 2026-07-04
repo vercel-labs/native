@@ -1470,7 +1470,7 @@ test "widget display list renders through reference surface" {
     try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
 
     try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 220, 20);
-    // The progress fill is the blue-violet primary of the shadcn preset.
+    // The progress fill is the blue-violet primary of the house preset.
     try expectPixelRgba8(.{ 20, 71, 230, 255 }, surface, 20, 100);
 }
 

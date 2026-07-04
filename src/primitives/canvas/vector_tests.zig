@@ -537,7 +537,7 @@ test "signature goldens pin curvy coverage byte for byte" {
     try std.testing.expectEqual(@as(u64, 17640634242114431619), wave_grid.signature());
 
     var icon = vector.PathBuilder(16){};
-    // A Lucide-flavored check mark: stroke-2 in a 24x24 box.
+    // A stroke-dialect check mark: stroke-2 in a 24x24 box.
     try icon.moveTo(PointF.init(4, 12));
     try icon.lineTo(PointF.init(9, 17));
     try icon.lineTo(PointF.init(20, 6));

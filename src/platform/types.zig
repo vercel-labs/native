@@ -322,7 +322,7 @@ pub const WindowRestorePolicy = enum {
 };
 
 /// How the window draws its titlebar chrome.
-/// `.hidden_inset` is the VS Code/Linear shape: content extends under a
+/// `.hidden_inset` is the modern editor-app shape: content extends under a
 /// transparent titlebar with the title hidden (macOS:
 /// `NSWindowStyleMaskFullSizeContentView` + `titlebarAppearsTransparent`
 /// + `titleVisibility` hidden — the traffic lights stay). The app's own
@@ -332,7 +332,7 @@ pub const WindowRestorePolicy = enum {
 /// ignore it (standard chrome).
 ///
 /// `.hidden_inset_tall` is the same shape with the TALL titlebar band —
-/// the Notes/Linear unified-toolbar height (~52pt vs ~28pt), where the
+/// the unified-toolbar height (~52pt vs ~28pt), where the
 /// system vertically centers the traffic lights in the band (macOS: an
 /// empty borderless `NSToolbar` + `NSWindowToolbarStyleUnified` +
 /// `titlebarSeparatorStyle = .none` — pure geometry, nothing drawn).

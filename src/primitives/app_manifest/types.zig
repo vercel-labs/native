@@ -255,7 +255,7 @@ pub const WindowRestorePolicy = enum {
 };
 
 /// How the window draws its titlebar chrome. `.hidden_inset` is the
-/// VS Code/Linear shape: content extends under a transparent titlebar
+/// modern editor-app shape: content extends under a transparent titlebar
 /// with the title hidden (macOS keeps the traffic lights). The app's
 /// own header takes over the titlebar's job: mark it
 /// `window-drag="true"` so it moves the window, and pad it by the
@@ -263,7 +263,7 @@ pub const WindowRestorePolicy = enum {
 /// without the concept keep standard chrome.
 ///
 /// `.hidden_inset_tall` is the same shape with the TALL titlebar band —
-/// the Notes/Linear unified-toolbar height (~52pt vs ~28pt), where
+/// the unified-toolbar height (~52pt vs ~28pt), where
 /// macOS vertically centers the traffic lights in the band. Declare it
 /// when the header row replacing the titlebar is toolbar-height, so the
 /// lights center against it instead of sitting high.

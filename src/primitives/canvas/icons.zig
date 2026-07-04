@@ -1,5 +1,5 @@
-//! The curated built-in icon set: Lucide-style stroke icons (24x24
-//! viewBox, stroke-width 2, round caps and joins, `currentColor`)
+//! The curated built-in icon set: stroke icons in the common dialect
+//! (24x24 viewBox, stroke-width 2, round caps and joins, `currentColor`)
 //! authored for this framework and parsed at COMPTIME from the SVG
 //! sources in `icons/` — the binary carries only lowered path elements,
 //! and an invalid icon source is a compile error.
@@ -9,8 +9,8 @@
 //! `known_icon_names` (markup at comptime in the compiled engine, at
 //! build/parse time in the validator and interpreter).
 //!
-//! Apps can parse their own `assets/icons/*.svg` (any Lucide/Feather/
-//! Tabler-dialect file) with `svg_icon.parseComptime(@embedFile(...))`
+//! Apps can parse their own `assets/icons/*.svg` (any file in the
+//! common stroke-icon dialect) with `svg_icon.parseComptime(@embedFile(...))`
 //! and register them under app-chosen names with `registerAppIcons` at
 //! boot: the widget draw paths resolve names through `resolve` (built-ins
 //! first, then the app table), so a registered app icon renders exactly

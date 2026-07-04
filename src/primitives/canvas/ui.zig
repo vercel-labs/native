@@ -384,7 +384,7 @@ pub fn Ui(comptime Msg: type) type {
             /// Press-and-hold Msg: a pointer held down on this element
             /// for ~350 ms dispatches it (the release then presses
             /// nothing), while a quick click dispatches `on_press` as
-            /// usual — the SwiftUI Menu + primaryAction shape. A
+            /// usual — the click-acts, hold-reveals menu-button shape. A
             /// secondary click (right/ctrl-click) with no context menu on
             /// the route dispatches it immediately, the desktop
             /// alternative. Like `on_press`, binding it makes the element
@@ -843,7 +843,7 @@ pub fn Ui(comptime Msg: type) type {
             return self.el(.checkbox, options, .{});
         }
 
-        /// shadcn-style avatar: a pill-clipped image with an initials
+        /// Avatar: a pill-clipped image with an initials
         /// fallback. With `options.image` set to a registered ImageId the
         /// engine clips the image to the avatar circle (`cover` fit);
         /// with no image (0) it renders `initials` centered — so an app
@@ -1040,7 +1040,7 @@ pub fn Ui(comptime Msg: type) type {
             return .pending;
         }
 
-        /// Stage stepper (shadcn stepper conventions: item + indicator +
+        /// Stage stepper (house stepper conventions: item + indicator +
         /// title joined by separators): a horizontal row of steps whose
         /// completed/active/pending states derive from `options.active`.
         /// Indicators are badges — a check for completed steps, the step
@@ -1111,7 +1111,7 @@ pub fn Ui(comptime Msg: type) type {
             semantics: canvas.WidgetSemantics = .{},
         };
 
-        /// Timeline/ledger list (shadcn timeline conventions: item +
+        /// Timeline/ledger list (house timeline conventions: item +
         /// indicator + separator + title/description/meta): a column of
         /// `timelineItem` nodes.
         pub fn timeline(self: *Self, options: TimelineOptions, items: anytype) Node {

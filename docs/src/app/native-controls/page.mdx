@@ -2,7 +2,7 @@
 
 Native controls are platform-owned views declared with `App.scene_fn`, attached with `runtime.createShellViews(...)`, created imperatively through `runtime.createView(...)`, or created from trusted WebView code through the guarded `window.zero.views.*` bridge helpers. They are intended for trusted chrome, utility panels, and OS-native affordances around rich WebView content.
 
-For product UI, prefer Native SDK's [Built-in Components](/built-in-components). They are native-rendered through the retained canvas/GPU surface, use shadcn-style defaults, and stay portable across desktop and mobile hosts. Native controls remain useful for shell chrome, menus, platform dialogs, and OS-owned integration points.
+For product UI, prefer Native SDK's [Built-in Components](/built-in-components). They are native-rendered through the retained canvas/GPU surface, use the house design-language defaults, and stay portable across desktop and mobile hosts. Native controls remain useful for shell chrome, menus, platform dialogs, and OS-owned integration points.
 
 ```zig
 const shell_views = [_]native_sdk.ShellView{

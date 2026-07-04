@@ -105,7 +105,7 @@ pub fn sceneByName(name: []const u8) ?*const Scene {
 
 // ------------------------------------------------------------- scenes
 
-/// Padded, centered preview tile on the background token — the shadcn
+/// Padded, centered preview tile on the background token — the docs-
 /// component-preview framing.
 fn tile(ui: *Ui, children: anytype) Node {
     return ui.column(.{ .padding = 32, .main = .center, .cross = .center, .grow = 1 }, children);

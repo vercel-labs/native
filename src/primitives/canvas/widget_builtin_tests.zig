@@ -412,7 +412,7 @@ test "icon widgets render built-in vector icons as tinted path commands" {
         if (pixels[index] < 250) ink += 1;
     }
     try std.testing.expect(ink > 20);
-    // Regenerated for the shadcn default palette: the tint (the text
+    // Regenerated for the house default palette: the tint (the text
     // token) moved from #09090b to #0a0a0a; same check-mark coverage.
     try std.testing.expectEqual(@as(u64, 1722938743772709742), support.referenceSurfaceSignature(&pixels));
 
@@ -645,7 +645,7 @@ test "design tokens provide theme and contrast palettes" {
     try std.testing.expectEqual(default_mono_font_family, light.typography.mono_font_family);
     try std.testing.expectEqualStrings("Geist", light.typography.bodyFamilyName());
     try std.testing.expectEqualStrings("Geist Mono", light.typography.monoFamilyName());
-    // The default palette is the shadcn neutral + blue preset (see
+    // The default palette is the neutral + blue house preset (see
     // ColorTokens): near-black foreground, blue-violet primary, mid-gray
     // ring.
     try std.testing.expectEqualDeep(Color.rgb8(10, 10, 10), light.colors.text);
@@ -676,7 +676,7 @@ test "design tokens provide theme and contrast palettes" {
     try std.testing.expectEqual(Easing.linear, reduced_motion.motion.easing);
 }
 
-test "built-in component catalog covers shadcn component set" {
+test "built-in component catalog covers the built-in component set" {
     const expected_names = [_][]const u8{
         "Accordion",
         "Alert",
@@ -725,7 +725,7 @@ test "built-in component catalog covers shadcn component set" {
         try std.testing.expectEqual(kind, descriptor.kind);
         try std.testing.expectEqualStrings(builtin_component_names[index], descriptor.name);
         try std.testing.expectEqualStrings(builtin_component_names[index], builtinComponentName(kind));
-        try std.testing.expectEqual(BuiltinComponentStyle.shadcn, descriptor.style);
+        try std.testing.expectEqual(BuiltinComponentStyle.house, descriptor.style);
         const ordinal = @intFromEnum(kind);
         try std.testing.expectEqual(index, ordinal);
         try std.testing.expect(!seen[ordinal]);
@@ -777,7 +777,7 @@ test "built-in component catalog maps to retained widget foundations" {
     try std.testing.expect(!builtinComponentDescriptor(.button).composite);
 }
 
-test "built-in component factory creates shadcn widget foundations" {
+test "built-in component factory creates house widget foundations" {
     for (builtin_component_kinds, 0..) |kind, index| {
         const descriptor = builtinComponentDescriptor(kind);
         const widget = builtinComponentWidget(kind, .{
@@ -802,7 +802,7 @@ test "built-in component factory creates shadcn widget foundations" {
     try std.testing.expectEqualStrings("Search components", builtinComponentWidget(.combobox, .{ .placeholder = "Search components" }).placeholder);
 }
 
-test "built-in component factory applies shadcn composite defaults" {
+test "built-in component factory applies house composite defaults" {
     const button_children = [_]Widget{
         builtinComponentWidget(.button, .{ .id = 2, .text = "One" }),
         builtinComponentWidget(.button, .{ .id = 3, .text = "Two", .variant = .secondary }),
@@ -854,7 +854,7 @@ test "built-in component factory applies shadcn composite defaults" {
     try std.testing.expectEqual(@as(f32, 24), custom_card.layout.gap);
 }
 
-test "built-in accordion renders shadcn disclosure chrome and toggle semantics" {
+test "built-in accordion renders house disclosure chrome and toggle semantics" {
     const accordion = builtinComponentWidget(.accordion, .{
         .id = 45,
         .frame = geometry.RectF.init(0, 0, 220, 64),
@@ -917,7 +917,7 @@ test "built-in accordion renders shadcn disclosure chrome and toggle semantics" 
     try std.testing.expect(display_list.findCommandById(widgetPartId(45, 7)) != null);
 }
 
-test "built-in resizable renders shadcn resize grip and drag semantics" {
+test "built-in resizable renders house resize grip and drag semantics" {
     const resizable = builtinComponentWidget(.resizable, .{
         .id = 46,
         .frame = geometry.RectF.init(0, 0, 180, 80),
@@ -1031,7 +1031,7 @@ test "built-in accordion disclosure state controls child layout and semantics" {
     try std.testing.expect(expanded_builder.displayList().findCommandById(widgetPartId(46, 1)) != null);
 }
 
-test "built-in alert renders shadcn surface chrome and text" {
+test "built-in alert renders house surface chrome and text" {
     const alert = builtinComponentWidget(.alert, .{
         .id = 40,
         .frame = geometry.RectF.init(0, 0, 320, 68),
@@ -1095,7 +1095,7 @@ test "built-in alert renders shadcn surface chrome and text" {
     }
 }
 
-test "built-in card renders shadcn surface chrome and title" {
+test "built-in card renders house surface chrome and title" {
     const card = builtinComponentWidget(.card, .{
         .id = 44,
         .frame = geometry.RectF.init(0, 0, 280, 120),
@@ -1211,7 +1211,7 @@ test "built-in status bar renders flat app chrome and text semantics" {
     }
 }
 
-test "built-in modal surfaces render shadcn chrome and semantics" {
+test "built-in modal surfaces render house chrome and semantics" {
     const viewport = geometry.RectF.init(0, 52, 1024, 640);
     const backdrop = builtinSurfaceBackdropWidget(.{
         .id = 49,
@@ -1419,7 +1419,7 @@ test "built-in modal surfaces render shadcn chrome and semantics" {
     }
 }
 
-test "built-in component widgets expose shadcn semantics and render tokens" {
+test "built-in component widgets expose house semantics and render tokens" {
     const children = [_]Widget{
         builtinComponentWidget(.button, .{
             .id = 2,
@@ -1503,7 +1503,7 @@ test "built-in component widgets expose shadcn semantics and render tokens" {
     }
 }
 
-test "built-in toggle renders shadcn toggle button tokens" {
+test "built-in toggle renders house toggle button tokens" {
     const toggle = builtinComponentWidget(.toggle, .{
         .id = 14,
         .frame = geometry.RectF.init(0, 0, 84, 32),
@@ -1566,7 +1566,7 @@ test "built-in toggle renders shadcn toggle button tokens" {
     }
 }
 
-test "built-in component primitive widgets render distinct shadcn chrome" {
+test "built-in component primitive widgets render distinct house chrome" {
     const widgets = [_]Widget{
         builtinComponentWidget(.avatar, .{
             .id = 20,

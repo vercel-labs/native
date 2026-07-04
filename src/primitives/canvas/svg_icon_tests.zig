@@ -1,7 +1,7 @@
 //! Tests for the SVG icon-subset parser (`svg_icon.zig`) and the
 //! built-in icon registry (`icons.zig`): tag scanning, shape lowering,
 //! style inheritance, the full path-data grammar, budgets, and a
-//! Lucide-dialect file rasterized through the vector core with pixel
+//! stroke-dialect file rasterized through the vector core with pixel
 //! goldens in the reference conventions.
 
 const std = @import("std");
@@ -14,14 +14,14 @@ const drawing = @import("drawing.zig");
 const PointF = geometry.PointF;
 const Affine = drawing.Affine;
 
-const lucide_dialect_header =
+const stroke_dialect_header =
     "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" " ++
     "fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">";
 
-test "parses the lucide dialect header and inherits the root style" {
+test "parses the stroke dialect header and inherits the root style" {
     var buffer = svg_icon.IconBuffer{};
     const icon = try svg_icon.parse(
-        lucide_dialect_header ++ "<circle cx=\"11\" cy=\"11\" r=\"7\"/><line x1=\"16\" y1=\"16\" x2=\"21\" y2=\"21\"/></svg>",
+        stroke_dialect_header ++ "<circle cx=\"11\" cy=\"11\" r=\"7\"/><line x1=\"16\" y1=\"16\" x2=\"21\" y2=\"21\"/></svg>",
         &buffer,
     );
     try std.testing.expectEqual(@as(f32, 24), icon.view_box.width);
@@ -39,7 +39,7 @@ test "parses the lucide dialect header and inherits the root style" {
 test "element attributes override inherited style and hex colors parse" {
     var buffer = svg_icon.IconBuffer{};
     const icon = try svg_icon.parse(
-        lucide_dialect_header ++
+        stroke_dialect_header ++
             "<rect x=\"4\" y=\"4\" width=\"16\" height=\"16\" fill=\"#3fA\" stroke=\"none\"/>" ++
             "<g stroke=\"#102030\" stroke-width=\"1.5\"><line x1=\"4\" y1=\"12\" x2=\"20\" y2=\"12\"/></g></svg>",
         &buffer,
@@ -185,7 +185,7 @@ test "app icon registration resolves for drawing but never widens the closed voc
     try std.testing.expectEqual(icons.find("check").?, icons.resolve("check").?);
 }
 
-test "every built-in icon is a 24x24 lucide-style stroke icon" {
+test "every built-in icon is a 24x24 stroke-dialect icon" {
     for (&icons.entries) |*entry| {
         const icon = entry.icon;
         try std.testing.expectEqual(@as(f32, 24), icon.view_box.width);
@@ -265,13 +265,13 @@ test "the check icon rasterizes deterministically and is pinned" {
     try std.testing.expectEqual(@as(u64, 9706765741162478182), grid.signature());
 }
 
-test "a real lucide-dialect file rasterizes through the same pipeline" {
-    // The exact attribute/element shape of a lucide `circle-x` style
+test "a real stroke-dialect file rasterizes through the same pipeline" {
+    // The exact attribute/element shape of a stock `circle-x`-style
     // icon (geometry authored here): root-level presentation attributes,
     // self-closing shape tags, arc-free and arc-bearing paths both.
     var buffer = svg_icon.IconBuffer{};
     const icon = try svg_icon.parse(
-        lucide_dialect_header ++
+        stroke_dialect_header ++
             "<circle cx=\"12\" cy=\"12\" r=\"10\"/>" ++
             "<path d=\"m15 9-6 6\"/><path d=\"m9 9 6 6\"/></svg>",
         &buffer,
