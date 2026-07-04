@@ -166,6 +166,10 @@ pub const RuntimeView = struct {
     presented_canvas_has_unkeyed: bool = false,
     canvas_render_animations: [max_canvas_render_animations_per_view]canvas.CanvasRenderAnimation = undefined,
     canvas_render_animation_count: usize = 0,
+    /// Command id of the caret currently carrying the looping blink
+    /// animation (0 when no caret is showing), so display-list refreshes
+    /// can retarget or remove the blink as focus and selection move.
+    canvas_widget_caret_blink_id: canvas.ObjectId = 0,
     canvas_render_animation_dirty_bounds: [max_canvas_render_animation_dirty_bounds_per_view]CanvasRenderAnimationDirtyBounds = undefined,
     canvas_render_animation_dirty_bounds_count: usize = 0,
     canvas_frame_render_overrides: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,

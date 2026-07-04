@@ -93,6 +93,7 @@ pub const nowMs = runtime_clock.nowMs;
 pub const nowNanoseconds = runtime_clock.nowNanoseconds;
 pub const monotonicMs = runtime_clock.monotonicMs;
 pub const monotonicNanoseconds = runtime_clock.monotonicNanoseconds;
+pub const setFreestandingMonotonicNanoseconds = runtime_clock.setFreestandingMonotonicNanoseconds;
 pub const ImageRegistryBinding = runtime_effects.ImageRegistryBinding;
 pub const RegisteredImage = runtime_effects.RegisteredImage;
 

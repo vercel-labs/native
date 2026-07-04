@@ -77,6 +77,7 @@ pub const nowMs = runtime.nowMs;
 pub const nowNanoseconds = runtime.nowNanoseconds;
 pub const monotonicMs = runtime.monotonicMs;
 pub const monotonicNanoseconds = runtime.monotonicNanoseconds;
+pub const setFreestandingMonotonicNanoseconds = runtime.setFreestandingMonotonicNanoseconds;
 pub const RegisteredImage = runtime.RegisteredImage;
 pub const max_registered_canvas_images = runtime.max_registered_canvas_images;
 pub const max_registered_canvas_image_pixel_bytes = runtime.max_registered_canvas_image_pixel_bytes;

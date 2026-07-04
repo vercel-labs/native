@@ -231,10 +231,19 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 break :blk 0;
             } else 0;
 
-            if (self.views[index].canvas_widget_focused_id == next_focus_id and self.views[index].canvas_widget_focus_visible_id == 0) return;
+            // Pointer focus renders quietly for buttons and rows, but an
+            // editable text widget shows its focus affordances (ring and
+            // caret) however focus arrived — the :focus-visible contract
+            // text inputs have on every platform.
+            const next_focus_visible_id: canvas.ObjectId = if (pointer_event.press_target) |target| blk: {
+                if (target.id == next_focus_id and canvas_widget_runtime.canvasWidgetEditableTextKind(target.kind)) break :blk next_focus_id;
+                break :blk 0;
+            } else 0;
+
+            if (self.views[index].canvas_widget_focused_id == next_focus_id and self.views[index].canvas_widget_focus_visible_id == next_focus_visible_id) return;
             const previous_state = self.views[index].canvasWidgetRenderState();
             self.views[index].canvas_widget_focused_id = next_focus_id;
-            self.views[index].canvas_widget_focus_visible_id = 0;
+            self.views[index].canvas_widget_focus_visible_id = next_focus_visible_id;
             try invalidateForCanvasWidgetRenderStateChange(self, index, previous_state, self.views[index].canvasWidgetRenderState());
         }
 
@@ -689,6 +698,21 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const previous_state = self.views[view_index].canvasWidgetRenderState();
             self.views[view_index].canvas_widget_focused_id = target_id;
             self.views[view_index].canvas_widget_focus_visible_id = target_id;
+            // Keyboard focus landing on an editable establishes a caret:
+            // without a selection the emitters draw no caret line, so a
+            // tabbed-into field would render its ring but no insertion
+            // point. Collapse at the end of the text, the plain caret
+            // placement; a selection the widget already carries survives.
+            if (target_id != 0 and self.views[view_index].canEditCanvasWidgetText(target_id)) {
+                if (self.views[view_index].canvasWidgetNodeIndexById(target_id)) |node_index| {
+                    const widget = &self.views[view_index].widget_layout_nodes[node_index].widget;
+                    if (widget.text_selection == null) {
+                        widget.text_selection = canvas.TextSelection.collapsed(widget.text.len);
+                        try self.views[view_index].refreshCanvasWidgetSemantics();
+                        self.views[view_index].widget_revision += 1;
+                    }
+                }
+            }
             try invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
         }
 

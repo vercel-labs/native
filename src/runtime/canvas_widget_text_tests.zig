@@ -195,7 +195,7 @@ test "runtime applies text input to focused canvas text fields" {
     } });
     try std.testing.expectEqual(@as(u32, 2), app_state.widget_keyboard_count);
     try std.testing.expectEqual(@as(u32, 1), app_state.widget_text_input_count);
-    try std.testing.expectEqual(@as(u64, 2), harness.runtime.views[0].widget_revision);
+    try std.testing.expectEqual(@as(u64, 3), harness.runtime.views[0].widget_revision);
 
     var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("Querya", retained.nodes[1].widget.text);
@@ -235,7 +235,7 @@ test "runtime applies text input to focused canvas text fields" {
     } });
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("Querya", retained.nodes[1].widget.text);
-    try std.testing.expectEqual(@as(u64, 2), harness.runtime.views[0].widget_revision);
+    try std.testing.expectEqual(@as(u64, 3), harness.runtime.views[0].widget_revision);
 
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
@@ -243,7 +243,7 @@ test "runtime applies text input to focused canvas text fields" {
         .kind = .key_down,
         .key = "backspace",
     } });
-    try std.testing.expectEqual(@as(u64, 3), harness.runtime.views[0].widget_revision);
+    try std.testing.expectEqual(@as(u64, 4), harness.runtime.views[0].widget_revision);
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("Query", retained.nodes[1].widget.text);
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(5), retained.nodes[1].widget.text_selection.?);
@@ -256,7 +256,7 @@ test "runtime applies text input to focused canvas text fields" {
         .text = "a",
         .modifiers = .{ .primary = true, .command = true },
     } });
-    try std.testing.expectEqual(@as(u64, 4), harness.runtime.views[0].widget_revision);
+    try std.testing.expectEqual(@as(u64, 5), harness.runtime.views[0].widget_revision);
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("Query", retained.nodes[1].widget.text);
     try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 0, .focus = 5 }, retained.nodes[1].widget.text_selection.?);
@@ -272,7 +272,7 @@ test "runtime applies text input to focused canvas text fields" {
         .key = "x",
         .text = "x",
     } });
-    try std.testing.expectEqual(@as(u64, 5), harness.runtime.views[0].widget_revision);
+    try std.testing.expectEqual(@as(u64, 6), harness.runtime.views[0].widget_revision);
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("x", retained.nodes[1].widget.text);
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(1), retained.nodes[1].widget.text_selection.?);
@@ -284,7 +284,7 @@ test "runtime applies text input to focused canvas text fields" {
         .key = "arrowleft",
         .modifiers = .{ .command = true },
     } });
-    try std.testing.expectEqual(@as(u64, 6), harness.runtime.views[0].widget_revision);
+    try std.testing.expectEqual(@as(u64, 7), harness.runtime.views[0].widget_revision);
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), retained.nodes[1].widget.text_selection.?);
 
@@ -295,7 +295,7 @@ test "runtime applies text input to focused canvas text fields" {
         .key = "arrowright",
         .modifiers = .{ .command = true },
     } });
-    try std.testing.expectEqual(@as(u64, 7), harness.runtime.views[0].widget_revision);
+    try std.testing.expectEqual(@as(u64, 8), harness.runtime.views[0].widget_revision);
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(1), retained.nodes[1].widget.text_selection.?);
 
@@ -305,7 +305,7 @@ test "runtime applies text input to focused canvas text fields" {
         .kind = .key_down,
         .key = "arrowup",
     } });
-    try std.testing.expectEqual(@as(u64, 8), harness.runtime.views[0].widget_revision);
+    try std.testing.expectEqual(@as(u64, 9), harness.runtime.views[0].widget_revision);
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), retained.nodes[1].widget.text_selection.?);
 
@@ -315,7 +315,7 @@ test "runtime applies text input to focused canvas text fields" {
         .kind = .key_down,
         .key = "arrowdown",
     } });
-    try std.testing.expectEqual(@as(u64, 9), harness.runtime.views[0].widget_revision);
+    try std.testing.expectEqual(@as(u64, 10), harness.runtime.views[0].widget_revision);
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(1), retained.nodes[1].widget.text_selection.?);
 
@@ -325,7 +325,7 @@ test "runtime applies text input to focused canvas text fields" {
         .kind = .key_down,
         .key = "escape",
     } });
-    try std.testing.expectEqual(@as(u64, 9), harness.runtime.views[0].widget_revision);
+    try std.testing.expectEqual(@as(u64, 10), harness.runtime.views[0].widget_revision);
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("x", retained.nodes[1].widget.text);
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(1), retained.nodes[1].widget.text_selection.?);
@@ -1216,7 +1216,7 @@ test "runtime applies text input to focused canvas search fields" {
         .key = "x",
         .text = "x",
     } });
-    try std.testing.expectEqual(@as(u64, 2), harness.runtime.views[0].widget_revision);
+    try std.testing.expectEqual(@as(u64, 3), harness.runtime.views[0].widget_revision);
 
     const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("Queryx", retained.nodes[1].widget.text);
@@ -1251,7 +1251,7 @@ test "runtime applies text input to focused canvas search fields" {
     try std.testing.expect(saw_inserted_text);
 
     _ = try harness.runtime.editCanvasWidgetText(1, "canvas", 2, .{ .set_composition = .{ .text = "ing", .cursor = 3 } });
-    try std.testing.expectEqual(@as(u64, 3), harness.runtime.views[0].widget_revision);
+    try std.testing.expectEqual(@as(u64, 4), harness.runtime.views[0].widget_revision);
 
     const composing = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("Queryxing", composing.nodes[1].widget.text);
@@ -1264,7 +1264,7 @@ test "runtime applies text input to focused canvas search fields" {
         .kind = .key_down,
         .key = "escape",
     } });
-    try std.testing.expectEqual(@as(u64, 4), harness.runtime.views[0].widget_revision);
+    try std.testing.expectEqual(@as(u64, 5), harness.runtime.views[0].widget_revision);
 
     const restored = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("Queryx", restored.nodes[1].widget.text);
@@ -1280,7 +1280,7 @@ test "runtime applies text input to focused canvas search fields" {
         .kind = .key_down,
         .key = "escape",
     } });
-    try std.testing.expectEqual(@as(u64, 5), harness.runtime.views[0].widget_revision);
+    try std.testing.expectEqual(@as(u64, 6), harness.runtime.views[0].widget_revision);
 
     const cleared = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("", cleared.nodes[1].widget.text);
@@ -1305,4 +1305,111 @@ test "runtime applies text input to focused canvas search fields" {
         }
     }
     try std.testing.expect(saw_search_placeholder);
+}
+
+test "runtime click focus shows caret, ring, and blink; blur drops them" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-caret-affordances", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+
+    // EMPTY field: the caret must appear even though the click's
+    // computed selection equals the implied default (the short-circuit
+    // that used to leave a clicked empty field caretless).
+    const text_field = canvas.Widget{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(12, 16, 160, 36),
+        .placeholder = "Search",
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{text_field} }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .timestamp_ns = 1_000_000_000,
+        .x = 90,
+        .y = 34,
+    } });
+
+    // Pointer focus on an editable renders the full focus affordances
+    // (the :focus-visible contract text inputs have on every platform).
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focus_visible_id);
+
+    var saw_caret = false;
+    var saw_ring = false;
+    var display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    for (display_list.commands) |command| {
+        switch (command) {
+            .draw_line => |line| {
+                if (line.id == testCanvasWidgetPartId(2, 6)) saw_caret = true;
+            },
+            .stroke_rect => |stroke| {
+                if (stroke.id == testCanvasWidgetPartId(2, 7)) saw_ring = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_caret);
+    try std.testing.expect(saw_ring);
+
+    // The caret carries a LOOPING blink animation: still active far in
+    // the future (frame scheduling keeps sampling it), fading between
+    // full and zero opacity across a cycle.
+    const view = &harness.runtime.views[0];
+    try std.testing.expectEqual(testCanvasWidgetPartId(2, 6), view.canvas_widget_caret_blink_id);
+    try std.testing.expect(view.canvasRenderAnimationsActive(1_000_000_000));
+    try std.testing.expect(view.canvasRenderAnimationsActive(1_000_000_000 + 60 * std.time.ns_per_s));
+    var overrides: [4]canvas.CanvasRenderOverride = undefined;
+    // Solid through the post-activity hold...
+    const held = try view.sampleCanvasRenderAnimations(1_000_000_000 + 400 * std.time.ns_per_ms, &overrides);
+    try std.testing.expectEqual(@as(usize, 1), held.len);
+    try std.testing.expectEqual(@as(f32, 1), held[0].opacity.?);
+    // ...fully faded one sweep after the hold ends.
+    const faded = try view.sampleCanvasRenderAnimations(1_000_000_000 + 1000 * std.time.ns_per_ms, &overrides);
+    try std.testing.expectEqual(@as(usize, 1), faded.len);
+    try std.testing.expectEqual(@as(f32, 0), faded[0].opacity.?);
+
+    // View blur removes the blink animation and the focus affordances,
+    // so the view can go idle (the wasm preview's park condition).
+    view.focused = false;
+    _ = try harness.runtime.emitCanvasWidgetDisplayListWithStoredTokens(1, "canvas");
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), view.canvas_widget_caret_blink_id);
+    try std.testing.expectEqual(@as(usize, 0), view.canvas_render_animation_count);
+    saw_caret = false;
+    saw_ring = false;
+    display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    for (display_list.commands) |command| {
+        switch (command) {
+            .draw_line => |line| {
+                if (line.id == testCanvasWidgetPartId(2, 6)) saw_caret = true;
+            },
+            .stroke_rect => |stroke| {
+                if (stroke.id == testCanvasWidgetPartId(2, 7)) saw_ring = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(!saw_caret);
+    try std.testing.expect(!saw_ring);
 }

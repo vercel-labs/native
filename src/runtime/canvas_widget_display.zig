@@ -253,6 +253,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             var canvas_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined;
             const changes = try canvas.DisplayList.diff(self.views[view_index].canvasDisplayList(), display_list, &canvas_changes);
             try self.views[view_index].copyCanvasDisplayList(display_list);
+            reconcileCanvasWidgetCaretBlink(self, view_index);
             canvas_frame_helpers.RuntimeCanvasFrames(Runtime).invalidateForCanvasChanges(self, self.views[view_index].frame, changes);
             if (changes.len > 0) {
                 try canvas_frame_helpers.RuntimeCanvasFrames(Runtime).requestCanvasFrameForView(self, view_index);
@@ -260,8 +261,66 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             }
             return false;
         }
+
+        /// Keep the caret's looping blink animation in step with the
+        /// display list just emitted: while a focused editable draws its
+        /// caret, a ping-pong opacity animation on the caret command
+        /// fades it out and back (500 ms per sweep, solid right after
+        /// activity — every refresh re-arms the phase, so the caret
+        /// holds steady while the user types or moves it). When no caret
+        /// is showing the animation is removed so the view goes idle.
+        fn reconcileCanvasWidgetCaretBlink(self: *Runtime, view_index: usize) void {
+            const view = &self.views[view_index];
+            const desired = canvasWidgetCaretBlinkTarget(view);
+            const previous = view.canvas_widget_caret_blink_id;
+            const desired_id: canvas.ObjectId = if (desired) |target| target.command_id else 0;
+            if (previous != 0 and previous != desired_id) {
+                view.removeCanvasRenderAnimation(previous);
+                view.canvas_widget_caret_blink_id = 0;
+            }
+            const target = desired orelse return;
+            view.replaceCanvasRenderAnimation(.{
+                .id = target.command_id,
+                .start_ns = canvasRenderAnimationStartNsForView(view) + caret_blink_solid_ns,
+                .duration_ms = caret_blink_sweep_ms,
+                .easing = .standard,
+                .from_opacity = 1,
+                .to_opacity = 0,
+                .loop = true,
+            }) catch return;
+            view.replaceCanvasRenderAnimationDirtyBounds(target.command_id, target.bounds) catch {};
+            view.canvas_widget_caret_blink_id = target.command_id;
+        }
+
+        fn canvasWidgetCaretBlinkTarget(view: anytype) ?CanvasWidgetCaretBlinkTarget {
+            if (!view.focused) return null;
+            const focused_id = view.canvas_widget_focused_id;
+            if (focused_id == 0 or view.canvas_widget_focus_visible_id != focused_id) return null;
+            if (!view.canEditCanvasWidgetText(focused_id)) return null;
+            const node_index = view.canvasWidgetNodeIndexById(focused_id) orelse return null;
+            const widget = view.widget_layout_nodes[node_index].widget;
+            // Mirror the emitters' caret gate: a caret line is drawn only
+            // for a collapsed selection.
+            const selection = canvas.widgetTextSelectionRange(widget) orelse return null;
+            if (!selection.isCollapsed(widget.text.len)) return null;
+            return .{
+                .command_id = canvas.textCaretCommandId(widget.kind, widget.id),
+                .bounds = view.widget_layout_nodes[node_index].frame,
+            };
+        }
     };
 }
+
+const CanvasWidgetCaretBlinkTarget = struct {
+    command_id: canvas.ObjectId,
+    bounds: geometry.RectF,
+};
+
+/// One blink sweep (fade out or back) — a full cycle is two sweeps.
+const caret_blink_sweep_ms: u32 = 500;
+/// Post-activity hold before the first fade, the native caret shape:
+/// typing or moving the caret keeps it solid.
+const caret_blink_solid_ns: u64 = 500 * std.time.ns_per_ms;
 
 fn validateRuntimeViewParent(self: anytype, window_id: platform.WindowId) !void {
     const index = runtimeFindWindowIndexById(self, window_id) orelse return error.WindowNotFound;

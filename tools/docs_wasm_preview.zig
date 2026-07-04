@@ -65,6 +65,10 @@ const Preview = struct {
     /// so `preview_render` can report "clean" without touching pixels.
     rendered_revision: u64 = std.math.maxInt(u64),
     rendered_scale_bits: u32 = 0,
+    /// Whether render animations were still running at the last render:
+    /// one more frame is painted after they settle so the final sampled
+    /// pose (knob at rest, caret back at full opacity) lands on screen.
+    rendered_animating: bool = false,
 
     fn app(self: *Preview) native_sdk.App {
         return .{
@@ -80,13 +84,17 @@ fn tokensForScheme(dark: bool) canvas.DesignTokens {
 }
 
 /// Monotonic event clock, advanced by the page (`preview_set_now_ms`
-/// with the rAF/event timestamp). Only relative time matters: the
-/// runtime uses it for press/drag gesture recognition.
+/// with the rAF/event timestamp, i.e. `performance.now()`). This is the
+/// build's ONE time source: it stamps input and frame events (gesture
+/// recognition, render-animation start times) AND feeds the runtime
+/// clock seam, which otherwise reads 0 on freestanding — frozen time is
+/// dead time-driven rendering (knob travel, caret blink).
 var now_ns: u64 = 0;
 
 export fn preview_set_now_ms(ms: f64) void {
     if (!std.math.isFinite(ms) or ms <= 0) return;
     now_ns = @intFromFloat(ms * std.time.ns_per_ms);
+    native_sdk.setFreestandingMonotonicNanoseconds(now_ns);
 }
 
 // ------------------------------------------------------------- memory
@@ -125,6 +133,7 @@ export fn preview_create(name_ptr: ?[*]const u8, name_len: usize, dark: u32) ?*P
     self.frame_index = 0;
     self.rendered_revision = std.math.maxInt(u64);
     self.rendered_scale_bits = 0;
+    self.rendered_animating = false;
     native_sdk.Runtime.initAt(&self.runtime, .{ .platform = self.null_platform.platform() });
 
     installScene(self, scene) catch {
@@ -272,6 +281,21 @@ export fn preview_text(self: ?*Preview, text_ptr: ?[*]const u8, text_len: usize)
     });
 }
 
+/// Mirror of the canvas element's DOM focus. The engine view gains
+/// focus implicitly from pointer/key downs, but nothing in the input
+/// stream says "focus left", so a blurred preview would keep its focus
+/// ring, caret, and blink animation (and the rAF loop pumping) forever.
+/// The page calls this from the canvas blur/focus handlers; the re-emit
+/// drops or restores the focus affordances and the blink reconciler
+/// with them, so the loop parks after a blur.
+export fn preview_set_focused(self: ?*Preview, focused: u32) void {
+    const p = self orelse return;
+    const wants_focus = focused != 0;
+    if (p.runtime.views[0].focused == wants_focus) return;
+    p.runtime.views[0].focused = wants_focus;
+    _ = p.runtime.emitCanvasWidgetDisplayListWithStoredTokens(1, view_label) catch {};
+}
+
 /// Nonzero while an editable text widget owns focus — the page keys
 /// mobile keyboard / inputmode hints on it (same contract as the embed
 /// ABI's text-input state).
@@ -343,7 +367,13 @@ export fn preview_render(
     const normalized_scale: f32 = if (std.math.isFinite(scale) and scale > 0) scale else 1;
     const scale_bits: u32 = @bitCast(normalized_scale);
     const revision = p.runtime.views[0].canvas_revision;
-    if (revision == p.rendered_revision and scale_bits == p.rendered_scale_bits) return 0;
+    // Render animations (switch knob travel, caret blink) are sampled at
+    // render time and never touch the display-list revision, so the view
+    // stays dirty while any animation runs — plus ONE settling frame so
+    // the final pose is painted — and only then reports clean again.
+    const animating = p.runtime.views[0].canvasRenderAnimationsActive(now_ns);
+    const settling = !animating and p.rendered_animating;
+    if (!animating and !settling and revision == p.rendered_revision and scale_bits == p.rendered_scale_bits) return 0;
 
     _ = p.runtime.renderCanvasScreenshot(
         1,
@@ -354,6 +384,7 @@ export fn preview_render(
     ) catch return -2;
     p.rendered_revision = revision;
     p.rendered_scale_bits = scale_bits;
+    p.rendered_animating = animating;
     return 1;
 }
 

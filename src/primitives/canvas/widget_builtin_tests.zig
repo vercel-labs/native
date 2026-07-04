@@ -1661,6 +1661,36 @@ test "built-in component primitive widgets render distinct shadcn chrome" {
     try std.testing.expect(image_display_list.commands[4] == .stroke_rect);
 }
 
+test "avatar initials center on the circle: layout alignment is the ONE centering pass" {
+    // The draw's origin must be the frame start — the `.center`
+    // text_layout shifts the line inside `max_width`, and a pre-centered
+    // origin stacked a second offset on top, parking the initials right
+    // of the circle center (the docs preview regression).
+    const avatar = support.builtinComponentWidget(.avatar, .{
+        .id = 20,
+        .frame = geometry.RectF.init(100, 60, 40, 40),
+        .text = "ZN",
+    });
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try support.emitWidgetTree(&builder, avatar, .{});
+
+    const display_list = builder.displayList();
+    const draw_text = switch (display_list.commands[1]) {
+        .draw_text => |text| text,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f32, 100), draw_text.origin.x);
+
+    var lines: [2]support.TextLine = undefined;
+    const layout = try support.layoutTextRun(draw_text, draw_text.text_layout.?, &lines);
+    try std.testing.expectEqual(@as(usize, 1), layout.lines.len);
+    const line = layout.lines[0];
+    const ink_center = line.bounds.x + line.bounds.width / 2;
+    const frame_center = avatar.frame.x + avatar.frame.width / 2;
+    try std.testing.expectApproxEqAbs(frame_center, ink_center, 0.5);
+}
+
 test "design token overrides compose with built-in themes" {
     const overrides = DesignTokenOverrides{
         .colors = .{

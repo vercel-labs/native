@@ -475,6 +475,7 @@ pub const sampleCanvasRenderAnimations = render_model.sampleCanvasRenderAnimatio
 
 pub const emitWidgetLayout = widget_runtime.emitWidgetLayout;
 pub const toggleWidgetKnobCommandId = widget_runtime.toggleWidgetKnobCommandId;
+pub const textCaretCommandId = widget_runtime.textCaretCommandId;
 pub const textSelectionCommandId = widget_runtime.textSelectionCommandId;
 pub const toggleWidgetKnobTravel = widget_runtime.toggleWidgetKnobTravel;
 pub const widgetControlAimPoint = widget_runtime.widgetControlAimPoint;

@@ -17,11 +17,29 @@
 //!   durations and elapsed-time math.
 //!
 //! Unsupported targets (wasi) read 0 rather than failing — the same
-//! honest degradation the automation timestamps always had.
+//! honest degradation the automation timestamps always had. Freestanding
+//! targets have no OS clock at all, so an embedding host (the docs wasm
+//! preview) injects its monotonic time through
+//! `setFreestandingMonotonicNanoseconds` and both monotonic reads follow
+//! it; without a host feed they read 0, the old honest degradation.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const clock_module = @This();
+
+/// Host-fed monotonic time for `freestanding` builds (single-threaded by
+/// construction — wasm32-freestanding has no threads to race). Clamped
+/// monotone so a jittery host feed can never run the clock backwards.
+var freestanding_monotonic_ns: u64 = 0;
+
+/// Feed the freestanding monotonic clock (no-op on targets with a real
+/// OS clock). The wasm preview host calls this with the page's
+/// `performance.now()` before dispatching input and frame events, so
+/// runtime code reading the clock seam observes real elapsed time.
+pub fn setFreestandingMonotonicNanoseconds(ns: u64) void {
+    if (builtin.os.tag != .freestanding) return;
+    if (ns > freestanding_monotonic_ns) freestanding_monotonic_ns = ns;
+}
 
 /// Wall-clock nanoseconds since the Unix epoch (REALTIME). 0 when the
 /// target has no readable clock (wasi).
@@ -63,7 +81,8 @@ pub fn monotonicNanoseconds() u64 {
             const ticks: u128 = @intCast(@max(counter, 0));
             return @intCast(ticks * std.time.ns_per_s / @as(u128, @intCast(frequency)));
         },
-        .wasi, .freestanding, .emscripten => return 0,
+        .freestanding => return freestanding_monotonic_ns,
+        .wasi, .emscripten => return 0,
         else => {
             var ts: std.posix.timespec = undefined;
             switch (std.posix.errno(std.posix.system.clock_gettime(.MONOTONIC, &ts))) {

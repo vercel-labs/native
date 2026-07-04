@@ -88,7 +88,12 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             const current_selection = widget.text_selection orelse canvas.TextSelection.collapsed(widget.text.len);
             const anchor: ?usize = if (extend) current_selection.anchor else null;
             const next_selection = canvas.textSelectionForWidgetPoint(widget, point, anchor, self.widget_tokens) orelse return null;
-            if (canvasTextSelectionsEqual(current_selection, next_selection) and widget.text_composition == null) return null;
+            // A widget with NO stored selection must store one even when
+            // it matches the implied default: the emitters draw a caret
+            // only for a present selection, so short-circuiting here left
+            // a click into an empty field (or past the end of the text)
+            // caretless.
+            if (widget.text_selection != null and canvasTextSelectionsEqual(current_selection, next_selection) and widget.text_composition == null) return null;
 
             self.widget_layout_nodes[index].widget.text_selection = next_selection;
             self.widget_layout_nodes[index].widget.text_composition = null;

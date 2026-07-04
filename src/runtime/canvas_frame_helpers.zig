@@ -299,6 +299,9 @@ fn canvasAffinesEqual(a: canvas.Affine, b: canvas.Affine) bool {
 
 pub fn canvasRenderAnimationActive(animation: canvas.CanvasRenderAnimation, timestamp_ns: u64) bool {
     if (animation.id == 0 or animation.duration_ms == 0) return false;
+    // Looping animations (caret blink) never complete: they stay active
+    // until explicitly removed, so frame scheduling keeps sampling them.
+    if (animation.loop) return true;
     if (timestamp_ns <= animation.start_ns) return true;
     const duration_ns = @as(u64, animation.duration_ms) * 1_000_000;
     return timestamp_ns - animation.start_ns < duration_ns;

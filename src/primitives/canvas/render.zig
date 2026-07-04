@@ -112,6 +112,10 @@ pub const CanvasRenderAnimation = struct {
     to_opacity: ?f32 = null,
     from_transform: ?Affine = null,
     to_transform: ?Affine = null,
+    /// Ping-pong the from→to sweep forever (0→1→0→…, one sweep per
+    /// `duration_ms`): the caret-blink shape. A looping animation never
+    /// completes — it stays active until explicitly removed.
+    loop: bool = false,
 };
 
 pub fn applyRenderOverrides(commands: []RenderCommand, overrides: []const CanvasRenderOverride) ?geometry.RectF {
@@ -210,7 +214,10 @@ pub fn sampleCanvasRenderAnimations(animations: []const CanvasRenderAnimation, t
 }
 
 pub fn motionProgress(animation: CanvasRenderAnimation, timestamp_ns: u64) f32 {
-    const raw = rawMotionProgress(animation.start_ns, animation.duration_ms, timestamp_ns);
+    const raw = if (animation.loop)
+        pingPongMotionProgress(animation.start_ns, animation.duration_ms, timestamp_ns)
+    else
+        rawMotionProgress(animation.start_ns, animation.duration_ms, timestamp_ns);
     return easedMotionProgress(animation.easing, animation.spring, raw);
 }
 
@@ -221,6 +228,20 @@ fn rawMotionProgress(start_ns: u64, duration_ms: u32, timestamp_ns: u64) f32 {
     const elapsed_ns = timestamp_ns - start_ns;
     if (elapsed_ns >= duration_ns) return 1;
     return @as(f32, @floatFromInt(elapsed_ns)) / @as(f32, @floatFromInt(duration_ns));
+}
+
+/// Looping sweep: fold elapsed time into a 0→1→0 triangle, one from→to
+/// sweep per `duration_ms`. Easing applies to each sweep, so a standard
+/// ease reads as a smooth fade out and back — the caret-blink shape.
+fn pingPongMotionProgress(start_ns: u64, duration_ms: u32, timestamp_ns: u64) f32 {
+    if (duration_ms == 0) return 1;
+    if (timestamp_ns <= start_ns) return 0;
+    const duration_ns = @as(u64, duration_ms) * 1_000_000;
+    const phase_ns = (timestamp_ns - start_ns) % (duration_ns * 2);
+    const forward = phase_ns < duration_ns;
+    const sweep_ns = if (forward) phase_ns else phase_ns - duration_ns;
+    const sweep = @as(f32, @floatFromInt(sweep_ns)) / @as(f32, @floatFromInt(duration_ns));
+    return if (forward) sweep else 1 - sweep;
 }
 
 fn easedMotionProgress(easing: Easing, spring: SpringToken, progress: f32) f32 {

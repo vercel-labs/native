@@ -33,6 +33,7 @@ interface PreviewExports {
     modifiers: number,
   ): void;
   preview_text(handle: number, textPtr: number, textLen: number): void;
+  preview_set_focused(handle: number, focused: number): void;
   preview_text_input_active(handle: number): number;
   preview_frame(handle: number): void;
   preview_pixel_width(handle: number, scale: number): number;
@@ -137,6 +138,16 @@ export class LivePreview {
   textInputActive(): boolean {
     if (this.destroyed) return false;
     return this.exports.preview_text_input_active(this.handle) !== 0;
+  }
+
+  /**
+   * Mirror the canvas element's DOM focus into the engine view: a blur
+   * drops the focus ring, caret, and caret-blink animation (parking the
+   * render loop); a focus restores them for the retained focused widget.
+   */
+  setFocused(focused: boolean): void {
+    if (this.destroyed) return;
+    this.exports.preview_set_focused(this.handle, focused ? 1 : 0);
   }
 
   setTheme(dark: boolean): void {

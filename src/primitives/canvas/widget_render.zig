@@ -809,7 +809,12 @@ fn emitAvatarWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
             .id = widgetPartId(widget.id, 3),
             .font_id = tokens.typography.font_id,
             .size = text_size,
-            .origin = pixelSnapTextPoint(tokens, centeredTextOrigin(widget.frame, widget.text, text_size, tokens)),
+            // Layout alignment centers the line inside `max_width`, so
+            // the origin must be the frame START like every other
+            // center-aligned text_layout draw — a pre-centered origin
+            // here applied the centering offset twice and pushed the
+            // initials right of the circle center.
+            .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, 0)),
             .color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted),
             .text = widget.text,
             .text_layout = boundedTextLayout(widget.frame, text_size, 0, .center, .none, tokens),
@@ -1320,6 +1325,18 @@ fn chartCommandId(widget_id: ObjectId, seed: u64, series_index: usize, ordinal: 
 
 pub fn toggleWidgetKnobCommandId(id: ObjectId) ObjectId {
     return widgetPartId(id, 3);
+}
+
+/// The command id of an editable text widget's caret line — the part
+/// slot `emitTextFieldWidget` / `emitSearchFieldWidget` draw it under —
+/// so the runtime can target the caret with a blink render animation.
+/// 0 for kinds that never draw a caret.
+pub fn textCaretCommandId(kind: WidgetKind, id: ObjectId) ObjectId {
+    return switch (kind) {
+        .input, .text_field, .textarea => widgetPartId(id, 6),
+        .search_field, .combobox => widgetPartId(id, 11),
+        else => 0,
+    };
 }
 
 pub fn toggleWidgetKnobTravel(widget: Widget, tokens: DesignTokens) f32 {

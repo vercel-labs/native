@@ -62,6 +62,15 @@ const handled_keys = new Set([
   "end",
 ]);
 
+/**
+ * Cmd/Ctrl chords the engine consumes: select-all routes INTO the
+ * focused engine text field (the same synthetic key_down the desktop
+ * edit menu emits) and cut/copy/paste hit the engine's clipboard, so
+ * none of them may fall through to the page (Cmd+A selecting the whole
+ * docs page under a focused preview field).
+ */
+const handled_shortcut_keys = new Set(["a", "c", "x", "v"]);
+
 function engineKeyName(key: string): string {
   return key === " " ? "space" : key.toLowerCase();
 }
@@ -73,6 +82,16 @@ function engineModifiers(event: { metaKey: boolean; ctrlKey: boolean; altKey: bo
   if (event.altKey) mask |= 8;
   if (event.shiftKey) mask |= 16;
   return mask;
+}
+
+/** Whether the engine consumes this key event while the canvas is focused. */
+function engineConsumesKey(event: { key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean }): boolean {
+  const key = engineKeyName(event.key);
+  if ((event.metaKey || event.ctrlKey) && !event.altKey) {
+    return handled_shortcut_keys.has(key);
+  }
+  const printable = event.key.length === 1;
+  return handled_keys.has(key) || printable;
 }
 
 export function ComponentPreviewLive({
@@ -284,6 +303,13 @@ export function ComponentPreviewLive({
     [toLogical, wake],
   );
 
+  // The generated vocab records the 2x FILE pixel dimensions; the tile
+  // presents at the scene's logical size in CSS pixels (the size the
+  // engine laid it out at), with the canvas backing store scaled by
+  // devicePixelRatio in `blit`. Letting the raw pixel dimensions drive
+  // the CSS size rendered every control at double its native size.
+  const logicalWidth = width / 2;
+
   return (
     <div
       ref={containerRef}
@@ -293,7 +319,8 @@ export function ComponentPreviewLive({
       tabIndex={interactive && !live ? 0 : -1}
       role={interactive ? "button" : undefined}
       aria-label={interactive && !live ? `Load interactive preview: ${alt}` : undefined}
-      className="group/live relative overflow-hidden rounded-md border border-gray-alpha-400 bg-background-100 outline-none focus-visible:ring-2 focus-visible:ring-blue-700"
+      className="group/live relative mx-auto overflow-hidden rounded-md border border-gray-alpha-400 bg-background-100 outline-none focus-visible:ring-2 focus-visible:ring-blue-700"
+      style={{ maxWidth: `${logicalWidth}px` }}
       onPointerEnter={activate}
       onFocus={activate}
     >
@@ -314,7 +341,7 @@ export function ComponentPreviewLive({
         <canvas
           ref={canvasRef}
           role="application"
-          aria-label={`${alt} — live interactive preview`}
+          aria-label={`${alt} — interactive WASM preview`}
           aria-roledescription="Interactive component preview rendered by the Native SDK engine. Press Escape to leave."
           tabIndex={0}
           className={`absolute inset-0 h-full w-full cursor-default touch-none outline-none focus-visible:ring-2 focus-visible:ring-blue-700 ${
@@ -341,6 +368,18 @@ export function ComponentPreviewLive({
           onPointerLeave={(event) => {
             if (!pointerDownRef.current) sendPointer(PointerKind.move, event);
           }}
+          onFocus={() => {
+            const preview = previewRef.current;
+            if (!preview) return;
+            preview.setFocused(true);
+            wake();
+          }}
+          onBlur={() => {
+            const preview = previewRef.current;
+            if (!preview) return;
+            preview.setFocused(false);
+            wake();
+          }}
           onKeyDown={(event) => {
             const preview = previewRef.current;
             if (!preview) return;
@@ -348,23 +387,21 @@ export function ComponentPreviewLive({
               event.currentTarget.blur();
               return;
             }
-            const key = engineKeyName(event.key);
+            if (!engineConsumesKey(event)) return;
             const printable = event.key.length === 1 && !event.metaKey && !event.ctrlKey;
-            if (!handled_keys.has(key) && !printable) return;
             preview.setNow(performance.now());
-            preview.key(0, key, printable ? event.key : "", engineModifiers(event));
+            preview.key(0, engineKeyName(event.key), printable ? event.key : "", engineModifiers(event));
             wake();
             event.preventDefault();
           }}
           onKeyUp={(event) => {
             const preview = previewRef.current;
             if (!preview) return;
-            const key = engineKeyName(event.key);
-            const printable = event.key.length === 1 && !event.metaKey && !event.ctrlKey;
-            if (!handled_keys.has(key) && !printable) return;
+            if (!engineConsumesKey(event)) return;
             preview.setNow(performance.now());
-            preview.key(1, key, "", engineModifiers(event));
+            preview.key(1, engineKeyName(event.key), "", engineModifiers(event));
             wake();
+            event.preventDefault();
           }}
         />
       ) : null}
@@ -376,7 +413,7 @@ export function ComponentPreviewLive({
           }`}
         >
           <span className={`h-1.5 w-1.5 rounded-full ${live ? "bg-green-700" : "bg-gray-600"}`} />
-          {live ? "Live" : "Hover to interact"}
+          {live ? "WASM Preview" : "Hover to interact"}
         </span>
       ) : null}
     </div>

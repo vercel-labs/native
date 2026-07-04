@@ -191,6 +191,10 @@ pub fn toggleWidgetKnobCommandId(id: ObjectId) ObjectId {
     return widget_render.toggleWidgetKnobCommandId(id);
 }
 
+pub fn textCaretCommandId(kind: WidgetKind, id: ObjectId) ObjectId {
+    return widget_render.textCaretCommandId(kind, id);
+}
+
 pub fn toggleWidgetKnobTravel(widget: Widget, tokens: DesignTokens) f32 {
     return widget_render.toggleWidgetKnobTravel(widget, tokens);
 }
