@@ -517,11 +517,15 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
 
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return 0;
             if (self.views[index].kind != .gpu_surface or !self.views[index].focused) return 0;
+            // Deliberately NOT gated on a focused widget: a surface
+            // opened from a non-focusable trigger (a text crumb) floats
+            // with nothing focused, and Escape must still find it — the
+            // view method falls back to the topmost mounted anchored
+            // surface when the focus chain yields none.
             const focused_id = self.views[index].canvas_widget_focused_id;
-            if (focused_id == 0) return 0;
 
             const previous_cursor = self.views[index].canvas_widget_cursor;
-            const dismissal = try self.views[index].dismissCanvasWidgetSurfaceForFocusedTarget(focused_id) orelse return 0;
+            const dismissal = try self.views[index].dismissCanvasWidgetSurfaceFromEscape(focused_id) orelse return 0;
             if (previous_cursor != self.views[index].canvas_widget_cursor) try syncCanvasWidgetCursorForView(self, index);
             try invalidateForCanvasWidgetDirty(self, index, dismissal.dirty);
             return dismissal.id;

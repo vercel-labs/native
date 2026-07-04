@@ -65,6 +65,8 @@ native automate screenshot inbox-canvas
 native automate screenshot inbox-canvas 2
 native automate widget-action canvas 2 press
 native automate widget-click canvas 3
+native automate widget-hold canvas 3
+native automate widget-context-press canvas 3
 native automate widget-drag canvas 4 0.25 0.82
 native automate widget-wheel canvas 5 18
 native automate widget-key canvas tab
@@ -105,7 +107,7 @@ Semantics:
 4. Run `native automate list` to inspect window summaries.
 5. Run `native automate bridge '...'` for bridge round-trip checks.
 6. Use `native automate widget-action <view-label> <widget-id> <action> [value]` to exercise retained canvas widget actions. `set_text` routes through the SAME input path real typing uses (focus, select-all, then a text-input event), so a TEA app's `on_input` mirror receives the edits and model state stays consistent with the on-screen field — it is not a presentation-only write.
-7. Use `native automate widget-click <view-label> <widget-id>` to exercise pointer-style retained widget routing.
+7. Use `native automate widget-click <view-label> <widget-id>` to exercise pointer-style retained widget routing. `widget-hold <view-label> <widget-id>` drives a press-and-hold through the same path — pointer down, the reserved hold timer fired, then the suppressed release — so `on_hold` Msgs are live-drivable (a target without `on_hold` degrades to the click a real long press is). `widget-context-press <view-label> <widget-id>` is the secondary click: it presents the widget's context menu, or dispatches `on_hold` immediately when the route declares none.
 8. Use `native automate widget-drag <view-label> <widget-id> <start-x-ratio> <end-x-ratio> [start-y-ratio end-y-ratio]` for continuous pointer controls.
 9. Use `native automate widget-wheel <view-label> <widget-id> <delta-y>` for retained widget scroll input.
 10. Use `native automate widget-key <view-label> <key> [text]` for focused retained widget keyboard input. The key accepts modifier chords — `cmd+a`, `cmd+c`, `cmd+v`, `cmd+x`, `ctrl+shift+arrowleft` (`cmd` sets the primary shortcut modifier on every platform) — so select-all/copy/cut/paste and shift-extended selection are drivable; after a copy, widget lines in the snapshot show the live selection as `selection=a..b`, and the copied text lands on the real system clipboard (`pbpaste` on macOS).

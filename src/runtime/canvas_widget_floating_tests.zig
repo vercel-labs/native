@@ -155,6 +155,83 @@ test "runtime dismisses nearest canvas floating surface with escape" {
     try std.testing.expect(retained_after_dismiss.findCommandById(testCanvasWidgetPartId(4, 1)) != null);
 }
 
+test "runtime escape with no focused widget dismisses the topmost mounted anchored surface" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-escape-fallback", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(20, 30, 360, 220),
+    });
+
+    // Two anchored menus mounted at once (two crumb switchers open),
+    // nothing focused: the trigger was plain text and took no focus.
+    const first_menu = [_]canvas.Widget{.{
+        .id = 3,
+        .kind = .dropdown_menu,
+        .frame = geometry.RectF.init(8, 28, 120, 60),
+        .layout = .{ .anchor = .{} },
+    }};
+    const second_menu = [_]canvas.Widget{.{
+        .id = 5,
+        .kind = .dropdown_menu,
+        .frame = geometry.RectF.init(148, 28, 120, 60),
+        .layout = .{ .anchor = .{} },
+    }};
+    const crumbs = [_]canvas.Widget{
+        .{ .id = 2, .kind = .stack, .frame = geometry.RectF.init(8, 8, 120, 20), .children = &first_menu },
+        .{ .id = 4, .kind = .stack, .frame = geometry.RectF.init(148, 8, 120, 20), .children = &second_menu },
+    };
+    const root = canvas.Widget{
+        .id = 1,
+        .kind = .column,
+        .frame = geometry.RectF.init(0, 0, 360, 220),
+        .children = &crumbs,
+    };
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(root, root.frame, &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    try harness.runtime.focusView(1, "canvas");
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_focused_id);
+
+    const escape: platform.Event = .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "escape",
+    } };
+
+    // Topmost (last in tree order — the late z-pass paints it on top)
+    // dismisses first; the earlier surface stays.
+    try harness.runtime.dispatchPlatformEvent(app, escape);
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(5).?.widget.semantics.hidden);
+    try std.testing.expect(!retained.findById(3).?.widget.semantics.hidden);
+
+    // The next Escape finds the remaining mounted surface.
+    try harness.runtime.dispatchPlatformEvent(app, escape);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(3).?.widget.semantics.hidden);
+
+    // With nothing mounted, Escape dismisses nothing (no error, no
+    // stray invalidation-by-dismissal).
+    try harness.runtime.dispatchPlatformEvent(app, escape);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(!retained.findById(1).?.widget.semantics.hidden);
+}
+
 test "runtime dismisses canvas floating surfaces from automation and accessibility actions" {
     const TestApp = struct {
         fn app(self: *@This()) App {

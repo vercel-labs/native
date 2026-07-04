@@ -39,6 +39,15 @@ pub const canvas_label = "monitor-canvas";
 pub const window_width = view_mod.window_width;
 pub const window_height = view_mod.window_height;
 
+// The model-declared settings WINDOW (dev-2's SettingsView shape): the
+// gear chip dispatches `.toggle_settings`, `windows_fn` declares the
+// window while the flag is set, and its canvas renders
+// `view_mod.settingsView` from the same model as the main window.
+pub const settings_window_label = "settings";
+pub const settings_canvas_label = "settings-canvas";
+pub const settings_window_width: f32 = 360;
+pub const settings_window_height: f32 = 320;
+
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
 const shell_views = [_]native_sdk.ShellView{
     .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .role = "System monitor canvas", .accessibility_label = "System monitor", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
@@ -65,9 +74,37 @@ pub fn monitorOptions() MonitorApp.Options {
         .update_fx = update,
         .init_fx = boot,
         .view = rootView,
+        .windows_fn = monitorWindows,
+        .window_view = monitorWindowView,
         .tokens_fn = tokensFromModel,
         .on_appearance = onAppearance,
     };
+}
+
+/// The declared window set derives from the model: the settings window
+/// exists exactly while `settings_open` is set. The runtime reconciles
+/// after every dispatch — a Msg opens it, a Msg closes it, and the
+/// user's close button dispatches `.settings_closed` so the model
+/// agrees (keep the flag set to veto and it comes right back).
+fn monitorWindows(model: *const Model, scratch: *MonitorApp.WindowsScratch) []const MonitorApp.WindowDescriptor {
+    var count: usize = 0;
+    if (model.settings_open) {
+        scratch.windows[count] = .{
+            .label = settings_window_label,
+            .canvas_label = settings_canvas_label,
+            .title = "Monitor Settings",
+            .width = settings_window_width,
+            .height = settings_window_height,
+            .on_close = .settings_closed,
+        };
+        count += 1;
+    }
+    return scratch.windows[0..count];
+}
+
+fn monitorWindowView(ui: *MonitorApp.Ui, model: *const Model, window_label: []const u8) MonitorApp.Ui.Node {
+    std.debug.assert(std.mem.eql(u8, window_label, settings_window_label));
+    return view_mod.settingsView(ui, model);
 }
 
 /// Design tokens derive from the model's theme preference plus the

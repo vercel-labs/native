@@ -98,19 +98,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
 
         pub fn dispatchAutomationWidgetClick(self: *Runtime, app: runtime_api.App(Runtime), target: AutomationWidgetTarget) anyerror!void {
             const view_index = try automationWidgetTargetViewIndex(self, target);
-            const layout = self.views[view_index].widgetLayoutTree();
-            if (!canvasWidgetInteractionTargetExists(layout, target.id)) return error.InvalidCommand;
-            const node = layout.findById(target.id) orelse return error.InvalidCommand;
-            const bounds = node.frame.normalized();
-            if (bounds.isEmpty()) return error.InvalidCommand;
-            // Aim where the control actually renders, not the geometric
-            // center: a stretched selection control (switch as a bare
-            // column child) draws its glyph at the left edge of a wide
-            // frame, and the frame's center can sit under an overlapping
-            // later-painted sibling — a real user clicks the knob.
-            var aim_widget = node.widget;
-            aim_widget.frame = node.frame;
-            const point = canvas.widgetControlAimPoint(aim_widget, self.views[view_index].widget_tokens);
+            const point = try automationWidgetAimPoint(self, view_index, target.id);
             const window_id = self.views[view_index].window_id;
             const label = self.views[view_index].label;
             const timestamp_ns = automationInputTimestampNs();
@@ -135,6 +123,103 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             } });
         }
 
+        /// Drive a press-and-hold gesture through the real pointer+timer
+        /// path: pointer-down at the control's aim point (the routed
+        /// pointer event arms the app's hold timer exactly as a live
+        /// press does), the reserved hold timer fired as the platform
+        /// would fire it at ~350 ms, then the release — which the fired
+        /// hold suppresses, one gesture one Msg. Automation is
+        /// time-warped, never path-warped: every step is the event a
+        /// live run dispatches. On a target without a hold handler
+        /// nothing arms, the fire no-ops, and the release presses — the
+        /// same click a real user's long-press-and-release produces.
+        pub fn dispatchAutomationWidgetHold(self: *Runtime, app: runtime_api.App(Runtime), target: AutomationWidgetTarget) anyerror!void {
+            const view_index = try automationWidgetTargetViewIndex(self, target);
+            const point = try automationWidgetAimPoint(self, view_index, target.id);
+            const window_id = self.views[view_index].window_id;
+            const label = self.views[view_index].label;
+            const timestamp_ns = automationInputTimestampNs();
+
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pointer_down,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+                .button = 0,
+            } });
+            try self.dispatchPlatformEvent(app, .{ .timer = .{
+                .id = platform.press_hold_timer_id,
+                .timestamp_ns = timestamp_ns,
+            } });
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pointer_up,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+                .button = 0,
+            } });
+            // A fired hold's release deliberately does not cancel the
+            // platform timer the down armed (the app never cancels a
+            // timer that already fired); the wall-clock fire would be a
+            // harmless no-op, but cancel it so a live run leaves no
+            // pending one-shot behind.
+            self.cancelTimer(platform.press_hold_timer_id) catch {};
+        }
+
+        /// Drive a secondary click (right/ctrl-click) as the full
+        /// button-1 stream a real one produces: the runtime resolves a
+        /// context menu on the down (app-declared items, editable-text
+        /// and selected-text defaults) and otherwise dispatches the
+        /// context-press event — the desktop press-and-hold alternative
+        /// whose press target's `on_hold` Msg dispatches immediately.
+        pub fn dispatchAutomationWidgetContextPress(self: *Runtime, app: runtime_api.App(Runtime), target: AutomationWidgetTarget) anyerror!void {
+            const view_index = try automationWidgetTargetViewIndex(self, target);
+            const point = try automationWidgetAimPoint(self, view_index, target.id);
+            const window_id = self.views[view_index].window_id;
+            const label = self.views[view_index].label;
+            const timestamp_ns = automationInputTimestampNs();
+
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pointer_down,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+                .button = 1,
+            } });
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pointer_up,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+                .button = 1,
+            } });
+        }
+
+        /// Where a pointer verb lands on a widget: the control's aim
+        /// point, not the geometric center — a stretched selection
+        /// control (switch as a bare column child) draws its glyph at
+        /// the left edge of a wide frame, and the frame's center can sit
+        /// under an overlapping later-painted sibling. A real user
+        /// clicks the knob.
+        fn automationWidgetAimPoint(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!geometry.PointF {
+            const layout = self.views[view_index].widgetLayoutTree();
+            if (!canvasWidgetInteractionTargetExists(layout, id)) return error.InvalidCommand;
+            const node = layout.findById(id) orelse return error.InvalidCommand;
+            const bounds = node.frame.normalized();
+            if (bounds.isEmpty()) return error.InvalidCommand;
+            var aim_widget = node.widget;
+            aim_widget.frame = node.frame;
+            return canvas.widgetControlAimPoint(aim_widget, self.views[view_index].widget_tokens);
+        }
+
         pub fn dispatchAutomationWidgetWheel(self: *Runtime, app: runtime_api.App(Runtime), wheel: AutomationWidgetWheel) anyerror!void {
             const view_index = try automationWidgetTargetViewIndex(self, wheel.target);
             const layout = self.views[view_index].widgetLayoutTree();
@@ -156,10 +241,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         }
 
         pub fn dispatchAutomationWidgetKeyInput(self: *Runtime, app: runtime_api.App(Runtime), key: AutomationWidgetKey) anyerror!void {
-            try validateRuntimeViewParent(self, 1);
-            try validateViewLabel(key.view_label);
-            const view_index = runtimeFindViewIndex(self, 1, key.view_label) orelse return error.ViewNotFound;
-            if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
+            const view_index = try automationGpuSurfaceViewIndexByLabel(self, key.view_label);
             try self.focusView(self.views[view_index].window_id, self.views[view_index].label);
             try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = self.views[view_index].window_id,
@@ -406,21 +488,33 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         }
 
         fn automationWidgetActionViewIndex(self: *Runtime, action: AutomationWidgetAction) anyerror!usize {
-            try validateRuntimeViewParent(self, 1);
-            try validateViewLabel(action.view_label);
-            const view_index = runtimeFindViewIndex(self, 1, action.view_label) orelse return error.ViewNotFound;
-            if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
+            const view_index = try automationGpuSurfaceViewIndexByLabel(self, action.view_label);
             const actions = canvasWidgetActionsForId(self, view_index, action.id) orelse return error.InvalidCommand;
             if (!automationWidgetActionSupported(actions, action.action)) return error.InvalidCommand;
             return view_index;
         }
 
         fn automationWidgetTargetViewIndex(self: *Runtime, target: AutomationWidgetTarget) anyerror!usize {
-            try validateRuntimeViewParent(self, 1);
-            try validateViewLabel(target.view_label);
-            const view_index = runtimeFindViewIndex(self, 1, target.view_label) orelse return error.ViewNotFound;
-            if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
-            return view_index;
+            return automationGpuSurfaceViewIndexByLabel(self, target.view_label);
+        }
+
+        /// Resolve a widget verb's gpu_surface view by label across ALL
+        /// open windows — snapshots enumerate every window's views, so
+        /// the verbs must reach them too (a model-declared settings
+        /// window's canvas is as drivable as the main one). Labels are
+        /// the verb's whole address; `UiApp` keeps canvas labels unique
+        /// per window, and for hand-rolled duplicates the first open
+        /// match in window order wins, deterministically.
+        pub fn automationGpuSurfaceViewIndexByLabel(self: *Runtime, view_label: []const u8) anyerror!usize {
+            try validateViewLabel(view_label);
+            for (self.views[0..self.view_count], 0..) |*view, index| {
+                if (!view.open or view.kind != .gpu_surface) continue;
+                if (!std.mem.eql(u8, view.label, view_label)) continue;
+                const window_index = runtimeFindWindowIndexById(self, view.window_id) orelse continue;
+                if (!self.windows[window_index].info.open) continue;
+                return index;
+            }
+            return error.ViewNotFound;
         }
 
         fn CanvasWidgetDisplayMethods() type {
@@ -431,11 +525,6 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             return runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime);
         }
     };
-}
-
-fn validateRuntimeViewParent(self: anytype, window_id: platform.WindowId) !void {
-    const index = runtimeFindWindowIndexById(self, window_id) orelse return error.WindowNotFound;
-    if (!self.windows[index].info.open) return error.WindowNotFound;
 }
 
 fn runtimeFindWindowIndexById(self: anytype, id: platform.WindowId) ?usize {

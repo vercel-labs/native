@@ -14,9 +14,10 @@ pub const max_command_bytes: usize = 16 * 1024 + 64;
 ///
 /// History: 1 = the first stamped version (post-rename dropbox
 /// `.zig-cache/native-sdk-automation`, publisher_pid liveness, stdout
-/// payloads). Snapshots without a `protocol=` field predate the
-/// handshake entirely.
-pub const version: u32 = 1;
+/// payloads). 2 = the gesture verbs (`widget-hold`,
+/// `widget-context-press`) and per-window snapshot view/widget scoping.
+/// Snapshots without a `protocol=` field predate the handshake entirely.
+pub const version: u32 = 2;
 
 pub const Error = error{
     InvalidCommand,
@@ -32,6 +33,8 @@ pub const Action = enum {
     native_command,
     widget_action,
     widget_click,
+    widget_hold,
+    widget_context_press,
     widget_drag,
     widget_wheel,
     widget_key,
@@ -61,6 +64,8 @@ pub const Command = struct {
         if (std.mem.eql(u8, action_text, "native-command") and value.len > 0) return .{ .action = .native_command, .value = value };
         if (std.mem.eql(u8, action_text, "widget-action") and value.len > 0) return .{ .action = .widget_action, .value = value };
         if (std.mem.eql(u8, action_text, "widget-click") and value.len > 0) return .{ .action = .widget_click, .value = value };
+        if (std.mem.eql(u8, action_text, "widget-hold") and value.len > 0) return .{ .action = .widget_hold, .value = value };
+        if (std.mem.eql(u8, action_text, "widget-context-press") and value.len > 0) return .{ .action = .widget_context_press, .value = value };
         if (std.mem.eql(u8, action_text, "widget-drag") and value.len > 0) return .{ .action = .widget_drag, .value = value };
         if (std.mem.eql(u8, action_text, "widget-wheel") and value.len > 0) return .{ .action = .widget_wheel, .value = value };
         if (std.mem.eql(u8, action_text, "widget-key") and value.len > 0) return .{ .action = .widget_key, .value = value };
@@ -132,6 +137,14 @@ test "commands parse reload and wait" {
     const widget_click = try Command.parse("widget-click canvas 2");
     try std.testing.expectEqual(Action.widget_click, widget_click.action);
     try std.testing.expectEqualStrings("canvas 2", widget_click.value);
+    const widget_hold = try Command.parse("widget-hold canvas 2");
+    try std.testing.expectEqual(Action.widget_hold, widget_hold.action);
+    try std.testing.expectEqualStrings("canvas 2", widget_hold.value);
+    try std.testing.expectError(error.InvalidCommand, Command.parse("widget-hold"));
+    const widget_context_press = try Command.parse("widget-context-press canvas 2");
+    try std.testing.expectEqual(Action.widget_context_press, widget_context_press.action);
+    try std.testing.expectEqualStrings("canvas 2", widget_context_press.value);
+    try std.testing.expectError(error.InvalidCommand, Command.parse("widget-context-press"));
     const widget_drag = try Command.parse("widget-drag canvas 2 0.2 0.8");
     try std.testing.expectEqual(Action.widget_drag, widget_drag.action);
     try std.testing.expectEqualStrings("canvas 2 0.2 0.8", widget_drag.value);

@@ -206,7 +206,46 @@ fn toolbarView(ui: *Ui, model: *const Model) Ui.Node {
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Sort"),
         sortChips(ui, model),
         sortDirectionIcon(ui, model),
+        iconChip(ui, "settings", "Settings", .toggle_settings, "Open settings window"),
     });
+}
+
+// ------------------------------------------------- settings window view
+
+/// The settings WINDOW's whole canvas: a model-declared secondary
+/// window (`windows_fn` declares it while `settings_open` is set), so
+/// this view rebuilds from the same model as the main canvas — picking
+/// a theme here restyles both windows on the same dispatch.
+pub fn settingsView(ui: *Ui, model: *const Model) Ui.Node {
+    return ui.column(.{
+        .grow = 1,
+        .padding = 20,
+        .gap = 14,
+        .style_tokens = .{ .background = .background },
+        .semantics = .{ .label = "Settings window" },
+    }, .{
+        ui.paragraph(.{ .semantics = .{ .label = "Settings title" } }, &.{
+            .{ .text = "Settings", .weight = .bold, .scale = 1.3 },
+        }),
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Theme"),
+        ui.el(.toggle_group, .{ .gap = 2, .semantics = .{ .label = "Theme preference" } }, .{
+            themeChoice(ui, model, .auto, "Auto"),
+            themeChoice(ui, model, .light, "Light"),
+            themeChoice(ui, model, .dark, "Dark"),
+        }),
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Sampling"),
+        samplingChip(ui, model),
+        ui.spacer(1),
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Close this window (or press its close button) to keep monitoring."),
+    });
+}
+
+fn themeChoice(ui: *Ui, model: *const Model, pref: model_mod.ThemePref, label: []const u8) Ui.Node {
+    return ui.el(.toggle_button, .{
+        .selected = model.theme_pref == pref,
+        .on_toggle = Msg{ .set_theme = pref },
+        .semantics = .{ .label = label },
+    }, .{ui.text(.{ .size = .sm }, label)});
 }
 
 /// Pause/resume: a pressable panel pairing the play/pause vector icon

@@ -42,12 +42,26 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
         }
 
         pub fn createWindowWithSourceMode(self: *Runtime, options: platform.WindowCreateOptions, source_reloads_from_app: bool, source_policy: WindowSourcePolicy) anyerror!platform.WindowInfo {
-            const source = options.source orelse self.loaded_source orelse switch (source_policy) {
-                .require_source => return error.MissingWindowSource,
-                .allow_source_less => null,
+            const source: ?platform.WebViewSource = switch (source_policy) {
+                .never_source => null,
+                .require_source => options.source orelse self.loaded_source orelse return error.MissingWindowSource,
+                .allow_source_less => options.source orelse self.loaded_source,
             };
-            const id = if (options.id != 0) options.id else Self.allocateWindowId(self);
             const label = if (options.label.len > 0) options.label else return error.InvalidWindowOptions;
+            // A CLOSED window releases its label (and id) for
+            // re-creation: model-driven windows open, close, and reopen
+            // under one stable label, and the retained slot of a closed
+            // window must not brick the reopen with a duplicate error.
+            // Open windows still collide loudly below.
+            if (Self.findWindowIndexByLabel(self, label)) |index| {
+                if (!self.windows[index].info.open) Self.removeWindowAt(self, index);
+            }
+            if (options.id != 0) {
+                if (Self.findWindowIndexById(self, options.id)) |index| {
+                    if (!self.windows[index].info.open) Self.removeWindowAt(self, index);
+                }
+            }
+            const id = if (options.id != 0) options.id else Self.allocateWindowId(self);
             try validateWindowFrame(options.default_frame);
             if (Self.findWindowIndexById(self, id) != null) return error.DuplicateWindowId;
             if (Self.findWindowIndexByLabel(self, label) != null) return error.DuplicateWindowLabel;

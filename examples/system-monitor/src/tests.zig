@@ -734,6 +734,90 @@ fn snapshotByName(snapshot: native_sdk.automation.snapshot.Input, name: []const 
     return null;
 }
 
+// ------------------------------------------------------- settings window
+
+fn settingsWindowInfo(live: LiveApp) ?native_sdk.WindowInfo {
+    var buffer: [16]native_sdk.WindowInfo = undefined;
+    for (live.harness.runtime.listWindows(&buffer)) |info| {
+        if (std.mem.eql(u8, info.label, main.settings_window_label)) return info;
+    }
+    return null;
+}
+
+fn settingsWidgetIdByLabel(live: LiveApp, window_id: u64, label: []const u8) !?canvas.ObjectId {
+    const layout = try live.harness.runtime.canvasWidgetLayout(window_id, main.settings_canvas_label);
+    for (layout.nodes) |node| {
+        if (std.mem.eql(u8, node.widget.semantics.label, label)) return node.widget.id;
+    }
+    return null;
+}
+
+test "the settings window opens by Msg, drives the theme from its own canvas, and round-trips close" {
+    if (!sampler.supported) return error.SkipZigTest;
+    const live = try LiveApp.start();
+    defer live.stop();
+    const model = &live.app_state.model;
+    try testing.expect(settingsWindowInfo(live) == null);
+
+    // Open through the REAL press path: the toolbar gear chip via the
+    // automation widget verb.
+    var snapshot = live.harness.runtime.automationSnapshot("System Monitor");
+    const gear = snapshotByName(snapshot, "Open settings window").?;
+    var command_buffer: [96]u8 = undefined;
+    const open_press = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ main.canvas_label, gear.id });
+    try live.harness.runtime.dispatchAutomationCommand(live.app, open_press);
+    try testing.expect(model.settings_open);
+    const info = settingsWindowInfo(live) orelse return error.TestUnexpectedResult;
+    try testing.expect(info.open);
+    try testing.expectEqualStrings("Monitor Settings", info.title);
+
+    // The settings canvas installs on its own first frame.
+    try live.harness.runtime.dispatchPlatformEvent(live.app, .{ .gpu_surface_frame = .{
+        .window_id = info.id,
+        .label = main.settings_canvas_label,
+        .size = geometry.SizeF.init(main.settings_window_width, main.settings_window_height),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 2_000_000,
+        .nonblank = true,
+    } });
+
+    // Pick the dark theme INSIDE the settings window, by automation
+    // verb addressed at the settings canvas label: one dispatch
+    // restyles both windows (same model, same tokens_fn).
+    const dark_id = (try settingsWidgetIdByLabel(live, info.id, "Dark")) orelse return error.TestUnexpectedResult;
+    const dark_press = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ main.settings_canvas_label, dark_id });
+    try live.harness.runtime.dispatchAutomationCommand(live.app, dark_press);
+    try testing.expectEqual(model_mod.ThemePref.dark, model.theme_pref);
+    try testing.expectEqualDeep(theme.dark_colors, (try live.harness.runtime.canvasWidgetDesignTokens(1, main.canvas_label)).colors);
+    try testing.expectEqualDeep(theme.dark_colors, (try live.harness.runtime.canvasWidgetDesignTokens(info.id, main.settings_canvas_label)).colors);
+
+    // The snapshot enumerates both windows.
+    snapshot = live.harness.runtime.automationSnapshot("System Monitor");
+    try testing.expectEqual(@as(usize, 2), snapshot.windows.len);
+
+    // Close by Msg: the model stops declaring the window and the
+    // reconcile closes it — no user-close Msg fires.
+    const close_press = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ main.canvas_label, gear.id });
+    try live.harness.runtime.dispatchAutomationCommand(live.app, close_press);
+    try testing.expect(!model.settings_open);
+    const closed = settingsWindowInfo(live);
+    try testing.expect(closed == null or !closed.?.open);
+
+    // Reopen (same label), then close as the USER (the fake host tears
+    // the window down like the real delegates do and reports it gone):
+    // the open=false event dispatches `.settings_closed` and the model
+    // clears its flag — the window stays closed.
+    try live.harness.runtime.dispatchAutomationCommand(live.app, open_press);
+    try testing.expect(model.settings_open);
+    const reopened = settingsWindowInfo(live) orelse return error.TestUnexpectedResult;
+    const close_event = live.harness.null_platform.userCloseWindow(reopened.id).?;
+    try live.harness.runtime.dispatchPlatformEvent(live.app, close_event);
+    try testing.expect(!model.settings_open);
+    const user_closed = settingsWindowInfo(live);
+    try testing.expect(user_closed == null or !user_closed.?.open);
+}
+
 // -------------------------------------------------------- showcase shots
 
 // Env-gated screenshot renderer (skipped everywhere by default, never in

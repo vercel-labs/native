@@ -97,9 +97,21 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
 
         pub fn closeWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
             const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
-            try self.options.platform.services.closeWindow(window_id);
+            // Flip the runtime flag BEFORE the platform call: hosts that
+            // run the close delegate synchronously (macOS `performClose`
+            // fires `windowWillClose` inline) echo a frame-changed
+            // open=false event, and the open->closed TRANSITION — which
+            // dispatches the `window_closed` app event — must stay
+            // reserved for closes the app did not initiate.
+            const was_open = self.windows[index].info.open;
+            const was_focused = self.windows[index].info.focused;
             self.windows[index].info.open = false;
             self.windows[index].info.focused = false;
+            self.options.platform.services.closeWindow(window_id) catch |err| {
+                self.windows[index].info.open = was_open;
+                self.windows[index].info.focused = was_focused;
+                return err;
+            };
             Self.removeWindowRuntimeViews(self, window_id);
             self.invalidated = true;
         }
@@ -113,7 +125,20 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             return Self.createShellWindowWithSourceMode(self, shell_window, source, source == null);
         }
 
+        /// A shell window that NEVER hosts the app webview source, even
+        /// when one is loaded: the shape for model-declared canvas
+        /// windows (UiApp secondary windows), whose whole content is
+        /// their gpu_surface view — a hybrid app's loaded source must
+        /// not silently materialize a webview under the canvas.
+        pub fn createSourcelessShellWindow(self: *Runtime, shell_window: app_manifest.ShellWindow) anyerror!platform.WindowInfo {
+            return Self.createShellWindowWithSourcePolicy(self, shell_window, null, false, .never_source);
+        }
+
         pub fn createShellWindowWithSourceMode(self: *Runtime, shell_window: app_manifest.ShellWindow, source: ?platform.WebViewSource, source_reloads_from_app: bool) anyerror!platform.WindowInfo {
+            return Self.createShellWindowWithSourcePolicy(self, shell_window, source, source_reloads_from_app, .allow_source_less);
+        }
+
+        pub fn createShellWindowWithSourcePolicy(self: *Runtime, shell_window: app_manifest.ShellWindow, source: ?platform.WebViewSource, source_reloads_from_app: bool, source_policy: runtime_state.WindowSourcePolicy) anyerror!platform.WindowInfo {
             const window_frame = geometry.RectF.init(
                 shell_window.x orelse 0,
                 shell_window.y orelse 0,
@@ -127,8 +152,9 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
                 .resizable = shell_window.resizable,
                 .restore_state = shell_window.restore_state,
                 .restore_policy = shellRestorePolicy(shell_window.restore_policy),
+                .titlebar = shell_layout.shellTitlebarStyle(shell_window.titlebar),
                 .source = source,
-            }, source_reloads_from_app, .allow_source_less);
+            }, source_reloads_from_app, source_policy);
             errdefer Self.closeWindow(self, info.id) catch {};
 
             try Self.createShellViews(self, info.id, shell_window.views, Self.shellBoundsForWindow(self, info.id));

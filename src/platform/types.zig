@@ -316,6 +316,19 @@ pub const WindowRestorePolicy = enum {
     center_on_primary,
 };
 
+/// How the window draws its titlebar chrome.
+/// `.hidden_inset` is the VS Code/Linear shape: content extends under a
+/// transparent titlebar with the title hidden (macOS:
+/// `NSWindowStyleMaskFullSizeContentView` + `titlebarAppearsTransparent`
+/// + `titleVisibility` hidden — the traffic lights stay). Drag regions,
+/// traffic-light-aware header layout, and double-click-zoom behaviors
+/// are deliberately NOT part of this channel. Platforms without the
+/// concept ignore it (standard chrome).
+pub const WindowTitlebarStyle = enum {
+    standard,
+    hidden_inset,
+};
+
 pub const WindowOptions = struct {
     id: WindowId = 1,
     label: []const u8 = "main",
@@ -324,6 +337,7 @@ pub const WindowOptions = struct {
     resizable: bool = true,
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
+    titlebar: WindowTitlebarStyle = .standard,
 
     pub fn resolvedTitle(self: WindowOptions, app_name: []const u8) []const u8 {
         return if (self.title.len > 0) self.title else app_name;
@@ -372,6 +386,7 @@ pub const WindowCreateOptions = struct {
     resizable: bool = true,
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
+    titlebar: WindowTitlebarStyle = .standard,
     source: ?WebViewSource = null,
 
     pub fn windowOptions(self: WindowCreateOptions, id: WindowId, label: []const u8) WindowOptions {
@@ -383,6 +398,7 @@ pub const WindowCreateOptions = struct {
             .resizable = self.resizable,
             .restore_state = self.restore_state,
             .restore_policy = self.restore_policy,
+            .titlebar = self.titlebar,
         };
     }
 };
@@ -969,6 +985,14 @@ pub const MenuCommandEvent = struct {
 /// internal timers (for example the ui-app markup watch poll). Application
 /// code must pick ids below this value when calling `startTimer`.
 pub const reserved_timer_id_base: u64 = 0xffff_ffff_0000_0000;
+
+/// Reserved framework timer id for the press-and-hold gesture
+/// (`ElementOptions.on_hold`): the ui-app layer arms it on pointer-down
+/// over a widget with a hold handler and dispatches the hold Msg when it
+/// fires first. Defined at the platform layer so the automation dispatch
+/// can fire the SAME timer a real gesture arms (`widget-hold`) without
+/// knowing the app type.
+pub const press_hold_timer_id: u64 = reserved_timer_id_base | 0x2e70_601d;
 
 pub const TimerEvent = struct {
     id: u64,

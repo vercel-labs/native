@@ -19,6 +19,10 @@ Each charted stat keeps 60 samples (a 2-minute window at the 2 s cadence), shift
 
 Right/ctrl-click a table row for the native context menu. **Terminate (SIGTERM)…** never signals directly: it opens a confirmation dialog naming the process and pid (copied into the model at request time, so a later sample can never retarget a confirmation you are reading). Confirming spawns exactly `/bin/kill -TERM <pid>` — the polite, catchable request. There is no SIGKILL anywhere in this app. A refused kill (not your process) lands as a status note, never a crash. The scrim cancels on click; the dialog body absorbs presses so a click inside it never falls through to the cancel.
 
+## The settings window (model-declared)
+
+The toolbar gear opens **Settings** in its own window — the model-declared window pattern: `windows_fn` declares the window descriptor while `model.settings_open` is set, `window_view` renders `settingsView` (theme preference + sampling pause) from the same model as the main canvas, so picking a theme there restyles both windows on one dispatch. Close it by the gear (a Msg stops declaring it), or with the window's close button — the platform close dispatches `.settings_closed` and the model clears its flag. Automation drives it like any canvas: its widgets are in the snapshot and `widget-click settings-canvas <id>` works while it is open.
+
 ## Authoring split (markup-first)
 
 - `src/header.zml` — brand, live/paused status line, model-driven exclusive theme chips.

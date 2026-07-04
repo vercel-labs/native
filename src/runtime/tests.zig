@@ -8,6 +8,7 @@ test {
     _ = @import("canvas_widget_event_tests.zig");
     _ = @import("ui_app_tests.zig");
     _ = @import("ui_app_huge_model_tests.zig");
+    _ = @import("ui_app_window_tests.zig");
     _ = @import("canvas_image_tests.zig");
     _ = @import("effects_tests.zig");
     _ = @import("effects_fetch_tests.zig");

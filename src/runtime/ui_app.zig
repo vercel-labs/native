@@ -11,6 +11,14 @@
 //! and hand them to `UiApp` with a shell scene containing one `gpu_surface`
 //! view. Shell command events can map into messages through `on_command`.
 //!
+//! Secondary windows are model-declared: `Options.windows_fn` returns the
+//! window descriptors that should exist right now (presence IS
+//! visibility), `Options.window_view` builds each declared window's
+//! canvas tree, the runtime reconciles declared against live windows
+//! after every rebuild, input from any window dispatches Msgs with its
+//! window identity, and a user close dispatches the descriptor's
+//! `on_close` Msg — the dismissal precedent, applied to windows.
+//!
 //! Markup apps choose an engine per build: `Options.markup` runs the
 //! runtime parser/interpreter (dev, hot reload), while
 //! `canvas.CompiledMarkupView(Model, Msg, source).build` handed to
@@ -143,6 +151,64 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             items: [platform.max_tray_items]platform.TrayMenuItem = undefined,
         };
 
+        /// Budget for model-declared secondary windows (see
+        /// `canvas_limits.max_ui_app_windows` for the sizing rationale).
+        pub const max_ui_windows: usize = canvas_limits.max_ui_app_windows;
+
+        /// A model-declared secondary window (`Options.windows_fn`):
+        /// settings, about, inspectors. Identity is `label`; PRESENCE in
+        /// the returned slice is visibility — the runtime reconciles the
+        /// declared set against live windows after every rebuild,
+        /// creating the missing and closing the no-longer-declared.
+        /// There is deliberately no `visible` flag: the platform window
+        /// channel is create/focus/close with no hide, so a
+        /// hidden-but-open descriptor would lie about what exists. The
+        /// model bool that `windows_fn` consults IS the visibility
+        /// channel, exactly like a dismissible surface's open flag.
+        pub const WindowDescriptor = struct {
+            /// Window label: the stable identity across rebuilds, and
+            /// the label automation snapshots print for the window.
+            label: []const u8,
+            /// The gpu_surface view label inside this window:
+            /// `window_view` builds its tree, input events route back
+            /// through it, and automation verbs address it. Must be
+            /// unique across the app — distinct from the main
+            /// `canvas_label` and every other descriptor's.
+            canvas_label: []const u8,
+            /// Window title, applied at creation (the platform window
+            /// channel has no retitle; re-create under a new label for a
+            /// different title).
+            title: []const u8 = "",
+            width: f32 = 480,
+            height: f32 = 360,
+            x: ?f32 = null,
+            y: ?f32 = null,
+            resizable: bool = true,
+            /// Titlebar chrome: `.hidden_inset` extends content under a
+            /// transparent titlebar with the title hidden (macOS keeps
+            /// the traffic lights) — the VS Code/Linear pattern. Drag
+            /// regions and traffic-light-aware header layout are the
+            /// dedicated titlebar-control channel's scope, not this
+            /// field's. Platforms without the concept keep standard
+            /// chrome.
+            titlebar: app_manifest.WindowTitlebarStyle = .standard,
+            /// Msg dispatched when the USER closes the window (never for
+            /// a reconcile close the model itself initiated). The
+            /// dismissal precedent: the window is already gone as an
+            /// optimistic echo; the model clears its open flag in
+            /// `update` — or keeps declaring the window and the next
+            /// rebuild re-creates it (source wins).
+            on_close: ?MsgT = null,
+        };
+
+        /// Scratch handed to `windows_fn` (the `status_item_fn` shape)
+        /// so a derived descriptor list needs no model-side storage.
+        /// Lives on the app struct; returned slices stay valid until the
+        /// next apply.
+        pub const WindowsScratch = struct {
+            windows: [max_ui_windows]WindowDescriptor = undefined,
+        };
+
         pub const MarkupOptions = struct {
             /// Markup source embedded into the binary: parsed on the first
             /// build when no `view` is set, and otherwise the baseline the
@@ -235,7 +301,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             on_frame: ?*const fn (model: *const ModelT, frame: platform.GpuFrame) ?MsgT = null,
             /// Reads runtime-owned widget state (slider values, scroll
             /// offsets) back into the model before update and rebuild so
-            /// the next source tree does not stomp it.
+            /// the next source tree does not stomp it. Main canvas only:
+            /// declared secondary windows' widget state is runtime-owned
+            /// between rebuilds but has no sync hook yet — keep
+            /// continuous controls in the secondary windows model-driven
+            /// (echo `on_change`/`on_scroll` values back into `value`).
             sync: ?*const fn (model: *ModelT, layout: canvas.WidgetLayoutTree) void = null,
             /// Model-derived webview panes, re-applied after every rebuild
             /// (so also on resize and every dispatched Msg): each pane
@@ -264,6 +334,28 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// tray title seam keep the menu updates and log the title
             /// gap once.
             status_item_fn: ?*const fn (model: *const ModelT, scratch: *StatusItemScratch) StatusItemState = null,
+            /// Model-declared secondary windows, reconciled after every
+            /// rebuild (and on the installing frame): windows the model
+            /// declares exist, windows it stops declaring close — the
+            /// `status_item_fn` shape applied to the window set, so a
+            /// settings window is `if (model.settings_open)` declaring a
+            /// descriptor, opened by a Msg and closed by one. Requires
+            /// `window_view`. A user close dispatches the descriptor's
+            /// `on_close` Msg (the dismissal precedent: the engine
+            /// already closed it; the model's next declared set is
+            /// truth). Reconcile failures degrade to logged warnings —
+            /// a failed create never takes the render loop down.
+            windows_fn: ?*const fn (model: *const ModelT, scratch: *WindowsScratch) []const WindowDescriptor = null,
+            /// Per-window view for declared secondary windows, keyed by
+            /// the descriptor's window label — the `view` seam with the
+            /// window identity alongside. Rebuilt for every open window
+            /// on every dispatched Msg. Markup deliberately binds ONE
+            /// window's content (the main canvas): there is no `window`
+            /// element in the closed grammar because windows are shell
+            /// concerns, not view-tree concerns — a markup-authored
+            /// secondary window is a `canvas.CompiledMarkupView` whose
+            /// `build` this fn calls for the matching label.
+            window_view: ?*const fn (ui: *Ui, model: *const ModelT, window_label: []const u8) Ui.Node = null,
         };
 
         /// Last-navigated webview pane state, tracked per shell label so
@@ -285,6 +377,46 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 return self.url_storage[0..self.url_len];
             }
         };
+
+        /// Live state for one model-declared secondary window: its own
+        /// tree and arena pair (the handler table must stay valid
+        /// between events, per window), the runtime window id, and the
+        /// close Msg. Slots are keyed by window label and reconciled by
+        /// `applyWindows`.
+        const WindowSlot = struct {
+            label_storage: [platform.max_window_label_bytes]u8 = undefined,
+            label_len: usize = 0,
+            canvas_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined,
+            canvas_label_len: usize = 0,
+            window_id: platform.WindowId = 0,
+            on_close: ?MsgT = null,
+            installed: bool = false,
+            canvas_size: geometry.SizeF = .{ .width = 1, .height = 1 },
+            tree: ?Ui.Tree = null,
+            arena_index: usize = 0,
+            arenas: [2]std.heap.ArenaAllocator,
+
+            fn init(backing: std.mem.Allocator) WindowSlot {
+                return .{ .arenas = .{
+                    std.heap.ArenaAllocator.init(backing),
+                    std.heap.ArenaAllocator.init(backing),
+                } };
+            }
+
+            fn label(self: *const WindowSlot) []const u8 {
+                return self.label_storage[0..self.label_len];
+            }
+
+            fn canvasLabel(self: *const WindowSlot) []const u8 {
+                return self.canvas_label_storage[0..self.canvas_label_len];
+            }
+        };
+
+        fn windowSlotsInit(backing: std.mem.Allocator) [max_ui_windows]WindowSlot {
+            var slots: [max_ui_windows]WindowSlot = undefined;
+            for (&slots) |*slot| slot.* = WindowSlot.init(backing);
+            return slots;
+        }
 
         model: ModelT,
         options: Options,
@@ -353,6 +485,20 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// the release's ordinary press — one gesture, one Msg).
         hold_armed_id: canvas.ObjectId = 0,
         hold_fired: bool = false,
+        /// Which canvas the armed hold belongs to (one pointer, one
+        /// gesture — but it can be in any window): the view label and
+        /// window id recorded at arm time so the fire resolves the right
+        /// tree and dispatches with the right window identity.
+        hold_view_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined,
+        hold_view_label_len: usize = 0,
+        hold_window_id: platform.WindowId = 1,
+        /// Live model-declared secondary windows (`Options.windows_fn`),
+        /// keyed by window label.
+        window_slots: [max_ui_windows]WindowSlot,
+        window_slot_count: usize = 0,
+        /// Scratch handed to `windows_fn`; on the app struct so returned
+        /// descriptor slices outlive the apply.
+        windows_scratch: WindowsScratch = .{},
 
         /// By-value construction. The Model parameter and the returned
         /// app both ride the caller's stack unless result-location
@@ -375,6 +521,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     std.heap.ArenaAllocator.init(backing),
                     std.heap.ArenaAllocator.init(backing),
                 },
+                .window_slots = windowSlotsInit(backing),
                 .effects = Effects.init(backing),
             };
         }
@@ -429,6 +576,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     std.heap.ArenaAllocator.init(backing),
                     std.heap.ArenaAllocator.init(backing),
                 },
+                .window_slots = windowSlotsInit(backing),
                 .effects = Effects.init(backing),
             };
         }
@@ -436,6 +584,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn assertOptions(options: Options) void {
             std.debug.assert(options.view != null or options.markup != null);
             std.debug.assert((options.update != null) != (options.update_fx != null));
+            // Declared windows need the per-window view to build them.
+            std.debug.assert(options.windows_fn == null or options.window_view != null);
             if (comptime !features.runtime_markup) std.debug.assert(options.markup == null);
         }
 
@@ -445,6 +595,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.arenas[1].deinit();
             self.markup_arenas[0].deinit();
             self.markup_arenas[1].deinit();
+            for (&self.window_slots) |*slot| {
+                slot.arenas[0].deinit();
+                slot.arenas[1].deinit();
+            }
             if (self.pixel_buffer.len > 0) self.backing.free(self.pixel_buffer);
             if (self.pixel_scratch.len > 0) self.backing.free(self.pixel_scratch);
             self.pixel_buffer = &.{};
@@ -467,9 +621,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.effects.bindServices(&runtime.options.platform.services);
             self.effects.bindEnviron(runtime.options.environ);
             self.effects.bindImages(runtime.canvasImageRegistryBinding());
-            self.syncModel(runtime, window_id);
+            self.syncModel(runtime, self.canvas_window_id);
             self.applyMsg(msg);
-            try self.rebuild(runtime, window_id);
+            try self.rebuild(runtime, self.canvas_window_id);
+            try self.rebuildWindowSlots(runtime);
+            // A Msg dispatched FROM a secondary window still rebuilt the
+            // main canvas above (one model, every window's view derives
+            // from it); `window_id` names the dispatch origin for apps
+            // that inspect it, not the rebuild target.
+            _ = window_id;
         }
 
         /// Run `update` through whichever form the app declared; the
@@ -500,7 +660,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 self.applyMsg(msg);
                 dispatched = true;
             }
-            if (dispatched) try self.rebuild(runtime, self.canvas_window_id);
+            if (dispatched) {
+                try self.rebuild(runtime, self.canvas_window_id);
+                try self.rebuildWindowSlots(runtime);
+            }
         }
 
         /// The design tokens for the next rebuild: static `tokens`, or the
@@ -568,6 +731,222 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             try self.scheduleAnimations(runtime, window_id);
             self.applyWebPanes(runtime, window_id, layout);
             self.applyStatusItem(runtime);
+            self.applyWindows(runtime);
+        }
+
+        /// Reconcile the model-declared secondary windows against the
+        /// live ones (the `status_item_fn` shape applied to the window
+        /// set): close what the model stopped declaring, create what it
+        /// started declaring. Failures degrade to logged warnings — a
+        /// failed window create never takes the render loop down.
+        fn applyWindows(self: *Self, runtime: *Runtime) void {
+            const windows_fn = self.options.windows_fn orelse return;
+            var declared = windows_fn(&self.model, &self.windows_scratch);
+            if (declared.len > max_ui_windows) {
+                ui_app_log.warn(
+                    "windows_fn declared {d} windows; the budget is {d} (canvas_limits.max_ui_app_windows) - the excess is ignored",
+                    .{ declared.len, max_ui_windows },
+                );
+                declared = declared[0..max_ui_windows];
+            }
+
+            // Close first: a label leaving the declared set frees its
+            // slot (and its runtime window label) before creations run.
+            var index: usize = 0;
+            while (index < self.window_slot_count) {
+                if (declaredWindowIndex(declared, self.window_slots[index].label()) == null) {
+                    self.closeWindowSlot(runtime, index);
+                    continue;
+                }
+                index += 1;
+            }
+
+            for (declared) |descriptor| {
+                if (self.windowSlotIndexByLabel(descriptor.label)) |slot_index| {
+                    // Already live: the close Msg follows the model.
+                    self.window_slots[slot_index].on_close = descriptor.on_close;
+                    continue;
+                }
+                self.createWindowSlot(runtime, descriptor);
+            }
+        }
+
+        fn declaredWindowIndex(declared: []const WindowDescriptor, label: []const u8) ?usize {
+            for (declared, 0..) |descriptor, index| {
+                if (std.mem.eql(u8, descriptor.label, label)) return index;
+            }
+            return null;
+        }
+
+        fn windowSlotIndexByLabel(self: *Self, label: []const u8) ?usize {
+            for (self.window_slots[0..self.window_slot_count], 0..) |*slot, index| {
+                if (std.mem.eql(u8, slot.label(), label)) return index;
+            }
+            return null;
+        }
+
+        fn windowSlotByCanvasLabel(self: *Self, canvas_label: []const u8) ?*WindowSlot {
+            for (self.window_slots[0..self.window_slot_count]) |*slot| {
+                if (std.mem.eql(u8, slot.canvasLabel(), canvas_label)) return slot;
+            }
+            return null;
+        }
+
+        fn windowSlotIndexByWindowId(self: *Self, window_id: platform.WindowId) ?usize {
+            for (self.window_slots[0..self.window_slot_count], 0..) |*slot, index| {
+                if (slot.window_id == window_id) return index;
+            }
+            return null;
+        }
+
+        fn createWindowSlot(self: *Self, runtime: *Runtime, descriptor: WindowDescriptor) void {
+            if (self.window_slot_count >= max_ui_windows) {
+                ui_app_log.warn(
+                    "declared window '{s}' ignored: more than {d} secondary windows (canvas_limits.max_ui_app_windows)",
+                    .{ descriptor.label, max_ui_windows },
+                );
+                return;
+            }
+            if (descriptor.label.len == 0 or descriptor.label.len > platform.max_window_label_bytes or
+                descriptor.canvas_label.len == 0 or descriptor.canvas_label.len > app_manifest.max_view_label_bytes)
+            {
+                ui_app_log.warn("declared window '{s}' ignored: window and canvas labels must be non-empty and fit the platform label budgets", .{descriptor.label});
+                return;
+            }
+            if (std.mem.eql(u8, descriptor.canvas_label, self.options.canvas_label) or self.windowSlotByCanvasLabel(descriptor.canvas_label) != null) {
+                ui_app_log.warn(
+                    "declared window '{s}' ignored: canvas label '{s}' is already bound - every window's canvas label must be unique",
+                    .{ descriptor.label, descriptor.canvas_label },
+                );
+                return;
+            }
+
+            const shell_views = [_]app_manifest.ShellView{self.secondaryShellView(descriptor)};
+            const info = runtime.createSourcelessShellWindow(.{
+                .label = descriptor.label,
+                .title = if (descriptor.title.len > 0) descriptor.title else null,
+                .width = descriptor.width,
+                .height = descriptor.height,
+                .x = descriptor.x,
+                .y = descriptor.y,
+                .resizable = descriptor.resizable,
+                .titlebar = descriptor.titlebar,
+                // Deterministic reopen: the descriptor is the geometry
+                // channel, not a persisted frame store.
+                .restore_state = false,
+                .views = &shell_views,
+            }) catch |err| {
+                ui_app_log.warn("declared window '{s}' create failed: {s}", .{ descriptor.label, @errorName(err) });
+                return;
+            };
+
+            const slot = &self.window_slots[self.window_slot_count];
+            slot.label_len = descriptor.label.len;
+            @memcpy(slot.label_storage[0..descriptor.label.len], descriptor.label);
+            slot.canvas_label_len = descriptor.canvas_label.len;
+            @memcpy(slot.canvas_label_storage[0..descriptor.canvas_label.len], descriptor.canvas_label);
+            slot.window_id = info.id;
+            slot.on_close = descriptor.on_close;
+            slot.installed = false;
+            slot.canvas_size = .{ .width = descriptor.width, .height = descriptor.height };
+            slot.tree = null;
+            slot.arena_index = 0;
+            self.window_slot_count += 1;
+        }
+
+        /// The gpu_surface shell view for a declared window: the
+        /// descriptor's canvas label wearing the MAIN canvas's declared
+        /// gpu options (backend, pixel format, present mode...), so a
+        /// secondary window renders through whatever pipeline the app
+        /// already chose for its platform.
+        fn secondaryShellView(self: *const Self, descriptor: WindowDescriptor) app_manifest.ShellView {
+            var view = app_manifest.ShellView{
+                .label = descriptor.canvas_label,
+                .kind = .gpu_surface,
+                .fill = true,
+            };
+            for (self.options.scene.windows) |window| {
+                for (window.views) |scene_view| {
+                    if (scene_view.kind != .gpu_surface) continue;
+                    if (!std.mem.eql(u8, scene_view.label, self.options.canvas_label)) continue;
+                    view.gpu_backend = scene_view.gpu_backend;
+                    view.gpu_pixel_format = scene_view.gpu_pixel_format;
+                    view.gpu_present_mode = scene_view.gpu_present_mode;
+                    view.gpu_alpha_mode = scene_view.gpu_alpha_mode;
+                    view.gpu_color_space = scene_view.gpu_color_space;
+                    view.gpu_vsync = scene_view.gpu_vsync;
+                    return view;
+                }
+            }
+            return view;
+        }
+
+        /// Remove the slot and close its runtime window (the reconcile
+        /// close: the model stopped declaring it, so no `on_close` Msg —
+        /// the model already knows).
+        fn closeWindowSlot(self: *Self, runtime: *Runtime, index: usize) void {
+            const window_id = self.window_slots[index].window_id;
+            const last = self.window_slot_count - 1;
+            var removed = self.window_slots[index];
+            self.window_slots[index] = self.window_slots[last];
+            self.window_slots[last] = WindowSlot.init(self.backing);
+            self.window_slot_count = last;
+            removed.arenas[0].deinit();
+            removed.arenas[1].deinit();
+            runtime.closeWindow(window_id) catch |err| {
+                ui_app_log.warn("declared window close failed: {s}", .{@errorName(err)});
+            };
+        }
+
+        /// Drop a slot whose runtime window is ALREADY gone (the user
+        /// closed it): bookkeeping only, no platform call.
+        fn forgetWindowSlot(self: *Self, index: usize) ?MsgT {
+            const on_close = self.window_slots[index].on_close;
+            const last = self.window_slot_count - 1;
+            var removed = self.window_slots[index];
+            self.window_slots[index] = self.window_slots[last];
+            self.window_slots[last] = WindowSlot.init(self.backing);
+            self.window_slot_count = last;
+            removed.arenas[0].deinit();
+            removed.arenas[1].deinit();
+            return on_close;
+        }
+
+        /// Rebuild every installed secondary window's tree from the
+        /// model — every dispatched Msg funnels through here after the
+        /// main rebuild, so all open windows always render the same
+        /// model generation.
+        fn rebuildWindowSlots(self: *Self, runtime: *Runtime) anyerror!void {
+            for (self.window_slots[0..self.window_slot_count]) |*slot| {
+                if (!slot.installed) continue;
+                try self.rebuildWindowSlot(runtime, slot);
+            }
+        }
+
+        fn rebuildWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot) anyerror!void {
+            const window_view = self.options.window_view orelse return;
+            const tokens = runtime.tokensWithTextMeasure(self.effectiveTokens());
+            const next_index = slot.arena_index ^ 1;
+            _ = slot.arenas[next_index].reset(.retain_capacity);
+            var ui = Ui.init(slot.arenas[next_index].allocator());
+            const node = window_view(&ui, &self.model, slot.label());
+            const tree = try ui.finalizeWithTokens(node, tokens);
+            const bounds = geometry.RectF.fromSize(slot.canvas_size).deflate(runtime.viewportInsetsForWindow(slot.window_id));
+            const layout = canvas.layoutWidgetTreeWithTokens(tree.root, bounds, tokens, &self.layout_nodes) catch |err| {
+                if (err == error.WidgetLayoutListFull) {
+                    ui_app_log.warn(
+                        "widget layout capacity exceeded for window '{s}' view '{s}': the per-view budget is {d} nodes (canvas_limits.max_canvas_widget_nodes_per_view) - reduce always-mounted widgets or virtualize lists",
+                        .{ slot.label(), slot.canvasLabel(), canvas_limits.max_canvas_widget_nodes_per_view },
+                    );
+                }
+                return err;
+            };
+            _ = try runtime.setCanvasWidgetLayout(slot.window_id, slot.canvasLabel(), layout);
+            if (slot.installed and self.options.tokens_fn != null) {
+                _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), tokens);
+            }
+            slot.tree = tree;
+            slot.arena_index = next_index;
         }
 
         /// Re-apply the model-derived webview panes against the freshly
@@ -798,8 +1177,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// (`ElementOptions.on_hold`): armed on pointer-down over a widget
         /// with a hold handler, cancelled on release, dispatching the hold
         /// Msg when it fires first. One-shot; distinct from the markup
-        /// watch id and the fx-timer range.
-        pub const press_hold_timer_id: u64 = platform.reserved_timer_id_base | 0x2e70_601d;
+        /// watch id and the fx-timer range. Defined at the platform layer
+        /// so `automate widget-hold` fires the same timer a real gesture
+        /// arms.
+        pub const press_hold_timer_id: u64 = platform.press_hold_timer_id;
         /// dev-2's Menu+primaryAction feel: ~350 ms press-and-hold.
         pub const press_hold_duration_ns: u64 = 350 * std.time.ns_per_ms;
 
@@ -909,8 +1290,35 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .canvas_widget_dismiss => |dismiss_event| try self.handleDismiss(runtime, dismiss_event),
                 .canvas_widget_context_press => |press_event| try self.handleContextPress(runtime, press_event),
                 .canvas_widget_resize => |resize_event| try self.handleWidgetResize(runtime, resize_event),
+                .window_closed => |closed| try self.handleWindowClosed(runtime, closed),
                 else => {},
             }
+        }
+
+        /// The platform closed a window (the user clicked its close
+        /// button): if it was one of ours, forget the slot — the window
+        /// is already gone, the optimistic echo — and dispatch the
+        /// descriptor's `on_close` Msg so the model owns the close. A
+        /// model that keeps declaring the window gets it back on the
+        /// next rebuild (source wins), exactly like a dismissed surface.
+        fn handleWindowClosed(self: *Self, runtime: *Runtime, closed: core.WindowClosedEvent) anyerror!void {
+            const index = self.windowSlotIndexByWindowId(closed.window_id) orelse return;
+            const on_close = self.forgetWindowSlot(index);
+            if (on_close) |msg| {
+                try self.dispatch(runtime, self.canvas_window_id, msg);
+            }
+        }
+
+        /// The tree whose handler table owns events from `view_label`:
+        /// the main canvas or a declared window's.
+        fn treeForViewLabel(self: *Self, view_label: []const u8) ?*const Ui.Tree {
+            if (std.mem.eql(u8, view_label, self.options.canvas_label)) {
+                return if (self.tree) |*tree| tree else null;
+            }
+            if (self.windowSlotByCanvasLabel(view_label)) |slot| {
+                return if (slot.tree) |*tree| tree else null;
+            }
+            return null;
         }
 
         fn handleTimer(self: *Self, runtime: *Runtime, timer_event: platform.TimerEvent) anyerror!void {
@@ -937,7 +1345,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         fn handleFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent) anyerror!void {
-            if (!std.mem.eql(u8, frame_event.label, self.options.canvas_label)) return;
+            if (!std.mem.eql(u8, frame_event.label, self.options.canvas_label)) {
+                return self.handleWindowSlotFrame(runtime, frame_event);
+            }
             // Host-pumped embeds deliver no `.wake`; drain pending effect
             // results with the frame tick so this frame presents them.
             try self.drainEffects(runtime);
@@ -977,13 +1387,32 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     self.applyWebPanes(runtime, frame_event.window_id, layout);
                 } else |_| {}
             }
-            try self.presentFrame(runtime, frame_event, installing);
+            try self.presentFrame(runtime, frame_event, self.options.canvas_label, installing);
             if (installing) return;
             const on_frame = self.options.on_frame orelse return;
             const gpu_frame = runtime.gpuSurfaceFrame(frame_event.window_id, self.options.canvas_label) catch return;
             if (on_frame(&self.model, gpu_frame)) |msg| {
                 try self.dispatch(runtime, frame_event.window_id, msg);
             }
+        }
+
+        /// A presented frame for one of the declared secondary windows:
+        /// install its tree on the first frame (the same choreography as
+        /// the main canvas — build, hand the layout to the runtime, emit
+        /// the display list), then present through the shared planner
+        /// buffers. Frames for labels no window owns are ignored.
+        fn handleWindowSlotFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent) anyerror!void {
+            const slot = self.windowSlotByCanvasLabel(frame_event.label) orelse return;
+            slot.window_id = frame_event.window_id;
+            var installing = false;
+            if (!slot.installed) {
+                installing = true;
+                slot.canvas_size = frame_event.size;
+                try self.rebuildWindowSlot(runtime, slot);
+                _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), runtime.tokensWithTextMeasure(self.effectiveTokens()));
+                slot.installed = true;
+            }
+            try self.presentFrame(runtime, frame_event, slot.canvasLabel(), installing);
         }
 
         /// Present the planned canvas frame: GPU packet when the platform
@@ -993,7 +1422,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// reports `UnsupportedService` at present time also falls back to
         /// pixels; that attempt forces a full repaint because the failed
         /// packet plan already recorded the frame's presented summary.
-        fn presentFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent, installing: bool) anyerror!void {
+        fn presentFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent, canvas_label: []const u8, installing: bool) anyerror!void {
             // The installing frame must paint unconditionally: on software
             // platforms with no window-manager-driven resizes, nothing else
             // invalidates before the first present, and the surface would
@@ -1006,7 +1435,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 const packet_presented = blk: {
                     _ = runtime.presentNextCanvasGpuPacketWithScale(
                         frame_event.window_id,
-                        self.options.canvas_label,
+                        canvas_label,
                         .{
                             .frame_index = frame_event.frame_index,
                             .timestamp_ns = frame_event.timestamp_ns,
@@ -1031,7 +1460,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.ensurePixelBuffers(frame_event.size, frame_event.scale_factor) catch return;
             _ = runtime.presentNextCanvasFramePixels(
                 frame_event.window_id,
-                self.options.canvas_label,
+                canvas_label,
                 .{
                     .frame_index = frame_event.frame_index,
                     .timestamp_ns = frame_event.timestamp_ns,
@@ -1094,7 +1523,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         fn handleResize(self: *Self, runtime: *Runtime, resize_event: platform.GpuSurfaceResizeEvent) anyerror!void {
-            if (!std.mem.eql(u8, resize_event.label, self.options.canvas_label)) return;
+            if (!std.mem.eql(u8, resize_event.label, self.options.canvas_label)) {
+                const slot = self.windowSlotByCanvasLabel(resize_event.label) orelse return;
+                slot.canvas_size = .{ .width = resize_event.frame.width, .height = resize_event.frame.height };
+                if (slot.installed) try self.rebuildWindowSlot(runtime, slot);
+                return;
+            }
             self.canvas_size = .{ .width = resize_event.frame.width, .height = resize_event.frame.height };
             if (self.installed) try self.rebuild(runtime, resize_event.window_id);
         }
@@ -1108,8 +1542,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// a fired hold suppresses the release's press (one gesture, one
         /// Msg), and any release/cancel disarms it.
         fn handlePointer(self: *Self, runtime: *Runtime, pointer_event: core.CanvasWidgetPointerEvent) anyerror!void {
-            if (!std.mem.eql(u8, pointer_event.view_label, self.options.canvas_label)) return;
-            const tree = self.tree orelse return;
+            const tree = self.treeForViewLabel(pointer_event.view_label) orelse return;
             switch (pointer_event.pointer.phase) {
                 .down => {
                     self.disarmHold(runtime);
@@ -1117,6 +1550,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         if (tree.hasHoldHandler(target.id)) {
                             self.hold_armed_id = target.id;
                             self.hold_fired = false;
+                            // One pointer, one gesture — but it can be
+                            // in any window: remember whose tree armed
+                            // it so the fire resolves the right handler
+                            // table and window identity.
+                            const label_len = @min(pointer_event.view_label.len, self.hold_view_label_storage.len);
+                            @memcpy(self.hold_view_label_storage[0..label_len], pointer_event.view_label[0..label_len]);
+                            self.hold_view_label_len = label_len;
+                            self.hold_window_id = pointer_event.window_id;
                             runtime.startTimer(press_hold_timer_id, press_hold_duration_ns, false) catch {};
                         }
                     }
@@ -1141,15 +1582,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         /// The hold timer fired while the press is still down: dispatch
-        /// the armed widget's `on_hold` Msg and remember that this gesture
-        /// consumed its press.
+        /// the armed widget's `on_hold` Msg — through the tree that
+        /// armed it, main canvas or a declared window's — and remember
+        /// that this gesture consumed its press.
         fn firePressHold(self: *Self, runtime: *Runtime) anyerror!void {
-            const tree = self.tree orelse return;
             const armed_id = self.hold_armed_id;
             if (armed_id == 0 or self.hold_fired) return;
+            const hold_label = self.hold_view_label_storage[0..self.hold_view_label_len];
+            const tree = self.treeForViewLabel(hold_label) orelse return;
             self.hold_fired = true;
             if (tree.msgForHold(armed_id)) |msg| {
-                try self.dispatch(runtime, self.canvas_window_id, msg);
+                try self.dispatch(runtime, self.hold_window_id, msg);
             }
         }
 
@@ -1160,8 +1603,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// model agree (or deliberately re-open on the next rebuild —
         /// source wins).
         fn handleDismiss(self: *Self, runtime: *Runtime, dismiss_event: core.CanvasWidgetDismissEvent) anyerror!void {
-            if (!std.mem.eql(u8, dismiss_event.view_label, self.options.canvas_label)) return;
-            const tree = self.tree orelse return;
+            const tree = self.treeForViewLabel(dismiss_event.view_label) orelse return;
             if (tree.msgForDismiss(dismiss_event.id)) |msg| {
                 try self.dispatch(runtime, dismiss_event.window_id, msg);
             }
@@ -1171,8 +1613,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// the desktop press-and-hold alternative — dispatch the press
         /// target's `on_hold` Msg immediately.
         fn handleContextPress(self: *Self, runtime: *Runtime, press_event: core.CanvasWidgetContextPressEvent) anyerror!void {
-            if (!std.mem.eql(u8, press_event.view_label, self.options.canvas_label)) return;
-            const tree = self.tree orelse return;
+            const tree = self.treeForViewLabel(press_event.view_label) orelse return;
             const target = press_event.press_target orelse return;
             if (tree.msgForHold(target.id)) |msg| {
                 try self.dispatch(runtime, press_event.window_id, msg);
@@ -1180,8 +1621,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         fn handleKeyboard(self: *Self, runtime: *Runtime, keyboard_event: core.CanvasWidgetKeyboardEvent) anyerror!void {
-            if (!std.mem.eql(u8, keyboard_event.view_label, self.options.canvas_label)) return;
-            const tree = self.tree orelse return;
+            const tree = self.treeForViewLabel(keyboard_event.view_label) orelse return;
             const target = keyboard_event.target orelse return;
             if (tree.msgForKeyboard(target.id, keyboard_event.keyboard)) |msg| {
                 try self.dispatch(runtime, keyboard_event.window_id, msg);
@@ -1193,8 +1633,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// applied, so a model that stores it and echoes it back into
         /// `value` never fights the split reconcile rule.
         fn handleWidgetResize(self: *Self, runtime: *Runtime, resize_event: core.CanvasWidgetResizeEvent) anyerror!void {
-            if (!std.mem.eql(u8, resize_event.view_label, self.options.canvas_label)) return;
-            const tree = self.tree orelse return;
+            const tree = self.treeForViewLabel(resize_event.view_label) orelse return;
             if (tree.msgForResize(resize_event.id, resize_event.fraction)) |msg| {
                 try self.dispatch(runtime, resize_event.window_id, msg);
             }
@@ -1205,8 +1644,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// already applied, so a model that stores it and echoes it back
         /// into `value` never fights the scroll reconcile rule.
         fn handleScroll(self: *Self, runtime: *Runtime, scroll_event: core.CanvasWidgetScrollEvent) anyerror!void {
-            if (!std.mem.eql(u8, scroll_event.view_label, self.options.canvas_label)) return;
-            const tree = self.tree orelse return;
+            const tree = self.treeForViewLabel(scroll_event.view_label) orelse return;
             if (tree.msgForScroll(scroll_event.id, scroll_event.scroll)) |msg| {
                 try self.dispatch(runtime, scroll_event.window_id, msg);
             }
@@ -1215,8 +1653,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// A native context-menu selection: resolve the selected
         /// item's declared `Msg` through the tree's handler table.
         fn handleContextMenu(self: *Self, runtime: *Runtime, menu_event: core.CanvasWidgetContextMenuEvent) anyerror!void {
-            if (!std.mem.eql(u8, menu_event.view_label, self.options.canvas_label)) return;
-            const tree = self.tree orelse return;
+            const tree = self.treeForViewLabel(menu_event.view_label) orelse return;
             if (tree.msgForContextMenu(menu_event.target_id, menu_event.item_index)) |msg| {
                 try self.dispatch(runtime, menu_event.window_id, msg);
             }

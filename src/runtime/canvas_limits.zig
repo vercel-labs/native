@@ -174,3 +174,18 @@ pub const max_canvas_widget_anchored_per_view: usize = 16;
 /// widgets track the first 16 (one focus target per rebuild wins
 /// anyway).
 pub const max_canvas_widget_autofocus_per_view: usize = 16;
+
+// Model-declared secondary windows per `UiApp` (`Options.windows_fn`
+// descriptors — settings, about, inspectors), on top of the scene's main
+// window. Sized for the dev-2-class desktop shape: one settings window,
+// maybe an auxiliary panel or two, never a window per document (that is
+// a different architecture — one Runtime hosts `platform.max_windows`
+// = 16 windows total, and the startup window plus tool windows must all
+// fit). The cost is NOT the runtime window (those are platform-capped):
+// each UiApp slot retains two arena allocators whose high-water mark is
+// that window's built view, plus a retained widget tree, and EVERY
+// dispatched Msg rebuilds every open window's view — 4 keeps the
+// rebuild-per-Msg bill visible-by-construction. Declaring more windows
+// than this warns loudly (naming this budget) and ignores the excess;
+// it never takes the render loop down.
+pub const max_ui_app_windows: usize = 4;

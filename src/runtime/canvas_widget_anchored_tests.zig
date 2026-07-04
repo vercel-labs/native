@@ -23,6 +23,10 @@ const PickerModel = struct {
     dismissals: u32 = 0,
     holds: u32 = 0,
     crumb_presses: u32 = 0,
+    // The crumb-switcher leg: a NON-focusable text trigger whose click
+    // opens an anchored menu (dev-2's breadcrumb switcher).
+    switcher_open: bool = false,
+    switcher_dismissals: u32 = 0,
 };
 
 const PickerMsg = union(enum) {
@@ -31,6 +35,8 @@ const PickerMsg = union(enum) {
     pick: u32,
     crumb_hold,
     crumb_press,
+    toggle_switcher,
+    close_switcher,
 };
 
 const PickerApp = ui_app_model.UiApp(PickerModel, PickerMsg);
@@ -51,6 +57,11 @@ fn pickerUpdate(model: *PickerModel, msg: PickerMsg) void {
         },
         .crumb_hold => model.holds += 1,
         .crumb_press => model.crumb_presses += 1,
+        .toggle_switcher => model.switcher_open = !model.switcher_open,
+        .close_switcher => {
+            model.switcher_open = false;
+            model.switcher_dismissals += 1;
+        },
     }
 }
 
@@ -70,8 +81,25 @@ fn pickerView(ui: *PickerApp.Ui, model: *const PickerModel) PickerApp.Ui.Node {
         }),
     }) else ui.stack(.{ .height = 28 }, .{trigger});
 
+    // A plain-text trigger: pressable (the handler makes it a hit
+    // target) but NOT focusable — clicking it clears widget focus, so
+    // its menu floats with nothing focused.
+    const switcher_trigger = ui.text(.{ .on_press = .toggle_switcher }, "Files");
+    const switcher = if (model.switcher_open) ui.stack(.{ .height = 20 }, .{
+        switcher_trigger,
+        ui.el(.dropdown_menu, .{
+            .anchor = .below,
+            .width = 140,
+            .height = 56,
+            .on_dismiss = .close_switcher,
+        }, .{
+            ui.el(.menu_item, .{ .key = .{ .int = 10 }, .text = "Sibling", .height = 26, .on_press = .crumb_press }, .{}),
+        }),
+    }) else ui.stack(.{ .height = 20 }, .{switcher_trigger});
+
     return ui.column(.{ .gap = 8, .padding = 12 }, .{
         picker,
+        switcher,
         ui.button(.{ .on_press = .crumb_press, .on_hold = .crumb_hold }, "Crumb"),
         ui.text(.{}, ui.fmt("picked {d}", .{model.picked})),
     });
@@ -209,6 +237,56 @@ test "anchored picker: escape dismisses as a Msg the model owns" {
     try std.testing.expect(fixture.widgetIdByText(.menu_item, "Alpha") == null);
 }
 
+test "escape dismisses an anchored surface opened from a NON-focusable trigger" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    // Clicking the plain-text crumb opens the menu but takes no focus:
+    // text is not focusable, so the pointer path clears the focused id.
+    const trigger_id = fixture.widgetIdByText(.text, "Files").?;
+    try fixture.clickWidget(trigger_id);
+    try std.testing.expect(fixture.app_state.model.switcher_open);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), fixture.harness.runtime.views[0].canvas_widget_focused_id);
+
+    // Escape still finds the mounted surface: with no focus chain to
+    // walk, the topmost mounted anchored surface dismisses, through the
+    // same on_dismiss Msg contract the focused path uses.
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .gpu_surface_input = .{
+        .label = canvas_label,
+        .kind = .key_down,
+        .key = "escape",
+    } });
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.switcher_dismissals);
+    try std.testing.expect(!fixture.app_state.model.switcher_open);
+    try std.testing.expect(fixture.widgetIdByText(.menu_item, "Sibling") == null);
+}
+
+test "escape from an unrelated focused widget falls back to the topmost mounted anchored surface" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    // Open the switcher menu (non-focusable trigger), then move focus
+    // to the select trigger WITHOUT opening its own picker.
+    const trigger_id = fixture.widgetIdByText(.text, "Files").?;
+    try fixture.clickWidget(trigger_id);
+    try std.testing.expect(fixture.app_state.model.switcher_open);
+    const select_id = fixture.widgetIdByText(.select, "Repo").?;
+    var command_buffer: [96]u8 = undefined;
+    const focus_command = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} focus", .{ canvas_label, select_id });
+    try fixture.harness.runtime.dispatchAutomationCommand(fixture.app, focus_command);
+    try std.testing.expectEqual(select_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+
+    // The focus chain from the select finds no open surface (its own
+    // picker is closed), so Escape falls back to the mounted menu.
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .gpu_surface_input = .{
+        .label = canvas_label,
+        .kind = .key_down,
+        .key = "escape",
+    } });
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.switcher_dismissals);
+    try std.testing.expect(!fixture.app_state.model.switcher_open);
+}
+
 test "anchored picker: click outside dismisses as a Msg; clicking the trigger toggles exactly once" {
     const fixture = try Fixture.create();
     defer fixture.destroy();
@@ -297,6 +375,68 @@ test "a secondary click with no context menu dispatches the hold Msg immediately
     try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.holds);
     // A right-click never acts as a primary press.
     try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.crumb_presses);
+}
+
+test "automation widget-hold drives on_hold through the real pointer+timer path" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const crumb_id = fixture.widgetIdByText(.button, "Crumb").?;
+    var command_buffer: [96]u8 = undefined;
+    const hold = try std.fmt.bufPrint(&command_buffer, "widget-hold {s} {d}", .{ canvas_label, crumb_id });
+    try fixture.harness.runtime.dispatchAutomationCommand(fixture.app, hold);
+
+    // The down armed the reserved timer, the verb fired it, and the
+    // release was suppressed: one gesture, one Msg — no press.
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.holds);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.crumb_presses);
+    // The verb cleans up the one-shot the down armed: no pending
+    // wall-clock fire remains.
+    try std.testing.expect(fixture.harness.null_platform.fireTimer(PickerApp.press_hold_timer_id, 5_000_000) == null);
+}
+
+test "automation widget-hold on a target without on_hold degrades to the click a real long press is" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const trigger_id = fixture.widgetIdByText(.select, "Repo").?;
+    var command_buffer: [96]u8 = undefined;
+    const hold = try std.fmt.bufPrint(&command_buffer, "widget-hold {s} {d}", .{ canvas_label, trigger_id });
+    try fixture.harness.runtime.dispatchAutomationCommand(fixture.app, hold);
+
+    // Nothing armed, the fire no-oped, and the release pressed — exactly
+    // what a real user holding a plain control and releasing gets.
+    try std.testing.expect(fixture.app_state.model.open);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.toggles);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.holds);
+}
+
+test "automation widget-context-press dispatches the hold Msg when the route has no context menu" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const crumb_id = fixture.widgetIdByText(.button, "Crumb").?;
+    var command_buffer: [96]u8 = undefined;
+    const press = try std.fmt.bufPrint(&command_buffer, "widget-context-press {s} {d}", .{ canvas_label, crumb_id });
+    try fixture.harness.runtime.dispatchAutomationCommand(fixture.app, press);
+
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.holds);
+    // A right-click never acts as a primary press.
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.crumb_presses);
+}
+
+test "automation gesture verbs reject unmounted targets loudly" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    // No widget carries this id: both gesture verbs fail like
+    // widget-click on a stale target.
+    var command_buffer: [96]u8 = undefined;
+    const hold = try std.fmt.bufPrint(&command_buffer, "widget-hold {s} 424242", .{canvas_label});
+    try std.testing.expectError(error.InvalidCommand, fixture.harness.runtime.dispatchAutomationCommand(fixture.app, hold));
+    const press = try std.fmt.bufPrint(&command_buffer, "widget-context-press {s} 424242", .{canvas_label});
+    try std.testing.expectError(error.InvalidCommand, fixture.harness.runtime.dispatchAutomationCommand(fixture.app, press));
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.holds);
 }
 
 test "the per-view anchored budget rejects a surface per row loudly" {

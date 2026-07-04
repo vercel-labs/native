@@ -268,12 +268,26 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             self.canvas_widget_cursor = next_cursor;
         }
 
-        pub fn dismissCanvasWidgetSurfaceForFocusedTarget(self: *RuntimeView, focused_id: canvas.ObjectId) anyerror!?CanvasWidgetSurfaceDismissal {
-            const focused_index = self.canvasWidgetNodeIndexById(focused_id) orelse return null;
-            const focused_widget = self.widget_layout_nodes[focused_index].widget;
-            if (canvasWidgetEditableTextKind(focused_widget.kind) and focused_widget.text_composition != null) return null;
-
-            return self.dismissCanvasWidgetSurfaceForTargetIndex(focused_index);
+        /// Escape's dismissal resolution: the nearest dismissible surface
+        /// up the focused widget's chain when something is focused, and
+        /// otherwise — or when the chain finds none — the topmost MOUNTED
+        /// anchored surface in the view. The fallback is what makes
+        /// surfaces opened from NON-focusable triggers dismissible: a
+        /// text-crumb trigger takes no focus on click, so nothing is
+        /// focused while its menu floats, and the focus-rooted walk alone
+        /// would leave Escape dead. A focused editable with live IME
+        /// composition always wins: Escape cancels the composition and
+        /// never dismisses a surface, not even through the fallback.
+        pub fn dismissCanvasWidgetSurfaceFromEscape(self: *RuntimeView, focused_id: canvas.ObjectId) anyerror!?CanvasWidgetSurfaceDismissal {
+            if (focused_id != 0) {
+                if (self.canvasWidgetNodeIndexById(focused_id)) |focused_index| {
+                    const focused_widget = self.widget_layout_nodes[focused_index].widget;
+                    if (canvasWidgetEditableTextKind(focused_widget.kind) and focused_widget.text_composition != null) return null;
+                    if (try self.dismissCanvasWidgetSurfaceForTargetIndex(focused_index)) |dismissal| return dismissal;
+                }
+            }
+            const surface_index = self.canvasWidgetTopmostAnchoredDismissibleIndex() orelse return null;
+            return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
         }
 
         pub fn dismissCanvasWidgetSurfaceForTarget(self: *RuntimeView, target_id: canvas.ObjectId) anyerror!?CanvasWidgetSurfaceDismissal {
@@ -356,6 +370,36 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 found = index;
             }
             return found;
+        }
+
+        /// The topmost visible anchored dismissible surface in the whole
+        /// view — highest node index, matching both the anchored late
+        /// z-pass paint order and reverse-order hit-testing, so "topmost"
+        /// here is the surface the user sees on top. Ancestor-hidden
+        /// subtrees are skipped: a surface inside a hidden branch is not
+        /// on screen and must not swallow Escape.
+        pub fn canvasWidgetTopmostAnchoredDismissibleIndex(self: *const RuntimeView) ?usize {
+            var found: ?usize = null;
+            for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
+                if (!canvas.widgetIsAnchored(node.widget)) continue;
+                if (!canvasWidgetDismissibleSurfaceKind(node.widget.kind)) continue;
+                if (canvasWidgetNodeHiddenInTree(self, index)) continue;
+                found = index;
+            }
+            return found;
+        }
+
+        /// True when the node or any of its ancestors carries the
+        /// semantics `hidden` flag (the dismissal echo, or an app-hidden
+        /// branch).
+        fn canvasWidgetNodeHiddenInTree(self: *const RuntimeView, node_index: usize) bool {
+            var current: ?usize = node_index;
+            while (current) |index| {
+                if (index >= self.widget_layout_node_count) return true;
+                if (self.widget_layout_nodes[index].widget.semantics.hidden) return true;
+                current = self.widget_layout_nodes[index].parent_index;
+            }
+            return false;
         }
 
         pub fn canvasWidgetRouteDescendsFromIndex(self: *const RuntimeView, route: []const canvas.WidgetEventRouteEntry, ancestor_index: usize) bool {

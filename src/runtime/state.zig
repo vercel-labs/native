@@ -84,6 +84,10 @@ pub const ShellApplyMode = enum {
 pub const WindowSourcePolicy = enum {
     require_source,
     allow_source_less,
+    /// Never host the app webview source, even when one is loaded: the
+    /// shape for model-driven canvas windows whose whole content is
+    /// their gpu_surface view.
+    never_source,
 };
 
 pub const FocusTraversalDirection = enum {

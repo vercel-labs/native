@@ -567,6 +567,19 @@ pub const NullPlatform = struct {
 
     fn createWindow(context: ?*anyopaque, options: WindowOptions) anyerror!WindowInfo {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        // A CLOSED window releases its label and id for re-creation —
+        // mirroring the real hosts, where a closed NSWindow is gone from
+        // the host dictionaries. Model-driven windows reopen under one
+        // stable label.
+        var scan: usize = 0;
+        while (scan < self.window_count) {
+            const window = self.windows[scan];
+            if (!window.open and (window.id == options.id or std.mem.eql(u8, window.label, options.label))) {
+                self.removeWindowAt(scan);
+                continue;
+            }
+            scan += 1;
+        }
         if (self.window_count >= max_windows) return error.WindowLimitReached;
         for (self.windows[0..self.window_count]) |window| {
             if (window.id == options.id) return error.DuplicateWindowId;
@@ -1284,6 +1297,38 @@ pub const NullPlatform = struct {
             self.copyViewStrings(cursor, next.label, next.parent, next.role, next.accessibility_label, next.text, next.command) catch unreachable;
         }
         self.view_count -= 1;
+    }
+
+    /// Test seam: the USER closed a window. Real hosts' window
+    /// delegates tear the native window out of their records before
+    /// emitting the open=false frame event (macOS `windowWillClose`),
+    /// so the fake host mirrors that — remove the window and its views
+    /// here, then dispatch the returned event through the runtime.
+    pub fn userCloseWindow(self: *NullPlatform, window_id: WindowId) ?Event {
+        const index = self.findWindowIndex(window_id) orelse return null;
+        const info = self.windows[index];
+        self.removeViewsForWindow(window_id);
+        self.removeWebViewsForWindow(window_id);
+        self.removeWindowAt(index);
+        return .{ .window_frame_changed = .{
+            .id = info.id,
+            .label = info.label,
+            .title = info.title,
+            .frame = info.frame,
+            .scale_factor = info.scale_factor,
+            .open = false,
+            .focused = false,
+        } };
+    }
+
+    fn removeWindowAt(self: *NullPlatform, index: usize) void {
+        if (index >= self.window_count) return;
+        var cursor = index;
+        while (cursor + 1 < self.window_count) : (cursor += 1) {
+            self.windows[cursor] = self.windows[cursor + 1];
+            self.window_resizable[cursor] = self.window_resizable[cursor + 1];
+        }
+        self.window_count -= 1;
     }
 
     fn removeViewsForWindow(self: *NullPlatform, window_id: WindowId) void {

@@ -211,6 +211,13 @@ pub fn shellRestorePolicy(policy: app_manifest.WindowRestorePolicy) platform.Win
     };
 }
 
+pub fn shellTitlebarStyle(style: app_manifest.WindowTitlebarStyle) platform.WindowTitlebarStyle {
+    return switch (style) {
+        .standard => .standard,
+        .hidden_inset => .hidden_inset,
+    };
+}
+
 /// Whether loading this scene must materialize the app's webview source
 /// into a window's main webview. Only a `main`-labeled webview view needs
 /// that; child webviews (a preview pane next to a gpu_surface canvas, an

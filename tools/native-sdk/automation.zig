@@ -56,6 +56,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         const value = try std.fmt.allocPrint(allocator, "{s} {s}", .{ args[1], args[2] });
         defer allocator.free(value);
         try sendCommand(allocator, io, "widget-click", value);
+    } else if (std.mem.eql(u8, command, "widget-hold")) {
+        if (args.len != 3) return usage();
+        const value = try std.fmt.allocPrint(allocator, "{s} {s}", .{ args[1], args[2] });
+        defer allocator.free(value);
+        try sendCommand(allocator, io, "widget-hold", value);
+    } else if (std.mem.eql(u8, command, "widget-context-press")) {
+        if (args.len != 3) return usage();
+        const value = try std.fmt.allocPrint(allocator, "{s} {s}", .{ args[1], args[2] });
+        defer allocator.free(value);
+        try sendCommand(allocator, io, "widget-context-press", value);
     } else if (std.mem.eql(u8, command, "widget-drag")) {
         if (args.len != 5 and args.len != 7) return usage();
         const value = if (args.len == 7)
@@ -117,6 +127,8 @@ fn usage() void {
         \\  native-command <id> [view-label]
         \\  widget-action <view-label> <widget-id> <action> [value]
         \\  widget-click <view-label> <widget-id>   (ids are the bare number; snapshots print #id)
+        \\  widget-hold <view-label> <widget-id>   (press-and-hold: arms and fires the on_hold timer, release suppressed)
+        \\  widget-context-press <view-label> <widget-id>   (right-click: context menu, or on_hold when the route has none)
         \\  widget-drag <view-label> <widget-id> <start-x-ratio> <end-x-ratio> [start-y-ratio end-y-ratio]
         \\  widget-wheel <view-label> <widget-id> <delta-y>
         \\  widget-key <view-label> <key> [text]

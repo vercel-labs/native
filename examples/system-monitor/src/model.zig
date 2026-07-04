@@ -86,6 +86,12 @@ pub const Msg = union(enum) {
     copied: native_sdk.EffectClipboardResult,
     set_theme: ThemePref,
     set_appearance: native_sdk.Appearance,
+    /// Toolbar gear: show/hide the settings WINDOW (model-declared —
+    /// the window exists exactly while this flag is set).
+    toggle_settings,
+    /// The user closed the settings window (its close button): the
+    /// model owns the consequence and clears the flag.
+    settings_closed,
 };
 
 /// The confirmation target, copied out of the row at request time.
@@ -147,6 +153,10 @@ pub const Model = struct {
     note_len: usize = 0,
     theme_pref: ThemePref = .auto,
     appearance: native_sdk.Appearance = .{},
+    /// The settings window's open flag: `windows_fn` declares the
+    /// window while this is set, so a Msg opens it and a Msg (or the
+    /// user's close button, via `settings_closed`) closes it.
+    settings_open: bool = false,
 
     // ------------------------------------------------------------ queries
 
@@ -550,6 +560,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .set_theme => |pref| model.theme_pref = pref,
         .set_appearance => |appearance| model.appearance = appearance,
+        .toggle_settings => model.settings_open = !model.settings_open,
+        .settings_closed => model.settings_open = false,
     }
 }
 

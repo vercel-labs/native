@@ -45,6 +45,7 @@ pub const SecurityConfig = types.SecurityConfig;
 pub const FrontendDevConfig = types.FrontendDevConfig;
 pub const FrontendConfig = types.FrontendConfig;
 pub const WindowRestorePolicy = types.WindowRestorePolicy;
+pub const WindowTitlebarStyle = types.WindowTitlebarStyle;
 pub const Window = types.Window;
 pub const ViewKind = types.ViewKind;
 pub const GpuSurfaceBackend = types.GpuSurfaceBackend;

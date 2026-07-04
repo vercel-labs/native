@@ -209,7 +209,7 @@ How the pieces fit, all model-owned (TEA):
 
 - **Open state is the model's.** `toggle_repo_picker` flips the bool; the surface exists only while the `if` renders it. There is no hidden engine open flag.
 - **`anchor` floats the menu.** The dropdown positions against its PARENT's frame (the `stack`, sized by the trigger): below it by default, flipping above when it doesn't fit and the other side has more room, height clamped to the chosen side, x clamped into the window. It consumes NO space in the flow (siblings never reflow), paints in a late z-pass above the whole tree, and escapes every ancestor scroll/clip region — window-clipped, not pane-clipped. `anchor-alignment="stretch"` widens it to at least the trigger's width (the select look).
-- **`on-dismiss` closes it model-side.** Escape and a click outside the menu dismiss the surface and dispatch the Msg; `close_repo_picker` clears the bool. The engine hides the surface immediately (the optimistic echo), and the next rebuild's source tree is truth — a model that keeps `open` true gets it back. Clicking the TRIGGER while open never double-fires: the anchor region owns its surface's toggling, so only `toggle_repo_picker` dispatches.
+- **`on-dismiss` closes it model-side.** Escape and a click outside the menu dismiss the surface and dispatch the Msg; `close_repo_picker` clears the bool. Escape works even when the trigger took no focus (a plain-text crumb): with no relevant focus chain it dismisses the topmost mounted anchored surface. The engine hides the surface immediately (the optimistic echo), and the next rebuild's source tree is truth — a model that keeps `open` true gets it back. Clicking the TRIGGER while open never double-fires: the anchor region owns its surface's toggling, so only `toggle_repo_picker` dispatches.
 - **Items close on pick.** `pick_repo` sets the value AND clears the open flag — a click inside the surface never dismisses.
 - **Keyboard**: once focus is in the menu (tab into it), tab wraps inside the surface (the floating focus scope) and Enter/Space activate items; Escape dismisses from the trigger or the menu.
 - **Automation sees everything**: the floating menu and its items appear in widget snapshots at their real frames and `widget-click <item-id>` works while it is open.
@@ -258,7 +258,7 @@ How the pieces fit, all model-owned (TEA):
 
 ### Press-and-hold: on-hold
 
-`on-hold` is the SwiftUI `Menu` + `primaryAction` shape — a control that acts on click and offers more on hold: a pointer held ~350 ms dispatches the hold Msg (the release then presses nothing), a quick click dispatches `on-press` as usual, and a right/ctrl-click whose route offers no context menu dispatches the hold Msg immediately (declared `context_menu`s always win). Like `on-press`, binding it makes any element pressable. The breadcrumb-switcher pattern: `on-press` selects the crumb, `on-hold` opens an anchored `dropdown-menu` of its siblings.
+`on-hold` is the SwiftUI `Menu` + `primaryAction` shape — a control that acts on click and offers more on hold: a pointer held ~350 ms dispatches the hold Msg (the release then presses nothing), a quick click dispatches `on-press` as usual, and a right/ctrl-click whose route offers no context menu dispatches the hold Msg immediately (declared `context_menu`s always win). Like `on-press`, binding it makes any element pressable. The breadcrumb-switcher pattern: `on-press` selects the crumb, `on-hold` opens an anchored `dropdown-menu` of its siblings. Both legs are live-drivable: `native automate widget-hold <view> <id>` runs the pointer+timer gesture, `widget-context-press <view> <id>` the secondary click.
 
 ```html
 <button on-press="select_crumb:{c.id}" on-hold="open_crumb_menu:{c.id}">{c.name}</button>
@@ -617,6 +617,35 @@ try harness.runtime.dispatchPlatformEvent(app, .wake);   // Msg{ .fetched = ... 
 
 The `.wake` platform event is how live platforms marshal worker completions onto the loop thread (macOS main-queue dispatch, GTK `g_idle_add`, Win32 `PostMessage`); dispatching it in tests exercises the same drain path. Note that after `fx.cancel(key)` runs in `update`, a subsequent `feedExit(key)` correctly fails with `error.EffectNotFound` — the cancel already delivered the terminal `.cancelled` exit, so there is no active effect left to feed. See `examples/effects-probe` for the complete pattern, including the live cancel flow.
 
+## Secondary windows: model-declared (`windows_fn` + `window_view`)
+
+Windows are model state, like an anchored surface's open flag. `Options.windows_fn` returns the descriptors that should exist RIGHT NOW (presence is visibility — no `visible` flag; the platform window channel has no hide); `Options.window_view` builds each declared window's whole canvas tree by window label. The runtime reconciles after every dispatch: create the newly declared, close the no-longer-declared, rebuild every open window's view from the same model.
+
+```zig
+fn windows(model: *const Model, scratch: *App.WindowsScratch) []const App.WindowDescriptor {
+    var count: usize = 0;
+    if (model.settings_open) {
+        scratch.windows[count] = .{
+            .label = "settings", .canvas_label = "settings-canvas",
+            .title = "Settings", .width = 360, .height = 320,
+            .on_close = .settings_closed,   // the user's close button, as a Msg
+        };
+        count += 1;
+    }
+    return scratch.windows[0..count];
+}
+fn windowView(ui: *App.Ui, model: *const Model, window_label: []const u8) App.Ui.Node { ... }
+// options: .windows_fn = windows, .window_view = windowView,
+```
+
+Rules that matter:
+- **Every canvas label must be unique across the app** (main + declared windows); input routes back by it, and automation verbs (`widget-click <canvas-label> <id>`, `screenshot`) address any window's canvas the same way.
+- **A user close dispatches `on_close`** (the dismissal precedent): the window is already gone as the optimistic echo; clear the open flag in `update` — or keep declaring the window and the next rebuild brings it back (source wins). A close the model itself initiated never echoes a Msg.
+- **Budget**: at most `UiApp.max_ui_windows` (4) declared windows; excess warns and is ignored. Every dispatched Msg rebuilds every open window's view.
+- **Markup binds ONE window's content** — there is no `window` element in the closed grammar. A markup-authored secondary window is a `canvas.CompiledMarkupView` whose `build` `window_view` calls for that label.
+- **Titlebar**: descriptors accept `.titlebar = .hidden_inset` (content under a transparent titlebar, macOS keeps the traffic lights); drag regions and inset-aware headers are the app's layout concern.
+- Tests: after the open Msg, deliver the new window's `gpu_surface_frame` (its window id from `runtime.listWindows`) to install its tree; simulate a user close by dispatching `.window_frame_changed` with `open = false`. See `examples/system-monitor` (gear chip -> settings window).
+
 ## Time: wall clock + monotonic, with a testable seam
 
 Zig 0.16 puts `std.time.milliTimestamp` behind `std.Io`, which `update` never sees — do NOT call `clock_gettime` yourself. The facade owns the clocks:
@@ -853,6 +882,8 @@ zig build -Dplatform=macos -Dweb-engine=system -Dautomation=true
 native automate wait                     # blocks until ready=true
 cat .zig-cache/native-sdk-automation/snapshot.txt   # widgets with ids, roles, names, bounds, state
 native automate widget-click <canvas-label> <id>   # id is the bare number (snapshot prints #id)
+native automate widget-hold <canvas-label> <id>    # press-and-hold: drives on_hold via the real timer path
+native automate widget-context-press <canvas-label> <id>   # right-click: context menu, or on_hold when none
 ```
 
 Snapshots expose the same structural widget ids your tests see, so live assertions are greps: click by id, re-read the snapshot, and check names/values/counts changed. Widget ids are stable across rebuilds, reorders, and hot reloads — asserting an id stayed constant while its bounds or state changed is the standard way to prove keyed identity.

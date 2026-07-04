@@ -190,6 +190,12 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     log(self, "surface.resize", "surface updated", &fields);
                 },
                 .window_frame_changed => |state| {
+                    // A user (or host) close arrives as open=false on a
+                    // window the runtime knew as open; a close the app
+                    // itself made through `closeWindow` already flipped
+                    // the flag, so the echo never re-fires. Capture the
+                    // transition BEFORE the update.
+                    const was_open = if (WindowViewMethods().findWindowIndexById(self, state.id)) |index| self.windows[index].info.open else false;
                     WindowViewMethods().updateWindowState(self, state) catch |err| log(self, "window.state.update_failed", @errorName(err), &.{trace.string("label", state.label)});
                     WindowViewMethods().relayoutShellViews(self, state.id) catch |err| log(self, "shell.relayout_failed", @errorName(err), &.{trace.uint("window_id", state.id)});
                     if (self.options.window_state_store) |store| {
@@ -202,6 +208,15 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                         trace.float("width", state.frame.width),
                         trace.float("height", state.frame.height),
                     });
+                    if (was_open and !state.open) {
+                        // The model owns the consequence (the dismissal
+                        // precedent): the app maps this to a Msg and its
+                        // next declared window set is truth. The label
+                        // comes from runtime storage, which outlives the
+                        // event's transient slices.
+                        const label = if (WindowViewMethods().findWindowIndexById(self, state.id)) |index| self.windows[index].info.label else state.label;
+                        try dispatchEvent(self, app, .{ .window_closed = .{ .window_id = state.id, .label = label } });
+                    }
                 },
                 .window_focused => |window_id| {
                     if (WindowViewMethods().findWindowIndexById(self, window_id)) |index| WindowViewMethods().setFocusedIndex(self, index);
@@ -341,6 +356,9 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .canvas_widget_dismiss => {},
                 .canvas_widget_context_press => {},
                 .canvas_widget_resize => {},
+                .window_closed => {
+                    self.invalidateFor(.state, null);
+                },
                 .lifecycle => {},
             }
         }
@@ -630,6 +648,8 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         fn automationCommandEventName(action: automation.protocol.Action) []const u8 {
             return switch (action) {
                 .widget_click => "automation.widget_click",
+                .widget_hold => "automation.widget_hold",
+                .widget_context_press => "automation.widget_context_press",
                 .widget_action => "automation.widget_action",
                 .widget_drag => "automation.widget_drag",
                 .widget_wheel => "automation.widget_wheel",
@@ -675,6 +695,12 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 },
                 .widget_click => {
                     try AutomationWidgetMethods().dispatchAutomationWidgetClick(self, app, try parseAutomationWidgetTarget(command.value));
+                },
+                .widget_hold => {
+                    try AutomationWidgetMethods().dispatchAutomationWidgetHold(self, app, try parseAutomationWidgetTarget(command.value));
+                },
+                .widget_context_press => {
+                    try AutomationWidgetMethods().dispatchAutomationWidgetContextPress(self, app, try parseAutomationWidgetTarget(command.value));
                 },
                 .widget_drag => {
                     try AutomationWidgetMethods().dispatchAutomationWidgetPointerDrag(self, app, try parseAutomationWidgetPointerDrag(command.value));
@@ -731,13 +757,18 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         pub fn publishAutomationScreenshot(self: *Runtime, value: []const u8) anyerror!void {
             const server = self.options.automation orelse return;
             const parsed = try parseAutomationScreenshotCommand(value);
+            // Screenshots address a gpu_surface view by label across ALL
+            // open windows, like the widget verbs — a secondary window's
+            // canvas captures the same way the main one does.
+            const view_index = try AutomationWidgetMethods().automationGpuSurfaceViewIndexByLabel(self, parsed.view_label);
+            const window_id = self.views[view_index].window_id;
             const allocator = std.heap.page_allocator;
-            const pixel_size = try self.canvasScreenshotPixelSize(1, parsed.view_label, parsed.scale);
+            const pixel_size = try self.canvasScreenshotPixelSize(window_id, parsed.view_label, parsed.scale);
             const pixels = try allocator.alloc(u8, pixel_size.byte_len);
             defer allocator.free(pixels);
             const scratch = try allocator.alloc(u8, pixel_size.byte_len);
             defer allocator.free(scratch);
-            const screenshot = try self.renderCanvasScreenshot(1, parsed.view_label, parsed.scale, pixels, scratch);
+            const screenshot = try self.renderCanvasScreenshot(window_id, parsed.view_label, parsed.scale, pixels, scratch);
             var writer = try std.Io.Writer.Allocating.initCapacity(
                 allocator,
                 try canvas.png.encodedRgba8ByteLen(screenshot.width, screenshot.height),

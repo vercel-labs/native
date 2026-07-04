@@ -179,6 +179,20 @@ pub const CanvasWidgetContextMenuEvent = struct {
     item_index: usize,
 };
 
+/// A window the RUNTIME knew as open was closed by the platform — the
+/// user clicked its close button (or the host tore it down). Never
+/// emitted for `runtime.closeWindow` calls the app itself made through
+/// the reconcile path before the platform echo arrives with the window
+/// already forgotten. The model owns the consequence, matching the
+/// dismissal precedent: `UiApp` maps this to the declared window's
+/// `on_close` Msg, and the next rebuild's declared window set is truth —
+/// a model that keeps declaring the window gets it back.
+pub const WindowClosedEvent = struct {
+    window_id: platform.WindowId,
+    /// The window's label from runtime storage (stable for the dispatch).
+    label: []const u8,
+};
+
 pub const InvalidationReason = enum {
     startup,
     surface_resize,
@@ -217,6 +231,7 @@ pub const Event = union(enum) {
     canvas_widget_dismiss: CanvasWidgetDismissEvent,
     canvas_widget_context_press: CanvasWidgetContextPressEvent,
     canvas_widget_resize: CanvasWidgetResizeEvent,
+    window_closed: WindowClosedEvent,
 
     pub fn name(self: Event) []const u8 {
         return switch (self) {
@@ -239,6 +254,7 @@ pub const Event = union(enum) {
             .canvas_widget_dismiss => "canvas_widget_dismiss",
             .canvas_widget_context_press => "canvas_widget_context_press",
             .canvas_widget_resize => "canvas_widget_resize",
+            .window_closed => "window_closed",
         };
     }
 };
