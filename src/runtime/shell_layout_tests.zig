@@ -461,7 +461,7 @@ test "shell window resizable reaches the platform create seam" {
         }
     };
 
-    // The friction: app.zon said `resizable = false`, the runtime carried
+    // The bug this locks down: app.zon said `resizable = false`, the runtime carried
     // it, and the macOS host dropped it at the C ABI (hardcoded
     // NSWindowStyleMaskResizable). Lock the runtime-to-platform half:
     // the created window's options arrive with the flag intact.

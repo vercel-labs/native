@@ -60,7 +60,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 &self.canvas_widget_reconcile_text_bytes,
                 tokens,
             );
-            // Native scroll drivers (#66): mark natively driven scroll
+            // Native scroll drivers: mark natively driven scroll
             // regions before the copy so rebuild-time clamping and display
             // emission both see the flag (engine scrollbar + engine clamp
             // stand down; the OS scroller owns them).

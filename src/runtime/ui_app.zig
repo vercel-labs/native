@@ -251,8 +251,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// macOS-proven (`NSStatusItem`); platforms without a
             /// status-bar service log a warning and continue.
             status_item: ?StatusItemOptions = null,
-            /// Model-derived status-item title and menu (friction #90:
-            /// an open-count badge in the menu bar, a latest-items
+            /// Model-derived status-item title and menu (e.g. an
+            /// open-count badge in the menu bar, a latest-items
             /// dropdown), the `web_panes` pattern: consulted on install
             /// and after every rebuild, re-applied only when the output
             /// actually changed. Selections dispatch each item's
@@ -352,7 +352,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// By-value construction. The Model parameter and the returned
         /// app both ride the caller's stack unless result-location
         /// semantics happen to elide them — at multi-MB Model sizes that
-        /// is a stack-overflow trap (#101, the #14/#62 family: fine in
+        /// is a stack-overflow trap (the multi-MB-by-value family: fine in
         /// `main`, deadly in tests that keep any sizable local). Prefer
         /// `create`/`destroy`, which never materialize the Model or the
         /// app outside the heap allocation.
@@ -374,7 +374,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             };
         }
 
-        /// #101: heap-allocate the app and construct every field — the
+        /// Heap-allocate the app and construct every field — the
         /// Model included — in place, so nothing app-sized ever rides
         /// the stack. The Model starts as its default value; set fields
         /// through the returned pointer before the app runs
@@ -538,7 +538,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // color still paint edge to edge under notches and bars.
             const bounds = geometry.RectF.fromSize(self.canvas_size).deflate(runtime.viewportInsetsForWindow(window_id));
             const layout = canvas.layoutWidgetTreeWithTokens(tree.root, bounds, tokens, &self.layout_nodes) catch |err| {
-                // Teach the fix at the failure site (#56): the error name
+                // Teach the fix at the failure site: the error name
                 // alone never says which budget or where to trim.
                 if (err == error.WidgetLayoutListFull) {
                     ui_app_log.warn(
@@ -838,7 +838,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         /// Re-derive the tray state from the model after a rebuild and
         /// patch only what changed — the `web_panes` shape for the menu
-        /// bar (#90). Failures degrade to a logged warning; a rejected
+        /// bar. Failures degrade to a logged warning; a rejected
         /// state is remembered so a static model does not warn per frame.
         fn applyStatusItem(self: *Self, runtime: *Runtime) void {
             const state_fn = self.options.status_item_fn orelse return;
@@ -1064,8 +1064,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             return scale_factor;
         }
 
-        /// Change-detection hashes for the model-derived tray state
-        /// (#90): field lengths are folded in so adjacent slices can
+        /// Change-detection hashes for the model-derived tray state:
+        /// field lengths are folded in so adjacent slices can
         /// never alias across boundaries.
         fn hashTrayTitle(title: []const u8) u64 {
             var hasher = std.hash.Wyhash.init(0x7261795f7469746c); // "ray_titl"
@@ -1194,7 +1194,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
         }
 
-        /// A native context-menu selection (#67): resolve the selected
+        /// A native context-menu selection: resolve the selected
         /// item's declared `Msg` through the tree's handler table.
         fn handleContextMenu(self: *Self, runtime: *Runtime, menu_event: core.CanvasWidgetContextMenuEvent) anyerror!void {
             if (!std.mem.eql(u8, menu_event.view_label, self.options.canvas_label)) return;

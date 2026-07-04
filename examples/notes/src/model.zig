@@ -966,7 +966,8 @@ pub fn persistStore(model: *Model, fx: *Effects) void {
 /// deterministic under a `TestClock`. Prose bodies are natural
 /// one-line paragraphs: the editor soft-wraps them with the same
 /// metrics the renderer inks, so the hard-wrapped-seed workaround
-/// (friction #80) is gone.
+/// (needed when the estimator diverged from real glyph metrics) is
+/// gone.
 pub fn seed(model: *Model) void {
     model.folder_count = 0;
     model.note_count = 0;

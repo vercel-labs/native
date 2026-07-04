@@ -71,7 +71,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
             };
         }
 
-        /// The live tray as the runtime last applied it (#95): title +
+        /// The live tray as the runtime last applied it: title +
         /// dropdown rows, or null when no status item exists. The menu
         /// bar is outside every window capture, so the snapshot is the
         /// only automation-visible evidence of the model-driven tray.
@@ -108,7 +108,8 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
 
         /// The publishing process's pid, stamped into every snapshot so
         /// the automation CLI can refuse dropbox files whose publisher is
-        /// gone (friction #93). 0 on platforms without a process table.
+        /// gone — stale files were once served as live state. 0 on
+        /// platforms without a process table.
         fn currentProcessId() u32 {
             return switch (builtin.os.tag) {
                 .windows => std.os.windows.GetCurrentProcessId(),

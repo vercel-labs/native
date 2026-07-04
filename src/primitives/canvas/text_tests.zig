@@ -1579,8 +1579,8 @@ test "injected measure provider drives line breaking and caret geometry" {
 // layout used. A CoreText-like provider measures multibyte codepoints
 // narrower than the estimator's flat 0.65em multibyte advance; walking
 // the raw estimator while the provider measured the line's bounds and
-// clip dropped one tail glyph per multibyte codepoint in every
-// automation screenshot of a live macOS app (system-monitor friction).
+// clip dropped one tail glyph per multibyte codepoint — the shape a
+// live macOS app's automation screenshots exposed.
 fn coretextLikeMeasureForTests(context: ?*anyopaque, font_id: FontId, size: f32, text: []const u8) f32 {
     _ = context;
     var width: f32 = 0;

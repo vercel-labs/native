@@ -596,7 +596,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 storage.glyph_atlas_cache_actions,
             );
             const text_layout_plan = display_list.textLayoutPlan(frame_options.text_layout_options, storage.text_layout_plans, storage.text_layout_lines) catch |err| {
-                // Teach the fix at the failure site (#94): the bare error
+                // Teach the fix at the failure site: the bare error
                 // name kills the frame without saying which budget bound
                 // it or where the headroom telemetry lives.
                 switch (err) {

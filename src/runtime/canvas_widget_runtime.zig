@@ -107,7 +107,7 @@ pub const CanvasWidgetSourceTextEntry = struct {
 
 /// The SOURCE-side selected state of one control on the previous
 /// rebuild, kept per view so the control reconcile can tell a
-/// model-driven (controlled) widget from an uncontrolled one (#81).
+/// model-driven (controlled) widget from an uncontrolled one.
 pub const CanvasWidgetSourceControlEntry = struct {
     id: canvas.ObjectId = 0,
     kind: canvas.WidgetKind = .toggle_button,
@@ -116,8 +116,8 @@ pub const CanvasWidgetSourceControlEntry = struct {
 
 /// Which control kinds track their SOURCE selected state across
 /// rebuilds. Only `toggle_button` today: chips are the one boolean
-/// control whose retained toggle fights model-driven exclusive groups
-/// (#81); toggles/checkboxes/list selections keep the retained-wins
+/// control whose retained toggle fights model-driven exclusive groups;
+/// toggles/checkboxes/list selections keep the retained-wins
 /// contract locked by the control reconcile tests.
 pub fn canvasWidgetSourceControlKind(kind: canvas.WidgetKind) bool {
     return kind == .toggle_button;
@@ -460,7 +460,7 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
         if (entry.id != copy.widget.id or entry.kind != copy.widget.kind) continue;
         switch (copy.widget.kind) {
             .toggle_button => {
-                // Chips (#81): a toggle-button whose SOURCE asserts
+                // Chips: a toggle-button whose SOURCE asserts
                 // selected — on this rebuild, or on the previous one
                 // (tracked in the view's source control entries) — is
                 // model-driven, and the source wins over the retained

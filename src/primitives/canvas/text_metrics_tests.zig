@@ -89,8 +89,8 @@ test "estimator fallbacks charge notdef and east asian wide cells" {
 //     per-cluster sum for incremental layout). Measured over the sample
 //     set the kerning residue is 1.5–2.1% (short strings kern denser);
 //     adversarial all-kerning text (e.g. "AVAWAY") can exceed this —
-//     that residual class is kerning, not advance error, and is
-//     documented in the friction log.
+//     that residual class is kerning, not advance error, and is a
+//     known, accepted divergence.
 
 const CFIndex = isize;
 const CGSize = extern struct { width: f64, height: f64 };

@@ -1,4 +1,4 @@
-//! Native scroll driver tests (#66): the runtime publishes per-region
+//! Native scroll driver tests: the runtime publishes per-region
 //! drivers to the platform, follows driver-reported offsets (including
 //! rubber-band overscroll), pushes runtime-side offset changes back, and
 //! keeps the rebuild reconciliation invariant. The null platform records

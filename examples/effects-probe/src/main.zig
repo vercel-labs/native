@@ -135,7 +135,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .cancel => fx.cancel(stream_key),
         // Copy the status line to the system clipboard through the
-        // effects channel (friction #82) — no pbcopy spawn: the
+        // effects channel — no pbcopy spawn: the
         // pasteboard is a platform service, and the terminal outcome
         // arrives as one `.copied` Msg.
         .copy_status => {

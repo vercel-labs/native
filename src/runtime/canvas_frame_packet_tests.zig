@@ -194,7 +194,7 @@ test "runtime presents next canvas GPU packet" {
     }, canvasFrameScratchStorage(&harness.runtime), canvas.Color.rgb8(247, 249, 252), &gpu_commands, &packet_json_buffer);
 
     try std.testing.expect(packet.requiresRender());
-    // The successful packet present stamped the path proof (#60).
+    // The successful packet present stamped the path proof.
     try std.testing.expectEqual(platform.GpuPresentPath.packet, harness.runtime.views[0].gpu_present_path);
     try std.testing.expectEqual(@as(usize, 1), packet.commandCount());
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_packet_present_count);
@@ -300,7 +300,8 @@ test "packet text carries engine line breaks so tight single-line boxes never re
     });
 
     // A text widget whose box is exactly as wide as the engine measured
-    // the text (the tight intrinsic case from friction #80): the packet
+    // the text (the tight intrinsic case that used to re-wrap host-side):
+    // the packet
     // must carry the engine's single unbroken line so the host draws it
     // verbatim instead of re-wrapping with its own measurement.
     const label = "Songs";
@@ -561,7 +562,7 @@ test "runtime falls back to pixels when packet JSON buffer is too small" {
     try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_packet_present_count);
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_present_count);
     // The FAILED packet attempt never stamped `.packet`: only the pixel
-    // present that actually painted did (#60).
+    // present that actually painted did.
     try std.testing.expectEqual(platform.GpuPresentPath.pixels, harness.runtime.views[0].gpu_present_path);
 }
 
@@ -610,7 +611,7 @@ test "runtime falls back to pixel presentation when packet presenter is unavaila
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_present_count);
     const presented_frame = try harness.runtime.gpuSurfaceFrame(1, "canvas");
     try std.testing.expect(!presented_frame.canvas_frame_requires_render);
-    // Snapshot-visible proof that the pixel path painted (#60).
+    // Snapshot-visible proof that the pixel path painted.
     try std.testing.expectEqual(platform.GpuPresentPath.pixels, harness.runtime.views[0].gpu_present_path);
     try std.testing.expectEqual(platform.GpuPresentPath.pixels, harness.runtime.views[0].info().gpu_present_path);
 }
@@ -758,7 +759,7 @@ test "runtime keeps frames with registered images on the packet path" {
     }, canvasFrameScratchStorage(&harness.runtime), &gpu_commands, packet_json_buffer, pixels, scratch, canvas.Color.rgb8(0, 0, 0), null);
     try std.testing.expectEqual(CanvasPresentationMode.skipped, second.mode);
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_image_upload_count);
-    // An idle skip keeps the last painted path: still `.packet` (#60).
+    // An idle skip keeps the last painted path: still `.packet`.
     try std.testing.expectEqual(platform.GpuPresentPath.packet, harness.runtime.views[0].gpu_present_path);
 }
 

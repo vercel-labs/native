@@ -262,7 +262,8 @@ fn durationText(ui: *Ui, duration: []const u8) Ui.Node {
 fn sectionHeading(ui: *Ui, title: []const u8, count: []const u8) Ui.Node {
     // Intrinsic width: layout measures with the bundled face's real
     // advances and the packet host draws the engine's lines verbatim,
-    // so the old slack-width workaround (friction #80) is gone.
+    // so the old slack-width workaround (needed when the estimator
+    // diverged from real glyph metrics) is gone.
     return ui.row(.{ .gap = 10, .cross = .center }, .{
         ui.paragraph(.{ .semantics = .{ .label = title } }, &.{
             .{ .text = title, .weight = .bold, .scale = 1.45 },

@@ -20,7 +20,7 @@ pub fn main(init: std.process.Init) !void {
         // Payload, not a diagnostic: scripts parse `native version`, so it
         // belongs on stdout (see automation.zig's emitPayload contract).
         // Commit + automation protocol make binary/framework skew a
-        // one-command check (#103: a stale zig-out `native` binary
+        // one-command check (a stale zig-out `native` binary once
         // silently drove a days-old dropbox).
         var stdout_buffer: [128]u8 = undefined;
         var stdout_writer = std.Io.File.stdout().writerStreaming(init.io, &stdout_buffer);

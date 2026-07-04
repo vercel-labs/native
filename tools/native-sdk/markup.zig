@@ -52,7 +52,7 @@ fn checkFile(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8) !v
     };
     if (ui_markup.validate(document)) |info| {
         // The tofu guard's position points at the exact character; name
-        // the codepoint so the fix is one glance (#98).
+        // the codepoint so the fix is one glance.
         if (info.message.ptr == ui_markup.font_coverage_message.ptr) {
             if (codepointAt(source, info.line, info.column)) |found| {
                 std.debug.print("{s}:{d}:{d}: error: {s} (found \"{s}\" U+{X:0>4})\n", .{ file_path, info.line, info.column, info.message, found.bytes, found.codepoint });
@@ -66,7 +66,7 @@ fn checkFile(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8) !v
     std.debug.print("{s}: ok\n", .{file_path});
 }
 
-/// #103's markup-vocabulary case: "unknown element/attribute" from an OLD
+/// The stale-binary markup-vocabulary case: "unknown element/attribute" from an OLD
 /// `native` binary checking NEW syntax looks exactly like an authoring
 /// mistake — a stale zig-out binary cost a misdiagnosis round this way.
 /// When the diagnosis is a vocabulary miss, say the other explanation

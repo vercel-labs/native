@@ -661,7 +661,7 @@ test "markup buttons take an inline icon with validated names" {
     // icon child to duplicate the handler onto.
     try testing.expectEqual(@as(usize, 0), labeled.children.len);
     try testing.expect(tree.msgFor(labeled.id, .press) != null);
-    // The rest of the labeled interactive set (#96): toggle-buttons
+    // The rest of the labeled interactive set: toggle-buttons
     // (chips, tab strips), list items, and menu items carry the icon in
     // the same field with the same closed vocabulary.
     const chip = tree.root.children[2];
@@ -1867,7 +1867,7 @@ test "avatar image misuse fails the build with the teaching messages" {
     }
 }
 
-// -------------------------------- text alignment and grid columns (#84)
+// ------------------------------------- text alignment and grid columns
 
 pub const AlignMsg = union(enum) { refresh };
 
@@ -1930,7 +1930,7 @@ test "text-alignment and grid columns build the hand-written tree" {
     // text-alignment lands on the widget; the default stays .start.
     const aligned = markup_tree.root.children[0];
     try testing.expectEqual(canvas.TextAlign.center, aligned.text_alignment);
-    // The info token resolves like any other ColorTokens field (#85).
+    // The info token resolves like any other ColorTokens field.
     try testing.expectEqualDeep((canvas.DesignTokens{}).colors.info, aligned.style.foreground.?);
 
     // columns lands in the grid layout, from a literal and from a binding.

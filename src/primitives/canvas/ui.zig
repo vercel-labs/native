@@ -50,8 +50,8 @@ fn warnStackContainerGap(kind: WidgetKind, gap: f32) void {
     );
 }
 
-/// Debug-build diagnostic for text the bundled face cannot fully render
-/// (#98): the codepoint draws as a tofu box wherever the bundled
+/// Debug-build diagnostic for text the bundled face cannot fully
+/// render: the codepoint draws as a tofu box wherever the bundled
 /// outlines are the only glyph source — reference screenshots
 /// (`automate screenshot`), mobile embeds, provider-less measurement.
 /// Markup literals get the same lesson as a validation error; this
@@ -836,7 +836,7 @@ pub fn Ui(comptime Msg: type) type {
             semantics: canvas.WidgetSemantics = .{},
         };
 
-        /// A data chart leaf (friction #99): line (optional area fill),
+        /// A data chart leaf: line (with optional area fill),
         /// bar, and band series over uniform x steps, drawn through the
         /// vector path pipeline with token-driven colors. Series are
         /// copied into the build arena and DOWNSAMPLED deterministically
@@ -970,7 +970,7 @@ pub fn Ui(comptime Msg: type) type {
             const state = stepState(active, index);
             // Completed steps wear the vector `check` icon — the ✓ text
             // glyph is outside the bundled face's coverage and rendered
-            // as tofu on the reference/screenshot paths (#98).
+            // as tofu on the reference/screenshot paths.
             const indicator = self.el(.badge, .{
                 .variant = if (state == .pending) canvas.WidgetVariant.outline else .primary,
                 .icon = if (state == .completed) "check" else "",
@@ -1025,7 +1025,7 @@ pub fn Ui(comptime Msg: type) type {
             /// Indicator badge text ("3"); empty (with no `icon`) renders
             /// a small dot. Prefer `icon` for symbols — text glyphs
             /// outside the bundled face render as tofu on the
-            /// reference/screenshot paths (#98).
+            /// reference/screenshot paths.
             indicator: []const u8 = "",
             /// Vector icon indicator (registry name, e.g. "check"):
             /// drawn inside the badge with the variant's tint. Wins the

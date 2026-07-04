@@ -486,7 +486,7 @@ const max_packet_text_layout_lines: usize = 64;
 /// host draws these lines verbatim instead of re-breaking the text with its
 /// own line breaker, so drawn line breaks can never disagree with the
 /// layout that measured the box — host-side re-wrapping broke tight
-/// intrinsic single-line boxes mid-word (friction #80). Uses the same
+/// intrinsic single-line boxes mid-word. Uses the same
 /// `layoutTextRun` the reference renderer and selection geometry draw from,
 /// including the injected measure provider carried by the layout options.
 /// Serializes `null` when the run exceeds the line budget, which keeps the

@@ -52,7 +52,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      # Percentile perf check (friction #77): 5 cold launches asserting p90
+      # Percentile perf check: 5 cold launches asserting p90
       # first-frame latency under NATIVE_SDK_PERF_BUDGET_MS, then 5 steady-state
       # widget clicks asserting p90 input latency under NATIVE_SDK_PERF_INPUT_BUDGET_MS.
       # Its own job so a shared-runner slowdown is visible in isolation and

@@ -42,9 +42,9 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 //     first nonblank presentation on an idle boot has no
                 //     resize and no input to piggyback on);
                 //   - this frame resolved a pending input into a recorded
-                //     input latency (friction #79: an occluded window's
-                //     click otherwise never publishes the latency the
-                //     perf harness waits on);
+                //     input latency (an occluded window's click otherwise
+                //     never publishes the latency the perf harness waits
+                //     on);
                 //   - this frame recorded the first-frame latency.
                 // Steady-state frames carry no new fact and stay quiet —
                 // a timer-mode surface must not republish observable
@@ -69,9 +69,9 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     enriched_frame_event = gpuSurfaceFrameEventFromGpuFrame(gpu_frame);
                 }
                 // Native scroll drivers reconcile against live host state
-                // on every presented frame (the #68 relayout-stomp
-                // lesson): frames, content extents, and diverged offsets
-                // all self-heal here.
+                // on every presented frame (the relayout-stomp lesson: a
+                // one-shot frame patch races shell relayout): frames,
+                // content extents, and diverged offsets all self-heal here.
                 ScrollDriverMethods().syncCanvasWidgetScrollDriversForView(self, index);
             }
             try self.dispatchEvent(app, .{ .gpu_surface_frame = enriched_frame_event });
@@ -97,7 +97,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
 
         pub fn dispatchGpuSurfaceInput(self: *Runtime, app: runtime_api.App(Runtime), input_event: platform.GpuSurfaceInputEvent) anyerror!void {
             // Secondary-button (right/ctrl-click, touch long-press) input
-            // is the context-menu gesture (#67): the press presents the
+            // is the context-menu gesture: the press presents the
             // native menu and the whole button-1 stream is consumed so a
             // right-click never acts as a primary press.
             if (ContextMenuMethods().canvasWidgetContextPointerInput(input_event)) {

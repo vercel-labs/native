@@ -375,7 +375,7 @@ test "span backgrounds fill seamless full-line rects behind the glyphs" {
 
     // A diff-style line: "middle" is one word whose two pieces carry the
     // same background but different styles, so it lays out as two abutting
-    // runs (the intra-line diff shape from friction #86).
+    // runs (the intra-line diff-emphasis shape).
     const spans = [_]TextSpan{
         .{ .text = "left " },
         .{ .text = "mid", .background = .success },

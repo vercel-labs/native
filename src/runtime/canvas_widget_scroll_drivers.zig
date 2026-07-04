@@ -1,4 +1,4 @@
-//! Native scroll drivers (#66): per-scrollable-region invisible OS
+//! Native scroll drivers: per-scrollable-region invisible OS
 //! scrollers (macOS `NSScrollView`) own scroll input and physics —
 //! momentum, rubber-band, overlay scrollbars — while the engine keeps
 //! rendering the content. The runtime:
@@ -7,7 +7,7 @@
 //!   so engine scrollbars and engine kinetic physics stand down,
 //! - pushes the full desired driver set (region frames, content extents,
 //!   offsets) on every widget-layout install AND every presented frame —
-//!   the self-healing reconcile lesson from #68: anything owning host
+//!   the self-healing reconcile lesson: anything owning host
 //!   view state must reconcile against live truth per frame,
 //! - applies driver-reported offsets through the same retained scroll
 //!   path wheel input uses, so `widget.value` stays the single offset of

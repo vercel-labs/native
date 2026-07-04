@@ -188,7 +188,7 @@ test "out of range glyph ids error instead of reading wild" {
 }
 
 test "font_coverage answers identically to the face's cmap" {
-    // The std-only coverage module (markup tofu guard, #98) re-reads the
+    // The std-only coverage module (markup tofu guard) re-reads the
     // same embedded bytes with its own minimal cmap walk; it must never
     // drift from the renderer's `Face.glyphIndex`.
     const font_coverage = @import("font_coverage.zig");

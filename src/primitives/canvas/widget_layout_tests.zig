@@ -2112,7 +2112,7 @@ test "widget tree layout widths follow the injected text measure provider" {
     try std.testing.expect(measured_layout.findById(2).?.frame.width > default_layout.findById(2).?.frame.width);
 }
 
-// ------------------------------------------------- definite sizes (#30)
+// ------------------------------------------------------ definite sizes
 
 test "definite width caps intrinsic content so siblings keep their share" {
     // Ovation repro shape: a non-growing 360px pane whose single-line text
@@ -2205,7 +2205,7 @@ test "definite size caps stack children instead of stretching them" {
     try expectLayoutFrame(layout, 2, geometry.RectF.init(0, 0, 120, 60));
 }
 
-// -------------------------------------------- separator orientation (#31)
+// ------------------------------------------------- separator orientation
 
 test "separator in a row is a thin vertical divider" {
     // Ovation repro shape: a divider between two growing panes. The
@@ -2260,7 +2260,7 @@ test "row intrinsic width counts a separator as its stroke width" {
     try std.testing.expectEqual(@as(f32, 101), layout.findById(2).?.frame.width);
 }
 
-// ------------------------------------------- overflow diagnostics (#31)
+// ------------------------------------------------ overflow diagnostics
 
 test "axis layout overflow is reported past the float-noise epsilon" {
     const widget_layout = @import("widget_layout.zig");

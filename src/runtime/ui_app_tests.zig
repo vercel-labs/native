@@ -1048,7 +1048,7 @@ fn findWidgetIdByKind(widget: canvas.Widget, kind: canvas.WidgetKind) ?canvas.Ob
 }
 
 test "automation set_text routes through the input path so the elm mirror stays consistent" {
-    // Friction #39: `widget-action <id> set_text` used to write the
+    // `widget-action <id> set_text` used to write the
     // runtime editor state directly and never dispatch `on_input`, so a
     // TEA app's model still saw an empty buffer (Send stayed disabled
     // while the field visibly held text — a state no real user can
@@ -1251,7 +1251,7 @@ test "ui app autofocus moves the keyboard to a freshly mounted editor through th
     try std.testing.expectEqual(button_id, harness.runtime.views[view_index].canvas_widget_focused_id);
 }
 
-// -------------------------------------------------- layout capacity (#56)
+// -------------------------------------------------------- layout capacity
 
 const CapacityModel = struct {
     row_count: usize = 4,
@@ -1297,8 +1297,8 @@ fn capacityView(ui: *CapacityApp.Ui, model: *const CapacityModel) CapacityApp.Ui
 }
 
 test "an effects-wake rebuild past the widget budget fails tests loudly and degrades in production" {
-    // Friction #56: a rebuild that blew max_canvas_widget_nodes_per_view
-    // on an effects-wake drain used to vanish into the #38 ring — the
+    // A rebuild that blew max_canvas_widget_nodes_per_view
+    // on an effects-wake drain used to vanish into the dispatch-error ring — the
     // test saw a passing dispatch and a silently stale frame.
     // The failing layout warns through std.log (the teaching diagnostic
     // under test would otherwise fail the build runner's stderr check).
@@ -1347,8 +1347,8 @@ test "an effects-wake rebuild past the widget budget fails tests loudly and degr
     try std.testing.expectEqualStrings("effects_wake", harness.runtime.dispatchErrors()[0].event);
     try std.testing.expectEqualStrings("WidgetLayoutListFull", harness.runtime.dispatchErrors()[0].error_name);
 
-    // Production policy: the same failure degrades — recorded in the #38
-    // ring, never fatal.
+    // Production policy: the same failure degrades — recorded in the
+    // dispatch-error ring, never fatal.
     harness.runtime.dispatch_error_policy = .degrade;
     app_state.model.row_count = 4;
     try app_state.dispatch(&harness.runtime, 1, .start);
@@ -1358,10 +1358,10 @@ test "an effects-wake rebuild past the widget budget fails tests loudly and degr
     try std.testing.expectEqualStrings("WidgetLayoutListFull", harness.runtime.dispatchErrors()[1].error_name);
 }
 
-// ---------------------------------------------- automation degrade (#61)
+// --------------------------------------------------- automation degrade
 
 test "a stale automation widget click degrades instead of killing the frame callback" {
-    // Friction #61: `frame()` used to `try` the consumed automation
+    // `frame()` used to `try` the consumed automation
     // command, so a widget-click on an unmounted id escaped the
     // frame_requested platform callback and stopped the whole app
     // (CallbackFailed). Automation misuse always degrades — even under
@@ -1692,7 +1692,7 @@ test "ui app status item installs a tray and dispatches its commands" {
     try std.testing.expectEqual(@as(u32, 1), app_state.model.refresh_count);
 }
 
-// ------------------------------------------- model-driven status item (#90)
+// ------------------------------------------------ model-driven status item
 
 const TrayStateModel = struct {
     open_count: u32 = 3,
@@ -1852,7 +1852,7 @@ test "ui app tray state rides automation snapshots and tray-action drives a row"
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = frame_event });
 
     // The snapshot exposes the applied tray: model-derived title, every
-    // dropdown row with id/label/command/enabled, and separators (#95) —
+    // dropdown row with id/label/command/enabled, and separators —
     // the menu bar is outside every window capture, so this is the only
     // automation-visible evidence the model-driven tray exists.
     {

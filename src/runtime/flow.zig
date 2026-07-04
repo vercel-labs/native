@@ -297,13 +297,13 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             const event_fields = [_]trace.Field{trace.string("event", event_value.name())};
             log(self, "runtime.event", null, &event_fields);
             // A handler/update error degrades — recorded and observable,
-            // never fatal (#38). Propagating it would reach the platform
+            // never fatal. Propagating it would reach the platform
             // callback, set `failed`, and exit the whole app. The tag
             // name (not `Event.name()`, which for commands aliases
             // transient command-name storage) keeps ring records static.
             // Under the TestHarness's `.propagate` policy the recorded
             // error additionally returns, so capacity errors fail tests
-            // instead of leaving silent stale frames (#56).
+            // instead of leaving silent stale frames.
             app.event(self, event_value) catch |err| {
                 recordDispatchError(self, @tagName(event_value), err);
                 if (self.dispatch_error_policy == .propagate) return err;
@@ -607,7 +607,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             const server = self.options.automation orelse return;
             var buffer: [automation.protocol.max_command_bytes]u8 = undefined;
             // Automation command errors ALWAYS degrade, regardless of
-            // `dispatch_error_policy` (#61): a stale widget target or a
+            // `dispatch_error_policy`: a stale widget target or a
             // malformed command is driver misuse, not an app fault —
             // propagating would escape the frame_requested platform
             // callback and kill the whole app under test, and the
@@ -624,7 +624,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         }
 
         /// Stable static event names for degraded automation command
-        /// errors (#61) — one per widget action, a generic fallback for
+        /// errors — one per widget action, a generic fallback for
         /// the rest (parse errors included).
         fn automationCommandEventName(action: automation.protocol.Action) []const u8 {
             return switch (action) {
@@ -698,7 +698,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     } });
                 },
                 .tray_action => {
-                    // Drive a status-item dropdown row (#95) through the
+                    // Drive a status-item dropdown row through the
                     // SAME platform event a real NSStatusItem menu click
                     // emits, so command resolution, `.tray` source, and
                     // UiApp's window fallback are all the real path. A
@@ -910,7 +910,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             try emitWindowEvent(self, drop.window_id, "drop:files", writer.buffered());
         }
 
-        /// Trace logging never fails dispatch (#38): a full or failing
+        /// Trace logging never fails dispatch: a full or failing
         /// sink drops the record and counts the loss where snapshots can
         /// see it (`dropped_trace_records`).
         fn log(self: *Runtime, name_value: []const u8, message: ?[]const u8, fields: []const trace.Field) void {
@@ -924,8 +924,8 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             };
         }
 
-        /// A handler/update error must degrade, never terminate the app
-        /// (#38): record it in the bounded ring (queryable through
+        /// A handler/update error must degrade, never terminate the
+        /// app: record it in the bounded ring (queryable through
         /// `Runtime.dispatchErrors` and the automation snapshot), trace
         /// it at `.err`, and republish observable state.
         fn recordDispatchError(self: *Runtime, event_name: []const u8, err: anyerror) void {

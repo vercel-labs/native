@@ -2,9 +2,9 @@
 // time constants sized for a dense desktop view, overflow errors name the
 // budget, and the automation snapshot reports headroom (widget_nodes=N/MAX).
 //
-// Raised for the ovation PR round (friction #62): a real three-pane desktop
-// app (sidebar tree + markdown detail pane + run surface) spent more design
-// effort budgeting nodes than building UI at the old 256-node cap. The
+// Raised after measuring a real three-pane desktop app (sidebar tree +
+// markdown detail pane + run surface): it spent more design effort
+// budgeting nodes than building UI at the old 256-node cap. The
 // widget-node budget quadrupled (256 -> 1024: the measured worst realistic
 // three-pane view is ~500 nodes, so 1024 leaves comfortable headroom), and
 // the frame-content budgets doubled (commands 1024 -> 2048, glyphs
@@ -47,8 +47,8 @@ pub const max_canvas_resources_per_view: usize = max_canvas_commands_per_view;
 pub const max_canvas_resource_cache_actions_per_view: usize = max_canvas_resources_per_view * 2;
 pub const max_canvas_visual_effects_per_view: usize = max_canvas_commands_per_view;
 pub const max_canvas_visual_effect_cache_actions_per_view: usize = max_canvas_visual_effects_per_view * 2;
-// Text layout plans per frame. Raised for friction #94: a real agent
-// transcript (long wrapped chat turns in a 380px pane) put >512 draw_text
+// Text layout plans per frame. Raised because a real agent transcript
+// (long wrapped chat turns in a 380px pane) put >512 draw_text
 // commands in one frame and killed renders with TextLayoutPlanListFull,
 // invisible outside one log line. Every plan is born from exactly one
 // `draw_text` command in a display list bounded by the command budget, so
@@ -63,8 +63,10 @@ pub const max_canvas_visual_effect_cache_actions_per_view: usize = max_canvas_vi
 // as views lay out text).
 pub const max_canvas_text_layouts_per_view: usize = max_canvas_commands_per_view;
 // Wrapped text lines across all of a frame's layout plans (the plan
-// arrays above index into one shared line pool). Sized with #94's shape
-// in mind: plans grow with COMMAND count, lines grow with WRAP count — a
+// arrays above index into one shared line pool). Sized with the
+// long-transcript shape in mind — a long agent transcript's wrapped lines
+// are what blew the old shared cap: plans grow with COMMAND count, lines
+// grow with WRAP count — a
 // 32 KiB frame-text budget wrapped at ~50 chars/line in a narrow pane is
 // ~650 lines, so 8192 (matching the frame glyph budget: a rendered line
 // costs at least one glyph) gives >10x headroom over the worst measured
@@ -84,8 +86,8 @@ pub const max_canvas_text_layout_lines_per_view: usize = 8192;
 pub const max_registered_canvas_images: usize = 16;
 pub const max_registered_canvas_image_pixel_bytes: usize = 1024 * 1024;
 
-// The retained widget-tree budgets (raised 256 -> 1024 for friction #62,
-// see the header comment). `automation.snapshot.max_widgets_per_view`
+// The retained widget-tree budgets (raised 256 -> 1024; see the header
+// comment). `automation.snapshot.max_widgets_per_view`
 // mirrors the node cap so snapshots never silently truncate widget
 // enumeration; a test in canvas_widget_layout_tests.zig keeps them in
 // lockstep.
@@ -94,7 +96,7 @@ pub const max_canvas_widget_semantics_per_view: usize = 1024;
 // Raised from 2048 with the inline-span/markdown work: a rendered document
 // retains its full plain text (paragraph bytes are stored once; span slices
 // rebase into them) plus link payloads, and 2048 bytes could not hold a
-// README-sized document. Raised again with the node-budget raise (#62):
+// README-sized document. Raised again with the node-budget raise:
 // a 1024-node view retains proportionally more text.
 pub const max_canvas_widget_text_bytes_per_view: usize = 65536;
 pub const max_canvas_widget_source_text_entries_per_view: usize = 256;
@@ -103,11 +105,11 @@ pub const max_canvas_widget_source_text_entries_per_view: usize = 256;
 // bytes); per-paragraph capacity is `canvas.max_text_spans_per_paragraph`.
 pub const max_canvas_widget_spans_per_view: usize = 1024;
 // Declared native context-menu entries retained across all widgets of a
-// view (labels live in the widget text bytes). Raised for friction #83
-// (confirmed by #89): the budget sums across every widget of the view,
-// and a real desktop view hit 128 fast — a 24-row sidebar with 4 items +
-// separator per row, a detail-pane menu, and per-step ledger menus
-// measured 124/128 before the app was finished. Quadrupled (128 -> 512)
+// view (labels live in the widget text bytes). Raised because the budget
+// sums across every widget of the view, and a real desktop view hit 128
+// fast — a 24-row sidebar with 4 items + separator per row, a detail-pane
+// menu, and per-step ledger menus measured 124/128 before the app was
+// finished. Quadrupled (128 -> 512)
 // so declared menus scale with the 1024-node budget instead of becoming
 // the next design-effort cliff. Memory cost is one 24-byte entry (a
 // 16-byte label slice + enabled/separator flags) per slot: 24 B x 512 =
@@ -120,8 +122,8 @@ pub const max_canvas_widget_spans_per_view: usize = 1024;
 // because a menu nobody can scan is a design bug, while this budget
 // bounds the retained declarations across all widgets of the view.
 pub const max_canvas_widget_context_menu_items_per_view: usize = 512;
-// Chart series and points retained across all `.chart` widgets of a view
-// (friction #99). `Ui.chart` downsamples every series to
+// Chart series and points retained across all `.chart` widgets of a
+// view. `Ui.chart` downsamples every series to
 // `canvas.max_chart_points_per_series` (256) before it reaches the
 // retained tree, so the points pool is sized as 64 maximal series: a
 // dashboard of 16 charts x 3 series x 256 points fills it exactly, and

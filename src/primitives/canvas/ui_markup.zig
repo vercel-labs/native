@@ -1,5 +1,5 @@
-//! Markup front-end for the declarative ui builder (design:
-//! plans/zero-native/markup-authoring.md).
+//! Markup front-end for the declarative ui builder (grammar reference:
+//! skill-data/native-ui/SKILL.md).
 //!
 //! This module owns the grammar: an HTML-like element tree with kebab-case
 //! element and attribute names, `{binding}` expressions, `on-*` message
@@ -709,7 +709,7 @@ pub const UncoveredCodepoint = struct {
 };
 
 /// First codepoint in a markup literal that the bundled face cannot
-/// render (#98): the tofu guard's shared predicate. `{...}` binding
+/// render: the tofu guard's shared predicate. `{...}` binding
 /// spans are skipped — dynamic values are the runtime Debug warning's
 /// job — and control characters are layout, not glyphs. Invalid UTF-8
 /// reports as U+FFFD at the offending byte. Comptime-callable, so the
@@ -1083,7 +1083,7 @@ fn validateTimelineItem(node: MarkupNode) ?MarkupErrorInfo {
 /// at a template body root.
 fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]const u8, template_limit: usize) ?MarkupErrorInfo {
     switch (node.kind) {
-        // Literal text content rides the tofu guard (#98): a codepoint
+        // Literal text content rides the tofu guard: a codepoint
         // the bundled face cannot render is a teaching error at its
         // exact position.
         .text => return textNodeCoverageError(node),

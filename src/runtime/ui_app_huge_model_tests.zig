@@ -1,16 +1,17 @@
-//! #101 stack-safety guard: a Model bigger than the 8 MiB test-thread
+//! Stack-safety guard: a Model bigger than the 8 MiB test-thread
 //! stack must construct, install, and dispatch without EVER riding the
 //! stack. `UiApp.init` takes the Model by value — at ovation's 5.9 MB
 //! Model one test's 2 MB scratch beside it overflowed the stack and
-//! segfaulted inside init (the #14/#62 family, third sighting). The
+//! segfaulted inside init (the third sighting of the multi-MB-by-value
+//! stack-overflow trap). The
 //! `create`/`initInPlace` seam heap-allocates the app and constructs
 //! every field, the Model included, in place; with a 12 MiB Model any
 //! regression back to a stack temporary crashes this test outright.
 //!
-//! The Model also carries an ovation-shaped pile of public decls so the
+//! The Model also carries a realistic pile of public decls so the
 //! default-features `UiApp` (which compiles `MarkupView(Model)`) guards
-//! friction #100 at the UiApp level too: the markup engines' comptime
-//! scans must budget for real Model sizes on their own.
+//! the comptime-quota cliff at the UiApp level too: the markup engines'
+//! comptime scans must budget for real Model sizes on their own.
 
 const std = @import("std");
 const geometry = @import("geometry");
@@ -242,7 +243,8 @@ const HugeMsg = union(enum) {
 };
 
 /// Default features on purpose: this instantiates `MarkupView(HugeModel)`
-/// exactly the way ovation's `zig build` did when #100 fired.
+/// exactly the way a real ~200-decl app Model failed before the quota
+/// derivation.
 const HugeApp = ui_app_model.UiApp(HugeModel, HugeMsg);
 
 fn hugeUpdate(model: *HugeModel, msg: HugeMsg) void {

@@ -747,7 +747,7 @@ test "timeline items compose indicator, content, chevron, and a root press" {
     try testing.expectEqual(@as(usize, 0), countKindIn(second, .separator));
     const badge2 = findByKind(second, .badge).?;
     // The failure indicator rides the vector icon channel — the ✗ text
-    // glyph is outside the bundled face's coverage (#98).
+    // glyph is outside the bundled face's coverage.
     try testing.expectEqualStrings("x", badge2.icon);
     try testing.expectEqual(@as(f32, 0), badge2.layout.min_size.width);
 }

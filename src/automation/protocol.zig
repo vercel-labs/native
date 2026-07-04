@@ -3,7 +3,7 @@ const std = @import("std");
 pub const default_dir = ".zig-cache/native-sdk-automation";
 pub const max_command_bytes: usize = 16 * 1024 + 64;
 
-/// CLI <-> app dropbox protocol version (#103). Both binaries bake this
+/// CLI <-> app dropbox protocol version. Both binaries bake this
 /// constant at THEIR build time: the app stamps it into every snapshot
 /// header (`protocol=N`), the CLI refuses a snapshot whose version is not
 /// its own — so a stale `native` binary driving a freshly built app (or

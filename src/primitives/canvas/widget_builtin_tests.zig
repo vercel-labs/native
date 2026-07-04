@@ -566,7 +566,7 @@ test "list and menu items draw a leading vector icon with the label shifted righ
         .stroke_path => |stroke| stroke,
         else => return error.TestUnexpectedResult,
     };
-    // Icon and label share the row's content tint (#96).
+    // Icon and label share the row's content tint.
     try expectFillColor(label.color, icon_stroke.stroke.fill);
     const registered = canvas.icons.find("folder").?;
     try std.testing.expectEqual(registered.elements.ptr, icon_stroke.elements.ptr);

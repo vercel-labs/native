@@ -291,7 +291,7 @@ test "runtime automation widget click aims at the rendered control of a stretche
         .frame = geometry.RectF.init(0, 0, 760, 400),
     });
 
-    // The #97 shape: a switch as a bare column child stretches to the
+    // The stretched-switch shape: a switch as a bare column child stretches to the
     // full 718px content width while its track renders ~42px at the left
     // edge. A static-text sibling painted later covers the frame's
     // geometric center — pointer synthesis that aims at the center lands
@@ -311,7 +311,7 @@ test "runtime automation widget click aims at the rendered control of a stretche
     const switch_frame = retained.findById(5).?.frame;
     try std.testing.expect(switch_frame.width > 700);
     // The stretched frame's geometric center resolves to the covering
-    // text sibling, not the switch — the pre-#97 aim point.
+    // text sibling, not the switch — the old geometric-center aim point.
     try std.testing.expectEqual(@as(canvas.ObjectId, 9), retained.hitTest(switch_frame.normalized().center()).?.id);
 
     // widget-click aims at the rendered track and toggles the switch.
@@ -778,7 +778,7 @@ test "runtime reconciles canvas control state across layout replacement" {
 }
 
 test "model-driven exclusive toggle-button chips follow the source across rebuilds" {
-    // Friction #81: `toggle_button` retained its pressed state
+    // `toggle_button` used to retain its pressed state
     // unconditionally, so a model-driven exclusive chip group
     // (`selected="{p == theme_pref}"`) showed every chip ever pressed
     // as active. A toggle-button whose SOURCE asserts selected — now,
@@ -870,7 +870,7 @@ test "model-driven exclusive toggle-button chips follow the source across rebuil
 }
 
 test "uncontrolled toggle-buttons keep their retained state across rebuilds" {
-    // The other half of the #81 contract: a toggle-button whose source
+    // The other half of the source-selected contract: a toggle-button whose source
     // never asserts selected stays runtime-owned — multi-select
     // formatting chips keep working with zero app wiring.
     const TestApp = struct {

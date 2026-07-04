@@ -150,19 +150,19 @@ pub const App = runtime_api.App(Runtime);
 pub const Options = runtime_api.Options;
 
 /// Bounded ring of degraded dispatch errors kept for snapshots and
-/// queries (#38): handler/update errors are caught, recorded here, and
+/// queries: handler/update errors are caught, recorded here, and
 /// the app continues. The oldest record is dropped when full; the
 /// lifetime total keeps counting.
 pub const max_dispatch_errors: usize = 16;
 pub const DispatchError = automation.snapshot.DispatchError;
 
 /// What dispatch does with a caught handler/update error AFTER recording
-/// it in the #38 ring. Production loops always `.degrade`: the app keeps
+/// it in the dispatch-error ring. Production loops always `.degrade`: the app keeps
 /// running and the error stays observable through `dispatchErrors()`,
 /// traces, and snapshots. The TestHarness sets `.propagate` so capacity
 /// errors (e.g. `error.WidgetLayoutListFull` from a view that outgrew
 /// its per-view budget) fail tests instead of leaving silent stale
-/// frames (#56). Automation command dispatch is exempt: driver misuse
+/// frames. Automation command dispatch is exempt: driver misuse
 /// always degrades, regardless of policy.
 pub const DispatchErrorPolicy = enum { degrade, propagate };
 
@@ -199,9 +199,9 @@ pub const Runtime = struct {
     /// Degraded dispatch errors, oldest first (see `max_dispatch_errors`).
     dispatch_errors: [max_dispatch_errors]DispatchError = [_]DispatchError{.{}} ** max_dispatch_errors,
     dispatch_error_len: usize = 0,
-    /// See `DispatchErrorPolicy`: production loops always degrade (#38);
+    /// See `DispatchErrorPolicy`: production loops always degrade;
     /// the TestHarness propagates so capacity errors fail tests instead
-    /// of leaving silent stale frames (#56).
+    /// of leaving silent stale frames.
     dispatch_error_policy: DispatchErrorPolicy = .degrade,
     /// Lifetime count of degraded dispatch errors (including ones the
     /// bounded ring has since dropped).
@@ -215,7 +215,7 @@ pub const Runtime = struct {
     automation_widgets: [automation.snapshot.max_widgets]automation.snapshot.Widget = undefined,
     automation_tray_items: [platform.max_tray_items]automation.snapshot.TrayItem = undefined,
     widget_event_route_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined,
-    /// The in-flight native context-menu request (#67): set when the
+    /// The in-flight native context-menu request: set when the
     /// platform is asked to present, resolved by the matching
     /// `context_menu_action` event. At most one menu tracks at a time.
     canvas_widget_context_menu_pending: ?runtime_canvas_widget_context_menu.PendingCanvasWidgetContextMenu = null,
@@ -225,7 +225,7 @@ pub const Runtime = struct {
     canvas_widget_reconcile_nodes: [canvas_limits.max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
     canvas_widget_source_semantics_scratch: [canvas_limits.max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
     // More reconcile-pass scratch that outgrew the stack when the widget
-    // budgets quadrupled (#62): previous control/scroll/text reconcile
+    // budgets quadrupled (256 -> 1024 nodes): previous control/scroll/text reconcile
     // entries, the previous text byte pool, and the invalidation diff.
     canvas_widget_reconcile_control_entries: [canvas_limits.max_canvas_widget_nodes_per_view]runtime_canvas_widget_runtime.CanvasWidgetControlReconcileEntry = undefined,
     canvas_widget_reconcile_scroll_entries: [canvas_limits.max_canvas_widget_nodes_per_view]runtime_canvas_widget_runtime.CanvasWidgetSourceScrollEntry = undefined,
@@ -324,7 +324,7 @@ pub const Runtime = struct {
     }
 
     /// The most recent handler/update errors dispatch caught and
-    /// degraded instead of terminating the app (#38), oldest first.
+    /// degraded instead of terminating the app, oldest first.
     /// Also published in automation snapshots (`error event=... name=...`
     /// lines) and traced as `dispatch.error` records.
     pub fn dispatchErrors(self: *const Runtime) []const DispatchError {
@@ -679,8 +679,8 @@ pub fn TestHarness() type {
                 // the app runner threads it from `std.process.Init`.
                 .environ = if (builtin.is_test) std.testing.environ else null,
             });
-            // Tests fail loud on handler/update errors (#56); production
-            // loops keep the degrade default (#38). Tests that exercise
+            // Tests fail loud on handler/update errors; production
+            // loops keep the degrade default. Tests that exercise
             // the degrade path set `.degrade` back explicitly.
             self.runtime.dispatch_error_policy = .propagate;
         }

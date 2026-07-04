@@ -1,4 +1,4 @@
-//! Native context menus (#67): right/ctrl-click (and a touch long-press,
+//! Native context menus: right/ctrl-click (and a touch long-press,
 //! which hosts report the same way) on a canvas widget asks the platform
 //! to present the OS context menu at the pointer — never a canvas-drawn
 //! imitation — and dispatches the selection back through typed messages.

@@ -393,7 +393,7 @@ test "theme preference and system appearance derive the custom tokens" {
 }
 
 test "theme chips are a model-driven exclusive group across rebuilds" {
-    // Friction #81: the header's theme chips are real toggle-buttons
+    // The header's theme chips are real toggle-buttons
     // whose selected= comes from the model. Pressing chips through the
     // real widget path must always leave exactly the model's selection
     // active — never every chip ever pressed.

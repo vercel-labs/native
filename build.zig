@@ -169,8 +169,8 @@ pub fn build(b: *std.Build) void {
     automation_cli_mod.addImport("automation_protocol", automation_protocol_mod);
     const automation_cli_tests = testArtifact(b, automation_cli_mod);
 
-    // #103: `native version` names the commit the binary was built from,
-    // so binary/framework skew ("your native binary may be stale") is a
+    // `native version` names the commit the binary was built from, so
+    // binary/framework skew ("your native binary may be stale") is a
     // one-command check. Falls back to "unknown" outside a git checkout.
     const cli_build_info = b.addOptions();
     cli_build_info.addOption([]const u8, "build_commit", cliBuildCommit(b));
@@ -1084,8 +1084,9 @@ pub fn build(b: *std.Build) void {
     gpu_dashboard_smoke_run.step.dependOn(&cli_exe.step);
     gpu_dashboard_smoke_step.dependOn(&gpu_dashboard_smoke_run.step);
 
-    // Percentile performance check (friction log #77). Deliberately NOT part
-    // of `zig build test` or the fast gate tier: N launches are slow and the
+    // Percentile performance check — a single-sample gate was noise-dominated,
+    // so this asserts p90 over N launches. Deliberately NOT part of
+    // `zig build test` or the fast gate tier: N launches are slow and the
     // numbers only mean something on a controlled machine. Runs via
     // `scripts/gate.sh full --perf` locally and a dedicated macos-14 CI job.
     // Knobs: NATIVE_SDK_PERF_LAUNCHES, NATIVE_SDK_PERF_INTERACTIONS, NATIVE_SDK_PERF_BUDGET_MS,
@@ -1753,7 +1754,7 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
 }
 
 /// The short commit hash of the framework checkout the CLI is built
-/// from, for `native version` staleness checks (#103). "unknown" when
+/// from, for `native version` staleness checks. "unknown" when
 /// git is unavailable (e.g. building from a package tarball).
 fn cliBuildCommit(b: *std.Build) []const u8 {
     var code: u8 = undefined;

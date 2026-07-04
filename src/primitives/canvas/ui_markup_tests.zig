@@ -257,7 +257,7 @@ test "structural validation reports positions for grammar misuse" {
 
     // The labeled interactive elements take an inline icon (with or
     // without a label): one hit target, one tint. Toggle-buttons cover
-    // chips and tab strips; list/menu items get a leading slot (#96).
+    // chips and tab strips; list/menu items get a leading slot.
     const button_icon_source = "<row gap=\"8\">\n  <button icon=\"save\" on-press=\"save\">Save</button>\n  <button icon=\"refresh-cw\" on-press=\"refresh\" label=\"Refresh\"></button>\n  <toggle-button icon=\"arrow-up\" on-toggle=\"sort\">Newest</toggle-button>\n  <list-item icon=\"folder\" on-press=\"open\">Projects</list-item>\n  <menu-item icon=\"trash\" on-press=\"remove\">Delete</menu-item>\n  <badge icon=\"check\">3</badge>\n</row>";
     var button_icon_parser = markup.Parser.init(arena_state.allocator(), button_icon_source);
     try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try button_icon_parser.parse()));

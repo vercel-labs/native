@@ -1008,7 +1008,7 @@ fn intrinsicAvatarWidgetSize(widget: Widget, tokens: DesignTokens) geometry.Size
 fn intrinsicBadgeWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
     const text_width = measuredTextWidth(tokens, widget.text, widgetLabelTextSize(widget, tokens));
     const inset = widgetControlInset(widget, tokens, tokens.spacing.sm);
-    // An inline icon (#96) widens the badge by the same shared metrics
+    // An inline icon widens the badge by the same shared metrics
     // the renderer paints with (gap only when a label follows).
     const icon_width = if (widget.icon.len > 0)
         widget_metrics.widgetBadgeIconExtent(widget, tokens) + (if (widget.text.len > 0) widget_metrics.widgetBadgeIconGap(widget, tokens) else 0)
@@ -1032,7 +1032,7 @@ fn intrinsicRowTextWidgetSize(widget: Widget, tokens: DesignTokens) geometry.Siz
     const text_size = widgetBodyTextSize(widget, tokens);
     const inset = widgetControlInset(widget, tokens, tokens.spacing.md);
     const text_width = measuredTextWidth(tokens, widget.text, text_size);
-    // A leading icon (#96) widens the row by the same shared metrics the
+    // A leading icon widens the row by the same shared metrics the
     // renderer paints with, so measured widths and pixels agree.
     const icon_width = if (widget.icon.len > 0)
         widget_metrics.widgetRowIconExtent(widget, tokens) + widget_metrics.widgetRowIconGap(widget, tokens)

@@ -1,4 +1,4 @@
-//! Std-only coverage lookup against the bundled face's cmap (#98).
+//! Std-only coverage lookup against the bundled face's cmap.
 //!
 //! A codepoint outside `Geist-Regular.ttf`'s character map renders as a
 //! tofu box everywhere the bundled outlines are the only glyph source —
@@ -111,7 +111,7 @@ test "coverage answers for known covered and uncovered codepoints" {
     for ([_]u21{ 'A', 'z', '0', ' ', 0x2026, 0x00B7, 0x2014, 0x00B1, 0x00F7, 0x2192, 0x00E9, 0x201C, 0x2019, 0x2022 }) |cp| {
         try std.testing.expect(covers(cp));
     }
-    // The recurring tofu class (#98): ⌘, ⑂, ◑, ✓, CJK, astral plane.
+    // The recurring tofu class: ⌘, ⑂, ◑, ✓, CJK, astral plane.
     for ([_]u21{ 0x2318, 0x2442, 0x25D1, 0x2713, 0x4E2D, 0x1F600 }) |cp| {
         try std.testing.expect(!covers(cp));
     }

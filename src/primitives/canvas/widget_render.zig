@@ -318,7 +318,7 @@ fn emitWidgetLayoutNodeContent(
             try builder.pushClip(.{ .id = widgetPartId(paint_widget.id, 1), .rect = paint_widget.frame });
             try emitWidgetLayoutChildren(builder, layout, node_index, tokens, state);
             try builder.popClip();
-            // Native scroll drivers own the (OS overlay) scrollbar (#66).
+            // Native scroll drivers own the (OS overlay) scrollbar.
             if (!paint_widget.native_scroll) {
                 try widget_render_scroll.emitScrollViewScrollbar(builder, paint_widget.frame, widgetScrollSemantics(layout, node_index).metrics, tokens, paint_widget.id);
             }
@@ -377,7 +377,7 @@ fn emitWidgetLayoutScrollableChildren(
     try builder.pushClip(clip);
     try emitWidgetLayoutChildren(builder, layout, parent_index, tokens, state);
     try builder.popClip();
-    // Native scroll drivers own the (OS overlay) scrollbar (#66).
+    // Native scroll drivers own the (OS overlay) scrollbar.
     if (!widget.native_scroll) {
         try widget_render_scroll.emitScrollViewScrollbar(builder, widget.frame, widgetScrollSemantics(layout, parent_index).metrics, tokens, widget.id);
     }
@@ -507,7 +507,7 @@ fn emitScrollViewWidget(builder: *Builder, widget: Widget, tokens: DesignTokens,
     try builder.pushClip(.{ .id = widgetPartId(widget.id, 1), .rect = widget.frame });
     try emitWidgetChildren(builder, widget.children, tokens, depth);
     try builder.popClip();
-    // Native scroll drivers own the (OS overlay) scrollbar (#66).
+    // Native scroll drivers own the (OS overlay) scrollbar.
     if (!widget.native_scroll) {
         try widget_render_scroll.emitScrollViewScrollbar(builder, widget.frame, widget_render_scroll.widgetScrollMetricsForWidget(widget, tokens), tokens, widget.id);
     }
@@ -604,7 +604,7 @@ fn emitTextSpansWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
         &runs,
     );
 
-    // Span background highlights (intra-line diff emphasis, #86): one
+    // Span background highlights (intra-line diff emphasis): one
     // full-line-height rect per run, the same geometry selection rects
     // use, painted before selection and glyphs. Edge-snapped rects of
     // adjacent runs share their boundary, so equal backgrounds abut
@@ -830,10 +830,10 @@ fn emitBadgeWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Erro
         },
     });
     const content_color = badgeTextColor(widget, tokens, visual);
-    // Inline vector icon (#96): icon-only badges center it (the stepper's
+    // Inline vector icon: icon-only badges center it (the stepper's
     // completed check, status chips); icon + text draws it before the
     // label. One widget, one tint — and no text glyph outside the bundled
-    // face's coverage (#98's stepper checkmark fix).
+    // face's coverage (the stepper-checkmark tofu fix).
     const icon = if (widget.icon.len > 0) icon_model.resolve(widget.icon) else null;
     if (icon) |resolved| {
         const icon_extent = widget_metrics.widgetBadgeIconExtent(widget, tokens);

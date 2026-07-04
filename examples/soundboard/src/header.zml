@@ -18,7 +18,7 @@
            square, the label carries the accessible name. -->
       <button size="sm" variant="ghost" icon="x" on-press="clear_search" label="Clear search"></button>
     </if>
-    <!-- Model-driven exclusive chips (#81): a toggle-button whose
+    <!-- Model-driven exclusive chips: a toggle-button whose
          selected= comes from the model is source-owned across rebuilds,
          so exactly the model's selection is active. -->
     <toggle-group gap="2" label="Theme">

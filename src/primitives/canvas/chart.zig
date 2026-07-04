@@ -1,5 +1,5 @@
-//! Chart plot data for the `.chart` widget kind (friction #99): model-
-//! derived series rendered through the vector path pipeline as one leaf
+//! Chart plot data for the `.chart` widget kind: model-derived series
+//! rendered through the vector path pipeline as one leaf
 //! widget — a line (with optional area fill), bars, or a min/max band —
 //! with token-driven series colors so charts retheme like every other
 //! widget.

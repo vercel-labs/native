@@ -27,7 +27,7 @@ pub const Diagnostics = struct {
     /// and runs, so the CLI checks this against the live process table
     /// before trusting a snapshot: a dead (or absent) publisher means
     /// the file is a leftover — served loudly as "stale", never as
-    /// current state (friction #93). 0 means the platform exposes no
+    /// current state. 0 means the platform exposes no
     /// pid; the CLI treats that as unverifiable-and-stale too.
     publisher_pid: u32 = 0,
     /// Lifetime count of handler/update errors dispatch caught and
@@ -150,7 +150,7 @@ pub const TrayItem = struct {
 
 /// The live status item (tray): current button title + dropdown items.
 /// The macOS menu bar is outside every window capture, so this is the
-/// only automation-visible evidence a model-driven tray exists (#95).
+/// only automation-visible evidence a model-driven tray exists.
 pub const Tray = struct {
     title: []const u8 = "",
     items: []const TrayItem = &.{},
@@ -170,10 +170,10 @@ pub const Input = struct {
     /// Per-frame text-layout budgets (`canvas_limits.max_canvas_text_
     /// layouts_per_view` / `..._lines_per_view`), stamped by the runtime
     /// so gpu_surface view lines report `text_layout_plans=current/budget`
-    /// headroom (#94).
+    /// headroom.
     text_layout_plan_budget: usize = 0,
     text_layout_line_budget: usize = 0,
-    /// The live status item, when the app created one (#95).
+    /// The live status item, when the app created one.
     tray: ?Tray = null,
     /// The most recent degraded dispatch errors, oldest first (bounded
     /// ring; `diagnostics.dispatch_error_count` is the lifetime total).
@@ -182,7 +182,7 @@ pub const Input = struct {
 };
 
 pub fn writeText(input: Input, writer: anytype) !void {
-    // `protocol=` is the CLI/app handshake (#103): the publishing app
+    // `protocol=` is the CLI/app handshake: the publishing app
     // stamps ITS baked-in protocol version so a stale `native` binary
     // (or a stale app) is refused loudly instead of silently driving
     // yesterday's dropbox shape.
@@ -331,7 +331,8 @@ pub fn writeText(input: Input, writer: anytype) !void {
                 view.canvas_frame_budget_exceeded_count,
                 view.canvas_frame_budget_ok,
             });
-            // Widget budget headroom telemetry (#62, context menus #83):
+            // Widget budget headroom telemetry (node and context-menu
+            // budgets):
             // current retained node/semantics/context-menu-item counts
             // against the per-view budgets, so authors see the cliff
             // coming instead of bisecting overflow by hand. The budgets
@@ -345,7 +346,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
                 view.widget_context_menu_item_count,
                 input.widget_context_menu_item_budget,
             });
-            // Text-layout plan headroom (#94): the last planned frame's
+            // Text-layout plan headroom: the last planned frame's
             // text runs and wrapped lines against the per-frame budgets,
             // so a growing transcript shows the cliff here before a frame
             // dies with TextLayoutPlanListFull/TextLayoutLineListFull (a

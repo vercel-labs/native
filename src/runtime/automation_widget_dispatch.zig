@@ -107,7 +107,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             // center: a stretched selection control (switch as a bare
             // column child) draws its glyph at the left edge of a wide
             // frame, and the frame's center can sit under an overlapping
-            // later-painted sibling — a real user clicks the knob (#97).
+            // later-painted sibling — a real user clicks the knob.
             var aim_widget = node.widget;
             aim_widget.frame = node.frame;
             const point = canvas.widgetControlAimPoint(aim_widget, self.views[view_index].widget_tokens);
@@ -291,7 +291,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         }
 
         /// Replace an editable widget's text through the SAME input-event
-        /// path real typing uses (#39): focus, a select-all key, then the
+        /// path real typing uses: focus, a select-all key, then the
         /// replacement text as a text-input event. Each step routes
         /// through `dispatchGpuSurfaceInput`, so the app receives the
         /// matching `.canvas_widget_keyboard` events and an elm-style

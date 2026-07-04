@@ -1,4 +1,4 @@
-//! Native context menu tests (#67): a secondary-button press asks the
+//! Native context menu tests: a secondary-button press asks the
 //! platform to present the OS menu (recorded by the null platform), the
 //! platform's `context_menu_action` event resolves to a
 //! `.canvas_widget_context_menu` runtime event for app-declared menus,
@@ -285,7 +285,7 @@ test "automation snapshots report per-view context-menu item headroom" {
     // Separators count against the budget: they occupy retained slots.
     try std.testing.expectEqual(@as(usize, 3), info.widget_context_menu_item_count);
 
-    // The gpu_surface view line reports declared/budget headroom (#83) so
+    // The gpu_surface view line reports declared/budget headroom so
     // authors watch the cliff without overflowing.
     var buffer: [16384]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);

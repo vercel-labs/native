@@ -320,7 +320,7 @@ fn navItem(ui: *DashboardUi, selection: u8, entry: *const DashboardEntry) Dashbo
     return ui.listItem(.{
         .selected = entry.index == selection,
         .on_press = Msg{ .select_nav = entry.index },
-        // Native context menu (#67): right/ctrl-click presents the real OS
+        // Native context menu: right/ctrl-click presents the real OS
         // menu at the pointer; each item dispatches its Msg like on_press.
         .context_menu = &.{
             .{ .label = "Open Section", .msg = Msg{ .select_nav = entry.index } },
@@ -1064,7 +1064,7 @@ test "gpu dashboard typed messages drive the model" {
     try std.testing.expectEqual(customers.id, rebuilt_customers.id);
     try std.testing.expect(rebuilt_customers.state.selected);
 
-    // The nav row declares a native context menu (#67): labels ride the
+    // The nav row declares a native context menu: labels ride the
     // widget, messages resolve through the handler table by item index.
     try std.testing.expectEqual(@as(usize, 3), rebuilt_customers.context_menu.len);
     try std.testing.expectEqualStrings("Open Section", rebuilt_customers.context_menu[0].label);

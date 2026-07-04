@@ -145,7 +145,7 @@ fn sendCommand(allocator: std.mem.Allocator, io: std.Io, action: []const u8, val
     // loudly instead, naming the dir we looked at.
     try requireAutomationDir(io);
     // A live publisher already on another protocol makes the queue write
-    // provably useless (or worse, misread) — refuse before writing (#103).
+    // provably useless (or worse, misread) — refuse before writing.
     try requireCompatibleSnapshotIfPresent(allocator, io);
     var command_path: [256]u8 = undefined;
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path(&command_path, "command.txt"), .data = line });
@@ -209,10 +209,10 @@ fn printFile(io: std.Io, name: []const u8) !void {
 // Dropbox files persist across builds and runs, so "a snapshot exists"
 // never means "an app is publishing": an app rebuilt WITHOUT
 // -Dautomation happily coexists with days-old files from an earlier
-// run, and serving those as live state cost a full misdiagnosis round
-// (friction #93). Every snapshot the framework writes carries the
-// publisher's pid in its header; reads refuse the file loudly when
-// that pid is gone (or the header predates the pid stamp).
+// run, and serving those as live state once cost a full misdiagnosis
+// round. Every snapshot the framework writes carries the publisher's
+// pid in its header; reads refuse the file loudly when that pid is
+// gone (or the header predates the pid stamp).
 
 const Liveness = enum { live, no_pid, dead_publisher };
 const WaitPolicy = enum { require_live_publisher, any_publisher };
@@ -238,12 +238,13 @@ fn publisherPid(bytes: []const u8) ?u32 {
     return headerField(bytes, "publisher_pid=");
 }
 
-// ---------------------------------------------- protocol handshake (#103)
+// ----------------------------------------------------- protocol handshake
 //
 // A stale `native` binary beside a fresh app (or the reverse) can drive
 // the wrong dropbox name, misread the snapshot format, or speak an old
 // command vocabulary — and every failure mode is SILENT (a days-old
-// snapshot reads as plausible state; #103 cost a misdiagnosis round).
+// snapshot reads as plausible state; a stale binary once cost a whole
+// misdiagnosis round).
 // Both binaries bake `protocol.version` at their own build time and the
 // app stamps its copy into every snapshot header; any read that would
 // interpret snapshot state first proves both sides speak the same
@@ -511,7 +512,7 @@ fn runAssert(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8)
         snapshot = readFile(allocator, io, path(&file_path, "snapshot.txt")) catch null;
         if (snapshot) |bytes| {
             // A live publisher on the wrong protocol can neither satisfy
-            // nor refute assertions, and polling never fixes it (#103).
+            // nor refute assertions, and polling never fixes it.
             if (snapshotLiveness(bytes, pidIsAlive) == .live) try requireProtocolMatch(bytes, io);
             // A stale dropbox (dead or pid-less publisher) can neither
             // satisfy nor refute assertions — keep polling for live state.

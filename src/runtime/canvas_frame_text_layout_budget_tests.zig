@@ -1,4 +1,5 @@
-//! Text-layout plan budget tests (friction #94): the per-frame plan list
+//! Text-layout plan budget tests: a long real agent transcript once blew
+//! the old fixed cap and killed renders. Now the per-frame plan list
 //! is derived from the command budget so `TextLayoutPlanListFull` is
 //! structurally unreachable through a real display list, the shared line
 //! pool overflows loudly one past its own budget, and automation

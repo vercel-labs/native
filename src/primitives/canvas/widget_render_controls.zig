@@ -594,7 +594,7 @@ pub fn emitListItemWidget(builder: *Builder, widget: Widget, tokens: DesignToken
     const text_size = widgetBodyTextSize(widget, tokens);
     const text_inset = widgetControlInset(widget, tokens, tokens.spacing.md);
     const content_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
-    // Leading icon slot (#96): drawn as part of the row's own rendering
+    // Leading icon slot: drawn as part of the row's own rendering
     // so icon + label are one hit target with one tint, mirroring the
     // button's inline icon. The label shifts right by the shared metric
     // the intrinsic size also accounts for.

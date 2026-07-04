@@ -1799,8 +1799,8 @@ pub const PlatformServices = struct {
 
     /// Retitle the live status-bar button without re-creating the item
     /// (re-creating flickers and can reshuffle the macOS menu bar). Added
-    /// for model-driven tray state (friction #90, e.g. an open-count badge
-    /// in the title).
+    /// for model-driven tray state (e.g. an open-count badge in the
+    /// title).
     pub fn updateTrayTitle(self: PlatformServices, title: []const u8) anyerror!void {
         const title_fn = self.update_tray_title_fn orelse return error.UnsupportedService;
         return title_fn(self.context, title);

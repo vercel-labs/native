@@ -521,7 +521,7 @@ test "compiled button icons match the interpreter and carry the validated name" 
         try testing.expectEqualStrings("refresh-cw", icon_only.icon);
         try testing.expectEqualStrings("", icon_only.text);
         try testing.expectEqualStrings("Refresh", icon_only.semantics.label);
-        // The wider labeled interactive set (#96) compiles to the same
+        // The wider labeled interactive set compiles to the same
         // widgets in both engines.
         const chip = tree.root.children[2];
         try testing.expectEqual(canvas.WidgetKind.toggle_button, chip.kind);
@@ -935,7 +935,7 @@ test "compiled wrap attribute matches the interpreter and the hand-written view"
     try testing.expectEqual(@as(f32, 360), compiled.root.layout.max_size.width);
 }
 
-// --------------------------- text alignment and grid columns parity (#84)
+// -------------------------------- text alignment and grid columns parity
 
 const AlignUi = fixture.AlignUi;
 const AlignInterpreter = markup_view.MarkupView(fixture.AlignModel, fixture.AlignMsg);

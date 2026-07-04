@@ -1,5 +1,5 @@
 #!/bin/sh
-# Percentile GPU performance check for examples/gpu-dashboard (friction log #77).
+# Percentile GPU performance check for examples/gpu-dashboard.
 #
 # The single-launch smoke (test-gpu-dashboard-smoke) proves correctness with one
 # load-tolerant latency sample; this harness measures a distribution:

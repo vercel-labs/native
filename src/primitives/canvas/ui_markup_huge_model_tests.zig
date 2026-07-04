@@ -1,4 +1,4 @@
-//! #100 compile-cost guard: a deliberately huge Model — ovation-shaped,
+//! Compile-cost guard: a deliberately huge Model — ovation-shaped,
 //! ~240 public decls plus dozens of distinct slice item types — must build
 //! through BOTH markup engines without the test (or any app) raising
 //! `@setEvalBranchQuota`. Before the fix, `collectItemTypes`'s comptime

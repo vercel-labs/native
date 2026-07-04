@@ -159,7 +159,7 @@ fn uptimeTile(ui: *Ui, model: *const Model) Ui.Node {
 // ------------------------------------------------------------ sparklines
 
 /// One sparkline: a single `ui.chart` widget over the 60-sample window
-/// (friction #99 retrofit — this used to be sixty hand-built bar widgets
+/// (chart-widget retrofit — this used to be sixty hand-built bar widgets
 /// per tile). Absolute-scale stats (`fraction`: percent of all cores, of
 /// total memory) draw zero-baseline bars pinned to the 0..1 domain;
 /// window-band stats (process counts, no natural ceiling) draw a filled

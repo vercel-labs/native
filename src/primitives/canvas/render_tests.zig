@@ -2269,7 +2269,7 @@ test "canvas gpu packet text serializes engine measured line breaks" {
     // Tight intrinsic box: max_width equals the engine-measured width, so
     // the engine keeps one line and the packet must carry it unbroken —
     // the host draws these lines verbatim instead of re-wrapping with its
-    // own line breaker (friction #80).
+    // own line breaker.
     const tight_width = estimateTextWidth("Songs", 12);
     // 70 explicit lines exceed the packet line budget (64): the serializer
     // must fall back to `null` so the host keeps its wrapping fallback.

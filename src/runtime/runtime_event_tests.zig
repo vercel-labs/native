@@ -851,7 +851,7 @@ test "gpu surface nonblank transition invalidates the runtime" {
 }
 
 test "a handler error degrades: dispatch continues, the error ring records it, snapshots publish it" {
-    // Friction #38: one erroring update arm used to exit the whole app
+    // One erroring update arm used to exit the whole app
     // (the platform callback saw the error, set `failed`, and stopped
     // the run loop as CallbackFailed).
     const TestApp = struct {
@@ -880,8 +880,8 @@ test "a handler error degrades: dispatch continues, the error ring records it, s
 
     const harness = try TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
-    // This test exercises the production degrade-not-die path (#38); the
-    // harness defaults to `.propagate` (#56).
+    // This test exercises the production degrade-not-die path; the
+    // harness defaults to `.propagate`.
     harness.runtime.dispatch_error_policy = .degrade;
     var app_state: TestApp = .{};
     const app = app_state.app();
@@ -938,8 +938,8 @@ test "the dispatch error ring stays bounded and keeps the newest records plus th
 
     const harness = try TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
-    // Exercises the production degrade-not-die path (#38); the harness
-    // defaults to `.propagate` (#56).
+    // Exercises the production degrade-not-die path; the harness
+    // defaults to `.propagate`.
     harness.runtime.dispatch_error_policy = .degrade;
     var app_state: TestApp = .{};
     const app = app_state.app();
@@ -957,7 +957,7 @@ test "the dispatch error ring stays bounded and keeps the newest records plus th
 }
 
 test "a full trace sink never fails dispatch; the loss is counted and published" {
-    // Friction #38 class (a): the TestHarness BufferSink holds 64
+    // A degrade-not-die shape: the TestHarness BufferSink holds 64
     // records; dispatch used to fail with OutOfSpace once it filled.
     const TestApp = struct {
         command_count: u32 = 0,

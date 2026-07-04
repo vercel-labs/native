@@ -1,6 +1,6 @@
 //! Markup interpreter: turns a parsed markup document into `Ui(Msg)` nodes
-//! against a concrete Model/Msg pair (design:
-//! plans/zero-native/markup-authoring.md).
+//! against a concrete Model/Msg pair (grammar reference:
+//! skill-data/native-ui/SKILL.md).
 //!
 //! The document is runtime data but binding and message resolution is
 //! comptime-unrolled: loop item types are collected from the Model at
@@ -85,7 +85,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         /// functions returning slices (optionally taking an arena).
         const item_types = collectItemTypes(ModelT);
 
-        /// #100: shared eval-branch budget for this view's Model/Msg
+        /// Shared eval-branch budget for this view's Model/Msg
         /// scaled comptime walks (`inline for` over model fields/decls,
         /// msg variants, and `item_types`); see `typeScanQuota`.
         const scan_quota = typeScanQuota(ModelT) + typeScanQuota(MsgT);
@@ -1302,7 +1302,7 @@ pub const color_style_attr_fields: []const AttrName = &.{
     .{ .markup = "focus-ring", .zig = "focus_ring" },
 };
 
-/// #100: comptime walks over an app's Model and Msg scale with the type's
+/// Comptime walks over an app's Model and Msg scale with the type's
 /// field/decl count, and the default 1000-backwards-branch quota dies at
 /// real app sizes (ovation: ~200 pub decls) — inside framework code the
 /// app never asked to run, before it uses any markup. Every Model/Msg

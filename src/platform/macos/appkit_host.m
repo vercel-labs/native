@@ -260,7 +260,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @end
 
 /* An invisible NSScrollView owning input + physics for one scrollable
- * canvas region (#66): the OS computes momentum, rubber-band, and draws
+ * canvas region: the OS computes momentum, rubber-band, and draws
  * the overlay scroller; the engine renders the content. Hit testing
  * passes everything through except the scrollers themselves (so the
  * overlay knob stays grabbable). */
@@ -1352,9 +1352,9 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
     // layout already broke the text into (the same breaks the reference
     // renderer draws and intrinsic sizing measured), so draw them verbatim.
     // Re-breaking here with AppKit's own line breaker disagreed with the
-    // engine on tight boxes and wrapped single-line labels mid-word
-    // (friction #80). Wrap, alignment, line height, and max width are all
-    // baked into each line's text slice and pen position.
+    // engine on tight boxes and wrapped single-line labels mid-word.
+    // Wrap, alignment, line height, and max width are all baked into
+    // each line's text slice and pen position.
     NSArray *packetLines = [text[@"lines"] isKindOfClass:[NSArray class]] ? text[@"lines"] : nil;
     if (packetLines) {
         for (id lineObject in packetLines) {
@@ -1743,9 +1743,9 @@ static BOOL NativeSdkPacketDrawCommand(NSDictionary *command, CGContextRef conte
     _metalLayer.contentsGravity = kCAGravityTopLeft;
     // Never block the main thread waiting for a drawable: an occluded or
     // otherwise non-composited window stops recycling its drawable pool,
-    // and the default 1s nextDrawable timeout would stall every frame
-    // (friction #79). A nil drawable takes the retained-completion path
-    // in renderFrame instead.
+    // and the default 1s nextDrawable timeout would stall every frame.
+    // A nil drawable takes the retained-completion path in renderFrame
+    // instead.
     _metalLayer.allowsNextDrawableTimeout = NO;
 
     self.wantsLayer = YES;
@@ -1806,9 +1806,9 @@ static BOOL NativeSdkPacketDrawCommand(NSDictionary *command, CGContextRef conte
     [self updateDrawableSize];
     [self updateSurfaceTrackingArea];
     // Re-present retained content once the window is composited again
-    // after occlusion (friction #79): frames completed logically while
-    // occluded (renderFrame's nil-drawable path) still owe the glass
-    // their latest retained pixels.
+    // after occlusion: frames completed logically while occluded
+    // (renderFrame's nil-drawable path) still owe the glass their
+    // latest retained pixels.
     [[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowDidChangeOcclusionStateNotification object:nil];
     if (self.window) {
         [[NSNotificationCenter defaultCenter] addObserver:self
@@ -2225,8 +2225,8 @@ static BOOL NativeSdkPacketDrawCommand(NSDictionary *command, CGContextRef conte
     id<CAMetalDrawable> drawable = [self.metalLayer nextDrawable];
     if (!drawable) {
         // Occluded/unfocused windows are not composited, so the layer
-        // stops vending drawables. Dropping the frame here silently was
-        // friction #79: the present-completion event drives the runtime's
+        // stops vending drawables. Dropping the frame here silently is
+        // not an option: the present-completion event drives the runtime's
         // frame loop (input latency recording, canvas animations,
         // automation snapshot refresh), so an occluded window went dead —
         // frames requested by the runtime never completed. The content is
@@ -2603,7 +2603,7 @@ static BOOL NativeSdkPacketDrawCommand(NSDictionary *command, CGContextRef conte
                           deltaY:deltaY];
 }
 
-// --- Native scroll drivers (#66) ---------------------------------------
+// --- Native scroll drivers ---------------------------------------------
 // Each scrollable canvas region gets an invisible NSScrollView subview
 // sized to the region and backed by a flipped document view sized to the
 // content extent. Wheel events over a region forward to its driver, so
@@ -2657,7 +2657,7 @@ static BOOL NativeSdkPacketDrawCommand(NSDictionary *command, CGContextRef conte
             [self.scrollDrivers addObject:driver];
         }
         // Reconcile against the live view state every push — comparing
-        // against anything but the actual frame races with relayout (#68).
+        // against anything but the actual frame races with relayout.
         NSRect target = NSMakeRect(desired.x, self.bounds.size.height - desired.y - desired.height, desired.width, desired.height);
         if (!NSEqualRects(driver.frame, target)) driver.frame = target;
         NSSize contentSize = NSMakeSize(MAX(desired.content_width, 1), MAX(desired.content_height, 1));
