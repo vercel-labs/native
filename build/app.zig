@@ -136,7 +136,23 @@ pub fn addMobileLib(b: *std.Build, dep: *std.Build.Dependency, options: MobileLi
     lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step);
 }
 
+/// The pieces `addApp` wires, for callers that extend the standard app
+/// build (extra native sources, frameworks, post-build steps such as
+/// entitlement signing). `install` is the artifact-install step behind the
+/// default `zig build`; append dependencies to it and to `run` to order
+/// work between the emitted binary and its consumers.
+pub const AppArtifacts = struct {
+    exe: *std.Build.Step.Compile,
+    tests: *std.Build.Step.Compile,
+    install: *std.Build.Step.InstallArtifact,
+    run: *std.Build.Step.Run,
+};
+
 pub fn addApp(b: *std.Build, dep: *std.Build.Dependency, app_options: AppOptions) void {
+    _ = addAppArtifacts(b, dep, app_options);
+}
+
+pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: AppOptions) AppArtifacts {
     const target = nativeSdkTarget(b);
     const optimize_request = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size");
     const optimize = exampleOptimizeMode(b, optimize_request, .Debug);
@@ -191,7 +207,8 @@ pub fn addApp(b: *std.Build, dep: *std.Build.Dependency, app_options: AppOptions
         .root_module = app_mod,
     });
     linkPlatform(b, dep, target, app_mod, exe, selected_platform, web_engine, cef_dir, cef_auto_install);
-    b.installArtifact(exe);
+    const install = b.addInstallArtifact(exe, .{});
+    b.getInstallStep().dependOn(&install.step);
 
     const run = b.addRunArtifact(exe);
     addCefRuntimeRunFiles(b, target, run, exe, web_engine, cef_dir);
@@ -202,6 +219,8 @@ pub fn addApp(b: *std.Build, dep: *std.Build.Dependency, app_options: AppOptions
     const tests = b.addTest(.{ .root_module = test_app_mod, .use_llvm = useLlvmWorkaround(target) });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+
+    return .{ .exe = exe, .tests = tests, .install = install, .run = run };
 }
 
 /// Zig 0.16.0's self-hosted x86_64 backend miscompiles the SysV C calling

@@ -320,6 +320,39 @@ test "runtime createView routes webview kind through WebView backend" {
     try std.testing.expect(remaining[0].focused);
 }
 
+test "runtime validates native-surface adoption before reaching the platform" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "surface-adoption", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    var fake_surface: u32 = 0;
+    const handle: *anyopaque = @ptrCast(&fake_surface);
+
+    // Unknown containers and webview-backed labels reject before any
+    // platform call; only a real native view reaches the service seam,
+    // where the null platform reports the capability honestly missing.
+    try std.testing.expectError(error.ViewNotFound, harness.runtime.adoptViewSurface(1, "missing", handle));
+    try std.testing.expectError(error.InvalidViewOptions, harness.runtime.adoptViewSurface(1, "main", handle));
+    try std.testing.expectError(error.ViewNotFound, harness.runtime.releaseViewSurface(1, "missing"));
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "guest-display",
+        .kind = .stack,
+        .frame = geometry.RectF.init(0, 0, 640, 480),
+    });
+    try std.testing.expect(!harness.runtime.supports(.view_surface_adoption));
+    try std.testing.expectError(error.UnsupportedService, harness.runtime.adoptViewSurface(1, "guest-display", handle));
+    try std.testing.expectError(error.UnsupportedService, harness.runtime.releaseViewSurface(1, "guest-display"));
+}
+
 test "runtime rejects invalid native view parents" {
     const TestApp = struct {
         fn app(self: *@This()) App {

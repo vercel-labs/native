@@ -1,0 +1,22 @@
+.{
+    .id = "dev.native_sdk.guest_mac",
+    .name = "guest-mac",
+    .display_name = "Guest macOS",
+    .version = "0.1.0",
+    .icons = .{"assets/icon.icns"},
+    .platforms = .{"macos"},
+    .permissions = .{ "view", "command" },
+    .capabilities = .{"native_views"},
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Guest macOS",
+                .width = 1360,
+                .height = 900,
+                .restore_policy = "center_on_primary",
+            },
+        },
+    },
+    .web_engine = "system",
+}

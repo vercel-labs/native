@@ -424,6 +424,10 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *windowClearColors;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, WKWebView *> *childWebViews;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSView *> *nativeViews;
+/// App-owned NSViews adopted into native view containers (native-surface
+/// adoption): container key → adopted view. Kept alongside `nativeViews`
+/// so close paths can drop the adoption bookkeeping with the container.
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSView *> *adoptedViewSurfaces;
 /// Host-wide binary image-upload side-channel store: image id (decimal
 /// string, the packet image cache key namespace) → straight-alpha RGBA8
 /// NSImage. Uploaded out-of-band before packets reference the id, shared
@@ -492,6 +496,8 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (NSArray<NSString *> *)nativeViewKeysInSubtreeForWindow:(uint64_t)windowId rootKey:(NSString *)rootKey;
 - (BOOL)closeNativeViewInWindow:(uint64_t)windowId label:(NSString *)label;
 - (void)closeNativeViewsInWindow:(uint64_t)windowId;
+- (BOOL)adoptViewSurfaceInWindow:(uint64_t)windowId label:(NSString *)label surface:(NSView *)surface;
+- (BOOL)releaseViewSurfaceInWindow:(uint64_t)windowId label:(NSString *)label;
 - (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled;
 - (BOOL)setNativeViewCursorInWindow:(uint64_t)windowId label:(NSString *)label cursor:(NSInteger)cursor;
 - (BOOL)setWebViewFrameInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height;
@@ -3864,6 +3870,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     self.windowClearColors = [[NSMutableDictionary alloc] init];
     self.childWebViews = [[NSMutableDictionary alloc] init];
     self.nativeViews = [[NSMutableDictionary alloc] init];
+    self.adoptedViewSurfaces = [[NSMutableDictionary alloc] init];
     self.canvasImageStore = [[NSMutableDictionary alloc] init];
     self.nativeViewCommands = [[NSMutableDictionary alloc] init];
     self.nativeViewExplicitTextKeys = [[NSMutableSet alloc] init];
@@ -4696,6 +4703,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     NSArray<NSString *> *keys = [self nativeViewKeysInSubtreeForWindow:windowId rootKey:key];
     if (keys.count == 0) return NO;
     for (NSString *viewKey in keys) {
+        [self dropAdoptedViewSurfaceForKey:viewKey];
         NSView *view = self.nativeViews[viewKey];
         [view removeFromSuperview];
         [self.nativeViews removeObjectForKey:viewKey];
@@ -4712,6 +4720,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     NSArray<NSString *> *keys = [self.nativeViews.allKeys copy];
     for (NSString *key in keys) {
         if (![key hasPrefix:prefix]) continue;
+        [self dropAdoptedViewSurfaceForKey:key];
         NSView *view = self.nativeViews[key];
         [view removeFromSuperview];
         [self.nativeViews removeObjectForKey:key];
@@ -4719,6 +4728,35 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
         [self.nativeViewExplicitTextKeys removeObject:key];
     }
     [self reorderWebViewsInWindow:windowId];
+}
+
+- (void)dropAdoptedViewSurfaceForKey:(NSString *)key {
+    NSView *adopted = self.adoptedViewSurfaces[key];
+    if (!adopted) return;
+    [adopted removeFromSuperview];
+    [self.adoptedViewSurfaces removeObjectForKey:key];
+}
+
+- (BOOL)adoptViewSurfaceInWindow:(uint64_t)windowId label:(NSString *)label surface:(NSView *)surface {
+    if (label.length == 0 || ![surface isKindOfClass:[NSView class]]) return NO;
+    NSString *key = [self nativeViewKeyForWindow:windowId label:label];
+    NSView *container = self.nativeViews[key];
+    if (!container) return NO;
+    [self dropAdoptedViewSurfaceForKey:key];
+    surface.frame = container.bounds;
+    surface.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [container addSubview:surface positioned:NSWindowAbove relativeTo:nil];
+    self.adoptedViewSurfaces[key] = surface;
+    [self scheduleFrame];
+    return YES;
+}
+
+- (BOOL)releaseViewSurfaceInWindow:(uint64_t)windowId label:(NSString *)label {
+    NSString *key = [self nativeViewKeyForWindow:windowId label:label];
+    if (!self.adoptedViewSurfaces[key]) return NO;
+    [self dropAdoptedViewSurfaceForKey:key];
+    [self scheduleFrame];
+    return YES;
 }
 
 - (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled {
@@ -6317,6 +6355,20 @@ int native_sdk_appkit_close_view(native_sdk_appkit_host_t *host, uint64_t window
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     return [object closeNativeViewInWindow:window_id label:labelString ?: @""] ? 1 : 0;
+}
+
+int native_sdk_appkit_adopt_view_surface(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, void *ns_view) {
+    if (!ns_view) return 0;
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    NSView *surface = (__bridge NSView *)ns_view;
+    return [object adoptViewSurfaceInWindow:window_id label:labelString ?: @"" surface:surface] ? 1 : 0;
+}
+
+int native_sdk_appkit_release_view_surface(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    return [object releaseViewSurfaceInWindow:window_id label:labelString ?: @""] ? 1 : 0;
 }
 
 int native_sdk_appkit_present_gpu_surface_pixels(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, size_t width, size_t height, double scale, int has_dirty_rect, double dirty_x, double dirty_y, double dirty_width, double dirty_height, const uint8_t *rgba8, size_t rgba8_len) {

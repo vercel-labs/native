@@ -1,0 +1,8 @@
+.{
+    .name = .guest_mac,
+    .fingerprint = 0x19ed10962802dd1b,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{ .native_sdk = .{ .path = "../.." } },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "app.zon", "entitlements.plist", "agents.md", "provision.sh", "README.md" },
+}

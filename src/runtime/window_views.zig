@@ -57,6 +57,8 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
         pub const closeView = WindowViewRuntimeMethods.closeView;
         pub const listViews = WindowViewRuntimeMethods.listViews;
         pub const focusView = WindowViewRuntimeMethods.focusView;
+        pub const adoptViewSurface = WindowViewRuntimeMethods.adoptViewSurface;
+        pub const releaseViewSurface = WindowViewRuntimeMethods.releaseViewSurface;
         pub const focusNextView = WindowViewRuntimeMethods.focusNextView;
         pub const focusPreviousView = WindowViewRuntimeMethods.focusPreviousView;
         pub const validateWebViewParent = WindowViewRuntimeMethods.validateWebViewParent;

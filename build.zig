@@ -37,6 +37,8 @@ const SigningMode = enum {
 
 pub const AppOptions = @import("build/app.zig").AppOptions;
 pub const addApp = @import("build/app.zig").addApp;
+pub const AppArtifacts = @import("build/app.zig").AppArtifacts;
+pub const addAppArtifacts = @import("build/app.zig").addAppArtifacts;
 pub const MobileLibOptions = @import("build/app.zig").MobileLibOptions;
 pub const addMobileLib = @import("build/app.zig").addMobileLib;
 const mobile_export_symbol_names = @import("build/app.zig").mobile_export_symbol_names;

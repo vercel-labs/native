@@ -508,6 +508,10 @@ pub const NullPlatform = struct {
             .gpu_surface_scroll_drivers => self.gpu_surface_scroll_drivers,
             .context_menus => true,
             .tray => self.web_engine == .system,
+            // The null platform has no real view hierarchy to adopt an
+            // app-owned platform view into — reporting support would be a
+            // lie the first adopt call exposes.
+            .view_surface_adoption => false,
         };
     }
 

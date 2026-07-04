@@ -166,6 +166,33 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             self.invalidateFor(.command, null);
         }
 
+        /// Native-surface adoption: install an app-owned platform view
+        /// handle (macOS: an NSView* — a `VZVirtualMachineView`, an
+        /// `MKMapView`) as the fill content of an existing NATIVE view.
+        /// The container keeps participating in shell layout; the platform
+        /// keeps the adopted surface sized to it. Webview-backed labels
+        /// reject — a webview already owns its backing view. Platforms
+        /// without the capability reject with `error.UnsupportedService`
+        /// (`supports(.view_surface_adoption)` is the honest pre-check).
+        pub fn adoptViewSurface(self: *Runtime, window_id: platform.WindowId, label: []const u8, surface_handle: *anyopaque) anyerror!void {
+            try Self.validateViewParent(self, window_id);
+            try validateViewLabel(label);
+            if (isMainWebViewLabel(label) or Self.findWebViewIndex(self, window_id, label) != null) return error.InvalidViewOptions;
+            if (Self.findViewIndex(self, window_id, label) == null) return error.ViewNotFound;
+            try self.options.platform.services.adoptViewSurface(window_id, label, surface_handle);
+            self.invalidateFor(.command, null);
+        }
+
+        /// Remove an adopted surface from its container; the app-owned
+        /// platform view stays alive for the caller to reuse.
+        pub fn releaseViewSurface(self: *Runtime, window_id: platform.WindowId, label: []const u8) anyerror!void {
+            try Self.validateViewParent(self, window_id);
+            try validateViewLabel(label);
+            if (Self.findViewIndex(self, window_id, label) == null) return error.ViewNotFound;
+            try self.options.platform.services.releaseViewSurface(window_id, label);
+            self.invalidateFor(.command, null);
+        }
+
         pub fn focusNextView(self: *Runtime, window_id: platform.WindowId) anyerror!platform.ViewInfo {
             return Self.focusAdjacentView(self, window_id, .next);
         }

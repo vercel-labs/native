@@ -125,6 +125,8 @@ extern fn native_sdk_appkit_set_view_visible(host: *AppKitHost, window_id: u64, 
 extern fn native_sdk_appkit_set_view_cursor(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, cursor: c_int) c_int;
 extern fn native_sdk_appkit_focus_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_appkit_close_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
+extern fn native_sdk_appkit_adopt_view_surface(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, ns_view: *anyopaque) c_int;
+extern fn native_sdk_appkit_release_view_surface(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_appkit_request_gpu_surface_frame(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_appkit_set_gpu_surface_scroll_drivers(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, drivers: [*]const AppKitScrollDriver, count: usize) c_int;
 extern fn native_sdk_appkit_show_context_menu(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, token: u64, items: [*]const AppKitContextMenuItem, count: usize) c_int;
@@ -362,6 +364,8 @@ pub const MacPlatform = struct {
                 .set_view_cursor_fn = setViewCursor,
                 .focus_view_fn = focusView,
                 .close_view_fn = closeView,
+                .adopt_view_surface_fn = adoptViewSurface,
+                .release_view_surface_fn = releaseViewSurface,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
                 .navigate_webview_fn = navigateWebView,
@@ -431,6 +435,7 @@ pub const MacPlatform = struct {
             .file_drops,
             .gpu_surfaces,
             .gpu_surface_scroll_drivers,
+            .view_surface_adoption,
             => self.web_engine == .system,
         };
     }
@@ -897,6 +902,18 @@ fn closeView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []co
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedViewKind;
     if (native_sdk_appkit_close_view(self.host, window_id, label.ptr, label.len) == 0) return error.ViewNotFound;
+}
+
+fn adoptViewSurface(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, surface_handle: *anyopaque) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    if (native_sdk_appkit_adopt_view_surface(self.host, window_id, label.ptr, label.len, surface_handle) == 0) return error.ViewNotFound;
+}
+
+fn releaseViewSurface(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    if (native_sdk_appkit_release_view_surface(self.host, window_id, label.ptr, label.len) == 0) return error.ViewNotFound;
 }
 
 fn startTimer(context: ?*anyopaque, id: u64, interval_ns: u64, repeats: bool) anyerror!void {
@@ -1477,6 +1494,7 @@ test "macos chromium reports unsupported native surfaces" {
     try std.testing.expect(MacPlatform.supportsFeature(&system, .native_control_commands));
     try std.testing.expect(MacPlatform.supportsFeature(&system, .menus));
     try std.testing.expect(MacPlatform.supportsFeature(&system, .gpu_surfaces));
+    try std.testing.expect(MacPlatform.supportsFeature(&system, .view_surface_adoption));
 
     var chromium = testPlatformWithEngine(.chromium);
     try std.testing.expect(MacPlatform.supportsFeature(&chromium, .main_webview));
@@ -1488,6 +1506,7 @@ test "macos chromium reports unsupported native surfaces" {
     try std.testing.expect(!MacPlatform.supportsFeature(&chromium, .menus));
     try std.testing.expect(!MacPlatform.supportsFeature(&chromium, .file_drops));
     try std.testing.expect(!MacPlatform.supportsFeature(&chromium, .gpu_surfaces));
+    try std.testing.expect(!MacPlatform.supportsFeature(&chromium, .view_surface_adoption));
 }
 
 fn testPlatformWithEngine(web_engine: platform_mod.WebEngine) MacPlatform {

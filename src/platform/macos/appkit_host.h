@@ -293,6 +293,22 @@ int native_sdk_appkit_set_view_visible(native_sdk_appkit_host_t *host, uint64_t 
 int native_sdk_appkit_set_view_cursor(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, int cursor);
 int native_sdk_appkit_focus_view(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len);
 int native_sdk_appkit_close_view(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len);
+/* Native-surface adoption: install an app-owned NSView (`ns_view`, an
+ * unretained NSView* the caller keeps alive elsewhere or transfers via the
+ * superview retain) as the fill content of an existing native view created
+ * through `native_sdk_appkit_create_view`. The adopted view is sized to the
+ * container's bounds and autoresizes with it, so shell relayout keeps it
+ * attached — the same containment shape webview-backed child views use,
+ * generalized to views the framework did not construct (a
+ * VZVirtualMachineView, an MKMapView, ...). Adopting over an existing
+ * adoption replaces it. Main-thread only, like every other view call.
+ * Returns 1 on success, 0 when the container is unknown or `ns_view` is not
+ * an NSView. */
+int native_sdk_appkit_adopt_view_surface(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, void *ns_view);
+/* Remove the adopted surface from a container (the view itself stays
+ * alive for the caller to reuse). Returns 1 on success, 0 when the
+ * container has no adopted surface. */
+int native_sdk_appkit_release_view_surface(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len);
 int native_sdk_appkit_present_gpu_surface_pixels(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, size_t width, size_t height, double scale, int has_dirty_rect, double dirty_x, double dirty_y, double dirty_width, double dirty_height, const uint8_t *rgba8, size_t rgba8_len);
 int native_sdk_appkit_present_gpu_surface_packet(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double surface_width, double surface_height, double scale, uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a, int requires_render, size_t command_count, size_t unsupported_command_count, int representable, const uint8_t *json, size_t json_len);
 int native_sdk_appkit_present_gpu_surface_packet_binary(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double surface_width, double surface_height, double scale, uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a, int requires_render, size_t command_count, size_t unsupported_command_count, int representable, const uint8_t *packet, size_t packet_len);

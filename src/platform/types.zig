@@ -98,6 +98,11 @@ pub const PlatformFeature = enum {
     /// `popUpMenuPositioningItem`). Selection returns asynchronously as a
     /// `context_menu_action` event.
     context_menus,
+    /// Adopting an app-owned platform view (macOS: an NSView* the app
+    /// constructed — a `VZVirtualMachineView`, an `MKMapView`) as the fill
+    /// content of a declared native view container, via
+    /// `PlatformServices.adoptViewSurface`. macOS system host only today.
+    view_surface_adoption,
 };
 
 pub const WebViewSourceKind = enum {
@@ -1696,6 +1701,8 @@ pub const PlatformServices = struct {
     set_view_cursor_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, cursor: Cursor) anyerror!void = null,
     focus_view_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8) anyerror!void = null,
     close_view_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8) anyerror!void = null,
+    adopt_view_surface_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, surface_handle: *anyopaque) anyerror!void = null,
+    release_view_surface_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8) anyerror!void = null,
     create_webview_fn: ?*const fn (context: ?*anyopaque, options: WebViewOptions) anyerror!void = null,
     set_webview_frame_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, frame: geometry.RectF) anyerror!void = null,
     navigate_webview_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, url: []const u8) anyerror!void = null,
@@ -1904,6 +1911,24 @@ pub const PlatformServices = struct {
         if (self.close_view_fn) |close_fn| return close_fn(self.context, window_id, label);
         if (!std.mem.eql(u8, label, "main")) return self.closeWebView(window_id, label);
         return error.InvalidViewOptions;
+    }
+
+    /// Native-surface adoption: install an app-owned platform view handle
+    /// (macOS: an NSView* the app constructed — a `VZVirtualMachineView`,
+    /// an `MKMapView`) as the fill content of an existing native view. The
+    /// platform keeps the surface sized to the container across shell
+    /// relayout, and drops it when the container closes. Platforms without
+    /// the capability reject explicitly instead of pretending.
+    pub fn adoptViewSurface(self: PlatformServices, window_id: WindowId, label: []const u8, surface_handle: *anyopaque) anyerror!void {
+        const adopt_fn = self.adopt_view_surface_fn orelse return error.UnsupportedService;
+        return adopt_fn(self.context, window_id, label, surface_handle);
+    }
+
+    /// Remove an adopted surface from its container; the app-owned view
+    /// itself stays alive for the caller to reuse.
+    pub fn releaseViewSurface(self: PlatformServices, window_id: WindowId, label: []const u8) anyerror!void {
+        const release_fn = self.release_view_surface_fn orelse return error.UnsupportedService;
+        return release_fn(self.context, window_id, label);
     }
 
     pub fn createWebView(self: PlatformServices, options: WebViewOptions) anyerror!void {
@@ -2190,6 +2215,7 @@ fn defaultSupportsFeature(services: PlatformServices, feature: PlatformFeature) 
         .gpu_surfaces => false,
         .gpu_surface_scroll_drivers => services.set_gpu_surface_scroll_drivers_fn != null,
         .context_menus => services.show_context_menu_fn != null,
+        .view_surface_adoption => services.adopt_view_surface_fn != null,
     };
 }
 
