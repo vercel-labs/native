@@ -1,4 +1,5 @@
 const std = @import("std");
+const canvas = @import("canvas");
 const geometry = @import("geometry");
 const platform = @import("../platform/root.zig");
 const runtime_api = @import("api.zig");
@@ -106,7 +107,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 if (input_event.kind == .pointer_down) {
                     try setFocusedView(self, input_event.window_id, input_event.label);
                     self.invalidated = true;
-                    try ContextMenuMethods().presentCanvasWidgetContextMenuFromPointer(self, input_event);
+                    try ContextMenuMethods().presentCanvasWidgetContextMenuFromPointer(self, app, input_event);
                 }
                 try self.dispatchEvent(app, .{ .gpu_surface_input = input_event });
                 return;
@@ -136,8 +137,9 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 => null,
                 else => return err,
             };
+            var dismissed_surface_id: canvas.ObjectId = 0;
             if (widget_pointer_event) |pointer_event| {
-                _ = try CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromPointerInput(self, pointer_event);
+                dismissed_surface_id = try CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromPointerInput(self, pointer_event);
                 try CanvasWidgetEventMethods().updateCanvasWidgetControlFromPointer(self, pointer_event);
                 try CanvasWidgetEventMethods().updateCanvasWidgetInteractionFromPointer(self, pointer_event);
                 try CanvasWidgetEventMethods().updateCanvasWidgetTextFromPointer(self, pointer_event);
@@ -151,7 +153,9 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 => null,
                 else => return err,
             };
-            const widget_surface_dismissed = try CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromKeyboardInput(self, input_event);
+            const keyboard_dismissed_id = try CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromKeyboardInput(self, input_event);
+            if (keyboard_dismissed_id != 0) dismissed_surface_id = keyboard_dismissed_id;
+            const widget_surface_dismissed = keyboard_dismissed_id != 0;
             if (!widget_surface_dismissed) try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromKeyboardInput(self, input_event);
             var widget_keyboard_event = if (widget_surface_dismissed)
                 null
@@ -196,6 +200,15 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             if (canvas_widget_refresh_batch_active) {
                 try CanvasWidgetDisplayMethods().endCanvasWidgetDisplayListRefreshBatch(self);
                 canvas_widget_refresh_batch_active = false;
+            }
+            // Dismissal reaches the app first (the model closes its open
+            // flag before any press-family Msg from the same input), and
+            // only here — after every runtime-side mutation above stopped
+            // routing into the pre-dismissal tree.
+            if (dismissed_surface_id != 0) {
+                if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
+                    try CanvasWidgetEventMethods().dispatchCanvasWidgetDismissEvent(self, app, index, dismissed_surface_id);
+                }
             }
             if (widget_pointer_event) |pointer_event| {
                 try CanvasWidgetEventMethods().dispatchCanvasWidgetCommandFromPointer(self, app, pointer_event);

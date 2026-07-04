@@ -488,36 +488,56 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             _ = try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, index);
         }
 
-        pub fn dismissCanvasWidgetSurfaceFromPointerInput(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!bool {
-            if (pointer_event.pointer.phase != .down) return false;
-            const index = runtimeFindViewIndex(self, pointer_event.window_id, pointer_event.view_label) orelse return false;
-            if (self.views[index].kind != .gpu_surface or !self.views[index].focused) return false;
+        /// Returns the dismissed surface's widget id (0 when nothing was
+        /// dismissed). The caller dispatches the `canvas_widget_dismiss`
+        /// app event at the END of input processing — an app dispatch
+        /// rebuilds the tree, and the rest of the input pipeline still
+        /// routes into the current one.
+        pub fn dismissCanvasWidgetSurfaceFromPointerInput(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!canvas.ObjectId {
+            if (pointer_event.pointer.phase != .down) return 0;
+            const index = runtimeFindViewIndex(self, pointer_event.window_id, pointer_event.view_label) orelse return 0;
+            if (self.views[index].kind != .gpu_surface or !self.views[index].focused) return 0;
             const focused_id = self.views[index].canvas_widget_focused_id;
-            if (focused_id == 0) return false;
+            if (focused_id == 0) return 0;
 
             const previous_cursor = self.views[index].canvas_widget_cursor;
-            const dirty = try self.views[index].dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(focused_id, pointer_event.route) orelse return false;
+            const dismissal = try self.views[index].dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(focused_id, pointer_event.route) orelse return 0;
             if (previous_cursor != self.views[index].canvas_widget_cursor) try syncCanvasWidgetCursorForView(self, index);
-            try invalidateForCanvasWidgetDirty(self, index, dirty);
-            return true;
+            try invalidateForCanvasWidgetDirty(self, index, dismissal.dirty);
+            return dismissal.id;
         }
 
-        pub fn dismissCanvasWidgetSurfaceFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent) anyerror!bool {
-            if (input_event.kind != .key_down) return false;
-            if (!canvasWidgetEscapeKey(input_event.key)) return false;
+        /// Same contract as the pointer variant: returns the dismissed
+        /// surface's id (0 = none); the caller dispatches the app event.
+        pub fn dismissCanvasWidgetSurfaceFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent) anyerror!canvas.ObjectId {
+            if (input_event.kind != .key_down) return 0;
+            if (!canvasWidgetEscapeKey(input_event.key)) return 0;
             const modifiers = canvasWidgetKeyboardModifiers(input_event.modifiers);
-            if (modifiers.shift or modifiers.hasNavigationModifier()) return false;
+            if (modifiers.shift or modifiers.hasNavigationModifier()) return 0;
 
-            const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return false;
-            if (self.views[index].kind != .gpu_surface or !self.views[index].focused) return false;
+            const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return 0;
+            if (self.views[index].kind != .gpu_surface or !self.views[index].focused) return 0;
             const focused_id = self.views[index].canvas_widget_focused_id;
-            if (focused_id == 0) return false;
+            if (focused_id == 0) return 0;
 
             const previous_cursor = self.views[index].canvas_widget_cursor;
-            const dirty = try self.views[index].dismissCanvasWidgetSurfaceForFocusedTarget(focused_id) orelse return false;
+            const dismissal = try self.views[index].dismissCanvasWidgetSurfaceForFocusedTarget(focused_id) orelse return 0;
             if (previous_cursor != self.views[index].canvas_widget_cursor) try syncCanvasWidgetCursorForView(self, index);
-            try invalidateForCanvasWidgetDirty(self, index, dirty);
-            return true;
+            try invalidateForCanvasWidgetDirty(self, index, dismissal.dirty);
+            return dismissal.id;
+        }
+
+        /// Every dismissal source (Escape, outside pointer, automation and
+        /// accessibility dismiss actions) delivers the dismissed surface's
+        /// id to the app, so a TEA model with an `on_dismiss` handler owns
+        /// the close instead of relying on the engine's transient hide.
+        pub fn dispatchCanvasWidgetDismissEvent(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, surface_id: canvas.ObjectId) anyerror!void {
+            if (surface_id == 0) return;
+            try self.dispatchEvent(app, .{ .canvas_widget_dismiss = .{
+                .window_id = self.views[view_index].window_id,
+                .view_label = self.views[view_index].label,
+                .id = surface_id,
+            } });
         }
 
         pub fn dispatchCanvasWidgetCommandForId(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, id: canvas.ObjectId) anyerror!void {

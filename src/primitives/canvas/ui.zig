@@ -89,6 +89,19 @@ fn warnUnknownIconName(name: []const u8) void {
     );
 }
 
+/// Debug-build diagnostic for `on_dismiss` on a kind the runtime's
+/// dismissal machinery never closes: the handler would sit dead. The
+/// markup validator teaches the same rule as a hard error; the builder
+/// warns and keeps building (the shipped-app rule).
+fn warnDismissHandlerKind(kind: WidgetKind) void {
+    if (builtin.mode != .Debug) return;
+    if (canvas.widgetKindDismissibleSurface(kind)) return;
+    ui_log.warn(
+        "on_dismiss never fires on {s}: only dismissible surfaces (dialog, drawer, sheet, popover, menu_surface, dropdown_menu) are closed by Escape/click-outside - put it on the surface element",
+        .{@tagName(kind)},
+    );
+}
+
 pub const UiKey = union(enum) {
     index: usize,
     int: u64,
@@ -103,6 +116,8 @@ pub const UiHandlerEvent = enum {
     input,
     scroll,
     context_menu,
+    dismiss,
+    hold,
 };
 
 /// A color design token referenced by name (the fields of
@@ -276,10 +291,45 @@ pub fn Ui(comptime Msg: type) type {
             /// `finalizeWithTokens`; explicit `style` values win.
             style_tokens: StyleTokenRefs = .{},
             semantics: canvas.WidgetSemantics = .{},
+            /// Anchored floating placement: setting this makes the element
+            /// a FLOATING surface positioned against its PARENT's resolved
+            /// frame (below/above with auto-flip at the window edges), not
+            /// the parent's flow — it consumes no parent space, paints in
+            /// a late window-level z-pass above the whole tree, and
+            /// escapes every ancestor scroll/clip region. The sanctioned
+            /// picker shape: a `stack` wraps the trigger, and the anchored
+            /// `dropdown_menu` (rendered only while the model's open flag
+            /// is set) is the trigger's sibling inside it. Pair with
+            /// `on_dismiss` so Escape/click-outside close model-side.
+            anchor: ?canvas.WidgetAnchorPlacement = null,
+            /// Horizontal alignment against the anchor (`anchor` only):
+            /// `start`/`end` align edges, `stretch` also widens the
+            /// surface to at least the anchor's width.
+            anchor_alignment: canvas.WidgetAnchorAlignment = .start,
+            /// Gap in points between anchor edge and surface (`anchor`
+            /// only).
+            anchor_offset: f32 = 4,
             on_press: ?Msg = null,
             on_toggle: ?Msg = null,
             on_change: ?Msg = null,
             on_submit: ?Msg = null,
+            /// Dismissal Msg for dismissible surfaces (dialog, drawer,
+            /// sheet, popover, menu_surface, dropdown_menu): dispatched
+            /// when the user dismisses the surface — Escape, a click
+            /// outside it, an automation/accessibility dismiss — so the
+            /// MODEL owns the close (clear the open flag in update). The
+            /// engine hides the surface immediately as an optimistic
+            /// echo; the source tree is truth again on the next rebuild.
+            on_dismiss: ?Msg = null,
+            /// Press-and-hold Msg: a pointer held down on this element
+            /// for ~350 ms dispatches it (the release then presses
+            /// nothing), while a quick click dispatches `on_press` as
+            /// usual — the SwiftUI Menu + primaryAction shape. A
+            /// secondary click (right/ctrl-click) with no context menu on
+            /// the route dispatches it immediately, the desktop
+            /// alternative. Like `on_press`, binding it makes the element
+            /// a hit target and press claimer.
+            on_hold: ?Msg = null,
             /// Message constructor for text edits: called with each
             /// `TextInputEvent` on text-entry widgets. Pair with `inputMsg`.
             on_input: ?InputMsgFn = null,
@@ -338,6 +388,8 @@ pub fn Ui(comptime Msg: type) type {
             on_toggle: ?Msg = null,
             on_change: ?Msg = null,
             on_submit: ?Msg = null,
+            on_dismiss: ?Msg = null,
+            on_hold: ?Msg = null,
             on_input: ?InputMsgFn = null,
             on_value: ?ValueMsgFn = null,
             on_scroll: ?ScrollMsgFn = null,
@@ -452,6 +504,27 @@ pub fn Ui(comptime Msg: type) type {
                 return null;
             }
 
+            /// Typed dispatch for a dismissed floating surface: the
+            /// surface's `on_dismiss` message.
+            pub fn msgForDismiss(self: Tree, id: ObjectId) ?Msg {
+                return self.msgFor(id, .dismiss);
+            }
+
+            /// Typed dispatch for a press-and-hold (or menu-less secondary
+            /// click): the widget's `on_hold` message.
+            pub fn msgForHold(self: Tree, id: ObjectId) ?Msg {
+                return self.msgFor(id, .hold);
+            }
+
+            /// Whether the widget binds an `on_hold` handler (the UiApp
+            /// hold-timer arms only for these).
+            pub fn hasHoldHandler(self: Tree, id: ObjectId) bool {
+                for (self.handlers) |handler| {
+                    if (handler.id == id and handler.event == .hold) return true;
+                }
+                return false;
+            }
+
             /// Typed dispatch for a selected context-menu item: the message
             /// declared for the widget's `context_menu[item_index]`.
             pub fn msgForContextMenu(self: Tree, id: ObjectId, item_index: usize) ?Msg {
@@ -523,6 +596,7 @@ pub fn Ui(comptime Msg: type) type {
         }
 
         pub fn el(self: *Self, kind: WidgetKind, options: ElementOptions, children: anytype) Node {
+            if (options.on_dismiss != null) warnDismissHandlerKind(kind);
             return .{
                 .widget = widgetFromOptions(kind, options),
                 .key = options.key,
@@ -533,6 +607,8 @@ pub fn Ui(comptime Msg: type) type {
                 .on_toggle = options.on_toggle,
                 .on_change = options.on_change,
                 .on_submit = options.on_submit,
+                .on_dismiss = options.on_dismiss,
+                .on_hold = options.on_hold,
                 .on_input = options.on_input,
                 .on_value = options.on_value,
                 .on_scroll = options.on_scroll,
@@ -1201,6 +1277,10 @@ pub fn Ui(comptime Msg: type) type {
             // same way a stringly `command` does for engine-owned dispatch.
             if (node.on_press != null) widget.semantics.actions.press = true;
             if (node.on_toggle != null) widget.semantics.actions.toggle = true;
+            // A hold handler makes the element pressable (hit target +
+            // press claimer), like on_press: the hold gesture starts as a
+            // press, and dev-2's Menu+primaryAction shape pairs the two.
+            if (node.on_hold != null) widget.semantics.actions.press = true;
             if (node.on_input != null) widget.semantics.actions.set_text = true;
             if (widget.kind == .slider and (node.on_value != null or node.on_change != null)) {
                 widget.semantics.actions.increment = true;
@@ -1218,6 +1298,8 @@ pub fn Ui(comptime Msg: type) type {
             appendHandler(handlers, handler_len, widget.id, .toggle, node.on_toggle);
             appendHandler(handlers, handler_len, widget.id, .change, node.on_change);
             appendHandler(handlers, handler_len, widget.id, .submit, node.on_submit);
+            appendHandler(handlers, handler_len, widget.id, .dismiss, node.on_dismiss);
+            appendHandler(handlers, handler_len, widget.id, .hold, node.on_hold);
             if (node.on_input) |make| {
                 handlers[handler_len.*] = .{ .id = widget.id, .event = .input, .action = .{ .input = make } };
                 handler_len.* += 1;
@@ -1263,6 +1345,8 @@ pub fn Ui(comptime Msg: type) type {
             if (node.on_toggle != null) total += 1;
             if (node.on_change != null) total += 1;
             if (node.on_submit != null) total += 1;
+            if (node.on_dismiss != null) total += 1;
+            if (node.on_hold != null) total += 1;
             if (node.on_input != null) total += 1;
             if (node.on_value != null) total += 1;
             if (node.on_scroll != null) total += 1;
@@ -1353,6 +1437,11 @@ pub fn Ui(comptime Msg: type) type {
                     .main_alignment = options.main,
                     .cross_alignment = options.cross,
                     .columns = options.columns,
+                    .anchor = if (options.anchor) |placement| .{
+                        .placement = placement,
+                        .alignment = options.anchor_alignment,
+                        .offset = options.anchor_offset,
+                    } else null,
                     .virtualized = options.virtualized,
                     .virtual_item_extent = options.virtual_item_extent,
                     .min_size = .{ .width = options.width, .height = options.height },

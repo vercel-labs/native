@@ -58,11 +58,13 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
 
         /// Present the context menu for a secondary-button press: hit-test
         /// the point, pick the menu (app-declared, editable-text default,
-        /// or static-selection copy), and hand it to the platform. No-op
-        /// when nothing under the pointer offers a menu or the platform
-        /// has no presenter.
-        pub fn presentCanvasWidgetContextMenuFromPointer(self: *Runtime, input_event: platform.GpuSurfaceInputEvent) anyerror!void {
-            if (self.options.platform.services.show_context_menu_fn == null) return;
+        /// or static-selection copy), and hand it to the platform. When
+        /// NOTHING under the pointer offers a menu — or the platform has
+        /// no presenter — the press is delivered to the app instead as a
+        /// `canvas_widget_context_press` with the resolved press target:
+        /// the desktop alternative for press-and-hold (`on_hold`).
+        /// Declared context menus always win over hold handlers.
+        pub fn presentCanvasWidgetContextMenuFromPointer(self: *Runtime, app: runtime_api.App(Runtime), input_event: platform.GpuSurfaceInputEvent) anyerror!void {
             const routed = CanvasWidgetEventMethods().routeCanvasWidgetPointerInput(self, input_event, &self.widget_event_route_entries) catch |err| switch (err) {
                 error.WindowNotFound, error.ViewNotFound, error.InvalidViewOptions => return,
                 else => return err,
@@ -72,11 +74,13 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             const point = geometry.PointF.init(input_event.x, input_event.y);
 
             var items: [platform.max_context_menu_items]platform.ContextMenuItem = undefined;
+            const has_presenter = self.options.platform.services.show_context_menu_fn != null;
 
             // 1. Deepest app-declared menu on the route wins.
             if (deepestContextMenuRouteNode(self, index, pointer_event.route)) |node_index| {
                 const widget = self.views[index].widget_layout_nodes[node_index].widget;
                 const count = @min(widget.context_menu.len, items.len);
+                if (count == 0 or !has_presenter) return;
                 for (widget.context_menu[0..count], 0..) |item, item_index| {
                     items[item_index] = .{
                         .id = @intCast(item_index + 1),
@@ -85,7 +89,6 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                         .separator = item.separator,
                     };
                 }
-                if (count == 0) return;
                 try showMenu(self, index, .{
                     .window_id = input_event.window_id,
                     .token = widget.id,
@@ -101,6 +104,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 const node_index = self.views[index].canvasWidgetNodeIndexById(target.id) orelse return;
                 const widget = self.views[index].widget_layout_nodes[node_index].widget;
                 if (canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind) and !widget.state.disabled) {
+                    if (!has_presenter) return;
                     try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromPointer(self, pointer_event);
                     const has_selection = if (canvas.widgetTextSelectionRange(widget)) |range| !range.isCollapsed(widget.text.len) else false;
                     items[0] = .{ .id = default_item_cut, .label = "Cut", .enabled = has_selection };
@@ -119,6 +123,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 // 3. Static text with a live selection: Copy only.
                 const selected_id = self.views[index].canvas_widget_selected_text_id;
                 if (selected_id != 0 and selected_id == target.id) {
+                    if (!has_presenter) return;
                     items[0] = .{ .id = default_item_copy, .label = "Copy" };
                     try showMenu(self, index, .{
                         .window_id = input_event.window_id,
@@ -128,6 +133,15 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                     return;
                 }
             }
+
+            // 4. No menu anywhere on the route: the press-and-hold
+            // alternative. Deliver the context press so `UiApp` can
+            // dispatch the press target's `on_hold` Msg.
+            try self.dispatchEvent(app, .{ .canvas_widget_context_press = .{
+                .window_id = input_event.window_id,
+                .view_label = self.views[index].label,
+                .press_target = pointer_event.press_target,
+            } });
         }
 
         fn showMenu(self: *Runtime, view_index: usize, pending: PendingCanvasWidgetContextMenu, point: geometry.PointF, items: []const platform.ContextMenuItem) anyerror!void {

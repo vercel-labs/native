@@ -312,6 +312,10 @@ pub const Server = struct {
                     for (avatar_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "avatar attribute", doc.doc);
                     for (attribute_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "zml attribute", doc.doc);
                     for (event_docs) |doc| try writeCompletionItem(&js, doc.name, .event, "zml event", doc.doc);
+                } else if (std.mem.eql(u8, element_name, "dropdown-menu")) {
+                    for (anchor_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "dropdown-menu attribute", doc.doc);
+                    for (attribute_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "zml attribute", doc.doc);
+                    for (event_docs) |doc| try writeCompletionItem(&js, doc.name, .event, "zml event", doc.doc);
                 } else {
                     for (attribute_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "zml attribute", doc.doc);
                     for (event_docs) |doc| try writeCompletionItem(&js, doc.name, .event, "zml event", doc.doc);
@@ -593,7 +597,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "table", .doc = "Vertical table container; children are table-row elements." },
     .{ .name = "table-row", .doc = "Horizontal table row; only allowed inside a table, children are table-cells." },
     .{ .name = "table-cell", .doc = "Table cell text leaf; only allowed inside a table-row, dispatch with on-press." },
-    .{ .name = "dropdown-menu", .doc = "Vertical menu surface; children are menu-item elements." },
+    .{ .name = "dropdown-menu", .doc = "Vertical menu surface; children are menu-item elements. anchor=\"below|above\" floats it against its parent (put it beside its trigger in a stack): late z-pass above the whole tree, window-clipped, auto-flipping at the edges. Pair with on-dismiss so Escape/click-outside close model-side." },
     .{ .name = "accordion", .doc = "Surface with a header (text attribute); children show when selected, dispatch with on-toggle." },
     .{ .name = "alert", .doc = "Alert surface; title via the text attribute, children stack inside." },
     .{ .name = "bubble", .doc = "Bubble surface (chat message); children stack inside." },
@@ -602,12 +606,12 @@ pub const element_docs = [_]Doc{
     .{ .name = "sheet", .doc = "Sheet surface rendered in place; title via text, wrap in an if to show conditionally." },
     .{ .name = "resizable", .doc = "Resizable panel with an engine-managed drag handle; width sets the initial width." },
     .{ .name = "avatar", .doc = "Avatar leaf; the text content renders as initials, image takes one {binding} to a runtime-registered ImageId (0 keeps the initials)." },
-    .{ .name = "select", .doc = "Select trigger only (no options attribute): content is the current value, placeholder while empty, on-press opens. Compose the options as a dropdown-menu of menu-items under an if (model-owned open state)." },
+    .{ .name = "select", .doc = "Select trigger only (no options attribute): content is the current value, placeholder while empty, on-press opens. Compose the options as an ANCHORED dropdown-menu of menu-items under an if, beside the trigger in a stack (anchor=\"below\" + on-dismiss; model-owned open state)." },
     .{ .name = "switch", .doc = "Switch control; label is the text content, bind checked, dispatch with on-toggle." },
     .{ .name = "toggle-button", .doc = "Pressed-state toggle button; label is the text content, dispatch with on-toggle." },
     .{ .name = "tooltip", .doc = "Tooltip text leaf; content supports {} interpolation." },
     .{ .name = "input", .doc = "Single-line text entry; text and placeholder bindings, edits via on-input, enter via on-submit." },
-    .{ .name = "combobox", .doc = "Text entry with menu affordance (no options attribute); edits via on-input, open via on-press — compose the options like select's dropdown-menu pattern." },
+    .{ .name = "combobox", .doc = "Text entry with menu affordance (no options attribute); edits via on-input, open via on-press — compose the options like select's anchored dropdown-menu pattern (filter the for-each source from the model as the user types)." },
     .{ .name = "skeleton", .doc = "Loading placeholder block; size with width and height." },
     .{ .name = "spinner", .doc = "Indeterminate progress spinner leaf." },
     .{ .name = "icon", .doc = "Built-in vector icon leaf: name selects one of the curated Lucide-style icons (comptime-validated), tint via foreground, size with width/height or size." },
@@ -720,6 +724,12 @@ pub const avatar_attr_docs = [_]Doc{
     .{ .name = "image", .doc = "avatar: one {binding} to a u64 ImageId the app registered at runtime (fx.registerImageBytes); 0 renders the initials fallback." },
 };
 
+pub const anchor_attr_docs = [_]Doc{
+    .{ .name = "anchor", .doc = "dropdown-menu: floats the surface against its PARENT's frame instead of the flow (literal below or above; either side auto-flips at the window edges). Late z-pass above the whole tree, window-clipped — never cropped by a scroll pane, never reflows siblings. Put the dropdown beside its trigger inside a stack." },
+    .{ .name = "anchor-alignment", .doc = "dropdown-menu (with anchor): horizontal alignment against the anchor - start, end, or stretch (stretch also widens the surface to at least the anchor's width, the select-menu look)." },
+    .{ .name = "anchor-offset", .doc = "dropdown-menu (with anchor): literal gap in points between the anchor edge and the surface (default 4)." },
+};
+
 pub const event_docs = [_]Doc{
     .{ .name = "on-press", .doc = "Dispatch a Msg on press: tag or tag:{payload}. Legal on any element — a bound press handler makes it pressable, and presses on plain text/icons inside it fall through to it (dragging still selects text)." },
     .{ .name = "on-toggle", .doc = "Dispatch a Msg on toggle: tag or tag:{payload}. Hit-target elements only (checkbox, toggle, toggle-button, switch, accordion, ...)." },
@@ -727,6 +737,8 @@ pub const event_docs = [_]Doc{
     .{ .name = "on-submit", .doc = "Dispatch a Msg on enter in a text field: tag or tag:{payload}." },
     .{ .name = "on-input", .doc = "Names a Msg variant with canvas.TextInputEvent payload; delivers each text edit." },
     .{ .name = "on-scroll", .doc = "scroll element only: names a Msg variant with canvas.ScrollState payload; delivers the post-scroll offset/viewport/content extents after wheel, kinetic, keyboard, and accessibility scrolls." },
+    .{ .name = "on-dismiss", .doc = "Dismissible surfaces only (dialog, drawer, sheet, dropdown-menu): Msg dispatched when Escape or a click outside dismisses the surface, so the MODEL owns the close (clear the open flag in update). The engine hides the surface immediately as an optimistic echo; the source tree wins on the next rebuild." },
+    .{ .name = "on-hold", .doc = "Press-and-hold Msg: a pointer held ~350 ms dispatches it and the release then presses nothing; a quick click dispatches on-press as usual. A right/ctrl-click with no context menu on the route dispatches it immediately. Like on-press, binding it makes any element pressable." },
 };
 
 pub fn elementDoc(name: []const u8) ?[]const u8 {
@@ -744,6 +756,7 @@ pub fn attributeDoc(name: []const u8) ?[]const u8 {
     if (findDoc(&timeline_attr_docs, name)) |doc| return doc;
     if (findDoc(&timeline_item_attr_docs, name)) |doc| return doc;
     if (findDoc(&avatar_attr_docs, name)) |doc| return doc;
+    if (findDoc(&anchor_attr_docs, name)) |doc| return doc;
     return findDoc(&if_attr_docs, name);
 }
 

@@ -95,6 +95,9 @@ pub fn isHitTarget(widget: Widget) bool {
 /// decorations — plain text, panel, card, alert, bubble, status_bar,
 /// progress — are deliberately NOT here: presses fall through them to the
 /// nearest claiming ancestor (`widgetPressTargetForHit`).
+///
+/// See also `widgetKindDismissibleSurface` below for the overlay set the
+/// runtime's dismissal machinery closes.
 pub fn widgetKindClaimsPress(kind: WidgetKind) bool {
     return switch (kind) {
         .button,
@@ -141,6 +144,25 @@ pub fn widgetClaimsPress(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     if (widget.semantics.actions.press or widget.semantics.actions.toggle) return true;
     return widgetKindClaimsPress(widget.kind);
+}
+
+/// Widget KINDS the runtime's dismissal machinery closes (Escape, click
+/// outside, automation/accessibility dismiss): the overlay surfaces. The
+/// runtime's `canvasWidgetDismissibleSurfaceKind` delegates here and
+/// `defaultSemanticActions` exposes the matching `dismiss` action, so the
+/// set cannot drift. `on_dismiss` handlers only ever fire on these.
+pub fn widgetKindDismissibleSurface(kind: WidgetKind) bool {
+    return switch (kind) {
+        .dialog,
+        .drawer,
+        .sheet,
+        .popover,
+        .menu_surface,
+        .dropdown_menu,
+        .tooltip,
+        => true,
+        else => false,
+    };
 }
 
 pub fn booleanControlSelected(widget: Widget) bool {

@@ -206,14 +206,17 @@ pub fn canvasWidgetLayoutNodeFrameVisible(layout: canvas.WidgetLayoutTree, node_
     if (node_index >= layout.nodes.len) return false;
     const frame = layout.nodes[node_index].frame.normalized();
     if (frame.isEmpty()) return false;
-    var current = layout.nodes[node_index].parent_index;
-    while (current) |index| {
+    var current: usize = node_index;
+    while (true) {
+        // Anchored floating widgets escape ancestor clip regions (they
+        // render in the hoisted window-level pass).
+        if (canvas.widgetIsAnchored(layout.nodes[current].widget)) return true;
+        const index = layout.nodes[current].parent_index orelse return true;
         if (index >= layout.nodes.len) return true;
         const ancestor = layout.nodes[index];
         if (canvasWidgetClipsContent(ancestor.widget) and geometry.RectF.intersection(frame, ancestor.frame.normalized()).isEmpty()) return false;
-        current = ancestor.parent_index;
+        current = index;
     }
-    return true;
 }
 
 pub fn canvasWidgetLayoutNodeClippedBounds(layout: canvas.WidgetLayoutTree, node_index: usize, bounds: geometry.RectF) ?geometry.RectF {
@@ -223,15 +226,19 @@ pub fn canvasWidgetLayoutNodeClippedBounds(layout: canvas.WidgetLayoutTree, node
     var clipped = bounds.normalized();
     if (clipped.isEmpty()) return null;
 
-    var current = layout.nodes[node_index].parent_index;
-    while (current) |index| {
+    var current: usize = node_index;
+    while (true) {
+        // Anchored floating widgets escape ancestor clip regions, so
+        // dirty bounds under them clip to the window only.
+        if (canvas.widgetIsAnchored(layout.nodes[current].widget)) break;
+        const index = layout.nodes[current].parent_index orelse break;
         if (index >= layout.nodes.len) return null;
         const ancestor = layout.nodes[index];
         if (canvasWidgetClipsContent(ancestor.widget)) {
             clipped = geometry.RectF.intersection(clipped, ancestor.frame.normalized());
             if (clipped.isEmpty()) return null;
         }
-        current = ancestor.parent_index;
+        current = index;
     }
     return clipped;
 }
@@ -248,18 +255,20 @@ pub fn canvasWidgetRuntimeHitTarget(widget: canvas.Widget) bool {
     return canvas.widgetIsHitTarget(widget);
 }
 
+/// A dismissed floating/dismissible surface: the structural id (for the
+/// `canvas_widget_dismiss` app event that lets a TEA model own the close)
+/// plus the dirty bounds to invalidate. The engine-side hide is the
+/// optimistic echo; the source tree is truth on the next rebuild.
+pub const CanvasWidgetSurfaceDismissal = struct {
+    id: canvas.ObjectId,
+    dirty: geometry.RectF,
+};
+
 pub fn canvasWidgetDismissibleSurfaceKind(kind: canvas.WidgetKind) bool {
-    return switch (kind) {
-        .dialog,
-        .drawer,
-        .sheet,
-        .popover,
-        .menu_surface,
-        .dropdown_menu,
-        .tooltip,
-        => true,
-        else => false,
-    };
+    // Single source of truth in canvas widget_access.zig, shared with the
+    // semantics layer's `dismiss` action and the builder's on_dismiss
+    // teaching warning.
+    return canvas.widgetKindDismissibleSurface(kind);
 }
 
 pub fn canvasWidgetEditableTextKind(kind: canvas.WidgetKind) bool {

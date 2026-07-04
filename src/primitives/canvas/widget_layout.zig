@@ -95,12 +95,14 @@ pub fn layoutWidgetDepth(
             if (accordionChildrenVisible(widget)) {
                 const child_content = accordionContentFrame(widget, content, tokens);
                 for (widget.children) |child| {
+                    if (child.layout.anchor != null) continue;
                     _ = try layoutWidgetDepth(child, stackChildFrame(child_content, child), index, depth + 1, output, len, tokens);
                 }
             }
         },
         .stack, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover => {
             for (widget.children) |child| {
+                if (child.layout.anchor != null) continue;
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len, tokens);
             }
         },
@@ -110,7 +112,81 @@ pub fn layoutWidgetDepth(
         .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .list_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner, .chart => {},
     }
 
+    // Anchored floating children are excluded from every flow above (they
+    // consume no parent space) and positioned here instead, against this
+    // widget's resolved frame and the window (the layout root's frame).
+    // Leaf trigger kinds (select, button, ...) never lay out flow
+    // children, but their anchored children float all the same.
+    try layoutAnchoredChildren(widget.children, frame, index, depth, output, len, tokens);
+
     return index;
+}
+
+fn layoutAnchoredChildren(
+    children: []const Widget,
+    anchor_rect: geometry.RectF,
+    parent_index: usize,
+    depth: usize,
+    output: []WidgetLayoutNode,
+    len: *usize,
+    tokens: DesignTokens,
+) Error!void {
+    for (children) |child| {
+        const anchor = child.layout.anchor orelse continue;
+        const child_frame = anchoredWidgetFrame(child, anchor, anchor_rect, output[0].frame, tokens);
+        _ = try layoutWidgetDepth(child, child_frame, parent_index, depth + 1, output, len, tokens);
+    }
+}
+
+/// Resolved frame of an anchored floating widget: sized from its explicit
+/// frame or intrinsic content (`stretch` widens to at least the anchor's
+/// width), placed on the preferred side of the anchor rect — flipping to
+/// the other side when it does not fit and the other side has more room —
+/// with height clamped to the chosen side's space and both axes clamped
+/// into the window. Pure geometry, unit-testable on its own.
+pub fn anchoredWidgetFrame(
+    child: Widget,
+    anchor: widget_model.WidgetAnchor,
+    anchor_rect: geometry.RectF,
+    window_rect: geometry.RectF,
+    tokens: DesignTokens,
+) geometry.RectF {
+    const window = window_rect.normalized();
+    const anchor_frame = anchor_rect.normalized();
+    const intrinsic = intrinsicWidgetSize(child, tokens);
+
+    var width = if (child.frame.width > 0) child.frame.width else intrinsic.width;
+    if (anchor.alignment == .stretch) width = @max(width, anchor_frame.width);
+    width = clampIntrinsicAxis(width, child.layout.min_size.width, child.layout.max_size.width);
+    width = @min(width, window.width);
+
+    var height = if (child.frame.height > 0) child.frame.height else intrinsic.height;
+    height = clampIntrinsicAxis(height, child.layout.min_size.height, child.layout.max_size.height);
+
+    const offset = nonNegative(anchor.offset);
+    const space_below = window.maxY() - anchor_frame.maxY() - offset;
+    const space_above = anchor_frame.y - window.y - offset;
+    const preferred_space = switch (anchor.placement) {
+        .below => space_below,
+        .above => space_above,
+    };
+    const other_space = switch (anchor.placement) {
+        .below => space_above,
+        .above => space_below,
+    };
+    const flipped = height > preferred_space and other_space > preferred_space;
+    const below = (anchor.placement == .below) != flipped;
+    const side_space = @max(0, if (below) space_below else space_above);
+    height = @min(height, side_space);
+
+    const y = if (below) anchor_frame.maxY() + offset else anchor_frame.y - offset - height;
+    var x = switch (anchor.alignment) {
+        .start, .stretch => anchor_frame.x,
+        .end => anchor_frame.maxX() - width,
+    };
+    x = std.math.clamp(x, window.x, @max(window.x, window.maxX() - width));
+    const clamped_y = std.math.clamp(y, window.y, @max(window.y, window.maxY() - height));
+    return geometry.RectF.init(x, clamped_y, width, height);
 }
 
 const LayoutAxis = enum {
@@ -129,7 +205,14 @@ fn layoutAxisChildren(
     style: WidgetLayoutStyle,
     tokens: DesignTokens,
 ) Error!void {
-    if (children.len == 0) return;
+    // Anchored floating children take no flow slot: they are skipped in
+    // every pass here (measurement, gap counting, placement) and laid out
+    // by `layoutAnchoredChildren` against the parent's frame instead.
+    var flow_count: usize = 0;
+    for (children) |child| {
+        if (child.layout.anchor == null) flow_count += 1;
+    }
+    if (flow_count == 0) return;
 
     const available_extent = switch (axis) {
         .horizontal => content.width,
@@ -140,10 +223,11 @@ fn layoutAxisChildren(
         .vertical => content.width,
     };
     const clamped_gap = nonNegative(style.gap);
-    const total_gap = clamped_gap * @as(f32, @floatFromInt(children.len - 1));
+    const total_gap = clamped_gap * @as(f32, @floatFromInt(flow_count - 1));
     var fixed_extent: f32 = 0;
     var grow_total: f32 = 0;
     for (children) |child| {
+        if (child.layout.anchor != null) continue;
         const grow = nonNegative(child.layout.grow);
         if (grow > 0) {
             grow_total += grow;
@@ -160,8 +244,8 @@ fn layoutAxisChildren(
     }
     const free_extent = @max(0, available_extent - used_extent);
     var child_gap = clamped_gap;
-    if (style.main_alignment == .space_between and children.len > 1) {
-        child_gap += free_extent / @as(f32, @floatFromInt(children.len - 1));
+    if (style.main_alignment == .space_between and flow_count > 1) {
+        child_gap += free_extent / @as(f32, @floatFromInt(flow_count - 1));
     }
     var cursor: f32 = switch (axis) {
         .horizontal => content.x,
@@ -169,6 +253,7 @@ fn layoutAxisChildren(
     } + mainAxisAlignmentOffset(style.main_alignment, free_extent);
 
     for (children) |child| {
+        if (child.layout.anchor != null) continue;
         const grow = nonNegative(child.layout.grow);
         const main_extent = if (grow > 0 and grow_total > 0)
             clampMainExtent(child, axis, remaining * grow / grow_total)
@@ -286,18 +371,22 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
         .column, .list, .data_grid, .table, .menu_surface, .dropdown_menu => blk: {
             if (widget.layout.virtualized) return preferredMainExtent(widget, .vertical, tokens);
             var sum: f32 = 0;
+            var flow_count: usize = 0;
             for (widget.children) |child| {
+                if (child.layout.anchor != null) continue;
                 const child_width = if (child.frame.width > 0) child.frame.width else inner_width;
                 sum += wrappedVerticalExtentForWidth(child, child_width, tokens, depth + 1);
+                flow_count += 1;
             }
-            if (widget.children.len > 1) {
-                sum += nonNegative(widget.layout.gap) * @as(f32, @floatFromInt(widget.children.len - 1));
+            if (flow_count > 1) {
+                sum += nonNegative(widget.layout.gap) * @as(f32, @floatFromInt(flow_count - 1));
             }
             break :blk sum;
         },
         .stack, .panel, .card, .alert, .bubble, .resizable, .popover => blk: {
             var max_height: f32 = 0;
             for (widget.children) |child| {
+                if (child.layout.anchor != null) continue;
                 const child_width = if (child.frame.width > 0) child.frame.width else inner_width;
                 max_height = @max(max_height, wrappedVerticalExtentForWidth(child, child_width, tokens, depth + 1));
             }
@@ -306,6 +395,7 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
         .row, .data_row, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group => blk: {
             var max_height: f32 = 0;
             for (widget.children, 0..) |child, index| {
+                if (child.layout.anchor != null) continue;
                 max_height = @max(max_height, wrappedVerticalExtentForWidth(
                     child,
                     rowChildWidth(widget, inner_width, index, tokens),
@@ -327,10 +417,12 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
 fn rowChildWidth(row: Widget, available_width: f32, index: usize, tokens: DesignTokens) f32 {
     const children = row.children;
     if (children.len == 0) return available_width;
-    const total_gap = nonNegative(row.layout.gap) * @as(f32, @floatFromInt(children.len - 1));
+    var flow_count: usize = 0;
     var fixed_extent: f32 = 0;
     var grow_total: f32 = 0;
     for (children) |child| {
+        if (child.layout.anchor != null) continue;
+        flow_count += 1;
         const grow = nonNegative(child.layout.grow);
         if (grow > 0) {
             grow_total += grow;
@@ -338,6 +430,8 @@ fn rowChildWidth(row: Widget, available_width: f32, index: usize, tokens: Design
             fixed_extent += preferredMainExtent(child, .horizontal, tokens);
         }
     }
+    if (flow_count == 0) return available_width;
+    const total_gap = nonNegative(row.layout.gap) * @as(f32, @floatFromInt(flow_count - 1));
     const remaining = @max(0, available_width - fixed_extent - total_gap);
     const child = children[index];
     const grow = nonNegative(child.layout.grow);
@@ -382,6 +476,7 @@ fn layoutTextSpanLinkChildren(
         if (child_index >= widget.children.len) break;
         const child = widget.children[child_index];
         child_index += 1;
+        if (child.layout.anchor != null) continue;
         const frame = if (text_spans_model.textSpanBounds(layout, span_index)) |bounds|
             geometry.RectF.init(content.x + bounds.x, content.y + bounds.y, bounds.width, bounds.height)
         else
@@ -389,6 +484,7 @@ fn layoutTextSpanLinkChildren(
         _ = try layoutWidgetDepth(child, frame, parent_index, depth + 1, output, len, tokens);
     }
     while (child_index < widget.children.len) : (child_index += 1) {
+        if (widget.children[child_index].layout.anchor != null) continue;
         _ = try layoutWidgetDepth(widget.children[child_index], geometry.RectF.init(content.x, content.y, 0, 0), parent_index, depth + 1, output, len, tokens);
     }
 }
@@ -397,6 +493,7 @@ fn assignedAxisChildrenExtent(children: []const Widget, axis: LayoutAxis, fixed_
     if (grow_total <= 0) return fixed_extent;
     var assigned = fixed_extent;
     for (children) |child| {
+        if (child.layout.anchor != null) continue;
         const grow = nonNegative(child.layout.grow);
         if (grow <= 0) continue;
         assigned += clampMainExtent(child, axis, remaining * grow / grow_total);
@@ -458,6 +555,8 @@ fn layoutGridChildren(
     const fallback_cell_height = if (rows > 0) @max(0, content.height - total_row_gap) / @as(f32, @floatFromInt(rows)) else 0;
 
     for (children, 0..) |child, child_index| {
+        // Anchored floating children keep their grid slot empty.
+        if (child.layout.anchor != null) continue;
         const column = child_index % columns;
         const row = child_index / columns;
         const x = content.x + @as(f32, @floatFromInt(column)) * (cell_width + clamped_gap);
@@ -517,6 +616,7 @@ fn layoutVirtualGridChildren(
         while (column < columns) : (column += 1) {
             const child_index = row * columns + column;
             if (child_index >= children.len) break;
+            if (children[child_index].layout.anchor != null) continue;
 
             var child = children[child_index];
             child.semantics.list_item_index = saturatingU32(child_index);
@@ -558,6 +658,7 @@ fn layoutScrollChildren(
 ) Error!void {
     const scrolled_content = content.translate(geometry.OffsetF.init(0, -scroll_y));
     for (children) |child| {
+        if (child.layout.anchor != null) continue;
         _ = try layoutWidgetDepth(child, stackChildFrame(scrolled_content, child), parent_index, depth + 1, output, len, tokens);
     }
 }
@@ -594,6 +695,7 @@ fn layoutVirtualVerticalChildren(
     const stride = range.item_extent + range.item_gap;
     var index = range.start_index;
     while (index < range.end_index) : (index += 1) {
+        if (children[index].layout.anchor != null) continue;
         var child = children[index];
         child.semantics.list_item_index = saturatingU32(index);
         child.semantics.list_item_count = saturatingU32(children.len);
@@ -747,10 +849,13 @@ fn intrinsicChildSizeInAxis(child: Widget, tokens: DesignTokens, depth: usize, a
 
 fn intrinsicAxisChildrenSize(widget: Widget, tokens: DesignTokens, axis: LayoutAxis, depth: usize) geometry.SizeF {
     if (depth >= max_widget_depth or widget.children.len == 0) return intrinsicOwnMinSize(widget);
-    const gap = nonNegative(widget.layout.gap) * @as(f32, @floatFromInt(widget.children.len - 1));
+    var flow_count: usize = 0;
     var main_sum: f32 = 0;
     var cross_max: f32 = 0;
     for (widget.children) |child| {
+        // Anchored floating children never grow their parent.
+        if (child.layout.anchor != null) continue;
+        flow_count += 1;
         const size = intrinsicChildSizeInAxis(child, tokens, depth + 1, axis);
         switch (axis) {
             .horizontal => {
@@ -763,6 +868,8 @@ fn intrinsicAxisChildrenSize(widget: Widget, tokens: DesignTokens, axis: LayoutA
             },
         }
     }
+    if (flow_count == 0) return intrinsicOwnMinSize(widget);
+    const gap = nonNegative(widget.layout.gap) * @as(f32, @floatFromInt(flow_count - 1));
     return paddedIntrinsicSize(widget, switch (axis) {
         .horizontal => geometry.SizeF.init(main_sum + gap, cross_max),
         .vertical => geometry.SizeF.init(cross_max, main_sum + gap),
@@ -774,6 +881,7 @@ fn intrinsicOverlayChildrenSize(widget: Widget, tokens: DesignTokens, depth: usi
     var width_max: f32 = 0;
     var height_max: f32 = 0;
     for (widget.children) |child| {
+        if (child.layout.anchor != null) continue;
         const size = intrinsicChildSize(child, tokens, depth + 1);
         width_max = @max(width_max, size.width);
         height_max = @max(height_max, size.height);
@@ -786,6 +894,7 @@ fn intrinsicGridChildrenSize(widget: Widget, tokens: DesignTokens, depth: usize)
     var cell_width: f32 = 0;
     var cell_height: f32 = 0;
     for (widget.children) |child| {
+        if (child.layout.anchor != null) continue;
         const size = intrinsicChildSize(child, tokens, depth + 1);
         cell_width = @max(cell_width, size.width);
         cell_height = @max(cell_height, size.height);

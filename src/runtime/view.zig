@@ -385,6 +385,7 @@ pub const RuntimeView = struct {
     pub const dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget = CanvasWidgetTreeMethods.dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget;
     pub const dismissCanvasWidgetSurfaceAtIndex = CanvasWidgetTreeMethods.dismissCanvasWidgetSurfaceAtIndex;
     pub const canvasWidgetDismissibleSurfaceIndexForTarget = CanvasWidgetTreeMethods.canvasWidgetDismissibleSurfaceIndexForTarget;
+    pub const canvasWidgetAnchoredDismissibleChildIndex = CanvasWidgetTreeMethods.canvasWidgetAnchoredDismissibleChildIndex;
     pub const canvasWidgetRouteDescendsFromIndex = CanvasWidgetTreeMethods.canvasWidgetRouteDescendsFromIndex;
     pub const canvasWidgetScopedFocusTarget = CanvasWidgetTreeMethods.canvasWidgetScopedFocusTarget;
     pub const canvasWidgetFocusTargetInScope = CanvasWidgetTreeMethods.canvasWidgetFocusTargetInScope;

@@ -1025,3 +1025,34 @@ test "compiled pressable rows (panel and layout containers) match the interprete
     try testing.expect(canvas.widgetIsHitTarget(pressable_row.?));
     try testing.expectEqual(EntriesMsg.refresh, compiled.msgForPointer(pressable_row.?.id, .up).?);
 }
+
+// -------------------------------------------------- anchored picker parity
+
+const PickerCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, fixture.picker_markup_source);
+
+test "compiled anchored picker (anchor, on-dismiss, on-hold) matches the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = fixture.Model{};
+
+    var view = try InboxInterpreter.init(arena, fixture.picker_markup_source);
+    var interpreter_ui = InboxUi.init(arena);
+    const interpreted = try interpreter_ui.finalize(try view.build(&interpreter_ui, &model));
+    var compiled_ui = InboxUi.init(arena);
+    const compiled = try compiled_ui.finalize(PickerCompiled.build(&compiled_ui, &model));
+    try expectSameTree(fixture.Msg, interpreted, compiled);
+
+    // Both engines resolve the anchor attributes into the same layout
+    // channel and bind the dismiss/hold handlers identically.
+    const dropdown = fixture.findByKind(compiled.root, .dropdown_menu).?;
+    const anchor = dropdown.layout.anchor orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(canvas.WidgetAnchorPlacement.below, anchor.placement);
+    try testing.expectEqual(canvas.WidgetAnchorAlignment.stretch, anchor.alignment);
+    try testing.expectEqual(@as(f32, 6), anchor.offset);
+    try testing.expect(compiled.msgFor(dropdown.id, .dismiss) != null);
+    const crumb = fixture.findByKind(compiled.root, .button).?;
+    try testing.expect(compiled.msgFor(crumb.id, .hold) != null);
+    try testing.expect(crumb.semantics.actions.press);
+}

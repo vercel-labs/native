@@ -151,7 +151,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 .select => try AutomationWidgetMethods(Runtime).selectAutomationCanvasWidget(self, index, action.id),
                 .drag => try AutomationWidgetMethods(Runtime).dispatchAutomationCanvasWidgetDrag(self, app, index, action.id, action.text),
                 .drop_files => try AutomationWidgetMethods(Runtime).dispatchAutomationCanvasWidgetFileDrop(self, app, index, action.id, action.text),
-                .dismiss => try AutomationWidgetMethods(Runtime).dismissAutomationCanvasWidget(self, index, action.id),
+                .dismiss => try AutomationWidgetMethods(Runtime).dismissAutomationCanvasWidget(self, app, index, action.id),
             }
             return self.views[index].info();
         }

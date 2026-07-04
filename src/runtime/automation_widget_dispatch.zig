@@ -43,7 +43,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 .select => try selectAutomationCanvasWidget(self, view_index, action.id),
                 .drag => try dispatchAutomationCanvasWidgetDrag(self, app, view_index, action.id, action.value),
                 .drop_files => try dispatchAutomationCanvasWidgetFileDrop(self, app, view_index, action.id, action.value),
-                .dismiss => try dismissAutomationCanvasWidget(self, view_index, action.id),
+                .dismiss => try dismissAutomationCanvasWidget(self, app, view_index, action.id),
             }
         }
 
@@ -234,11 +234,12 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             return null;
         }
 
-        pub fn dismissAutomationCanvasWidget(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!void {
+        pub fn dismissAutomationCanvasWidget(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, id: canvas.ObjectId) anyerror!void {
             if (view_index >= self.view_count) return error.ViewNotFound;
             self.views[view_index].recordGpuSurfaceInputTimestamp(automationInputTimestampNs());
-            const dirty = try self.views[view_index].dismissCanvasWidgetSurfaceForTarget(id) orelse return error.InvalidCommand;
-            try CanvasWidgetEventMethods().invalidateForCanvasWidgetDirty(self, view_index, dirty);
+            const dismissal = try self.views[view_index].dismissCanvasWidgetSurfaceForTarget(id) orelse return error.InvalidCommand;
+            try CanvasWidgetEventMethods().invalidateForCanvasWidgetDirty(self, view_index, dismissal.dirty);
+            try CanvasWidgetEventMethods().dispatchCanvasWidgetDismissEvent(self, app, view_index, dismissal.id);
         }
 
         pub fn focusAutomationCanvasWidget(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!void {

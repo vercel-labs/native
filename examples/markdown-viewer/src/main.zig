@@ -104,6 +104,10 @@ pub const Model = struct {
     details_expanded: [max_details]bool = [_]bool{false} ** max_details,
     /// The sidebar sample currently loaded (0 = none: edited or opened).
     active_sample_id: u32 = 0,
+    /// Toolbar sample-picker open state — model-owned (TEA): the anchored
+    /// dropdown exists only while this is true; `close_sample_picker`
+    /// (the surface's on-dismiss) and picking both clear it.
+    sample_picker_open: bool = false,
     /// Theme: the system scheme flows in through `on_appearance`; the
     /// toolbar toggle overrides it until the app restarts.
     system_scheme: canvas.ColorScheme = .light,
@@ -345,6 +349,8 @@ pub const Msg = union(enum) {
     edit: canvas.TextInputEvent,
     edit_path: canvas.TextInputEvent,
     load_sample: u32,
+    toggle_sample_picker,
+    close_sample_picker,
     open_recent: usize,
     open_doc,
     save_doc,
@@ -429,7 +435,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (model.editor.truncated) model.setNote("Document is full ({d} KiB cap)", .{max_document_bytes / 1024});
         },
         .edit_path => |edit| model.path_field.apply(edit),
-        .load_sample => |id| model.loadSample(id),
+        .load_sample => |id| {
+            model.loadSample(id);
+            model.sample_picker_open = false;
+        },
+        .toggle_sample_picker => model.sample_picker_open = !model.sample_picker_open,
+        // The anchored dropdown's on-dismiss: Escape or a click outside
+        // the menu closes it here, model-side.
+        .close_sample_picker => model.sample_picker_open = false,
         .open_recent => |index| {
             if (index >= model.recent_count) return;
             model.path_field.set(model.recentAt(index));

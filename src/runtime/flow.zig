@@ -338,6 +338,8 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .canvas_widget_context_menu => {
                     self.invalidateFor(.command, null);
                 },
+                .canvas_widget_dismiss => {},
+                .canvas_widget_context_press => {},
                 .lifecycle => {},
             }
         }

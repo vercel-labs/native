@@ -892,6 +892,29 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
                         if (canvas.icons.find(expression.literal) == null) fail(node, markup.button_icon_message);
                         break :blk expression.literal;
                     };
+                } else if (comptime std.mem.eql(u8, attribute.name, "anchor")) {
+                    // Anchored floating placement, dropdown-menu-scoped:
+                    // a literal side resolved at comptime (interpreter
+                    // and validator parity).
+                    options.anchor = comptime blk: {
+                        if (!markup.anchorElement(node.name)) fail(node, markup.anchor_element_message);
+                        break :blk std.meta.stringToEnum(canvas.WidgetAnchorPlacement, attribute.value) orelse
+                            fail(node, markup.anchor_value_message);
+                    };
+                } else if (comptime std.mem.eql(u8, attribute.name, "anchor-alignment")) {
+                    options.anchor_alignment = comptime blk: {
+                        if (!markup.anchorElement(node.name)) fail(node, markup.anchor_element_message);
+                        if (node.attr("anchor") == null) fail(node, markup.anchor_dependent_attr_message);
+                        break :blk std.meta.stringToEnum(canvas.WidgetAnchorAlignment, attribute.value) orelse
+                            fail(node, markup.anchor_alignment_value_message);
+                    };
+                } else if (comptime std.mem.eql(u8, attribute.name, "anchor-offset")) {
+                    options.anchor_offset = comptime blk: {
+                        if (!markup.anchorElement(node.name)) fail(node, markup.anchor_element_message);
+                        if (node.attr("anchor") == null) fail(node, markup.anchor_dependent_attr_message);
+                        break :blk std.fmt.parseFloat(f32, attribute.value) catch
+                            fail(node, markup.anchor_offset_value_message);
+                    };
                 } else if (comptime (colorStyleField(attribute.name) != null)) {
                     // Style token refs resolve entirely at comptime: a typo
                     // in a token name is a compile error.
@@ -1066,6 +1089,17 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
                 options.on_change = msg;
             } else if (comptime std.mem.eql(u8, event, "submit")) {
                 options.on_submit = msg;
+            } else if (comptime std.mem.eql(u8, event, "dismiss")) {
+                // Only dismissible surfaces are ever dismissed by the
+                // runtime (interpreter and validator parity).
+                comptime {
+                    if (!markup.dismissEventElement(node.name)) fail(node, markup.on_dismiss_element_message);
+                }
+                options.on_dismiss = msg;
+            } else if (comptime std.mem.eql(u8, event, "hold")) {
+                // Press family: like on-press, a bound hold makes any
+                // element pressable.
+                options.on_hold = msg;
             } else {
                 comptime fail(node, "unknown event attribute");
             }

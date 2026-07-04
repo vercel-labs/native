@@ -486,3 +486,35 @@ test "render icon-batch screenshots (env-gated)" {
     h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/icon-batch-shots/markdown-viewer-dark-artifacts", "Markdown Viewer");
     try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot viewer-canvas 2");
 }
+
+test "the sample picker is a real anchored select: open, pick, and dismiss model-side" {
+    var h = try Harness.create();
+    defer h.destroy();
+
+    // The trigger opens the picker; the anchored dropdown floats below it
+    // in the retained tree at a real frame automation can click.
+    const trigger = findByLabel(h.app_state.tree.?.root, "Sample picker") orelse return error.TestUnexpectedResult;
+    try h.clickWidget(trigger.id);
+    try testing.expect(h.app_state.model.sample_picker_open);
+    const notes_item = findByText(h.app_state.tree.?.root, .menu_item, "Reading notes") orelse return error.TestUnexpectedResult;
+    const layout = try h.harness.runtime.canvasWidgetLayout(1, "viewer-canvas");
+    const trigger_frame = layout.findById(trigger.id).?.frame;
+    const item_frame = layout.findById(notes_item.id).?.frame;
+    try testing.expect(item_frame.y > trigger_frame.maxY());
+
+    // Picking loads the sample and closes the picker in one Msg.
+    try h.clickWidget(notes_item.id);
+    try testing.expect(!h.app_state.model.sample_picker_open);
+    try testing.expectEqual(@as(u32, 4), h.app_state.model.active_sample_id);
+    try testing.expect(findByText(h.app_state.tree.?.root, .menu_item, "Reading notes") == null);
+
+    // Escape dismisses through on-dismiss: the MODEL closes it.
+    try h.clickWidget(trigger.id);
+    try testing.expect(h.app_state.model.sample_picker_open);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_input = .{
+        .label = "viewer-canvas",
+        .kind = .key_down,
+        .key = "escape",
+    } });
+    try testing.expect(!h.app_state.model.sample_picker_open);
+}

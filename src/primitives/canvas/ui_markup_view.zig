@@ -842,6 +842,18 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     try self.applyButtonIconAttr(node, options, attribute.value);
                     continue;
                 }
+                if (std.mem.eql(u8, attribute.name, "anchor")) {
+                    try self.applyAnchorAttr(node, options, attribute.value);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "anchor-alignment")) {
+                    try self.applyAnchorAlignmentAttr(node, options, attribute.value);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "anchor-offset")) {
+                    try self.applyAnchorOffsetAttr(node, options, attribute.value);
+                    continue;
+                }
                 if (try self.applyStyleTokenAttr(node, options, attribute)) continue;
                 if (!try self.applyOptionAttr(scope, node, options, attribute)) {
                     return self.failVoid(node, "unknown attribute for this element");
@@ -916,6 +928,40 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             if (expression != .literal) return self.failVoid(node, markup.button_icon_message);
             if (canvas.icons.find(expression.literal) == null) return self.failVoid(node, markup.button_icon_message);
             options.icon = expression.literal;
+        }
+
+        /// `anchor="below|above"` on dropdown-menu: anchored floating
+        /// placement — the surface floats against its parent's frame in
+        /// the late window-level pass instead of the parent's flow.
+        /// Literal placements only, mirroring the validator and the
+        /// compiled engine's comptime resolution.
+        fn applyAnchorAttr(self: *Self, node: markup.MarkupNode, options: *Ui.ElementOptions, raw: []const u8) BuildError!void {
+            if (!markup.anchorElement(node.name)) {
+                return self.failVoid(node, markup.anchor_element_message);
+            }
+            options.anchor = std.meta.stringToEnum(canvas.WidgetAnchorPlacement, raw) orelse {
+                return self.failVoid(node, markup.anchor_value_message);
+            };
+        }
+
+        fn applyAnchorAlignmentAttr(self: *Self, node: markup.MarkupNode, options: *Ui.ElementOptions, raw: []const u8) BuildError!void {
+            if (!markup.anchorElement(node.name)) {
+                return self.failVoid(node, markup.anchor_element_message);
+            }
+            if (node.attr("anchor") == null) return self.failVoid(node, markup.anchor_dependent_attr_message);
+            options.anchor_alignment = std.meta.stringToEnum(canvas.WidgetAnchorAlignment, raw) orelse {
+                return self.failVoid(node, markup.anchor_alignment_value_message);
+            };
+        }
+
+        fn applyAnchorOffsetAttr(self: *Self, node: markup.MarkupNode, options: *Ui.ElementOptions, raw: []const u8) BuildError!void {
+            if (!markup.anchorElement(node.name)) {
+                return self.failVoid(node, markup.anchor_element_message);
+            }
+            if (node.attr("anchor") == null) return self.failVoid(node, markup.anchor_dependent_attr_message);
+            options.anchor_offset = std.fmt.parseFloat(f32, raw) catch {
+                return self.failVoid(node, markup.anchor_offset_value_message);
+            };
         }
 
         fn applyOptionAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!bool {
@@ -1000,6 +1046,17 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 options.on_change = msg;
             } else if (std.mem.eql(u8, event, "submit")) {
                 options.on_submit = msg;
+            } else if (std.mem.eql(u8, event, "dismiss")) {
+                // Only dismissible surfaces are ever dismissed by the
+                // runtime; anywhere else the Msg could never fire.
+                if (!markup.dismissEventElement(node.name)) {
+                    return self.failVoid(node, markup.on_dismiss_element_message);
+                }
+                options.on_dismiss = msg;
+            } else if (std.mem.eql(u8, event, "hold")) {
+                // Press family: like on-press, a bound hold makes any
+                // element pressable.
+                options.on_hold = msg;
             } else {
                 return self.failVoid(node, "unknown event attribute");
             }

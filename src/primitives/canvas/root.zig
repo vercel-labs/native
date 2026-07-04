@@ -320,6 +320,9 @@ pub const WidgetRenderState = widget_model.WidgetRenderState;
 pub const WidgetMainAlignment = widget_model.WidgetMainAlignment;
 pub const WidgetCrossAlignment = widget_model.WidgetCrossAlignment;
 pub const WidgetLayoutStyle = widget_model.WidgetLayoutStyle;
+pub const WidgetAnchor = widget_model.WidgetAnchor;
+pub const WidgetAnchorPlacement = widget_model.WidgetAnchorPlacement;
+pub const WidgetAnchorAlignment = widget_model.WidgetAnchorAlignment;
 pub const WidgetStyle = widget_model.WidgetStyle;
 pub const WidgetVariant = widget_model.WidgetVariant;
 pub const WidgetSize = widget_model.WidgetSize;
@@ -506,6 +509,9 @@ pub const widgetIsHitTarget = @import("widget_access.zig").isHitTarget;
 /// stops instead of falling through to the nearest pressable ancestor.
 pub const widgetKindClaimsPress = @import("widget_access.zig").widgetKindClaimsPress;
 pub const widgetClaimsPress = @import("widget_access.zig").widgetClaimsPress;
+/// The overlay-surface kinds the runtime's dismissal machinery closes
+/// (Escape, click outside, automation/accessibility dismiss).
+pub const widgetKindDismissibleSurface = @import("widget_access.zig").widgetKindDismissibleSurface;
 /// The press fall-through walk (widget_routing.zig): the deepest widget on
 /// a hit path that claims presses.
 pub const widgetPressTargetForHit = @import("widget_routing.zig").widgetPressTargetForHit;
@@ -515,6 +521,8 @@ pub const widgetPressTargetIndexFromNode = @import("widget_routing.zig").widgetP
 /// diagnostic, both markup engines, and the markup validator's
 /// stack-container list all derive from).
 pub const widgetKindStacksChildren = @import("widget_layout.zig").widgetKindStacksChildren;
+pub const widgetIsAnchored = @import("widget_tree.zig").widgetIsAnchored;
+pub const anchoredWidgetFrame = @import("widget_layout.zig").anchoredWidgetFrame;
 pub const WidgetTextGeometry = widget_runtime.WidgetTextGeometry;
 pub const textGeometryForWidget = widget_runtime.textGeometryForWidget;
 pub const virtualWidgetScrollContentExtent = widget_runtime.virtualWidgetScrollContentExtent;

@@ -141,6 +141,8 @@ pub const CanvasWidgetAccessibilityAction = runtime_api.CanvasWidgetAccessibilit
 pub const CanvasWidgetFileDropEvent = runtime_api.CanvasWidgetFileDropEvent;
 pub const CanvasWidgetDragEvent = runtime_api.CanvasWidgetDragEvent;
 pub const CanvasWidgetContextMenuEvent = runtime_api.CanvasWidgetContextMenuEvent;
+pub const CanvasWidgetDismissEvent = runtime_api.CanvasWidgetDismissEvent;
+pub const CanvasWidgetContextPressEvent = runtime_api.CanvasWidgetContextPressEvent;
 pub const InvalidationReason = runtime_api.InvalidationReason;
 pub const FrameDiagnostics = runtime_api.FrameDiagnostics;
 pub const Event = runtime_api.Event;
@@ -284,7 +286,7 @@ pub const Runtime = struct {
     pub fn initAt(self: *Runtime, options: Options) void {
         inline for (@typeInfo(Runtime).@"struct".fields) |field| {
             if (comptime fieldHasSmallDefault(field)) {
-                @field(self, field.name) = @as(*const field.type, @alignCast(@ptrCast(field.default_value_ptr.?))).*;
+                @field(self, field.name) = @as(*const field.type, @ptrCast(@alignCast(field.default_value_ptr.?))).*;
             }
         }
         self.options = options;
@@ -781,4 +783,3 @@ pub const testing = struct {
 test {
     std.testing.refAllDecls(@This());
 }
-

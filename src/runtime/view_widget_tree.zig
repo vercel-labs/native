@@ -13,6 +13,7 @@ const max_canvas_widget_text_bytes_per_view = canvas_limits.max_canvas_widget_te
 const max_canvas_widget_source_text_entries_per_view = canvas_limits.max_canvas_widget_source_text_entries_per_view;
 
 const CanvasWidgetScrollReconcileEntry = canvas_widget_runtime.CanvasWidgetScrollReconcileEntry;
+const CanvasWidgetSurfaceDismissal = canvas_widget_runtime.CanvasWidgetSurfaceDismissal;
 const CanvasWidgetControlReconcileEntry = canvas_widget_runtime.CanvasWidgetControlReconcileEntry;
 const CanvasWidgetTextReconcileEntry = canvas_widget_runtime.CanvasWidgetTextReconcileEntry;
 const CanvasWidgetSourceTextEntry = canvas_widget_runtime.CanvasWidgetSourceTextEntry;
@@ -141,6 +142,11 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// `canvas_widget_copy_scratch` (the event loop is single-threaded).
         pub fn copyWidgetLayoutTree(self: *RuntimeView, layout: canvas.WidgetLayoutTree, scratch: *canvas_widget_runtime.CanvasWidgetCopyScratch) anyerror!void {
             if (layout.nodes.len > self.widget_layout_nodes.len) return error.WidgetNodeLimitReached;
+            var anchored_count: usize = 0;
+            for (layout.nodes) |node| {
+                if (canvas.widgetIsAnchored(node.widget)) anchored_count += 1;
+            }
+            if (anchored_count > canvas_limits.max_canvas_widget_anchored_per_view) return error.WidgetAnchoredSurfaceLimitReached;
             if (layout.nodes.len > 0 and layout.nodes.ptr == self.widget_layout_nodes[0..].ptr) {
                 self.widget_revision += 1;
                 return;
@@ -262,7 +268,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             self.canvas_widget_cursor = next_cursor;
         }
 
-        pub fn dismissCanvasWidgetSurfaceForFocusedTarget(self: *RuntimeView, focused_id: canvas.ObjectId) anyerror!?geometry.RectF {
+        pub fn dismissCanvasWidgetSurfaceForFocusedTarget(self: *RuntimeView, focused_id: canvas.ObjectId) anyerror!?CanvasWidgetSurfaceDismissal {
             const focused_index = self.canvasWidgetNodeIndexById(focused_id) orelse return null;
             const focused_widget = self.widget_layout_nodes[focused_index].widget;
             if (canvasWidgetEditableTextKind(focused_widget.kind) and focused_widget.text_composition != null) return null;
@@ -270,24 +276,34 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return self.dismissCanvasWidgetSurfaceForTargetIndex(focused_index);
         }
 
-        pub fn dismissCanvasWidgetSurfaceForTarget(self: *RuntimeView, target_id: canvas.ObjectId) anyerror!?geometry.RectF {
+        pub fn dismissCanvasWidgetSurfaceForTarget(self: *RuntimeView, target_id: canvas.ObjectId) anyerror!?CanvasWidgetSurfaceDismissal {
             const target_index = self.canvasWidgetNodeIndexById(target_id) orelse return null;
             return self.dismissCanvasWidgetSurfaceForTargetIndex(target_index);
         }
 
-        pub fn dismissCanvasWidgetSurfaceForTargetIndex(self: *RuntimeView, target_index: usize) anyerror!?geometry.RectF {
+        pub fn dismissCanvasWidgetSurfaceForTargetIndex(self: *RuntimeView, target_index: usize) anyerror!?CanvasWidgetSurfaceDismissal {
             const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(target_index) orelse return null;
             return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
         }
 
-        pub fn dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(self: *RuntimeView, focused_id: canvas.ObjectId, route: []const canvas.WidgetEventRouteEntry) anyerror!?geometry.RectF {
+        pub fn dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(self: *RuntimeView, focused_id: canvas.ObjectId, route: []const canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetSurfaceDismissal {
             const focused_index = self.canvasWidgetNodeIndexById(focused_id) orelse return null;
             const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(focused_index) orelse return null;
             if (self.canvasWidgetRouteDescendsFromIndex(route, surface_index)) return null;
+            // Clicking the ANCHOR region of an anchored surface (the
+            // trigger, or the stack that wraps trigger + surface) is the
+            // trigger's own toggle gesture: skip the outside-dismiss so a
+            // click on the open picker's trigger dispatches exactly one
+            // Msg (the toggle), never dismiss-then-reopen.
+            if (canvas.widgetIsAnchored(self.widget_layout_nodes[surface_index].widget)) {
+                if (self.widget_layout_nodes[surface_index].parent_index) |anchor_index| {
+                    if (self.canvasWidgetRouteDescendsFromIndex(route, anchor_index)) return null;
+                }
+            }
             return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
         }
 
-        pub fn dismissCanvasWidgetSurfaceAtIndex(self: *RuntimeView, surface_index: usize) anyerror!?geometry.RectF {
+        pub fn dismissCanvasWidgetSurfaceAtIndex(self: *RuntimeView, surface_index: usize) anyerror!?CanvasWidgetSurfaceDismissal {
             if (surface_index >= self.widget_layout_node_count) return null;
             const surface = self.widget_layout_nodes[surface_index].widget;
             if (surface.semantics.hidden) return null;
@@ -306,7 +322,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
 
             try self.refreshCanvasWidgetSemantics();
             self.widget_revision += 1;
-            return dirty;
+            return .{ .id = surface.id, .dirty = dirty };
         }
 
         pub fn canvasWidgetDismissibleSurfaceIndexForTarget(self: *const RuntimeView, target_index: usize) ?usize {
@@ -316,9 +332,30 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 if (index >= self.widget_layout_node_count) return null;
                 const widget = self.widget_layout_nodes[index].widget;
                 if (canvasWidgetDismissibleSurfaceKind(widget.kind) and !widget.semantics.hidden) return index;
+                // An anchored dismissible surface HANGING OFF this
+                // ancestor (the ancestor is its anchor) is the nearest
+                // floating surface: Escape on the focused trigger — or on
+                // the stack wrapping trigger + surface — closes its own
+                // menu even though the surface is a descendant, not an
+                // ancestor, of the focus.
+                if (self.canvasWidgetAnchoredDismissibleChildIndex(index)) |surface_index| return surface_index;
                 current = self.widget_layout_nodes[index].parent_index;
             }
             return null;
+        }
+
+        /// The topmost (last-mounted) visible anchored dismissible surface
+        /// whose anchor is `anchor_index`, or null.
+        pub fn canvasWidgetAnchoredDismissibleChildIndex(self: *const RuntimeView, anchor_index: usize) ?usize {
+            var found: ?usize = null;
+            for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
+                if (node.parent_index != anchor_index) continue;
+                if (!canvas.widgetIsAnchored(node.widget)) continue;
+                if (!canvasWidgetDismissibleSurfaceKind(node.widget.kind)) continue;
+                if (node.widget.semantics.hidden) continue;
+                found = index;
+            }
+            return found;
         }
 
         pub fn canvasWidgetRouteDescendsFromIndex(self: *const RuntimeView, route: []const canvas.WidgetEventRouteEntry, ancestor_index: usize) bool {

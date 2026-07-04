@@ -712,6 +712,74 @@ test "markup autofocus binds to focusable controls in both shapes" {
     try testing.expectEqualStrings(canvas.ui_markup.autofocus_element_message, failing_view.diagnostic.message);
 }
 
+/// Shared source for the anchored-picker parity tests (interpreter here,
+/// compiled engine in ui_markup_compiled_tests.zig): the sanctioned select
+/// composition with a floating dropdown, dismissal Msg, and a
+/// press-and-hold crumb.
+pub const picker_markup_source =
+    \\<column gap="8">
+    \\  <stack height="28">
+    \\    <select text="Repo" on-press="add"/>
+    \\    <dropdown-menu anchor="below" anchor-alignment="stretch" anchor-offset="6" width="160" height="90" on-dismiss="add">
+    \\      <menu-item on-press="toggle:{open_count}">Alpha</menu-item>
+    \\    </dropdown-menu>
+    \\  </stack>
+    \\  <button on-press="add" on-hold="add">Crumb</button>
+    \\</column>
+;
+
+test "markup anchors dropdown-menus and binds dismiss and hold handlers" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, picker_markup_source);
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+
+    const picker_stack = tree.root.children[0];
+    const dropdown = picker_stack.children[1];
+    try testing.expectEqual(canvas.WidgetKind.dropdown_menu, dropdown.kind);
+    const anchor = dropdown.layout.anchor orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(canvas.WidgetAnchorPlacement.below, anchor.placement);
+    try testing.expectEqual(canvas.WidgetAnchorAlignment.stretch, anchor.alignment);
+    try testing.expectEqual(@as(f32, 6), anchor.offset);
+    try testing.expect(tree.msgFor(dropdown.id, .dismiss) != null);
+
+    const crumb = tree.root.children[1];
+    try testing.expect(tree.msgFor(crumb.id, .hold) != null);
+    // A hold handler makes the element pressable, like on-press.
+    try testing.expect(crumb.semantics.actions.press);
+
+    // Misplaced and malformed anchor/dismiss attributes fail the build
+    // with the validator's teaching messages.
+    const failing = [_]struct { source: []const u8, message: []const u8 }{
+        .{ .source = "<row>\n  <button anchor=\"below\">Save</button>\n</row>", .message = canvas.ui_markup.anchor_element_message },
+        .{ .source = "<row>\n  <dropdown-menu anchor=\"sideways\"><menu-item on-press=\"add\">A</menu-item></dropdown-menu>\n</row>", .message = canvas.ui_markup.anchor_value_message },
+        .{ .source = "<row>\n  <dropdown-menu anchor-alignment=\"end\"><menu-item on-press=\"add\">A</menu-item></dropdown-menu>\n</row>", .message = canvas.ui_markup.anchor_dependent_attr_message },
+        .{ .source = "<row>\n  <dropdown-menu anchor=\"below\" anchor-offset=\"lots\"><menu-item on-press=\"add\">A</menu-item></dropdown-menu>\n</row>", .message = canvas.ui_markup.anchor_offset_value_message },
+        .{ .source = "<row>\n  <button on-dismiss=\"add\">Save</button>\n</row>", .message = canvas.ui_markup.on_dismiss_element_message },
+    };
+    for (failing) |case| {
+        var failing_view = try InboxMarkup.init(arena, case.source);
+        var failing_ui = InboxUi.init(arena);
+        try testing.expectError(error.MarkupBuild, failing_view.build(&failing_ui, &model));
+        try testing.expectEqualStrings(case.message, failing_view.diagnostic.message);
+    }
+
+    // The validator teaches the same rules through `markup check`.
+    for (failing) |case| {
+        var parser = canvas.ui_markup.Parser.init(arena, case.source);
+        const document = try parser.parse();
+        const diagnostic = canvas.ui_markup.validate(document) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, diagnostic.message);
+    }
+    var good_parser = canvas.ui_markup.Parser.init(arena, picker_markup_source);
+    const good_document = try good_parser.parse();
+    try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(good_document));
+}
+
 test "the validator's icon name list matches the comptime registry" {
     // ui_markup.zig is std-only (it doubles as the LSP's module root), so
     // its icon vocabulary is a hardcoded mirror of the comptime-parsed

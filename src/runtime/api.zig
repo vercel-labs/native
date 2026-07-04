@@ -124,6 +124,34 @@ pub const CanvasWidgetDragEvent = struct {
     route: []const canvas.WidgetEventRouteEntry = &.{},
 };
 
+/// A dismissible floating surface (dialog, drawer, sheet, popover,
+/// menu-surface, dropdown-menu) was dismissed by a user gesture — Escape,
+/// a pointer press outside it, or an automation/accessibility dismiss
+/// action. The runtime hides the surface immediately (the optimistic
+/// echo; the source tree is truth on the next rebuild) and delivers this
+/// event so a TEA model can OWN the close: `UiApp` maps it through the
+/// tree's handler table to the surface's `on_dismiss` Msg.
+pub const CanvasWidgetDismissEvent = struct {
+    window_id: platform.WindowId = 1,
+    view_label: []const u8,
+    /// The dismissed surface's structural widget id.
+    id: canvas.ObjectId,
+};
+
+/// A secondary-button press (right/ctrl-click, touch long-press) whose
+/// route offered NO context menu — no app-declared items, no editable or
+/// selected-text default. Delivered with the resolved press target so
+/// `UiApp` can treat it as the press-and-hold alternative: the target's
+/// `on_hold` Msg dispatches immediately. Widgets with a declared context
+/// menu never see this — the native menu wins.
+pub const CanvasWidgetContextPressEvent = struct {
+    window_id: platform.WindowId = 1,
+    view_label: []const u8,
+    /// The deepest press-claiming widget on the hit route (the same
+    /// resolution primary presses use).
+    press_target: ?canvas.WidgetHit = null,
+};
+
 /// The user selected an item from a widget's app-declared native context
 /// menu (`ElementOptions.context_menu`). `item_index` indexes the
 /// widget's declared items; `UiApp` maps it to the item's `Msg` through
@@ -170,6 +198,8 @@ pub const Event = union(enum) {
     canvas_widget_file_drop: CanvasWidgetFileDropEvent,
     canvas_widget_drag: CanvasWidgetDragEvent,
     canvas_widget_context_menu: CanvasWidgetContextMenuEvent,
+    canvas_widget_dismiss: CanvasWidgetDismissEvent,
+    canvas_widget_context_press: CanvasWidgetContextPressEvent,
 
     pub fn name(self: Event) []const u8 {
         return switch (self) {
@@ -189,6 +219,8 @@ pub const Event = union(enum) {
             .canvas_widget_file_drop => "canvas_widget_file_drop",
             .canvas_widget_drag => "canvas_widget_drag",
             .canvas_widget_context_menu => "canvas_widget_context_menu",
+            .canvas_widget_dismiss => "canvas_widget_dismiss",
+            .canvas_widget_context_press => "canvas_widget_context_press",
         };
     }
 };

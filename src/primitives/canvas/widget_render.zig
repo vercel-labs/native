@@ -156,6 +156,21 @@ pub fn emitWidgetLayout(builder: *Builder, layout: anytype, tokens: DesignTokens
 pub fn emitWidgetLayoutWithState(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
     resetChartFramePathScratch();
     try emitWidgetLayoutChildren(builder, layout, null, tokens, state);
+    try emitWidgetLayoutAnchored(builder, layout, tokens, state);
+}
+
+/// The late z-pass for anchored floating surfaces: they are skipped by
+/// the in-tree walk above and emitted here LAST, at the top level, so no
+/// ancestor scroll/clip region crops them (window-clipped, not
+/// parent-clipped) and they paint above everything in the tree. Node
+/// order is tree order, so a nested anchored surface (submenu) paints
+/// above the surface it hangs from. Ancestor hiding still applies.
+fn emitWidgetLayoutAnchored(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
+    for (layout.nodes, 0..) |node, index| {
+        if (!widget_tree.widgetIsAnchored(node.widget)) continue;
+        if (widget_tree.isWidgetHiddenInAncestors(layout, index)) continue;
+        try emitWidgetLayoutNode(builder, layout, index, tokens, state);
+    }
 }
 
 fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
@@ -250,7 +265,11 @@ fn emitWidgetLayoutChildren(
     var previous: ?WidgetPaintOrder = null;
     while (emitted < child_count) : (emitted += 1) {
         const child_index = nextWidgetLayoutPaintChild(layout, parent_index, tokens, previous) orelse return;
-        try emitWidgetLayoutNode(builder, layout, child_index, tokens, state);
+        // Anchored floating children paint in the late z-pass
+        // (`emitWidgetLayoutAnchored`), never in tree position.
+        if (!widget_tree.widgetIsAnchored(layout.nodes[child_index].widget)) {
+            try emitWidgetLayoutNode(builder, layout, child_index, tokens, state);
+        }
         previous = .{ .layer = widgetPaintLayer(layout.nodes[child_index].widget, tokens), .index = child_index };
     }
 }

@@ -138,6 +138,40 @@ pub const WidgetCrossAlignment = enum {
     end,
 };
 
+/// Preferred side of an anchored floating widget relative to its anchor.
+/// Either side flips to the other when the surface does not fit and the
+/// opposite side has more room (the auto-flip contract); the height then
+/// clamps to the chosen side's space.
+pub const WidgetAnchorPlacement = enum {
+    below,
+    above,
+};
+
+/// Horizontal alignment of an anchored floating widget against its
+/// anchor: `start`/`end` align the matching edges; `stretch` also widens
+/// the surface to at least the anchor's width (the select-menu look).
+/// The x position always clamps into the window.
+pub const WidgetAnchorAlignment = enum {
+    start,
+    end,
+    stretch,
+};
+
+/// Anchored floating placement (`WidgetLayoutStyle.anchor`): a widget
+/// carrying this is a FLOATING surface — the layout pass positions it
+/// against its PARENT widget's resolved frame (the anchor) and the
+/// window bounds instead of the parent's flow, it consumes no space in
+/// the parent (no reflow), and rendering/hit-testing hoist it to a late
+/// window-level pass above the rest of the tree, clipped by the window
+/// rather than any scroll/clip ancestor. Open state stays model-owned:
+/// the surface floats only while the view renders it.
+pub const WidgetAnchor = struct {
+    placement: WidgetAnchorPlacement = .below,
+    alignment: WidgetAnchorAlignment = .start,
+    /// Gap in points between the anchor edge and the surface.
+    offset: f32 = 4,
+};
+
 pub const WidgetLayoutStyle = struct {
     padding: geometry.InsetsF = .{},
     gap: f32 = 0,
@@ -149,6 +183,9 @@ pub const WidgetLayoutStyle = struct {
     virtualized: bool = false,
     virtual_item_extent: f32 = 0,
     virtual_overscan: usize = 0,
+    /// Anchored floating placement: non-null makes this widget a floating
+    /// surface positioned against its parent (see `WidgetAnchor`).
+    anchor: ?WidgetAnchor = null,
     min_size: geometry.SizeF = .{},
     /// Per-axis upper bound; 0 leaves the axis unbounded. An explicit
     /// author size is definite: the ui builder writes `width`/`height`
@@ -889,6 +926,7 @@ fn widgetLayoutStyleIsDefault(layout: WidgetLayoutStyle) bool {
         layout.cross_alignment == .stretch and
         !layout.clip_content and
         layout.columns == 0 and
+        layout.anchor == null and
         !layout.virtualized and
         layout.virtual_item_extent == 0 and
         layout.virtual_overscan == 0 and

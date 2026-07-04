@@ -39,6 +39,7 @@ const arrow_down = builtin("arrow-down");
 const arrow_right = builtin("arrow-right");
 const arrow_up = builtin("arrow-up");
 const check = builtin("check");
+const check_circle = builtin("check-circle");
 const chevron_down = builtin("chevron-down");
 const chevron_left = builtin("chevron-left");
 const chevron_right = builtin("chevron-right");
@@ -53,6 +54,8 @@ const eye = builtin("eye");
 const file_text = builtin("file-text");
 const folder = builtin("folder");
 const folder_open = builtin("folder-open");
+const git_branch = builtin("git-branch");
+const git_merge = builtin("git-merge");
 const git_pull_request = builtin("git-pull-request");
 const info = builtin("info");
 const menu = builtin("menu");
@@ -74,6 +77,7 @@ const sun = builtin("sun");
 const trash = builtin("trash");
 const volume = builtin("volume");
 const x = builtin("x");
+const x_circle = builtin("x-circle");
 
 /// Sorted by name; kept in lockstep with `known_icon_names` below (a
 /// unit test enforces it).
@@ -84,6 +88,7 @@ pub const entries = [_]Entry{
     .{ .name = "arrow-right", .icon = &arrow_right },
     .{ .name = "arrow-up", .icon = &arrow_up },
     .{ .name = "check", .icon = &check },
+    .{ .name = "check-circle", .icon = &check_circle },
     .{ .name = "chevron-down", .icon = &chevron_down },
     .{ .name = "chevron-left", .icon = &chevron_left },
     .{ .name = "chevron-right", .icon = &chevron_right },
@@ -98,6 +103,8 @@ pub const entries = [_]Entry{
     .{ .name = "file-text", .icon = &file_text },
     .{ .name = "folder", .icon = &folder },
     .{ .name = "folder-open", .icon = &folder_open },
+    .{ .name = "git-branch", .icon = &git_branch },
+    .{ .name = "git-merge", .icon = &git_merge },
     .{ .name = "git-pull-request", .icon = &git_pull_request },
     .{ .name = "info", .icon = &info },
     .{ .name = "menu", .icon = &menu },
@@ -119,6 +126,7 @@ pub const entries = [_]Entry{
     .{ .name = "trash", .icon = &trash },
     .{ .name = "volume", .icon = &volume },
     .{ .name = "x", .icon = &x },
+    .{ .name = "x-circle", .icon = &x_circle },
 };
 
 /// The markup-facing name list (comptime-validated attribute values).

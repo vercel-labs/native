@@ -33,6 +33,16 @@ const isWidgetHiddenInAncestors = widget_tree.isWidgetHiddenInAncestors;
 const max_widget_depth: usize = 32;
 
 pub fn hitTestWidgetLayout(layout: anytype, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
+    // Anchored floating surfaces paint in the late z-pass — topmost — so
+    // they hit-test FIRST, in reverse tree order (a nested anchored
+    // submenu has a higher node index than the surface it hangs from).
+    var index = layout.nodes.len;
+    while (index > 0) {
+        index -= 1;
+        if (!widget_tree.widgetIsAnchored(layout.nodes[index].widget)) continue;
+        if (isWidgetHiddenInAncestors(layout, index)) continue;
+        if (hitTestWidgetLayoutNode(layout, index, point, tokens)) |hit| return hit;
+    }
     return hitTestWidgetLayoutChildren(layout, null, point, tokens);
 }
 
@@ -42,7 +52,11 @@ fn hitTestWidgetLayoutChildren(layout: anytype, parent_index: ?usize, point: geo
     var previous: ?widget_tree.WidgetPaintOrder = null;
     while (tested < child_count) : (tested += 1) {
         const child_index = widget_tree.previousWidgetLayoutPaintChild(layout, parent_index, tokens, previous) orelse return null;
-        if (hitTestWidgetLayoutNode(layout, child_index, point, tokens)) |hit| return hit;
+        // Anchored floating children live in the hoisted pre-pass above,
+        // never at their tree position.
+        if (!widget_tree.widgetIsAnchored(layout.nodes[child_index].widget)) {
+            if (hitTestWidgetLayoutNode(layout, child_index, point, tokens)) |hit| return hit;
+        }
         previous = .{ .layer = widget_tree.widgetPaintLayer(layout.nodes[child_index].widget, tokens), .index = child_index };
     }
     return null;
@@ -104,26 +118,35 @@ pub fn widgetPressTargetForHit(layout: anytype, hit: WidgetHit) ?WidgetHit {
 }
 
 fn isPointVisibleInWidgetAncestors(layout: anytype, node_index: usize, point: geometry.PointF) bool {
-    var current = layout.nodes[node_index].parent_index;
-    while (current) |parent_index| {
+    var current: usize = node_index;
+    while (true) {
+        // An anchored floating widget escapes its ancestors' clip regions
+        // (window-clipped, not parent-clipped), so the walk stops here.
+        if (widget_tree.widgetIsAnchored(layout.nodes[current].widget)) return true;
+        const parent_index = layout.nodes[current].parent_index orelse return true;
+        if (parent_index >= layout.nodes.len) return true;
         const parent = layout.nodes[parent_index];
         if (widget_tree.widgetClipsContent(parent.widget) and !parent.frame.normalized().containsPoint(point)) return false;
-        current = parent.parent_index;
+        current = parent_index;
     }
-    return true;
 }
 
 fn isWidgetFrameVisibleInWidgetAncestors(layout: anytype, node_index: usize) bool {
     if (node_index >= layout.nodes.len) return false;
     const frame = layout.nodes[node_index].frame.normalized();
     if (frame.isEmpty()) return false;
-    var current = layout.nodes[node_index].parent_index;
-    while (current) |parent_index| {
+    var current: usize = node_index;
+    while (true) {
+        // Anchored floating widgets escape ancestor clips — focus targets
+        // inside an open overlay stay live outside the scroll ancestor's
+        // bounds.
+        if (widget_tree.widgetIsAnchored(layout.nodes[current].widget)) return true;
+        const parent_index = layout.nodes[current].parent_index orelse return true;
+        if (parent_index >= layout.nodes.len) return true;
         const parent = layout.nodes[parent_index];
         if (widget_tree.widgetClipsContent(parent.widget) and geometry.RectF.intersection(frame, parent.frame.normalized()).isEmpty()) return false;
-        current = parent.parent_index;
+        current = parent_index;
     }
-    return true;
 }
 
 pub fn routeWidgetPointerEvent(layout: anytype, event: WidgetPointerEvent, tokens: DesignTokens, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {

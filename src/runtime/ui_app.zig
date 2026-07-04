@@ -342,6 +342,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Scratch handed to `status_item_fn`; on the app struct so the
         /// returned slices outlive the apply.
         tray_scratch: StatusItemScratch = .{},
+        /// Press-and-hold gesture state (`ElementOptions.on_hold`): the
+        /// widget id whose press armed the hold timer, and whether the
+        /// timer fired for the current gesture (a fired hold suppresses
+        /// the release's ordinary press — one gesture, one Msg).
+        hold_armed_id: canvas.ObjectId = 0,
+        hold_fired: bool = false,
 
         /// By-value construction. The Model parameter and the returned
         /// app both ride the caller's stack unless result-location
@@ -783,6 +789,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         pub const markup_watch_timer_id: u64 = platform.reserved_timer_id_base | 0x2e70_a11c;
         const markup_watch_interval_ns: u64 = 500 * std.time.ns_per_ms;
 
+        /// Reserved framework timer id for the press-and-hold gesture
+        /// (`ElementOptions.on_hold`): armed on pointer-down over a widget
+        /// with a hold handler, cancelled on release, dispatching the hold
+        /// Msg when it fires first. One-shot; distinct from the markup
+        /// watch id and the fx-timer range.
+        pub const press_hold_timer_id: u64 = platform.reserved_timer_id_base | 0x2e70_601d;
+        /// dev-2's Menu+primaryAction feel: ~350 ms press-and-hold.
+        pub const press_hold_duration_ns: u64 = 350 * std.time.ns_per_ms;
+
         fn readWatchedFile(io: std.Io, path: []const u8, buffer: []u8) ![]const u8 {
             var file = try std.Io.Dir.cwd().openFile(io, path, .{});
             defer file.close(io);
@@ -886,6 +901,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .canvas_widget_keyboard => |keyboard_event| try self.handleKeyboard(runtime, keyboard_event),
                 .canvas_widget_scroll => |scroll_event| try self.handleScroll(runtime, scroll_event),
                 .canvas_widget_context_menu => |menu_event| try self.handleContextMenu(runtime, menu_event),
+                .canvas_widget_dismiss => |dismiss_event| try self.handleDismiss(runtime, dismiss_event),
+                .canvas_widget_context_press => |press_event| try self.handleContextPress(runtime, press_event),
                 else => {},
             }
         }
@@ -893,6 +910,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn handleTimer(self: *Self, runtime: *Runtime, timer_event: platform.TimerEvent) anyerror!void {
             if (timer_event.id == markup_watch_timer_id) {
                 self.pollMarkupWatch(runtime, self.canvas_window_id);
+                return;
+            }
+            if (timer_event.id == press_hold_timer_id) {
+                try self.firePressHold(runtime);
                 return;
             }
             // Fired fx timers (`fx.startTimer`) map back to their
@@ -1076,13 +1097,79 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// deepest widget on the hit path that claims presses — so a press
         /// on a pressable row's plain text children lands on the row's
         /// `on_press`, and a release that ended a text-selection drag
-        /// (press_target = null) presses nothing.
+        /// (press_target = null) presses nothing. Press targets with an
+        /// `on_hold` handler additionally arm the hold timer on `.down`;
+        /// a fired hold suppresses the release's press (one gesture, one
+        /// Msg), and any release/cancel disarms it.
         fn handlePointer(self: *Self, runtime: *Runtime, pointer_event: core.CanvasWidgetPointerEvent) anyerror!void {
             if (!std.mem.eql(u8, pointer_event.view_label, self.options.canvas_label)) return;
             const tree = self.tree orelse return;
+            switch (pointer_event.pointer.phase) {
+                .down => {
+                    self.disarmHold(runtime);
+                    if (pointer_event.press_target) |target| {
+                        if (tree.hasHoldHandler(target.id)) {
+                            self.hold_armed_id = target.id;
+                            self.hold_fired = false;
+                            runtime.startTimer(press_hold_timer_id, press_hold_duration_ns, false) catch {};
+                        }
+                    }
+                },
+                .up, .cancel => {
+                    const suppressed = self.hold_fired;
+                    self.disarmHold(runtime);
+                    if (suppressed) return;
+                },
+                else => {},
+            }
             const target = pointer_event.press_target orelse return;
             if (tree.msgForPointer(target.id, pointer_event.pointer.phase)) |msg| {
                 try self.dispatch(runtime, pointer_event.window_id, msg);
+            }
+        }
+
+        fn disarmHold(self: *Self, runtime: *Runtime) void {
+            if (self.hold_armed_id != 0 and !self.hold_fired) runtime.cancelTimer(press_hold_timer_id) catch {};
+            self.hold_armed_id = 0;
+            self.hold_fired = false;
+        }
+
+        /// The hold timer fired while the press is still down: dispatch
+        /// the armed widget's `on_hold` Msg and remember that this gesture
+        /// consumed its press.
+        fn firePressHold(self: *Self, runtime: *Runtime) anyerror!void {
+            const tree = self.tree orelse return;
+            const armed_id = self.hold_armed_id;
+            if (armed_id == 0 or self.hold_fired) return;
+            self.hold_fired = true;
+            if (tree.msgForHold(armed_id)) |msg| {
+                try self.dispatch(runtime, self.canvas_window_id, msg);
+            }
+        }
+
+        /// A dismissible surface was dismissed (Escape, click outside,
+        /// automation/accessibility dismiss): the model owns the close
+        /// through the surface's `on_dismiss` Msg. The engine already hid
+        /// the surface as an optimistic echo; this dispatch makes the
+        /// model agree (or deliberately re-open on the next rebuild —
+        /// source wins).
+        fn handleDismiss(self: *Self, runtime: *Runtime, dismiss_event: core.CanvasWidgetDismissEvent) anyerror!void {
+            if (!std.mem.eql(u8, dismiss_event.view_label, self.options.canvas_label)) return;
+            const tree = self.tree orelse return;
+            if (tree.msgForDismiss(dismiss_event.id)) |msg| {
+                try self.dispatch(runtime, dismiss_event.window_id, msg);
+            }
+        }
+
+        /// A secondary click with no context menu anywhere on its route:
+        /// the desktop press-and-hold alternative — dispatch the press
+        /// target's `on_hold` Msg immediately.
+        fn handleContextPress(self: *Self, runtime: *Runtime, press_event: core.CanvasWidgetContextPressEvent) anyerror!void {
+            if (!std.mem.eql(u8, press_event.view_label, self.options.canvas_label)) return;
+            const tree = self.tree orelse return;
+            const target = press_event.press_target orelse return;
+            if (tree.msgForHold(target.id)) |msg| {
+                try self.dispatch(runtime, press_event.window_id, msg);
             }
         }
 

@@ -1,0 +1,341 @@
+//! The anchored floating surface contract through the REAL dispatch
+//! paths: a TEA picker (select trigger + anchored dropdown-menu) whose
+//! open state is model-owned, closed by Escape and click-outside via
+//! `on_dismiss` Msgs, clicked through automation while floating over
+//! later siblings, plus press-and-hold (`on_hold`) through the runtime
+//! timer path and the right-click alternative, and the per-view anchored
+//! budget.
+
+const std = @import("std");
+const geometry = @import("geometry");
+const canvas = @import("canvas");
+const app_manifest = @import("app_manifest");
+const core = @import("core.zig");
+const ui_app_model = @import("ui_app.zig");
+const support = @import("test_support.zig");
+
+const canvas_label = "picker-canvas";
+
+const PickerModel = struct {
+    open: bool = false,
+    picked: u32 = 99,
+    toggles: u32 = 0,
+    dismissals: u32 = 0,
+    holds: u32 = 0,
+    crumb_presses: u32 = 0,
+};
+
+const PickerMsg = union(enum) {
+    toggle_picker,
+    close_picker,
+    pick: u32,
+    crumb_hold,
+    crumb_press,
+};
+
+const PickerApp = ui_app_model.UiApp(PickerModel, PickerMsg);
+
+fn pickerUpdate(model: *PickerModel, msg: PickerMsg) void {
+    switch (msg) {
+        .toggle_picker => {
+            model.open = !model.open;
+            model.toggles += 1;
+        },
+        .close_picker => {
+            model.open = false;
+            model.dismissals += 1;
+        },
+        .pick => |index| {
+            model.picked = index;
+            model.open = false;
+        },
+        .crumb_hold => model.holds += 1,
+        .crumb_press => model.crumb_presses += 1,
+    }
+}
+
+fn pickerView(ui: *PickerApp.Ui, model: *const PickerModel) PickerApp.Ui.Node {
+    const trigger = ui.el(.select, .{ .text = "Repo", .width = 160, .on_press = .toggle_picker }, .{});
+    const picker = if (model.open) ui.stack(.{ .height = 28 }, .{
+        trigger,
+        ui.el(.dropdown_menu, .{
+            .anchor = .below,
+            .anchor_alignment = .stretch,
+            .width = 160,
+            .height = 90,
+            .on_dismiss = .close_picker,
+        }, .{
+            ui.el(.menu_item, .{ .key = .{ .int = 0 }, .text = "Alpha", .height = 26, .on_press = PickerMsg{ .pick = 0 } }, .{}),
+            ui.el(.menu_item, .{ .key = .{ .int = 1 }, .text = "Beta", .height = 26, .on_press = PickerMsg{ .pick = 1 } }, .{}),
+        }),
+    }) else ui.stack(.{ .height = 28 }, .{trigger});
+
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        picker,
+        ui.button(.{ .on_press = .crumb_press, .on_hold = .crumb_hold }, "Crumb"),
+        ui.text(.{}, ui.fmt("picked {d}", .{model.picked})),
+    });
+}
+
+const picker_views = [_]app_manifest.ShellView{
+    .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
+};
+const picker_windows = [_]app_manifest.ShellWindow{.{
+    .label = "main",
+    .title = "Picker",
+    .width = 400,
+    .height = 300,
+    .views = &picker_views,
+}};
+const picker_scene: app_manifest.ShellConfig = .{ .windows = &picker_windows };
+
+fn pickerOptions() PickerApp.Options {
+    return .{
+        .name = "ui-app-picker",
+        .scene = picker_scene,
+        .canvas_label = canvas_label,
+        .update = pickerUpdate,
+        .view = pickerView,
+    };
+}
+
+const Fixture = struct {
+    harness: *core.TestHarness(),
+    app_state: *PickerApp,
+    app: core.App,
+
+    fn create() !Fixture {
+        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+        errdefer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        const app_state = try PickerApp.create(std.heap.page_allocator, pickerOptions());
+        const app = app_state.app();
+        try harness.start(app);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = geometry.SizeF.init(400, 300),
+            .scale_factor = 2,
+            .frame_index = 1,
+            .timestamp_ns = 1_000_000,
+            .nonblank = true,
+        } });
+        return .{ .harness = harness, .app_state = app_state, .app = app };
+    }
+
+    fn destroy(self: Fixture) void {
+        self.app_state.destroy();
+        self.harness.destroy(std.testing.allocator);
+    }
+
+    fn widgetIdByText(self: Fixture, kind: canvas.WidgetKind, text: []const u8) ?canvas.ObjectId {
+        return findIn(self.app_state.tree.?.root, kind, text);
+    }
+
+    fn findIn(widget: canvas.Widget, kind: canvas.WidgetKind, text: []const u8) ?canvas.ObjectId {
+        if (widget.kind == kind and std.mem.eql(u8, widget.text, text)) return widget.id;
+        for (widget.children) |child| {
+            if (findIn(child, kind, text)) |id| return id;
+        }
+        return null;
+    }
+
+    fn retainedFrame(self: Fixture, id: canvas.ObjectId) !?geometry.RectF {
+        const layout = try self.harness.runtime.canvasWidgetLayout(1, canvas_label);
+        const node = layout.findById(id) orelse return null;
+        if (node.widget.semantics.hidden) return null;
+        return node.frame;
+    }
+
+    fn pointer(self: Fixture, kind: support.platform.GpuSurfaceInputKind, point: geometry.PointF) !void {
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
+            .label = canvas_label,
+            .kind = kind,
+            .x = point.x,
+            .y = point.y,
+        } });
+    }
+
+    fn click(self: Fixture, point: geometry.PointF) !void {
+        try self.pointer(.pointer_down, point);
+        try self.pointer(.pointer_up, point);
+    }
+
+    fn clickWidget(self: Fixture, id: canvas.ObjectId) !void {
+        const frame = (try self.retainedFrame(id)) orelse return error.TestUnexpectedResult;
+        try self.click(frame.center());
+    }
+};
+
+test "anchored picker: trigger opens, menu floats, item click picks and closes" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const trigger_id = fixture.widgetIdByText(.select, "Repo").?;
+    try fixture.clickWidget(trigger_id);
+    try std.testing.expect(fixture.app_state.model.open);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.toggles);
+
+    // The dropdown floats BELOW the trigger, stretched to its width.
+    const alpha_id = fixture.widgetIdByText(.menu_item, "Alpha").?;
+    const trigger_frame = (try fixture.retainedFrame(trigger_id)).?;
+    const alpha_frame = (try fixture.retainedFrame(alpha_id)).?;
+    try std.testing.expect(alpha_frame.y > trigger_frame.maxY());
+
+    // Clicking the floating item picks and the model closes the picker;
+    // no dismissal fires (the click is inside the surface).
+    try fixture.clickWidget(alpha_id);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.picked);
+    try std.testing.expect(!fixture.app_state.model.open);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.dismissals);
+    try std.testing.expect((try fixture.retainedFrame(alpha_id)) == null);
+}
+
+test "anchored picker: escape dismisses as a Msg the model owns" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const trigger_id = fixture.widgetIdByText(.select, "Repo").?;
+    try fixture.clickWidget(trigger_id);
+    try std.testing.expect(fixture.app_state.model.open);
+
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .gpu_surface_input = .{
+        .label = canvas_label,
+        .kind = .key_down,
+        .key = "escape",
+    } });
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.dismissals);
+    try std.testing.expect(!fixture.app_state.model.open);
+    // The rebuilt source tree agrees: the surface is gone, not hidden.
+    try std.testing.expect(fixture.widgetIdByText(.menu_item, "Alpha") == null);
+}
+
+test "anchored picker: click outside dismisses as a Msg; clicking the trigger toggles exactly once" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const trigger_id = fixture.widgetIdByText(.select, "Repo").?;
+    try fixture.clickWidget(trigger_id);
+    try std.testing.expect(fixture.app_state.model.open);
+
+    // Click far outside trigger and menu: one dismissal Msg, no toggle.
+    try fixture.click(geometry.PointF.init(360, 280));
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.dismissals);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.toggles);
+    try std.testing.expect(!fixture.app_state.model.open);
+
+    // Re-open, then click the TRIGGER while open: the anchor owns its
+    // surface's toggling — exactly one toggle Msg closes it, and no
+    // dismiss-then-reopen race leaves it open.
+    try fixture.clickWidget(trigger_id);
+    try std.testing.expect(fixture.app_state.model.open);
+    try fixture.clickWidget(trigger_id);
+    try std.testing.expect(!fixture.app_state.model.open);
+    try std.testing.expectEqual(@as(u32, 3), fixture.app_state.model.toggles);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.dismissals);
+}
+
+test "anchored picker: automation clicks land on the floating menu item" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const trigger_id = fixture.widgetIdByText(.select, "Repo").?;
+    var command_buffer: [96]u8 = undefined;
+    const open_click = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ canvas_label, trigger_id });
+    try fixture.harness.runtime.dispatchAutomationCommand(fixture.app, open_click);
+    try std.testing.expect(fixture.app_state.model.open);
+
+    // The floating item is in the snapshot-visible tree and clickable by
+    // id through the same synthesized-pointer path automation uses live.
+    const beta_id = fixture.widgetIdByText(.menu_item, "Beta").?;
+    var beta_buffer: [96]u8 = undefined;
+    const beta_click = try std.fmt.bufPrint(&beta_buffer, "widget-click {s} {d}", .{ canvas_label, beta_id });
+    try fixture.harness.runtime.dispatchAutomationCommand(fixture.app, beta_click);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.picked);
+    try std.testing.expect(!fixture.app_state.model.open);
+}
+
+test "press-and-hold fires through the runtime timer path and suppresses the release press" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const crumb_id = fixture.widgetIdByText(.button, "Crumb").?;
+    const crumb_frame = (try fixture.retainedFrame(crumb_id)).?;
+    const center = crumb_frame.center();
+
+    // Hold: down arms the reserved timer; firing it dispatches the hold
+    // Msg; the release then presses nothing.
+    try fixture.pointer(.pointer_down, center);
+    try std.testing.expect(fixture.harness.null_platform.startedTimer(PickerApp.press_hold_timer_id) != null);
+    const fire = fixture.harness.null_platform.fireTimer(PickerApp.press_hold_timer_id, 2_000_000).?;
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, fire);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.holds);
+    try fixture.pointer(.pointer_up, center);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.crumb_presses);
+
+    // Quick click: the timer is cancelled before it fires and the press
+    // dispatches normally.
+    try fixture.pointer(.pointer_down, center);
+    try fixture.pointer(.pointer_up, center);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.crumb_presses);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.holds);
+    try std.testing.expect(fixture.harness.null_platform.fireTimer(PickerApp.press_hold_timer_id, 3_000_000) == null);
+}
+
+test "a secondary click with no context menu dispatches the hold Msg immediately" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const crumb_id = fixture.widgetIdByText(.button, "Crumb").?;
+    const crumb_frame = (try fixture.retainedFrame(crumb_id)).?;
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .gpu_surface_input = .{
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .x = crumb_frame.center().x,
+        .y = crumb_frame.center().y,
+        .button = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.holds);
+    // A right-click never acts as a primary press.
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.crumb_presses);
+}
+
+test "the per-view anchored budget rejects a surface per row loudly" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const TestApp = struct {
+        fn app(self: *@This()) core.App {
+            return .{ .context = self, .name = "anchored-budget", .source = support.platform.WebViewSource.html("<h1>Hi</h1>") };
+        }
+    };
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 400, 300),
+    });
+
+    var anchored: [17]canvas.Widget = undefined;
+    for (&anchored, 0..) |*widget, index| {
+        widget.* = .{
+            .id = @intCast(index + 2),
+            .kind = .dropdown_menu,
+            .frame = geometry.RectF.init(0, 0, 40, 20),
+            .layout = .{ .anchor = .{} },
+        };
+    }
+    const root = canvas.Widget{ .id = 1, .kind = .stack, .children = &anchored };
+    var nodes: [24]canvas.WidgetLayoutNode = undefined;
+
+    // 16 anchored surfaces apply; 17 fail loudly with the budget's error.
+    const at_budget = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = anchored[0..16] }, geometry.RectF.init(0, 0, 400, 300), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", at_budget);
+    const over_budget = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 400, 300), &nodes);
+    try std.testing.expectError(
+        error.WidgetAnchoredSurfaceLimitReached,
+        harness.runtime.setCanvasWidgetLayout(1, "canvas", over_budget),
+    );
+}

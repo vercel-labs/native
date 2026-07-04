@@ -3,7 +3,21 @@
      the app runs and the window updates without losing document state. -->
 <column background="background">
   <row gap="8" padding="10" cross="center" background="surface">
-    <text foreground="text_muted">{docTitle}</text>
+    <!-- The sample picker: a REAL select — the trigger shows the current
+         document, and the options are an anchored dropdown that floats
+         over the toolbar's siblings (late z-pass, window-clipped, no
+         reflow). Open state is the model's; Escape/click-outside dismiss
+         through on-dismiss, picking closes in update. -->
+    <stack height="28">
+      <select size="sm" width="176" on-press="toggle_sample_picker" label="Sample picker">{docTitle}</select>
+      <if test="{sample_picker_open}">
+        <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="close_sample_picker" label="Samples">
+          <for each="samples" key="id" as="s">
+            <menu-item on-press="load_sample:{s.id}" selected="{s.id == active_sample_id}">{s.title}</menu-item>
+          </for>
+        </dropdown-menu>
+      </if>
+    </stack>
     <spacer width="16" />
     <text-field text="{path}" placeholder="/path/to/document.md" on-input="edit_path" on-submit="open_doc" grow="1" label="Document path" />
     <!-- Inline button icons: icon + label are one widget, so the icon

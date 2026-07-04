@@ -188,7 +188,7 @@ pub const Parser = struct {
             if (trimmed.len > 0) {
                 var line = text_line;
                 var column = text_column;
-                for (text[0 .. textLeadingTrim(text)]) |lead_byte| {
+                for (text[0..textLeadingTrim(text)]) |lead_byte| {
                     if (lead_byte == '\n') {
                         line += 1;
                         column = 1;
@@ -435,7 +435,7 @@ fn parseElementComptime(comptime parser: *Parser) MarkupNode {
         if (trimmed.len > 0) {
             var line = text_line;
             var column = text_column;
-            for (text[0 .. textLeadingTrim(text)]) |lead_byte| {
+            for (text[0..textLeadingTrim(text)]) |lead_byte| {
                 if (lead_byte == '\n') {
                     line += 1;
                     column = 1;
@@ -577,10 +577,29 @@ pub const known_option_attrs = [_][]const u8{
     "autofocus",
 };
 
-pub const known_events = [_][]const u8{ "press", "toggle", "change", "submit", "input", "scroll" };
+pub const known_events = [_][]const u8{ "press", "toggle", "change", "submit", "input", "scroll", "dismiss", "hold" };
 
 pub const on_scroll_element_message = "on-scroll is only supported on scroll - the runtime emits scroll offsets for scroll containers, so the handler belongs on the scroll element itself";
 pub const on_scroll_payload_message = "on-scroll takes a bare Msg tag whose payload is the post-scroll state (a canvas.ScrollState variant, like activity_scrolled: canvas.ScrollState)";
+
+/// Elements the runtime's dismissal machinery closes (Escape, click
+/// outside, automation/accessibility dismiss) — the markup subset of the
+/// engine's dismissible-surface kinds (`canvas.widgetKindDismissibleSurface`;
+/// popover/menu-surface/tooltip stay Zig views or leaves).
+pub const known_dismiss_element_names = [_][]const u8{ "dialog", "drawer", "sheet", "dropdown-menu" };
+
+pub const on_dismiss_element_message = "on-dismiss is only supported on dismissible surfaces (dialog, drawer, sheet, dropdown-menu) - Escape and click-outside dismiss those, and the Msg lets the model own the close (clear the open flag in update)";
+
+/// Elements that may float as anchored surfaces. dropdown-menu is the
+/// markup channel; popover/menu-surface stay Zig views (documented
+/// exclusions) and dialogs/drawers/sheets place themselves.
+pub const known_anchor_element_names = [_][]const u8{"dropdown-menu"};
+
+pub const anchor_element_message = "anchor is only supported on dropdown-menu - it floats the surface against its PARENT's frame (put the dropdown beside its trigger inside a stack); dialogs, drawers, and sheets place themselves";
+pub const anchor_value_message = "anchor takes a literal placement: below or above (either side flips automatically when the surface does not fit and the other side has more room)";
+pub const anchor_alignment_value_message = "anchor-alignment takes a literal alignment: start, end, or stretch (stretch also widens the surface to at least the anchor's width)";
+pub const anchor_offset_value_message = "anchor-offset takes a literal number: the gap in points between the anchor edge and the surface";
+pub const anchor_dependent_attr_message = "anchor-alignment and anchor-offset only apply together with anchor - add anchor=\"below\" (or \"above\") to float this surface";
 
 /// Elements whose widget KIND the engine never hit-tests: layout and
 /// decoration only. A bound `on-press`/`on-toggle` makes any element a
@@ -640,15 +659,15 @@ pub const avatar_image_element_message = "image is only supported on avatar - th
 /// registry); a test in ui_markup_view_tests.zig keeps the two in
 /// lockstep so a new icon cannot ship without its markup name.
 pub const known_icon_names = [_][]const u8{
-    "alert",            "archive",      "arrow-down",   "arrow-right",   "arrow-up",
-    "check",            "chevron-down", "chevron-left", "chevron-right", "chevron-up",
-    "circle-dot",       "clock",        "copy",         "download",      "edit",
-    "external-link",    "eye",          "file-text",    "folder",        "folder-open",
-    "git-pull-request", "info",         "menu",         "moon",          "music",
-    "pause",            "play",         "plus",         "refresh-cw",    "repeat",
-    "save",             "search",       "send",         "settings",      "shuffle",
-    "skip-back",        "skip-forward", "sun",          "trash",         "volume",
-    "x",
+    "alert",       "archive",       "arrow-down",   "arrow-right",      "arrow-up",
+    "check",       "check-circle",  "chevron-down", "chevron-left",     "chevron-right",
+    "chevron-up",  "circle-dot",    "clock",        "copy",             "download",
+    "edit",        "external-link", "eye",          "file-text",        "folder",
+    "folder-open", "git-branch",    "git-merge",    "git-pull-request", "info",
+    "menu",        "moon",          "music",        "pause",            "play",
+    "plus",        "refresh-cw",    "repeat",       "save",             "search",
+    "send",        "settings",      "shuffle",      "skip-back",        "skip-forward",
+    "sun",         "trash",         "volume",       "x",                "x-circle",
 };
 
 pub const icon_name_message = "name takes a literal built-in icon name (see canvas.icons.known_icon_names, e.g. search, plus, x, check, chevron-down, settings, trash)";
@@ -669,6 +688,14 @@ pub const known_icon_attr_element_names = [_][]const u8{ "button", "toggle-butto
 
 pub fn iconAttrElement(name: []const u8) bool {
     return nameInList(name, &known_icon_attr_element_names);
+}
+
+pub fn anchorElement(name: []const u8) bool {
+    return nameInList(name, &known_anchor_element_names);
+}
+
+pub fn dismissEventElement(name: []const u8) bool {
+    return nameInList(name, &known_dismiss_element_names);
 }
 
 pub const font_coverage_message = "this text contains a character outside the bundled font's coverage - it renders as a tofu box on the reference/screenshot and mobile paths; use a vector icon (<icon name=\"...\"/> or the icon attribute) or plain words";
@@ -1122,6 +1149,13 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                         if (!std.mem.eql(u8, node.name, "scroll")) {
                             return .{ .line = attribute.line, .column = attribute.column, .message = on_scroll_element_message };
                         }
+                    } else if (std.mem.eql(u8, attribute.name, "on-dismiss")) {
+                        // Only dismissible surfaces are ever dismissed by
+                        // the runtime; anywhere else the Msg could never
+                        // fire.
+                        if (!nameInList(node.name, &known_dismiss_element_names)) {
+                            return .{ .line = attribute.line, .column = attribute.column, .message = on_dismiss_element_message };
+                        }
                     } else if (nameInList(node.name, &known_non_hit_target_element_names) and deadHandlerOnNonHitTarget(attribute.name)) {
                         return .{ .line = attribute.line, .column = attribute.column, .message = non_hit_target_handler_message };
                     }
@@ -1207,6 +1241,42 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     if (expression == null or expression.? != .binding) {
                         return .{ .line = attribute.line, .column = attribute.column, .message = avatar_image_message };
                     }
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "anchor")) {
+                    // Anchored floating placement, dropdown-menu-scoped:
+                    // a literal side so the compiled engine resolves it
+                    // at comptime (flip is automatic either way).
+                    if (!nameInList(node.name, &known_anchor_element_names)) {
+                        return .{ .line = attribute.line, .column = attribute.column, .message = anchor_element_message };
+                    }
+                    if (!std.mem.eql(u8, attribute.value, "below") and !std.mem.eql(u8, attribute.value, "above")) {
+                        return .{ .line = attribute.line, .column = attribute.column, .message = anchor_value_message };
+                    }
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "anchor-alignment")) {
+                    if (!nameInList(node.name, &known_anchor_element_names)) {
+                        return .{ .line = attribute.line, .column = attribute.column, .message = anchor_element_message };
+                    }
+                    if (node.attr("anchor") == null) {
+                        return .{ .line = attribute.line, .column = attribute.column, .message = anchor_dependent_attr_message };
+                    }
+                    if (!std.mem.eql(u8, attribute.value, "start") and !std.mem.eql(u8, attribute.value, "end") and !std.mem.eql(u8, attribute.value, "stretch")) {
+                        return .{ .line = attribute.line, .column = attribute.column, .message = anchor_alignment_value_message };
+                    }
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "anchor-offset")) {
+                    if (!nameInList(node.name, &known_anchor_element_names)) {
+                        return .{ .line = attribute.line, .column = attribute.column, .message = anchor_element_message };
+                    }
+                    if (node.attr("anchor") == null) {
+                        return .{ .line = attribute.line, .column = attribute.column, .message = anchor_dependent_attr_message };
+                    }
+                    _ = std.fmt.parseFloat(f32, attribute.value) catch {
+                        return .{ .line = attribute.line, .column = attribute.column, .message = anchor_offset_value_message };
+                    };
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "gap") and nameInList(node.name, &known_stack_container_element_names)) {

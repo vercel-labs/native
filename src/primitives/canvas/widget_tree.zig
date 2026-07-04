@@ -92,6 +92,15 @@ pub fn widgetClipsContent(widget: Widget) bool {
     return widget.kind == .scroll_view or widget.layout.clip_content;
 }
 
+/// True for anchored floating widgets (`layout.anchor` set): hoisted out
+/// of the in-tree paint and hit-test walks into a late window-level pass,
+/// and excluded from every ancestor clip region (window-clipped, not
+/// parent-clipped). Ancestor HIDING still applies — a hidden subtree
+/// hides its floating surfaces too.
+pub fn widgetIsAnchored(widget: Widget) bool {
+    return widget.layout.anchor != null;
+}
+
 pub fn widgetIndexById(layout: anytype, id: ObjectId) ?usize {
     if (id == 0) return null;
     for (layout.nodes, 0..) |node, index| {
