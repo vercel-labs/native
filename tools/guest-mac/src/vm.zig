@@ -277,3 +277,25 @@ test "events accumulator tracks progress, messages, and the fetched ipsw path" {
     try std.testing.expect(events.failed);
     try std.testing.expectEqualStrings("boom", events.lastMessage());
 }
+
+/// Repo root for the virtio-fs share: nearest ancestor with `.git`,
+/// even when launched from a subdirectory (like this tool's own). `.git`
+/// wins over the NEAREST build.zig.zon: nested packages (tools/*,
+/// examples/*) carry their own zon but are not the repo. Falls back to the
+/// outermost build.zig.zon seen, then the cwd itself.
+pub fn repoRootOrCwd(buffer: *[512]u8) []const u8 {
+    const cwd = currentDir(buffer) orelse return ".";
+    var outermost_zon: ?[]const u8 = null;
+    var dir = cwd;
+    while (dir.len > 1) {
+        var probe_buffer: [600]u8 = undefined;
+        if (std.fmt.bufPrint(&probe_buffer, "{s}/.git", .{dir})) |probe| {
+            if (fileExists(probe)) return dir;
+        } else |_| {}
+        if (std.fmt.bufPrint(&probe_buffer, "{s}/build.zig.zon", .{dir})) |probe| {
+            if (fileExists(probe)) outermost_zon = dir;
+        } else |_| {}
+        dir = std.fs.path.dirname(dir) orelse break;
+    }
+    return outermost_zon orelse cwd;
+}

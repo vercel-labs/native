@@ -138,7 +138,7 @@ fn runStart(command: cli.Command) !void {
     }
 
     var cwd_buffer: [512]u8 = undefined;
-    const share_dir = command.share orelse repoRootOrCwd(&cwd_buffer);
+    const share_dir = command.share orelse vm.repoRootOrCwd(&cwd_buffer);
     std.debug.print("guest-mac: sharing {s} as virtio-fs tag \"{s}\"\n", .{ share_dir, command.tag });
 
     try session.engine.configure(share_dir, command.tag, command.cpus, command.memory_gb << 30);
@@ -282,27 +282,6 @@ fn currentGuestIp(engine: vm.Engine) ?[]const u8 {
 
 /// Walk up from the cwd to the repo root — the directory an agent almost
 /// always means by "the repo" — so `guest-mac start` shares the right root
-/// even when launched from a subdirectory (like this tool's own). `.git`
-/// wins over the NEAREST build.zig.zon: nested packages (tools/*,
-/// examples/*) carry their own zon but are not the repo. Falls back to the
-/// outermost build.zig.zon seen, then the cwd itself.
-fn repoRootOrCwd(buffer: *[512]u8) []const u8 {
-    const cwd = vm.currentDir(buffer) orelse return ".";
-    var outermost_zon: ?[]const u8 = null;
-    var dir = cwd;
-    while (dir.len > 1) {
-        var probe_buffer: [600]u8 = undefined;
-        if (std.fmt.bufPrint(&probe_buffer, "{s}/.git", .{dir})) |probe| {
-            if (vm.fileExists(probe)) return dir;
-        } else |_| {}
-        if (std.fmt.bufPrint(&probe_buffer, "{s}/build.zig.zon", .{dir})) |probe| {
-            if (vm.fileExists(probe)) outermost_zon = dir;
-        } else |_| {}
-        dir = std.fs.path.dirname(dir) orelse break;
-    }
-    return outermost_zon orelse cwd;
-}
-
 fn installSignalHandlers() void {
     const action: std.posix.Sigaction = .{
         .handler = .{ .handler = handleSignal },

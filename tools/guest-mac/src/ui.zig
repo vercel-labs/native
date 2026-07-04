@@ -215,7 +215,9 @@ pub const GuestMacApp = struct {
             },
             .configuring => {
                 var cwd_buffer: [512]u8 = undefined;
-                const share_dir = vm.currentDir(&cwd_buffer) orelse "";
+                // Share the repo root, not the launch cwd (the windowed app is
+                // usually launched from the tool directory).
+                const share_dir = vm.repoRootOrCwd(&cwd_buffer);
                 engine.configure(share_dir, cli.default_share_tag, cli.default_cpus, cli.default_memory_gb << 30) catch return;
                 self.phase = .ready;
             },
