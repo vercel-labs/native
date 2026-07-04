@@ -1,6 +1,7 @@
 import { ImageResponse } from "next/og";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { siteName } from "@/lib/site";
 
 export { getPageTitle } from "@/lib/page-titles";
 
@@ -58,7 +59,7 @@ export async function renderOgImage(title: string) {
             color: "white",
           }}
         >
-          Native SDK
+          {siteName}
         </span>
       </div>
 

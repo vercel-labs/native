@@ -750,3 +750,27 @@ fn presentShotFrame(h: *Harness, frame_index: u64) !void {
         .nonblank = true,
     } });
 }
+
+// Env-gated homepage screenshot renderer (skipped by default, never in
+// CI): the docs-homepage showcase state — the seeded notes list with the
+// first note open — once per color scheme, same state in both. PNGs land
+// in /tmp/homepage-shots/notes-{light,dark}-artifacts/. To use:
+//
+//   HOMEPAGE_SHOTS=1 zig build test
+test "render homepage screenshots (env-gated)" {
+    if (std.c.getenv("HOMEPAGE_SHOTS") == null) return error.SkipZigTest;
+    const io = testing.io;
+
+    var clock = native_sdk.TestClock{};
+    var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
+    defer h.destroy();
+
+    h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/notes-light-artifacts", "Notes");
+    try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot notes-canvas 2");
+
+    // Same state, dark scheme: the dispatch re-emits the display list
+    // with the re-derived tokens, so no present is needed in between.
+    try h.dispatch(.toggle_theme);
+    h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/notes-dark-artifacts", "Notes");
+    try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot notes-canvas 2");
+}

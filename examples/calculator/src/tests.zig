@@ -692,3 +692,35 @@ fn clickSnapshotButton(live: LiveApp, snapshot: *native_sdk.automation.snapshot.
     const command = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ main.canvas_label, button.id });
     try live.harness.runtime.dispatchAutomationCommand(live.app, command);
 }
+
+// Env-gated homepage screenshot renderer (skipped by default, never in
+// CI): the docs-homepage showcase state — a finished calculation so the
+// display, memory line, and keypad all carry real content — once per
+// color scheme, same state in both. PNGs land in
+// /tmp/homepage-shots/calculator-{light,dark}-artifacts/. To use:
+//
+//   HOMEPAGE_SHOTS=1 zig build test
+test "render homepage screenshots (env-gated)" {
+    if (std.c.getenv("HOMEPAGE_SHOTS") == null) return error.SkipZigTest;
+    const io = testing.io;
+
+    const live = try LiveApp.start();
+    defer live.stop();
+
+    // 128 × 96 = 12,288 through the real dispatch path, then an operator
+    // pending so the expression line is live too.
+    for ([_]Msg{ .d1, .d2, .d8, .multiply, .d9, .d6, .equals }) |msg| {
+        try live.app_state.dispatch(&live.harness.runtime, 1, msg);
+    }
+
+    // theme_pref cycles auto -> light -> dark.
+    try live.app_state.dispatch(&live.harness.runtime, 1, .cycle_theme);
+    live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/calculator-light-artifacts", "Calculator");
+    try live.harness.runtime.dispatchAutomationCommand(live.app, "screenshot calc-canvas 2");
+
+    // Same state, dark scheme: the dispatch re-emits the display list
+    // with the re-derived tokens, so no present is needed in between.
+    try live.app_state.dispatch(&live.harness.runtime, 1, .cycle_theme);
+    live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/calculator-dark-artifacts", "Calculator");
+    try live.harness.runtime.dispatchAutomationCommand(live.app, "screenshot calc-canvas 2");
+}

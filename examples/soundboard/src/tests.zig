@@ -584,3 +584,32 @@ fn presentShotFrame(live: LiveApp, frame_index: u64) !void {
         .nonblank = true,
     } });
 }
+
+// Env-gated homepage screenshot renderer (skipped by default, never in
+// CI): renders the docs-homepage showcase state OFFSCREEN through the
+// deterministic reference renderer — the album grid with a track playing,
+// once per color scheme, same state in both. PNGs land in
+// /tmp/homepage-shots/soundboard-{light,dark}-artifacts/. To use:
+//
+//   HOMEPAGE_SHOTS=1 zig build test
+test "render homepage screenshots (env-gated)" {
+    if (std.c.getenv("HOMEPAGE_SHOTS") == null) return error.SkipZigTest;
+    const io = testing.io;
+
+    const live = try LiveApp.start(true);
+    defer live.stop();
+
+    // The hero state: album grid, covers decoded, a track playing so the
+    // now-playing bar and transport are on screen.
+    try live.dispatch(.{ .play_track = 7 });
+    try live.dispatch(.{ .set_theme = .light });
+    try presentShotFrame(live, 2);
+    live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/soundboard-light-artifacts", "Soundboard");
+    try live.harness.runtime.dispatchAutomationCommand(live.app_state.app(), "screenshot soundboard-canvas 2");
+
+    // Same state, dark scheme: the dispatch re-emits the display list
+    // with the re-derived tokens, so no present is needed in between.
+    try live.dispatch(.{ .set_theme = .dark });
+    live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/soundboard-dark-artifacts", "Soundboard");
+    try live.harness.runtime.dispatchAutomationCommand(live.app_state.app(), "screenshot soundboard-canvas 2");
+}

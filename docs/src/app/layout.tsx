@@ -7,31 +7,29 @@ import { Search } from "@/components/search";
 import { DocsMobileNav } from "@/components/docs-mobile-nav";
 import { DocsNav } from "@/components/docs-nav";
 import { getStarCount } from "@/lib/github";
+import { siteName, siteUrl, tagline, description, githubUrl } from "@/lib/site";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://zero-native.dev"),
+  metadataBase: new URL(siteUrl),
   title: {
-    default: "Native SDK | Write Markup. Ship Native Pixels.",
-    template: "%s | Native SDK",
+    default: `${siteName} | ${tagline}`,
+    template: `%s | ${siteName}`,
   },
-  description:
-    "Cross-platform native UI: declarative markup views, design-token styling, and Zig logic on an Elm-style loop — rendered into real OS windows with no browser in the binary.",
+  description,
   openGraph: {
     type: "website",
     locale: "en_US",
-    url: "https://zero-native.dev",
-    siteName: "Native SDK",
-    title: "Native SDK | Write Markup. Ship Native Pixels.",
-    description:
-      "Cross-platform native UI: declarative markup views, design-token styling, and Zig logic on an Elm-style loop — rendered into real OS windows with no browser in the binary.",
-    images: [{ url: "/og", width: 1200, height: 630, alt: "Native SDK" }],
+    url: siteUrl,
+    siteName,
+    title: `${siteName} | ${tagline}`,
+    description,
+    images: [{ url: "/og", width: 1200, height: 630, alt: siteName }],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Native SDK | Write Markup. Ship Native Pixels.",
-    description:
-      "Cross-platform native UI: declarative markup views, design-token styling, and Zig logic on an Elm-style loop — rendered into real OS windows with no browser in the binary.",
+    title: `${siteName} | ${tagline}`,
+    description,
     images: ["/og"],
   },
 };
@@ -76,13 +74,13 @@ function Header({ stars }: { stars?: string }) {
             </svg>
           </span>
           <Link href="/">
-            <span className={`${GeistPixelSquare.className} text-lg`}>Native SDK</span>
+            <span className={`${GeistPixelSquare.className} text-lg`}>{siteName}</span>
           </Link>
         </div>
         <nav className="flex items-center gap-4">
           <Search />
           <a
-            href="https://github.com/vercel-labs/zero-native"
+            href={githubUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-1.5 text-sm text-neutral-500 hover:text-neutral-900 transition-colors dark:text-neutral-400 dark:hover:text-neutral-100"
