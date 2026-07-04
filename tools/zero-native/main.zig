@@ -84,6 +84,7 @@ pub fn main(init: std.process.Init) !void {
             .signing = .{ .mode = signing, .identity = try flagValue(args, "--identity"), .entitlements = try flagValue(args, "--entitlements"), .team_id = try flagValue(args, "--team-id") },
             .archive = archive,
         });
+        defer if (stats.archive_path) |path| allocator.free(path);
         tooling.package.printDiagnostic(stats);
     } else if (std.mem.eql(u8, command, "dev")) {
         const manifest_path = try flagValue(args, "--manifest") orelse "app.zon";
@@ -114,6 +115,7 @@ pub fn main(init: std.process.Init) !void {
             .web_engine = web_engine.engine,
             .cef_dir = web_engine.cef_dir,
         });
+        defer if (stats.archive_path) |path| allocator.free(path);
         tooling.package.printDiagnostic(stats);
     } else if (std.mem.eql(u8, command, "package-android")) {
         const metadata = try tooling.manifest.readMetadata(allocator, init.io, try flagValue(args, "--manifest") orelse "app.zon");
@@ -128,6 +130,7 @@ pub fn main(init: std.process.Init) !void {
             .web_engine = web_engine.engine,
             .cef_dir = web_engine.cef_dir,
         });
+        defer if (stats.archive_path) |path| allocator.free(path);
         tooling.package.printDiagnostic(stats);
     } else if (std.mem.eql(u8, command, "automate")) {
         try automation_cli.run(allocator, init.io, args[2..]);
@@ -293,5 +296,6 @@ fn packageShortcut(allocator: std.mem.Allocator, io: std.Io, args: []const []con
         .web_engine = web_engine.engine,
         .cef_dir = web_engine.cef_dir,
     });
+    defer if (stats.archive_path) |path| allocator.free(path);
     tooling.package.printDiagnostic(stats);
 }
