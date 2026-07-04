@@ -1058,7 +1058,8 @@ fn intrinsicRadioWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF
 }
 
 fn intrinsicToggleWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
-    const track_width = widgetSizedDensityValue(widget, tokens, 42);
+    // Matches the rendered 44x24 switch track.
+    const track_width = widgetSizedDensityValue(widget, tokens, 44);
     const track_height = widgetSizedDensityValue(widget, tokens, 24);
     const label_size = widgetLabelTextSize(widget, tokens);
     const label_width = measuredTextWidth(tokens, widget.text, label_size);

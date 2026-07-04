@@ -1,4 +1,5 @@
 const support = @import("test_support.zig");
+const widget_render_style = @import("widget_render_style.zig");
 const std = support.std;
 const geometry = support.geometry;
 const canvas = support.canvas;
@@ -526,7 +527,9 @@ test "widget layout diff includes paint overdraw in dirty bounds" {
     try std.testing.expectEqual(@as(usize, 1), focus_invalidations.len);
     try std.testing.expectEqual(WidgetInvalidationKind.changed, focus_invalidations[0].kind);
     try std.testing.expectEqual(@as(ObjectId, 3), focus_invalidations[0].id);
-    try expectRect(geometry.RectF.init(9, 69, 102, 32), focus_invalidations[0].dirty_bounds);
+    // The focus ring strokes 2px outside the control, so its dirty
+    // bounds inflate by the offset plus half the 2px focus stroke.
+    try expectRect(geometry.RectF.init(7, 67, 106, 36), focus_invalidations[0].dirty_bounds);
 }
 
 test "widget render state dirty bounds tracks changed runtime states" {
@@ -554,7 +557,7 @@ test "widget render state dirty bounds tracks changed runtime states" {
     const layout = try layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 160, 140), &nodes);
 
     try expectRect(
-        geometry.RectF.init(9, 11, 98, 78),
+        geometry.RectF.init(7, 9, 102, 82),
         layout.renderStateDirtyBounds(
             .{ .focused_id = 2, .focus_visible_id = 2, .hovered_id = 2, .pressed_id = 2 },
             .{ .focused_id = 3, .focus_visible_id = 3, .hovered_id = 3 },
@@ -578,7 +581,7 @@ test "widget render state dirty bounds uses custom focus stroke tokens" {
     const layout = try layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 160, 80), &nodes);
 
     try expectRect(
-        geometry.RectF.init(7, 9, 102, 38),
+        geometry.RectF.init(5, 7, 106, 42),
         layout.renderStateDirtyBoundsWithTokens(.{}, .{ .focused_id = 2, .focus_visible_id = 2 }, tokens),
     );
 }
@@ -1467,7 +1470,8 @@ test "widget display list renders through reference surface" {
     try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
 
     try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 220, 20);
-    try expectPixelRgba8(.{ 24, 24, 27, 255 }, surface, 20, 100);
+    // The progress fill is the blue-violet primary of the shadcn preset.
+    try expectPixelRgba8(.{ 20, 71, 230, 255 }, surface, 20, 100);
 }
 
 test "widget emitter applies button state tokens" {
@@ -1665,7 +1669,9 @@ test "widget emitter applies input and list control tokens" {
     try emitWidgetTree(&builder, .{ .id = 53, .kind = .list_item, .frame = geometry.RectF.init(0, 168, 180, 30), .text = "Inbox", .state = .{ .selected = true } }, tokens);
 
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 18), display_list.commandCount());
+    // The search field's magnifier is now the vector `search` icon:
+    // transform in, circle + handle stroke paths, inverse transform out.
+    try std.testing.expectEqual(@as(usize, 17), display_list.commandCount());
     switch (display_list.commands[0]) {
         .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(20, 24, 28), fill.fill),
         else => return error.TestUnexpectedResult,
@@ -1686,39 +1692,39 @@ test "widget emitter applies input and list control tokens" {
         .stroke_rect => |stroke| try expectFillColor(Color.rgb8(90, 100, 110), stroke.stroke.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[5]) {
-        .draw_line => |line| try expectFillColor(Color.rgb8(210, 220, 230), line.stroke.fill),
+    switch (display_list.commands[6]) {
+        .stroke_path => |stroke| try expectFillColor(Color.rgb8(210, 220, 230), stroke.stroke.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[10]) {
+    switch (display_list.commands[9]) {
         .draw_text => |text| {
             try std.testing.expectEqualStrings("Search", text.text);
             try std.testing.expectEqualDeep(Color.rgb8(210, 220, 230), text.color);
         },
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[11]) {
+    switch (display_list.commands[10]) {
         .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(28, 32, 36), fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[12]) {
+    switch (display_list.commands[11]) {
         .stroke_rect => |stroke| try expectFillColor(Color.rgb8(96, 106, 116), stroke.stroke.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[13]) {
+    switch (display_list.commands[12]) {
         .push_clip => {},
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[14]) {
+    switch (display_list.commands[13]) {
         .draw_text => |text| try std.testing.expectEqualDeep(Color.rgb8(236, 240, 244), text.color),
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(CanvasCommand.pop_clip, display_list.commands[15]);
-    switch (display_list.commands[16]) {
+    try std.testing.expectEqual(CanvasCommand.pop_clip, display_list.commands[14]);
+    switch (display_list.commands[15]) {
         .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(52, 62, 72), fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[17]) {
+    switch (display_list.commands[16]) {
         .draw_text => |text| try std.testing.expectEqualDeep(Color.rgb8(244, 248, 252), text.color),
         else => return error.TestUnexpectedResult,
     }
@@ -2141,7 +2147,7 @@ test "widget emitter applies control sizes" {
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[9]) {
-        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(@as(f32, 15.75), fill.rect.width, 0.001),
+        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(@as(f32, 18), fill.rect.width, 0.001),
         else => return error.TestUnexpectedResult,
     }
 }
@@ -2276,7 +2282,7 @@ test "widget emitter applies density tokens to spacing and affordances" {
     var compact_checkbox_builder = Builder.init(&compact_checkbox_commands);
     try emitWidgetTree(&compact_checkbox_builder, checkbox, .{ .density = .compact });
     switch (compact_checkbox_builder.displayList().commands[0]) {
-        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(@as(f32, 12.25), fill.rect.width, 0.001),
+        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(@as(f32, 14), fill.rect.width, 0.001),
         else => return error.TestUnexpectedResult,
     }
 
@@ -2284,7 +2290,7 @@ test "widget emitter applies density tokens to spacing and affordances" {
     var regular_checkbox_builder = Builder.init(&regular_checkbox_commands);
     try emitWidgetTree(&regular_checkbox_builder, checkbox, .{ .density = .regular });
     switch (regular_checkbox_builder.displayList().commands[0]) {
-        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(@as(f32, 14), fill.rect.width, 0.001),
+        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(@as(f32, 16), fill.rect.width, 0.001),
         else => return error.TestUnexpectedResult,
     }
 
@@ -2292,7 +2298,7 @@ test "widget emitter applies density tokens to spacing and affordances" {
     var spacious_checkbox_builder = Builder.init(&spacious_checkbox_commands);
     try emitWidgetTree(&spacious_checkbox_builder, checkbox, .{ .density = .spacious });
     switch (spacious_checkbox_builder.displayList().commands[0]) {
-        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(@as(f32, 15.75), fill.rect.width, 0.001),
+        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(@as(f32, 18), fill.rect.width, 0.001),
         else => return error.TestUnexpectedResult,
     }
 }
@@ -2519,17 +2525,28 @@ test "widget emitter renders checkbox radio toggle and slider controls" {
         .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.accent, fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[14]) {
+    // The switch track is borderless now, so the toggle's label follows
+    // its fill and knob directly.
+    switch (display_list.commands[13]) {
         .draw_text => |text| try std.testing.expectEqualStrings("Mode", text.text),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[16]) {
-        .fill_rounded_rect => |fill| try expectRect(geometry.RectF.init(0, 138, 40, 4), fill.rect),
+    // 6px slider track centered in the 32px row: y = 124 + 13.
+    switch (display_list.commands[15]) {
+        .fill_rounded_rect => |fill| try expectRect(geometry.RectF.init(0, 137, 40, 6), fill.rect),
+        else => return error.TestUnexpectedResult,
+    }
+    // The knob keeps its primary border; focus adds the offset ring.
+    switch (display_list.commands[17]) {
+        .stroke_rect => |stroke| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(13, 4)), stroke.id);
+            try expectFillColor(tokens.colors.accent, stroke.stroke.fill);
+        },
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[18]) {
         .stroke_rect => |stroke| {
-            try std.testing.expectEqual(@as(ObjectId, widgetPartId(13, 4)), stroke.id);
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(13, 5)), stroke.id);
             try std.testing.expectEqual(@as(f32, 3), stroke.stroke.width);
             try expectFillColor(tokens.colors.focus_ring, stroke.stroke.fill);
         },
@@ -2558,7 +2575,9 @@ test "checkbox radio and switch focus rings stay on the control glyph" {
     switch (checkbox_box) {
         .stroke_rect => |box| switch (checkbox_focus) {
             .stroke_rect => |focus| {
-                try std.testing.expectEqualDeep(box.rect, focus.rect);
+                // The ring wraps the box 2px outside it — still glyph-
+                // sized, nowhere near the clickable label's row width.
+                try std.testing.expectEqualDeep(widget_render_style.focusRingRect(box.rect), focus.rect);
                 try std.testing.expect(focus.rect.width < 32);
                 try std.testing.expect(focus.rect.width < 160);
                 try expectFillColor(tokens.colors.focus_ring, focus.stroke.fill);
@@ -2583,7 +2602,7 @@ test "checkbox radio and switch focus rings stay on the control glyph" {
     switch (radio_circle) {
         .stroke_rect => |circle| switch (radio_focus) {
             .stroke_rect => |focus| {
-                try std.testing.expectEqualDeep(circle.rect, focus.rect);
+                try std.testing.expectEqualDeep(widget_render_style.focusRingRect(circle.rect), focus.rect);
                 try std.testing.expect(focus.rect.width < 32);
                 try std.testing.expect(focus.rect.width < 160);
                 try expectFillColor(tokens.colors.focus_ring, focus.stroke.fill);
@@ -2603,12 +2622,13 @@ test "checkbox radio and switch focus rings stay on the control glyph" {
         .state = .{ .focused = true },
     }, tokens);
     const switch_display_list = switch_builder.displayList();
-    const switch_track = switch_display_list.findCommandById(widgetPartId(22, 2)).?.command;
+    // The borderless track's fill (slot 1) anchors the ring geometry.
+    const switch_track = switch_display_list.findCommandById(widgetPartId(22, 1)).?.command;
     const switch_focus = switch_display_list.findCommandById(widgetPartId(22, 4)).?.command;
     switch (switch_track) {
-        .stroke_rect => |track| switch (switch_focus) {
+        .fill_rounded_rect => |track| switch (switch_focus) {
             .stroke_rect => |focus| {
-                try std.testing.expectEqualDeep(track.rect, focus.rect);
+                try std.testing.expectEqualDeep(widget_render_style.focusRingRect(track.rect), focus.rect);
                 try std.testing.expect(focus.rect.width < 80);
                 try std.testing.expect(focus.rect.width < 160);
                 try expectFillColor(tokens.colors.focus_ring, focus.stroke.fill);
@@ -2649,12 +2669,14 @@ test "selection control focus bounds exclude clickable labels" {
     try std.testing.expectEqual(@as(ObjectId, 21), switch_label_hit.id);
     try std.testing.expectEqual(WidgetKind.switch_control, switch_label_hit.kind);
 
+    // Dirty bounds cover the offset ring: control glyph + 2px ring
+    // offset + half the 4px focus stroke on every side.
     try expectRectApprox(
-        geometry.RectF.init(8, 15.2, 21.6, 21.6),
+        geometry.RectF.init(6, 13.2, 25.6, 25.6),
         layout.renderStateDirtyBoundsWithTokens(.{}, .{ .focused_id = 20, .focus_visible_id = 20 }, tokens),
     );
     try expectRect(
-        geometry.RectF.init(8, 54, 60, 28),
+        geometry.RectF.init(6, 52, 64, 32),
         layout.renderStateDirtyBoundsWithTokens(.{}, .{ .focused_id = 21, .focus_visible_id = 21 }, tokens),
     );
 }
@@ -2669,7 +2691,7 @@ test "widget emitter renders list item and segmented control states" {
         },
         .stroke = .{ .focus = 3 },
     };
-    var commands: [6]CanvasCommand = undefined;
+    var commands: [7]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, .{
         .id = 20,
@@ -2687,7 +2709,7 @@ test "widget emitter renders list item and segmented control states" {
     }, tokens);
 
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 6), display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, 7), display_list.commandCount());
     switch (display_list.commands[0]) {
         .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_pressed, fill.fill),
         else => return error.TestUnexpectedResult,
@@ -2700,19 +2722,25 @@ test "widget emitter renders list item and segmented control states" {
         .draw_text => |text| try std.testing.expectEqualStrings("Inbox", text.text),
         else => return error.TestUnexpectedResult,
     }
+    // The active tab lifts to the page surface with a hairline border;
+    // its label stays on the foreground, not the accent text.
     switch (display_list.commands[3]) {
-        .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.accent, fill.fill),
+        .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface, fill.fill),
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[4]) {
+        .stroke_rect => |stroke| try expectFillColor(tokens.colors.border, stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[5]) {
         .stroke_rect => |stroke| {
             try std.testing.expectEqual(@as(f32, 3), stroke.stroke.width);
             try expectFillColor(tokens.colors.focus_ring, stroke.stroke.fill);
         },
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[5]) {
-        .draw_text => |text| try std.testing.expectEqualDeep(tokens.colors.accent_text, text.color),
+    switch (display_list.commands[6]) {
+        .draw_text => |text| try std.testing.expectEqualDeep(tokens.colors.text, text.color),
         else => return error.TestUnexpectedResult,
     }
 }

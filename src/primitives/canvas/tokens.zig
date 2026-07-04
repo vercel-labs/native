@@ -56,17 +56,39 @@ pub const ThemeOptions = struct {
     reduce_motion: bool = false,
 };
 
+/// The default palette is the shadcn/ui "neutral + blue" preset,
+/// converted from its published oklch values to sRGB hex (D65, standard
+/// oklch -> linear sRGB -> gamma-encoded; conversions are exact to the
+/// nearest 8-bit channel). Neutral gray scale for surfaces and text, a
+/// blue-violet primary for accents, translucent-white hairlines in dark
+/// mode, and card/popover surfaces one step lighter than the dark
+/// background. Rationale per token is on the field.
 pub const ColorTokens = struct {
+    /// oklch(1 0 0) = #ffffff — the page background.
     background: Color = Color.rgb8(255, 255, 255),
+    /// Card/popover surface; oklch(1 0 0) = #ffffff (same as the
+    /// background in light — elevation comes from the border + shadow).
     surface: Color = Color.rgb8(255, 255, 255),
-    surface_subtle: Color = Color.rgb8(244, 244, 245),
-    surface_pressed: Color = Color.rgb8(228, 228, 231),
-    text: Color = Color.rgb8(9, 9, 11),
-    text_muted: Color = Color.rgb8(113, 113, 122),
-    border: Color = Color.rgb8(228, 228, 231),
-    accent: Color = Color.rgb8(24, 24, 27),
-    accent_text: Color = Color.rgb8(250, 250, 250),
-    destructive: Color = Color.rgb8(220, 38, 38),
+    /// Muted/accent surface; oklch(0.97 0 0) = #f5f5f5 — hover washes,
+    /// skeletons, secondary chrome.
+    surface_subtle: Color = Color.rgb8(245, 245, 245),
+    /// Pressed/selected wash and the "input" surface (switch tracks);
+    /// oklch(0.922 0 0) = #e5e5e5 — the same step the border sits on.
+    surface_pressed: Color = Color.rgb8(229, 229, 229),
+    /// Foreground; oklch(0.145 0 0) = #0a0a0a.
+    text: Color = Color.rgb8(10, 10, 10),
+    /// Muted foreground; oklch(0.556 0 0) = #737373.
+    text_muted: Color = Color.rgb8(115, 115, 115),
+    /// Border/input hairline; oklch(0.922 0 0) = #e5e5e5.
+    border: Color = Color.rgb8(229, 229, 229),
+    /// Primary; oklch(0.488 0.243 264.376) = #1447e6 — the blue-violet
+    /// that identifies checked, active, and filled-primary states.
+    accent: Color = Color.rgb8(20, 71, 230),
+    /// Primary foreground; oklch(0.97 0.014 254.604) = #eff6ff — a
+    /// blue-tinted near-white that reads as white on the primary.
+    accent_text: Color = Color.rgb8(239, 246, 255),
+    /// Destructive; oklch(0.577 0.245 27.325) = #e7000b.
+    destructive: Color = Color.rgb8(231, 0, 11),
     destructive_text: Color = Color.rgb8(250, 250, 250),
     success: Color = Color.rgb8(22, 163, 74),
     success_text: Color = Color.rgb8(250, 250, 250),
@@ -81,9 +103,12 @@ pub const ColorTokens = struct {
     /// actually need, and nothing else in the palette competes with it.
     info: Color = Color.rgb8(124, 58, 237),
     info_text: Color = Color.rgb8(250, 250, 250),
-    focus_ring: Color = Color.rgb8(24, 24, 27),
+    /// Ring; oklch(0.708 0 0) = #a1a1a1 — a mid gray so the focus ring
+    /// reads as an outline, not a second border color.
+    focus_ring: Color = Color.rgb8(161, 161, 161),
     shadow: Color = Color.rgba8(0, 0, 0, 26),
-    disabled: Color = Color.rgb8(244, 244, 245),
+    /// Disabled wash; the muted surface step, oklch(0.97 0 0) = #f5f5f5.
+    disabled: Color = Color.rgb8(245, 245, 245),
 
     pub fn theme(color_scheme: ColorScheme, contrast: ColorContrast) ColorTokens {
         return switch (color_scheme) {
@@ -104,16 +129,32 @@ pub const ColorTokens = struct {
 
     pub fn dark() ColorTokens {
         return .{
-            .background = Color.rgb8(9, 9, 11),
-            .surface = Color.rgb8(24, 24, 27),
-            .surface_subtle = Color.rgb8(39, 39, 42),
-            .surface_pressed = Color.rgb8(63, 63, 70),
+            // oklch(0.145 0 0) = #0a0a0a.
+            .background = Color.rgb8(10, 10, 10),
+            // Card/popover one step LIGHTER than the background:
+            // oklch(0.205 0 0) = #171717 — elevation by lightness.
+            .surface = Color.rgb8(23, 23, 23),
+            // Muted/accent surface; oklch(0.269 0 0) = #262626.
+            .surface_subtle = Color.rgb8(38, 38, 38),
+            // "Input" surface and pressed wash: white at 15% alpha, so
+            // pressed states and switch tracks tint whatever they sit on
+            // (the dark-mode input treatment).
+            .surface_pressed = Color.rgba8(255, 255, 255, 38),
+            // oklch(0.985 0 0) = #fafafa.
             .text = Color.rgb8(250, 250, 250),
-            .text_muted = Color.rgb8(161, 161, 170),
-            .border = Color.rgb8(39, 39, 42),
-            .accent = Color.rgb8(250, 250, 250),
-            .accent_text = Color.rgb8(9, 9, 11),
-            .destructive = Color.rgb8(239, 68, 68),
+            // Muted foreground; oklch(0.708 0 0) = #a1a1a1.
+            .text_muted = Color.rgb8(161, 161, 161),
+            // Dark borders are translucent white (10%), not a gray fill:
+            // hairlines brighten what they overlap instead of muddying it.
+            .border = Color.rgba8(255, 255, 255, 26),
+            // Primary; oklch(0.424 0.199 265.638) = #193cb8 — the same
+            // blue-violet hue, stepped down for dark surfaces.
+            .accent = Color.rgb8(25, 60, 184),
+            // Primary foreground stays the blue-tinted near-white,
+            // oklch(0.97 0.014 254.604) = #eff6ff.
+            .accent_text = Color.rgb8(239, 246, 255),
+            // Destructive; oklch(0.704 0.191 22.216) = #ff6467.
+            .destructive = Color.rgb8(255, 100, 103),
             .destructive_text = Color.rgb8(250, 250, 250),
             .success = Color.rgb8(34, 197, 94),
             .success_text = Color.rgb8(9, 9, 11),
@@ -121,9 +162,11 @@ pub const ColorTokens = struct {
             .warning_text = Color.rgb8(9, 9, 11),
             .info = Color.rgb8(167, 139, 250),
             .info_text = Color.rgb8(9, 9, 11),
-            .focus_ring = Color.rgb8(212, 212, 216),
+            // Ring; oklch(0.556 0 0) = #737373.
+            .focus_ring = Color.rgb8(115, 115, 115),
             .shadow = Color.rgba8(0, 0, 0, 150),
-            .disabled = Color.rgb8(39, 39, 42),
+            // Disabled wash; the muted step, oklch(0.269 0 0) = #262626.
+            .disabled = Color.rgb8(38, 38, 38),
         };
     }
 
@@ -131,12 +174,16 @@ pub const ColorTokens = struct {
         return .{
             .background = Color.rgb8(255, 255, 255),
             .surface = Color.rgb8(255, 255, 255),
-            .surface_subtle = Color.rgb8(243, 244, 246),
-            .surface_pressed = Color.rgb8(229, 231, 235),
+            // The standard theme's neutral steps, kept on the same scale.
+            .surface_subtle = Color.rgb8(245, 245, 245),
+            .surface_pressed = Color.rgb8(229, 229, 229),
             .text = Color.rgb8(0, 0, 0),
-            .text_muted = Color.rgb8(55, 65, 81),
+            .text_muted = Color.rgb8(64, 64, 64),
             .border = Color.rgba8(0, 0, 0, 180),
-            .accent = Color.rgb8(0, 0, 0),
+            // The dark-scheme primary (oklch(0.424 0.199 265.638) =
+            // #193cb8): same blue-violet identity, deep enough for
+            // 8.8:1 against the near-white accent text.
+            .accent = Color.rgb8(25, 60, 184),
             .accent_text = Color.rgb8(255, 255, 255),
             .destructive = Color.rgb8(127, 29, 29),
             .destructive_text = Color.rgb8(255, 255, 255),
@@ -146,9 +193,11 @@ pub const ColorTokens = struct {
             .warning_text = Color.rgb8(255, 255, 255),
             .info = Color.rgb8(76, 29, 149),
             .info_text = Color.rgb8(255, 255, 255),
-            .focus_ring = Color.rgb8(0, 84, 197),
+            // The primary itself (oklch(0.488 0.243 264.376) = #1447e6):
+            // high-contrast rings should shout, and the brand blue does.
+            .focus_ring = Color.rgb8(20, 71, 230),
             .shadow = Color.rgba8(0, 0, 0, 96),
-            .disabled = Color.rgb8(156, 163, 175),
+            .disabled = Color.rgb8(163, 163, 163),
         };
     }
 
@@ -159,9 +208,12 @@ pub const ColorTokens = struct {
             .surface_subtle = Color.rgb8(23, 23, 23),
             .surface_pressed = Color.rgb8(38, 38, 38),
             .text = Color.rgb8(255, 255, 255),
-            .text_muted = Color.rgb8(229, 231, 235),
+            .text_muted = Color.rgb8(229, 229, 229),
             .border = Color.rgba8(255, 255, 255, 190),
-            .accent = Color.rgb8(255, 255, 255),
+            // A lifted primary (oklch(0.707 0.165 254.624) = #51a2ff):
+            // the blue-violet identity at 7.9:1 against black accent
+            // text, replacing the old hueless white accent.
+            .accent = Color.rgb8(81, 162, 255),
             .accent_text = Color.rgb8(0, 0, 0),
             .destructive = Color.rgb8(248, 113, 113),
             .destructive_text = Color.rgb8(0, 0, 0),
@@ -221,6 +273,9 @@ pub const SpacingTokens = struct {
     xl: f32 = 24,
 };
 
+/// Derived from a 10px base radius the way shadcn/ui derives from
+/// `--radius`: lg is the base, md steps down 2, sm steps down 4, and xl
+/// steps up 4. Buttons and inputs sit on md; cards and surfaces on lg.
 pub const RadiusTokens = struct {
     sm: f32 = 6,
     md: f32 = 8,

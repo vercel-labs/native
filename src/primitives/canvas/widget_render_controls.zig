@@ -147,17 +147,7 @@ pub fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
             .width = buttonStrokeWidth(widget, tokens),
         },
     });
-    if (widget.state.focused) {
-        try builder.strokeRect(.{
-            .id = widgetPartId(widget.id, 3),
-            .rect = widget.frame,
-            .radius = radius,
-            .stroke = .{
-                .fill = widgetFocusRingFill(widget, tokens),
-                .width = tokens.stroke.focus,
-            },
-        });
-    }
+    if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 3, widget.frame, radius);
     const content_color = buttonTextColorForWidget(widget, tokens);
     const icon = if (widget.icon.len > 0) icon_model.resolve(widget.icon) else null;
     if (icon) |resolved| {
@@ -225,10 +215,11 @@ pub fn emitIconButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTok
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else buttonBorderFill(widget, tokens),
-            .width = if (widget.state.focused) tokens.stroke.focus else buttonStrokeWidth(widget, tokens),
+            .fill = buttonBorderFill(widget, tokens),
+            .width = buttonStrokeWidth(widget, tokens),
         },
     });
+    if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 15, widget.frame, radius);
     // Real vector icons: `widget.icon` first, then an icon-name `text`
     // (so `el(.icon_button, .{ .text = "play" })` upgrades from glyph to
     // vector); any other text keeps the historical glyph rendering.
@@ -343,10 +334,11 @@ pub fn emitSelectWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else widgetBorderFill(widget, visual.border orelse tokens.colors.border),
-            .width = if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, visual, tokens.stroke.regular),
+            .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+            .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
     });
+    if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 6, widget.frame, radius);
     if (visible_text.len > 0) {
         const text_color = if (is_placeholder)
             widgetForegroundColor(widget, tokens, tokens.colors.text_muted)
@@ -406,10 +398,11 @@ pub fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignToke
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else textInputBorderFill(widget, visual, tokens.colors.border),
-            .width = if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, visual, tokens.stroke.regular),
+            .fill = textInputBorderFill(widget, visual, tokens.colors.border),
+            .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
     });
+    if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 7, widget.frame, radius);
     if (clips_text) try builder.pushClip(.{ .id = widgetPartId(widget.id, 16), .rect = clip_rect, .radius = radius });
     if (selection_range) |range| {
         if (!range.isCollapsed(widget.text.len)) {
@@ -466,10 +459,11 @@ pub fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTo
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else textInputBorderFill(widget, visual, tokens.colors.border),
-            .width = if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, visual, tokens.stroke.regular),
+            .fill = textInputBorderFill(widget, visual, tokens.colors.border),
+            .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
     });
+    if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 14, widget.frame, radius);
     try emitSearchFieldIcon(builder, widget, tokens, icon_size);
     if (selection_range) |range| {
         if (!range.isCollapsed(widget.text.len)) {
@@ -520,22 +514,17 @@ fn emitComboboxChevron(builder: *Builder, widget: Widget, tokens: DesignTokens, 
 }
 
 fn emitSearchFieldIcon(builder: *Builder, widget: Widget, tokens: DesignTokens, icon_size: f32) Error!void {
+    // The registry `search` icon (a true circle lowered to kappa cubics
+    // plus a handle), not a hand-drawn line box: the glass stays round at
+    // every size because the circle flattens in viewBox units before the
+    // icon transform scales it down, so 12-14px fields keep real arcs.
+    const icon = icon_model.resolve("search") orelse return;
     const left = widget.frame.x + widgetControlInset(widget, tokens, tokens.spacing.md);
     const top = widget.frame.y + @max(0, (widget.frame.height - icon_size) * 0.5);
-    const box = icon_size * 0.58;
-    const p0 = pixelSnapGeometryPoint(tokens, geometry.PointF.init(left, top));
-    const p1 = pixelSnapGeometryPoint(tokens, geometry.PointF.init(left + box, top));
-    const p2 = pixelSnapGeometryPoint(tokens, geometry.PointF.init(left + box, top + box));
-    const p3 = pixelSnapGeometryPoint(tokens, geometry.PointF.init(left, top + box));
-    const tail = pixelSnapGeometryPoint(tokens, geometry.PointF.init(left + icon_size, top + icon_size));
+    const icon_frame = geometry.RectF.init(left, top, icon_size, icon_size);
     const visual = textInputControlVisualTokens(widget, tokens);
-    const stroke = Stroke{ .fill = colorFill(widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted)), .width = tokens.stroke.regular };
-
-    try builder.drawLine(.{ .id = widgetPartId(widget.id, 3), .from = p0, .to = p1, .stroke = stroke });
-    try builder.drawLine(.{ .id = widgetPartId(widget.id, 4), .from = p1, .to = p2, .stroke = stroke });
-    try builder.drawLine(.{ .id = widgetPartId(widget.id, 5), .from = p2, .to = p3, .stroke = stroke });
-    try builder.drawLine(.{ .id = widgetPartId(widget.id, 6), .from = p3, .to = p0, .stroke = stroke });
-    try builder.drawLine(.{ .id = widgetPartId(widget.id, 7), .from = p2, .to = tail, .stroke = stroke });
+    const color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
+    try emitVectorIcon(builder, widget.id, 3, icon_frame, color, icon);
 }
 
 pub fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
@@ -677,30 +666,37 @@ pub fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: Des
     const radius = controlRadius(widget, visual, tokens.radius.md);
     const text_size = widgetLabelTextSize(widget, tokens);
     const text_inset = widgetControlInset(widget, tokens, tokens.spacing.md);
+    // The tab-trigger treatment: the active segment lifts to the page
+    // surface with a hairline border, inactive segments sit on the muted
+    // wash with muted text — selection reads by elevation, not by an
+    // accent fill.
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = widget.frame,
         .radius = radius,
         .fill = if (selected)
-            colorFill(widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent))
+            colorFill(widgetAccentColor(widget, visual.active_background orelse tokens.colors.surface))
         else
-            colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, false, widget.state.hovered, tokens.colors.surface))),
+            colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, false, widget.state.hovered, tokens.colors.surface_subtle))),
     });
-    try builder.strokeRect(.{
-        .id = widgetPartId(widget.id, 2),
-        .rect = widget.frame,
-        .radius = radius,
-        .stroke = .{
-            .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else widgetBorderFill(widget, visual.border orelse tokens.colors.border),
-            .width = if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, visual, tokens.stroke.regular),
-        },
-    });
+    if (selected) {
+        try builder.strokeRect(.{
+            .id = widgetPartId(widget.id, 2),
+            .rect = widget.frame,
+            .radius = radius,
+            .stroke = .{
+                .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+                .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
+            },
+        });
+    }
+    if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 4, widget.frame, radius);
     try builder.drawText(.{
         .id = widgetPartId(widget.id, 3),
         .font_id = tokens.typography.font_id,
         .size = text_size,
         .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset)),
-        .color = if (selected) widgetAccentForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.accent_text) else widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text),
+        .color = if (selected) widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text) else widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted),
         .text = widget.text,
         .text_layout = boundedTextLayout(widget.frame, text_size, text_inset, .center, .none, tokens),
     });
@@ -710,7 +706,10 @@ pub fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignToken
     const visual = selectionControlVisualTokens(widget, tokens);
     const box = checkboxWidgetBoxRect(widget, tokens);
     const selected = booleanControlSelected(widget);
-    const radius = controlRadius(widget, visual, tokens.radius.sm);
+    // A literal 4px default, not the sm radius token: on a 16px box the
+    // 6px token reads nearly round; 4px keeps the square-with-softened-
+    // corners shape the checkbox is known by.
+    const radius = controlRadius(widget, visual, 4);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = box,
@@ -765,14 +764,16 @@ pub fn emitRadioWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
         .id = widgetPartId(widget.id, 2),
         .rect = circle,
         .radius = radius,
+        // The border stays on the input hairline even when selected —
+        // the primary-colored dot alone carries the checked state.
         .stroke = .{
-            .fill = if (selected) widgetAccentFill(widget, visual.border orelse visual.active_background orelse tokens.colors.accent) else widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+            .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
     });
     if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 3, circle, radius);
     if (selected) {
-        const dot_size = @max(0, circle.height * 0.48);
+        const dot_size = @max(0, circle.height * 0.5);
         const dot = pixelSnapGeometryRect(tokens, geometry.RectF.init(
             circle.x + (circle.width - dot_size) * 0.5,
             circle.y + (circle.height - dot_size) * 0.5,
@@ -811,20 +812,32 @@ pub fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
         else
             colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, false, widget.state.hovered, tokens.colors.surface_pressed))),
     });
-    try builder.strokeRect(.{
-        .id = widgetPartId(widget.id, 2),
-        .rect = track,
-        .radius = track_radius,
-        .stroke = .{
-            .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
-            .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
-        },
-    });
+    // Borderless by default: the switch is a filled pill (primary when
+    // on, the input wash when off) whose near-white thumb provides the
+    // edge — a track hairline reads as chrome the control doesn't have.
+    // Themes that opt into a border (a color or an explicit width on
+    // the toggle control tokens) still get the stroked track.
+    const wants_track_stroke = widget.style.border != null or visual.border != null;
+    const track_stroke_width = controlStrokeWidth(widget, visual, if (wants_track_stroke) tokens.stroke.regular else 0);
+    if (track_stroke_width > 0) {
+        try builder.strokeRect(.{
+            .id = widgetPartId(widget.id, 2),
+            .rect = track,
+            .radius = track_radius,
+            .stroke = .{
+                .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+                .width = track_stroke_width,
+            },
+        });
+    }
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 3),
         .rect = knob,
         .radius = controlRadius(widget, visual, knob.height * 0.5),
-        .fill = colorFill(if (selected) widgetAccentForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.accent_text) else widgetBackgroundColor(widget, visual.foreground orelse tokens.colors.surface)),
+        // The thumb is near-white in both states and schemes (the
+        // primary-foreground tint), so it stays legible on the primary
+        // track and on the dark input wash alike.
+        .fill = colorFill(if (selected) widgetAccentForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.accent_text) else widgetBackgroundColor(widget, visual.foreground orelse tokens.colors.accent_text)),
     });
     if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 4, track, track_radius);
     try emitControlLabelWithColor(builder, widget, tokens, track.x + track.width + widgetControlInset(widget, tokens, tokens.spacing.sm), 5, visual.foreground orelse tokens.colors.text);
@@ -839,11 +852,14 @@ pub fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
     const track_radius = controlRadius(widget, visual, track.height * 0.5);
     const knob_radius = controlRadius(widget, visual, knob.height * 0.5);
 
+    // Track on the muted wash, filled range on the primary, and a
+    // near-white thumb ringed by a primary hairline — the slider reads
+    // as one primary-accented control rather than knob-with-border.
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = track,
         .radius = track_radius,
-        .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_pressed)),
+        .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle)),
     });
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 2),
@@ -855,21 +871,23 @@ pub fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
         .id = widgetPartId(widget.id, 3),
         .rect = knob,
         .radius = knob_radius,
-        .fill = colorFill(if (widget.state.disabled) tokens.colors.disabled else widgetBackgroundColor(widget, visual.foreground orelse tokens.colors.surface)),
+        .fill = colorFill(if (widget.state.disabled) tokens.colors.disabled else widgetBackgroundColor(widget, visual.foreground orelse tokens.colors.accent_text)),
     });
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 4),
         .rect = knob,
         .radius = knob_radius,
         .stroke = .{
-            .fill = if (widget.state.focused) widgetFocusRingFill(widget, tokens) else widgetBorderFill(widget, visual.border orelse tokens.colors.border),
-            .width = if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, visual, tokens.stroke.regular),
+            .fill = widgetBorderFill(widget, visual.border orelse (if (widget.state.disabled) tokens.colors.border else widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent))),
+            .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
     });
+    if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 5, knob, knob_radius);
 }
 
 pub fn checkboxWidgetBoxRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
-    const box_size = @min(@max(widgetSizedDensityValue(widget, tokens, 14), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
+    // 16px box at default size/density — the size-4 checkbox metric.
+    const box_size = @min(@max(widgetSizedDensityValue(widget, tokens, 16), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
     return pixelSnapGeometryRect(tokens, geometry.RectF.init(
         widget.frame.x,
         widget.frame.y + (widget.frame.height - box_size) * 0.5,
@@ -879,7 +897,8 @@ pub fn checkboxWidgetBoxRect(widget: Widget, tokens: DesignTokens) geometry.Rect
 }
 
 pub fn radioWidgetCircleRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
-    const circle_size = @min(@max(widgetSizedDensityValue(widget, tokens, 14), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
+    // 16px circle at default size/density — the size-4 radio metric.
+    const circle_size = @min(@max(widgetSizedDensityValue(widget, tokens, 16), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
     return pixelSnapGeometryRect(tokens, geometry.RectF.init(
         widget.frame.x,
         widget.frame.y + (widget.frame.height - circle_size) * 0.5,
@@ -889,7 +908,10 @@ pub fn radioWidgetCircleRect(widget: Widget, tokens: DesignTokens) geometry.Rect
 }
 
 pub fn toggleWidgetTrackRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
-    const track_width = @min(widget.frame.width, @max(widgetSizedDensityValue(widget, tokens, 36), widget.frame.height * 1.75));
+    // 44x24 track at default size/density, giving the 20px thumb (track
+    // height minus the 2px inset per side) 20px of travel — the classic
+    // switch proportion, and wide enough that on/off read at a glance.
+    const track_width = @min(widget.frame.width, @max(widgetSizedDensityValue(widget, tokens, 44), widget.frame.height * 1.75));
     const track_height = @min(widget.frame.height, widgetSizedDensityValue(widget, tokens, 24));
     return pixelSnapGeometryRect(tokens, geometry.RectF.init(
         widget.frame.x,
@@ -900,7 +922,9 @@ pub fn toggleWidgetTrackRect(widget: Widget, tokens: DesignTokens) geometry.Rect
 }
 
 fn sliderWidgetTrackRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
-    const track_height: f32 = widgetSizedDensityValue(widget, tokens, 4);
+    // 6px track — thick enough for the muted wash to read against the
+    // page at 1x without turning the slider into a progress bar.
+    const track_height: f32 = widgetSizedDensityValue(widget, tokens, 6);
     return pixelSnapGeometryRect(tokens, geometry.RectF.init(
         widget.frame.x,
         widget.frame.y + (widget.frame.height - track_height) * 0.5,
@@ -911,7 +935,8 @@ fn sliderWidgetTrackRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
 
 pub fn sliderWidgetKnobRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
     const value = std.math.clamp(widget.value, 0, 1);
-    const knob_size = @min(@max(widgetSizedDensityValue(widget, tokens, 14), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
+    // 16px thumb at default size/density — the size-4 slider thumb.
+    const knob_size = @min(@max(widgetSizedDensityValue(widget, tokens, 16), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
     const knob_x = std.math.clamp(
         widget.frame.x + widget.frame.width * value - knob_size * 0.5,
         widget.frame.x,
@@ -930,11 +955,14 @@ pub fn emitProgressWidget(builder: *Builder, widget: Widget, tokens: DesignToken
     const visual = selectionControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, @min(tokens.radius.md, widget.frame.height * 0.5));
     if (progress < 1) {
+        // The unfilled track is the primary at 20% alpha, so the bar
+        // reads as one hue (filled primary ahead of its own tint) rather
+        // than primary-on-gray.
         try builder.fillRoundedRect(.{
             .id = widgetPartId(widget.id, 1),
             .rect = widget.frame,
             .radius = radius,
-            .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_pressed)),
+            .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse widget_render_style.colorWithAlpha(widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent), 0.2))),
         });
     }
     if (progress > 0) {
@@ -951,11 +979,14 @@ fn emitWidgetFocusRing(builder: *Builder, widget: Widget, tokens: DesignTokens, 
     return emitWidgetFocusRingForRect(builder, widget, tokens, slot, widget.frame, widgetRadius(widget, tokens.radius.md));
 }
 
+/// The ring-offset focus treatment: the control keeps its own border
+/// and the ring strokes a concentric rounded rect 2px outside it, so
+/// focus adds an outline instead of recoloring the control's edge.
 fn emitWidgetFocusRingForRect(builder: *Builder, widget: Widget, tokens: DesignTokens, slot: ObjectId, rect: geometry.RectF, radius: Radius) Error!void {
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, slot),
-        .rect = rect,
-        .radius = radius,
+        .rect = widget_render_style.focusRingRect(rect),
+        .radius = widget_render_style.focusRingRadius(radius),
         .stroke = .{
             .fill = widgetFocusRingFill(widget, tokens),
             .width = tokens.stroke.focus,

@@ -764,19 +764,24 @@ test "widget icons expose image and button semantics" {
         else => return error.TestUnexpectedResult,
     }
 
-    var button_commands: [3]CanvasCommand = undefined;
+    var button_commands: [4]CanvasCommand = undefined;
     var button_builder = Builder.init(&button_commands);
     try emitWidgetTree(&button_builder, children[1], tokens);
     const button_display_list = button_builder.displayList();
-    try std.testing.expectEqual(@as(usize, 3), button_display_list.commandCount());
-    switch (button_display_list.commands[1]) {
+    // Focus no longer restyles the border: fill, border, offset focus
+    // ring, then the glyph.
+    try std.testing.expectEqual(@as(usize, 4), button_display_list.commandCount());
+    switch (button_display_list.commands[2]) {
         .stroke_rect => |stroke| {
             try std.testing.expectEqual(@as(f32, 4), stroke.stroke.width);
             try expectFillColor(tokens.colors.focus_ring, stroke.stroke.fill);
+            // The ring sits 2px outside the control frame.
+            try std.testing.expectEqual(@as(f32, 40 - 2), stroke.rect.x);
+            try std.testing.expectEqual(@as(f32, 32 + 4), stroke.rect.width);
         },
         else => return error.TestUnexpectedResult,
     }
-    switch (button_display_list.commands[2]) {
+    switch (button_display_list.commands[3]) {
         .draw_text => |text| {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(3, 3)), text.id);
             try std.testing.expectEqualStrings("+", text.text);
@@ -863,19 +868,22 @@ test "widget text fields expose textbox semantics and render focused chrome" {
         .colors = .{ .focus_ring = Color.rgb8(1, 2, 3) },
         .stroke = .{ .focus = 3 },
     };
-    var commands: [3]CanvasCommand = undefined;
+    var commands: [4]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, text_field, tokens);
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
-    switch (display_list.commands[1]) {
+    // Fill, border, offset focus ring, text: focus adds a ring instead
+    // of recoloring the border.
+    try std.testing.expectEqual(@as(usize, 4), display_list.commandCount());
+    switch (display_list.commands[2]) {
         .stroke_rect => |stroke| {
             try std.testing.expectEqual(@as(f32, 3), stroke.stroke.width);
             try expectFillColor(tokens.colors.focus_ring, stroke.stroke.fill);
+            try std.testing.expectEqual(@as(f32, 10 - 2), stroke.rect.x);
         },
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[2]) {
+    switch (display_list.commands[3]) {
         .draw_text => |text| try std.testing.expectEqualStrings("search terms", text.text),
         else => return error.TestUnexpectedResult,
     }
@@ -1060,11 +1068,12 @@ test "widget selects expose trigger semantics and render chevron chrome" {
             },
         },
     };
-    var commands: [5]CanvasCommand = undefined;
+    var commands: [6]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, select, tokens);
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 5), display_list.commandCount());
+    // Fill, border, offset focus ring, text, then the two chevron lines.
+    try std.testing.expectEqual(@as(usize, 6), display_list.commandCount());
     switch (display_list.commands[0]) {
         .fill_rounded_rect => |fill| {
             try expectFillColor(Color.rgb8(20, 24, 28), fill.fill);
@@ -1074,12 +1083,20 @@ test "widget selects expose trigger semantics and render chevron chrome" {
     }
     switch (display_list.commands[1]) {
         .stroke_rect => |stroke| {
-            try std.testing.expectEqual(@as(f32, 3), stroke.stroke.width);
-            try expectFillColor(tokens.colors.focus_ring, stroke.stroke.fill);
+            try std.testing.expectEqual(@as(f32, 2), stroke.stroke.width);
+            try expectFillColor(Color.rgb8(80, 90, 100), stroke.stroke.fill);
         },
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[2]) {
+        .stroke_rect => |stroke| {
+            try std.testing.expectEqual(@as(f32, 3), stroke.stroke.width);
+            try expectFillColor(tokens.colors.focus_ring, stroke.stroke.fill);
+            try std.testing.expectEqual(@as(f32, 10 - 2), stroke.rect.x);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[3]) {
         .draw_text => |text| {
             try std.testing.expectEqualStrings("Production", text.text);
             try std.testing.expectEqualDeep(Color.rgb8(238, 242, 246), text.color);
@@ -1088,11 +1105,11 @@ test "widget selects expose trigger semantics and render chevron chrome" {
         },
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[3]) {
+    switch (display_list.commands[4]) {
         .draw_line => |line| try expectFillColor(Color.rgb8(238, 242, 246), line.stroke.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[4]) {
+    switch (display_list.commands[5]) {
         .draw_line => |line| try expectFillColor(Color.rgb8(238, 242, 246), line.stroke.fill),
         else => return error.TestUnexpectedResult,
     }
@@ -1164,16 +1181,25 @@ test "widget search fields expose textbox semantics and render search chrome" {
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, search_field, tokens);
     const display_list = builder.displayList();
+    // Fill, border, offset focus ring, then the vector magnifier
+    // (transform, circle + handle stroke paths, inverse transform),
+    // text, caret.
     try std.testing.expectEqual(@as(usize, 9), display_list.commandCount());
-    switch (display_list.commands[1]) {
+    switch (display_list.commands[2]) {
         .stroke_rect => |stroke| {
             try std.testing.expectEqual(@as(f32, 3), stroke.stroke.width);
             try expectFillColor(tokens.colors.focus_ring, stroke.stroke.fill);
         },
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[2]) {
-        .draw_line => |line| try std.testing.expectEqual(@as(ObjectId, widgetPartId(10, 3)), line.id),
+    // The magnifier is the registry `search` icon: a true circle as a
+    // stroked path, not the old hand-drawn line box.
+    switch (display_list.commands[4]) {
+        .stroke_path => |stroke| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(10, 4)), stroke.id);
+            const registered = canvas.icons.find("search").?;
+            try std.testing.expectEqual(registered.elements.ptr, stroke.elements.ptr);
+        },
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[7]) {
@@ -1212,8 +1238,9 @@ test "widget comboboxes expose textbox semantics and render trigger chrome" {
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, combobox, .{});
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 10), display_list.commandCount());
-    switch (display_list.commands[7]) {
+    // Fill, border, vector magnifier (4 commands), text, two chevrons.
+    try std.testing.expectEqual(@as(usize, 9), display_list.commandCount());
+    switch (display_list.commands[6]) {
         .draw_text => |text| {
             try std.testing.expectEqualStrings("components", text.text);
             try std.testing.expect(text.text_layout != null);
@@ -1221,11 +1248,11 @@ test "widget comboboxes expose textbox semantics and render trigger chrome" {
         },
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[8]) {
+    switch (display_list.commands[7]) {
         .draw_line => |line| try std.testing.expectEqual(@as(ObjectId, widgetPartId(14, 12)), line.id),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[9]) {
+    switch (display_list.commands[8]) {
         .draw_line => |line| try std.testing.expectEqual(@as(ObjectId, widgetPartId(14, 13)), line.id),
         else => return error.TestUnexpectedResult,
     }
@@ -1264,16 +1291,17 @@ test "widget textareas expose multiline textbox semantics and render wrapped tex
     const offset = textOffsetForWidgetPoint(textarea, geometry.PointF.init(28, 36), .{}) orelse return error.TestUnexpectedResult;
     try std.testing.expect(offset <= textarea.text.len);
 
-    var commands: [6]CanvasCommand = undefined;
+    var commands: [7]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, textarea, .{});
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 6), display_list.commandCount());
-    switch (display_list.commands[2]) {
+    // Fill, border, offset focus ring, clip, text, caret, pop.
+    try std.testing.expectEqual(@as(usize, 7), display_list.commandCount());
+    switch (display_list.commands[3]) {
         .push_clip => |clip| try expectRectApprox(textInputViewportForWidget(textarea, .{}).?, clip.rect),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[3]) {
+    switch (display_list.commands[4]) {
         .draw_text => |text| {
             try std.testing.expectEqualStrings("First line Second line", text.text);
             try std.testing.expect(text.text_layout != null);
@@ -1282,11 +1310,11 @@ test "widget textareas expose multiline textbox semantics and render wrapped tex
         },
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[4]) {
+    switch (display_list.commands[5]) {
         .draw_line => |line| try expectFillColor(ColorTokens.light().focus_ring, line.stroke.fill),
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(CanvasCommand.pop_clip, display_list.commands[5]);
+    try std.testing.expectEqual(CanvasCommand.pop_clip, display_list.commands[6]);
 }
 
 test "widget text fields render selection caret and composition ranges" {
@@ -1322,16 +1350,17 @@ test "widget text fields render selection caret and composition ranges" {
     try std.testing.expectEqual(@as(usize, 1), text_geometry.composition_rect_count);
     try expectRectApprox(geometry.RectF.init(36.352, 19.25, 16.1, 17.5), text_geometry.composition_bounds.?);
 
-    var commands: [6]CanvasCommand = undefined;
+    var commands: [7]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try layout.emitDisplayList(&builder, tokens);
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 5), display_list.commandCount());
-    switch (display_list.commands[2]) {
+    // Fill, border, offset focus ring, selection, text, composition.
+    try std.testing.expectEqual(@as(usize, 6), display_list.commandCount());
+    switch (display_list.commands[3]) {
         .fill_rounded_rect => |selection| try expectFillColor(textSelectionFillColor(composing, tokens), selection.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[3]) {
+    switch (display_list.commands[4]) {
         .draw_text => |text| {
             try std.testing.expectEqualStrings("abcdef", text.text);
             try std.testing.expect(text.text_layout != null);
@@ -1339,7 +1368,7 @@ test "widget text fields render selection caret and composition ranges" {
         },
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[4]) {
+    switch (display_list.commands[5]) {
         .draw_line => |line| try expectFillColor(affordance_color, line.stroke.fill),
         else => return error.TestUnexpectedResult,
     }
@@ -1352,12 +1381,12 @@ test "widget text fields render selection caret and composition ranges" {
         .text_selection = TextSelection.collapsed(2),
         .state = .{ .focused = true },
     };
-    var caret_commands: [4]CanvasCommand = undefined;
+    var caret_commands: [5]CanvasCommand = undefined;
     var caret_builder = Builder.init(&caret_commands);
     try emitWidgetTree(&caret_builder, caret, tokens);
     const caret_display_list = caret_builder.displayList();
-    try std.testing.expectEqual(@as(usize, 4), caret_display_list.commandCount());
-    switch (caret_display_list.commands[3]) {
+    try std.testing.expectEqual(@as(usize, 5), caret_display_list.commandCount());
+    switch (caret_display_list.commands[4]) {
         .draw_line => |line| {
             try expectFillColor(affordance_color, line.stroke.fill);
             try std.testing.expectEqual(line.from.x, line.to.x);
@@ -1392,22 +1421,23 @@ test "widget text fields render wrapped selection geometry" {
     try expectRectApprox(geometry.RectF.init(8, 10, 14.13, 25), text_geometry.selection_bounds.?);
 
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 5), display_list.commandCount());
-    switch (display_list.commands[2]) {
+    // Fill, border, offset focus ring, two selection rects, text.
+    try std.testing.expectEqual(@as(usize, 6), display_list.commandCount());
+    switch (display_list.commands[3]) {
         .fill_rounded_rect => |selection| {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(11, 3)), selection.id);
             try expectRectApprox(geometry.RectF.init(14.7, 10, 6.8, 12.5), selection.rect);
         },
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[3]) {
+    switch (display_list.commands[4]) {
         .fill_rounded_rect => |selection| {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(11, 13)), selection.id);
             try expectRectApprox(geometry.RectF.init(8, 22.5, 14.13, 12.5), selection.rect);
         },
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[4]) {
+    switch (display_list.commands[5]) {
         .draw_text => |text| {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(11, 4)), text.id);
             try std.testing.expectEqualStrings("AB CD", text.text);

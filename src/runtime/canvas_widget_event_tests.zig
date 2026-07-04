@@ -324,7 +324,8 @@ test "runtime dispatches routed canvas widget pointer events" {
     try std.testing.expectEqualStrings("tab", app_state.last_keyboard_key);
     try std.testing.expect(harness.runtime.invalidated);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.pendingDirtyRegions().len);
-    try std.testing.expectEqualDeep(geometry.RectF.init(9, 51, 142, 34), harness.runtime.pendingDirtyRegions()[0]);
+    // Focus dirty bounds include the ring's 2px outside offset.
+    try std.testing.expectEqualDeep(geometry.RectF.init(7, 49, 146, 38), harness.runtime.pendingDirtyRegions()[0]);
 
     const tab_snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expect(!tab_snapshot.widgets[1].focused);

@@ -410,7 +410,11 @@ test "dev-2 README renders through the mapper and the reference renderer" {
 // and re-flowed line breaks (em dashes now measure 0.913 em instead of
 // the flat 0.65 em, so "—no" renders with its real gap); spot-reviewed
 // the three biggest-moving bands for overlap or clipping — none.
-const dev2_readme_reference_signature: u64 = 1181242958105405837;
+// Regenerated for the shadcn default palette (2026-07-04): color-only —
+// foreground/border/panel neutrals moved to the neutral scale and links/
+// accents to the blue-violet primary; no metric feeding markdown layout
+// changed, so glyph and rule geometry are byte-identical.
+const dev2_readme_reference_signature: u64 = 9541408420961398904;
 
 
 test "bare URLs autolink at word boundaries with trailing punctuation trimmed" {

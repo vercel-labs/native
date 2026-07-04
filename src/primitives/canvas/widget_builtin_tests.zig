@@ -412,7 +412,9 @@ test "icon widgets render built-in vector icons as tinted path commands" {
         if (pixels[index] < 250) ink += 1;
     }
     try std.testing.expect(ink > 20);
-    try std.testing.expectEqual(@as(u64, 791826400385843778), support.referenceSurfaceSignature(&pixels));
+    // Regenerated for the shadcn default palette: the tint (the text
+    // token) moved from #09090b to #0a0a0a; same check-mark coverage.
+    try std.testing.expectEqual(@as(u64, 1722938743772709742), support.referenceSurfaceSignature(&pixels));
 
     // A non-registry text keeps the historical glyph rendering.
     const glyph = Widget{
@@ -643,19 +645,23 @@ test "design tokens provide theme and contrast palettes" {
     try std.testing.expectEqual(default_mono_font_family, light.typography.mono_font_family);
     try std.testing.expectEqualStrings("Geist", light.typography.bodyFamilyName());
     try std.testing.expectEqualStrings("Geist Mono", light.typography.monoFamilyName());
-    try std.testing.expectEqualDeep(Color.rgb8(9, 9, 11), light.colors.text);
-    try std.testing.expectEqualDeep(Color.rgb8(24, 24, 27), light.colors.accent);
-    try std.testing.expectEqualDeep(Color.rgb8(24, 24, 27), light.colors.focus_ring);
+    // The default palette is the shadcn neutral + blue preset (see
+    // ColorTokens): near-black foreground, blue-violet primary, mid-gray
+    // ring.
+    try std.testing.expectEqualDeep(Color.rgb8(10, 10, 10), light.colors.text);
+    try std.testing.expectEqualDeep(Color.rgb8(20, 71, 230), light.colors.accent);
+    try std.testing.expectEqualDeep(Color.rgb8(161, 161, 161), light.colors.focus_ring);
 
     const dark = DesignTokens.theme(.{ .color_scheme = .dark, .density = .compact });
     try std.testing.expectEqual(Density.compact, dark.density);
     try std.testing.expectEqualDeep(ColorTokens.dark(), dark.colors);
-    try std.testing.expectEqualDeep(Color.rgb8(9, 9, 11), dark.colors.background);
+    try std.testing.expectEqualDeep(Color.rgb8(10, 10, 10), dark.colors.background);
     try std.testing.expectEqualDeep(Color.rgb8(250, 250, 250), dark.colors.text);
-    try std.testing.expectEqualDeep(Color.rgb8(39, 39, 42), dark.colors.border);
-    try std.testing.expectEqualDeep(Color.rgb8(250, 250, 250), dark.colors.accent);
-    try std.testing.expectEqualDeep(Color.rgb8(9, 9, 11), dark.colors.accent_text);
-    try std.testing.expectEqualDeep(Color.rgb8(212, 212, 216), dark.colors.focus_ring);
+    // Dark hairlines are translucent white, not a gray fill.
+    try std.testing.expectEqualDeep(Color.rgba8(255, 255, 255, 26), dark.colors.border);
+    try std.testing.expectEqualDeep(Color.rgb8(25, 60, 184), dark.colors.accent);
+    try std.testing.expectEqualDeep(Color.rgb8(239, 246, 255), dark.colors.accent_text);
+    try std.testing.expectEqualDeep(Color.rgb8(115, 115, 115), dark.colors.focus_ring);
 
     const high_contrast = DesignTokens.theme(.{ .color_scheme = .dark, .contrast = .high, .density = .spacious });
     try std.testing.expectEqual(Density.spacious, high_contrast.density);

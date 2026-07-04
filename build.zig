@@ -966,12 +966,12 @@ pub fn build(b: *std.Build) void {
         \\  attempts=0
         \\  while [ "$attempts" -lt 50 ]; do
         \\    snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\    case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_commands=70'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
+        \\    case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_commands=67'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
         \\    attempts=$((attempts + 1))
         \\    sleep 0.1
         \\  done
-        \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_commands=70'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "dashboard GPU canvas did not present the retained display list as a packet" >&2; exit 1 ;; esac
-        \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'canvas_commands=70'*'widget_semantics=48'*) ;; *) echo "dashboard GPU canvas was missing retained commands or widget semantics" >&2; exit 1 ;; esac
+        \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_commands=67'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "dashboard GPU canvas did not present the retained display list as a packet" >&2; exit 1 ;; esac
+        \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'canvas_commands=67'*'widget_semantics=48'*) ;; *) echo "dashboard GPU canvas was missing retained commands or widget semantics" >&2; exit 1 ;; esac
         \\  first_frame_latency="$(printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/dashboard-canvas kind=gpu_surface.* gpu_first_frame_latency_ns=\([0-9][0-9]*\).*/\1/p')"
         \\  case "$first_frame_latency" in ''|*[!0-9]*) echo "dashboard GPU first frame latency was missing" >&2; exit 1 ;; esac
         \\  if [ "$first_frame_latency" -le 0 ]; then echo "dashboard GPU first frame latency was not recorded" >&2; exit 1; fi
@@ -1035,13 +1035,13 @@ pub fn build(b: *std.Build) void {
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
         \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  case "$snapshot" in *'window @w1 "Native SDK GPU Dashboard" bounds=('*' 1120x700)'*'view @w1/dashboard-canvas kind=gpu_surface'*'bounds=(0,0 1120x700)'*'gpu_nonblank=true'*'canvas_commands=70'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
+        \\  case "$snapshot" in *'window @w1 "Native SDK GPU Dashboard" bounds=('*' 1120x700)'*'view @w1/dashboard-canvas kind=gpu_surface'*'bounds=(0,0 1120x700)'*'gpu_nonblank=true'*'canvas_commands=67'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
         \\  attempts=$((attempts + 1))
         \\  sleep 0.1
         \\done
         \\case "$snapshot" in *'window @w1 "Native SDK GPU Dashboard" bounds=('*' 1120x700)'*) ;; *) echo "dashboard window resize was not reflected in snapshot" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'bounds=(0,0 1120x700)'*) ;; *) echo "dashboard GPU canvas did not relayout after resize" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_commands=70'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "dashboard GPU canvas did not remain packet-renderable after resize" >&2; exit 1 ;; esac
+        \\case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_commands=67'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "dashboard GPU canvas did not remain packet-renderable after resize" >&2; exit 1 ;; esac
         \\canvas_revision_after_resize="$(canvas_revision_from_snapshot)"
         \\case "$canvas_revision_after_resize" in ''|*[!0-9]*) echo "dashboard canvas revision was missing after resize" >&2; exit 1 ;; esac
         \\if [ "$canvas_revision_after_resize" -lt "$canvas_revision_before_resize" ]; then echo "dashboard canvas revision went backwards after resize: $canvas_revision_before_resize -> $canvas_revision_after_resize" >&2; exit 1; fi

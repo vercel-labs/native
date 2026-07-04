@@ -8,6 +8,7 @@ const event_model = @import("events.zig");
 const equality_model = @import("equality.zig");
 const widget_tree = @import("widget_tree.zig");
 const widget_render = @import("widget_render.zig");
+const widget_render_style = @import("widget_render_style.zig");
 const textSpansEqual = @import("text_spans.zig").textSpansEqual;
 const chartDataEqual = @import("chart.zig").chartDataEqual;
 
@@ -411,7 +412,10 @@ fn widgetFrameStrokeBounds(widget: Widget, tokens: DesignTokens) ?geometry.RectF
 
 fn widgetFocusPaintBounds(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
     if (!widget.state.focused or widgetFocusStrokeWidth(widget, tokens) <= 0) return null;
-    return strokeBounds(widgetFocusPaintRect(widget, tokens), tokens.stroke.focus);
+    // Focus rings stroke a rect offset OUTSIDE the control (the
+    // ring-offset treatment), so the damage rect inflates by the same
+    // offset the renderer uses.
+    return strokeBounds(widget_render_style.focusRingRect(widgetFocusPaintRect(widget, tokens)), tokens.stroke.focus);
 }
 
 fn widgetInteractiveStatePaintBounds(widget: Widget, tokens: DesignTokens) geometry.RectF {

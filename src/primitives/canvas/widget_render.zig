@@ -1265,15 +1265,11 @@ pub fn toggleWidgetKnobCommandId(id: ObjectId) ObjectId {
 
 pub fn toggleWidgetKnobTravel(widget: Widget, tokens: DesignTokens) f32 {
     if (!widgetSwitchControlKind(widget.kind)) return 0;
-    const knob_inset = densityValue(tokens, 2);
-    const track_width = @min(widget.frame.width, @max(densityValue(tokens, 36), widget.frame.height * 1.75));
-    const track_height = @min(widget.frame.height, densityValue(tokens, 24));
-    const track = pixelSnapGeometryRect(tokens, geometry.RectF.init(
-        widget.frame.x,
-        widget.frame.y + (widget.frame.height - track_height) * 0.5,
-        track_width,
-        track_height,
-    ));
+    // Shares the renderer's track/inset metrics (44x24 track, 2px thumb
+    // inset, both size- and density-scaled) so animated travel lands on
+    // exactly the painted on/off thumb positions.
+    const knob_inset = widget_metrics.widgetSizedDensityValue(widget, tokens, 2);
+    const track = widget_render_controls.toggleWidgetTrackRect(widget, tokens);
     const knob_size = @max(0, track.height - knob_inset * 2);
     const off_knob = pixelSnapGeometryRect(tokens, geometry.RectF.init(track.x + knob_inset, track.y + knob_inset, knob_size, knob_size));
     const on_knob = pixelSnapGeometryRect(tokens, geometry.RectF.init(

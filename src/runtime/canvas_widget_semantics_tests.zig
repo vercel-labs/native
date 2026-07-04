@@ -631,7 +631,8 @@ test "runtime clears focused canvas widget when layout replacement hides it" {
     try std.testing.expect(harness.runtime.invalidated);
     try std.testing.expect(harness.runtime.pendingDirtyRegions().len >= 2);
     try std.testing.expectEqualDeep(geometry.RectF.init(59.5, 79.5, 81, 33), harness.runtime.pendingDirtyRegions()[0]);
-    try std.testing.expectEqualDeep(geometry.RectF.init(59, 79, 82, 34), harness.runtime.pendingDirtyRegions()[1]);
+    // Focus dirty bounds include the ring's 2px outside offset.
+    try std.testing.expectEqualDeep(geometry.RectF.init(57, 77, 86, 38), harness.runtime.pendingDirtyRegions()[1]);
 
     const retained_after_hide = try harness.runtime.canvasDisplayList(1, "canvas");
     var saw_stale_focused_ring = false;

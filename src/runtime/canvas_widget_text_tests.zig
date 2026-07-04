@@ -1231,8 +1231,10 @@ test "runtime applies text input to focused canvas search fields" {
     var saw_inserted_text = false;
     for (display_list.commands) |command| {
         switch (command) {
-            .draw_line => |line| {
-                if (line.id == testCanvasWidgetPartId(2, 3)) {
+            // The magnifier is the vector `search` icon now: the circle
+            // strokes as a path in the icon's first stroke slot.
+            .stroke_path => |path| {
+                if (path.id == testCanvasWidgetPartId(2, 4)) {
                     saw_search_icon = true;
                 }
             },

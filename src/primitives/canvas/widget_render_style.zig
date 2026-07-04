@@ -1,4 +1,5 @@
 const std = @import("std");
+const geometry = @import("geometry");
 const drawing_model = @import("drawing.zig");
 const token_model = @import("tokens.zig");
 const widget_model = @import("widgets.zig");
@@ -10,6 +11,28 @@ const DesignTokens = token_model.DesignTokens;
 const ControlVisualTokens = token_model.ControlVisualTokens;
 const Widget = widget_model.Widget;
 const WidgetState = widget_model.WidgetState;
+
+/// How far the focus ring sits outside the control's border — the
+/// ring-offset treatment: the control keeps its own border and the ring
+/// floats a hairline gap outside it, so focus never restyles the control.
+pub const focus_ring_offset: f32 = 2;
+
+/// The frame the focus ring strokes: the control rect pushed out by the
+/// ring offset.
+pub fn focusRingRect(rect: geometry.RectF) geometry.RectF {
+    return rect.normalized().inflate(geometry.InsetsF.all(focus_ring_offset));
+}
+
+/// The ring's corner radius: the control's own radius grown by the
+/// offset so the ring stays concentric with the border it wraps.
+pub fn focusRingRadius(radius: Radius) Radius {
+    return .{
+        .top_left = radius.top_left + focus_ring_offset,
+        .top_right = radius.top_right + focus_ring_offset,
+        .bottom_right = radius.bottom_right + focus_ring_offset,
+        .bottom_left = radius.bottom_left + focus_ring_offset,
+    };
+}
 
 pub fn textInputAffordanceColor(widget: Widget, tokens: DesignTokens) Color {
     const visual = textInputControlVisualTokens(widget, tokens);
@@ -103,12 +126,22 @@ pub fn buttonFill(widget: Widget, tokens: DesignTokens) Fill {
             colorFill(widgetBackgroundColor(widget, visual.hover_background orelse tokens.colors.surface_subtle))
         else
             colorFill(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface)),
-        .primary => colorFill(widgetAccentColor(widget, buttonStateBackground(visual, active, widget.state.hovered, tokens.colors.accent))),
-        .secondary => colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, active, widget.state.hovered, if (active or widget.state.hovered) tokens.colors.surface_pressed else tokens.colors.surface_subtle))),
+        // Filled variants hover by dropping their fill to 90% alpha (80%
+        // for secondary) — the wash lightens on light surfaces and
+        // deepens on dark ones without a second color per scheme.
+        .primary => colorFill(widgetAccentColor(widget, buttonStateBackground(visual, active, widget.state.hovered, hoverWash(tokens.colors.accent, active, widget.state.hovered, 0.9)))),
+        .secondary => colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, active, widget.state.hovered, if (active) tokens.colors.surface_pressed else hoverWash(tokens.colors.surface_subtle, false, widget.state.hovered, 0.8)))),
         .outline => colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, active, widget.state.hovered, if (active or widget.state.hovered) tokens.colors.surface_subtle else transparentColor()))),
         .ghost => colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, active, widget.state.hovered, if (active or widget.state.hovered) tokens.colors.surface_subtle else transparentColor()))),
-        .destructive => colorFill(widgetAccentColor(widget, buttonStateBackground(visual, active, widget.state.hovered, tokens.colors.destructive))),
+        .destructive => colorFill(widgetAccentColor(widget, buttonStateBackground(visual, active, widget.state.hovered, hoverWash(tokens.colors.destructive, active, widget.state.hovered, 0.9)))),
     };
+}
+
+/// The hover state of a filled control: the base color at reduced
+/// alpha while hovered (and not pressed), the base color otherwise.
+fn hoverWash(base: Color, active: bool, hovered: bool, alpha: f32) Color {
+    if (hovered and !active) return colorWithAlpha(base, alpha * base.a);
+    return base;
 }
 
 pub fn buttonTextColorForWidget(widget: Widget, tokens: DesignTokens) Color {

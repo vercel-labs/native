@@ -460,10 +460,12 @@ fn widgetPartId(id: ObjectId, slot: ObjectId) ObjectId {
 }
 
 fn emitWidgetFocusRing(builder: *Builder, widget: Widget, tokens: DesignTokens, slot: ObjectId) Error!void {
+    // The shared ring-offset treatment: a concentric ring 2px outside
+    // the widget's own border (see widget_render_style).
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, slot),
-        .rect = widget.frame,
-        .radius = widgetRadius(widget, tokens.radius.md),
+        .rect = widget_render_style.focusRingRect(widget.frame),
+        .radius = widget_render_style.focusRingRadius(widgetRadius(widget, tokens.radius.md)),
         .stroke = .{
             .fill = widgetFocusRingFill(widget, tokens),
             .width = tokens.stroke.focus,
