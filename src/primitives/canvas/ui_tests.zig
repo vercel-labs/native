@@ -815,6 +815,56 @@ test "nav mounts the active page with stable position-derived identity" {
     try testing.expect(findTextContaining(clamped.root, "transcript") != null);
 }
 
+test "nav min_width declares the pane root's layout floor" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Split panes clamp against the pane ROOT's min_size; a chat/detail
+    // pane commonly roots in ui.nav, so the nav must be able to declare
+    // its own floor instead of stamping
+    // widget.layout.min_size.width post-build.
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(ui.nav(.{ .active = 0, .min_width = 360, .grow = 1 }, .{
+        ui.scroll(.{}, .{ui.text(.{}, "chat")}),
+    }));
+    try testing.expectEqual(@as(f32, 360), tree.root.layout.min_size.width);
+
+    // The empty-pages shape keeps the floor too.
+    var empty_ui = InboxUi.init(arena);
+    const empty = try empty_ui.finalize(empty_ui.nav(.{ .min_width = 240 }, .{}));
+    try testing.expectEqual(@as(f32, 240), empty.root.layout.min_size.width);
+}
+
+test "wrap on a non-text element warns in Debug but never fails the build" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Same contract as the stacking-container gap warning: wrap is
+    // text-leaf word wrapping only, rows never flow-wrap — the option on
+    // a container is silently inert and shipped apps carry it, so the
+    // diagnostic must stay a warning, never a
+    // failure. Raise the test log threshold so the intentional warn stays
+    // out of the test output.
+    const saved_log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = saved_log_level;
+
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(ui.row(.{ .wrap = true, .gap = 8 }, .{
+        ui.text(.{}, "a"),
+        ui.text(.{}, "b"),
+    }));
+    try testing.expectEqual(canvas.WidgetKind.row, tree.root.kind);
+
+    // wrap on a plain text leaf keeps working (and stays quiet): it
+    // becomes the single-span paragraph documented on ElementOptions.wrap.
+    var text_ui = InboxUi.init(arena);
+    const wrapped = try text_ui.finalize(text_ui.text(.{ .wrap = true }, "long message"));
+    try testing.expectEqual(@as(usize, 1), wrapped.root.spans.len);
+}
+
 test "gap on a stacking container warns in Debug but never fails the build" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

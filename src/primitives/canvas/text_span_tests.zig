@@ -518,3 +518,91 @@ test "span selection degrades to unsupported when spans alias other storage" {
     var rects: [4]canvas.TextSelectionRect = undefined;
     try testing.expectEqual(@as(usize, 0), text_spans.textSpanSelectionRects(paragraph, &spans, options, .{ .start = 0, .end = paragraph.len }, &rects).len);
 }
+
+// ------------------------------------------- measurement seam on run draws
+
+/// A CoreText-shaped stand-in: mono at the exact 0.6 em design pitch,
+/// sans at the estimator's advances minus a kerning residue — the
+/// relationship the live macOS provider exhibits (its sans lines measure
+/// 1.5–2.1% narrower than the kerning-free estimator).
+const KernedMeasure = struct {
+    fn measure(context: ?*anyopaque, font_id: canvas.FontId, size: f32, text: []const u8) f32 {
+        _ = context;
+        const estimated = text_metrics.estimateTextWidthForFont(font_id, text, size);
+        if (font_id == canvas.default_mono_font_id) return estimated;
+        return estimated * 0.98;
+    }
+};
+
+test "span run draws carry the measurement seam their layout positioned with" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = SpanUi.init(arena_state.allocator());
+
+    // The markdown shape that exposed the drift: prose + inline
+    // code (mono) + prose on one line, plus a mono table-cell paragraph.
+    const spans = [_]TextSpan{
+        .{ .text = "keep the " },
+        .{ .text = "experimental_", .monospace = true },
+        .{ .text = " name" },
+    };
+    const tree = try ui.finalize(ui.column(.{}, .{ui.paragraph(.{}, &spans)}));
+
+    const provider = text_metrics.TextMeasureProvider{ .measure_fn = KernedMeasure.measure };
+    var tokens = canvas.DesignTokens{};
+    tokens.text_measure = &provider;
+
+    var nodes: [32]canvas.WidgetLayoutNode = undefined;
+    const tree_layout = try canvas.layoutWidgetTreeWithTokens(tree.root, geometry.RectF.init(0, 0, 600, 200), tokens, &nodes);
+
+    var commands: [64]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try canvas.emitWidgetLayout(&builder, tree_layout, tokens);
+
+    // Every run command carries layout options with the SAME provider the
+    // run positions were measured with, and no wrap work (wrapping already
+    // happened at the span level). The reference renderer walks these
+    // advances, so a kerned prose run can no longer overpaint the mono
+    // span that follows it (the swallowed inter-span space class).
+    var text_commands: usize = 0;
+    var mono_commands: usize = 0;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .draw_text => |value| {
+                text_commands += 1;
+                const options = value.text_layout orelse return error.TestUnexpectedResult;
+                try testing.expectEqual(canvas.TextWrap.none, options.wrap);
+                try testing.expectEqual(@as(?*const text_metrics.TextMeasureProvider, &provider), options.measure);
+                if (value.font_id == canvas.default_mono_font_id) {
+                    mono_commands += 1;
+                    try testing.expectEqualStrings("experimental_", value.text);
+                }
+            },
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), text_commands);
+    try testing.expectEqual(@as(usize, 1), mono_commands);
+}
+
+test "provider-kerned prose runs never overlap the mono span that follows" {
+    const provider = text_metrics.TextMeasureProvider{ .measure_fn = KernedMeasure.measure };
+    const spans = [_]TextSpan{
+        .{ .text = "all remaining " },
+        .{ .text = "experimental_", .monospace = true },
+        .{ .text = " APIs" },
+    };
+    var runs: [text_spans.max_text_span_runs_per_paragraph]TextSpanRun = undefined;
+    const result = layout(&spans, .{ .size = 14, .max_width = 10_000, .measure = &provider }, &runs);
+
+    try testing.expectEqual(@as(usize, 3), result.runs.len);
+    for (result.runs[0 .. result.runs.len - 1], result.runs[1..]) |left, right| {
+        // Runs abut exactly at their provider-measured widths...
+        try testing.expectApproxEqAbs(left.x + left.width, right.x, 0.01);
+        // ...and the drawn width equals the measured width when the draw
+        // walks the same provider (the seam the emitted commands carry),
+        // so painted ink ends where the next run begins.
+        const drawn = text_metrics.measureTextWidthForFont(&provider, left.font_id, left.text, left.size);
+        try testing.expectApproxEqAbs(left.width, drawn, 0.01);
+    }
+}

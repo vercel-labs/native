@@ -125,11 +125,12 @@ pub fn estimateTextAdvanceForBytes(font_id: FontId, bytes: []const u8, size: f32
 /// a comptime `hmtx` table for printable ASCII, a runtime lookup against
 /// the embedded face for every other covered codepoint (so the estimate
 /// is definitionally in lockstep with the bytes the renderer inks), and
-/// two documented fallbacks for what the face cannot answer — East
+/// three documented fallbacks for what the face cannot answer — East
 /// Asian wide/fullwidth codepoints charge a full em (the advance CJK
 /// fallback fonts such as PingFang use, and the cell a fullwidth block
-/// glyph should occupy), everything else charges the face's own
-/// `.notdef` advance.
+/// glyph should occupy), uncovered symbol/pictograph blocks charge
+/// 0.8 em (the AppleSymbols cascade class real macOS text falls back
+/// to), everything else charges the face's own `.notdef` advance.
 fn clusterAdvanceEm(bytes: []const u8) f32 {
     if (bytes.len == 1) {
         const byte = bytes[0];
@@ -145,7 +146,28 @@ fn clusterAdvanceEm(bytes: []const u8) f32 {
     const glyph = face.glyphIndex(codepoint);
     if (glyph != 0) return faceAdvanceEm(face, glyph);
     if (isEastAsianWideCodepoint(codepoint)) return 1.0;
+    if (isSymbolPictographCodepoint(codepoint)) return 0.8;
     return notdef_advance_em;
+}
+
+/// Symbol and pictograph blocks the bundled face does not cover but that
+/// real dynamic content carries constantly (GitHub markdown ballot boxes
+/// U+2610/U+2611, technical symbols, geometric shapes). Live macOS text
+/// draws these through CoreText's cascade — AppleSymbols answers the
+/// ballot boxes at 0.83 em behind the bundled sans — so charging the
+/// face's 0.6 em `.notdef` advance under-reserved the cell every time the
+/// deterministic estimator measured one. 0.8 em is the documented
+/// approximation of that cascade class (measured: U+2610/U+2611 0.83 em
+/// via AppleSymbols; only codepoints the face itself cannot answer reach
+/// this class, so covered symbols like → keep their exact face advance).
+fn isSymbolPictographCodepoint(codepoint: u21) bool {
+    return switch (codepoint) {
+        // Arrows through Misc Symbols and Arrows: arrows, math operators,
+        // misc technical, control pictures, enclosed alphanumerics, box
+        // drawing/blocks, geometric shapes, misc symbols, dingbats.
+        0x2190...0x2BFF => true,
+        else => false,
+    };
 }
 
 /// East Asian wide / fullwidth blocks (Unicode EAW `W`/`F`, plus the

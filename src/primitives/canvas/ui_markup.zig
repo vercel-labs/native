@@ -653,6 +653,8 @@ pub const known_stack_container_element_names = [_][]const u8{
 
 pub const stack_container_gap_message = "gap does nothing here: this container layers its children on top of each other - wrap them in a column (or row) inside it for flow, or drop the gap";
 
+pub const wrap_element_message = "wrap is only supported on text - only plain text leaves word-wrap; put wrap on the text leaf itself, or size the container so content fits (rows and columns never flow-wrap their children)";
+
 pub const grid_columns_element_message = "columns is only supported on grid - it fixes the grid's column count (omit it for the derived near-square grid)";
 
 pub const avatar_image_message = "image takes one {binding} to a u64 ImageId the app registered at runtime (fx.registerImageBytes) - runtime image ids are model data, not markup literals; 0 renders the initials fallback";
@@ -1311,6 +1313,13 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     // else it would silently do nothing (same policy as
                     // gap on stacking containers).
                     return .{ .line = attribute.line, .column = attribute.column, .message = grid_columns_element_message };
+                }
+                if (std.mem.eql(u8, attribute.name, "wrap") and !std.mem.eql(u8, node.name, "text")) {
+                    // Only plain text leaves word-wrap; on a container the
+                    // option is silently inert and has shipped with
+                    // comments asserting wrapping that never happened
+                    // (same policy as gap on stacking containers).
+                    return .{ .line = attribute.line, .column = attribute.column, .message = wrap_element_message };
                 }
                 if (!nameInList(attribute.name, &known_option_attrs)) {
                     return .{ .line = attribute.line, .column = attribute.column, .message = "unknown attribute" };

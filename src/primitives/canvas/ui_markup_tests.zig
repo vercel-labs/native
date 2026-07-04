@@ -509,6 +509,17 @@ test "wrap and issue-link-base validate as vocabulary with teaching errors" {
             .source = "<column>\n  <markdown source=\"{body}\" wrap=\"true\" />\n</column>",
             .message = markup.markdown_attr_message,
         },
+        // wrap on anything but a text leaf is silently inert (rows never
+        // flow-wrap their children) — rejected with the teaching message,
+        // same policy as gap on stacking containers.
+        .{
+            .source = "<column>\n  <row wrap=\"true\">\n    <text>a</text>\n  </row>\n</column>",
+            .message = markup.wrap_element_message,
+        },
+        .{
+            .source = "<column>\n  <badge wrap=\"true\">new</badge>\n</column>",
+            .message = markup.wrap_element_message,
+        },
     };
     for (cases) |case| {
         var parser = markup.Parser.init(arena, case.source);

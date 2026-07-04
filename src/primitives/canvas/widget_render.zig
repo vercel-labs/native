@@ -648,6 +648,22 @@ fn emitTextSpansWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
             .origin = origin,
             .color = color,
             .text = run.text,
+            // Wrapping already happened at the span level (each run is one
+            // line segment), so the options carry no wrap work — they carry
+            // the measurement seam. Renderers that walk per-cluster
+            // advances (the reference renderer behind every automation
+            // screenshot) then advance with the same provider layout
+            // positioned the runs with; without it a provider-kerned prose
+            // run repainted at estimator advances overran the next span's
+            // x and visually swallowed the inter-span space
+            // ("remaining`experimental_`" -> "remainingexperimental_").
+            .text_layout = .{
+                .max_width = 0,
+                .line_height = layout.line_height,
+                .wrap = .none,
+                .alignment = .start,
+                .measure = tokens.text_measure,
+            },
         });
 
         const thickness = @max(1, tokens.stroke.hairline);

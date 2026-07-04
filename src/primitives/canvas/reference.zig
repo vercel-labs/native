@@ -472,7 +472,7 @@ pub const ReferenceRenderSurface = struct {
         block_rect: geometry.RectF,
     ) void {
         if (codepoint) |cp| {
-            if (self.drawGlyphOutline(command, value, draw_bounds, cp, pen_x, baseline)) return;
+            if (self.drawGlyphOutline(command, value, draw_bounds, cp, pen_x, baseline, block_rect.width)) return;
         }
         self.fillTextRect(command.transform.transformRect(block_rect).normalized(), draw_bounds, value.color, command.opacity);
     }
@@ -487,15 +487,26 @@ pub const ReferenceRenderSurface = struct {
         codepoint: u21,
         pen_x: f32,
         baseline: f32,
+        cell_advance: f32,
     ) bool {
         const face = &font_ttf.geist_regular;
         const glyph = face.glyphIndex(codepoint);
         if (glyph == 0) return false;
 
+        // Center the outline's natural advance inside its layout cell when
+        // the cell is wider — mono runs charge a fixed 0.6 em pitch while
+        // the bundled sans outlines keep proportional ink, and left-aligned
+        // ink read as clumps with stray gaps ("i nl i ne"). Real mono faces
+        // center narrow glyphs in the fixed cell, so the reference render
+        // does the same. Sans cells equal their natural advance (inset 0),
+        // keeping every proportional golden byte-identical.
+        const natural_advance = value.size * (face.advance(glyph) / face.units_per_em);
+        const cell_inset = @max(0, (cell_advance - natural_advance) * 0.5);
+
         const scale = value.size / face.units_per_em;
         // Font units are y-up; bake the flip and em scaling into the pen
         // placement, then apply the command transform on top.
-        const local = Affine{ .a = scale, .b = 0, .c = 0, .d = -scale, .tx = pen_x, .ty = baseline };
+        const local = Affine{ .a = scale, .b = 0, .c = 0, .d = -scale, .tx = pen_x + cell_inset, .ty = baseline };
         const total = command.transform.multiply(local);
 
         var builder = vector.PathBuilder(reference_glyph_path_capacity){};

@@ -65,6 +65,15 @@ test "estimator fallbacks charge notdef and east asian wide cells" {
     try testing.expectEqual(notdef_em, estimatorAdvanceEm(canvas.default_sans_font_id, &[_]u8{ 0xE2, 0x86 }));
     try testing.expectEqual(notdef_em, estimatorAdvanceEm(canvas.default_sans_font_id, &[_]u8{0x07}));
 
+    // Uncovered symbol/pictograph blocks (GitHub markdown's U+2610/U+2611
+    // ballot boxes, ⌘, geometric shapes): 0.8 em, the documented
+    // approximation of the AppleSymbols cascade class live macOS text
+    // falls back to (measured 0.83 em for the ballot boxes). Covered
+    // symbols like → keep their exact face advance (pinned above).
+    try testing.expectEqual(@as(f32, 0.8), estimatorAdvanceEm(canvas.default_sans_font_id, "☐"));
+    try testing.expectEqual(@as(f32, 0.8), estimatorAdvanceEm(canvas.default_sans_font_id, "☑"));
+    try testing.expectEqual(@as(f32, 0.8), estimatorAdvanceEm(canvas.default_sans_font_id, "⌘"));
+
     // Mono keeps its documented 0.6 em design pitch (Geist Mono's real
     // advance; no mono face is bundled), and the sans span variants keep
     // their width factors on top of the derived regular advances.
@@ -191,5 +200,32 @@ test "estimator agrees with CoreText shaping the bundled face" {
         const shaped = try coreTextLineWidthEm(font, size, sample);
         try testing.expect(shaped > 0);
         try testing.expect(@abs(estimated - shaped) / shaped <= 0.025);
+    }
+}
+
+test "CoreText cascades codepoints the bundled face lacks" {
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+
+    // The packet host draws text through the system string stack, which
+    // falls back through CoreText's cascade for glyphs the resolved font
+    // lacks — that is the live no-tofu guarantee for DYNAMIC strings
+    // (GitHub markdown ballot boxes et al). Shape them behind the bundled
+    // face itself: the line must come back with real positive width (a
+    // face without cascade answers .notdef zero-ink), and the width class
+    // must be the one the estimator's 0.8 em symbol fallback models —
+    // clearly wider than the face's 0.6 em .notdef, at most a full em.
+    const size: f64 = 1000;
+    const font = try bundledCoreTextFont(size);
+    defer CFRelease(font);
+
+    for ([_][]const u8{ "☐", "☑" }) |sample| {
+        // The bundled face itself has no glyph (that is why the reference
+        // renderer draws its documented .notdef block)...
+        const codepoint = try std.unicode.utf8Decode(sample);
+        try testing.expectEqual(@as(u16, 0), font_ttf.geist_regular.glyphIndex(codepoint));
+        // ...but the shaped line cascades to a real symbol font.
+        const shaped = try coreTextLineWidthEm(font, size, sample);
+        try testing.expect(shaped >= 0.7);
+        try testing.expect(shaped <= 1.0);
     }
 }

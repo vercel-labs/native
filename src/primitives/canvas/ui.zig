@@ -50,6 +50,27 @@ fn warnStackContainerGap(kind: WidgetKind, gap: f32) void {
     );
 }
 
+/// Debug-build diagnostic for `wrap = true` on anything but a plain text
+/// leaf. `ElementOptions.wrap` is text-leaf word wrapping only — rows and
+/// columns never flow-wrap their children (that is the layout system's
+/// design: one axis, no reflow), so the option on a container is silently
+/// inert and has shipped with comments asserting wrapping that never
+/// happened. Warn and keep building — shipped
+/// apps already carry the mistake, so it must never fail the build.
+/// Markup views get the same lesson as a validation error
+/// (`ui_markup.wrap_element_message`).
+fn warnInertWrap(kind: WidgetKind, wrap: bool) void {
+    if (builtin.mode != .Debug) return;
+    if (!wrap) return;
+    // Plain text leaves wrap for real; span paragraphs already wrap by
+    // design, so the option is redundant there, not a trap.
+    if (kind == .text) return;
+    ui_log.warn(
+        "wrap does nothing on {s}: only plain text leaves word-wrap - put wrap on the text leaf itself, or size the container so content fits (rows and columns never flow-wrap)",
+        .{@tagName(kind)},
+    );
+}
+
 /// Debug-build diagnostic for text the bundled face cannot fully
 /// render: the codepoint draws as a tofu box wherever the bundled
 /// outlines are the only glyph source — reference screenshots
@@ -1213,6 +1234,13 @@ pub fn Ui(comptime Msg: type) type {
             key: ?UiKey = null,
             global_key: ?UiKey = null,
             grow: f32 = 0,
+            /// Layout floor for the nav's box, mirroring
+            /// `ElementOptions.min_width`. Split panes clamp against their
+            /// pane ROOT's `min_size`, and a chat/detail pane commonly
+            /// roots in `ui.nav` — this lets the pane declare its own
+            /// floor instead of the app stamping
+            /// `widget.layout.min_size.width` post-build.
+            min_width: f32 = 0,
             /// Container semantics; role defaults to `group`.
             semantics: canvas.WidgetSemantics = .{},
         };
@@ -1233,6 +1261,7 @@ pub fn Ui(comptime Msg: type) type {
                     .key = options.key,
                     .global_key = options.global_key,
                     .grow = options.grow,
+                    .min_width = options.min_width,
                     .semantics = semantics,
                 }, .{});
             }
@@ -1255,6 +1284,7 @@ pub fn Ui(comptime Msg: type) type {
                 .key = options.key,
                 .global_key = options.global_key,
                 .grow = options.grow,
+                .min_width = options.min_width,
                 .semantics = semantics,
             }, .{mounted[0..mounted_len]});
         }
@@ -1334,6 +1364,7 @@ pub fn Ui(comptime Msg: type) type {
             var widget = node.widget;
             warnUncoveredText(widget.kind, widget.text);
             warnUncoveredText(widget.kind, widget.placeholder);
+            warnInertWrap(widget.kind, node.wrap);
             applyStyleTokens(&widget.style, node.style_tokens, tokens);
             // Opt-in text wrapping reuses the span paragraph machinery: a
             // wrapped text leaf becomes a single-span paragraph over its

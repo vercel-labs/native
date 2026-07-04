@@ -414,7 +414,13 @@ test "dev-2 README renders through the mapper and the reference renderer" {
 // foreground/border/panel neutrals moved to the neutral scale and links/
 // accents to the blue-violet primary; no metric feeding markdown layout
 // changed, so glyph and rule geometry are byte-identical.
-const dev2_readme_reference_signature: u64 = 9541408420961398904;
+// Regenerated for mono cell centering (2026-07-04): 3.06% of pixels
+// moved, all inside mono runs — each sans outline now centers in its
+// fixed 0.6 em cell instead of hugging the left edge, so inline code and
+// mono table cells read as monospace ("gh  aut h  l ogi n" ->
+// "gh auth login"); spot-reviewed the requirements bullet and the
+// command-table band before/after — no overlap, no clipping.
+const dev2_readme_reference_signature: u64 = 10642772447876144228;
 
 
 test "bare URLs autolink at word boundaries with trailing punctuation trimmed" {
@@ -499,4 +505,49 @@ test "issue refs linkify only with an issue link base, at dev-2 boundaries" {
     const link_child = paragraph.children[0];
     const msg = tree.msgForPointer(link_child.id, .up).?;
     try testing.expectEqualStrings("ghissue://123", msg.open_url);
+}
+
+test "real GitHub symbol codepoints keep their bytes and charge the cascade-class advance" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+
+    // Real GitHub-flavored content: ballot-box
+    // symbols in a table's status column next to mono cells and an
+    // em-dash. The markdown engine deliberately does NOT rewrite the
+    // characters (bytes stay byte-identical for selection/copy fidelity;
+    // live macOS rendering covers them through CoreText's cascade, pinned
+    // in text_metrics_tests) — the engine's job is an honest measured
+    // cell for them.
+    const tree = try doc.build(
+        \\| Status | API group | Effort |
+        \\| --- | --- | --- |
+        \\| ☐ | `experimental_createProviderRegistry` | — |
+        \\| ☑ | `experimental_wrapLanguageModel` | — |
+        \\
+    , .{});
+
+    const open_cell = findCellContaining(tree.root, "☐").?;
+    try testing.expectEqualStrings("☐", std.mem.trim(u8, open_cell.text, " "));
+
+    // The estimator charges the ballot box the 0.8 em symbol class (the
+    // AppleSymbols cascade advance live text falls back to), not the
+    // 0.6 em .notdef advance, so headless layout reserves the same cell
+    // class the live host inks.
+    const spans = open_cell.spans;
+    try testing.expect(spans.len >= 1);
+    const width = canvas.text_spans.textSpansIntrinsicWidth(spans, .{ .size = 10 });
+    try testing.expectApproxEqAbs(@as(f32, 8), width, 0.01);
+
+    // Mono cells stay intact single spans (the packet host draws the run
+    // as one string with the real mono face; the reference renderer
+    // centers each glyph in its fixed 0.6 em cell).
+    const mono_cell = findCellContaining(tree.root, "experimental_createProviderRegistry").?;
+    var mono_spans: usize = 0;
+    for (mono_cell.spans) |span| {
+        if (span.monospace) {
+            mono_spans += 1;
+            try testing.expectEqualStrings("experimental_createProviderRegistry", span.text);
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), mono_spans);
 }

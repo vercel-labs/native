@@ -1074,6 +1074,77 @@ test "reference renderer advances proxy text by utf8 scalars" {
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 4, 1);
 }
 
+test "reference renderer centers mono glyph ink inside the fixed pitch cell" {
+    // No mono face is bundled: mono runs charge a fixed 0.6 em cell and
+    // ink the bundled SANS outline. Left-aligned ink read as clumps with
+    // stray gaps ("i nl i ne"); real mono faces center narrow glyphs in
+    // the cell, so the reference render must too. At size 20 the cell is
+    // 12 px; sans 'i' ink is ~4.5 px wide, so centered ink starts ~3 px in
+    // and ends ~3 px short — never hugging either cell edge.
+    const size: f32 = 20;
+    const cell: usize = 12; // 0.6 em at size 20
+    const commands = [_]CanvasCommand{.{ .draw_text = .{
+        .id = 1,
+        .font_id = default_mono_font_id,
+        .size = size,
+        .origin = geometry.PointF.init(0, 20),
+        .color = Color.rgb8(255, 0, 0),
+        .text = "il",
+    } }};
+
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [1]RenderResource = undefined;
+    var resource_cache_entries: [1]RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [1]RenderResourceCacheAction = undefined;
+    var glyphs: [2]GlyphAtlasEntry = undefined;
+    var glyph_cache_entries: [2]GlyphAtlasCacheEntry = undefined;
+    var glyph_cache_actions: [2]GlyphAtlasCacheAction = undefined;
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(26, 24),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .glyph_atlas_cache_entries = &glyph_cache_entries,
+        .glyph_atlas_cache_actions = &glyph_cache_actions,
+        .changes = &changes,
+    });
+
+    var pixels: [26 * 24 * 4]u8 = undefined;
+    const surface = try ReferenceRenderSurface.init(26, 24, &pixels);
+    try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
+
+    // Per-cell ink extents: any red coverage in a column marks it inked.
+    for (0..2) |cell_index| {
+        const cell_start = cell_index * cell;
+        var first_ink: ?usize = null;
+        var last_ink: usize = 0;
+        for (cell_start..cell_start + cell) |x| {
+            var inked = false;
+            for (0..24) |y| {
+                if (pixels[(y * 26 + x) * 4] != 0) {
+                    inked = true;
+                    break;
+                }
+            }
+            if (inked) {
+                if (first_ink == null) first_ink = x - cell_start;
+                last_ink = x - cell_start;
+            }
+        }
+        // Ink exists and sits centered: at least 2 px of cell padding on
+        // each side (left-aligned ink starts at column 0/1 and fails).
+        const first = first_ink orelse return error.TestUnexpectedResult;
+        try std.testing.expect(first >= 2);
+        try std.testing.expect(last_ink <= cell - 3);
+    }
+}
+
 test "reference renderer applies shaped glyph y offsets" {
     const shaped_glyphs = [_]Glyph{.{ .id = 1, .x = 0, .y = 1, .advance = 1 }};
     const commands = [_]CanvasCommand{.{ .draw_text = .{

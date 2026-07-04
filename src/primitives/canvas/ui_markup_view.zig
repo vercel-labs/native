@@ -199,6 +199,16 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     }
                 }
             }
+            // Only plain text leaves word-wrap; anywhere else the option
+            // is silently inert dead layout data. Mirrors the validator
+            // and the compiled engine's compile error.
+            if (kind != .text) {
+                for (node.attrs) |attribute| {
+                    if (std.mem.eql(u8, attribute.name, "wrap")) {
+                        return self.failNode(node, markup.wrap_element_message);
+                    }
+                }
+            }
             // Splits take exactly two static pane children (the divider
             // sits between fixed panes). Mirrors the validator and the
             // compiled engine's compile error.

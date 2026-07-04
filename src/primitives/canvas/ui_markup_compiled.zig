@@ -177,6 +177,16 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
                         }
                     }
                 }
+                // Interpreter parity: only plain text leaves word-wrap;
+                // anywhere else the option is silently inert dead layout
+                // data — a compile error here.
+                if (kind != .text) {
+                    for (node.attrs) |attribute| {
+                        if (std.mem.eql(u8, attribute.name, "wrap")) {
+                            fail(node, markup.wrap_element_message);
+                        }
+                    }
+                }
                 // Interpreter parity: splits take exactly two static
                 // pane children (the divider sits between fixed panes).
                 if (kind == .split) {
