@@ -1,0 +1,24 @@
+<!-- The deck's bottom status strip: search, match counter, queue badge,
+     and the LIB/PERF face toggle. Compiled at comptime
+     (canvas.CompiledMarkupView) and composed under the Zig root view; the
+     test suite also builds it through the runtime interpreter and asserts
+     engine parity. Styling comes entirely from the deck theme's tokens —
+     the glass search inset and plate chips are `controls.*` overrides. -->
+<column>
+  <separator />
+  <row height="38" padding="8" gap="10" cross="center" background="surface" label="Status strip">
+    <search-field text="{search}" placeholder="SEARCH LIBRARY" width="230" on-input="search_edit" label="Search library" />
+    <if test="{searching}">
+      <button size="sm" variant="ghost" icon="x" on-press="clear_search" label="Clear search"></button>
+    </if>
+    <spacer grow="1" />
+    <if test="{hasQueue}">
+      <badge background="warning" foreground="warning_text">{queueLabel}</badge>
+    </if>
+    <text size="sm" foreground="text_muted">{statusLabel}</text>
+    <toggle-group gap="2" label="Face">
+      <toggle-button size="sm" selected="{libraryShowing}" on-toggle="show_library" label="Library face">LIB</toggle-button>
+      <toggle-button size="sm" selected="{performanceShowing}" on-toggle="show_performance" label="Performance face">PERF</toggle-button>
+    </toggle-group>
+  </row>
+</column>

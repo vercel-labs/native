@@ -1,0 +1,40 @@
+.{
+    .id = "dev.native_sdk.deck",
+    .name = "deck",
+    .display_name = "Deck",
+    .version = "0.1.0",
+    .icons = .{"assets/icon.icns"},
+    .platforms = .{"macos"},
+    .permissions = .{ "view", "command" },
+    .capabilities = .{ "native_views", "gpu_surfaces", "shortcuts" },
+    .shortcuts = .{
+        .{ .id = "deck.play-pause", .key = "p", .modifiers = .{"primary"} },
+        .{ .id = "deck.next", .key = "arrowright", .modifiers = .{"primary"} },
+        .{ .id = "deck.prev", .key = "arrowleft", .modifiers = .{"primary"} },
+        .{ .id = "deck.toggle-face", .key = "k", .modifiers = .{"primary"} },
+        .{ .id = "deck.dismiss", .key = "escape" },
+    },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Native SDK Deck",
+                .width = 960,
+                .height = 640,
+                .restore_state = false,
+                .restore_policy = "center_on_primary",
+                .views = .{
+                    .{ .label = "deck-canvas", .kind = "gpu_surface", .fill = true, .role = "Deck canvas", .accessibility_label = "Deck music player", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+}
