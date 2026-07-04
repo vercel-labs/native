@@ -143,15 +143,42 @@ const stats = [
   },
   {
     value: "0",
-    label: "JS engines, browsers, or interpreters inside a canvas app’s binary.",
+    label: "Embedded browsers, script engines, or interpreters inside that binary.",
   },
   {
     value: "918",
-    label: "Lines of markup + Zig for that entire calculator app.",
+    label: "Lines of markup and logic for that entire calculator app.",
   },
   {
     value: "5",
     label: "Real apps in examples/, screenshotted on this page from actual builds.",
+  },
+];
+
+const principles = [
+  {
+    name: "Beautiful by default",
+    detail: "Great software should not start from a blank slate.",
+  },
+  {
+    name: "Customizable by design",
+    detail: "Your app should have its own identity, not ours.",
+  },
+  {
+    name: "Native from the start",
+    detail: "Every interface is rendered without a browser or WebView.",
+  },
+  {
+    name: "Predictable state",
+    detail: "State changes should be explicit, inspectable and easy to reason about.",
+  },
+  {
+    name: "Simple authoring",
+    detail: "Interfaces should be easy to read, easy to write and easy to generate.",
+  },
+  {
+    name: "AI is part of the workflow",
+    detail: "Native SDK is designed for a world where humans and AI agents build software together.",
   },
 ];
 
@@ -216,14 +243,14 @@ export default function HomePage() {
             macOS · Linux · Windows · iOS · Android
           </p>
           <h1 className="mx-auto mt-4 max-w-5xl heading-40 text-gray-1000 sm:heading-64 lg:heading-72">
-            The complete toolkit
-            <br />
-            for native apps.
+            Build beautiful native{" "}
+            <br className="hidden sm:block" />
+            desktop and mobile apps.
           </h1>
           <p className="mx-auto mt-4 max-w-2xl copy-16 text-gray-900 sm:copy-18">
-            {siteName} builds native desktop and mobile applications from one codebase. Views are
-            markup. Styling is tokens. Logic is Zig. The pixels come from its own engine — no
-            browser, no JS runtime, one small binary.
+            Developers shouldn’t have to choose between expressive UI and native performance.{" "}
+            {siteName} is the complete toolkit for both: expressive interfaces, rendered by its
+            own engine into real OS windows. No browser. No WebView. No compromise.
           </p>
           <div className="mx-auto mt-8 flex max-w-2xl flex-col items-center justify-center gap-3 sm:flex-row">
             <div className="w-full max-w-xs sm:w-auto sm:min-w-[21rem]">
@@ -272,16 +299,41 @@ export default function HomePage() {
         </div>
       </section>
 
+      {/* Principles */}
+      <section className="border-t border-gray-alpha-400">
+        <div className="mx-auto max-w-[1200px] px-6 py-16 sm:py-24">
+          <SectionLabel>Principles</SectionLabel>
+          <SectionTitle>Beautiful by default. Customizable by design.</SectionTitle>
+          <SectionLede>
+            {siteName} exists because expressive UI and native performance should not be competing
+            goals. Developers often choose web-based runtimes because they offer freedom, speed and
+            control over the product experience. But that freedom often comes with a heavy runtime.{" "}
+            {siteName} keeps the expressive authoring model and replaces the runtime with native
+            rendering.
+          </SectionLede>
+          <div className="mx-auto mt-12 grid max-w-4xl gap-x-10 gap-y-8 sm:grid-cols-2 lg:grid-cols-3">
+            {principles.map((principle) => (
+              <div key={principle.name} className="border-t border-gray-alpha-400 pt-4">
+                <h3 className="heading-16 text-gray-1000">{principle.name}</h3>
+                <p className="mt-2 copy-14 text-gray-900">{principle.detail}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
       {/* The loop */}
       <section className="border-t border-gray-alpha-400">
         <div className="mx-auto max-w-[1200px] px-6 py-16 sm:py-24">
-          <SectionLabel>The architecture</SectionLabel>
-          <SectionTitle>One view. One update. Real pixels.</SectionTitle>
+          <SectionLabel>Predictable by design</SectionLabel>
+          <SectionTitle>Events. Messages. State. Interface.</SectionTitle>
           <SectionLede>
-            This is <InlineCode>examples/ui-inbox</InlineCode> from the repository. The UI is one
-            markup file. The logic is a Model, a Msg union, and an update function. Markup compiles
-            at comptime — view mistakes are compile errors with line and column — and in dev you
-            edit the view while the app runs, keeping model state.
+            Events produce messages, messages update state, and state renders the interface —
+            simple to debug, simple to maintain, and simple for AI to generate. This is{" "}
+            <InlineCode>examples/ui-inbox</InlineCode> from the repository: the whole UI is one
+            declarative view, and one update function is the only place state changes. Mistakes in
+            a view are compile errors with line and column, and in dev you edit the view while the
+            app runs, keeping state.
           </SectionLede>
           <div className="mt-10 grid gap-6 lg:grid-cols-2">
             <CodePane title="src/inbox.zml" lang="html" code={zmlSample} />
@@ -310,11 +362,12 @@ export default function HomePage() {
       {/* Showcase */}
       <section className="border-t border-gray-alpha-400" id="showcase">
         <div className="mx-auto max-w-[1200px] px-6 py-16 sm:py-24">
-          <SectionLabel>Showcase</SectionLabel>
+          <SectionLabel>Built for modern apps</SectionLabel>
           <SectionTitle>Five real apps, in the repo</SectionTitle>
           <SectionLede>
-            Every screenshot is rendered by {siteName}’s deterministic engine from the example apps
-            in <InlineCode>examples/</InlineCode> — the same state captured once per color scheme.
+            Dashboards, editors, tools, internal apps, creative software — every screenshot is
+            rendered by {siteName}’s deterministic engine from the example apps in{" "}
+            <InlineCode>examples/</InlineCode>, the same state captured once per color scheme.
             Flip the site theme and the apps flip with it.
           </SectionLede>
           <div className="mt-10">
@@ -329,16 +382,16 @@ export default function HomePage() {
           <div className="grid items-center gap-10 lg:grid-cols-2">
             <div>
               <p className="font-mono label-12 font-medium uppercase tracking-[0.2em] text-gray-900">
-                Native feel
+                Native from the start
               </p>
               <h2 className="mt-3 heading-32 text-gray-1000 sm:heading-40">
                 Feels native because it is
               </h2>
               <p className="mt-4 copy-16 text-gray-900">
-                One engine renders every widget into real OS windows — Metal presentation on
-                macOS, lean software paths on Linux and Windows. The parts users touch stay with
-                the operating system: scrolling carries OS momentum, menus are real menus, and the
-                tray is the real tray.
+                {siteName} owns its renderer — no embedded browser, no heavy runtime pretending to
+                be native. One engine draws every widget into real OS windows, and the parts users
+                touch stay with the operating system: scrolling carries OS momentum, menus are
+                real menus, and the tray is the real tray.
               </p>
               <Link
                 href="/native-ui"
@@ -375,7 +428,7 @@ export default function HomePage() {
             </div>
             <div className="order-1 lg:order-2">
               <p className="font-mono label-12 font-medium uppercase tracking-[0.2em] text-gray-900">
-                Agents first
+                AI is part of the workflow
               </p>
               <h2 className="mt-3 heading-32 text-gray-1000 sm:heading-40">
                 Built to be written by AI agents
@@ -412,7 +465,7 @@ export default function HomePage() {
               </h2>
               <p className="mt-4 copy-16 text-gray-900">
                 Markup compiles into the executable, so release builds carry no parser, no
-                interpreter, and no JS engine — just your logic and the engine, linking the
+                interpreter, and no scripting engine — just your logic and the engine, linking the
                 system’s own frameworks. Effects run HTTP fetches, process spawns, file I/O, and
                 timers off the loop; results come back into <InlineCode>update</InlineCode> as
                 plain messages. And when part of your product is the web, WebView panes coexist
@@ -442,7 +495,7 @@ export default function HomePage() {
       <section className="border-t border-gray-alpha-400">
         <div className="mx-auto max-w-[1200px] px-6 py-16 sm:py-24">
           <SectionLabel>Cross-platform</SectionLabel>
-          <SectionTitle>Platforms, honestly</SectionTitle>
+          <SectionTitle>One SDK, desktop and mobile</SectionTitle>
           <SectionLede>
             One codebase compiles for macOS, Linux, Windows, iOS, and Android. These statuses
             describe what ships and is verified today — not a roadmap.

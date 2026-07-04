@@ -1,0 +1,31 @@
+# Philosophy
+
+Native SDK exists because expressive UI and native performance should not be competing goals. Developers often choose web-based runtimes because they offer freedom, speed and control over the product experience. But that freedom often comes with a heavy runtime. Native SDK keeps the expressive authoring model and replaces the runtime with native rendering.
+
+In practice, that makes Native SDK an open source toolkit for building beautiful native desktop and mobile applications. It combines markup for declarative interfaces, a predictable message-based state model, a modern component library, a native renderer, and tooling for building, running, and packaging apps — one codebase for macOS, Linux, Windows, iOS, and Android.
+
+Six principles guide every decision in the toolkit.
+
+## Beautiful by default
+
+Great software should not start from a blank slate. The [built-in components](/built-in-components) ship with considered typography, spacing, and color, and `native init` scaffolds an app that already looks intentional the first time its window opens. The example apps in the repository are held to the same bar: design excellence is a reason Native SDK exists, not an afterthought.
+
+## Customizable by design
+
+Your app should have its own identity, not ours. Styling is [design tokens](/native-ui#styling-with-design-tokens) end to end: color, radius, and typography resolve by name, re-resolve live when the theme changes, and can be replaced wholesale. The defaults are a starting point, never a look you are locked into.
+
+## Native from the start
+
+Every interface is rendered without a browser or WebView. Native SDK draws its own pixels through its own engine into real OS windows, and the parts users touch stay with the operating system: scroll physics, menus, dialogs, the tray, text input, HiDPI. See [Native UI](/native-ui) and [Platform Support](/platform-support). When part of your product genuinely is the web, [WebViews coexist](/frontend) with the native canvas — by choice, not by default.
+
+## Predictable state
+
+State changes should be explicit, inspectable and easy to reason about. Events produce messages, messages update state, and state renders the interface. There is exactly one place state changes — the `update` function — which makes an app simple to debug, simple to test headless, and simple to maintain. The [App Model](/app-model) walks the loop end to end.
+
+## Simple authoring
+
+Interfaces should be easy to read, easy to write and easy to generate. Views are declarative markup with bindings and message dispatch — no lifecycle, no hidden state, no imperative wiring — validated at check and compile time with teaching errors that point at a line and column. [Native UI](/native-ui) covers every element and pattern.
+
+## AI is part of the workflow
+
+Native SDK is designed for a world where humans and AI agents build software together. The properties that make apps easy for people to reason about — declarative views, one typed update function, explicit state — are the same ones that make them reliable for agents to generate. Every app can embed an [automation server](/automation) so any agent can see and drive the running window: snapshots, assertions, input, screenshots.

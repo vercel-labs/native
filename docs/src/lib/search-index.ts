@@ -28,7 +28,7 @@ export async function getSearchIndex(): Promise<IndexEntry[]> {
 async function pageContent(href: string, fallback: string): Promise<string> {
   // The homepage is a TSX landing page, not MDX; index a hand-written summary.
   if (href === "/") {
-    return "Write markup. Ship native pixels. Cross-platform native UI: declarative .zml markup views, design tokens, Zig logic, the Elm Architecture, hot reload, typed effects, AI agent skills and evals, automation, WebView coexistence on macOS, Linux, Windows, iOS, and Android.";
+    return "Build beautiful native apps. Cross-platform native UI: declarative .zml markup views, design tokens, Zig logic, a predictable message-based state loop, hot reload, typed effects, AI agent skills and evals, automation, WebView coexistence on macOS, Linux, Windows, iOS, and Android.";
   }
   const relative = path.join(href.slice(1), "page.mdx");
   const filePath = path.join(process.cwd(), "src", "app", relative);
