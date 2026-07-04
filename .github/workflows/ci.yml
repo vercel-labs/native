@@ -131,55 +131,14 @@ jobs:
           version: 0.16.0
       - name: Install GTK and Xvfb
         run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev xvfb
+      # Drives the gpu_surface software path against system WebKitGTK under
+      # Xvfb: snapshot ready, gpu_backend=software, gpu_nonblank=true,
+      # automation widget-click, and a rendered screenshot. Sandbox/a11y
+      # env, the widened cold-start readiness budget (shared runners stall
+      # ~27 s before the first runtime event), and failure forensics (dump
+      # snapshot + app log) all live in the script.
       - name: Build and drive ui-inbox headless
-        # WebKitGTK's bubblewrap sandbox needs unprivileged user namespaces,
-        # which ubuntu-24.04 runners restrict via AppArmor; without this the
-        # web process dies launching xdg-dbus-proxy and the app never
-        # publishes an automation snapshot (reproduced in a local container:
-        # ready=true never lands; with the sandbox disabled the full smoke
-        # passes). The sandbox is not what this smoke tests.
-        #
-        # GTK_A11Y=none: under xvfb-run there is no session bus providing
-        # org.a11y.Bus, and GTK4's a11y init blocks ~25 s on the GDBus
-        # name lookup before warning and continuing — the app's first
-        # runtime event landed after `automate wait`'s 30 s window had
-        # already expired (reproduced in a local container: without this
-        # the wait times out at startup; with it the full smoke passes).
-        # Accessibility is not what this smoke tests.
-        env:
-          WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: "1"
-          GTK_A11Y: none
-        run: |
-          set -euo pipefail
-          zig build
-          cd examples/ui-inbox
-          zig build -Dplatform=linux -Dweb-engine=system -Dautomation=true
-          rm -rf .zig-cache/native-sdk-automation
-          xvfb-run -a ./zig-out/bin/ui-inbox &
-          pid=$!
-          trap 'kill "$pid" >/dev/null 2>&1 || true' EXIT
-          cli=../../zig-out/bin/native
-          # `automate wait` prints the ready snapshot to stderr, so capture
-          # both streams (the macOS smokes do the same); piping stdout into
-          # grep can never match and fails the step right after readiness.
-          ready="$("$cli" automate wait 2>&1)"
-          case "$ready" in *"ready=true"*) ;; *) echo "ui-inbox automation snapshot was not ready" >&2; exit 1 ;; esac
-          snap=.zig-cache/native-sdk-automation/snapshot.txt
-          for i in $(seq 1 50); do
-            grep -q 'gpu_nonblank=true' "$snap" && break
-            sleep 0.2
-          done
-          grep -q 'gpu_nonblank=true' "$snap"
-          grep -q 'gpu_backend=software' "$snap"
-          add=$(grep -o 'widget @w1/inbox-canvas#[0-9]* role=button name="Add task"' "$snap" | grep -o '#[0-9]*' | tr -d '#')
-          "$cli" automate widget-click inbox-canvas "$add"
-          for i in $(seq 1 50); do
-            grep -q '4 open' "$snap" && break
-            sleep 0.2
-          done
-          grep -q '4 open' "$snap"
-          "$cli" automate screenshot inbox-canvas
-          test -s .zig-cache/native-sdk-automation/screenshot-inbox-canvas.png
+        run: .github/scripts/linux-canvas-smoke.sh
 
   windows-canvas-smoke:
     name: Windows Canvas Smoke (Wine)
