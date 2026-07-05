@@ -59,6 +59,8 @@ fn panelWindows(model: *const PanelModel, scratch: *PanelApp.WindowsScratch) []c
             .title = "Settings",
             .width = 320,
             .height = 240,
+            .min_width = 280,
+            .min_height = 200,
             .on_close = .settings_closed,
         };
         count += 1;
@@ -172,6 +174,20 @@ test "a Msg declares the settings window, its canvas installs, and automation dr
     const info = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
     try std.testing.expect(info.open);
     try std.testing.expectEqualStrings("Settings", info.title);
+
+    // The descriptor's min-size floor survives to the platform create
+    // seam (the macOS host applies it as `contentMinSize`).
+    {
+        const null_platform = fixture.harness.null_platform;
+        var found = false;
+        for (null_platform.windows[0..null_platform.window_count], 0..) |window, index| {
+            if (window.id != info.id) continue;
+            try std.testing.expectEqual(@as(f32, 280), null_platform.window_min_width[index]);
+            try std.testing.expectEqual(@as(f32, 200), null_platform.window_min_height[index]);
+            found = true;
+        }
+        try std.testing.expect(found);
+    }
 
     // The window's own first frame installs its tree.
     try fixture.installSettingsCanvas(info.id);

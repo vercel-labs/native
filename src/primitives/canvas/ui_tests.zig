@@ -493,6 +493,93 @@ test "text wrap opt-in becomes a single-span paragraph at finalize" {
     // Default stays the classic single-line path, byte-identical.
     const plain_widget = tree.root.children[1];
     try testing.expectEqual(@as(usize, 0), plain_widget.spans.len);
+    try testing.expect(!plain_widget.text_no_wrap);
+    try testing.expect(!wrapped_widget.text_no_wrap);
+}
+
+test "explicit wrap=false stamps the honest single-line text mode" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var ui = InboxUi.init(arena_state.allocator());
+    const content = "A list-row title that must stay on one line however narrow the row gets";
+    const tree = try ui.finalize(ui.column(.{}, .{
+        ui.text(.{ .wrap = false }, content),
+        ui.text(.{}, content),
+    }));
+
+    // wrap=false keeps the plain text path (no spans) and stamps the
+    // no-wrap paint mode; the unset default stays untouched.
+    const no_wrap_widget = tree.root.children[0];
+    try testing.expectEqual(@as(usize, 0), no_wrap_widget.spans.len);
+    try testing.expect(no_wrap_widget.text_no_wrap);
+    try testing.expectEqualStrings(content, no_wrap_widget.text);
+    const plain_widget = tree.root.children[1];
+    try testing.expect(!plain_widget.text_no_wrap);
+}
+
+test "no-wrap text paints one clipped line in a width-constrained row" {
+    // The list-row overlap repro: a narrow column would let the classic
+    // paint path re-wrap the title onto a second line over the sibling
+    // below. wrap=false must keep single-line measurement AND emit a
+    // single `.none` text run clipped to the received frame.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var ui = InboxUi.init(arena_state.allocator());
+    const content = "A long issue title that is much wider than the narrow row it sits in";
+    const tree = try ui.finalize(ui.column(.{ .width = 160 }, .{
+        ui.text(.{ .wrap = false }, content),
+        ui.text(.{}, "Below"),
+    }));
+
+    var layout_nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, 160, 400), &layout_nodes);
+
+    const title = tree.root.children[0];
+    const below = tree.root.children[1];
+    var title_frame: ?geometry.RectF = null;
+    var below_frame: ?geometry.RectF = null;
+    for (layout.nodes) |node| {
+        if (node.widget.id == title.id) title_frame = node.frame;
+        if (node.widget.id == below.id) below_frame = node.frame;
+    }
+    // Measurement stays single-line in the constrained path: the title
+    // reserves one line and the sibling sits below without overlap.
+    try testing.expectEqual(title_frame.?.height, below_frame.?.height);
+    try testing.expect(below_frame.?.y >= title_frame.?.y + title_frame.?.height);
+
+    // Paint agrees: one `.none`-wrapped text run for the title, clipped
+    // to the frame it received.
+    var storage: [128]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&storage);
+    try canvas.emitWidgetLayout(&builder, layout, .{});
+    const list = builder.displayList();
+    var found_title = false;
+    var clip_depth: usize = 0;
+    var title_clipped = false;
+    var clip_rect: ?geometry.RectF = null;
+    for (list.commands) |command| {
+        switch (command) {
+            .push_clip => |clip| {
+                clip_depth += 1;
+                clip_rect = clip.rect;
+            },
+            .pop_clip => clip_depth -= 1,
+            .draw_text => |text| {
+                if (std.mem.eql(u8, text.text, content)) {
+                    found_title = true;
+                    try testing.expectEqual(canvas.TextWrap.none, text.text_layout.?.wrap);
+                    title_clipped = clip_depth > 0;
+                }
+            },
+            else => {},
+        }
+    }
+    try testing.expect(found_title);
+    try testing.expect(title_clipped);
+    // The clip is the title's own frame — the clean-clip truncation.
+    try testing.expectEqual(title_frame.?.width, clip_rect.?.width);
 }
 
 test "wrapped text reserves its wrapped height in a definite-width pane" {

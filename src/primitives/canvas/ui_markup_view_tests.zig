@@ -1745,6 +1745,7 @@ pub const wrap_markup_source =
     \\<column gap="8" width="360">
     \\  <text wrap="true">{message}</text>
     \\  <text>{message}</text>
+    \\  <text wrap="false">{message}</text>
     \\</column>
 ;
 
@@ -1754,6 +1755,7 @@ pub fn handWrapView(ui: *WrapUi, model: *const WrapModel) WrapUi.Node {
     return ui.column(.{ .gap = 8, .width = 360 }, .{
         ui.text(.{ .wrap = true }, model.message),
         ui.text(.{}, model.message),
+        ui.text(.{ .wrap = false }, model.message),
     });
 }
 
@@ -1788,6 +1790,14 @@ test "the wrap attribute builds the hand-written wrapped text leaf" {
     try testing.expect(wrapped.spans[0].text.ptr == wrapped.text.ptr);
     const plain = markup_tree.root.children[1];
     try testing.expectEqual(@as(usize, 0), plain.spans.len);
+    try testing.expect(!plain.text_no_wrap);
+
+    // wrap="false" stays on the plain text path and stamps the honest
+    // single-line mode (one line, clean-clipped at paint).
+    const no_wrap = markup_tree.root.children[2];
+    try testing.expectEqual(@as(usize, 0), no_wrap.spans.len);
+    try testing.expect(no_wrap.text_no_wrap);
+    try testing.expectEqualStrings(model.message, no_wrap.text);
 
     // The definite column width is both floor and cap.
     try testing.expectEqual(@as(f32, 360), markup_tree.root.layout.min_size.width);

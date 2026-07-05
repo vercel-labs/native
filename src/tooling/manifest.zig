@@ -164,6 +164,8 @@ pub const WindowMetadata = struct {
     resizable: bool = true,
     restore_state: bool = true,
     titlebar: []const u8 = "standard",
+    min_width: f32 = 0,
+    min_height: f32 = 0,
 };
 
 pub const ShellMetadata = struct {
@@ -181,6 +183,8 @@ pub const ShellWindowMetadata = struct {
     restore_state: bool = true,
     restore_policy: []const u8 = "clamp_to_visible_screen",
     titlebar: []const u8 = "standard",
+    min_width: f32 = 0,
+    min_height: f32 = 0,
     views: []const ShellViewMetadata = &.{},
 };
 
@@ -475,6 +479,8 @@ fn convertRawWindows(allocator: std.mem.Allocator, windows: []const RawWindow) !
             .resizable = window.resizable,
             .restore_state = window.restore_state,
             .titlebar = try allocator.dupe(u8, window.titlebar),
+            .min_width = window.min_width,
+            .min_height = window.min_height,
         };
     }
     return converted;
@@ -499,6 +505,8 @@ fn convertRawShellWindows(allocator: std.mem.Allocator, windows: []const RawShel
             .restore_state = window.restore_state,
             .restore_policy = try allocator.dupe(u8, window.restore_policy),
             .titlebar = try allocator.dupe(u8, window.titlebar),
+            .min_width = window.min_width,
+            .min_height = window.min_height,
             .views = try convertRawShellViews(allocator, window.views),
         };
     }
@@ -696,6 +704,8 @@ fn convertWindows(allocator: std.mem.Allocator, windows: []const WindowMetadata)
             .resizable = window.resizable,
             .restore_state = window.restore_state,
             .titlebar = try parseTitlebarStyle(window.titlebar),
+            .min_width = try parseWindowMinSize(window.min_width),
+            .min_height = try parseWindowMinSize(window.min_height),
         };
     }
     return converted;
@@ -716,6 +726,8 @@ fn parseShell(allocator: std.mem.Allocator, shell: ShellMetadata) !app_manifest.
         // slice, so a bad policy/titlebar string cannot leak it.
         const restore_policy = try parseRestorePolicy(window.restore_policy);
         const titlebar = try parseTitlebarStyle(window.titlebar);
+        const min_width = try parseWindowMinSize(window.min_width);
+        const min_height = try parseWindowMinSize(window.min_height);
         const views = try parseShellViews(allocator, window.views);
         windows[index] = .{
             .label = window.label,
@@ -728,6 +740,8 @@ fn parseShell(allocator: std.mem.Allocator, shell: ShellMetadata) !app_manifest.
             .restore_state = window.restore_state,
             .restore_policy = restore_policy,
             .titlebar = titlebar,
+            .min_width = min_width,
+            .min_height = min_height,
             .views = views,
         };
         initialized += 1;
@@ -1028,6 +1042,14 @@ fn parseTitlebarStyle(value: []const u8) !app_manifest.WindowTitlebarStyle {
     if (std.mem.eql(u8, value, "hidden_inset")) return .hidden_inset;
     if (std.mem.eql(u8, value, "hidden_inset_tall")) return .hidden_inset_tall;
     return error.InvalidWindowTitlebarStyle;
+}
+
+/// Same validation posture as the titlebar style: a min-size floor the
+/// host cannot honor (negative or non-finite) is a manifest error, not
+/// a silent clamp. 0 is the "no floor" sentinel.
+fn parseWindowMinSize(value: f32) !f32 {
+    if (!std.math.isFinite(value) or value < 0) return error.InvalidWindowMinSize;
+    return value;
 }
 
 fn parseViewKind(value: []const u8) !app_manifest.ViewKind {
@@ -1397,6 +1419,61 @@ test "manifest parser reads window titlebar styles" {
     const shell = try parseShell(std.testing.allocator, metadata.shell);
     defer deinitParsedShell(std.testing.allocator, shell);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.hidden_inset_tall, shell.windows[0].titlebar);
+}
+
+test "manifest parser reads window min sizes" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.2.3",
+        \\  .windows = .{
+        \\    .{ .label = "main", .min_width = 596, .min_height = 420 },
+        \\  },
+        \\  .shell = .{
+        \\    .windows = .{
+        \\      .{ .label = "scene", .min_width = 596, .min_height = 420, .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
+        \\    },
+        \\  },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(f32, 596), metadata.windows[0].min_width);
+    try std.testing.expectEqual(@as(f32, 420), metadata.windows[0].min_height);
+    try std.testing.expectEqual(@as(f32, 596), metadata.shell.windows[0].min_width);
+
+    const windows = try convertWindows(std.testing.allocator, metadata.windows);
+    defer std.testing.allocator.free(windows);
+    try std.testing.expectEqual(@as(f32, 596), windows[0].min_width);
+    try std.testing.expectEqual(@as(f32, 420), windows[0].min_height);
+
+    const shell = try parseShell(std.testing.allocator, metadata.shell);
+    defer deinitParsedShell(std.testing.allocator, shell);
+    try std.testing.expectEqual(@as(f32, 596), shell.windows[0].min_width);
+    try std.testing.expectEqual(@as(f32, 420), shell.windows[0].min_height);
+}
+
+test "manifest parser rejects negative window min sizes" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.2.3",
+        \\  .windows = .{
+        \\    .{ .label = "main", .min_width = -1 },
+        \\  },
+        \\  .shell = .{
+        \\    .windows = .{
+        \\      .{ .label = "scene", .min_height = -20, .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
+        \\    },
+        \\  },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.InvalidWindowMinSize, convertWindows(std.testing.allocator, metadata.windows));
+    try std.testing.expectError(error.InvalidWindowMinSize, parseShell(std.testing.allocator, metadata.shell));
 }
 
 test "manifest parser rejects unknown window titlebar style" {

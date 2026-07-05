@@ -196,6 +196,7 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         previous.widget.backdrop_blur != next.widget.backdrop_blur or
         previous.widget.backdrop_blur_token != next.widget.backdrop_blur_token or
         previous.widget.text_alignment != next.widget.text_alignment or
+        previous.widget.text_no_wrap != next.widget.text_no_wrap or
         previous.widget.variant != next.widget.variant or
         previous.widget.size != next.widget.size or
         !widgetStylesEqual(previous.widget.style, next.widget.style);

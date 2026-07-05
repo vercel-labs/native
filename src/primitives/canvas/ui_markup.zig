@@ -653,7 +653,7 @@ pub const known_stack_container_element_names = [_][]const u8{
 
 pub const stack_container_gap_message = "gap does nothing here: this container layers its children on top of each other - wrap them in a column (or row) inside it for flow, or drop the gap";
 
-pub const wrap_element_message = "wrap is only supported on text - only plain text leaves word-wrap; put wrap on the text leaf itself, or size the container so content fits (rows and columns never flow-wrap their children)";
+pub const wrap_element_message = "wrap is only supported on text - only plain text leaves take a line policy (wrap=\"true\" word-wraps, wrap=\"false\" clips to one honest line); put wrap on the text leaf itself, or size the container so content fits (rows and columns never flow-wrap their children)";
 
 pub const grid_columns_element_message = "columns is only supported on grid - it fixes the grid's column count (omit it for the derived near-square grid)";
 

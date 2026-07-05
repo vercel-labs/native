@@ -930,6 +930,12 @@ test "compiled wrap attribute matches the interpreter and the hand-written view"
     try testing.expectEqual(@as(usize, 1), compiled_wrapped.spans.len);
     try testing.expectEqualStrings(model.message, compiled_wrapped.text);
     try testing.expectEqual(@as(usize, 0), compiled.root.children[1].spans.len);
+    try testing.expect(!compiled.root.children[1].text_no_wrap);
+    // And both stamp wrap="false" as the honest single-line mode.
+    const compiled_no_wrap = compiled.root.children[2];
+    try testing.expectEqual(@as(usize, 0), compiled_no_wrap.spans.len);
+    try testing.expect(compiled_no_wrap.text_no_wrap);
+    try testing.expect(interpreted.root.children[2].text_no_wrap);
     // The definite width lands in both bounds.
     try testing.expectEqual(@as(f32, 360), compiled.root.layout.min_size.width);
     try testing.expectEqual(@as(f32, 360), compiled.root.layout.max_size.width);

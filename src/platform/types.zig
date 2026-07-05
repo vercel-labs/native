@@ -389,6 +389,13 @@ pub const WindowOptions = struct {
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
     titlebar: WindowTitlebarStyle = .standard,
     show: WindowShowMode = .immediate,
+    /// Content min-size floor the WINDOW enforces (macOS
+    /// `contentMinSize`): the user cannot resize below it, so declared
+    /// layout floors stop clamping/clipping panes instead of stopping
+    /// the resize. 0 = no floor on that axis. Applied at create; it
+    /// does not grow an already-smaller restored frame.
+    min_width: f32 = 0,
+    min_height: f32 = 0,
 
     pub fn resolvedTitle(self: WindowOptions, app_name: []const u8) []const u8 {
         return if (self.title.len > 0) self.title else app_name;
@@ -439,6 +446,10 @@ pub const WindowCreateOptions = struct {
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
     titlebar: WindowTitlebarStyle = .standard,
     show: WindowShowMode = .immediate,
+    /// Window-enforced content min-size floor (see
+    /// `WindowOptions.min_width`/`min_height`); 0 = no floor.
+    min_width: f32 = 0,
+    min_height: f32 = 0,
     source: ?WebViewSource = null,
 
     pub fn windowOptions(self: WindowCreateOptions, id: WindowId, label: []const u8) WindowOptions {
@@ -452,6 +463,8 @@ pub const WindowCreateOptions = struct {
             .restore_policy = self.restore_policy,
             .titlebar = self.titlebar,
             .show = self.show,
+            .min_width = self.min_width,
+            .min_height = self.min_height,
         };
     }
 };

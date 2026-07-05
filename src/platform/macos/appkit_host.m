@@ -6769,6 +6769,19 @@ int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t win
     return [object createWindowWithId:window_id title:titleString ?: @"" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) resizable:(resizable != 0) titlebarStyle:titlebar_style showPolicy:show_policy makeMain:NO] ? 1 : 0;
 }
 
+int native_sdk_appkit_set_window_content_min_size(native_sdk_appkit_host_t *host, uint64_t window_id, double min_width, double min_height) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) return 0;
+    // The declared floor is CONTENT size (matches the frame the runtime
+    // reasons about); AppKit adds the chrome on top. Axes <= 0 keep
+    // AppKit's default minimum for that axis.
+    NSSize current = window.contentMinSize;
+    window.contentMinSize = NSMakeSize(min_width > 0 ? min_width : current.width,
+                                       min_height > 0 ? min_height : current.height);
+    return 1;
+}
+
 int native_sdk_appkit_focus_window(native_sdk_appkit_host_t *host, uint64_t window_id) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     if (!object.windows[@(window_id)]) return 0;

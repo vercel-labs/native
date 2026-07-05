@@ -217,6 +217,12 @@ pub const NullPlatform = struct {
     /// Captured `WindowOptions.show` per created window: the
     /// present-before-show policy that must survive to the create seam.
     window_show: [max_windows]types.WindowShowMode = [_]types.WindowShowMode{.immediate} ** max_windows,
+    /// Captured `WindowOptions.min_width`/`min_height` per created
+    /// window — the content min-size floor that must survive to the
+    /// create seam (macOS applies it as `contentMinSize`); same
+    /// seam-regression purpose as `window_resizable`.
+    window_min_width: [max_windows]f32 = [_]f32{0} ** max_windows,
+    window_min_height: [max_windows]f32 = [_]f32{0} ** max_windows,
     /// Live visibility per window, modeling the macOS host: immediate
     /// windows are visible at create; `.on_first_present` windows stay
     /// hidden until their first gpu-surface present (or an explicit
@@ -650,6 +656,8 @@ pub const NullPlatform = struct {
         self.window_resizable[self.window_count] = options.resizable;
         self.window_titlebar[self.window_count] = options.titlebar;
         self.window_show[self.window_count] = options.show;
+        self.window_min_width[self.window_count] = options.min_width;
+        self.window_min_height[self.window_count] = options.min_height;
         self.window_first_present_seq[self.window_count] = 0;
         // Present-before-show: deferred windows are created hidden and
         // become visible on their first gpu-surface present.
@@ -1440,6 +1448,8 @@ pub const NullPlatform = struct {
         while (cursor + 1 < self.window_count) : (cursor += 1) {
             self.windows[cursor] = self.windows[cursor + 1];
             self.window_resizable[cursor] = self.window_resizable[cursor + 1];
+            self.window_min_width[cursor] = self.window_min_width[cursor + 1];
+            self.window_min_height[cursor] = self.window_min_height[cursor + 1];
         }
         self.window_count -= 1;
     }

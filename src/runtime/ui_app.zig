@@ -184,6 +184,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             x: ?f32 = null,
             y: ?f32 = null,
             resizable: bool = true,
+            /// Content min-size floor the WINDOW enforces (macOS
+            /// `contentMinSize`): the user's resize stops at the floor
+            /// instead of the layout clamping/clipping panes below
+            /// their declared minimums. The window knows the floor the
+            /// framework already knows. 0 = no floor on that axis.
+            min_width: f32 = 0,
+            min_height: f32 = 0,
             /// Titlebar chrome: `.hidden_inset` extends content under a
             /// transparent titlebar with the title hidden (macOS keeps
             /// the traffic lights) — the modern editor-app pattern —
@@ -864,6 +871,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .y = descriptor.y,
                 .resizable = descriptor.resizable,
                 .titlebar = descriptor.titlebar,
+                .min_width = descriptor.min_width,
+                .min_height = descriptor.min_height,
                 // Deterministic reopen: the descriptor is the geometry
                 // channel, not a persisted frame store.
                 .restore_state = false,

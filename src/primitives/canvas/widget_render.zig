@@ -552,6 +552,16 @@ fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
     // Empty text leaves are hit/semantics-only: paragraph link hotspots
     // and composite press overlays (timeline items) draw nothing.
     if (widget.text.len == 0) return;
+    // Honest single-line (`wrap = false`): one line, clean-clipped to
+    // the frame the widget received — a width-constrained title never
+    // paints a second line over the row below. Clip rather than
+    // ellipsize: the text machinery has no elide mode, and synthesizing
+    // an ellipsis would diverge painted bytes from `widget.text` (the
+    // selection/copy source of truth). The default path stays
+    // byte-identical.
+    if (widget.text_no_wrap) {
+        try builder.pushClip(.{ .id = widgetPartId(widget.id, 9), .rect = widget.frame });
+    }
     try emitStaticTextSelection(builder, widget, tokens);
     const text_size = widgetBodyTextSize(widget, tokens);
     try builder.drawText(.{
@@ -564,11 +574,12 @@ fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
         .text_layout = .{
             .max_width = textWrapMaxWidth(tokens, widget.frame.width),
             .line_height = text_size * 1.25,
-            .wrap = .word,
+            .wrap = if (widget.text_no_wrap) .none else .word,
             .alignment = widget.text_alignment,
             .measure = tokens.text_measure,
         },
     });
+    if (widget.text_no_wrap) try builder.popClip();
 }
 
 /// Wrap budget for text painted inside a pixel-snapped frame. Geometry

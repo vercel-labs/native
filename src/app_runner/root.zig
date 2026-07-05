@@ -77,6 +77,11 @@ pub const RunOptions = struct {
             // never flashes a blank window.
             info.main_window.titlebar = manifestShellStartupTitlebar();
             info.main_window.show = manifestShellStartupShowMode();
+            // Min-size floors ride the create call like the titlebar:
+            // the scene re-applies size/title later, but the window's
+            // enforced floor is host state from the first frame on.
+            info.main_window.min_width = manifestShellStartupMinSize("min_width");
+            info.main_window.min_height = manifestShellStartupMinSize("min_height");
         }
         return info;
     }
@@ -135,7 +140,20 @@ fn manifestWindow(comptime window: anytype, comptime index: usize) native_sdk.Wi
         .restore_state = windowBool(window, "restore_state", true),
         .restore_policy = windowRestorePolicy(window),
         .titlebar = windowTitlebarStyle(window),
+        .min_width = windowMinSize(window, "min_width"),
+        .min_height = windowMinSize(window, "min_height"),
     };
+}
+
+/// Window-enforced content min-size floor from app.zon. Validated at
+/// comptime like the titlebar style: a negative floor is an authoring
+/// error, not a silent clamp.
+fn windowMinSize(comptime window: anytype, comptime field: []const u8) f32 {
+    const value: f32 = comptime windowFloat(window, field, 0);
+    comptime {
+        if (!(value >= 0)) @compileError("app.zon window " ++ field ++ " must be non-negative");
+    }
+    return value;
 }
 
 fn windowTitlebarStyle(comptime window: anytype) native_sdk.WindowTitlebarStyle {
@@ -157,6 +175,16 @@ fn manifestShellStartupTitlebar() native_sdk.WindowTitlebarStyle {
     if (comptime !@hasField(@TypeOf(shell), "windows")) return .standard;
     if (comptime shell.windows.len == 0) return .standard;
     return windowTitlebarStyle(shell.windows[0]);
+}
+
+/// The startup window's content min-size floor for scene-first apps:
+/// app.zon's `.shell.windows[0].min_width`/`.min_height` (0 = none).
+fn manifestShellStartupMinSize(comptime field: []const u8) f32 {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return 0;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return 0;
+    if (comptime shell.windows.len == 0) return 0;
+    return windowMinSize(shell.windows[0], field);
 }
 
 /// Present-before-show for the STARTUP window: when app.zon's first

@@ -50,8 +50,8 @@ fn warnStackContainerGap(kind: WidgetKind, gap: f32) void {
     );
 }
 
-/// Debug-build diagnostic for `wrap = true` on anything but a plain text
-/// leaf. `ElementOptions.wrap` is text-leaf word wrapping only — rows and
+/// Debug-build diagnostic for a set `wrap` on anything but a plain text
+/// leaf. `ElementOptions.wrap` is text-leaf line policy only — rows and
 /// columns never flow-wrap their children (that is the layout system's
 /// design: one axis, no reflow), so the option on a container is silently
 /// inert and has shipped with comments asserting wrapping that never
@@ -59,14 +59,14 @@ fn warnStackContainerGap(kind: WidgetKind, gap: f32) void {
 /// apps already carry the mistake, so it must never fail the build.
 /// Markup views get the same lesson as a validation error
 /// (`ui_markup.wrap_element_message`).
-fn warnInertWrap(kind: WidgetKind, wrap: bool) void {
+fn warnInertWrap(kind: WidgetKind, wrap: ?bool) void {
     if (builtin.mode != .Debug) return;
-    if (!wrap) return;
+    if (wrap == null) return;
     // Plain text leaves wrap for real; span paragraphs already wrap by
     // design, so the option is redundant there, not a trap.
     if (kind == .text) return;
     ui_log.warn(
-        "wrap does nothing on {s}: only plain text leaves word-wrap - put wrap on the text leaf itself, or size the container so content fits (rows and columns never flow-wrap)",
+        "wrap does nothing on {s}: only plain text leaves take a line policy - put wrap on the text leaf itself, or size the container so content fits (rows and columns never flow-wrap)",
         .{@tagName(kind)},
     );
 }
@@ -321,12 +321,18 @@ pub fn Ui(comptime Msg: type) type {
             padding: f32 = 0,
             main: canvas.WidgetMainAlignment = .start,
             cross: canvas.WidgetCrossAlignment = .stretch,
-            /// Opt-in word wrapping for `text` leaves: the content lays
-            /// out through the span paragraph machinery (a single-span
-            /// paragraph), wrapping at the width the widget receives and
-            /// reserving its real wrapped height in columns. Off keeps
-            /// the classic single-line text path byte-identical.
-            wrap: bool = false,
+            /// Line policy for `text` leaves. `true`: word-wrap through
+            /// the span paragraph machinery (a single-span paragraph),
+            /// wrapping at the width the widget receives and reserving
+            /// its real wrapped height in columns. `false`: honest
+            /// single-line — the content paints as ONE line clipped to
+            /// the frame it receives, so a width-constrained title never
+            /// paints a second line over the row below (measurement is
+            /// single-line either way; this makes paint agree with it).
+            /// Unset (null) keeps the classic paint path byte-identical:
+            /// single-line measurement, but paint re-wraps overflow —
+            /// prefer an explicit `false` for width-constrained titles.
+            wrap: ?bool = null,
             /// Horizontal alignment of the widget's text content within
             /// its box: `.text` leaves (plain and wrapped/paragraph),
             /// status bars, and surface titles consume it. Controls that
@@ -449,9 +455,10 @@ pub fn Ui(comptime Msg: type) type {
             global_key: ?UiKey = null,
             /// Deferred `ElementOptions.wrap`: text content may be
             /// assigned after `el` returns (builder sugar and the markup
-            /// engines both do), so the single-span conversion happens in
-            /// `finalizeNode`, when the text is final.
-            wrap: bool = false,
+            /// engines both do), so the single-span conversion (true)
+            /// and the no-wrap stamp (false) happen in `finalizeNode`,
+            /// when the text is final.
+            wrap: ?bool = null,
             style_tokens: StyleTokenRefs = .{},
             on_press: ?Msg = null,
             on_toggle: ?Msg = null,
@@ -1381,10 +1388,17 @@ pub fn Ui(comptime Msg: type) type {
             // `widget.text`), so wrapping, intrinsic sizing, wrapped
             // height reservation, and rendering are all the existing span
             // path — no forked text pipeline.
-            if (node.wrap and widget.kind == .text and widget.spans.len == 0 and widget.text.len > 0) {
+            if (node.wrap == true and widget.kind == .text and widget.spans.len == 0 and widget.text.len > 0) {
                 const spans = try self.arena.alloc(canvas.TextSpan, 1);
                 spans[0] = .{ .text = widget.text };
                 widget.spans = spans;
+            }
+            // An explicit `wrap = false` is the honest single-line
+            // contract: paint one line (TextWrap.none) clipped to the
+            // frame, matching the single-line measurement both layout
+            // paths already perform. Span paragraphs keep wrapping.
+            if (node.wrap == false and widget.kind == .text and widget.spans.len == 0) {
+                widget.text_no_wrap = true;
             }
             widget.id = if (node.global_key) |global_key|
                 structuralId(global_id_seed, widget.kind, global_key)

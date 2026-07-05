@@ -490,6 +490,7 @@ test "wrap and issue-link-base validate as vocabulary with teaching errors" {
     // one binding.
     const valid_sources = [_][]const u8{
         "<column>\n  <text wrap=\"true\">long message</text>\n</column>",
+        "<column>\n  <text wrap=\"false\">one-line row title</text>\n</column>",
         "<column>\n  <markdown source=\"{body}\" issue-link-base=\"ghissue://\" />\n</column>",
         "<column>\n  <markdown source=\"{body}\" issue-link-base=\"{issue_base}\" />\n</column>",
     };
@@ -518,6 +519,10 @@ test "wrap and issue-link-base validate as vocabulary with teaching errors" {
         },
         .{
             .source = "<column>\n  <badge wrap=\"true\">new</badge>\n</column>",
+            .message = markup.wrap_element_message,
+        },
+        .{
+            .source = "<column>\n  <row wrap=\"false\">\n    <text>a</text>\n  </row>\n</column>",
             .message = markup.wrap_element_message,
         },
     };

@@ -542,6 +542,15 @@ pub const Widget = struct {
     /// built-in names up front).
     icon: []const u8 = "",
     text_alignment: TextAlign = .start,
+    /// Honest single-line mode for plain `.text` leaves
+    /// (`ElementOptions.wrap = false` / markup `wrap="false"`): the
+    /// content paints as ONE line (`TextWrap.none`) clipped to the
+    /// widget's frame instead of word-wrapping at paint into siblings
+    /// below. Measurement already treats plain text as one line in both
+    /// the intrinsic and constrained paths, so this makes paint agree
+    /// with layout. Off keeps the classic paint path byte-identical.
+    /// Ignored on span paragraphs (`spans`), which wrap by design.
+    text_no_wrap: bool = false,
     /// Source-driven focus request: when this turns ON for a widget —
     /// newly mounted with it set, or the source flips it false→true —
     /// the runtime moves keyboard focus to the widget on the rebuild

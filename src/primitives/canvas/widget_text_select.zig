@@ -118,7 +118,9 @@ fn staticTextLayoutOptions(widget: Widget, tokens: DesignTokens, text_size: f32)
     return .{
         .max_width = widget.frame.width,
         .line_height = text_size * 1.25,
-        .wrap = .word,
+        // Mirrors `emitTextWidget`: honest single-line text lays out
+        // (and therefore selects/hit-maps) as the one line it paints.
+        .wrap = if (widget.text_no_wrap) .none else .word,
         .alignment = widget.text_alignment,
         .measure = tokens.text_measure,
     };

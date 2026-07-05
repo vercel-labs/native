@@ -276,6 +276,10 @@ void native_sdk_appkit_set_menus(native_sdk_appkit_host_t *host, const char *con
 void native_sdk_appkit_set_shortcuts(native_sdk_appkit_host_t *host, const char *const *ids, const size_t *id_lens, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count);
 void native_sdk_appkit_set_automation_frame_polling(native_sdk_appkit_host_t *host, int enabled);
 int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy);
+// Content min-size floor for a created window (NSWindow contentMinSize):
+// the user's resize stops at the floor. Values <= 0 leave that axis at
+// AppKit's default minimum. Returns 0 when the window id is unknown.
+int native_sdk_appkit_set_window_content_min_size(native_sdk_appkit_host_t *host, uint64_t window_id, double min_width, double min_height);
 int native_sdk_appkit_focus_window(native_sdk_appkit_host_t *host, uint64_t window_id);
 int native_sdk_appkit_close_window(native_sdk_appkit_host_t *host, uint64_t window_id);
 // Window-drag region channel: called during dispatch of the pointer-down

@@ -287,6 +287,11 @@ pub const Window = struct {
     /// threaded through the platform create call, so the main window
     /// can hide its titlebar before the scene loads.
     titlebar: WindowTitlebarStyle = .standard,
+    /// Content min-size floor the window itself enforces (macOS
+    /// `contentMinSize`): the resize stops at the floor instead of the
+    /// layout clamping/clipping panes below it. 0 = no floor.
+    min_width: f32 = 0,
+    min_height: f32 = 0,
 };
 
 pub const ViewKind = enum {
@@ -409,6 +414,14 @@ pub const ShellWindow = struct {
     /// create, and the scene's first window here should declare the
     /// SAME style so the two never disagree.
     titlebar: WindowTitlebarStyle = .standard,
+    /// Content min-size floor the window itself enforces (macOS
+    /// `contentMinSize`): the resize stops at the floor instead of the
+    /// layout clamping/clipping panes below it. 0 = no floor. Like
+    /// `titlebar`, the STARTUP window applies it at the host create —
+    /// app.zon's first window declaration threads it through — and
+    /// runtime-created windows apply their own declaration at create.
+    min_width: f32 = 0,
+    min_height: f32 = 0,
     views: []const ShellView = &.{},
 };
 

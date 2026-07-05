@@ -118,6 +118,7 @@ extern fn native_sdk_appkit_set_menus(host: *AppKitHost, menu_titles: [*]const [
 extern fn native_sdk_appkit_set_shortcuts(host: *AppKitHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
 extern fn native_sdk_appkit_set_automation_frame_polling(host: *AppKitHost, enabled: c_int) void;
 extern fn native_sdk_appkit_create_window(host: *AppKitHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, show_policy: c_int) c_int;
+extern fn native_sdk_appkit_set_window_content_min_size(host: *AppKitHost, window_id: u64, min_width: f64, min_height: f64) c_int;
 extern fn native_sdk_appkit_focus_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_close_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_start_window_drag(host: *AppKitHost, window_id: u64) c_int;
@@ -322,6 +323,10 @@ pub const MacPlatform = struct {
         const window_title = window_options.resolvedTitle(app_info.app_name);
         const frame = window_options.default_frame;
         const host = native_sdk_appkit_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), showModeInt(window_options.show)) orelse return error.CreateFailed;
+        // The startup window's declared content min-size floor
+        // (AppKit `contentMinSize`); the create call above registers
+        // the window under its id, so the floor applies right after.
+        applyWindowContentMinSize(host, window_options.id, window_options.min_width, window_options.min_height);
         return .{
             .host = host,
             .web_engine = web_engine,
@@ -749,11 +754,23 @@ fn showModeInt(mode: platform_mod.WindowShowMode) c_int {
     };
 }
 
+/// Apply a declared content min-size floor to a created window
+/// (AppKit `contentMinSize`). Zero/negative/non-finite floors are the
+/// "no floor" sentinel and skip the call — the window keeps AppKit's
+/// default minimum.
+fn applyWindowContentMinSize(host: *AppKitHost, window_id: u64, min_width: f32, min_height: f32) void {
+    const width: f64 = if (std.math.isFinite(min_width) and min_width > 0) min_width else 0;
+    const height: f64 = if (std.math.isFinite(min_height) and min_height > 0) min_height else 0;
+    if (width <= 0 and height <= 0) return;
+    _ = native_sdk_appkit_set_window_content_min_size(host, window_id, width, height);
+}
+
 fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyerror!platform_mod.WindowInfo {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     const title = options.resolvedTitle(self.app_info.app_name);
     const frame = options.default_frame;
     if (native_sdk_appkit_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), showModeInt(options.show)) == 0) return error.CreateFailed;
+    applyWindowContentMinSize(self.host, options.id, options.min_width, options.min_height);
     return .{
         .id = options.id,
         .label = options.label,
