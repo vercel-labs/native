@@ -25,33 +25,11 @@ pub const BuildDiagnostic = struct {
 };
 
 /// A resolved binding value. Enums resolve to their tag name so equality
-/// against enum-typed loop variables and literals works uniformly. Shared
-/// with the comptime-compiled path (ui_markup_compiled.zig) so both engines
-/// convert and compare values through the same code.
-pub const Value = union(enum) {
-    string: []const u8,
-    integer: i64,
-    float: f32,
-    boolean: bool,
-
-    pub fn eql(a: Value, b: Value) bool {
-        return switch (a) {
-            .string => |sa| b == .string and std.mem.eql(u8, sa, b.string),
-            .integer => |ia| b == .integer and ia == b.integer,
-            .float => |fa| b == .float and fa == b.float,
-            .boolean => |ba| b == .boolean and ba == b.boolean,
-        };
-    }
-
-    pub fn truthy(self: Value) bool {
-        return switch (self) {
-            .boolean => |value| value,
-            .integer => |value| value != 0,
-            .float => |value| value != 0,
-            .string => |value| value.len > 0,
-        };
-    }
-};
+/// against enum-typed loop variables and literals works uniformly. Defined
+/// in the expression core (ui_markup_expr.zig) and shared with the
+/// comptime-compiled path so both engines convert, compare, and evaluate
+/// values through the same code.
+pub const Value = markup.expr.Value;
 
 pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
     return struct {
@@ -1336,7 +1314,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
 
         fn evalAttrExpression(self: *Self, scope: *Scope, node: markup.MarkupNode, raw: []const u8) BuildError!Value {
             const expression = markup.parseAttrExpression(raw) orelse {
-                return self.failValue(node, "invalid expression: values are a literal, one {binding}, or one {a == b} equality - no other operators or calls (put logic in a model function)");
+                return self.failValue(node, markup.invalid_expression_message);
             };
             return switch (expression) {
                 .literal => |text| literalValue(text),
@@ -1348,6 +1326,33 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     try self.evalBinding(scope, node, sides.left, false),
                     try self.evalBinding(scope, node, sides.right, false),
                 ) },
+                .expression => |inner| try self.evalExpressionTree(scope, node, inner),
+            };
+        }
+
+        /// Evaluate a full `{expression}`: parse it (bounded, allocation-
+        /// free), resolve every binding node through the ordinary scope
+        /// chain, and hand the values to the shared evaluator — the same
+        /// code the compiled engine runs, so results match bit for bit.
+        /// Parse, type, and value failures (division by zero, overflow)
+        /// become build diagnostics carrying the evaluator's teaching
+        /// message.
+        fn evalExpressionTree(self: *Self, scope: *Scope, node: markup.MarkupNode, inner: []const u8) BuildError!Value {
+            var tree: markup.expr.ExprTree = .{};
+            var diagnostic: markup.expr.Diagnostic = .{};
+            if (!markup.expr.parse(inner, &tree, &diagnostic)) {
+                return self.failValue(node, diagnostic.message);
+            }
+            var values: [markup.expr.max_expression_nodes]Value = undefined;
+            for (tree.nodes[0..tree.len], 0..) |expr_node, index| {
+                if (expr_node.kind != .binding) continue;
+                // Comparison operands reject arena-computed scalars, the
+                // same teaching rule as `{a == b}`.
+                values[index] = try self.evalBinding(scope, node, expr_node.text, !expr_node.comparison_operand);
+            }
+            return switch (try markup.expr.eval(&tree, &values, scope.arena)) {
+                .value => |value| value,
+                .fail => |message| self.failValue(node, message),
             };
         }
 
@@ -1412,8 +1417,11 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 const close = std.mem.indexOfScalarPos(u8, rest, open, '}') orelse {
                     return self.failText(node, "unterminated interpolation");
                 };
-                const path = std.mem.trim(u8, rest[open + 1 .. close], " ");
-                const value = try self.evalBinding(scope, node, path, true);
+                const inner = std.mem.trim(u8, rest[open + 1 .. close], " ");
+                const value = if (markup.isBindingPath(inner))
+                    try self.evalBinding(scope, node, inner, true)
+                else
+                    try self.evalExpressionTree(scope, node, inner);
                 try appendValue(&out, ui.arena, value);
                 rest = rest[close + 1 ..];
             }
@@ -1683,15 +1691,10 @@ pub fn literalValue(text: []const u8) Value {
     return .{ .string = text };
 }
 
-pub fn appendValue(out: *std.ArrayListUnmanaged(u8), arena: std.mem.Allocator, value: Value) error{OutOfMemory}!void {
-    var buffer: [64]u8 = undefined;
-    switch (value) {
-        .string => |text| try out.appendSlice(arena, text),
-        .integer => |int| try out.appendSlice(arena, std.fmt.bufPrint(&buffer, "{d}", .{int}) catch return error.OutOfMemory),
-        .float => |float| try out.appendSlice(arena, std.fmt.bufPrint(&buffer, "{d}", .{float}) catch return error.OutOfMemory),
-        .boolean => |boolean| try out.appendSlice(arena, if (boolean) "true" else "false"),
-    }
-}
+/// Display-text formatting for interpolation and `++` concatenation:
+/// defined once in the expression core so both engines (and the evaluator
+/// itself) format identically, floats included.
+pub const appendValue = markup.expr.appendValue;
 
 pub fn pathHead(path: []const u8) []const u8 {
     const dot = std.mem.indexOfScalar(u8, path, '.') orelse return path;

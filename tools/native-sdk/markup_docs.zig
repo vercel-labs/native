@@ -141,7 +141,7 @@ pub const for_attr_docs = [_]Doc{
 };
 
 pub const if_attr_docs = [_]Doc{
-    .{ .name = "test", .doc = "if: one {binding} or one {a == b} equality." },
+    .{ .name = "test", .doc = "if: one {expression} - a binding, a comparison (count > 0, a == b), or boolean logic (and/or/not)." },
 };
 
 pub const markdown_attr_docs = [_]Doc{

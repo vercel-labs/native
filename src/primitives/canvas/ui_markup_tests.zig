@@ -93,7 +93,7 @@ test "reports syntax errors with line and column" {
     }
 }
 
-test "attribute expressions parse into the sanctioned forms only" {
+test "attribute expressions classify into the sanctioned forms" {
     const literal = markup.parseAttrExpression("primary").?;
     try testing.expectEqualStrings("primary", literal.literal);
 
@@ -104,12 +104,37 @@ test "attribute expressions parse into the sanctioned forms only" {
     try testing.expectEqualStrings("f", equals.equals.left);
     try testing.expectEqualStrings("filter", equals.equals.right);
 
-    // Anything beyond bindings and one equality is rejected.
-    try testing.expectEqual(@as(?markup.Expression, null), markup.parseAttrExpression("{a + b}"));
-    try testing.expectEqual(@as(?markup.Expression, null), markup.parseAttrExpression("{call(a)}"));
-    try testing.expectEqual(@as(?markup.Expression, null), markup.parseAttrExpression("{a == b == c}"));
+    // Everything else brace-wrapped classifies as a full expression: the
+    // grammar (and its teaching errors) live in the expression core, which
+    // `attrExpressionError` and the engines run.
+    const arithmetic = markup.parseAttrExpression("{a + b}").?;
+    try testing.expectEqualStrings("a + b", arithmetic.expression);
+    try testing.expect(markup.attrExpressionError("{a + b}", "fallback") == null);
+    try testing.expect(markup.attrExpressionError("{count > 0 and not busy}", "fallback") == null);
+    try testing.expect(markup.attrExpressionError("{plural(n, 'item', 'items')}", "fallback") == null);
+
+    // Invalid expressions surface the core's specific messages.
+    try testing.expectEqualStrings(
+        markup.expr.unknown_function_message,
+        markup.attrExpressionError("{call(a)}", "fallback").?,
+    );
+    try testing.expectEqualStrings(
+        markup.expr.comparison_chain_message,
+        markup.attrExpressionError("{a == b == c}", "fallback").?,
+    );
+    try testing.expectEqualStrings(
+        markup.expr.clock_function_message,
+        markup.attrExpressionError("{now()}", "fallback").?,
+    );
+    try testing.expectEqualStrings(
+        markup.expr.arithmetic_type_message,
+        markup.attrExpressionError("{'a' - 1}", "fallback").?,
+    );
+
+    // Values that do not even classify keep the caller's message.
     try testing.expectEqual(@as(?markup.Expression, null), markup.parseAttrExpression("{}"));
     try testing.expectEqual(@as(?markup.Expression, null), markup.parseAttrExpression("{unclosed"));
+    try testing.expectEqualStrings("fallback", markup.attrExpressionError("{}", "fallback").?);
 }
 
 test "message expressions parse tag and optional payload binding" {
@@ -199,7 +224,7 @@ test "template and use misuse is validated with positions and teaching messages"
         .{ .source = "<template name=\"t\" args=\"title\"><text>{title}</text></template>\n<row>\n  <use template=\"t\" />\n</row>", .message = markup.use_missing_arg_message },
         .{ .source = "<template name=\"t\"><text>x</text></template>\n<row>\n  <use template=\"t\" extra=\"1\" />\n</row>", .message = markup.use_extra_arg_message },
         .{ .source = "<template name=\"t\"><text>x</text></template>\n<row>\n  <use template=\"t\"><text>y</text></use>\n</row>", .message = markup.use_children_without_slot_message },
-        .{ .source = "<template name=\"t\" args=\"title\"><text>{title}</text></template>\n<row>\n  <use template=\"t\" title=\"{a + b}\" />\n</row>", .message = markup.invalid_expression_message },
+        .{ .source = "<template name=\"t\" args=\"title\"><text>{title}</text></template>\n<row>\n  <use template=\"t\" title=\"{a ++}\" />\n</row>", .message = markup.expr.expected_operand_message },
         // A template using itself is a later-reference error (recursion).
         .{ .source = "<template name=\"loop\"><column><use template=\"loop\" /></column></template>\n<row />", .message = markup.use_earlier_template_message },
     };
@@ -291,7 +316,12 @@ test "structural validation reports positions for grammar misuse" {
         .{ .source = "<column on-input=\"draft\">\n  <text>x</text>\n</column>", .message = markup.non_hit_target_handler_message },
         .{ .source = "<table>\n  <table-row on-submit=\"pick\">\n    <table-cell>x</table-cell>\n  </table-row>\n</table>", .message = markup.non_hit_target_handler_message },
         .{ .source = "<row>\n  <badge on-change=\"x\">3</badge>\n</row>", .message = markup.non_hit_target_handler_message },
-        .{ .source = "<row gap=\"{a + b}\" />", .message = "invalid expression: values are a literal, one {binding}, or one {a == b} equality - no other operators or calls (put logic in a model function)" },
+        // Full expressions are valid attribute values now; broken ones
+        // surface the expression core's specific teaching message.
+        .{ .source = "<row gap=\"{a +}\" />", .message = markup.expr.expected_operand_message },
+        .{ .source = "<row gap=\"{count(a)}\" />", .message = markup.expr.unknown_function_message },
+        .{ .source = "<row gap=\"{now()}\" />", .message = markup.expr.clock_function_message },
+        .{ .source = "<row gap=\"{'a' - 1}\" />", .message = markup.expr.arithmetic_type_message },
         .{ .source = "<column>\n  <for as=\"t\"><text>x</text></for>\n</column>", .message = "for requires an each attribute" },
         .{ .source = "<column>\n  <if><text>x</text></if>\n</column>", .message = "if requires a test attribute" },
         .{ .source = "<column>\n  <else><text>x</text></else>\n</column>", .message = markup.else_placement_message },

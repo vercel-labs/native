@@ -130,9 +130,6 @@ pub const Model = struct {
         return model.task_count - model.openCount();
     }
 
-    pub fn doneEmpty(model: *const Model) bool {
-        return model.doneCount() == 0;
-    }
 
     pub fn visible(model: *const Model, arena: std.mem.Allocator) []const Task {
         const out = arena.alloc(Task, model.task_count) catch return &.{};

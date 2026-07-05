@@ -14,6 +14,10 @@
 const std = @import("std");
 const font_coverage = @import("font_coverage.zig");
 
+/// The expression core: grammar, bounds, type discipline, and the one
+/// evaluator both engines share (see ui_markup_expr.zig).
+pub const expr = @import("ui_markup_expr.zig");
+
 pub const MarkupErrorInfo = struct {
     line: usize = 0,
     column: usize = 0,
@@ -560,12 +564,20 @@ pub const Expression = union(enum) {
     literal: []const u8,
     binding: []const u8,
     equals: struct { left: []const u8, right: []const u8 },
+    /// Any other `{...}` content: the total expression grammar
+    /// (arithmetic, comparisons, boolean logic, `++` concatenation, and
+    /// the closed function library — see ui_markup_expr.zig). The payload
+    /// is the raw inner text; classification does not parse it, so
+    /// consumers (the validator via `attrExpressionError`, the engines via
+    /// their evaluators) surface the specific teaching message themselves.
+    expression: []const u8,
 };
 
-/// Parse an attribute value: either a plain literal or exactly one
-/// sanctioned expression form — `{path}` or `{a == b}`. Mixed literal and
-/// binding text is only allowed in text content (interpolation), not in
-/// attribute values.
+/// Parse an attribute value: a plain literal, or exactly one brace-wrapped
+/// expression — a bare `{path}` binding, the legacy `{a == b}` path
+/// equality, or the full expression grammar. Mixed literal and binding
+/// text is only allowed in text content (interpolation), not in attribute
+/// values.
 pub fn parseAttrExpression(value: []const u8) ?Expression {
     if (value.len == 0 or value[0] != '{') return .{ .literal = value };
     if (value[value.len - 1] != '}') return null;
@@ -574,11 +586,51 @@ pub fn parseAttrExpression(value: []const u8) ?Expression {
     if (std.mem.indexOf(u8, inner, "==")) |eq| {
         const left = std.mem.trim(u8, inner[0..eq], " ");
         const right = std.mem.trim(u8, inner[eq + 2 ..], " ");
-        if (!isBindingPath(left) or !isBindingPath(right)) return null;
-        return .{ .equals = .{ .left = left, .right = right } };
+        if (isBindingPath(left) and isBindingPath(right)) {
+            return .{ .equals = .{ .left = left, .right = right } };
+        }
     }
-    if (!isBindingPath(inner)) return null;
-    return .{ .binding = inner };
+    if (isBindingPath(inner)) return .{ .binding = inner };
+    return .{ .expression = inner };
+}
+
+/// Structural check of an attribute expression, shared by the validator
+/// (what `native markup check` runs, with no model in hand): syntax,
+/// bounds, function names and arity, and the type discipline over the
+/// parts whose types are already known (literals and operators). Binding
+/// types are the engines' job. Returns the teaching message, or null when
+/// the value is fine; `fallback` is the caller's message for values that
+/// do not even classify (unterminated braces, empty `{}`).
+pub fn attrExpressionError(value: []const u8, fallback: []const u8) ?[]const u8 {
+    const expression = parseAttrExpression(value) orelse return fallback;
+    if (expression != .expression) return null;
+    return expressionTextError(expression.expression);
+}
+
+/// The structural check for one expression's inner text (also used for
+/// text-interpolation segments).
+pub fn expressionTextError(inner: []const u8) ?[]const u8 {
+    var tree: expr.ExprTree = .{};
+    var diagnostic: expr.Diagnostic = .{};
+    if (!expr.parse(inner, &tree, &diagnostic)) return diagnostic.message;
+    const unknown: [expr.max_expression_nodes]?expr.ValueKind = @splat(null);
+    _ = expr.checkTypes(&tree, &unknown, &diagnostic) catch return diagnostic.message;
+    return null;
+}
+
+/// First uncovered codepoint inside an expression's STRING LITERALS: the
+/// tofu guard for text an expression can inject into a rendered label
+/// (`{plural(n, 'item', 'items')}`). Binding values stay the runtime
+/// Debug warning's job, exactly like plain `{binding}` spans.
+pub fn expressionStringCoverageError(inner: []const u8) bool {
+    var tree: expr.ExprTree = .{};
+    var diagnostic: expr.Diagnostic = .{};
+    if (!expr.parse(inner, &tree, &diagnostic)) return false;
+    for (tree.nodes[0..tree.len]) |node| {
+        if (node.kind != .literal_string) continue;
+        if (firstUncoveredCodepoint(node.text) != null) return true;
+    }
+    return false;
 }
 
 pub const MessageExpression = struct {
@@ -602,23 +654,7 @@ pub fn parseMessageExpression(value: []const u8) ?MessageExpression {
     return .{ .tag = value };
 }
 
-fn isBindingPath(text: []const u8) bool {
-    if (text.len == 0) return false;
-    var segment_start = true;
-    for (text) |byte| {
-        if (segment_start) {
-            if (!std.ascii.isAlphabetic(byte) and byte != '_') return false;
-            segment_start = false;
-            continue;
-        }
-        if (byte == '.') {
-            segment_start = true;
-            continue;
-        }
-        if (!std.ascii.isAlphanumeric(byte) and byte != '_') return false;
-    }
-    return !segment_start;
-}
+pub const isBindingPath = expr.isBindingPath;
 
 // ------------------------------------------------------------ validation
 
@@ -855,9 +891,62 @@ fn textNodeCoverageError(node: MarkupNode) ?MarkupErrorInfo {
 fn attrCoverageError(node: MarkupNode, attribute: MarkupAttr) ?MarkupErrorInfo {
     if (!nameInList(attribute.name, &known_text_attr_names)) return null;
     const expression = parseAttrExpression(attribute.value) orelse return null;
-    if (expression != .literal) return null;
-    if (firstUncoveredCodepoint(expression.literal) == null) return null;
-    return attrError(node, attribute, font_coverage_message);
+    switch (expression) {
+        .literal => |literal| {
+            if (firstUncoveredCodepoint(literal) == null) return null;
+            return attrError(node, attribute, font_coverage_message);
+        },
+        // Expression string literals are markup-authored text too: they
+        // can land in a rendered label, so they ride the same guard.
+        .expression => |inner| {
+            if (!expressionStringCoverageError(inner)) return null;
+            return attrError(node, attribute, font_coverage_message);
+        },
+        else => return null,
+    }
+}
+
+/// Structural check of a text run's `{...}` interpolations: unterminated
+/// braces, and every non-path segment through the expression grammar
+/// (syntax, bounds, function names/arity, literal type discipline) plus
+/// the tofu guard over expression string literals. Positions point at the
+/// segment's opening brace.
+fn textInterpolationError(node: MarkupNode) ?MarkupErrorInfo {
+    var rest = node.text;
+    var consumed: usize = 0;
+    while (std.mem.indexOfScalar(u8, rest, '{')) |open| {
+        const close = std.mem.indexOfScalarPos(u8, rest, open, '}') orelse {
+            return textErrorAtOffset(node, consumed + open, unterminated_interpolation_message);
+        };
+        const inner = std.mem.trim(u8, rest[open + 1 .. close], " ");
+        if (!isBindingPath(inner)) {
+            if (expressionTextError(inner)) |message| {
+                return textErrorAtOffset(node, consumed + open, message);
+            }
+            if (expressionStringCoverageError(inner)) {
+                return textErrorAtOffset(node, consumed + open, font_coverage_message);
+            }
+        }
+        consumed += close + 1;
+        rest = rest[close + 1 ..];
+    }
+    return null;
+}
+
+/// An error positioned at a byte offset within a text run (mirrors the
+/// tofu guard's position walk).
+fn textErrorAtOffset(node: MarkupNode, offset: usize, message: []const u8) MarkupErrorInfo {
+    var line = node.line;
+    var column = node.column;
+    for (node.text[0..offset]) |byte| {
+        if (byte == '\n') {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    return .{ .line = line, .column = column, .message = message, .path = node.src_path };
 }
 
 /// Markup attributes that reference a color design token by name. Values
@@ -889,7 +978,9 @@ pub const unknown_radius_token_message = "unknown radius token: radius takes a c
 pub const for_children_message = "for takes one or more element children (elements, use, if/else, or a nested for) - text content is only allowed inside text-bearing elements";
 pub const else_placement_message = "else must directly follow an if (renders when the test is false) or a for (renders when the iterable is empty)";
 
-pub const invalid_expression_message = "invalid expression: values are a literal, one {binding}, or one {a == b} equality - no other operators or calls (put logic in a model function)";
+pub const invalid_expression_message = "invalid expression: values are a literal or one {expression} - a binding path, arithmetic, comparisons, and/or/not, ++ concatenation, and the built-in formatting functions (stateful logic stays a model function)";
+pub const if_test_expression_message = "invalid expression: test takes one {expression} - a binding, a comparison, or boolean logic";
+pub const unterminated_interpolation_message = "unterminated interpolation";
 pub const arena_scalar_equality_message = "arena-computed bindings cannot be compared with == - compare the source fields directly, or bind a pub fn returning bool";
 pub const markdown_source_message = "markdown requires a source attribute with one {binding} naming the markdown text (a []const u8 field or fn - arena fns work)";
 pub const markdown_children_message = "markdown takes no children or text content - the source binding provides the markdown";
@@ -1095,8 +1186,8 @@ fn validateUse(document: MarkupDocument, node: MarkupNode, template_limit: usize
         if (!templateDeclaresArg(template_node, attribute.name)) {
             return attrError(node, attribute, use_extra_arg_message);
         }
-        if (parseAttrExpression(attribute.value) == null) {
-            return attrError(node, attribute, invalid_expression_message);
+        if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+            return attrError(node, attribute, message);
         }
     }
     return validateUseChildren(document, node, template_limit);
@@ -1183,14 +1274,14 @@ fn validateStepper(node: MarkupNode) ?MarkupErrorInfo {
     for (node.attrs) |attribute| {
         if (std.mem.eql(u8, attribute.name, "active")) {
             has_active = true;
-            if (parseAttrExpression(attribute.value) == null) {
-                return attrError(node, attribute, stepper_active_message);
+            if (attrExpressionError(attribute.value, stepper_active_message)) |message| {
+                return attrError(node, attribute, message);
             }
             continue;
         }
         if (std.mem.eql(u8, attribute.name, "key") or std.mem.eql(u8, attribute.name, "global-key") or std.mem.eql(u8, attribute.name, "label")) {
-            if (parseAttrExpression(attribute.value) == null) {
-                return attrError(node, attribute, invalid_expression_message);
+            if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+                return attrError(node, attribute, message);
             }
             continue;
         }
@@ -1209,6 +1300,7 @@ fn validateStepper(node: MarkupNode) ?MarkupErrorInfo {
             if (run.kind != .text) return errorAt(run, text_leaf_children_message);
             text_runs += 1;
             if (text_runs > 1) return errorAt(run, text_leaf_single_run_message);
+            if (textInterpolationError(run)) |info| return info;
             if (textNodeCoverageError(run)) |info| return info;
         }
     }
@@ -1228,8 +1320,8 @@ fn validateTimeline(document: MarkupDocument, node: MarkupNode, template_limit: 
         if (!known) {
             return attrError(node, attribute, timeline_attr_message);
         }
-        if (parseAttrExpression(attribute.value) == null) {
-            return attrError(node, attribute, invalid_expression_message);
+        if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+            return attrError(node, attribute, message);
         }
     }
     var previous_kind: ?MarkupNodeKind = null;
@@ -1253,8 +1345,8 @@ fn validateTimelineItem(node: MarkupNode) ?MarkupErrorInfo {
     for (node.attrs) |attribute| {
         if (std.mem.eql(u8, attribute.name, "title")) {
             has_title = true;
-            if (parseAttrExpression(attribute.value) == null) {
-                return attrError(node, attribute, timeline_item_title_message);
+            if (attrExpressionError(attribute.value, timeline_item_title_message)) |message| {
+                return attrError(node, attribute, message);
             }
             if (attrCoverageError(node, attribute)) |info| return info;
             continue;
@@ -1293,8 +1385,8 @@ fn validateTimelineItem(node: MarkupNode) ?MarkupErrorInfo {
         if (!known) {
             return attrError(node, attribute, timeline_item_attr_message);
         }
-        if (parseAttrExpression(attribute.value) == null) {
-            return attrError(node, attribute, invalid_expression_message);
+        if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+            return attrError(node, attribute, message);
         }
         if (attrCoverageError(node, attribute)) |info| return info;
     }
@@ -1307,10 +1399,14 @@ fn validateTimelineItem(node: MarkupNode) ?MarkupErrorInfo {
 /// at a template body root.
 fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]const u8, template_limit: usize, slot_rule: SlotRule) ?MarkupErrorInfo {
     switch (node.kind) {
-        // Literal text content rides the tofu guard: a codepoint
-        // the bundled face cannot render is a teaching error at its
-        // exact position.
-        .text => return textNodeCoverageError(node),
+        // Literal text content rides the tofu guard (a codepoint the
+        // bundled face cannot render is a teaching error at its exact
+        // position) and the interpolation check (every `{...}` segment
+        // is a path or a valid expression).
+        .text => {
+            if (textInterpolationError(node)) |info| return info;
+            return textNodeCoverageError(node);
+        },
         .template_block => return errorAt(node, template_top_level_message),
         .import_block => return errorAt(node, import_top_level_message),
         .use_block => return validateUse(document, node, template_limit),
@@ -1469,8 +1565,8 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     if (nameInList(node.name, &known_non_hit_target_element_names)) {
                         return attrError(node, attribute, autofocus_element_message);
                     }
-                    if (parseAttrExpression(attribute.value) == null) {
-                        return attrError(node, attribute, invalid_expression_message);
+                    if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+                        return attrError(node, attribute, message);
                     }
                     continue;
                 }
@@ -1561,8 +1657,8 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                 if (!nameInList(attribute.name, &known_option_attrs)) {
                     return attrError(node, attribute, "unknown attribute");
                 }
-                if (parseAttrExpression(attribute.value) == null) {
-                    return attrError(node, attribute, invalid_expression_message);
+                if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+                    return attrError(node, attribute, message);
                 }
                 if (attrCoverageError(node, attribute)) |info| return info;
             }
@@ -1582,7 +1678,9 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
         .if_block => {
             if (parent_element == null) return errorAt(node, "if is only allowed inside an element");
             const test_value = node.attr("test") orelse return errorAt(node, "if requires a test attribute");
-            if (parseAttrExpression(test_value) == null) return errorAt(node, "invalid expression: test takes one {binding} or {a == b} equality");
+            if (attrExpressionError(test_value, if_test_expression_message)) |message| {
+                return errorAt(node, message);
+            }
         },
         .else_block => {},
     }

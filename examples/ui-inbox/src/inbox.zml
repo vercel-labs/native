@@ -4,7 +4,7 @@
 <column gap="12" padding="16">
   <row gap="8" cross="center">
     <text grow="1">Inbox</text>
-    <button variant="ghost" disabled="{doneEmpty}" on-press="clear_done">Clear done</button>
+    <button variant="ghost" disabled="{doneCount == 0}" on-press="clear_done">Clear done</button>
   </row>
   <row gap="8" cross="center">
     <text-field text="{draft}" placeholder="New task…" on-input="draft_edit" on-submit="add" grow="1" />

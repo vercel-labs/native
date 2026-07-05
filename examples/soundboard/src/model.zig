@@ -270,14 +270,6 @@ pub const Model = struct {
         return formatMs(arena, track.duration_ms);
     }
 
-    pub fn hasQueue(model: *const Model) bool {
-        return model.queue_len > 0;
-    }
-
-    pub fn queueLabel(model: *const Model, arena: std.mem.Allocator) []const u8 {
-        return std.fmt.allocPrint(arena, "{d} queued", .{model.queue_len}) catch "";
-    }
-
     /// Albums matching the search query, derived into the build arena.
     pub fn visibleAlbums(model: *const Model, arena: std.mem.Allocator) []const AlbumCell {
         const out = arena.alloc(AlbumCell, albums.len) catch return &.{};

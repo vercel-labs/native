@@ -1391,6 +1391,9 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
             if (comptime (expression == .binding)) {
                 return bindingValue(node, entries, comptime expression.binding, ui, model, scope, true);
             }
+            if (comptime (expression == .expression)) {
+                return evalExpressionTree(node, entries, comptime expression.expression, ui, model, scope);
+            }
             // Arena-computed bindings are excluded from equality on
             // purpose (same rule as the interpreter): comparing freshly
             // formatted strings is a smell — compare source fields, or
@@ -1400,6 +1403,91 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
                 bindingValue(node, entries, sides.left, ui, model, scope, false),
                 bindingValue(node, entries, sides.right, ui, model, scope, false),
             ) };
+        }
+
+        /// Evaluate a full `{expression}`: the tree parses at comptime
+        /// (syntax, bounds, function names/arity are compile errors with
+        /// the evaluator's teaching messages), binding nodes resolve
+        /// through the same comptime-unrolled path access as bare
+        /// bindings, and the SHARED evaluator computes the result at
+        /// runtime — identical Value inputs through identical arithmetic
+        /// and formatting code as the interpreter, so results match bit
+        /// for bit. Value-dependent failures (division by zero, overflow)
+        /// latch `ui.failed` exactly like the engine's other runtime
+        /// conversions.
+        fn evalExpressionTree(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime inner: []const u8, ui: *Ui, model: *const ModelT, scope: anytype) Value {
+            const tree = comptime parsedExpression(node, inner);
+            // Static type discipline: definite mismatches are compile
+            // errors carrying the same message the interpreter reports.
+            _ = comptime expressionTreeVariant(node, entries, inner);
+            var values: [markup.expr.max_expression_nodes]Value = undefined;
+            inline for (0..markup.expr.max_expression_nodes) |index| {
+                if (comptime (index < tree.len and tree.nodes[index].kind == .binding)) {
+                    // Comparison operands reject arena-computed scalars,
+                    // the same teaching rule as `{a == b}`.
+                    values[index] = bindingValue(node, entries, comptime tree.nodes[index].text, ui, model, scope, comptime !tree.nodes[index].comparison_operand);
+                }
+            }
+            const outcome = markup.expr.eval(&tree, &values, ui.arena) catch {
+                ui.failed = true;
+                return .{ .boolean = false };
+            };
+            return switch (outcome) {
+                .value => |value| value,
+                .fail => blk: {
+                    ui.failed = true;
+                    break :blk .{ .boolean = false };
+                },
+            };
+        }
+
+        fn parsedExpression(comptime node: markup.MarkupNode, comptime inner: []const u8) markup.expr.ExprTree {
+            comptime {
+                @setEvalBranchQuota(4_000 + inner.len * 400);
+                var tree: markup.expr.ExprTree = .{};
+                var diagnostic: markup.expr.Diagnostic = .{};
+                if (!markup.expr.parse(inner, &tree, &diagnostic)) fail(node, diagnostic.message);
+                const frozen = tree;
+                return frozen;
+            }
+        }
+
+        /// The comptime-known result kind of a full expression: binding
+        /// kinds come from the same leaf-type resolution as bare bindings
+        /// (so an unresolvable path is a compile error with the
+        /// interpreter's message), and the shared type checker promotes
+        /// every definite mismatch to a compile error.
+        fn expressionTreeVariant(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime inner: []const u8) ?ValueVariant {
+            comptime {
+                @setEvalBranchQuota(4_000 + inner.len * 400);
+                const tree = parsedExpression(node, inner);
+                var kinds: [markup.expr.max_expression_nodes]?markup.expr.ValueKind = @splat(null);
+                for (tree.nodes[0..tree.len], 0..) |expr_node, index| {
+                    if (expr_node.kind != .binding) continue;
+                    kinds[index] = kindFromVariant(pathVariant(node, entries, expr_node.text, !expr_node.comparison_operand));
+                }
+                var diagnostic: markup.expr.Diagnostic = .{};
+                const result = markup.expr.checkTypes(&tree, &kinds, &diagnostic) catch fail(node, diagnostic.message);
+                return variantFromKind(result);
+            }
+        }
+
+        fn kindFromVariant(variant: ?ValueVariant) ?markup.expr.ValueKind {
+            return switch (variant orelse return null) {
+                .string => .string,
+                .integer => .integer,
+                .float => .float,
+                .boolean => .boolean,
+            };
+        }
+
+        fn variantFromKind(kind: ?markup.expr.ValueKind) ?ValueVariant {
+            return switch (kind orelse return null) {
+                .string => .string,
+                .integer => .integer,
+                .float => .float,
+                .boolean => .boolean,
+            };
         }
 
         /// The comptime-known `Value` variant an expression produces, or
@@ -1417,6 +1505,7 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
                     }),
                     .binding => |path| pathVariant(node, entries, path, true),
                     .equals => .boolean,
+                    .expression => |inner| expressionTreeVariant(node, entries, inner),
                 };
             }
         }
@@ -1593,6 +1682,7 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
         const TextSegment = union(enum) {
             literal: []const u8,
             binding: []const u8,
+            expression: []const u8,
         };
 
         fn textSegments(comptime node: markup.MarkupNode, comptime text: []const u8) []const TextSegment {
@@ -1603,7 +1693,12 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
                 while (std.mem.indexOfScalar(u8, rest, '{')) |open| {
                     segments = segments ++ &[_]TextSegment{.{ .literal = rest[0..open] }};
                     const close = std.mem.indexOfScalarPos(u8, rest, open, '}') orelse fail(node, "unterminated interpolation");
-                    segments = segments ++ &[_]TextSegment{.{ .binding = std.mem.trim(u8, rest[open + 1 .. close], " ") }};
+                    const inner = std.mem.trim(u8, rest[open + 1 .. close], " ");
+                    if (markup.isBindingPath(inner)) {
+                        segments = segments ++ &[_]TextSegment{.{ .binding = inner }};
+                    } else {
+                        segments = segments ++ &[_]TextSegment{.{ .expression = inner }};
+                    }
                     rest = rest[close + 1 ..];
                 }
                 segments = segments ++ &[_]TextSegment{.{ .literal = rest }};
@@ -1632,8 +1727,11 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
                 const segment = comptime segments[index];
                 if (comptime (segment == .literal)) {
                     out.appendSlice(ui.arena, comptime segment.literal) catch return runtimeFail([]const u8, ui);
-                } else {
+                } else if (comptime (segment == .binding)) {
                     const value = bindingValue(node, entries, comptime segment.binding, ui, model, scope, true);
+                    interpreter.appendValue(&out, ui.arena, value) catch return runtimeFail([]const u8, ui);
+                } else {
+                    const value = evalExpressionTree(node, entries, comptime segment.expression, ui, model, scope);
                     interpreter.appendValue(&out, ui.arena, value) catch return runtimeFail([]const u8, ui);
                 }
             }

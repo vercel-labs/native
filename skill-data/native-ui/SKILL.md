@@ -326,17 +326,33 @@ Color and radius come from the design tokens, referenced by token NAME — liter
 
 References resolve against the app's LIVE tokens on every rebuild (`finalizeWithTokens`), so a themed app (`tokens`/`tokens_fn`) re-resolves them when the theme changes — dark mode flips `surface` automatically. An explicit `style` value set in Zig always wins over a token ref on the same field. Unknown token names are validation/compile errors.
 
-## Expressions — the complete list
+## Expressions — the complete grammar
 
-Attribute values take a literal or exactly ONE expression; there are only three forms:
+Attribute values take a literal or exactly ONE `{expression}`; text content interpolates any number (`{open_count} open · {done_count} done`). An expression is PURE and TOTAL — spreadsheet power, never a programming language: no user-defined functions, no effects, no computed message names, guaranteed termination.
 
-1. `{path.to.value}` — a binding
-2. `{a == b}` — equality (the only comparison; for `selected` states)
-3. on `on-*` attributes: `msg` or `msg:{path}` — message tag plus optional payload binding
+- Operands: binding paths (`{c.title}`), numbers (`3`, `0.5` — no exponents), `'strings'` (single quotes, no escapes), `true`/`false`.
+- Arithmetic `+ - * /`: numbers only (int op int stays int; any float promotes; `/` ALWAYS produces a float — wrap in `round()`/`floor()`/`ceil()` for whole-number attributes). Division by zero, integer overflow, and non-finite float results are loud errors, never silent zeros/NaN/inf.
+- Comparison `== != < <= > >=`: ordering takes numbers only; equality compares any two values (different types are simply NOT equal; int/float compare numerically). Comparisons do not chain (`a < b < c` is an error — use `and`). Comparison operands reject arena-computed bindings (compare source fields, or bind a `pub fn ... bool`).
+- Boolean `and` / `or` / `not`: booleans only — write `{count > 0}`, not `{count}`. Both sides always evaluate (pure, so only errors observable).
+- `++` concatenation: joins ANY values as display text, formatted exactly like interpolation (`{'$' ++ fixed(price, 2)}`).
+- `msg` or `msg:{path}` on `on-*` attributes stays its own form: tags and payloads are paths, never expressions.
 
-Text content (in text-bearing elements) additionally supports interpolation: `{open_count} open · {done_count} done`.
+The function library is CLOSED (16 functions; adding one is a toolkit change — anything else is a model fn):
 
-There is NO `!=`, `<`, `>`, arithmetic, function calls with arguments, or ternaries — by design. Any derived value or condition beyond these is a Zig model function you bind to (`{doneEmpty}`, `each="visible"`).
+| fn | notes |
+|---|---|
+| `fixed(x, digits)` | exact decimals, digits 0-6, half-away rounding (`fixed(3.14159, 2)` → `3.14`) |
+| `thousands(n)` | whole number with `,` separators (`1,234,567`) |
+| `percent(fraction, digits?)` | `percent(0.42)` → `42%`; digits default 0 |
+| `date(ts)` / `time(ts)` / `datetime(ts)` | unix SECONDS from the model, formatted UTC (`2026-07-05`, `14:03`); formatting model time is pure — `now()` is a teaching error: reading the clock is an effect, keep a timestamp field updated by update/fx |
+| `upper(s)` / `lower(s)` / `trim(s)` | ASCII case map / whitespace trim; non-ASCII passes through unchanged |
+| `min(a, b)` / `max(a, b)` / `abs(x)` | numbers; int stays int |
+| `round(x)` / `floor(x)` / `ceil(x)` | number → whole number |
+| `plural(count, singular, plural)` | count exactly 1 picks singular (`{plural(n, 'item', 'items')}`) |
+
+Bounds (taught one past): 256 bytes, 64 terms, 16 nesting levels per expression. Where expressions are allowed: text interpolation, attribute values, `if` tests, template args at use sites. Path-only by design: message tags/payloads, `for each` iterables, import paths. Both engines evaluate through ONE shared evaluator — results are bit-for-bit identical, floats included — and `native markup check` validates syntax, bounds, function names (with did-you-mean), arity, and literal types without needing the model.
+
+Anything stateful or beyond the grammar is a Zig model function you bind to (`each="visible"`, `{summaryLine}`).
 
 ## Binding resolution rules
 
@@ -345,7 +361,7 @@ A path like `{h.streak}` resolves left to right, starting from the model or a `f
 - everything bindable is declared INSIDE the Model struct: fields, and `pub fn` METHODS in the struct body. A file-scope `pub fn visibleRows(model: *const Model, ...)` written NEXT TO the struct is invisible to bindings and `for each` — `native markup check` still passes (it is grammar-only), and the view then fails at test/run time with "each does not name an iterable". If a binding or `each` cannot find your fn, first check it lives inside `pub const Model = struct { ... }`
 - struct fields bind directly: `{habit_count}`, `{h.done}`
 - zero-arg pub methods bind like fields: `{totalDays}` calls `pub fn totalDays(m: *const Model) usize`
-- arena-taking scalar methods bind the same way: `{summary}` calls `pub fn summary(m: *const Model, arena: std.mem.Allocator) []const u8` — format derived display strings straight into the build arena (it lives exactly one view build). Works anywhere a scalar binding does — text interpolation, attribute values, message payloads — EXCEPT inside `{a == b}` equality, which rejects arena-computed values with a teaching error: compare the source fields, or bind a `pub fn ... bool`
+- arena-taking scalar methods bind the same way: `{summary}` calls `pub fn summary(m: *const Model, arena: std.mem.Allocator) []const u8` — format derived display strings straight into the build arena (it lives exactly one view build). Works anywhere a scalar binding does — text interpolation, attribute values, message payloads, expression function arguments (`{upper(summary)}`) — EXCEPT as a comparison operand (`==`, `<`, ...), which rejects arena-computed values with a teaching error: compare the source fields, or bind a `pub fn ... bool`
 - enums resolve to their tag name — so `{f}` renders "active", `{f == filter}` compares tags, and `set_filter:{f}` coerces the tag back into an enum payload
 - `for each="name"` resolves, in order: a Model field that is a slice/array, a pub array/slice decl (`pub const filters = [_]Filter{...}`), a pub fn `(*const Model) []const T`, or a pub fn `(*const Model, std.mem.Allocator) []const T` — the allocator variant is how filtered/derived lists work (allocate from the passed arena)
 - item methods work too: `{h.name}` may be a field or `pub fn name(h: *const Habit) []const u8`

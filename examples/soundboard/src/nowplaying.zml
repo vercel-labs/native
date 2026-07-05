@@ -28,8 +28,8 @@
     <text size="sm" foreground="text_muted" width="34">{elapsedLabel}</text>
     <slider grow="1" value="{progressFraction}" disabled="{idle}" on-change="seeked" label="Seek" />
     <text size="sm" foreground="text_muted" width="34">{durationLabel}</text>
-    <if test="{hasQueue}">
-      <badge variant="secondary">{queueLabel}</badge>
+    <if test="{queue_len > 0}">
+      <badge variant="secondary">{queue_len} queued</badge>
     </if>
   </row>
 </column>

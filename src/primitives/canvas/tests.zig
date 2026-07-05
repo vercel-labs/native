@@ -2,6 +2,7 @@ test {
     _ = @import("widget_tests.zig");
     _ = @import("ui_tests.zig");
     _ = @import("ui_markup_tests.zig");
+    _ = @import("ui_markup_expr_tests.zig");
     _ = @import("ui_markup_view_tests.zig");
     _ = @import("ui_markup_compiled_tests.zig");
     _ = @import("ui_markup_huge_model_tests.zig");

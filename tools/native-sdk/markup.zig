@@ -118,6 +118,15 @@ const DiskLoader = struct {
 const VocabularySuggestion = struct { token: []const u8, suggestion: ?[]const u8 };
 
 fn vocabularySuggestion(source: []const u8, info: ui_markup.MarkupErrorInfo) ?VocabularySuggestion {
+    // The expression library is a closed vocabulary too: name the unknown
+    // function and its nearest valid spelling. The validator's position
+    // points at the attribute (or the interpolation's brace), so the
+    // offending call sits at or after it on the rest of the source.
+    if (std.mem.eql(u8, info.message, ui_markup.expr.unknown_function_message)) {
+        const rest = sourceFrom(source, info.line, info.column) orelse return null;
+        const token = ui_markup.expr.firstUnknownFunction(rest) orelse return null;
+        return .{ .token = token, .suggestion = nearestName(token, &ui_markup.expr.known_function_names) };
+    }
     const names: []const []const u8 = if (std.mem.eql(u8, info.message, "unknown attribute"))
         &ui_markup.known_option_attrs
     else if (std.mem.eql(u8, info.message, "unknown element"))
@@ -126,6 +135,21 @@ fn vocabularySuggestion(source: []const u8, info: ui_markup.MarkupErrorInfo) ?Vo
         return null;
     const token = tokenAt(source, info.line, info.column) orelse return null;
     return .{ .token = token, .suggestion = nearestName(token, names) };
+}
+
+/// The source from a 1-based line/column to the end (columns count bytes,
+/// matching the parser's positions).
+fn sourceFrom(source: []const u8, line: usize, column: usize) ?[]const u8 {
+    if (line == 0 or column == 0) return null;
+    var current_line: usize = 1;
+    var index: usize = 0;
+    while (index < source.len and current_line < line) : (index += 1) {
+        if (source[index] == '\n') current_line += 1;
+    }
+    if (current_line != line) return null;
+    const start = index + (column - 1);
+    if (start >= source.len) return null;
+    return source[start..];
 }
 
 /// The identifier ([a-z0-9-_]) starting at a 1-based line/column.
