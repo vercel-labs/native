@@ -977,7 +977,10 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\                exe.step.dependOn(&cef_check.step);
         \\                const include_arg = b.fmt("-I{s}", .{cef_dir});
         \\                const define_arg = b.fmt("-DNATIVE_SDK_CEF_DIR=\"{s}\"", .{cef_dir});
-        \\                const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
+        \\                // The SDK's usr/include must stay a system include dir (searched after zig's
+        \\                // bundled libc++/libc headers). A plain -I shadows libc++'s <string.h>/<math.h>
+        \\                // wrappers in ObjC++ and surfaces SDK nullability gaps as a diagnostic flood.
+        \\                const sdk_include = if (b.sysroot) |sysroot| b.fmt("-isystem{s}/usr/include", .{sysroot}) else "";
         \\                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC++", "-std=c++17", "-stdlib=libc++", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include, include_arg, define_arg } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC++", "-std=c++17", "-stdlib=libc++", "-mmacosx-version-min=11.0", include_arg, define_arg };
         \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/macos/cef_host.mm"), .flags = flags });
         \\                app_mod.addObjectFile(b.path(b.fmt("{s}/libcef_dll_wrapper/libcef_dll_wrapper.a", .{cef_dir})));

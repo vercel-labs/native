@@ -2,6 +2,7 @@
 
 #import <AppKit/AppKit.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <ImageIO/ImageIO.h>
 #import <Security/Security.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <crt_externs.h>
@@ -60,6 +61,10 @@ static BOOL NativeSdkShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventM
 static NSString *NativeSdkStringFromBytes(const char *bytes, size_t len) {
     if (!bytes || len == 0) return nil;
     return [[NSString alloc] initWithBytes:bytes length:len encoding:NSUTF8StringEncoding];
+}
+
+static uint64_t NativeSdkChromiumTimestampNanoseconds(void) {
+    return (uint64_t)([[NSDate date] timeIntervalSince1970] * 1000000000.0);
 }
 
 static NSString *NativeSdkPasteboardTypeForMime(const char *mime_type, size_t mime_type_len) {
@@ -515,6 +520,7 @@ static const char *NativeSdkCefBridgeScript() {
 @property(nonatomic, strong) NSMutableSet<NSString *> *closingWebViewKeys;
 @property(nonatomic, assign) uint64_t nextWebViewGeneration;
 @property(nonatomic, strong) NSTimer *timer;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSTimer *> *appTimers;
 @property(nonatomic, strong) NSString *appName;
 @property(nonatomic, assign) native_sdk_appkit_event_callback_t callback;
 @property(nonatomic, assign) native_sdk_appkit_bridge_callback_t bridgeCallback;
@@ -546,6 +552,10 @@ static const char *NativeSdkCefBridgeScript() {
 - (void)runWithCallback:(native_sdk_appkit_event_callback_t)callback context:(void *)context;
 - (void)stop;
 - (void)emitEvent:(native_sdk_appkit_event_t)event;
+- (void)startAppTimerWithId:(uint64_t)timerId intervalNs:(uint64_t)intervalNs repeats:(BOOL)repeats;
+- (void)cancelAppTimerWithId:(uint64_t)timerId;
+- (void)invalidateAppTimers;
+- (void)wakeFromAnyThread;
 - (void)startApplicationActivationObservers;
 - (void)stopApplicationActivationObservers;
 - (void)applicationDidBecomeActive:(NSNotification *)notification;
@@ -713,6 +723,7 @@ static const char *NativeSdkCefBridgeScript() {
     self.webviewPendingZooms = [[NSMutableDictionary alloc] init];
     self.webviewGenerations = [[NSMutableDictionary alloc] init];
     self.closingWebViewKeys = [[NSMutableSet alloc] init];
+    self.appTimers = [[NSMutableDictionary alloc] init];
     self.nextWebViewGeneration = 1;
     self.cefClients = new std::map<uint64_t, CefRefPtr<NativeSdkCefClient>>();
     self.browsers = new std::map<uint64_t, CefRefPtr<CefBrowser>>();
@@ -933,6 +944,7 @@ static const char *NativeSdkCefBridgeScript() {
 - (void)stop {
     [self.timer invalidate];
     self.timer = nil;
+    [self invalidateAppTimers];
     if (self.shortcutEventMonitor) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
@@ -1038,6 +1050,69 @@ static const char *NativeSdkCefBridgeScript() {
     if (self.didShutdown) return;
     self.didShutdown = YES;
     [self emitEvent:(native_sdk_appkit_event_t){ .kind = NATIVE_SDK_APPKIT_EVENT_SHUTDOWN }];
+}
+
+/* App timers and cross-thread wake, mirrored from the AppKit host: the
+ * runtime's scheduler and effect queue rely on TIMER/WAKE events on both
+ * engines. */
+- (void)startAppTimerWithId:(uint64_t)timerId intervalNs:(uint64_t)intervalNs repeats:(BOOL)repeats {
+    NSNumber *key = @(timerId);
+    [self.appTimers[key] invalidate];
+    NSTimeInterval interval = (NSTimeInterval)intervalNs / 1000000000.0;
+    // Common modes: a timer must keep firing while the user holds a menu
+    // open or live-resizes the window (same discipline as the AppKit host).
+    NSTimer *app_timer = [NSTimer timerWithTimeInterval:interval
+                                                 target:self
+                                               selector:@selector(appTimerFired:)
+                                               userInfo:@{ @"id": key, @"repeats": @(repeats) }
+                                                repeats:repeats];
+    [[NSRunLoop mainRunLoop] addTimer:app_timer forMode:NSRunLoopCommonModes];
+    self.appTimers[key] = app_timer;
+}
+
+- (void)cancelAppTimerWithId:(uint64_t)timerId {
+    NSNumber *key = @(timerId);
+    [self.appTimers[key] invalidate];
+    [self.appTimers removeObjectForKey:key];
+}
+
+- (void)appTimerFired:(NSTimer *)timer {
+    NSDictionary *info = (NSDictionary *)timer.userInfo;
+    NSNumber *key = info[@"id"];
+    if (!key) return;
+    // A non-repeating timer invalidates itself after this fire; drop the
+    // bookkeeping entry before the callback so it may start a replacement
+    // timer with the same id.
+    if (![info[@"repeats"] boolValue] && self.appTimers[key] == timer) {
+        [self.appTimers removeObjectForKey:key];
+    }
+    [self emitEvent:(native_sdk_appkit_event_t){
+        .kind = NATIVE_SDK_APPKIT_EVENT_TIMER,
+        .timer_id = key.unsignedLongLongValue,
+        .timestamp_ns = NativeSdkChromiumTimestampNanoseconds(),
+    }];
+}
+
+- (void)invalidateAppTimers {
+    for (NSTimer *timer in self.appTimers.allValues) {
+        [timer invalidate];
+    }
+    [self.appTimers removeAllObjects];
+}
+
+/* Called from any thread: marshal onto the main queue and emit the WAKE
+ * event there, so the runtime's effect-queue drain always runs on the
+ * loop thread. */
+- (void)wakeFromAnyThread {
+    __weak NativeSdkChromiumHost *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NativeSdkChromiumHost *strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.didShutdown) return;
+        [strongSelf emitEvent:(native_sdk_appkit_event_t){
+            .kind = NATIVE_SDK_APPKIT_EVENT_WAKE,
+            .timestamp_ns = NativeSdkChromiumTimestampNanoseconds(),
+        }];
+    });
 }
 
 - (void)loadSource:(NSString *)source kind:(NSInteger)kind assetRoot:(NSString *)assetRoot entry:(NSString *)entry origin:(NSString *)origin spaFallback:(BOOL)spaFallback {
@@ -1958,6 +2033,17 @@ int native_sdk_appkit_set_view_visible(native_sdk_appkit_host_t *host, uint64_t 
     return 0;
 }
 
+int native_sdk_appkit_set_view_cursor(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, int cursor) {
+    // Native child views are system-engine-only (create_view above); no
+    // view exists for the label, so this reports it like the other stubs.
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    (void)cursor;
+    return 0;
+}
+
 int native_sdk_appkit_focus_view(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len) {
     (void)host;
     (void)window_id;
@@ -2107,6 +2193,232 @@ int native_sdk_appkit_close_webview(native_sdk_appkit_host_t *host, uint64_t win
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     return [object closeWebViewInWindow:window_id label:labelString ?: @""] ? 1 : 0;
+}
+
+void native_sdk_appkit_start_timer(native_sdk_appkit_host_t *host, uint64_t timer_id, uint64_t interval_ns, int repeats) {
+    NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
+    [object startAppTimerWithId:timer_id intervalNs:interval_ns repeats:(repeats != 0)];
+}
+
+void native_sdk_appkit_cancel_timer(native_sdk_appkit_host_t *host, uint64_t timer_id) {
+    NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
+    [object cancelAppTimerWithId:timer_id];
+}
+
+void native_sdk_appkit_wake(native_sdk_appkit_host_t *host) {
+    NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
+    [object wakeFromAnyThread];
+}
+
+void native_sdk_appkit_set_automation_frame_polling(native_sdk_appkit_host_t *host, int enabled) {
+    // The AppKit host pauses FRAME events when idle and uses this poll to
+    // keep automation captures fresh. The Chromium host pumps FRAME
+    // unconditionally at 60Hz from its message-loop timer (see emitFrame),
+    // so there is no retained-frame pause to poll around.
+    (void)host;
+    (void)enabled;
+}
+
+/* GPU-surface compositing (pixel/packet presents, image store, scroll
+ * drivers, widget accessibility trees) is implemented by the system-engine
+ * AppKit host only; the Chromium host renders every window through the web
+ * engine and creates no gpu-surface views (see native_sdk_appkit_create_view
+ * above). These report failure through the same channel as an unknown view
+ * so callers see an explicit error instead of silently dropped frames. */
+int native_sdk_appkit_adopt_view_surface(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, void *ns_view) {
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    (void)ns_view;
+    return 0;
+}
+
+int native_sdk_appkit_release_view_surface(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len) {
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    return 0;
+}
+
+int native_sdk_appkit_request_gpu_surface_frame(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len) {
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    return 0;
+}
+
+int native_sdk_appkit_set_gpu_surface_scroll_drivers(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const native_sdk_appkit_scroll_driver_t *drivers, size_t count) {
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    (void)drivers;
+    (void)count;
+    return 0;
+}
+
+int native_sdk_appkit_present_gpu_surface_pixels(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, size_t width, size_t height, double scale, int has_dirty_rect, double dirty_x, double dirty_y, double dirty_width, double dirty_height, const uint8_t *rgba8, size_t rgba8_len) {
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    (void)width;
+    (void)height;
+    (void)scale;
+    (void)has_dirty_rect;
+    (void)dirty_x;
+    (void)dirty_y;
+    (void)dirty_width;
+    (void)dirty_height;
+    (void)rgba8;
+    (void)rgba8_len;
+    return 0;
+}
+
+int native_sdk_appkit_present_gpu_surface_packet(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double surface_width, double surface_height, double scale, uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a, int requires_render, size_t command_count, size_t unsupported_command_count, int representable, const uint8_t *json, size_t json_len) {
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    (void)surface_width;
+    (void)surface_height;
+    (void)scale;
+    (void)clear_r;
+    (void)clear_g;
+    (void)clear_b;
+    (void)clear_a;
+    (void)requires_render;
+    (void)command_count;
+    (void)unsupported_command_count;
+    (void)representable;
+    (void)json;
+    (void)json_len;
+    return 0;
+}
+
+int native_sdk_appkit_present_gpu_surface_packet_binary(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double surface_width, double surface_height, double scale, uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a, int requires_render, size_t command_count, size_t unsupported_command_count, int representable, const uint8_t *packet, size_t packet_len) {
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    (void)surface_width;
+    (void)surface_height;
+    (void)scale;
+    (void)clear_r;
+    (void)clear_g;
+    (void)clear_b;
+    (void)clear_a;
+    (void)requires_render;
+    (void)command_count;
+    (void)unsupported_command_count;
+    (void)representable;
+    (void)packet;
+    (void)packet_len;
+    return 0;
+}
+
+int native_sdk_appkit_upload_gpu_surface_image(native_sdk_appkit_host_t *host, uint64_t image_id, size_t width, size_t height, const uint8_t *rgba8, size_t rgba8_len) {
+    (void)host;
+    (void)image_id;
+    (void)width;
+    (void)height;
+    (void)rgba8;
+    (void)rgba8_len;
+    return 0;
+}
+
+int native_sdk_appkit_remove_gpu_surface_image(native_sdk_appkit_host_t *host, uint64_t image_id) {
+    (void)host;
+    (void)image_id;
+    return 0;
+}
+
+int native_sdk_appkit_update_widget_accessibility(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const native_sdk_appkit_widget_accessibility_node_t *nodes, size_t node_count) {
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    (void)nodes;
+    (void)node_count;
+    return 0;
+}
+
+/* The Chromium host has no packet text renderer, so there are no host
+ * metrics to match: return the documented negative sentinel and the canvas
+ * provider uses its estimator (the same fallback the AppKit host takes for
+ * invalid UTF-8). */
+double native_sdk_appkit_measure_text(uint64_t font_id, double size, const char *text, size_t text_len) {
+    (void)font_id;
+    (void)size;
+    (void)text;
+    (void)text_len;
+    return -1;
+}
+
+/* Mirror of the AppKit host's decoder: pure CoreGraphics/ImageIO with no
+ * host state, so both engines decode identically. See appkit_host.h for
+ * the pixel-format and return-value contract. */
+int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t *out_width, size_t *out_height) {
+    if (out_width) *out_width = 0;
+    if (out_height) *out_height = 0;
+    if (!bytes || bytes_len == 0 || !pixels) return 0;
+    @autoreleasepool {
+        NSData *data = [NSData dataWithBytesNoCopy:(void *)bytes length:bytes_len freeWhenDone:NO];
+        CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+        if (!source) return 0;
+        CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+        CFRelease(source);
+        if (!image) return 0;
+
+        size_t width = CGImageGetWidth(image);
+        size_t height = CGImageGetHeight(image);
+        if (width == 0 || height == 0 || width > 8192 || height > 8192) {
+            CGImageRelease(image);
+            return 0;
+        }
+        if (out_width) *out_width = width;
+        if (out_height) *out_height = height;
+        size_t byte_len = width * height * 4;
+        if (byte_len / 4 / height != width || pixels_len < byte_len) {
+            CGImageRelease(image);
+            return -1;
+        }
+
+        CGColorSpaceRef color_space = CGColorSpaceCreateDeviceRGB();
+        if (!color_space) {
+            CGImageRelease(image);
+            return 0;
+        }
+        CGContextRef context = CGBitmapContextCreate(pixels, width, height, 8, width * 4, color_space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+        CGColorSpaceRelease(color_space);
+        if (!context) {
+            CGImageRelease(image);
+            return 0;
+        }
+        memset(pixels, 0, byte_len);
+        CGContextSetBlendMode(context, kCGBlendModeCopy);
+        CGContextDrawImage(context, CGRectMake(0, 0, (CGFloat)width, (CGFloat)height), image);
+        CGContextRelease(context);
+        CGImageRelease(image);
+
+        // Un-premultiply: round to nearest so opaque pixels survive exactly.
+        for (size_t offset = 0; offset < byte_len; offset += 4) {
+            uint8_t alpha = pixels[offset + 3];
+            if (alpha == 0) {
+                pixels[offset + 0] = 0;
+                pixels[offset + 1] = 0;
+                pixels[offset + 2] = 0;
+            } else if (alpha != 255) {
+                pixels[offset + 0] = (uint8_t)MIN(255, ((size_t)pixels[offset + 0] * 255 + alpha / 2) / alpha);
+                pixels[offset + 1] = (uint8_t)MIN(255, ((size_t)pixels[offset + 1] * 255 + alpha / 2) / alpha);
+                pixels[offset + 2] = (uint8_t)MIN(255, ((size_t)pixels[offset + 2] * 255 + alpha / 2) / alpha);
+            }
+        }
+        return 1;
+    }
 }
 
 size_t native_sdk_appkit_clipboard_read(native_sdk_appkit_host_t *host, char *buffer, size_t buffer_len) {
@@ -2433,6 +2745,19 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
         }
         object.statusItem.menu = menu;
     }
+}
+
+int native_sdk_appkit_set_window_content_min_size(native_sdk_appkit_host_t *host, uint64_t window_id, double min_width, double min_height) {
+    NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) return 0;
+    // The declared floor is CONTENT size (matches the frame the runtime
+    // reasons about); AppKit adds the chrome on top. Axes <= 0 keep
+    // AppKit's default minimum for that axis.
+    NSSize current = window.contentMinSize;
+    window.contentMinSize = NSMakeSize(min_width > 0 ? min_width : current.width,
+                                       min_height > 0 ? min_height : current.height);
+    return 1;
 }
 
 void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, const char *title, size_t title_len) {

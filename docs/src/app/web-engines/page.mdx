@@ -59,6 +59,8 @@ CEF mode is first-class on macOS. It uses the same Native SDK runtime APIs as WK
 
 Chromium is available through CEF on macOS. Linux can still use WebKitGTK with `system`, and Windows can use the native system host with `system`; Linux and Windows Chromium builds fail early until their CEF hosts are implemented.
 
+Native-rendered surfaces stay a system-engine feature: the macOS Chromium host does not implement native child views or `gpu_surface` compositing, and those operations report unsupported instead of silently no-oping (see [Platform Support](/platform-support)). Windows, child WebViews, the bridge, keyboard shortcuts, tray, dialogs, clipboard, and app timers behave the same as the system host.
+
 ### Setup
 
 The happy path is managed by the CLI:
@@ -128,7 +130,9 @@ zig build test-webview-cef-smoke -Dplatform=macos -Dweb-engine=chromium
 zig build test-package-cef-layout -Dplatform=macos
 ```
 
-The Chromium smoke step requires a local CEF layout or `-Dcef-auto-install=true`. It launches the example with automation, verifies `native.ping`, and exercises JS window create/list/focus/close. The package layout step verifies that a Chromium macOS package contains the framework and resources CEF expects.
+The Chromium smoke step requires a local CEF layout or `-Dcef-auto-install=true`. It launches the WebView example under CEF with automation, verifies `native.ping` over the bridge, and exercises child WebView create/setFrame/navigate/close. The package layout step verifies that a Chromium macOS package contains the framework and resources CEF expects.
+
+`zig build test-webview-cef-link` builds the WebView example with `-Dweb-engine=chromium` without running it — the cheapest way to prove the Chromium host still compiles and links after platform-layer changes. `scripts/gate.sh fast` runs it automatically whenever `src/platform/macos/` files change (macOS only; it skips with a warning when no CEF layout is installed).
 
 ## Choosing An Engine
 

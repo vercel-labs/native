@@ -15,6 +15,15 @@
 #   tools/**, tests/**, assets/**              -> framework change: root suites
 #                                                 + ALL example suites
 #                                                 (frontends, native, mobile)
+#   src/platform/macos/**                       -> additionally cef-host-link:
+#                                                 build the WebView example
+#                                                 with -Dweb-engine=chromium so
+#                                                 cef_host.mm actually compiles
+#                                                 and links (macOS only; skipped
+#                                                 with a loud warning when the
+#                                                 CEF layout is absent — prime
+#                                                 with `zig build &&
+#                                                 ./zig-out/bin/native cef install`)
 #   examples/<name>/**                          -> that example's suite only
 #                                                 (test-example-<name>; the
 #                                                 mobile projects map to
@@ -28,7 +37,8 @@
 # in both tiers: it never runs unless docs/ changed (or --all in full).
 #
 # full — root test + validate, every example suite (frontends, native incl.
-# canvas-preview, mobile), the four macOS GPU smokes (gpu-surface,
+# canvas-preview, mobile), the Chromium host link check (cef-host-link),
+# the four macOS GPU smokes (gpu-surface,
 # gpu-dashboard, gpu-components, canvas-preview; skipped off-macOS), a
 # markup check over every example .zml, and the docs check if docs/ changed
 # vs base-ref or --all was passed. --perf additionally runs the percentile
@@ -89,6 +99,7 @@ fi
 changed_files="$( (git diff --name-only "$base_commit"; git ls-files --others --exclude-standard) | sort -u)"
 
 framework_changed=false
+macos_platform_changed=false
 docs_changed=false
 meta_changed=false
 affected_examples=""   # space-separated example dir names
@@ -118,6 +129,7 @@ while IFS= read -r file; do
   [ -n "$file" ] || continue
   case "$file" in
     docs/*) docs_changed=true ;;
+    src/platform/macos/*) framework_changed=true; macos_platform_changed=true ;;
     src/*|build.zig|build.zig.zon|build/*|tools/*|tests/*|assets/*) framework_changed=true ;;
     examples/*/*)
       example="${file#examples/}"
@@ -194,6 +206,34 @@ run_bench_check_step() { # runs (or explains skipping) the render-benchmark ratc
   fi
 }
 
+# The Chromium (CEF) host, src/platform/macos/cef_host.mm, is only compiled
+# by Chromium-engine app builds — never by `zig build test`/`validate` — so
+# without this step an edit that keeps it merely grep-identical to the
+# AppKit host can land without ever seeing a compiler. test-webview-cef-link
+# builds (and links) the WebView example against the host for real.
+cef_layout_ready() {
+  [ -f third_party/cef/macos/include/cef_app.h ] &&
+  [ -d "third_party/cef/macos/Release/Chromium Embedded Framework.framework" ] &&
+  [ -f third_party/cef/macos/libcef_dll_wrapper/libcef_dll_wrapper.a ]
+}
+
+cef_host_step() {
+  if ! $is_macos; then
+    skip_step "cef-host-link" "macOS only"
+    return
+  fi
+  if ! cef_layout_ready; then
+    echo "" >&2
+    echo "==> cef-host-link: WARNING — src/platform/macos changed but the CEF layout is absent," >&2
+    echo "    so the Chromium host was NOT compiled. Blind cef_host.mm edits will not be caught." >&2
+    echo "    Prime it once (downloads the prepared CEF runtime into third_party/cef/macos):" >&2
+    echo "      zig build && ./zig-out/bin/native cef install" >&2
+    skip_step "cef-host-link" "CEF layout absent at third_party/cef/macos (see warning)"
+    return
+  fi
+  run_step "cef-host-link" zig build test-webview-cef-link
+}
+
 # ---- tiers ----------------------------------------------------------------
 
 if [ "$tier" = "fast" ]; then
@@ -232,6 +272,12 @@ if [ "$tier" = "fast" ]; then
     $mobile_affected && run_step "examples-mobile" zig build test-examples-mobile
   fi
 
+  if $macos_platform_changed; then
+    cef_host_step
+  else
+    skip_step "cef-host-link" "src/platform/macos unchanged vs $base_ref"
+  fi
+
   if $docs_changed; then
     docs_check
   else
@@ -243,6 +289,8 @@ else # full
   run_step "examples-frontends" zig build test-examples-frontends
   run_step "examples-native" zig build test-examples-native
   run_step "examples-mobile" zig build test-examples-mobile
+
+  cef_host_step
 
   if $is_macos; then
     run_step "smoke-gpu-surface" zig build test-gpu-surface-smoke

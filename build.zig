@@ -569,13 +569,13 @@ pub fn build(b: *std.Build) void {
     const run_hello_step = b.step("run-hello", "Run the native-sdk hello WebView example");
     run_hello_step.dependOn(&run_hello.step);
 
-    const run_webview = b.addSystemCommand(&.{ "zig", "build", "run", b.fmt("-Dplatform={s}", .{platform_arg}), b.fmt("-Dtrace={s}", .{@tagName(trace_option)}), b.fmt("-Dweb-engine={s}", .{@tagName(web_engine)}), b.fmt("-Dcef-dir={s}", .{cef_dir}) });
+    const run_webview = b.addSystemCommand(&.{ "zig", "build", "run", b.fmt("-Dplatform={s}", .{platform_arg}), b.fmt("-Dtrace={s}", .{@tagName(trace_option)}), b.fmt("-Dweb-engine={s}", .{@tagName(web_engine)}), b.fmt("-Dcef-dir={s}", .{exampleCefDir(b, cef_dir)}) });
     run_webview.setCwd(b.path("examples/webview"));
     const run_webview_step = b.step("run-webview", "Run the native-sdk WebView example");
     run_webview_step.dependOn(&run_webview.step);
 
     const browser_cef_dir = cef_dir_override orelse defaultCefDir(selected_platform, "third_party/cef/macos");
-    const run_browser = b.addSystemCommand(&.{ "zig", "build", "run", b.fmt("-Dplatform={s}", .{platform_arg}), b.fmt("-Dtrace={s}", .{@tagName(trace_option)}), b.fmt("-Dweb-engine={s}", .{@tagName(browser_web_engine)}), b.fmt("-Dcef-dir={s}", .{browser_cef_dir}) });
+    const run_browser = b.addSystemCommand(&.{ "zig", "build", "run", b.fmt("-Dplatform={s}", .{platform_arg}), b.fmt("-Dtrace={s}", .{@tagName(trace_option)}), b.fmt("-Dweb-engine={s}", .{@tagName(browser_web_engine)}), b.fmt("-Dcef-dir={s}", .{exampleCefDir(b, browser_cef_dir)}) });
     run_browser.setCwd(b.path("examples/browser"));
     const run_browser_step = b.step("run-browser", "Run the native-sdk browser example");
     run_browser_step.dependOn(&run_browser.step);
@@ -714,7 +714,7 @@ pub fn build(b: *std.Build) void {
     examples_step.dependOn(native_examples_step);
     examples_step.dependOn(mobile_examples_step);
 
-    const build_webview_cef = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=chromium", b.fmt("-Dcef-dir={s}", .{cef_dir}) });
+    const build_webview_cef = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=chromium", b.fmt("-Dcef-dir={s}", .{exampleCefDir(b, cef_dir)}) });
     build_webview_cef.setCwd(b.path("examples/webview"));
     const webview_cef_link_step = b.step("test-webview-cef-link", "Build the WebView example with Chromium/CEF");
     webview_cef_link_step.dependOn(&build_webview_cef.step);
@@ -1644,7 +1644,7 @@ pub fn build(b: *std.Build) void {
     gpu_components_smoke_step.dependOn(&gpu_components_smoke_run.step);
 
     const webview_cef_smoke_step = b.step("test-webview-cef-smoke", "Run macOS Chromium WebView automation smoke test");
-    const webview_cef_smoke_build = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=chromium", b.fmt("-Dcef-dir={s}", .{cef_dir}), "-Dautomation=true", "-Djs-bridge=true" });
+    const webview_cef_smoke_build = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=chromium", b.fmt("-Dcef-dir={s}", .{exampleCefDir(b, cef_dir)}), "-Dautomation=true", "-Djs-bridge=true" });
     webview_cef_smoke_build.setCwd(b.path("examples/webview"));
     const webview_cef_smoke_run = b.addSystemCommand(&.{
         "sh", "-c",
@@ -1968,6 +1968,16 @@ fn defaultCefDir(platform: PlatformOption, configured: []const u8) []const u8 {
         .windows => "third_party/cef/windows",
         else => configured,
     };
+}
+
+/// CEF dir for a sub-build whose cwd is an example directory (two levels
+/// below the repo root). Relative paths are resolved by the example's
+/// build against its own root, so the repo-root-relative default must be
+/// rebased; absolute overrides pass through, but the example build.zigs
+/// reject them (b.path panics), so callers should prefer relative paths.
+fn exampleCefDir(b: *std.Build, cef_dir: []const u8) []const u8 {
+    if (std.fs.path.isAbsolute(cef_dir)) return cef_dir;
+    return b.fmt("../../{s}", .{cef_dir});
 }
 
 fn webEngineFromBuildOption(option: WebEngineOption) web_engine_tool.Engine {
