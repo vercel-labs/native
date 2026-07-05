@@ -5,12 +5,15 @@ import { Showcase } from "@/components/home/showcase";
 import { CopyCommand } from "@/components/home/copy-command";
 import { HeroWindow } from "@/components/home/hero-window";
 import { HeroPointer } from "@/components/home/hero-pointer";
-import { githubUrl, npmCli, siteName } from "@/lib/site";
+import { githubUrl, siteName } from "@/lib/site";
 
 // ---------------------------------------------------------------- samples
 // Both excerpts are real source from examples/ui-inbox in this repository.
 
-const installCommand = `npm install -g ${npmCli}`;
+// The honest install path today: the CLI builds from a source checkout
+// (`zig build` emits zig-out/bin/native). Swap back to the npm one-liner
+// when @native-sdk/cli is actually published.
+const installCommands = [`git clone ${githubUrl}.git`, "cd zero-native && zig build"];
 
 const zmlSample = `<column gap="12" padding="16">
   <row gap="8" cross="center">
@@ -278,7 +281,7 @@ export default function HomePage() {
           </p>
           <div className="mx-auto mt-8 flex max-w-2xl flex-col items-center justify-center gap-3 sm:flex-row">
             <div className="w-full max-w-xs sm:w-auto sm:min-w-[21rem]">
-              <CopyCommand lines={[installCommand]} />
+              <CopyCommand lines={installCommands} />
             </div>
             <div className="flex items-center gap-3">
               <Link
@@ -611,9 +614,8 @@ export default function HomePage() {
           </p>
           <div className="mx-auto mt-8 max-w-md">
             <Terminal title="terminal">
-              <Prompt>npm install -g {npmCli}</Prompt>
               <Prompt>native init my_app</Prompt>
-              <Prompt>cd my_app && zig build run</Prompt>
+              <Prompt>cd my_app && native dev</Prompt>
               <Muted>a real window opens — edit src/app.zml while it runs</Muted>
             </Terminal>
           </div>

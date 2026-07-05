@@ -4,10 +4,10 @@ The automation server exposes runtime state and accepts commands via a file-base
 
 ## Enabling automation
 
-Build with the automation flag:
+Build with the automation flag (`native` verbs forward `-D` flags to the underlying `zig build`):
 
 ```bash
-zig build -Dautomation=true
+native build -Dautomation=true
 ```
 
 In your runner, pass an `automation.Server` to `RuntimeOptions`:

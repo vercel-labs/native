@@ -5,7 +5,7 @@
  */
 export const siteName = "Native SDK";
 
-/** The npm package that carries the CLI. */
+/** The npm package that will carry the CLI (not yet published — the CLI builds from a source checkout today). */
 export const npmCli = "@native-sdk/cli";
 
 /** The public repository. */

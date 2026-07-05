@@ -7,14 +7,11 @@ The Native SDK provides tooling to bundle your app into distributable packages f
 Build and package in two steps:
 
 ```bash
-zig build package
+native build
+native package --target macos
 ```
 
-Or use the CLI directly with more control:
-
-```bash
-native package --target macos --manifest app.zon --binary zig-out/bin/MyApp
-```
+`native package` picks up the manifest at `app.zon` and the binary at `zig-out/bin/<name>` automatically; pass `--manifest`, `--binary`, or the other flags below for more control. Apps that own their build ([ejected](/cli) or scaffolded with `--full`) also get a `zig build package` step that wires the same thing into the build graph.
 
 ## Build options
 
@@ -135,7 +132,7 @@ The manifest drives packaging metadata:
 
 ### App bundle
 
-`zig build package` creates a `.app` bundle with:
+`native package --target macos` creates a `.app` bundle with:
 
 - `Contents/MacOS/<binary>` -- the compiled executable
 - `Contents/Resources/icon.icns` -- the app icon

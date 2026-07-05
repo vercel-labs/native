@@ -1,6 +1,6 @@
 # Testing in CI
 
-Apps scaffolded with `native init` ship a GitHub Actions workflow at `.github/workflows/ci.yml`. Like everything init generates, the file belongs to you: it starts with proven recipes and grows with the app.
+Apps scaffolded with `native init --full` (and every web-frontend scaffold) ship a GitHub Actions workflow at `.github/workflows/ci.yml`; the zero-config default scaffold stays lean and skips CI, so copy the recipes below in when you want them. Like everything init generates, the file belongs to you: it starts with proven recipes and grows with the app.
 
 ## Three tiers of confidence
 
@@ -39,7 +39,7 @@ native automate assert --absent 'error event=' 'dispatch_errors=[1-9]'
 
 ## The generated workflow
 
-`native init` writes two jobs for native apps (web-frontend scaffolds get the `test` job only, since the smoke recipe is native-specific):
+`native init --full` writes two jobs for native apps (web-frontend scaffolds get the `test` job only, since the smoke recipe is native-specific):
 
 ```yaml
 env:

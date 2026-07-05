@@ -1,20 +1,33 @@
 # Quick Start
 
-Native SDK is an open source toolkit for building beautiful native desktop and mobile applications. It combines markup for declarative interfaces, a predictable message-based state model, a modern component library, a native renderer, and tooling for building, running, and packaging apps — no browser or WebView in the binary. This page takes you from install to a running, tested, packaged app.
+Native SDK is the complete toolkit for building beautiful native desktop and mobile applications: declarative markup, a predictable message-based state model, a modern component library, a native renderer, and tooling for building, running, and packaging apps — no browser or WebView in the binary. This page takes you from a source checkout to a running, tested app.
 
 ## Prerequisites
 
-- [Zig 0.16.0+](https://ziglang.org/download/)
+- [Zig 0.16.0+](https://ziglang.org/download/) — needed once, to build the CLI itself
 - macOS 11 or newer, Linux, or Windows
-- Node.js with npm (only for installing the CLI, and for apps that [embed web content](/frontend))
 
-Install the `native` CLI:
+## Get the CLI
+
+The `native` CLI is not on a package registry yet. Build it from a source checkout of the SDK:
 
 ```bash
-npm install -g @native-sdk/cli
+git clone https://github.com/vercel-labs/zero-native.git
+cd zero-native
+zig build
 ```
 
-Or build it from a source checkout of the SDK: `zig build` in the repo root produces `zig-out/bin/native`, ready to use from anywhere.
+That produces `zig-out/bin/native`. Put it on your PATH for the rest of this page:
+
+```bash
+export PATH="$PWD/zig-out/bin:$PATH"
+native version
+```
+
+Two things this binary carries with it, so you never configure them:
+
+- **The SDK location.** Apps build against the checkout the CLI was built in — `native init` records the path automatically (override with `--framework <sdk path>`).
+- **The Zig toolchain.** `native dev|build|test` use the Zig on your PATH when its version is compatible, and otherwise offer to download the pinned version into `~/.native/toolchains/` (checksum-verified; pass `--yes` to skip the prompt in scripts).
 
 ## Create an app
 
@@ -23,7 +36,7 @@ native init my_app
 cd my_app
 ```
 
-This scaffolds a complete native-rendered project:
+This scaffolds a native-rendered app — and nothing else. There are no build files to maintain: the CLI owns the build graph, generating it under `.native/build/` (gitignored) on each run.
 
 <table>
   <thead>
@@ -50,31 +63,25 @@ This scaffolds a complete native-rendered project:
       <td>App manifest: identity, window and view declarations, permissions, security policy</td>
     </tr>
     <tr>
-      <td><code>build.zig</code>, <code>build.zig.zon</code></td>
-      <td>Build graph and the <code>native_sdk</code> dependency</td>
-    </tr>
-    <tr>
       <td><code>assets/icon.icns</code></td>
       <td>App icon for packaging</td>
     </tr>
     <tr>
-      <td><code>.github/workflows/ci.yml</code></td>
-      <td>Ready-made CI: headless logic tests plus a Linux automation smoke job</td>
-    </tr>
-    <tr>
-      <td><code>.vscode/settings.json</code>, <code>.gitignore</code>, <code>README.md</code></td>
-      <td>Editor association for <code>.zml</code> (HTML highlighting), ignores, and project notes</td>
+      <td><code>.gitignore</code>, <code>README.md</code></td>
+      <td>Ignores for generated directories, and the commands on this page</td>
     </tr>
   </tbody>
 </table>
 
+Prefer to own `build.zig` from day one? `native init my_app --full` scaffolds the expanded shape (build files, editor config, a ready-made CI workflow) and you drive it with `zig build` directly.
+
 ## Run it
 
 ```bash
-zig build run
+native dev
 ```
 
-A native window opens with a working counter. The whole view is `src/app.zml`:
+The first run compiles the app and the SDK, so give it a minute; subsequent runs are incremental. A native window opens with a working counter. The whole view is `src/app.zml`:
 
 ```html
 <column gap="12" padding="16">
@@ -117,67 +124,54 @@ That is the whole loop: the model holds state, messages describe what happened, 
 
 ## Edit while it runs
 
-`src/app.zml` is embedded into the binary and watched during development. Edit it while the app runs — change a color token, add a button — and the window updates within about two seconds without losing the count. Parse failures keep the last good view on screen.
+`src/app.zml` is embedded into the binary and watched while `native dev` runs. Edit it — change a label, add a button — and the window updates within a couple of seconds without losing the count. Parse failures keep the last good view on screen.
 
-Validate markup without building:
-
-```bash
-native markup check src/app.zml
-```
-
-Errors come back with `file:line:column` and a teaching message. `native markup lsp` provides the same diagnostics plus completion and hover in your editor.
-
-## Test it
+## Check and test
 
 ```bash
-zig build test
+native check
 ```
 
-The generated `src/tests.zig` builds the real view from the markup, finds the `+` button, dispatches its press exactly like the runtime would, and asserts the model and the rebuilt view — headless, on any machine.
+`native check` validates every `.zml` file under `src/` plus `app.zon` without building anything:
 
-## Drive it from the outside
+```
+src/app.zml: ok
+info[manifest.valid]: app.zon is valid
+checked 1 markup file and app.zon
+```
 
-Build with automation enabled and the running app publishes an accessibility snapshot any script (or AI agent) can assert on:
+Markup errors come back with `file:line:column` and a teaching message (`native markup lsp` provides the same diagnostics plus completion and hover in your editor). Then run the real tests:
 
 ```bash
-zig build -Dautomation=true
-./zig-out/bin/my-app &
-native automate wait
-native automate assert 'role=button name="Reset"' 'count: 0'
+native test
 ```
 
-(The binary is the app name with underscores dashed: `native init my_app` builds `zig-out/bin/my-app`.)
+The generated `src/tests.zig` builds the real view from the markup, finds the `+` button, dispatches its press exactly like the runtime would, and asserts on the model and the rebuilt view — headless, on any machine. See [Testing](/testing) for the full tiers, including driving the live app from the outside with [automation](/automation).
 
-The generated CI workflow runs exactly this flow headless under Xvfb on Linux — see [Testing in CI](/testing/ci).
-
-## Style with design tokens
-
-Color and radius attributes reference design tokens by name — `background="surface"`, `foreground="text_muted"`, `radius="md"` — validated at check/compile time and re-resolved live when the theme changes, so dark mode works without app code. See [Native UI](/native-ui#styling-with-design-tokens).
-
-## Package it
+## Build a release binary
 
 ```bash
-zig build package
-native doctor --manifest app.zon --strict
+native build
 ```
 
-The bundle lands at `zig-out/package/<name>.app`. See [Packaging](/packaging) for platform targets and [Code Signing](/packaging/signing) for distribution.
+This produces an optimized binary and tells you where it landed:
 
-## Apps with web content
-
-Native SDK can also embed web frontends — an existing React, Next.js, Svelte, or Vue app running in a WebView inside the native shell, with a guarded bridge to native code:
-
-```bash
-native init my_app --frontend next
+```
+built zig-out/bin/my-app (ReleaseFast)
 ```
 
-Frontend options: `next`, `vite`, `react`, `svelte`, `vue`. This is a secondary path for teams bringing existing web UI along; see [Web Content](/frontend) for the full workflow.
+(The binary name comes from `app.zon`: `native init my_app` sets `.name = "my-app"`.) From there, [Packaging](/packaging) turns it into a distributable app bundle with `native package`.
+
+## Escape hatch: own the build
+
+If the app outgrows the managed graph — extra build steps, custom sources — run `native eject` once. It writes a `build.zig`/`build.zig.zon` you own into the app and never touches them again; `native dev|build|test` keep working, now driving your files through `zig build`. See the [CLI reference](/cli).
 
 ## Next steps
 
 - [App Model](/app-model) — the model/message/update loop, wiring, and hot reload
 - [Native UI](/native-ui) — every element, attribute, and pattern in the markup
-- [State & Data Flow](/state) — derive-don't-store, bindings, and text editing state
 - [Components](/components) — the component catalog
-- [Automation](/automation) — snapshots, assertions, and scripted interaction
+- [State & Data Flow](/state) — derive-don't-store, bindings, and text editing state
+- [Examples](https://github.com/vercel-labs/zero-native/tree/main/examples) — complete apps in the repository, from a calculator to a native shell
+- [Web Content](/frontend) — the secondary path for apps that embed an existing web frontend
 - [Platform Support](/platform-support) — what each host supports today

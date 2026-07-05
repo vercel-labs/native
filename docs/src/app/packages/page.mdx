@@ -12,17 +12,19 @@ The Native SDK is distributed as a Zig codebase plus a small npm wrapper package
   <tbody>
     <tr>
       <td><code>@native-sdk/cli</code></td>
-      <td>npm package that installs the <code>native</code> command and wraps the native Zig CLI binary</td>
+      <td>npm package that will install the <code>native</code> command and wrap the native Zig CLI binary</td>
     </tr>
   </tbody>
 </table>
 
 ## Install
 
-The Native SDK CLI is published to npm as `@native-sdk/cli`:
+The npm package is not published yet. Today the CLI builds from a source checkout of the SDK:
 
 ```bash
-npm install -g @native-sdk/cli
+git clone https://github.com/vercel-labs/zero-native.git
+cd zero-native
+zig build
 ```
 
-The npm package includes prebuilt binaries for macOS (arm64/x64), Linux (gnu/musl, arm64/x64), and Windows (x64). See `packages/native-sdk/` in the repository for the wrapper scripts and packaging metadata.
+That produces `zig-out/bin/native` — see the [Quick Start](/quick-start) for the full flow. When published, `@native-sdk/cli` will carry prebuilt binaries for macOS (arm64/x64), Linux (gnu/musl, arm64/x64), and Windows (x64); see `packages/native-sdk/` in the repository for the wrapper scripts and packaging metadata.
