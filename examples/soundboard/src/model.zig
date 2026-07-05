@@ -193,12 +193,6 @@ pub const Model = struct {
     /// Copy-to-clipboard bookkeeping: how many pbcopy spawns finished ok.
     copies_done: u32 = 0,
     copy_failed: bool = false,
-    /// Time seam (`native_sdk.Clock`) so the track-change animation
-    /// window stays deterministic in tests.
-    clock: native_sdk.Clock = .system,
-    /// Monotonic ms when the playing track last changed; gates the
-    /// now-playing slide-in animation window (0 = never).
-    motion_started_ms: u64 = 0,
 
     // ------------------------------------------------------------- queries
 
@@ -500,8 +494,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
 
 fn startTrack(model: *Model, fx: *Effects, track_id: u8) void {
     model.now = track_id;
+    // `elapsed_ms` restarts here and advances by tick — it is also the
+    // motion clock for the now-playing slide-in window, so animation
+    // gating replays deterministically (no live clock read anywhere).
     model.elapsed_ms = 0;
-    model.motion_started_ms = model.clock.monotonicMs();
     setPlaying(model, fx, true);
 }
 

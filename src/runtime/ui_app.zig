@@ -715,16 +715,54 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .name = self.options.name,
                 .scene_fn = sceneFn,
                 .event_fn = eventFn,
+                .replay_fn = replayFn,
             };
+        }
+
+        /// Bind the runtime-owned seams onto the effects channel (all
+        /// first-bind-sticks): platform services, spawn environment,
+        /// image registry, and — while a session is being recorded —
+        /// the recorder's result journal.
+        fn bindEffectsChannel(self: *Self, runtime: *Runtime) void {
+            self.effects.bindServices(&runtime.options.platform.services);
+            self.effects.bindEnviron(runtime.options.environ);
+            self.effects.bindImages(runtime.canvasImageRegistryBinding());
+            if (runtime.options.session_recorder) |recorder| {
+                self.effects.bindJournal(recorder.effectJournal());
+            }
+        }
+
+        /// Session-replay control (`App.replay_fn`): arm the effects
+        /// channel into replay mode before the first replayed event, and
+        /// feed journaled results into the stub executor. `.timer`
+        /// records never feed — fx-timer fires replay through the
+        /// journaled platform `.timer` events, and rejection notices
+        /// regenerate from the same deterministic validation.
+        fn replayFn(context: *anyopaque, control: core.ReplayControl) anyerror!void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            switch (control) {
+                .arm => self.effects.armReplay(),
+                .feed => |record| switch (record.kind) {
+                    .line => try self.effects.feedLine(record.key, record.payload),
+                    .exit => {
+                        if (record.payload.len > 0) try self.effects.feedOutput(record.key, record.payload);
+                        if (record.stderr_tail.len > 0) try self.effects.feedStderr(record.key, record.stderr_tail);
+                        try self.effects.feedExitReason(record.key, record.code, record.exit_reason);
+                    },
+                    .response => try self.effects.feedResponseOutcome(record.key, record.fetch_outcome, record.status, record.payload),
+                    .file => try self.effects.feedFileResult(record.key, record.file_outcome, record.payload),
+                    .clipboard => try self.effects.feedClipboardResult(record.key, record.clipboard_outcome, record.payload),
+                    .clock => try self.effects.pushReplayClock(record.clock_wall_ms),
+                    .timer => {},
+                },
+            }
         }
 
         /// Apply a message and rebuild the widget tree. Runtime-owned
         /// widget state is synced into the model first so `update` sees
         /// current slider values and scroll offsets.
         pub fn dispatch(self: *Self, runtime: *Runtime, window_id: platform.WindowId, msg: MsgT) anyerror!void {
-            self.effects.bindServices(&runtime.options.platform.services);
-            self.effects.bindEnviron(runtime.options.environ);
-            self.effects.bindImages(runtime.canvasImageRegistryBinding());
+            self.bindEffectsChannel(runtime);
             self.syncModel(runtime, self.canvas_window_id);
             self.applyMsg(msg);
             // Before the installing frame there is nothing to render
@@ -763,9 +801,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         pub fn drainEffects(self: *Self, runtime: *Runtime) anyerror!void {
             if (!self.installed) return;
             if (!self.effects.hasPending()) return;
-            self.effects.bindServices(&runtime.options.platform.services);
-            self.effects.bindEnviron(runtime.options.environ);
-            self.effects.bindImages(runtime.canvasImageRegistryBinding());
+            self.bindEffectsChannel(runtime);
             self.syncModel(runtime, self.canvas_window_id);
             var dispatched = false;
             while (self.effects.takeMsg()) |msg| {
@@ -1830,9 +1866,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 if (self.options.init_fx) |init_fx| {
                     if (!self.init_fx_ran) {
                         self.init_fx_ran = true;
-                        self.effects.bindServices(&runtime.options.platform.services);
-                        self.effects.bindEnviron(runtime.options.environ);
-                        self.effects.bindImages(runtime.canvasImageRegistryBinding());
+                        self.bindEffectsChannel(runtime);
                         init_fx(&self.model, &self.effects);
                         // Launch lap (env-gated): boot-effect cost (asset
                         // decode/registration) splits out of the

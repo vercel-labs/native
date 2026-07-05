@@ -525,9 +525,7 @@ test "the track-change animation window opens on play and closes after" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var test_clock = native_sdk.TestClock{};
-    test_clock.advanceMs(10_000);
-    var model = Model{ .clock = test_clock.clock() };
+    var model = Model{};
     var animations: [8]canvas.CanvasRenderAnimation = undefined;
 
     // Nothing playing yet: no animations.
@@ -539,8 +537,9 @@ test "the track-change animation window opens on play and closes after" {
     tree = try buildTree(arena, &model);
     try testing.expectEqual(@as(usize, 3), main.animations(&model, &tree, 0, &animations));
 
-    // A progress-tick rebuild 400 ms later does not restart the motion.
-    test_clock.advanceMs(400);
+    // 400 ms of playback ticks later, a rebuild does not restart the
+    // motion — the playback clock is the motion clock.
+    model.elapsed_ms = 400;
     try testing.expectEqual(@as(usize, 0), main.animations(&model, &tree, 0, &animations));
 }
 

@@ -25,6 +25,7 @@ const runtime_canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const runtime_frame_profile = @import("frame_profile.zig");
 const runtime_gpu_surface_events = @import("gpu_surface_events.zig");
 const runtime_flow = @import("flow.zig");
+const runtime_session_state = @import("session_state.zig");
 const runtime_state = @import("state.zig");
 const runtime_system_services = @import("system_services.zig");
 const runtime_builtin_bridge = @import("builtin_bridge.zig");
@@ -152,6 +153,7 @@ pub const FrameDiagnostics = runtime_api.FrameDiagnostics;
 pub const Event = runtime_api.Event;
 pub const App = runtime_api.App(Runtime);
 pub const Options = runtime_api.Options;
+pub const ReplayControl = runtime_api.ReplayControl;
 
 /// Bounded ring of degraded dispatch errors kept for snapshots and
 /// queries: handler/update errors are caught, recorded here, and
@@ -382,6 +384,9 @@ pub const Runtime = struct {
     pub const frameDiagnostics = FlowMethods.frameDiagnostics;
     pub const supports = FlowMethods.supports;
     const reloadWindows = FlowMethods.reloadWindows;
+
+    const SessionStateMethods = runtime_session_state.RuntimeSessionState(Runtime);
+    pub const sessionStateFingerprint = SessionStateMethods.sessionStateFingerprint;
 
     const WindowViewMethods = runtime_window_views.RuntimeWindowViews(Runtime);
     pub const createWindow = WindowViewMethods.createWindow;

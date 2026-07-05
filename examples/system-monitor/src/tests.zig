@@ -293,7 +293,7 @@ test "a full sample lands: fixtures through the collect exits, TestClock timesta
 
     var test_clock = native_sdk.TestClock{};
     test_clock.setWallMs(1_000_000); // 00:16:40 UTC
-    model.clock = test_clock.clock();
+    live.app_state.effects.clock = test_clock.clock();
 
     // Host info first so the CPU figure normalizes by real cores.
     try live.finishSpawn(model_mod.info_key, sysctl_fixture);

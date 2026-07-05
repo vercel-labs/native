@@ -597,6 +597,8 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) BOOL observesAppearanceChanges;
 @property(nonatomic, assign) NSInteger bridgeFrameKeepalive;
 @property(nonatomic, strong) id shortcutEventMonitor;
+@property(nonatomic, strong) id willTerminateObserver;
+@property(nonatomic, strong) dispatch_source_t sigtermSource;
 @property(nonatomic, strong) NSArray<NativeSdkShortcut *> *shortcuts;
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, assign) native_sdk_appkit_tray_callback_t trayCallback;
@@ -7224,6 +7226,15 @@ static void NativeSdkRegisterFontsInDirectory(NSString *directoryPath) {
     }
 }
 
+// Bundled-font activation for hosts WITHOUT a live AppKit host object
+// (headless session replay measures text through the same CoreText seam
+// a live host uses, so the bundled faces must be registered the same
+// way). Safe to call alongside a live host: the underlying registration
+// is dispatch_once.
+void native_sdk_appkit_register_bundled_fonts(void) {
+    NativeSdkRegisterBundledFonts();
+}
+
 static void NativeSdkRegisterBundledFonts(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -7456,11 +7467,45 @@ static NSURL *NativeSdkAssetEntryURL(NSString *origin, NSString *entryPath) {
         }
     }
 
+    // Terminations that bypass the host's own stop path — cmd+Q's
+    // default NSApp terminate, an AppleScript quit — must still deliver
+    // the shutdown event synchronously before the process exits: the
+    // runtime's app.stop hook and the session recorder's journal seal
+    // both hang off it (an unsealed journal is refused by replay as
+    // truncated).
+    __weak NativeSdkAppKitHost *weakSelf = self;
+    self.willTerminateObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:NSApplicationWillTerminateNotification
+                    object:nil
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *note) {
+                    (void)note;
+                    [weakSelf emitShutdown];
+                }];
+    // SIGTERM becomes a graceful quit (dispatch source, never a raw
+    // signal handler): drivers that stop a recorded app with `kill`
+    // get the same sealed journal a menu quit produces.
+    signal(SIGTERM, SIG_IGN);
+    dispatch_source_t sigterm_source = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGTERM, 0, dispatch_get_main_queue());
+    dispatch_source_set_event_handler(sigterm_source, ^{
+        [NSApp terminate:nil];
+    });
+    dispatch_activate(sigterm_source);
+    self.sigtermSource = sigterm_source;
+
     [self scheduleFrame];
     [NSApp run];
 }
 
 - (void)stop {
+    if (self.willTerminateObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self.willTerminateObserver];
+        self.willTerminateObserver = nil;
+    }
+    if (self.sigtermSource) {
+        dispatch_source_cancel(self.sigtermSource);
+        self.sigtermSource = nil;
+    }
     [self.timer invalidate];
     self.timer = nil;
     [self.automationFrameTimer invalidate];

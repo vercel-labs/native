@@ -94,6 +94,27 @@ pub const EffectTimerOutcome = runtime_effects.EffectTimerOutcome;
 pub const max_effect_timers = runtime_effects.max_effect_timers;
 pub const effect_timer_platform_id_base = runtime_effects.effect_timer_platform_id_base;
 
+const runtime_session_journal = @import("session_journal.zig");
+const runtime_session_record = @import("session_record.zig");
+const runtime_session_replay = @import("session_replay.zig");
+pub const session_journal = runtime_session_journal;
+pub const SessionRecorder = runtime_session_record.SessionRecorder;
+pub const SessionRecorderSink = runtime_session_record.RecorderSink;
+pub const SessionHeader = runtime_session_journal.Header;
+pub const sessionHeaderNow = runtime_session_record.headerNow;
+pub const sessionPlatformName = runtime_session_replay.currentPlatformName;
+pub const replaySession = runtime_session_replay.replaySession;
+pub const ReplayOptions = runtime_session_replay.ReplayOptions;
+pub const ReplayReport = runtime_session_replay.ReplayReport;
+pub const ReplayMismatch = runtime_session_replay.ReplayMismatch;
+pub const ReplayControl = core.ReplayControl;
+pub const EffectResultRecord = runtime_effects.EffectResultRecord;
+pub const EffectResultKind = runtime_effects.EffectResultKind;
+pub const EffectJournal = runtime_effects.EffectJournal;
+pub const max_session_journal_bytes = runtime_session_journal.max_session_journal_bytes;
+pub const max_session_record_bytes = runtime_session_journal.max_session_record_bytes;
+pub const max_session_event_bytes = runtime_session_journal.max_session_event_bytes;
+
 const runtime_clock = @import("clock.zig");
 pub const Clock = runtime_clock.Clock;
 pub const TestClock = runtime_clock.TestClock;

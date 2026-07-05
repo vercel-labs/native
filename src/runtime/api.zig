@@ -6,6 +6,8 @@ const bridge = @import("../bridge/root.zig");
 const extensions = @import("../extensions/root.zig");
 const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
+const runtime_effects = @import("effects.zig");
+const runtime_session_record = @import("session_record.zig");
 const runtime_view = @import("view.zig");
 const security = @import("../security/root.zig");
 const widget_bridge = @import("widget_bridge.zig");
@@ -265,6 +267,17 @@ pub const Event = union(enum) {
     }
 };
 
+/// Session-replay control, type-erased over the app's Msg union so the
+/// replay driver can steer any app through its `App` value: `.arm`
+/// switches the app's effects channel into replay mode (fake executor,
+/// journaled results as the only terminal source) before the first
+/// replayed event; `.feed` delivers one journaled effect result into
+/// the stub executor's pending request with the matching key.
+pub const ReplayControl = union(enum) {
+    arm,
+    feed: runtime_effects.EffectResultRecord,
+};
+
 pub fn App(comptime Runtime: type) type {
     return struct {
         const Self = @This();
@@ -273,6 +286,7 @@ pub fn App(comptime Runtime: type) type {
         const SourceFn = *const fn (context: *anyopaque) anyerror!platform.WebViewSource;
         const SceneFn = *const fn (context: *anyopaque) anyerror!app_manifest.ShellConfig;
         const StopFn = *const fn (context: *anyopaque, runtime: *Runtime) anyerror!void;
+        const ReplayFn = *const fn (context: *anyopaque, control: ReplayControl) anyerror!void;
 
         context: *anyopaque,
         name: []const u8,
@@ -282,6 +296,10 @@ pub fn App(comptime Runtime: type) type {
         start_fn: ?StartFn = null,
         event_fn: ?EventFn = null,
         stop_fn: ?StopFn = null,
+        /// Session-replay hook (`UiApp` wires it automatically). Null
+        /// means the app cannot be replayed with effect stubbing —
+        /// replay refuses journals that carry effect results for it.
+        replay_fn: ?ReplayFn = null,
 
         pub fn start(self: Self, runtime: *Runtime) anyerror!void {
             if (self.start_fn) |start_fn| try start_fn(self.context, runtime);
@@ -303,6 +321,13 @@ pub fn App(comptime Runtime: type) type {
 
         pub fn stop(self: Self, runtime: *Runtime) anyerror!void {
             if (self.stop_fn) |stop_fn| try stop_fn(self.context, runtime);
+        }
+
+        /// Steer the app's replay hook. `error.ReplayUnsupported` when
+        /// the app registered none.
+        pub fn replayControl(self: Self, control: ReplayControl) anyerror!void {
+            const replay_fn = self.replay_fn orelse return error.ReplayUnsupported;
+            try replay_fn(self.context, control);
         }
     };
 }
@@ -328,4 +353,10 @@ pub const Options = struct {
     /// `Init` (embed/mobile): the libc/PEB environment where available,
     /// `.empty` otherwise.
     environ: ?std.process.Environ = null,
+    /// Session recorder (record/replay): when set, the dispatch choke
+    /// point journals every platform event, the effects channel journals
+    /// every drained result, and each published frame appends a state
+    /// fingerprint checkpoint. The app runner arms this from
+    /// `NATIVE_SDK_SESSION_RECORD=<path>`.
+    session_recorder: ?*runtime_session_record.SessionRecorder = null,
 };

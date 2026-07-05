@@ -216,7 +216,7 @@ pub fn main(init: std.process.Init) !void {
         });
         tooling.package.printDiagnostic(stats);
     } else if (std.mem.eql(u8, command, "automate")) {
-        try automation_cli.run(allocator, init.io, args[2..]);
+        try automation_cli.run(allocator, init.io, init.environ_map, args[2..]);
     } else if (std.mem.eql(u8, command, "skills")) {
         skills_cli.run(allocator, init.io, init.environ_map, args[2..]) catch |err| switch (err) {
             error.WriteFailed => return,

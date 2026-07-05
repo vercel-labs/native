@@ -153,6 +153,7 @@ extern fn native_sdk_appkit_close_webview(host: *AppKitHost, window_id: u64, lab
 extern fn native_sdk_appkit_clipboard_read(host: *AppKitHost, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_appkit_measure_text(font_id: u64, size: f64, text: [*]const u8, text_len: usize) f64;
 extern fn native_sdk_appkit_register_font(font_id: u64, bytes: [*]const u8, bytes_len: usize) c_int;
+extern fn native_sdk_appkit_register_bundled_fonts() void;
 extern fn native_sdk_appkit_decode_image(bytes: [*]const u8, bytes_len: usize, pixels: [*]u8, pixels_len: usize, out_width: *usize, out_height: *usize) c_int;
 extern fn native_sdk_appkit_clipboard_write(host: *AppKitHost, text: [*]const u8, text_len: usize) void;
 extern fn native_sdk_appkit_clipboard_read_data(host: *AppKitHost, mime_type: [*]const u8, mime_type_len: usize, buffer: [*]u8, buffer_len: usize) usize;
@@ -654,6 +655,17 @@ fn readClipboard(context: ?*anyopaque, buffer: []u8) anyerror![]const u8 {
 /// CoreText-backed text measurement matching `NativeSdkPacketDrawText`'s
 /// font resolution. Negative host results (invalid UTF-8) are surfaced as
 /// negative so the canvas provider falls back to its estimator.
+/// Headless text services for session replay: the SAME CoreText
+/// measurement, canvas-font registration, and bundled-font activation a
+/// live host performs, with no window and no run loop — so a journal
+/// recorded against this host measures (and therefore lays out and
+/// renders) identically under a headless replay on the same platform.
+pub fn installHeadlessTextServices(services: *platform_mod.PlatformServices) void {
+    native_sdk_appkit_register_bundled_fonts();
+    services.measure_text_fn = measureText;
+    services.register_gpu_surface_font_fn = registerGpuSurfaceFont;
+}
+
 fn measureText(context: ?*anyopaque, font_id: u64, size: f32, text: []const u8) f32 {
     _ = context;
     return @floatCast(native_sdk_appkit_measure_text(font_id, size, text.ptr, text.len));

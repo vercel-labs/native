@@ -127,6 +127,24 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         }
 
         pub fn dispatchPlatformEvent(self: *Runtime, app: App, event_value: platform.Event) anyerror!void {
+            // Session recording: stage the event on entry, commit it on
+            // exit — so effect results drained DURING dispatch precede
+            // the event record in the journal (replay feeds them before
+            // dispatching), and nested dispatches (automation commands
+            // inside frame_requested) commit innermost-first. One state
+            // fingerprint checkpoint follows each published frame.
+            if (self.options.session_recorder) |recorder| recorder.stageEvent(event_value);
+            defer if (self.options.session_recorder) |recorder| {
+                recorder.commitEvent();
+                if (recorder.wantsCheckpoint(self.frame_index)) {
+                    recorder.recordCheckpoint(self.frame_index, self.sessionStateFingerprint());
+                }
+                // Seal on shutdown, here rather than only at run() exit:
+                // a host that terminates without unwinding the platform
+                // loop still leaves a whole journal behind.
+                if (event_value == .app_shutdown) recorder.finish();
+            };
+
             if ((event_value != .frame_requested and event_value != .gpu_surface_frame) or self.invalidated) {
                 const event_fields = [_]trace.Field{trace.string("event", event_value.name())};
                 log(self, "platform.event", null, &event_fields);
@@ -799,6 +817,18 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             defer writer.deinit();
             try canvas.png.writeRgba8(&writer.writer, screenshot.width, screenshot.height, screenshot.rgba8);
             try server.publishScreenshot(parsed.view_label, writer.written());
+            // A screenshot taken during a recorded session marks a pixel
+            // checkpoint: replay re-renders the same view at the same
+            // scale through the same deterministic reference renderer
+            // and compares hashes.
+            if (self.options.session_recorder) |recorder| {
+                recorder.recordScreenshot(
+                    parsed.view_label,
+                    parsed.scale orelse 1,
+                    std.hash.Wyhash.hash(0, writer.written()),
+                    writer.written().len,
+                );
+            }
             log(self, "automation.screenshot", "screenshot published", &.{
                 trace.string("view", parsed.view_label),
                 trace.uint("width", screenshot.width),

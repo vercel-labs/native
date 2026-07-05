@@ -65,6 +65,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("../platform/root.zig");
+const runtime_clock = @import("clock.zig");
 
 /// Maximum in-flight effects (spawn slots / worker threads).
 pub const max_effects: usize = 16;
@@ -436,6 +437,64 @@ pub const effect_timer_platform_id_base: u64 = platform.reserved_timer_id_base |
 /// `.fake` records spawn requests for tests to inspect and answer with
 /// `feedLine`/`feedExit` — fully deterministic, no processes, no threads.
 pub const EffectExecutor = enum { real, fake };
+
+/// Which effect channel a journaled result came from (the session
+/// record/replay taxonomy — one value per drain-delivered Msg shape,
+/// plus `.clock` for journaled wall-clock reads).
+pub const EffectResultKind = enum(u8) {
+    line = 1,
+    exit = 2,
+    response = 3,
+    file = 4,
+    clipboard = 5,
+    timer = 6,
+    clock = 7,
+};
+
+/// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
+/// Bounded like everything else: more reads per drain window than this
+/// is a runaway loop, not a session shape.
+pub const max_effect_replay_clock_entries: usize = 64;
+
+/// One drained effect result, flattened for the session journal: the
+/// exact payload `update` received, Msg-type-erased so the recorder and
+/// replayer need no knowledge of the app's Msg union. Only the fields
+/// for `kind` are meaningful; the rest keep their defaults.
+pub const EffectResultRecord = struct {
+    kind: EffectResultKind,
+    key: u64,
+    /// Line bytes / collected stdout / response body / file bytes /
+    /// clipboard text.
+    payload: []const u8 = "",
+    /// Collect-exit stderr tail.
+    stderr_tail: []const u8 = "",
+    truncated: bool = false,
+    /// `dropped_before` for lines/terminals, `dropped_lines` for exits.
+    dropped: u32 = 0,
+    code: i32 = 0,
+    exit_reason: EffectExitReason = .exited,
+    output_truncated: bool = false,
+    stderr_truncated: bool = false,
+    status: u16 = 0,
+    fetch_outcome: EffectFetchOutcome = .ok,
+    file_op: EffectFileOp = .read,
+    file_outcome: EffectFileOutcome = .ok,
+    clipboard_op: EffectClipboardOp = .write,
+    clipboard_outcome: EffectClipboardOutcome = .ok,
+    timer_timestamp_ns: u64 = 0,
+    timer_outcome: EffectTimerOutcome = .fired,
+    /// `.clock` records: the wall-clock value `Effects.wallMs` returned.
+    clock_wall_ms: i64 = 0,
+};
+
+/// Type-erased sink the drain reports every delivered result to while a
+/// session is being recorded (`bindJournal`). Called on the loop thread,
+/// immediately before the Msg constructed from the same payload runs
+/// through `update` — so the journal holds exactly what the app saw.
+pub const EffectJournal = struct {
+    context: *anyopaque,
+    record_fn: *const fn (context: *anyopaque, record: EffectResultRecord) void,
+};
 
 /// Tiny spin lock over `std.atomic.Mutex` (0.16 has no blocking
 /// thread mutex outside `Io`). Every guarded section here is a bounded
@@ -1003,6 +1062,31 @@ pub fn Effects(comptime Msg: type) type {
 
         allocator: std.mem.Allocator,
         executor: EffectExecutor = .real,
+        /// Session-record sink: every drain-delivered result is reported
+        /// here (loop thread, right before its Msg runs through
+        /// `update`). Null outside recording.
+        journal: ?EffectJournal = null,
+        /// The clock behind `wallMs` — the swap seam tests use
+        /// (`TestClock`), exactly like the fake executor. Session replay
+        /// never consults it: journaled values win there.
+        clock: runtime_clock.Clock = .system,
+        /// Session replay: the executor is `.fake` AND terminal delivery
+        /// comes exclusively from journaled results (`armReplay`). In
+        /// this mode `cancel` never self-delivers a `.cancelled`
+        /// terminal — the journaled terminal (recorded as `.cancelled`)
+        /// is fed instead, so replay delivers exactly what the recorded
+        /// session delivered, in the same order.
+        replay: bool = false,
+        /// Journaled wall-clock values queued for replay-mode `wallMs`
+        /// reads (FIFO; fed from `.clock` records before the consuming
+        /// event dispatches).
+        replay_clock: [max_effect_replay_clock_entries]i64 = [_]i64{0} ** max_effect_replay_clock_entries,
+        replay_clock_head: usize = 0,
+        replay_clock_len: usize = 0,
+        /// Replay `wallMs` reads that found no journaled value: a
+        /// divergence signal (the replayed update read the clock more
+        /// often than the recorded one). Reported loudly once.
+        replay_clock_underflows: u64 = 0,
         /// Set once from the loop thread before the first dispatch;
         /// workers call `services.wake()` through it (the one
         /// thread-safe PlatformServices entry).
@@ -1170,6 +1254,69 @@ pub fn Effects(comptime Msg: type) type {
         /// only; the first bind sticks.
         pub fn bindImages(self: *Self, binding: ImageRegistryBinding) void {
             if (self.images == null) self.images = binding;
+        }
+
+        /// Point the drain's result reporting at a session recorder.
+        /// Loop-thread only; the first bind sticks.
+        pub fn bindJournal(self: *Self, binding: EffectJournal) void {
+            if (self.journal == null) self.journal = binding;
+        }
+
+        /// Switch this channel into session-replay mode: the fake
+        /// executor (no processes, no network, no file or pasteboard
+        /// I/O — requests park in their slots) with journaled results as
+        /// the only terminal source. Must run before the first
+        /// spawn/fetch, i.e. before the replayed `app_start` dispatches.
+        pub fn armReplay(self: *Self) void {
+            self.executor = .fake;
+            self.replay = true;
+        }
+
+        /// Report one delivered result to the bound session recorder.
+        fn journalNote(self: *Self, record: EffectResultRecord) void {
+            const binding = self.journal orelse return;
+            binding.record_fn(binding.context, record);
+        }
+
+        /// Wall-clock milliseconds since the Unix epoch, AS AN EFFECT:
+        /// the ledger-timestamp read for `update`/`init_fx` that stays
+        /// deterministic under session replay. Recording journals every
+        /// value returned; replay returns the journaled values in the
+        /// same order instead of touching the OS clock — so "stamp the
+        /// note's edited time" replays byte-identical. This is the one
+        /// sanctioned wall-clock read inside update: a direct
+        /// `Clock.system` read there is nondeterminism outside the
+        /// effect boundary and will fail replay verification at the
+        /// next checkpoint.
+        pub fn wallMs(self: *Self) i64 {
+            if (self.replay) {
+                if (self.replay_clock_len == 0) {
+                    self.replay_clock_underflows += 1;
+                    if (self.replay_clock_underflows == 1) {
+                        std.debug.print(
+                            "session replay: a wallMs read found no journaled value - the replayed update reads the clock more often than the recording did (nondeterministic control flow); returning 0\n",
+                            .{},
+                        );
+                    }
+                    return 0;
+                }
+                const value = self.replay_clock[self.replay_clock_head];
+                self.replay_clock_head = (self.replay_clock_head + 1) % max_effect_replay_clock_entries;
+                self.replay_clock_len -= 1;
+                return value;
+            }
+            const value = self.clock.wallMs();
+            self.journalNote(.{ .kind = .clock, .key = 0, .clock_wall_ms = value });
+            return value;
+        }
+
+        /// Queue one journaled clock value for a replay-mode `wallMs`
+        /// read (the `.clock` record feed).
+        pub fn pushReplayClock(self: *Self, value: i64) error{EffectNotFound}!void {
+            if (self.replay_clock_len >= max_effect_replay_clock_entries) return error.EffectNotFound;
+            const index = (self.replay_clock_head + self.replay_clock_len) % max_effect_replay_clock_entries;
+            self.replay_clock[index] = value;
+            self.replay_clock_len += 1;
         }
 
         // ------------------------------------------------------------- API
@@ -1644,6 +1791,12 @@ pub fn Effects(comptime Msg: type) type {
             slot.cancelled_generation = slot.generation;
             slot.cancel_requested.store(true, .release);
             if (slot.fake) {
+                // Replay mode: never self-deliver — the recorded session
+                // already journaled this effect's terminal (as
+                // `.cancelled`, the drain rewrite the marked generation
+                // guarantees), and feeding that record is the one
+                // delivery. The slot stays parked until the feed.
+                if (self.replay) return;
                 if (slot.kind == .fetch) {
                     // No exchange: retire the slot and surface the
                     // terminal response now.
@@ -1786,22 +1939,64 @@ pub fn Effects(comptime Msg: type) type {
                     switch (pending) {
                         .exit => |entry| {
                             const exit_fn = entry.exit_fn orelse continue;
+                            self.journalNote(.{
+                                .kind = .exit,
+                                .key = entry.exit.key,
+                                .payload = entry.exit.output,
+                                .stderr_tail = entry.exit.stderr_tail,
+                                .dropped = entry.exit.dropped_lines,
+                                .code = entry.exit.code,
+                                .exit_reason = entry.exit.reason,
+                                .output_truncated = entry.exit.output_truncated,
+                                .stderr_truncated = entry.exit.stderr_truncated,
+                            });
                             return exit_fn(entry.exit);
                         },
                         .response => |entry| {
                             const response_fn = entry.response_fn orelse continue;
+                            self.journalNote(.{
+                                .kind = .response,
+                                .key = entry.response.key,
+                                .payload = entry.response.body,
+                                .truncated = entry.response.truncated,
+                                .dropped = entry.response.dropped_before,
+                                .status = entry.response.status,
+                                .fetch_outcome = entry.response.outcome,
+                            });
                             return response_fn(entry.response);
                         },
                         .file => |entry| {
                             const file_fn = entry.file_fn orelse continue;
+                            self.journalNote(.{
+                                .kind = .file,
+                                .key = entry.result.key,
+                                .payload = entry.result.bytes,
+                                .dropped = entry.result.dropped_before,
+                                .file_op = entry.result.op,
+                                .file_outcome = entry.result.outcome,
+                            });
                             return file_fn(entry.result);
                         },
                         .clipboard => |entry| {
                             const clipboard_fn = entry.clipboard_fn orelse continue;
+                            self.journalNote(.{
+                                .kind = .clipboard,
+                                .key = entry.result.key,
+                                .payload = entry.result.text,
+                                .dropped = entry.result.dropped_before,
+                                .clipboard_op = entry.result.op,
+                                .clipboard_outcome = entry.result.outcome,
+                            });
                             return clipboard_fn(entry.result);
                         },
                         .timer => |entry| {
                             const timer_fn = entry.timer_fn orelse continue;
+                            self.journalNote(.{
+                                .kind = .timer,
+                                .key = entry.timer.key,
+                                .timer_timestamp_ns = entry.timer.timestamp_ns,
+                                .timer_outcome = entry.timer.outcome,
+                            });
                             return timer_fn(entry.timer);
                         },
                     }
@@ -1830,12 +2025,20 @@ pub fn Effects(comptime Msg: type) type {
                             heap[0..entry.line_len]
                         else
                             entry.line_bytes[0..entry.line_len];
-                        return line_fn(.{
+                        const line: EffectLine = .{
                             .key = entry.key,
                             .line = line_bytes,
                             .truncated = entry.truncated,
                             .dropped_before = entry.dropped_before,
+                        };
+                        self.journalNote(.{
+                            .kind = .line,
+                            .key = line.key,
+                            .payload = line.line,
+                            .truncated = line.truncated,
+                            .dropped = line.dropped_before,
                         });
+                        return line_fn(line);
                     },
                     .exit => {
                         // Collect exits own a heap stdout buffer: take it
@@ -1853,26 +2056,38 @@ pub fn Effects(comptime Msg: type) type {
                             }
                         }
                         const exit_fn = entry.exit_fn orelse continue;
-                        if (cancelled) {
+                        const exit: EffectExit = if (cancelled)
                             // Cancelled exits mirror cancelled fetches:
                             // no payload, just the terminal notice.
-                            return exit_fn(.{
+                            .{
                                 .key = entry.key,
                                 .code = effect_error_exit_code,
                                 .reason = .cancelled,
                                 .dropped_lines = entry.dropped_lines,
-                            });
-                        }
-                        return exit_fn(.{
-                            .key = entry.key,
-                            .code = entry.code,
-                            .reason = entry.reason,
-                            .dropped_lines = entry.dropped_lines,
-                            .output = output,
-                            .output_truncated = entry.collect_truncated,
-                            .stderr_tail = if (entry.collect) entry.line_bytes[0..entry.line_len] else "",
-                            .stderr_truncated = entry.stderr_truncated,
+                            }
+                        else
+                            .{
+                                .key = entry.key,
+                                .code = entry.code,
+                                .reason = entry.reason,
+                                .dropped_lines = entry.dropped_lines,
+                                .output = output,
+                                .output_truncated = entry.collect_truncated,
+                                .stderr_tail = if (entry.collect) entry.line_bytes[0..entry.line_len] else "",
+                                .stderr_truncated = entry.stderr_truncated,
+                            };
+                        self.journalNote(.{
+                            .kind = .exit,
+                            .key = exit.key,
+                            .payload = exit.output,
+                            .stderr_tail = exit.stderr_tail,
+                            .dropped = exit.dropped_lines,
+                            .code = exit.code,
+                            .exit_reason = exit.reason,
+                            .output_truncated = exit.output_truncated,
+                            .stderr_truncated = exit.stderr_truncated,
                         });
+                        return exit_fn(exit);
                     },
                     .response => {
                         // One response per fetch occupancy: a mismatched
@@ -1887,21 +2102,31 @@ pub fn Effects(comptime Msg: type) type {
                         slot.fetch_buffer = null;
                         const payload_len = slot.payload_len;
                         const response_fn = entry.response_fn orelse continue;
-                        if (cancelled) {
-                            return response_fn(.{ .key = entry.key, .outcome = .cancelled });
-                        }
                         const body: []const u8 = if (self.drain_fetch_body) |buffer|
                             buffer[payload_len .. payload_len + entry.line_len]
                         else
                             "";
-                        return response_fn(.{
-                            .key = entry.key,
-                            .outcome = entry.outcome,
-                            .status = entry.status,
-                            .body = body,
-                            .truncated = entry.truncated,
-                            .dropped_before = entry.dropped_before,
+                        const response: EffectResponse = if (cancelled)
+                            .{ .key = entry.key, .outcome = .cancelled }
+                        else
+                            .{
+                                .key = entry.key,
+                                .outcome = entry.outcome,
+                                .status = entry.status,
+                                .body = body,
+                                .truncated = entry.truncated,
+                                .dropped_before = entry.dropped_before,
+                            };
+                        self.journalNote(.{
+                            .kind = .response,
+                            .key = response.key,
+                            .payload = response.body,
+                            .truncated = response.truncated,
+                            .dropped = response.dropped_before,
+                            .status = response.status,
+                            .fetch_outcome = response.outcome,
                         });
+                        return response_fn(response);
                     },
                     .file => {
                         // One terminal per file occupancy, mirroring
@@ -1915,20 +2140,29 @@ pub fn Effects(comptime Msg: type) type {
                         slot.fetch_buffer = null;
                         const payload_len = slot.payload_len;
                         const file_fn = entry.file_fn orelse continue;
-                        if (cancelled) {
-                            return file_fn(.{ .key = entry.key, .op = entry.file_op, .outcome = .cancelled });
-                        }
                         const bytes: []const u8 = if (self.drain_fetch_body) |buffer|
                             buffer[payload_len .. payload_len + entry.line_len]
                         else
                             "";
-                        return file_fn(.{
-                            .key = entry.key,
-                            .op = entry.file_op,
-                            .outcome = entry.file_outcome,
-                            .bytes = bytes,
-                            .dropped_before = entry.dropped_before,
+                        const result: EffectFileResult = if (cancelled)
+                            .{ .key = entry.key, .op = entry.file_op, .outcome = .cancelled }
+                        else
+                            .{
+                                .key = entry.key,
+                                .op = entry.file_op,
+                                .outcome = entry.file_outcome,
+                                .bytes = bytes,
+                                .dropped_before = entry.dropped_before,
+                            };
+                        self.journalNote(.{
+                            .kind = .file,
+                            .key = result.key,
+                            .payload = result.bytes,
+                            .dropped = result.dropped_before,
+                            .file_op = result.op,
+                            .file_outcome = result.outcome,
                         });
+                        return file_fn(result);
                     },
                     .clipboard => {
                         // One terminal per clipboard occupancy, mirroring
@@ -1942,20 +2176,29 @@ pub fn Effects(comptime Msg: type) type {
                         slot.fetch_buffer = null;
                         const payload_len = slot.payload_len;
                         const clipboard_fn = entry.clipboard_fn orelse continue;
-                        if (cancelled) {
-                            return clipboard_fn(.{ .key = entry.key, .op = entry.clipboard_op, .outcome = .cancelled });
-                        }
                         const text: []const u8 = if (self.drain_fetch_body) |buffer|
                             buffer[payload_len .. payload_len + entry.line_len]
                         else
                             "";
-                        return clipboard_fn(.{
-                            .key = entry.key,
-                            .op = entry.clipboard_op,
-                            .outcome = entry.clipboard_outcome,
-                            .text = text,
-                            .dropped_before = entry.dropped_before,
+                        const result: EffectClipboardResult = if (cancelled)
+                            .{ .key = entry.key, .op = entry.clipboard_op, .outcome = .cancelled }
+                        else
+                            .{
+                                .key = entry.key,
+                                .op = entry.clipboard_op,
+                                .outcome = entry.clipboard_outcome,
+                                .text = text,
+                                .dropped_before = entry.dropped_before,
+                            };
+                        self.journalNote(.{
+                            .kind = .clipboard,
+                            .key = result.key,
+                            .payload = result.text,
+                            .dropped = result.dropped_before,
+                            .clipboard_op = result.op,
+                            .clipboard_outcome = result.outcome,
                         });
+                        return clipboard_fn(result);
                     },
                 }
             }
@@ -2062,6 +2305,13 @@ pub fn Effects(comptime Msg: type) type {
         /// through the pending ring — with empty payloads and the
         /// truncation flags set, never silently.
         pub fn feedExit(self: *Self, key: u64, code: i32) error{EffectNotFound}!void {
+            return self.feedExitReason(key, code, .exited);
+        }
+
+        /// `feedExit` with an explicit exit reason — the session-replay
+        /// feed, which must deliver exactly the reason the recorded
+        /// session delivered (`.signaled`, `.cancelled`, ...).
+        pub fn feedExitReason(self: *Self, key: u64, code: i32, reason: EffectExitReason) error{EffectNotFound}!void {
             const slot_index = self.findActiveFakeSlot(key, .spawn) orelse return error.EffectNotFound;
             const slot = &self.slots[slot_index];
             var entry: Entry = .{
@@ -2070,7 +2320,7 @@ pub fn Effects(comptime Msg: type) type {
                 .generation = slot.generation,
                 .key = slot.key,
                 .code = code,
-                .reason = .exited,
+                .reason = reason,
                 .dropped_lines = slot.dropped_total,
                 .exit_fn = slot.on_exit,
             };
@@ -2083,7 +2333,7 @@ pub fn Effects(comptime Msg: type) type {
                     self.deliverLoopExit(.{
                         .key = entry.key,
                         .code = code,
-                        .reason = .exited,
+                        .reason = reason,
                         .dropped_lines = entry.dropped_lines,
                         .output_truncated = true,
                         .stderr_truncated = true,
@@ -2098,7 +2348,7 @@ pub fn Effects(comptime Msg: type) type {
                 self.deliverLoopExit(.{
                     .key = entry.key,
                     .code = code,
-                    .reason = .exited,
+                    .reason = reason,
                     .dropped_lines = entry.dropped_lines,
                 }, exit_fn);
             }
@@ -2115,10 +2365,19 @@ pub fn Effects(comptime Msg: type) type {
         /// through the pending ring — with an empty body and
         /// `truncated = true`, never silently.
         pub fn feedResponse(self: *Self, key: u64, status: u16, body: []const u8) error{EffectNotFound}!void {
+            return self.feedResponseOutcome(key, .ok, status, body);
+        }
+
+        /// `feedResponse` with an explicit terminal outcome — the
+        /// session-replay feed, which must deliver exactly the outcome
+        /// the recorded session delivered (`.timed_out`,
+        /// `.connect_failed`, ...). Non-`.ok` outcomes carry no body,
+        /// mirroring the real executor.
+        pub fn feedResponseOutcome(self: *Self, key: u64, outcome: EffectFetchOutcome, status: u16, body: []const u8) error{EffectNotFound}!void {
             const slot_index = self.findActiveFakeSlot(key, .fetch) orelse return error.EffectNotFound;
             const slot = &self.slots[slot_index];
             const buffer = slot.fetch_buffer orelse return error.EffectNotFound;
-            if (slot.fetch_response_mode == .stream) {
+            if (slot.fetch_response_mode == .stream or outcome != .ok) {
                 slot.body_len = 0;
                 slot.fetch_truncated = false;
             } else {
@@ -2129,7 +2388,7 @@ pub fn Effects(comptime Msg: type) type {
                 slot.fetch_truncated = body.len > capacity;
             }
             slot.fetch_status = status;
-            slot.fetch_outcome = .ok;
+            slot.fetch_outcome = outcome;
             var entry: Entry = .{
                 .kind = .response,
                 .slot_index = @intCast(slot_index),
@@ -2139,7 +2398,7 @@ pub fn Effects(comptime Msg: type) type {
                 .truncated = slot.fetch_truncated,
                 .dropped_before = slot.dropped_pending,
                 .status = status,
-                .outcome = .ok,
+                .outcome = outcome,
                 .response_fn = slot.on_response,
             };
             slot.state.store(.draining, .release);
@@ -2148,12 +2407,23 @@ pub fn Effects(comptime Msg: type) type {
                 self.releaseFetchSlot(slot);
                 self.deliverLoopResponse(.{
                     .key = entry.key,
-                    .outcome = .ok,
+                    .outcome = outcome,
                     .status = status,
                     .truncated = true,
                 }, response_fn);
             }
             self.wakeHost();
+        }
+
+        /// Append raw bytes to a fake `.collect` spawn's accumulated
+        /// stdout WITHOUT line framing — the session-replay feed for a
+        /// recorded collect exit's whole `output` payload (whose
+        /// original line structure is already baked into the bytes).
+        pub fn feedOutput(self: *Self, key: u64, bytes: []const u8) error{EffectNotFound}!void {
+            const slot_index = self.findActiveFakeSlot(key, .spawn) orelse return error.EffectNotFound;
+            const slot = &self.slots[slot_index];
+            if (slot.output_mode != .collect) return error.EffectNotFound;
+            appendCollected(slot, bytes);
         }
 
         /// Number of recorded (still-active) fake file requests.

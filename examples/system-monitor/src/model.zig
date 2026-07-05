@@ -115,10 +115,10 @@ pub const Model = struct {
     mem_inflight: bool = false,
     samples_taken: u32 = 0,
     /// Wall-clock ms of the last applied ps sample (0 = none yet).
+    /// Stamped from `fx.wallMs` — the journaled clock read, so recorded
+    /// sessions replay the same timestamps (tests swap the seam through
+    /// `effects.clock`).
     sampled_at_ms: i64 = 0,
-    /// Time seam (`native_sdk.Clock`) so tests drive the sample
-    /// timestamps deterministically.
-    clock: native_sdk.Clock = .system,
 
     // Host facts (boot-time info spawn; memory total may also ride the
     // Linux memory sample).
@@ -368,7 +368,7 @@ pub const Model = struct {
         len.* += 1;
     }
 
-    fn applyPsSample(model: *Model, sample: sampler.PsSample) void {
+    fn applyPsSample(model: *Model, sample: sampler.PsSample, sampled_at_ms: i64) void {
         model.process_count = sample.process_count;
         model.uptime_seconds = sample.uptime_seconds;
         model.rows = sample.rows;
@@ -380,7 +380,7 @@ pub const Model = struct {
         const cores: f32 = @floatFromInt(@max(model.cores, 1));
         model.cpu_percent = std.math.clamp(sample.cpu_sum / cores, 0, 100);
         model.samples_taken += 1;
-        model.sampled_at_ms = model.clock.wallMs();
+        model.sampled_at_ms = sampled_at_ms;
         if (sample.skipped_lines > 0) model.parse_failures += sample.skipped_lines;
         pushHistory(&model.cpu_history, &model.cpu_history_len, model.cpu_percent / 100);
         pushHistory(&model.proc_history, &model.proc_history_len, @floatFromInt(sample.process_count));
@@ -470,7 +470,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 return;
             }
             if (exit.output_truncated) model.parse_failures += 1;
-            model.applyPsSample(sampler.parsePs(exit.output));
+            // The sample timestamp is a JOURNALED wall-clock read
+            // (`fx.wallMs`): under session replay it resolves from the
+            // journal instead of the OS clock, so the same Msg sequence
+            // stamps the same time.
+            model.applyPsSample(sampler.parsePs(exit.output), fx.wallMs());
         },
         .mem_done => |exit| {
             model.mem_inflight = false;

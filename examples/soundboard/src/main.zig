@@ -120,14 +120,15 @@ fn sync(model: *Model, layout: canvas.WidgetLayoutTree) void {
 
 /// Subtle track-change motion: the now-playing title and cover fade/slide
 /// in for a ~240 ms window after a track starts. The window is gated on
-/// the model's monotonic clock so later rebuilds (progress ticks) do not
-/// restart it; reduce-motion zeroes the durations through the theme.
-const motion_window_ms: u64 = 240;
+/// the PLAYBACK clock (`elapsed_ms`, which restarts on every track
+/// change and advances by tick), so later rebuilds do not restart it and
+/// the same Msg sequence replays the same animation set — no live clock
+/// read anywhere; reduce-motion zeroes the durations through the theme.
+const motion_window_ms: u32 = 240;
 
 pub fn animations(model: *const Model, tree: *const SoundboardApp.Ui.Tree, start_ns: u64, out: []canvas.CanvasRenderAnimation) usize {
-    if (model.motion_started_ms == 0) return 0;
-    const elapsed = model.clock.monotonicMs() -| model.motion_started_ms;
-    if (elapsed > motion_window_ms) return 0;
+    if (model.now == null) return 0;
+    if (model.elapsed_ms > motion_window_ms) return 0;
     const motion = tokensFromModel(model).motion;
 
     var count: usize = 0;

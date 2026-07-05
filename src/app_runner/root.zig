@@ -262,6 +262,11 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
     if (build_options.debug_overlay) {
         std.debug.print("debug-overlay=true backend={s} web-engine={s} trace={s}\n", .{ build_options.platform, build_options.web_engine, build_options.trace });
     }
+    // Session replay never opens a real platform: the journal is the
+    // world, and it drives a headless runtime over the null platform.
+    if (init.environ_map.get("NATIVE_SDK_SESSION_REPLAY")) |journal_path| {
+        return runSessionReplay(app, options, init, journal_path);
+    }
     if (comptime std.mem.eql(u8, build_options.platform, "macos")) {
         try runMacos(app, options, init);
     } else if (comptime std.mem.eql(u8, build_options.platform, "linux")) {
@@ -277,6 +282,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const session_recorder = setupSessionRecorder(init, app_info);
     var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
@@ -314,9 +320,11 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
         .environ = init.minimal.environ,
+        .session_recorder = session_recorder,
     });
 
     try runtime.run(app);
+    finishSessionRecorder(session_recorder);
 }
 
 fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
@@ -326,6 +334,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const session_recorder = setupSessionRecorder(init, app_info);
     var mac_platform = try native_sdk.platform.macos.MacPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
     defer mac_platform.deinit();
     native_sdk.runtime.launch_timing.lap("host_ready");
@@ -365,16 +374,19 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
         .environ = init.minimal.environ,
+        .session_recorder = session_recorder,
     });
     native_sdk.runtime.launch_timing.lap("runtime_ready");
 
     try runtime.run(app);
+    finishSessionRecorder(session_recorder);
 }
 
 fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const session_recorder = setupSessionRecorder(init, app_info);
     var linux_platform = try native_sdk.platform.linux.LinuxPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
     defer linux_platform.deinit();
     var trace_sink = StdoutTraceSink{};
@@ -413,15 +425,18 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
         .environ = init.minimal.environ,
+        .session_recorder = session_recorder,
     });
 
     try runtime.run(app);
+    finishSessionRecorder(session_recorder);
 }
 
 fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const session_recorder = setupSessionRecorder(init, app_info);
     var windows_platform = try native_sdk.platform.windows.WindowsPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
     defer windows_platform.deinit();
     var trace_sink = StdoutTraceSink{};
@@ -460,9 +475,168 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
         .environ = init.minimal.environ,
+        .session_recorder = session_recorder,
     });
 
     try runtime.run(app);
+    finishSessionRecorder(session_recorder);
+}
+
+// ------------------------------------------------- session record/replay
+
+/// Positional file sink behind the session recorder. Process-lifetime:
+/// allocated once at launch and never freed (the recorder outlives every
+/// dispatch).
+const SessionRecordContext = struct {
+    io: std.Io,
+    file: std.Io.File,
+    offset: u64 = 0,
+
+    fn sink(self: *SessionRecordContext) native_sdk.runtime.SessionRecorderSink {
+        return .{ .context = self, .write_fn = write };
+    }
+
+    fn write(context: *anyopaque, bytes: []const u8) anyerror!void {
+        const self: *SessionRecordContext = @ptrCast(@alignCast(context));
+        try self.file.writePositionalAll(self.io, bytes, self.offset);
+        self.offset += bytes.len;
+    }
+};
+
+/// `NATIVE_SDK_SESSION_RECORD=<path>`: create the journal file and a
+/// recorder that streams the session into it from the very first
+/// dispatched event (init determinism needs init-time effect results).
+/// Failures disable recording loudly and never block the app.
+fn setupSessionRecorder(init: std.process.Init, app_info: native_sdk.AppInfo) ?*native_sdk.runtime.SessionRecorder {
+    const path = init.environ_map.get("NATIVE_SDK_SESSION_RECORD") orelse return null;
+    const file = std.Io.Dir.cwd().createFile(init.io, path, .{ .truncate = true }) catch |err| {
+        std.debug.print("session recording disabled: cannot create {s}: {s}\n", .{ path, @errorName(err) });
+        return null;
+    };
+    const context = std.heap.page_allocator.create(SessionRecordContext) catch return null;
+    context.* = .{ .io = init.io, .file = file };
+    const recorder = std.heap.page_allocator.create(native_sdk.runtime.SessionRecorder) catch return null;
+    recorder.* = native_sdk.runtime.SessionRecorder.init(context.sink());
+    recorder.begin(native_sdk.runtime.sessionHeaderNow(
+        native_sdk.runtime.sessionPlatformName(),
+        app_info.app_name,
+        app_info.main_window.default_frame.width,
+        app_info.main_window.default_frame.height,
+    ));
+    std.debug.print("session recording to {s}\n", .{path});
+    return recorder;
+}
+
+/// Seal the journal on clean exit. A crashed or killed app leaves no
+/// end record, and replay refuses the file as truncated — honest by
+/// construction.
+fn finishSessionRecorder(recorder: ?*native_sdk.runtime.SessionRecorder) void {
+    const active = recorder orelse return;
+    active.finish();
+    if (!active.failed) {
+        std.debug.print("session journal sealed: {d} events, {d} effect results, {d} checkpoints, {d} screenshots, {d} bytes\n", .{
+            active.event_count,
+            active.effect_count,
+            active.checkpoint_count,
+            active.screenshot_count,
+            active.bytes_written,
+        });
+    }
+}
+
+/// `NATIVE_SDK_SESSION_REPLAY=<path>`: replay the journal headlessly
+/// (null platform — no windows, no timers, no effects; the journal is
+/// the world), verify fingerprint and screenshot checkpoints unless
+/// `NATIVE_SDK_SESSION_VERIFY=0`, print the report, and exit non-zero
+/// on any mismatch.
+fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.Init, journal_path: []const u8) !void {
+    const journal_bytes = readSessionJournal(init.io, journal_path) catch |err| {
+        std.debug.print("session replay: cannot read {s}: {s}\n", .{ journal_path, @errorName(err) });
+        return err;
+    };
+
+    var buffers: StateBuffers = undefined;
+    const app_info = options.appInfo(&buffers);
+    var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
+    null_platform.gpu_surfaces = true;
+    var replay_platform = null_platform.platform();
+    // Same-platform replay must mirror the RECORDING host's rendering
+    // capabilities, or pixel checkpoints catch the honest difference:
+    // - text measures through the SAME host seam (macOS: CoreText + the
+    //   bundled faces) — engine fallback metrics differ by fractions of
+    //   a pixel;
+    // - native scroll drivers exist (macOS overlay scrollers), so the
+    //   engine's drawn scrollbar stands down exactly like it did live.
+    if (comptime std.mem.eql(u8, build_options.platform, "macos")) {
+        native_sdk.platform.macos.installHeadlessTextServices(&replay_platform.services);
+        null_platform.gpu_surface_scroll_drivers = true;
+    }
+    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
+    defer std.heap.page_allocator.destroy(runtime);
+    // Bridge policy and security must match what the recording ran
+    // under (they gate replayed bridge_message dispatch); automation,
+    // window-state restore, and tracing stay off — replay consumes only
+    // the journal and restores nothing.
+    native_sdk.Runtime.initAt(runtime, .{
+        .platform = replay_platform,
+        .bridge = options.bridge,
+        .builtin_bridge = options.builtin_bridge,
+        .js_window_api = options.js_window_api,
+        .security = options.security,
+        .menus = options.menus,
+    });
+
+    const verify = if (init.environ_map.get("NATIVE_SDK_SESSION_VERIFY")) |value|
+        !std.mem.eql(u8, value, "0")
+    else
+        true;
+    const report = native_sdk.runtime.replaySession(runtime, app, journal_bytes, .{ .verify = verify }) catch |err| {
+        switch (err) {
+            error.JournalBadMagic,
+            error.JournalUnsupportedVersion,
+            error.JournalTruncated,
+            error.JournalCorrupt,
+            error.JournalRecordOverBudget,
+            error.JournalMissingHeader,
+            error.JournalCountMismatch,
+            => std.debug.print("session replay refused {s}: {s}\n", .{ journal_path, native_sdk.runtime.session_journal.describeError(@errorCast(err)) }),
+            else => {},
+        }
+        return err;
+    };
+    std.debug.print("session replay: {d} events, {d} effect results fed ({d} regenerated), {d} fingerprint checkpoints, {d} screenshot marks\n", .{
+        report.events_replayed,
+        report.effects_fed,
+        report.effects_skipped,
+        report.checkpoints_verified,
+        report.screenshots_verified,
+    });
+    if (!report.ok()) {
+        const detail_count: usize = @intCast(@min(report.mismatch_count, report.mismatches.len));
+        for (report.mismatches[0..detail_count]) |mismatch| {
+            std.debug.print("session replay mismatch: {s} after event {d} (frame {d}): recorded {x} vs replayed {x}\n", .{
+                @tagName(mismatch.kind),
+                mismatch.event_ordinal,
+                mismatch.frame_index,
+                mismatch.expected,
+                mismatch.actual,
+            });
+        }
+        std.debug.print("session replay FAILED verification: {d} mismatching checkpoint(s)\n", .{report.mismatch_count});
+        return error.SessionReplayMismatch;
+    }
+    std.debug.print("session replay verified: deterministic\n", .{});
+}
+
+fn readSessionJournal(io: std.Io, path: []const u8) ![]const u8 {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var read_buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buffer);
+    return reader.interface.allocRemaining(
+        std.heap.page_allocator,
+        .limited(native_sdk.runtime.max_session_journal_bytes),
+    );
 }
 
 fn shouldTrace(record: native_sdk.trace.Record) bool {

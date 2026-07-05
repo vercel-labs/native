@@ -94,6 +94,12 @@ pub const Effects = NotesApp.Effects;
 /// TEA init: restore the persisted store before the first paint, and
 /// start the repeating tick that keeps relative timestamps honest.
 pub fn boot(model: *Model, fx: *Effects) void {
+    // Deterministic init under session replay: re-stamp the sample
+    // notes from the JOURNALED clock read. `main` seeded with the live
+    // clock before the runtime existed; this reseed lands before the
+    // first view build, so the ages the first frame renders come from a
+    // value the journal replays verbatim.
+    model_mod.seedAt(model, fx.wallMs());
     if (model.store_path_len > 0) {
         fx.readFile(.{
             .key = model_mod.store_read_key,

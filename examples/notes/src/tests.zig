@@ -120,6 +120,10 @@ const Harness = struct {
         errdefer testing.allocator.destroy(app_state);
         app_state.* = NotesApp.init(std.heap.page_allocator, model, notesOptions());
         app_state.effects.executor = .fake;
+        // The journaled clock reads (`fx.wallMs`) follow the model's
+        // test clock, so boot's reseed and edit timestamps stay
+        // deterministic under the harness.
+        app_state.effects.clock = app_state.model.clock;
         const app = app_state.app();
         try harness.start(app);
         try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{

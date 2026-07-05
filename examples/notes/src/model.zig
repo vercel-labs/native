@@ -178,6 +178,11 @@ pub const Model = struct {
     /// Time seam (`native_sdk.Clock`): relative timestamps and note
     /// mutation times read it, so tests substitute a `TestClock`.
     clock: native_sdk.Clock = .system,
+    /// The view's time base for relative labels ("2m", "3h"): stamped in
+    /// UPDATE — from the journaled clock read (`fx.wallMs`) on every
+    /// refresh tick and edit — never read live in the view, so replaying
+    /// the same Msg sequence renders the same labels.
+    now_ms: i64 = 0,
     /// One-line activity note for the status bar ("Saved", "Copied…").
     status_storage: [max_status_bytes]u8 = undefined,
     status_len: usize = 0,
@@ -324,7 +329,7 @@ pub const Model = struct {
         var indexes: [max_notes]usize = undefined;
         const count = model.visibleNoteIndexes(&indexes);
         const out = arena.alloc(NoteRow, count) catch return &.{};
-        const now = model.clock.wallMs();
+        const now = model.now_ms;
         for (out, indexes[0..count]) |*row, index| {
             const note = &model.notes[index];
             row.* = .{
@@ -366,7 +371,7 @@ pub const Model = struct {
     pub fn editorMeta(model: *const Model, arena: std.mem.Allocator) []const u8 {
         const note = model.activeNote() orelse return "";
         const text = note.body.text();
-        const age = relativeTimeLabel(arena, model.clock.wallMs(), note.updated_ms);
+        const age = relativeTimeLabel(arena, model.now_ms, note.updated_ms);
         const edited = if (std.mem.eql(u8, age, "now"))
             "Edited just now"
         else
@@ -723,7 +728,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .edit => |edit| {
             const note = model.noteByIdMut(model.active_note) orelse return;
             note.body.apply(edit);
-            note.updated_ms = model.clock.wallMs();
+            note.updated_ms = fx.wallMs();
+            model.now_ms = note.updated_ms;
             model.status_len = 0;
             if (note.body.truncated) model.setStatus("Note is full ({d} KiB cap)", .{max_note_bytes / 1024});
             scheduleSave(fx);
@@ -756,7 +762,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 (if (model.folder_count > 0) model.folders[0].id else return)
             else
                 model.selected_folder;
-            const id = model.addNote(folder_id, model.clock.wallMs(), "") orelse {
+            model.now_ms = fx.wallMs();
+            const id = model.addNote(folder_id, model.now_ms, "") orelse {
                 model.setStatus("Note limit reached ({d})", .{max_notes});
                 return;
             };
@@ -814,9 +821,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .system_scheme => |scheme| model.system_scheme = scheme,
-        // The rebuild that follows every dispatch re-derives the relative
-        // timestamps; the tick itself carries no state.
-        .refresh_tick => {},
+        // Advance the view's time base through the JOURNALED clock read
+        // and let the rebuild that follows every dispatch re-derive the
+        // relative labels — a live clock read in the view would render
+        // differently on replay of the same Msg sequence.
+        .refresh_tick => model.now_ms = fx.wallMs(),
         .save_tick => persistStore(model, fx),
         .store_done => |result| switch (result.op) {
             .read => switch (result.outcome) {
@@ -975,11 +984,20 @@ pub fn persistStore(model: *Model, fx: *Effects) void {
 /// (needed when the estimator diverged from real glyph metrics) is
 /// gone.
 pub fn seed(model: *Model) void {
+    seedAt(model, model.clock.wallMs());
+}
+
+/// `seed` against an explicit "now": the deterministic-init seam. `boot`
+/// re-stamps the seeds from the journaled clock read (`fx.wallMs`)
+/// before the first view build, so a recorded session's very first
+/// frame replays reproducibly even though `main` seeded with the live
+/// clock before the runtime existed.
+pub fn seedAt(model: *Model, now: i64) void {
     model.folder_count = 0;
     model.note_count = 0;
     model.next_folder_id = 1;
     model.next_note_id = 1;
-    const now = model.clock.wallMs();
+    model.now_ms = now;
 
     const inbox = model.addFolder("Inbox").?;
     const ideas = model.addFolder("Ideas").?;

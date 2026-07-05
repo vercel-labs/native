@@ -4,10 +4,14 @@ const protocol = @import("automation_protocol");
 
 const automation_dir = protocol.default_dir;
 
-pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !void {
+pub fn run(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.Environ.Map, args: []const []const u8) !void {
     if (args.len == 0) return usage();
     const command = args[0];
-    if (std.mem.eql(u8, command, "list")) {
+    if (std.mem.eql(u8, command, "record")) {
+        return runSessionLaunch(allocator, io, environ_map, args[1..], .record);
+    } else if (std.mem.eql(u8, command, "replay")) {
+        return runSessionLaunch(allocator, io, environ_map, args[1..], .replay);
+    } else if (std.mem.eql(u8, command, "list")) {
         // windows.txt has no pid of its own; the snapshot in the same
         // dropbox vouches for (or condemns) the whole directory.
         try requireLiveSnapshotFile(allocator, io);
@@ -116,11 +120,91 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     }
 }
 
+const SessionLaunchMode = enum { record, replay };
+
+/// `record --out <journal> -- <app command...>` and
+/// `replay <journal> [--verify|--no-verify] -- <app command...>`:
+/// launch the app with the session environment armed
+/// (NATIVE_SDK_SESSION_RECORD / NATIVE_SDK_SESSION_REPLAY — the app
+/// runner does the recording and replaying; this verb only launches).
+/// Recording must arm at launch because replay re-runs the app's init:
+/// a mid-session recording could never replay its init-time effects.
+/// The child's exit code propagates, so `replay --verify` fails this
+/// command when verification fails.
+fn runSessionLaunch(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.Environ.Map, args: []const []const u8, mode: SessionLaunchMode) !void {
+    var journal_path: ?[]const u8 = null;
+    var verify = true;
+    var child_argv: []const []const u8 = &.{};
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--")) {
+            child_argv = args[index + 1 ..];
+            break;
+        } else if (mode == .record and std.mem.eql(u8, arg, "--out")) {
+            index += 1;
+            if (index >= args.len) return fail("record: --out requires a journal path");
+            journal_path = args[index];
+        } else if (mode == .replay and std.mem.eql(u8, arg, "--verify")) {
+            verify = true;
+        } else if (mode == .replay and std.mem.eql(u8, arg, "--no-verify")) {
+            verify = false;
+        } else if (journal_path == null and arg.len > 0 and arg[0] != '-') {
+            journal_path = arg;
+        } else {
+            return usage();
+        }
+    }
+    const journal = journal_path orelse return fail(if (mode == .record)
+        "record: name the journal with --out <path> (before the -- app command)"
+    else
+        "replay: name the journal file (before the -- app command)");
+    if (child_argv.len == 0) {
+        return fail("name the app to launch after `--`, e.g.: native automate record --out session.journal -- ./zig-out/bin/my-app");
+    }
+
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    const keys = environ_map.keys();
+    const values = environ_map.values();
+    for (keys, values) |key, value| try env.put(key, value);
+    switch (mode) {
+        .record => try env.put("NATIVE_SDK_SESSION_RECORD", journal),
+        .replay => {
+            try env.put("NATIVE_SDK_SESSION_REPLAY", journal);
+            try env.put("NATIVE_SDK_SESSION_VERIFY", if (verify) "1" else "0");
+        },
+    }
+
+    var child = try std.process.spawn(io, .{
+        .argv = child_argv,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+        .environ_map = &env,
+    });
+    const term = try child.wait(io);
+    switch (term) {
+        .exited => |code| {
+            if (code != 0) {
+                std.debug.print("{s}: the app exited with code {d}\n", .{ @tagName(mode), code });
+                return error.AutomationCommandFailed;
+            }
+        },
+        else => {
+            std.debug.print("{s}: the app did not exit cleanly (the journal, if any, is unsealed and replay will refuse it)\n", .{@tagName(mode)});
+            return error.AutomationCommandFailed;
+        },
+    }
+}
+
 fn usage() void {
     std.debug.print(
         \\usage: native automate <command>
         \\
         \\commands:
+        \\  record --out <session.journal> -- <app command...>   (launch the app with session recording armed)
+        \\  replay <session.journal> [--verify|--no-verify] -- <app command...>   (replay the journal headlessly and verify checkpoints)
         \\  list
         \\  snapshot
         \\  screenshot <view-label> [scale]   (renders the gpu_surface view's canvas to screenshot-<view-label>.png)
