@@ -31,7 +31,7 @@ ui.list(.{ .width = 340, .gap = 2 }, .{
 
 ## Virtualization
 
-For thousands of rows, turn on `virtualized` and give each row a fixed `virtual-item-extent` — the engine materializes only the rows in view. Loop the model data with a keyed `for` and dispatch a payload per row.
+For long row sets, turn on `virtualized` and give each row a fixed `virtual-item-extent` — the engine lays out only the rows in view. Loop the model data with a keyed `for` and dispatch a payload per row. The rows still all BUILD (this bounds layout and paint, not the tree), so it suits row sets the model already holds — hundreds, not hundreds of thousands. For dataset-scale rows where the view should only ever build the visible window, use the builder's [virtual list](/components/virtual-list).
 
 ```html
 <list virtualized="true" virtual-item-extent="28" grow="1">

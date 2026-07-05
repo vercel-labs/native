@@ -208,6 +208,23 @@ pub const WidgetLayoutStyle = struct {
     virtualized: bool = false,
     virtual_item_extent: f32 = 0,
     virtual_overscan: usize = 0,
+    /// TOTAL virtual item count for a windowed virtual list: the container
+    /// represents this many items even when `children` holds only the
+    /// built window (the visible slice plus overscan). Content extent,
+    /// scrollbars, and `list_item_count` semantics derive from this count,
+    /// not from `children.len`. 0 keeps the legacy contract where
+    /// `children` IS the full item set (layout-culled virtualization).
+    /// Setting it non-zero also marks the container RUNTIME-SCROLLED (see
+    /// `widgetVirtualRuntimeScrolled`): engine wheel/kinetic/keyboard
+    /// scrolling and native scroll drivers engage, where legacy
+    /// virtualized containers stay model-driven.
+    virtual_item_count: usize = 0,
+    /// Virtual index of `children[0]` in a windowed virtual list: the
+    /// layout pass positions built children at their ABSOLUTE virtual
+    /// offsets (`(virtual_first_index + i) * stride`), so a window built
+    /// anywhere in the list lands exactly where the full list would put
+    /// it. Only meaningful with `virtual_item_count > 0`.
+    virtual_first_index: usize = 0,
     /// Anchored floating placement: non-null makes this widget a floating
     /// surface positioned against its parent (see `WidgetAnchor`).
     anchor: ?WidgetAnchor = null,
@@ -1016,6 +1033,8 @@ fn widgetLayoutStyleIsDefault(layout: WidgetLayoutStyle) bool {
         !layout.virtualized and
         layout.virtual_item_extent == 0 and
         layout.virtual_overscan == 0 and
+        layout.virtual_item_count == 0 and
+        layout.virtual_first_index == 0 and
         layout.min_size.width == 0 and
         layout.min_size.height == 0 and
         layout.max_size.width == 0 and

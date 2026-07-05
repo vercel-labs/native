@@ -250,6 +250,12 @@ test "structural validation reports positions for grammar misuse" {
     var scrollable_parser = markup.Parser.init(arena_state.allocator(), scrollable);
     try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try scrollable_parser.parse()));
 
+    // on-reach-end (the infinite-scroll fetch signal) validates on the
+    // scroll element too, with or without a payload.
+    const reachable = "<scroll on-reach-end=\"load_more\" on-scroll=\"scrolled\">\n  <column><text>x</text></column>\n</scroll>";
+    var reachable_parser = markup.Parser.init(arena_state.allocator(), reachable);
+    try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try reachable_parser.parse()));
+
     // A built-in vector icon with a literal name and token tint is valid.
     const icon_source = "<row gap=\"8\">\n  <icon name=\"search\" width=\"16\" height=\"16\" foreground=\"accent\" />\n  <text>Search</text>\n</row>";
     var icon_parser = markup.Parser.init(arena_state.allocator(), icon_source);
@@ -282,6 +288,8 @@ test "structural validation reports positions for grammar misuse" {
         .{ .source = "<column>\n  <else><text>x</text></else>\n</column>", .message = markup.else_placement_message },
         .{ .source = "<row>\n  <button on-scroll=\"scrolled\">X</button>\n</row>", .message = markup.on_scroll_element_message },
         .{ .source = "<column>\n  <list on-scroll=\"scrolled\"><list-item>x</list-item></list>\n</column>", .message = markup.on_scroll_element_message },
+        .{ .source = "<row>\n  <button on-reach-end=\"load_more\">X</button>\n</row>", .message = markup.on_reach_end_element_message },
+        .{ .source = "<column>\n  <list on-reach-end=\"load_more\"><list-item>x</list-item></list>\n</column>", .message = markup.on_reach_end_element_message },
         .{ .source = "<column>\n  <text>x</text>\n  <else><text>y</text></else>\n</column>", .message = markup.else_placement_message },
         .{ .source = "<column>\n  <for each=\"items\" as=\"t\"></for>\n</column>", .message = markup.for_children_message },
         .{ .source = "<column>\n  <for each=\"items\" as=\"t\">stray text</for>\n</column>", .message = markup.for_children_message },

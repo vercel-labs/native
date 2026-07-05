@@ -13,11 +13,20 @@ pub const CanvasWidgetScrollSource = enum {
     wheel,
 };
 
+/// Virtualized containers whose scroll offset stays MODEL-driven (the
+/// legacy contract: children are the full item set, the source `value`
+/// is the only offset channel). The engine refuses to scroll these;
+/// runtime-scrolled virtual lists (declared item count) take the same
+/// engine scroll paths a plain scroll_view does.
+fn canvasWidgetModelDrivenVirtual(widget: canvas.Widget) bool {
+    return widget.layout.virtualized and !canvas.widgetVirtualRuntimeScrolled(widget);
+}
+
 pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
     return struct {
         pub fn canvasWidgetKineticScrollActive(self: *const RuntimeView) bool {
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
-                if (node.widget.kind != .scroll_view or node.widget.layout.virtualized) continue;
+                if (node.widget.kind != .scroll_view or canvasWidgetModelDrivenVirtual(node.widget)) continue;
                 // Native drivers own momentum + rubber-band recovery.
                 if (node.widget.native_scroll) continue;
                 const viewport = node.frame.inset(node.widget.layout.padding).normalized();
@@ -30,7 +39,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         pub fn applyCanvasWidgetScrollRoute(self: *RuntimeView, route: []const canvas.WidgetEventRouteEntry, delta_y: f32, source: CanvasWidgetScrollSource) anyerror!?geometry.RectF {
             var depth_limit: ?usize = null;
             while (self.deepestCanvasWidgetScrollIndex(route, depth_limit)) |scroll_index| {
-                if (self.widget_layout_nodes[scroll_index].widget.layout.virtualized) return null;
+                if (canvasWidgetModelDrivenVirtual(self.widget_layout_nodes[scroll_index].widget)) return null;
                 const has_scroll_parent = self.deepestCanvasWidgetScrollIndex(route, self.widget_layout_nodes[scroll_index].depth) != null;
                 if (has_scroll_parent and !self.canvasWidgetScrollCanConsume(scroll_index, delta_y)) {
                     depth_limit = self.widget_layout_nodes[scroll_index].depth;
@@ -103,7 +112,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             if (scroll_index >= self.widget_layout_node_count or delta_y == 0) return false;
             const scroll_node = self.widget_layout_nodes[scroll_index];
             if (!canvasWidgetScrollableKind(scroll_node.widget.kind)) return false;
-            if (scroll_node.widget.kind == .scroll_view and scroll_node.widget.layout.virtualized) return false;
+            if (canvasWidgetModelDrivenVirtual(scroll_node.widget)) return false;
 
             if (scroll_node.widget.kind == .textarea) {
                 const max_offset = canvas.textInputMaxScrollOffsetForWidget(scroll_node.widget, self.widget_tokens);
@@ -127,7 +136,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             const scroll_node = self.widget_layout_nodes[scroll_index];
             if (!canvasWidgetScrollableKind(scroll_node.widget.kind)) return null;
             if (scroll_node.widget.kind == .textarea) return self.applyCanvasWidgetTextareaScroll(scroll_index, delta_y, source);
-            if (scroll_node.widget.layout.virtualized) return null;
+            if (canvasWidgetModelDrivenVirtual(scroll_node.widget)) return null;
 
             const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
             if (viewport.isEmpty()) return null;
@@ -198,7 +207,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         pub fn applyCanvasWidgetScrollDriverOffset(self: *RuntimeView, scroll_index: usize, offset: f32) anyerror!?geometry.RectF {
             if (scroll_index >= self.widget_layout_node_count) return null;
             const scroll_node = self.widget_layout_nodes[scroll_index];
-            if (scroll_node.widget.kind != .scroll_view or scroll_node.widget.layout.virtualized) return null;
+            if (scroll_node.widget.kind != .scroll_view or canvasWidgetModelDrivenVirtual(scroll_node.widget)) return null;
 
             const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
             if (viewport.isEmpty()) return null;
@@ -223,7 +232,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         pub fn applyCanvasWidgetScrollKeyboardTarget(self: *RuntimeView, scroll_index: usize, target: CanvasWidgetScrollKeyboardTarget) anyerror!?geometry.RectF {
             if (scroll_index >= self.widget_layout_node_count) return null;
             const scroll_node = self.widget_layout_nodes[scroll_index];
-            if (scroll_node.widget.kind != .scroll_view or scroll_node.widget.layout.virtualized) return null;
+            if (scroll_node.widget.kind != .scroll_view or canvasWidgetModelDrivenVirtual(scroll_node.widget)) return null;
 
             const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
             if (viewport.isEmpty()) return null;
@@ -255,7 +264,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             const physics = self.widget_tokens.scroll;
 
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |scroll_node, scroll_index| {
-                if (scroll_node.widget.kind != .scroll_view or scroll_node.widget.layout.virtualized) continue;
+                if (scroll_node.widget.kind != .scroll_view or canvasWidgetModelDrivenVirtual(scroll_node.widget)) continue;
                 // Native drivers own momentum + rubber-band recovery.
                 if (scroll_node.widget.native_scroll) continue;
 
@@ -292,6 +301,13 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         pub fn canvasWidgetScrollContentExtent(self: *const RuntimeView, scroll_index: usize, viewport: geometry.RectF) f32 {
             if (scroll_index < self.widget_layout_node_count and self.widget_layout_nodes[scroll_index].widget.kind == .textarea) {
                 return canvas.textInputContentExtentForWidget(self.widget_layout_nodes[scroll_index].widget, self.widget_tokens);
+            }
+            // Virtualized containers derive their extent from the item
+            // count and extent (declared count for windowed virtual
+            // lists), never from the mounted descendants — walking the
+            // built window would collapse the extent to the window.
+            if (scroll_index < self.widget_layout_node_count and self.widget_layout_nodes[scroll_index].widget.layout.virtualized) {
+                return @max(viewport.height, canvas.virtualWidgetScrollContentExtentWithTokens(self.widget_layout_nodes[scroll_index].widget, viewport.height, self.widget_tokens));
             }
             const scroll_depth = self.widget_layout_nodes[scroll_index].depth;
             const offset = self.widget_layout_nodes[scroll_index].widget.value;

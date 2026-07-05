@@ -2265,3 +2265,180 @@ test "ui app delivers chrome overlay geometry before install and on change" {
     try std.testing.expectEqual(@as(f32, 0), app_state.model.buttons_center_y);
     try std.testing.expect(try retainedTextExists(&harness.runtime, "leading 0"));
 }
+
+// -------------------------------------- windowed virtual list fixture
+
+const VirtualFeedModel = struct {
+    /// Items currently loaded; `load_more` appends batches to a cap.
+    loaded: usize = 400,
+    /// Every reach-end dispatch, including the ones past the cap.
+    fetches: u32 = 0,
+};
+
+const VirtualFeedMsg = union(enum) {
+    load_more,
+};
+
+const VirtualFeedApp = ui_app_model.UiApp(VirtualFeedModel, VirtualFeedMsg);
+
+const virtual_feed_batch: usize = 100;
+const virtual_feed_cap: usize = 600;
+const virtual_row_extent: f32 = 24;
+
+fn virtualFeedUpdate(model: *VirtualFeedModel, msg: VirtualFeedMsg) void {
+    switch (msg) {
+        .load_more => {
+            model.fetches += 1;
+            if (model.loaded < virtual_feed_cap) model.loaded += virtual_feed_batch;
+        },
+    }
+}
+
+fn virtualFeedOptions(model: *const VirtualFeedModel) VirtualFeedApp.Ui.VirtualListOptions {
+    return .{
+        .id = "vfeed",
+        .item_count = model.loaded,
+        .item_extent = virtual_row_extent,
+        .overscan = 2,
+        .grow = 1,
+        .on_reach_end = .load_more,
+    };
+}
+
+/// The windowed pattern: ask for the visible range, build ONLY those
+/// rows from the model, hand both to `virtualList`. Deliberately no
+/// `on_scroll` binding — the runtime re-derives the view on scroll for
+/// mounted virtual lists on its own.
+fn virtualFeedView(ui: *VirtualFeedApp.Ui, model: *const VirtualFeedModel) VirtualFeedApp.Ui.Node {
+    const options = virtualFeedOptions(model);
+    const window = ui.virtualWindow(options);
+    const rows = ui.arena.alloc(VirtualFeedApp.Ui.Node, window.itemCount()) catch {
+        ui.failed = true;
+        return ui.column(.{}, .{});
+    };
+    for (rows, 0..) |*row, offset| {
+        const index = window.start_index + offset;
+        var node = ui.listItem(.{}, ui.fmt("Item {d}", .{index}));
+        node.key = .{ .int = @intCast(index) };
+        row.* = node;
+    }
+    return ui.virtualList(options, window, .{rows});
+}
+
+fn virtualFeedAppOptions() VirtualFeedApp.Options {
+    return .{
+        .name = "ui-app-virtual-feed",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = virtualFeedUpdate,
+        .view = virtualFeedView,
+    };
+}
+
+test "windowed virtual list scrolls, re-windows, budgets to the viewport, and fires reach-end with hysteresis" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(VirtualFeedApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = VirtualFeedApp.init(std.heap.page_allocator, .{}, virtualFeedAppOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // The first build materialized only the first window (300pt viewport
+    // at 24pt rows + 2 overscan = 15 rows), never the 400 loaded items.
+    const list_id = canvas.globalWidgetId(.scroll_view, .{ .str = "vfeed" });
+    try std.testing.expectEqual(list_id, app_state.tree.?.root.id);
+    try std.testing.expectEqual(@as(usize, 15), app_state.tree.?.root.children.len);
+    try std.testing.expectEqual(@as(usize, 0), app_state.tree.?.root.layout.virtual_first_index);
+
+    // A wheel scroll with NO on_scroll binding still re-windows the
+    // view: the runtime owns the offset, the scroll observation itself
+    // triggers the re-derivation.
+    var command_buffer: [96]u8 = undefined;
+    var wheel = try std.fmt.bufPrint(&command_buffer, "widget-wheel {s} {d} 240", .{ canvas_label, list_id });
+    try harness.runtime.dispatchAutomationCommand(app, wheel);
+    try std.testing.expectEqual(@as(usize, 8), app_state.tree.?.root.layout.virtual_first_index);
+    try std.testing.expect(findIn(app_state.tree.?.root, .list_item, "Item 8") != null);
+    try std.testing.expect(findIn(app_state.tree.?.root, .list_item, "Item 0") == null);
+    const retained = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    try std.testing.expectEqual(@as(f32, 240), retained.findById(list_id).?.widget.value);
+
+    // Row identity is the item, not the slot: item 10 was in both
+    // windows and kept its structural id across the shift.
+    // (The id is derived from the list id and the item key alone.)
+    try std.testing.expect(findIn(app_state.tree.?.root, .list_item, "Item 10") != null);
+
+    // Scroll to the end of the loaded 400 items (content 9600, viewport
+    // 300, max offset 9300): the approach-end signal fires ONCE and the
+    // model appends a batch.
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.fetches);
+    wheel = try std.fmt.bufPrint(&command_buffer, "widget-wheel {s} {d} 9060", .{ canvas_label, list_id });
+    try harness.runtime.dispatchAutomationCommand(app, wheel);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.fetches);
+    try std.testing.expectEqual(@as(usize, 500), app_state.model.loaded);
+
+    // The appended batch grew the extent (12_000), pulling the offset
+    // out of the band — the next small scroll re-arms, no fire.
+    wheel = try std.fmt.bufPrint(&command_buffer, "widget-wheel {s} {d} 24", .{ canvas_label, list_id });
+    try harness.runtime.dispatchAutomationCommand(app, wheel);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.fetches);
+
+    // Ride to the new end: fires again (offset 9324 + 2376 = 11_700 =
+    // the new max), appends to the 600 cap.
+    wheel = try std.fmt.bufPrint(&command_buffer, "widget-wheel {s} {d} 2376", .{ canvas_label, list_id });
+    try harness.runtime.dispatchAutomationCommand(app, wheel);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.fetches);
+    try std.testing.expectEqual(@as(usize, 600), app_state.model.loaded);
+
+    // At the cap the model stops appending, so the extent stops
+    // growing — riding the end must NOT dispatch a fetch storm.
+    wheel = try std.fmt.bufPrint(&command_buffer, "widget-wheel {s} {d} 24", .{ canvas_label, list_id });
+    try harness.runtime.dispatchAutomationCommand(app, wheel);
+    wheel = try std.fmt.bufPrint(&command_buffer, "widget-wheel {s} {d} 2376", .{ canvas_label, list_id });
+    try harness.runtime.dispatchAutomationCommand(app, wheel);
+    try std.testing.expectEqual(@as(u32, 3), app_state.model.fetches);
+    wheel = try std.fmt.bufPrint(&command_buffer, "widget-wheel {s} {d} -24", .{ canvas_label, list_id });
+    try harness.runtime.dispatchAutomationCommand(app, wheel);
+    wheel = try std.fmt.bufPrint(&command_buffer, "widget-wheel {s} {d} 24", .{ canvas_label, list_id });
+    try harness.runtime.dispatchAutomationCommand(app, wheel);
+    try std.testing.expectEqual(@as(u32, 3), app_state.model.fetches);
+
+    // Budget stays viewport-sized throughout: ~19 mounted rows against
+    // 600 loaded items, and the scroll semantics report the full extent.
+    const final_layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    try std.testing.expect(final_layout.nodes.len < 40);
+    const scroll_state = harness.runtime.views[0].canvasWidgetScrollStateById(list_id).?;
+    try std.testing.expectEqual(@as(f32, 600 * virtual_row_extent), scroll_state.content_extent);
+
+    // A window-growing resize converges within ONE rebuild: the first
+    // build pass reads the stale 300pt viewport, the coverage check sees
+    // the fresh 600pt geometry under-covered, and the retry pass builds
+    // the wider window against it.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_resized = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .frame = geometry.RectF.init(0, 0, 400, 600),
+        .scale_factor = 2,
+    } });
+    const root = app_state.tree.?.root;
+    const first_index = root.layout.virtual_first_index;
+    const mounted = root.children.len;
+    // Offset clamps to the new max (14_400 - 600 = 13_800): visible rows
+    // 575..600 must all be inside the built window.
+    try std.testing.expect(first_index <= 575);
+    try std.testing.expectEqual(@as(usize, 600), first_index + mounted);
+    try std.testing.expect(mounted >= 25);
+}

@@ -1398,6 +1398,80 @@ test "widget virtualized scroll view lays out only visible overscan children" {
     try std.testing.expectEqual(@as(f32, -12), top_layout.virtualRangeById(20).?.layout_offset);
 }
 
+test "windowed virtual list lays out the built window at absolute virtual positions" {
+    // The WINDOWED contract: children are the built slice (here items
+    // 100..106 of a 100k list), `virtual_first_index` names where it
+    // starts, and the declared `virtual_item_count` drives the content
+    // extent, the range math, and the list_item semantics — the view
+    // never materializes the other 99_994 items.
+    const window = [_]Widget{
+        .{ .id = 2, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Item 100" },
+        .{ .id = 3, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Item 101" },
+        .{ .id = 4, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Item 102" },
+        .{ .id = 5, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Item 103" },
+        .{ .id = 6, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Item 104" },
+        .{ .id = 7, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Item 105" },
+    };
+    const list = Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        // Item 100's row top: 100 * (20 + 5).
+        .value = 2500,
+        .layout = .{
+            .gap = 5,
+            .virtualized = true,
+            .virtual_item_extent = 20,
+            .virtual_overscan = 1,
+            .virtual_item_count = 100_000,
+            .virtual_first_index = 100,
+        },
+        .children = &window,
+    };
+
+    var nodes: [8]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(list, geometry.RectF.init(0, 0, 120, 50), &nodes);
+
+    // The runtime-scrolled predicate holds for exactly this shape.
+    try std.testing.expect(support.canvas.widgetVirtualRuntimeScrolled(layout.nodes[0].widget));
+
+    // Semantics and extent derive from the DECLARED count: 100k items of
+    // stride 25 (minus the trailing gap), not the six built children.
+    try std.testing.expectEqual(@as(?u32, 100_000), layout.nodes[0].widget.semantics.list_item_count);
+    try std.testing.expectEqual(@as(f32, 2_499_995), virtualWidgetScrollContentExtent(layout.nodes[0].widget, 50));
+
+    // The visible range (offset 2500, viewport 50, overscan 1) is items
+    // 99..104 (end exclusive); intersected with the built window it
+    // mounts 100..103, each at its ABSOLUTE virtual position.
+    const range = layout.virtualRangeById(1).?;
+    try std.testing.expectEqual(@as(usize, 99), range.start_index);
+    try std.testing.expectEqual(@as(usize, 104), range.end_index);
+    try std.testing.expectEqual(@as(usize, 5), layout.nodeCount());
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(0, 0, 120, 20));
+    try expectLayoutFrame(layout, 3, geometry.RectF.init(0, 25, 120, 20));
+    try expectLayoutFrame(layout, 4, geometry.RectF.init(0, 50, 120, 20));
+    try expectLayoutFrame(layout, 5, geometry.RectF.init(0, 75, 120, 20));
+    try std.testing.expect(layout.findById(6) == null);
+    try std.testing.expect(layout.findById(7) == null);
+
+    // Built rows carry their absolute item indices against the declared
+    // count — assistive tech reads "item 101 of 100000".
+    try std.testing.expectEqual(@as(?u32, 100), layout.findById(2).?.widget.semantics.list_item_index);
+    try std.testing.expectEqual(@as(?u32, 100_000), layout.findById(2).?.widget.semantics.list_item_count);
+    try std.testing.expectEqual(@as(?u32, 103), layout.findById(5).?.widget.semantics.list_item_index);
+
+    // A window that under-covers the visible range mounts only the
+    // intersection (the coverage-retry rebuild widens it): scrolled to
+    // the very end, the same 100..106 window mounts nothing.
+    var tail = list;
+    tail.value = 2_499_995 - 50;
+    var tail_nodes: [8]WidgetLayoutNode = undefined;
+    const tail_layout = try layoutWidgetTree(tail, geometry.RectF.init(0, 0, 120, 50), &tail_nodes);
+    try std.testing.expectEqual(@as(usize, 1), tail_layout.nodeCount());
+    const tail_range = tail_layout.virtualRangeById(1).?;
+    try std.testing.expectEqual(@as(usize, 99_996), tail_range.start_index);
+    try std.testing.expectEqual(@as(usize, 100_000), tail_range.end_index);
+}
+
 test "widget virtualized list exposes logical item semantics" {
     const children = [_]Widget{
         .{ .id = 2, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Zero" },

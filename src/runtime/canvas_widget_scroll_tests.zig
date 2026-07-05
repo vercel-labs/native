@@ -1476,3 +1476,70 @@ test "user scroll offsets survive rebuilds until the source offset changes" {
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", final_layout);
     try std.testing.expectEqual(@as(f32, 18), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(1).?.widget.value);
 }
+
+test "engine wheel scrolls a windowed virtual list against its declared extent" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-virtual-window-scroll", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 64),
+    });
+
+    // A 1000-item windowed virtual list mounting a four-row window.
+    // Legacy virtualized containers refuse engine scrolling (their offset
+    // is model-driven); the DECLARED count makes this one runtime-owned.
+    const window = [_]canvas.Widget{
+        .{ .id = 2, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Item 0" },
+        .{ .id = 3, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Item 1" },
+        .{ .id = 4, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Item 2" },
+        .{ .id = 5, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Item 3" },
+    };
+    const list = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .layout = .{
+            .virtualized = true,
+            .virtual_item_extent = 20,
+            .virtual_overscan = 1,
+            .virtual_item_count = 1000,
+        },
+        .children = &window,
+    };
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(list, geometry.RectF.init(0, 0, 180, 64), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // Wheel input applies through the ordinary engine scroll path.
+    try harness.runtime.dispatchAutomationCommand(app, "widget-wheel canvas 1 30");
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 30), retained.findById(1).?.widget.value);
+
+    // The scroll state reports the DECLARED virtual extent (1000 x 20),
+    // not the four mounted rows.
+    const state = harness.runtime.views[0].canvasWidgetScrollStateById(1).?;
+    try std.testing.expectEqual(@as(f32, 20_000), state.content_extent);
+    try std.testing.expectEqual(@as(f32, 64), state.viewport_extent);
+
+    // A rebuild whose source offset overshoots the end clamps against
+    // the virtual extent (max offset 20_000 - 64).
+    var overshoot = list;
+    overshoot.value = 30_000;
+    var overshoot_nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const overshoot_layout = try canvas.layoutWidgetTree(overshoot, geometry.RectF.init(0, 0, 180, 64), &overshoot_nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", overshoot_layout);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 19_936), retained.findById(1).?.widget.value);
+}

@@ -368,3 +368,85 @@ test "scroll drivers stay unpublished without platform support" {
     }
     try std.testing.expect(saw_scrollbar_thumb);
 }
+
+fn windowedVirtualListLayout(nodes: []canvas.WidgetLayoutNode, offset: f32, declared_count: usize) !canvas.WidgetLayoutTree {
+    const window = [_]canvas.Widget{
+        .{ .id = 2, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Item 0" },
+        .{ .id = 3, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Item 1" },
+        .{ .id = 4, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Item 2" },
+        .{ .id = 5, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Item 3" },
+        .{ .id = 6, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 20), .text = "Item 4" },
+    };
+    const list = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .value = offset,
+        .layout = .{
+            .virtualized = true,
+            .virtual_item_extent = 20,
+            .virtual_overscan = 1,
+            .virtual_item_count = declared_count,
+            .virtual_first_index = 0,
+        },
+        .children = &window,
+    };
+    return canvas.layoutWidgetTree(list, geometry.RectF.init(0, 0, 180, 72), nodes);
+}
+
+test "windowed virtual lists ride the native scroll driver with the full virtual extent" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: PassiveApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    // A 10k-item windowed virtual list mounting a five-row window: the
+    // driver's content size is the VIRTUAL extent (10_000 x 20 = 200_000
+    // rebased onto the region frame), so the OS scrollbar spans the whole
+    // list while five rows exist.
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const layout = try windowedVirtualListLayout(&nodes, 0, 10_000);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try std.testing.expect(harness.null_platform.scroll_driver_set_count >= 1);
+    const drivers = harness.null_platform.scrollDrivers();
+    try std.testing.expectEqual(@as(usize, 1), drivers.len);
+    try std.testing.expectEqual(@as(u64, 1), drivers[0].id);
+    try std.testing.expectEqual(@as(f32, 200_000), drivers[0].content_size.height);
+
+    // The retained region is natively driven: engine scrollbar and
+    // engine physics stand down.
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.nodes[0].widget.native_scroll);
+
+    // A driver-reported offset scrolls the window (the optimistic echo
+    // translates the built rows; the app's rebuild re-windows).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_scroll_driver = .{
+        .window_id = 1,
+        .label = "canvas",
+        .driver_id = 1,
+        .offset_y = 30,
+        .timestamp_ns = 1_000_000_000,
+    } });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 30), retained.nodes[0].widget.value);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, -30, 180, 20), retained.nodes[1].frame);
+
+    // A LEGACY virtualized container (no declared count: children are
+    // the full item set, model-driven offset) stays unpublished.
+    var legacy_nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const legacy_layout = try windowedVirtualListLayout(&legacy_nodes, 0, 0);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", legacy_layout);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.scrollDrivers().len);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(!retained.nodes[0].widget.native_scroll);
+}

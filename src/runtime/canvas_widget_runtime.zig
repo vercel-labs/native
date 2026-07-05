@@ -786,7 +786,12 @@ pub fn applyCanvasWidgetSourceScrollSemantics(
 
 pub fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, states: ?[]canvas.ScrollState) void {
     for (nodes, 0..) |node, index| {
-        if (node.widget.kind != .scroll_view or node.widget.layout.virtualized) continue;
+        if (node.widget.kind != .scroll_view) continue;
+        // Legacy virtualized containers are model-driven: the source
+        // offset is the only channel, so the engine never clamps it.
+        // Runtime-scrolled virtual lists (declared item count) clamp
+        // like plain scroll views, against the VIRTUAL content extent.
+        if (node.widget.layout.virtualized and !canvas.widgetVirtualRuntimeScrolled(node.widget)) continue;
         // Native scroll drivers own clamping: the OS scroller constrains
         // its own contentOffset (including mid-rubber-band rebuilds, which
         // an engine clamp here would fight) and reports the settled offset

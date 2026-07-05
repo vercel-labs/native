@@ -139,6 +139,7 @@ pub const scenes = [_]Scene{
     .{ .name = "breadcrumb", .height = 140, .build = stateless(buildBreadcrumb) },
     .{ .name = "pagination", .height = 150, .build = stateless(buildPagination) },
     .{ .name = "list", .height = 260, .build = stateless(buildList) },
+    .{ .name = "virtual-list", .height = 260, .build = stateless(buildVirtualList) },
     .{ .name = "table", .height = 240, .build = stateless(buildTable) },
     .{ .name = "tree", .height = 280, .build = stateless(buildTree) },
     .{ .name = "split", .height = 240, .build = stateless(buildSplit) },
@@ -580,6 +581,33 @@ fn buildList(ui: *Ui) Node {
             ui.listItem(.{ .icon = "folder" }, "Archive"),
             ui.listItem(.{ .icon = "music", .disabled = true }, "demo-track.wav"),
         }),
+    });
+}
+
+/// The WINDOWED virtual list: 2,500 rows exist as arithmetic, the tree
+/// holds only the visible window plus overscan, and the runtime owns
+/// the scroll offset (the live preview host re-derives the scene on
+/// every scroll observation, the `UiApp` loop's shape).
+fn buildVirtualList(ui: *Ui) Node {
+    const options = Ui.VirtualListOptions{
+        .id = "docs-virtual-list",
+        .item_count = 2500,
+        .item_extent = 28,
+        .overscan = 6,
+        .width = 340,
+        .height = 168,
+        .viewport_fallback = 168,
+    };
+    const window = ui.virtualWindow(options);
+    const rows = ui.arena.alloc(Node, window.itemCount()) catch return tile(ui, .{ui.column(.{}, .{})});
+    for (rows, 0..) |*row, offset| {
+        const index = window.start_index + offset;
+        var node = ui.listItem(.{ .icon = "file-text" }, ui.fmt("Row {d} of 2500", .{index}));
+        node.key = .{ .int = @intCast(index) };
+        row.* = node;
+    }
+    return tile(ui, .{
+        ui.panel(.{}, .{ui.virtualList(options, window, .{rows})}),
     });
 }
 

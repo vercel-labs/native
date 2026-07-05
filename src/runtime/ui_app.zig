@@ -46,6 +46,14 @@ const ui_app_log = std.log.scoped(.zero_ui_app);
 /// Maximum number of webview panes a `UiApp` can drive (`Options.web_panes`).
 pub const max_web_panes: usize = 4;
 
+/// Approach-end hysteresis for `on_reach_end`, in viewports from the
+/// content end: fire when the offset comes within one viewport, re-arm
+/// only past one and a half — so the fire and re-arm boundaries never
+/// chatter, and a freshly appended batch (which grows the extent) is
+/// what re-arms the next approach.
+pub const reach_end_fire_ratio: f32 = 1.0;
+pub const reach_end_rearm_ratio: f32 = 1.5;
+
 /// Comptime feature selection for `UiAppWithFeatures`.
 pub const UiAppFeatures = struct {
     /// Ship the runtime markup engine (parser + interpreter) in the app.
@@ -523,6 +531,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         hold_view_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined,
         hold_view_label_len: usize = 0,
         hold_window_id: platform.WindowId = 1,
+        /// The windowed virtual lists the LAST build declared
+        /// (`Ui.virtualList` records): scroll events on these regions
+        /// re-derive the view even without an app `on_scroll` binding,
+        /// and the coverage check re-runs a build whose fresh geometry
+        /// proved a window too small.
+        virtual_windows: [canvas.max_virtual_windows]canvas.VirtualWindowRecord = [_]canvas.VirtualWindowRecord{.{}} ** canvas.max_virtual_windows,
+        virtual_window_count: usize = 0,
+        /// Scroll regions whose `on_reach_end` fired and has not re-armed
+        /// (the approach-end hysteresis state, keyed by widget id).
+        reach_end_fired_ids: [canvas.max_virtual_windows]canvas.ObjectId = [_]canvas.ObjectId{0} ** canvas.max_virtual_windows,
         /// Live model-declared secondary windows (`Options.windows_fn`),
         /// keyed by window label.
         window_slots: [max_ui_windows]WindowSlot,
@@ -722,40 +740,69 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// table remains valid between events. Apps with a `chrome` hook
         /// also rebuild the retained display list (chrome prefix + widget
         /// commands + chrome suffix) here.
+        ///
+        /// Windowed virtual lists (`Ui.virtualList`) get their window
+        /// source installed here: each `ui.virtualWindow` request
+        /// resolves against the RETAINED layout's scroll offset and
+        /// viewport for the list's global identity (canvas height at
+        /// offset 0 before the list first mounts). When the fresh
+        /// layout's geometry proves a window under-covered — the first
+        /// build guessed the viewport, or a resize widened it — the view
+        /// is derived once more against the fresh geometry, so the
+        /// window converges within the same rebuild instead of waiting
+        /// for the next Msg.
         pub fn rebuild(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
             self.syncModel(runtime, window_id);
             const tokens = runtime.tokensWithTextMeasure(self.effectiveTokens());
             const next_index = self.arena_index ^ 1;
-            _ = self.arenas[next_index].reset(.retain_capacity);
-            var ui = Ui.init(self.arenas[next_index].allocator());
-            // Frame-profile stamps (no-ops unless profiling is on): the
-            // view build fn + tree finalize is the `rebuild` stage, the
-            // flex pass below is `layout`; reconcile/emit are stamped at
-            // their runtime-side choke points so input-driven refreshes
-            // are attributed too.
-            const rebuild_begin = runtime.frame_profile.begin();
-            const node = try self.buildViewNode(&ui);
-            const tree = try ui.finalizeWithTokens(node, tokens);
-            runtime.frame_profile.end(.rebuild, rebuild_begin);
-
             // Widget layout is inset by the runtime's viewport chrome
             // (safe areas + keyboard on mobile, zero on desktop); the
             // canvas itself stays surface-sized so chrome and the clear
             // color still paint edge to edge under notches and bars.
             const bounds = geometry.RectF.fromSize(self.canvas_size).deflate(runtime.viewportInsetsForWindow(window_id));
-            const layout_begin = runtime.frame_profile.begin();
-            const layout = canvas.layoutWidgetTreeWithTokens(tree.root, bounds, tokens, &self.layout_nodes) catch |err| {
-                // Teach the fix at the failure site: the error name
-                // alone never says which budget or where to trim.
-                if (err == error.WidgetLayoutListFull) {
-                    ui_app_log.warn(
-                        "widget layout capacity exceeded for view '{s}': the per-view budget is {d} nodes (canvas_limits.max_canvas_widget_nodes_per_view) - reduce always-mounted widgets or virtualize lists",
-                        .{ self.options.canvas_label, canvas_limits.max_canvas_widget_nodes_per_view },
-                    );
-                }
-                return err;
+            var window_source = VirtualWindowResolver{
+                .runtime = runtime,
+                .window_id = window_id,
+                .canvas_label = self.options.canvas_label,
+                .fallback_viewport = bounds.height,
             };
-            runtime.frame_profile.end(.layout, layout_begin);
+            var tree: Ui.Tree = undefined;
+            var layout: canvas.WidgetLayoutTree = undefined;
+            var pass: usize = 0;
+            while (true) {
+                _ = self.arenas[next_index].reset(.retain_capacity);
+                var ui = Ui.init(self.arenas[next_index].allocator());
+                ui.virtual_window_context = @ptrCast(&window_source);
+                ui.virtual_window_source = VirtualWindowResolver.resolve;
+                // Frame-profile stamps (no-ops unless profiling is on): the
+                // view build fn + tree finalize is the `rebuild` stage, the
+                // flex pass below is `layout`; reconcile/emit are stamped at
+                // their runtime-side choke points so input-driven refreshes
+                // are attributed too.
+                const rebuild_begin = runtime.frame_profile.begin();
+                const node = try self.buildViewNode(&ui);
+                tree = try ui.finalizeWithTokens(node, tokens);
+                runtime.frame_profile.end(.rebuild, rebuild_begin);
+
+                const layout_begin = runtime.frame_profile.begin();
+                layout = canvas.layoutWidgetTreeWithTokens(tree.root, bounds, tokens, &self.layout_nodes) catch |err| {
+                    // Teach the fix at the failure site: the error name
+                    // alone never says which budget or where to trim.
+                    if (err == error.WidgetLayoutListFull) {
+                        ui_app_log.warn(
+                            "widget layout capacity exceeded for view '{s}': the per-view budget is {d} nodes (canvas_limits.max_canvas_widget_nodes_per_view) - reduce always-mounted widgets or virtualize lists",
+                            .{ self.options.canvas_label, canvas_limits.max_canvas_widget_nodes_per_view },
+                        );
+                    }
+                    return err;
+                };
+                runtime.frame_profile.end(.layout, layout_begin);
+
+                self.rememberVirtualWindows(&ui);
+                pass += 1;
+                if (pass >= 2 or !self.virtualWindowsUndercovered(layout)) break;
+                window_source.fresh = layout;
+            }
 
             if (self.options.chrome) |chrome| {
                 try self.installChromeDisplayList(runtime, window_id, chrome, layout, tokens);
@@ -772,6 +819,123 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.applyWebPanes(runtime, window_id, layout);
             self.applyStatusItem(runtime);
             self.applyWindows(runtime);
+        }
+
+        /// The window source backing `Ui.virtualWindow` during a rebuild:
+        /// resolves a virtual list's retained scroll state (offset of
+        /// record + content viewport) by its global identity, preferring
+        /// the freshly laid-out geometry on the coverage-retry pass. The
+        /// fallback (offset 0 at the canvas height) makes the first
+        /// build materialize enough rows to fill the window. Main canvas
+        /// only — declared secondary windows have no window source yet
+        /// (the `sync` scope note); their builds use each request's
+        /// `viewport_fallback`.
+        const VirtualWindowResolver = struct {
+            runtime: *Runtime,
+            window_id: platform.WindowId,
+            canvas_label: []const u8,
+            fallback_viewport: f32,
+            fresh: ?canvas.WidgetLayoutTree = null,
+
+            fn resolve(context: ?*anyopaque, id: canvas.ObjectId) ?canvas.VirtualWindowState {
+                const self: *VirtualWindowResolver = @ptrCast(@alignCast(context orelse return null));
+                if (self.fresh) |fresh| {
+                    if (fresh.findById(id)) |node| return stateForNode(node);
+                }
+                const layout = self.runtime.canvasWidgetLayout(self.window_id, self.canvas_label) catch
+                    return .{ .offset = 0, .viewport_extent = self.fallback_viewport };
+                if (layout.findById(id)) |node| return stateForNode(node);
+                return .{ .offset = 0, .viewport_extent = self.fallback_viewport };
+            }
+
+            fn stateForNode(node: canvas.WidgetLayoutNode) canvas.VirtualWindowState {
+                const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+                return .{ .offset = node.widget.value, .viewport_extent = viewport.height };
+            }
+        };
+
+        /// Keep this build's virtual-window records: the scroll handler
+        /// re-derives the view for these regions even without an app
+        /// `on_scroll` binding (the window follows the runtime offset).
+        fn rememberVirtualWindows(self: *Self, ui: *const Ui) void {
+            const records = ui.virtualWindows();
+            self.virtual_window_count = records.len;
+            @memcpy(self.virtual_windows[0..records.len], records);
+        }
+
+        /// Whether any declared virtual window fails to cover the visible
+        /// range its FRESH geometry implies (first-build viewport guess,
+        /// resize growth): the trigger for the one coverage-retry build.
+        fn virtualWindowsUndercovered(self: *const Self, layout: canvas.WidgetLayoutTree) bool {
+            for (self.virtual_windows[0..self.virtual_window_count]) |record| {
+                const node = layout.findById(record.id) orelse continue;
+                const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+                if (viewport.isEmpty()) continue;
+                const item_extent = if (node.widget.layout.virtual_item_extent > 0)
+                    node.widget.layout.virtual_item_extent
+                else
+                    record.item_extent;
+                const range = canvas.virtualListRange(.{
+                    .item_count = record.item_count,
+                    .item_extent = item_extent,
+                    .item_gap = record.gap,
+                    .viewport_extent = viewport.height,
+                    .scroll_offset = node.widget.value,
+                    .overscan = record.overscan,
+                });
+                if (range.start_index < record.start_index or range.end_index > record.end_index) return true;
+            }
+            return false;
+        }
+
+        fn isVirtualWindowId(self: *const Self, id: canvas.ObjectId) bool {
+            if (id == 0) return false;
+            for (self.virtual_windows[0..self.virtual_window_count]) |record| {
+                if (record.id == id) return true;
+            }
+            return false;
+        }
+
+        /// Approach-end hysteresis (`on_reach_end`): fire when a scroll
+        /// lands within `reach_end_fire_ratio` viewports of the content
+        /// end and the region is armed; re-arm once the offset sits more
+        /// than `reach_end_rearm_ratio` viewports from the end — which
+        /// appending a batch causes on its own, since the extent grows
+        /// under the unchanged offset. One Msg per approach, never a
+        /// fetch storm from a user riding the end of the list.
+        fn reachEndShouldFire(self: *Self, id: canvas.ObjectId, scroll_state: canvas.ScrollState) bool {
+            if (id == 0 or scroll_state.viewport_extent <= 0) return false;
+            const remaining = scroll_state.content_extent - scroll_state.viewport_extent - scroll_state.offset;
+            if (remaining > scroll_state.viewport_extent * reach_end_rearm_ratio) {
+                self.clearReachEndFired(id);
+                return false;
+            }
+            if (remaining > scroll_state.viewport_extent * reach_end_fire_ratio) return false;
+            if (self.reachEndFired(id)) return false;
+            self.markReachEndFired(id);
+            return true;
+        }
+
+        fn reachEndFired(self: *const Self, id: canvas.ObjectId) bool {
+            for (self.reach_end_fired_ids) |fired| {
+                if (fired == id) return true;
+            }
+            return false;
+        }
+
+        fn markReachEndFired(self: *Self, id: canvas.ObjectId) void {
+            for (&self.reach_end_fired_ids) |*slot| {
+                if (slot.* == 0 or slot.* == id) {
+                    slot.* = id;
+                    return;
+                }
+            }
+        }
+
+        fn clearReachEndFired(self: *Self, id: canvas.ObjectId) void {
+            for (&self.reach_end_fired_ids) |*slot| {
+                if (slot.* == id) slot.* = 0;
+            }
         }
 
         /// Reconcile the model-declared secondary windows against the
@@ -1726,10 +1890,32 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// `on_scroll` constructor. The payload is the offset the runtime
         /// already applied, so a model that stores it and echoes it back
         /// into `value` never fights the scroll reconcile rule.
+        ///
+        /// Two ride-alongs per scroll observation:
+        /// - `on_reach_end` fires through the approach-end hysteresis
+        ///   (`reachEndShouldFire`) — the infinite-scroll fetch signal.
+        /// - A windowed virtual list re-derives the view even with no
+        ///   Msg bound: its window follows the runtime-owned offset, so
+        ///   the scroll itself is the rebuild trigger (main canvas only,
+        ///   where the window source is installed).
         fn handleScroll(self: *Self, runtime: *Runtime, scroll_event: core.CanvasWidgetScrollEvent) anyerror!void {
             const tree = self.treeForViewLabel(scroll_event.view_label) orelse return;
+            var rebuilt = false;
             if (tree.msgForScroll(scroll_event.id, scroll_event.scroll)) |msg| {
                 try self.dispatch(runtime, scroll_event.window_id, msg);
+                rebuilt = true;
+            }
+            if (tree.msgForReachEnd(scroll_event.id)) |msg| {
+                if (self.reachEndShouldFire(scroll_event.id, scroll_event.scroll)) {
+                    try self.dispatch(runtime, scroll_event.window_id, msg);
+                    rebuilt = true;
+                }
+            }
+            if (!rebuilt and self.installed and
+                std.mem.eql(u8, scroll_event.view_label, self.options.canvas_label) and
+                self.isVirtualWindowId(scroll_event.id))
+            {
+                try self.rebuild(runtime, scroll_event.window_id);
             }
         }
 

@@ -19,6 +19,7 @@ const Task = struct {
 
 const Msg = union(enum) {
     add,
+    load_more,
     toggle: u32,
     set_filter: Filter,
     draft: canvas.TextInputEvent,
@@ -61,6 +62,14 @@ fn findByKind(widget: canvas.Widget, kind: canvas.WidgetKind) ?canvas.Widget {
     if (widget.kind == kind) return widget;
     for (widget.children) |child| {
         if (findByKind(child, kind)) |found| return found;
+    }
+    return null;
+}
+
+fn findByText(widget: canvas.Widget, text: []const u8) ?canvas.Widget {
+    if (std.mem.eql(u8, widget.text, text)) return widget;
+    for (widget.children) |child| {
+        if (findByText(child, text)) |found| return found;
     }
     return null;
 }
@@ -1159,4 +1168,130 @@ test "chart builder copies, downsamples, and summarizes series" {
         .semantics = .{ .label = "CPU history" },
     }, &.{.{ .kind = .line, .values = &small }}));
     try testing.expectEqualStrings("CPU history", labeled.root.semantics.label);
+}
+
+// -------------------------------------------------- windowed virtual lists
+
+const feed_options = InboxUi.VirtualListOptions{
+    .id = "feed",
+    .item_count = 100_000,
+    .item_extent = 25,
+    .overscan = 2,
+    .grow = 1,
+    .on_scroll = InboxUi.scrollMsg(.feed_scrolled),
+    .on_reach_end = .load_more,
+};
+
+fn feedRow(ui: *InboxUi, index: usize) InboxUi.Node {
+    var node = ui.listItem(.{}, ui.fmt("Item {d}", .{index}));
+    node.key = .{ .int = @intCast(index) };
+    return node;
+}
+
+fn buildFeed(ui: *InboxUi, window: canvas.VirtualListRange) !InboxUi.Tree {
+    const rows = try ui.arena.alloc(InboxUi.Node, window.itemCount());
+    for (rows, 0..) |*row, offset| row.* = feedRow(ui, window.start_index + offset);
+    return ui.finalize(ui.virtualList(feed_options, window, .{rows}));
+}
+
+/// A window source pinned to one scroll state, the shape `UiApp`
+/// installs from the retained layout.
+const FixedWindowSource = struct {
+    state: canvas.VirtualWindowState,
+
+    fn resolve(context: ?*anyopaque, id: canvas.ObjectId) ?canvas.VirtualWindowState {
+        _ = id;
+        const self: *FixedWindowSource = @ptrCast(@alignCast(context.?));
+        return self.state;
+    }
+};
+
+test "virtualWindow resolves the runtime state and virtualList builds only the window" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = InboxUi.init(arena_state.allocator());
+
+    // Scrolled to item 1000 (offset 25_000) in a 90-point viewport.
+    var source = FixedWindowSource{ .state = .{ .offset = 25_000, .viewport_extent = 90 } };
+    ui.virtual_window_context = @ptrCast(&source);
+    ui.virtual_window_source = FixedWindowSource.resolve;
+
+    const window = ui.virtualWindow(feed_options);
+    try testing.expectEqual(@as(usize, 998), window.start_index);
+    try testing.expectEqual(@as(usize, 1006), window.end_index);
+    try testing.expectEqual(@as(usize, 1000), window.first_visible_index);
+
+    const tree = try buildFeed(&ui, window);
+
+    // The container: a runtime-scrolled virtual list under its declared
+    // global identity, with the window's slice stamped on the layout.
+    try testing.expect(canvas.widgetVirtualRuntimeScrolled(tree.root));
+    try testing.expectEqual(canvas.globalWidgetId(.scroll_view, .{ .str = "feed" }), tree.root.id);
+    try testing.expectEqual(@as(usize, 100_000), tree.root.layout.virtual_item_count);
+    try testing.expectEqual(@as(usize, 998), tree.root.layout.virtual_first_index);
+    try testing.expectEqual(@as(f32, 25), tree.root.layout.virtual_item_extent);
+    try testing.expectEqual(@as(usize, 2), tree.root.layout.virtual_overscan);
+    try testing.expectEqual(window.layout_offset, tree.root.value);
+    try testing.expectEqual(@as(usize, 8), tree.root.children.len);
+
+    // The build records its window for the app loop.
+    const records = ui.virtualWindows();
+    try testing.expectEqual(@as(usize, 1), records.len);
+    try testing.expectEqual(tree.root.id, records[0].id);
+    try testing.expectEqual(@as(usize, 998), records[0].start_index);
+    try testing.expectEqual(@as(usize, 1006), records[0].end_index);
+    try testing.expectEqual(@as(usize, 100_000), records[0].item_count);
+
+    // Typed dispatch: the scroll observation and the approach-end signal
+    // both resolve through the container's handlers.
+    const state = canvas.ScrollState{ .offset = 25_000, .viewport_extent = 90, .content_extent = 2_499_975 };
+    try testing.expectEqual(@as(f32, 25_000), tree.msgForScroll(tree.root.id, state).?.feed_scrolled.offset);
+    try testing.expectEqual(Msg.load_more, tree.msgForReachEnd(tree.root.id).?);
+}
+
+test "virtual list row identity is stable across window shifts" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    // Window A: items 998..1006.
+    var ui_a = InboxUi.init(arena_state.allocator());
+    var source_a = FixedWindowSource{ .state = .{ .offset = 25_000, .viewport_extent = 90 } };
+    ui_a.virtual_window_context = @ptrCast(&source_a);
+    ui_a.virtual_window_source = FixedWindowSource.resolve;
+    const tree_a = try buildFeed(&ui_a, ui_a.virtualWindow(feed_options));
+
+    // Window B: scrolled ~two rows on — items 1000..1008 overlap A.
+    var ui_b = InboxUi.init(arena_state.allocator());
+    var source_b = FixedWindowSource{ .state = .{ .offset = 25_050, .viewport_extent = 90 } };
+    ui_b.virtual_window_context = @ptrCast(&source_b);
+    ui_b.virtual_window_source = FixedWindowSource.resolve;
+    const tree_b = try buildFeed(&ui_b, ui_b.virtualWindow(feed_options));
+
+    // Item 1002 exists in both windows at DIFFERENT child positions, yet
+    // its structural id is identical — engine-owned row state follows
+    // the item across window shifts, and returns with it.
+    const row_a = findByText(tree_a.root, "Item 1002").?;
+    const row_b = findByText(tree_b.root, "Item 1002").?;
+    try testing.expectEqual(row_a.id, row_b.id);
+
+    // A row A built and B did not: present exactly once.
+    try testing.expect(findByText(tree_a.root, "Item 998") != null);
+    try testing.expect(findByText(tree_b.root, "Item 998") == null);
+}
+
+test "virtualWindow without a source falls back to the request viewport" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = InboxUi.init(arena_state.allocator());
+
+    // No source installed (bare build): offset 0 at the fallback height.
+    var options = feed_options;
+    options.viewport_fallback = 100;
+    const window = ui.virtualWindow(options);
+    try testing.expectEqual(@as(usize, 0), window.start_index);
+    try testing.expectEqual(@as(usize, 6), window.end_index);
+
+    // And a zero fallback builds nothing — the honest "viewport unknown".
+    options.viewport_fallback = 0;
+    try testing.expect(ui.virtualWindow(options).isEmpty());
 }

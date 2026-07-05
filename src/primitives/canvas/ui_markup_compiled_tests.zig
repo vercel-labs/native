@@ -326,7 +326,7 @@ test "compiled global-key rows keep their ids across reorders" {
 // ------------------------------------------------ on-scroll parity
 
 const scroll_feed_markup =
-    \\<scroll on-scroll="feed_scrolled">
+    \\<scroll on-scroll="feed_scrolled" on-reach-end="refresh">
     \\  <column gap="4">
     \\    <for each="entries" as="e" key="id">
     \\      <text>{e.label}</text>
@@ -360,6 +360,11 @@ test "compiled on-scroll binds the ScrollState constructor identically to the in
         interpreted.msgForScroll(feed.id, state).?.feed_scrolled.offset,
         compiled.msgForScroll(feed.id, state).?.feed_scrolled.offset,
     );
+
+    // And the same approach-end Msg (`on-reach-end`, the infinite-scroll
+    // fetch signal) through both handler tables.
+    try testing.expectEqual(EntriesMsg.refresh, compiled.msgForReachEnd(feed.id).?);
+    try testing.expectEqual(interpreted.msgForReachEnd(feed.id).?, compiled.msgForReachEnd(feed.id).?);
 }
 
 // --------------------- multi-child for bodies and the for-empty else

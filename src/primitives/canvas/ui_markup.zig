@@ -577,9 +577,10 @@ pub const known_option_attrs = [_][]const u8{
     "autofocus",      "min-width",   "expanded",    "window-drag",
 };
 
-pub const known_events = [_][]const u8{ "press", "toggle", "change", "submit", "input", "scroll", "dismiss", "hold", "resize" };
+pub const known_events = [_][]const u8{ "press", "toggle", "change", "submit", "input", "scroll", "dismiss", "hold", "resize", "reach-end" };
 
 pub const on_scroll_element_message = "on-scroll is only supported on scroll - the runtime emits scroll offsets for scroll containers, so the handler belongs on the scroll element itself";
+pub const on_reach_end_element_message = "on-reach-end is only supported on scroll - the runtime emits the approach-end signal for scroll containers, so the handler belongs on the scroll element itself";
 pub const on_scroll_payload_message = "on-scroll takes a bare Msg tag whose payload is the post-scroll state (a canvas.ScrollState variant, like activity_scrolled: canvas.ScrollState)";
 
 pub const on_resize_element_message = "on-resize is only supported on split - the runtime emits fraction changes for split dividers, so the handler belongs on the split element itself";
@@ -1174,6 +1175,12 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                         // fire.
                         if (!nameInList(node.name, &known_dismiss_element_names)) {
                             return .{ .line = attribute.line, .column = attribute.column, .message = on_dismiss_element_message };
+                        }
+                    } else if (std.mem.eql(u8, attribute.name, "on-reach-end")) {
+                        // The approach-end signal (infinite-scroll fetch)
+                        // is emitted for scroll containers only.
+                        if (!std.mem.eql(u8, node.name, "scroll")) {
+                            return .{ .line = attribute.line, .column = attribute.column, .message = on_reach_end_element_message };
                         }
                     } else if (std.mem.eql(u8, attribute.name, "on-resize")) {
                         // The runtime emits fraction changes for split

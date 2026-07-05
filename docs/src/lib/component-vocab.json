@@ -42,7 +42,7 @@
     },
     {
       "name": "text",
-      "doc": "Text leaf; content supports {} interpolation. Single-line by default; wrap=\"true\" word-wraps."
+      "doc": "Text leaf; content supports {} interpolation. Line policy via wrap: wrap=\"true\" word-wraps, wrap=\"false\" clips to one honest line."
     },
     {
       "name": "badge",
@@ -318,7 +318,7 @@
     },
     {
       "name": "wrap",
-      "doc": "text only: true word-wraps the content at the width the element receives (reserving wrapped height in columns); default is single-line."
+      "doc": "text only: true word-wraps the content at the width the element receives (reserving wrapped height in columns); false is honest single-line - one line, clipped to the element's frame, so a width-constrained title never paints over the row below. Unset measures one line but lets paint re-wrap overflow."
     },
     {
       "name": "text-alignment",
@@ -437,6 +437,10 @@
     {
       "name": "on-resize",
       "doc": "split element only: names a Msg variant with f32 payload; delivers the applied first-pane fraction after every divider drag, keyboard adjustment, and assistive increment/decrement. Echo it back into value - the delivered fraction never fights the reconcile."
+    },
+    {
+      "name": "on-reach-end",
+      "doc": "scroll element only: Msg (tag or tag:{payload}) dispatched when a user scroll comes within one viewport of the content end - the infinite-scroll fetch signal. Fires once per approach with hysteresis: it re-arms only after the offset retreats past 1.5 viewports, which appending a batch causes on its own by growing the extent."
     }
   ],
   "scoped": {
@@ -729,6 +733,10 @@
       "height": 300
     },
     "list": {
+      "width": 1120,
+      "height": 520
+    },
+    "virtual-list": {
       "width": 1120,
       "height": 520
     },

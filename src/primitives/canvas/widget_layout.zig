@@ -734,12 +734,23 @@ fn layoutVirtualVerticalChildren(
 ) Error!void {
     if (children.len == 0) return;
 
+    // A windowed virtual list (`virtual_item_count > 0`) holds only the
+    // built slice in `children`: `first_index` names the virtual index of
+    // children[0], the declared count drives the range math (content
+    // extent, scrollbar, list_item_count semantics), and each built child
+    // lands at its ABSOLUTE virtual offset. The legacy contract (no
+    // declared count: children are the full item set) is byte-identical.
+    const first_index = style.virtual_first_index;
+    const item_count = if (style.virtual_item_count > 0)
+        @max(style.virtual_item_count, first_index + children.len)
+    else
+        children.len;
     const item_extent = if (style.virtual_item_extent > 0)
         style.virtual_item_extent
     else
         preferredMainExtent(children[0], .vertical, tokens);
     const range = virtualListRange(.{
-        .item_count = children.len,
+        .item_count = item_count,
         .item_extent = item_extent,
         .item_gap = style.gap,
         .viewport_extent = content.height,
@@ -747,16 +758,17 @@ fn layoutVirtualVerticalChildren(
         .overscan = style.virtual_overscan,
     });
     output[parent_index].widget.layout.virtual_item_extent = range.item_extent;
-    output[parent_index].widget.semantics.list_item_count = saturatingU32(children.len);
+    output[parent_index].widget.semantics.list_item_count = saturatingU32(item_count);
     if (range.isEmpty()) return;
 
     const stride = range.item_extent + range.item_gap;
-    var index = range.start_index;
-    while (index < range.end_index) : (index += 1) {
-        if (children[index].layout.anchor != null) continue;
-        var child = children[index];
+    var index = @max(range.start_index, first_index);
+    const end_index = @min(range.end_index, first_index + children.len);
+    while (index < end_index) : (index += 1) {
+        if (children[index - first_index].layout.anchor != null) continue;
+        var child = children[index - first_index];
         child.semantics.list_item_index = saturatingU32(index);
-        child.semantics.list_item_count = saturatingU32(children.len);
+        child.semantics.list_item_count = saturatingU32(item_count);
         const y = content.y + @as(f32, @floatFromInt(index)) * stride - range.layout_offset + child.frame.y;
         const width = clampIntrinsicAxis(if (child.frame.width > 0) child.frame.width else content.width, child.layout.min_size.width, child.layout.max_size.width);
         const height = clampIntrinsicAxis(if (child.frame.height > 0) child.frame.height else range.item_extent, child.layout.min_size.height, child.layout.max_size.height);
@@ -1444,6 +1456,13 @@ pub fn virtualWidgetScrollContentExtentWithTokens(widget: Widget, viewport_exten
 }
 
 fn virtualWidgetScrollItemCount(widget: Widget) usize {
+    // A windowed virtual list's extent comes from its DECLARED count:
+    // children hold only the built window, so counting them would
+    // collapse the scrollbar (and the native driver's content size) to
+    // the window.
+    if (widget.layout.virtual_item_count > 0) {
+        return @max(widget.layout.virtual_item_count, widget.layout.virtual_first_index + widget.children.len);
+    }
     if (widget.kind == .grid and widget.children.len > 0) {
         const columns = gridColumnCount(widget.children.len, widget.layout.columns);
         return gridRowCount(widget.children.len, columns);

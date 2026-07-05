@@ -143,6 +143,43 @@ pub const UiKey = union(enum) {
     str: []const u8,
 };
 
+/// Budget for windowed virtual lists per view build (`Ui.virtualList`):
+/// each records its request so the app loop can verify window coverage
+/// after layout and re-derive the view when the runtime scrolls it.
+pub const max_virtual_windows: usize = 8;
+
+/// Runtime scroll state for one windowed virtual list, resolved by the
+/// window source during a view build: the CURRENT offset of record
+/// (`widget.value` on the retained node — wheel, kinetic, keyboard, and
+/// native-driver motion all land there) and the content viewport height
+/// the list most recently laid out at.
+pub const VirtualWindowState = struct {
+    offset: f32 = 0,
+    viewport_extent: f32 = 0,
+};
+
+/// The window source seam: installed on the `Ui` by the app loop before
+/// each view build (`UiApp` backs it with the retained widget layout),
+/// consulted by `Ui.virtualWindow` per list identity. Returning null
+/// means "no runtime state yet" (first build, list not mounted) and
+/// falls back to offset 0 at the request's fallback viewport.
+pub const VirtualWindowSourceFn = *const fn (context: ?*anyopaque, id: ObjectId) ?VirtualWindowState;
+
+/// One windowed virtual list the current build declared: enough for the
+/// app loop to re-check the window against the freshly laid-out
+/// geometry (a resize or first build can widen the viewport after the
+/// window was computed) and to know which scroll regions require a
+/// view re-derivation when the runtime scrolls them.
+pub const VirtualWindowRecord = struct {
+    id: ObjectId = 0,
+    item_count: usize = 0,
+    item_extent: f32 = 0,
+    gap: f32 = 0,
+    overscan: usize = 0,
+    start_index: usize = 0,
+    end_index: usize = 0,
+};
+
 pub const UiHandlerEvent = enum {
     press,
     toggle,
@@ -158,6 +195,13 @@ pub const UiHandlerEvent = enum {
     /// runtime already applied — echoing it back into `value` never
     /// fights the split reconcile rule.
     resize,
+    /// Approach-the-end of a scroll region (infinite-scroll fetch):
+    /// dispatched by the runtime with hysteresis when a user scroll
+    /// brings the offset within one viewport of the content end, and
+    /// re-armed once the offset retreats past one and a half viewports
+    /// (appending items grows the extent, so a fresh batch re-arms the
+    /// next approach on its own).
+    reach_end,
 };
 
 /// A color design token referenced by name (the fields of
@@ -230,6 +274,15 @@ pub fn Ui(comptime Msg: type) type {
 
         arena: std.mem.Allocator,
         failed: bool = false,
+        /// Window source for `virtualWindow` (see `VirtualWindowSourceFn`):
+        /// null outside an app loop, where builds fall back to each
+        /// request's `viewport_fallback` at offset 0.
+        virtual_window_context: ?*anyopaque = null,
+        virtual_window_source: ?VirtualWindowSourceFn = null,
+        /// The windowed virtual lists this build declared (`virtualList`),
+        /// for the app loop's coverage check and scroll re-derivation.
+        virtual_window_records: [max_virtual_windows]VirtualWindowRecord = [_]VirtualWindowRecord{.{}} ** max_virtual_windows,
+        virtual_window_record_count: usize = 0,
 
         pub const ElementOptions = struct {
             /// Sibling-scoped identity: the widget id hashes the parent
@@ -343,6 +396,20 @@ pub fn Ui(comptime Msg: type) type {
             columns: usize = 0,
             virtualized: bool = false,
             virtual_item_extent: f32 = 0,
+            /// Overscan rows built and laid out beyond the visible range
+            /// on each side of a virtualized container (scroll slack
+            /// before the next window rebuild lands).
+            virtual_overscan: usize = 0,
+            /// TOTAL item count for a WINDOWED virtual list (see
+            /// `Widget.layout.virtual_item_count`): children are the
+            /// built window, content extent and semantics derive from
+            /// this count, and the runtime owns the scroll offset.
+            /// Prefer the `virtualList` sugar, which stamps this
+            /// together with the window's first index and offset.
+            virtual_item_count: usize = 0,
+            /// Virtual index of the first child in a windowed virtual
+            /// list (see `Widget.layout.virtual_first_index`).
+            virtual_first_index: usize = 0,
             /// Marks the element as a WINDOW-drag surface (the hidden
             /// titlebar pattern): pressing its own background — or plain
             /// text/icons inside it — moves the window, and double-click
@@ -387,6 +454,16 @@ pub fn Ui(comptime Msg: type) type {
             /// engine hides the surface immediately as an optimistic
             /// echo; the source tree is truth again on the next rebuild.
             on_dismiss: ?Msg = null,
+            /// Approach-end Msg for scroll containers (the
+            /// infinite-scroll fetch signal): dispatched when a user
+            /// scroll brings the offset within one viewport of the
+            /// content end, with hysteresis — it fires once per
+            /// approach and re-arms only after the offset retreats (or
+            /// the content grows, which appending a batch does), so a
+            /// user riding the end of the list never dispatches a
+            /// fetch storm. Pair with an `update` that appends a batch;
+            /// the runtime never calls into the model itself.
+            on_reach_end: ?Msg = null,
             /// Press-and-hold Msg: a pointer held down on this element
             /// for ~350 ms dispatches it (the release then presses
             /// nothing), while a quick click dispatches `on_press` as
@@ -466,6 +543,7 @@ pub fn Ui(comptime Msg: type) type {
             on_submit: ?Msg = null,
             on_dismiss: ?Msg = null,
             on_hold: ?Msg = null,
+            on_reach_end: ?Msg = null,
             on_input: ?InputMsgFn = null,
             on_value: ?ValueMsgFn = null,
             on_resize: ?ValueMsgFn = null,
@@ -604,6 +682,14 @@ pub fn Ui(comptime Msg: type) type {
                 return self.msgFor(id, .hold);
             }
 
+            /// Typed dispatch for an approach-end signal on a scroll
+            /// container: the widget's `on_reach_end` message. The
+            /// hysteresis (fire once per approach, re-arm on retreat or
+            /// content growth) lives with the dispatcher (`UiApp`).
+            pub fn msgForReachEnd(self: Tree, id: ObjectId) ?Msg {
+                return self.msgFor(id, .reach_end);
+            }
+
             /// Whether the widget binds an `on_hold` handler (the UiApp
             /// hold-timer arms only for these).
             pub fn hasHoldHandler(self: Tree, id: ObjectId) bool {
@@ -698,6 +784,7 @@ pub fn Ui(comptime Msg: type) type {
                 .on_submit = options.on_submit,
                 .on_dismiss = options.on_dismiss,
                 .on_hold = options.on_hold,
+                .on_reach_end = options.on_reach_end,
                 .on_input = options.on_input,
                 .on_value = options.on_value,
                 .on_resize = options.on_resize,
@@ -741,6 +828,155 @@ pub fn Ui(comptime Msg: type) type {
 
         pub fn list(self: *Self, options: ElementOptions, children: anytype) Node {
             return self.el(.list, options, children);
+        }
+
+        /// Options shared by `virtualWindow` and `virtualList` — declare
+        /// them once, pass the same value to both calls.
+        pub const VirtualListOptions = struct {
+            /// Stable list identity: becomes the element's `global_key`
+            /// (so the scroll region's structural id survives layout
+            /// refactors) and the identity the runtime window source
+            /// resolves scroll state by. Unique per (scroll_view,
+            /// global_key) pair within the tree.
+            id: []const u8,
+            /// TOTAL number of items the MODEL holds right now — the
+            /// model owns the data; the runtime only ever sees the
+            /// count, the fixed extent, and the built window.
+            item_count: usize,
+            /// Fixed per-item extent in points — the v1 contract:
+            /// uniform row heights, so the visible index range, the
+            /// content extent, and the scrollbar all derive from
+            /// arithmetic instead of measuring 100k unbuilt rows.
+            item_extent: f32,
+            /// Vertical gap between rows (part of the row stride).
+            gap: f32 = 0,
+            /// Rows built beyond the visible range on each side: scroll
+            /// slack until the next window rebuild lands.
+            overscan: usize = 4,
+            /// Viewport height assumed when no runtime scroll state
+            /// exists for the list yet. Bare builds (plain `finalize`
+            /// tests, previews) use it directly; under `UiApp` the
+            /// installed window source falls back to the canvas height
+            /// instead, so apps normally leave it 0.
+            viewport_fallback: f32 = 0,
+            width: f32 = 0,
+            height: f32 = 0,
+            min_width: f32 = 0,
+            grow: f32 = 0,
+            padding: f32 = 0,
+            style: canvas.WidgetStyle = .{},
+            style_tokens: StyleTokenRefs = .{},
+            /// Container semantics; role defaults to `list`, and the
+            /// layout pass stamps each built row's absolute
+            /// `list_item_index` against the declared count.
+            semantics: canvas.WidgetSemantics = .{},
+            /// Optional scroll observation (`scrollMsg` constructor).
+            /// NOT required for windowing: the runtime re-derives the
+            /// view on scroll for every mounted virtual list on its
+            /// own; bind this only when the model wants the offset.
+            on_scroll: ?ScrollMsgFn = null,
+            /// The infinite-scroll fetch signal (see
+            /// `ElementOptions.on_reach_end`).
+            on_reach_end: ?Msg = null,
+        };
+
+        /// The DATA-WINDOW seam of the windowed virtual list: resolve
+        /// which item range this build should materialize. The runtime
+        /// owns the viewport math — the installed window source supplies
+        /// the retained scroll offset and viewport for the list identity,
+        /// and the shared `canvas.virtualListRange` turns them into the
+        /// visible index range plus overscan. The MODEL owns the data:
+        /// read `range.start_index..range.end_index`, build one keyed
+        /// node per item, and hand both to `virtualList`. No callbacks
+        /// into the model, no engine-owned copies of the items — the
+        /// range is plain data the view reads during build, the same
+        /// direction of flow as the chrome and appearance channels.
+        pub fn virtualWindow(self: *Self, options: VirtualListOptions) canvas.VirtualListRange {
+            const id = globalWidgetId(.scroll_view, .{ .str = options.id });
+            const state: VirtualWindowState = blk: {
+                if (self.virtual_window_source) |source| {
+                    if (source(self.virtual_window_context, id)) |value| break :blk value;
+                }
+                break :blk .{ .offset = 0, .viewport_extent = options.viewport_fallback };
+            };
+            return canvas.virtualListRange(.{
+                .item_count = options.item_count,
+                .item_extent = options.item_extent,
+                .item_gap = options.gap,
+                .viewport_extent = state.viewport_extent,
+                .scroll_offset = state.offset,
+                .overscan = options.overscan,
+            });
+        }
+
+        /// A WINDOWED virtual list: a runtime-scrolled scroll region
+        /// representing `item_count` items of which only `children` —
+        /// the rows for the `window` returned by `virtualWindow`, one
+        /// keyed node per item — exist in the tree. The runtime owns
+        /// the scroll offset (wheel, kinetic, keyboard, and the native
+        /// scroll driver, whose scrollbar spans the full virtual
+        /// extent); the layout pass places each built row at its
+        /// absolute virtual position; and per-item identity rides the
+        /// row keys, so engine-owned row state survives scrolling away
+        /// and back. Budgets stay viewport-sized: the widget-node cost
+        /// is the window, never the dataset.
+        pub fn virtualList(self: *Self, options: VirtualListOptions, window: canvas.VirtualListRange, children: anytype) Node {
+            var semantics = options.semantics;
+            if (semantics.role == .none) semantics.role = .list;
+            const node = self.el(.scroll_view, .{
+                .global_key = .{ .str = options.id },
+                // Mirror the runtime offset into the source so the flex
+                // pass lays the window out at the offset the window was
+                // computed for — the same value the scroll reconcile
+                // keeps, so source and runtime never fight.
+                .value = window.layout_offset,
+                .width = options.width,
+                .height = options.height,
+                .min_width = options.min_width,
+                .grow = options.grow,
+                .padding = options.padding,
+                .gap = options.gap,
+                .virtualized = true,
+                .virtual_item_extent = options.item_extent,
+                .virtual_overscan = options.overscan,
+                .virtual_item_count = options.item_count,
+                .virtual_first_index = window.start_index,
+                .style = options.style,
+                .style_tokens = options.style_tokens,
+                .semantics = semantics,
+                .on_scroll = options.on_scroll,
+                .on_reach_end = options.on_reach_end,
+            }, children);
+            self.recordVirtualWindow(.{
+                .id = globalWidgetId(.scroll_view, .{ .str = options.id }),
+                .item_count = options.item_count,
+                .item_extent = options.item_extent,
+                .gap = options.gap,
+                .overscan = options.overscan,
+                .start_index = window.start_index,
+                .end_index = window.start_index + node.nodes.len,
+            });
+            return node;
+        }
+
+        fn recordVirtualWindow(self: *Self, record: VirtualWindowRecord) void {
+            if (self.virtual_window_record_count >= self.virtual_window_records.len) {
+                if (builtin.mode == .Debug) {
+                    ui_log.warn(
+                        "more than {d} virtual lists in one build (canvas.ui_builder.max_virtual_windows) - the excess scrolls but skips the app loop's window coverage check",
+                        .{max_virtual_windows},
+                    );
+                }
+                return;
+            }
+            self.virtual_window_records[self.virtual_window_record_count] = record;
+            self.virtual_window_record_count += 1;
+        }
+
+        /// The declared virtual windows of this build (`virtualList`
+        /// calls), for the app loop.
+        pub fn virtualWindows(self: *const Self) []const VirtualWindowRecord {
+            return self.virtual_window_records[0..self.virtual_window_record_count];
         }
 
         /// Two-pane horizontal splitter. Exactly two children (the
@@ -1447,6 +1683,7 @@ pub fn Ui(comptime Msg: type) type {
             appendHandler(handlers, handler_len, widget.id, .submit, node.on_submit);
             appendHandler(handlers, handler_len, widget.id, .dismiss, node.on_dismiss);
             appendHandler(handlers, handler_len, widget.id, .hold, node.on_hold);
+            appendHandler(handlers, handler_len, widget.id, .reach_end, node.on_reach_end);
             if (node.on_input) |make| {
                 handlers[handler_len.*] = .{ .id = widget.id, .event = .input, .action = .{ .input = make } };
                 handler_len.* += 1;
@@ -1498,6 +1735,7 @@ pub fn Ui(comptime Msg: type) type {
             if (node.on_submit != null) total += 1;
             if (node.on_dismiss != null) total += 1;
             if (node.on_hold != null) total += 1;
+            if (node.on_reach_end != null) total += 1;
             if (node.on_input != null) total += 1;
             if (node.on_value != null) total += 1;
             if (node.on_resize != null) total += 1;
@@ -1613,6 +1851,9 @@ pub fn Ui(comptime Msg: type) type {
                     } else null,
                     .virtualized = options.virtualized,
                     .virtual_item_extent = options.virtual_item_extent,
+                    .virtual_overscan = options.virtual_overscan,
+                    .virtual_item_count = options.virtual_item_count,
+                    .virtual_first_index = options.virtual_first_index,
                     .min_size = .{ .width = @max(options.width, options.min_width), .height = options.height },
                     // Explicit sizes are definite (min AND max). Resizable
                     // is the exception: width documents the initial width
@@ -1643,6 +1884,13 @@ pub fn Ui(comptime Msg: type) type {
             };
         }
     };
+}
+
+/// The structural id a widget with `global_key` gets, computable without
+/// the parent chain: the seam the app loop uses to resolve a windowed
+/// virtual list's retained scroll state by its declared identity.
+pub fn globalWidgetId(kind: WidgetKind, key: UiKey) ObjectId {
+    return structuralId(global_id_seed, kind, key);
 }
 
 pub fn uiKey(value: anytype) UiKey {

@@ -81,6 +81,11 @@ const Preview = struct {
     /// one more frame is painted after they settle so the final sampled
     /// pose (knob at rest, caret back at full opacity) lands on screen.
     rendered_animating: bool = false,
+    /// Whether the current build declared windowed virtual lists
+    /// (`ui.virtualList`): their window follows the runtime-owned scroll
+    /// offset, so scroll observations re-derive the scene — the `UiApp`
+    /// loop's shape, applied to the preview host.
+    has_virtual_windows: bool = false,
 
     fn app(self: *Preview) native_sdk.App {
         return .{
@@ -110,6 +115,13 @@ fn previewEventFn(context: *anyopaque, runtime: *native_sdk.Runtime, event: nati
             break :blk tree.msgForKeyboard(target.id, keyboard_event.keyboard);
         },
         .canvas_widget_dismiss => |dismiss_event| tree.msgForDismiss(dismiss_event.id),
+        .canvas_widget_scroll => blk: {
+            // Windowed virtual lists follow the runtime-owned offset:
+            // the scroll observation itself re-derives the scene, no
+            // Msg needed (the UiApp shape).
+            if (self.has_virtual_windows) rebuildScene(self) catch {};
+            break :blk null;
+        },
         else => null,
     };
     if (msg) |value| {
@@ -120,6 +132,20 @@ fn previewEventFn(context: *anyopaque, runtime: *native_sdk.Runtime, event: nati
 
 fn tokensForScheme(dark: bool) canvas.DesignTokens {
     return canvas.DesignTokens.theme(.{ .color_scheme = if (dark) .dark else .light });
+}
+
+/// The preview host's window source (`Ui.virtualWindow`): the retained
+/// node's scroll offset and content viewport, falling back to the tile
+/// height before the list first mounts.
+fn previewVirtualWindowState(context: ?*anyopaque, id: canvas.ObjectId) ?canvas.VirtualWindowState {
+    const self: *Preview = @ptrCast(@alignCast(context orelse return null));
+    const layout = self.runtime.canvasWidgetLayout(1, view_label) catch
+        return .{ .offset = 0, .viewport_extent = self.height };
+    if (layout.findById(id)) |node| {
+        const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+        return .{ .offset = node.widget.value, .viewport_extent = viewport.height };
+    }
+    return .{ .offset = 0, .viewport_extent = self.height };
 }
 
 /// Monotonic event clock, advanced by the page (`preview_set_now_ms`
@@ -216,7 +242,12 @@ fn rebuildScene(self: *Preview) !void {
     const next_index = self.arena_index ^ 1;
     _ = self.arenas[next_index].reset(.retain_capacity);
     var ui = Ui.init(self.arenas[next_index].allocator());
+    // Windowed virtual lists resolve their visible range against the
+    // RETAINED scroll state, exactly like the app loop.
+    ui.virtual_window_context = @ptrCast(self);
+    ui.virtual_window_source = previewVirtualWindowState;
     const tree = try ui.finalizeWithTokens(self.scene.build(&ui, &self.model), tokens);
+    self.has_virtual_windows = ui.virtualWindows().len > 0;
     const layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, self.width, self.height), &self.layout_nodes);
     _ = try self.runtime.setCanvasWidgetLayout(1, view_label, layout);
     _ = try self.runtime.emitCanvasWidgetDisplayList(1, view_label, tokens);

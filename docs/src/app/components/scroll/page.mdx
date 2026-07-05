@@ -3,7 +3,7 @@ import { AttrTable } from "@/components/attr-table";
 
 # Scroll
 
-A scroll view: wrap multiple children in a single column inside it. The engine owns wheel, kinetic, and keyboard scrolling and draws the scrollbar while a scroll is in flight; `on-scroll` names a Msg variant with a `canvas.ScrollState` payload that delivers the post-scroll offset and viewport/content extents, so the model can observe position without owning it. Pair with [list](/components/list) for virtualized rows.
+A scroll view: wrap multiple children in a single column inside it. The engine owns wheel, kinetic, and keyboard scrolling and draws the scrollbar while a scroll is in flight; `on-scroll` names a Msg variant with a `canvas.ScrollState` payload that delivers the post-scroll offset and viewport/content extents, so the model can observe position without owning it. `on-reach-end` dispatches a plain Msg when a scroll comes within one viewport of the content end — the infinite-fetch signal, fired once per approach with hysteresis (appending a batch grows the extent and re-arms the next approach). Pair with [list](/components/list) for layout-culled rows, or the builder's [virtual list](/components/virtual-list) for dataset-scale windows.
 
 <ComponentPreview name="scroll" alt="A scroll region rendered by the engine" caption="a fixed-height scroll region; the engine draws the scrollbar during scrolling" />
 
@@ -41,4 +41,4 @@ ui.scroll(.{ .height = 240, .padding = 8, .on_scroll = Ui.scrollMsg(.log_scrolle
 
 ## Attributes
 
-<AttrTable attrs={["on-scroll", "height", "width", "padding"]} />
+<AttrTable attrs={["on-scroll", "on-reach-end", "height", "width", "padding"]} />

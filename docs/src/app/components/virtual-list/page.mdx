@@ -1,0 +1,103 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Virtual List
+
+The windowed virtual list: a scroll region that represents the model's whole dataset while the view only ever builds the rows on screen. The runtime owns the viewport math — retained scroll offset + viewport height → visible index range, from a fixed per-item extent — and the model owns the data: the view asks `ui.virtualWindow` for the range, builds one keyed node per item in it, and hands both to `ui.virtualList`. Widget-node cost is the window plus overscan, never the dataset, so a 100,000-row timeline stays deep under the per-view node budget while the scrollbar (engine-drawn, or the native scroll driver's OS overlay on macOS) spans the full virtual extent.
+
+<ComponentPreview name="virtual-list" alt="A windowed virtual list rendered by the engine" caption="2,500 rows exist as arithmetic; the tree holds only the visible window" />
+
+## Zig builder
+
+Declare the list options once and use them twice — `virtualWindow` resolves which items are visible, `virtualList` mounts exactly those rows. Keys carry per-item identity: a row that scrolls away and back returns under the same structural id, so engine-owned and model-owned row state survive window shifts.
+
+```zig
+const options = Ui.VirtualListOptions{
+    .id = "timeline",              // stable identity (global key + scroll-state lookup)
+    .item_count = model.loaded,    // the MODEL owns the data; this is all the runtime sees
+    .item_extent = 84,             // fixed row height: the v1 uniform-extent contract
+    .overscan = 4,                 // rows built beyond the visible range on each side
+    .grow = 1,
+    .on_reach_end = .load_more,    // the infinite-scroll fetch signal
+};
+const window = ui.virtualWindow(options);
+const rows = ui.arena.alloc(Ui.Node, window.itemCount()) catch return ...;
+for (rows, 0..) |*row, offset| {
+    const index = window.start_index + offset;
+    var node = postRow(ui, model, index); // read model data for ONE item
+    node.key = .{ .int = @intCast(index) };
+    row.* = node;
+}
+return ui.virtualList(options, window, .{rows});
+```
+
+No `on_scroll` binding is required: the runtime owns the offset (wheel, kinetic, keyboard, and the native scroll driver all land on it), and every scroll observation re-derives the view so the window follows. Bind `on_scroll` only when the model wants to observe the position.
+
+## The data-window seam
+
+`ui.virtualWindow` is a value the view **reads during build** — the same direction of flow as the appearance and window-chrome channels, never a callback into the model. Under `UiApp` the window source resolves the list's retained scroll state by its declared `id`; on the first build (no state yet) it assumes offset 0 at the canvas height, and if the freshly laid-out geometry proves the window under-covered (first build, a window resize), the view is derived once more against it — the window converges within the same rebuild. In bare tree builds (tests, previews) with no source installed, `viewport_fallback` stands in.
+
+## Reach-end
+
+`on_reach_end` is the infinite-fetch signal for any scroll container (markup: `on-reach-end` on `scroll`): dispatched when a user scroll comes within one viewport of the content end, with hysteresis — it fires once per approach and re-arms only after the offset retreats past one and a half viewports, which appending a batch causes on its own by growing the extent. `update` appends the next batch; nothing else is required.
+
+<AttrTable attrs={["on-reach-end"]} />
+
+## Options
+
+`Ui.VirtualListOptions` fields (shared by `virtualWindow` and `virtualList`):
+
+<table>
+  <thead>
+    <tr>
+      <th>Option</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>id</code></td>
+      <td>Stable list identity: becomes the element's <code>global_key</code> and the key the runtime resolves scroll state by. Unique per tree.</td>
+    </tr>
+    <tr>
+      <td><code>item_count</code></td>
+      <td>TOTAL items the model holds right now. Content extent, scrollbar, and <code>list_item_index/count</code> semantics derive from it.</td>
+    </tr>
+    <tr>
+      <td><code>item_extent</code></td>
+      <td>Fixed per-item extent in points. The v1 contract is uniform rows — the visible range and the 100k-row extent are pure arithmetic, no measurement pass.</td>
+    </tr>
+    <tr>
+      <td><code>gap</code></td>
+      <td>Vertical gap between rows (part of the row stride).</td>
+    </tr>
+    <tr>
+      <td><code>overscan</code></td>
+      <td>Rows built beyond the visible range on each side (default 4): scroll slack until the next window rebuild lands.</td>
+    </tr>
+    <tr>
+      <td><code>viewport_fallback</code></td>
+      <td>Viewport height assumed when no runtime scroll state exists (bare builds); under <code>UiApp</code> the installed window source falls back to the canvas height instead.</td>
+    </tr>
+    <tr>
+      <td><code>width</code> / <code>height</code> / <code>min_width</code> / <code>grow</code> / <code>padding</code></td>
+      <td>The container's box, as on any element.</td>
+    </tr>
+    <tr>
+      <td><code>style</code> / <code>style_tokens</code> / <code>semantics</code></td>
+      <td>Container styling and semantics; the role defaults to <code>list</code>.</td>
+    </tr>
+    <tr>
+      <td><code>on_scroll</code></td>
+      <td>Optional scroll observation (<code>Ui.scrollMsg</code> constructor). Not required for windowing.</td>
+    </tr>
+    <tr>
+      <td><code>on_reach_end</code></td>
+      <td>The approach-end Msg (see above).</td>
+    </tr>
+  </tbody>
+</table>
+
+## Markup
+
+The windowed virtual list is **builder-only**: the closed markup grammar has no channel for the view to receive the runtime's range request inside a `for` binding, so markup cannot build "only the visible rows" honestly. Markup lists keep the bounded form — [`<list virtualized>`](/components/list) lays out only the visible window of the rows the `for` produced, which is the right shape when the row set already fits the model (hundreds, not hundreds of thousands). `on-reach-end` IS markup-expressible on `scroll`, so markup apps get honest infinite fetch with bounded windows.

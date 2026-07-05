@@ -4,7 +4,10 @@
 //! rendering the content. The runtime:
 //!
 //! - stamps `widget.native_scroll` on every non-virtualized `.scroll_view`
-//!   so engine scrollbars and engine kinetic physics stand down,
+//!   (and every RUNTIME-SCROLLED virtual list — a virtualized scroll_view
+//!   with a declared item count, whose driver content size is the full
+//!   virtual extent) so engine scrollbars and engine kinetic physics
+//!   stand down,
 //! - pushes the full desired driver set (region frames, content extents,
 //!   offsets) on every widget-layout install AND every presented frame —
 //!   the self-healing reconcile lesson: anything owning host
@@ -147,7 +150,14 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
 }
 
 pub fn canvasWidgetScrollDriverEligible(node: canvas.WidgetLayoutNode) bool {
-    return node.widget.kind == .scroll_view and !node.widget.layout.virtualized and node.widget.id != 0;
+    if (node.widget.kind != .scroll_view or node.widget.id == 0) return false;
+    // Runtime-scrolled virtual lists (declared item count) ride the
+    // native driver too: their content extent is the VIRTUAL total
+    // (`canvasWidgetScrollContentExtent`'s virtualized branch), so the
+    // OS scroller's bar spans the whole list while only the built
+    // window mounts. Legacy virtualized containers stay model-driven.
+    if (node.widget.layout.virtualized) return canvas.widgetVirtualRuntimeScrolled(node.widget);
+    return true;
 }
 
 fn trackedScrollDriverOffset(view: anytype, driver_id: u64) ?f32 {

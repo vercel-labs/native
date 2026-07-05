@@ -1137,6 +1137,14 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
                 // Press family: like on-press, a bound hold makes any
                 // element pressable.
                 options.on_hold = msg;
+            } else if (comptime std.mem.eql(u8, event, "reach-end")) {
+                // The approach-end signal (infinite-scroll fetch) is
+                // emitted for scroll containers only (interpreter and
+                // validator parity).
+                comptime {
+                    if (!std.mem.eql(u8, node.name, "scroll")) fail(node, markup.on_reach_end_element_message);
+                }
+                options.on_reach_end = msg;
             } else {
                 comptime fail(node, "unknown event attribute");
             }

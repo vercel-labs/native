@@ -111,7 +111,7 @@ Title updates retitle the live `NSStatusItem` button without re-creating it; pla
 
 ### Native scrolling (macOS)
 
-Zero app code: on macOS every non-virtualized `scroll` region is driven by an invisible `NSScrollView` — OS momentum, rubber-band overscroll, and the system overlay scrollbar — while the engine renders the content. `widget.value` stays the offset of record, so the rebuild reconcile rule ("user offset survives rebuilds until the source offset changes"), automation snapshot offsets (`scroll=[offset=..]`), and `Options.sync` all work exactly as before; the engine-drawn scrollbar simply stops painting for natively driven regions. Programmatic scrolls still work: change the source offset (or scroll via keyboard/automation) and the runtime pushes it into the native scroller. GTK/Win32 and mobile embeds keep the engine's wheel physics unchanged. Nested-scroll saturation handoff (inner region exhausted, outer continues) is per-region native today: the inner region rubber-bands at its edge like a standalone scroller.
+Zero app code: on macOS every non-virtualized `scroll` region — and every windowed virtual list (`ui.virtualList`), whose driver content size is the full virtual extent — is driven by an invisible `NSScrollView` — OS momentum, rubber-band overscroll, and the system overlay scrollbar — while the engine renders the content. `widget.value` stays the offset of record, so the rebuild reconcile rule ("user offset survives rebuilds until the source offset changes"), automation snapshot offsets (`scroll=[offset=..]`), and `Options.sync` all work exactly as before; the engine-drawn scrollbar simply stops painting for natively driven regions. Programmatic scrolls still work: change the source offset (or scroll via keyboard/automation) and the runtime pushes it into the native scroller. GTK/Win32 and mobile embeds keep the engine's wheel physics unchanged. Nested-scroll saturation handoff (inner region exhausted, outer continues) is per-region native today: the inner region rubber-bands at its edge like a standalone scroller.
 
 ### Native context menus
 
@@ -271,9 +271,45 @@ Every view has fixed per-view capacities (`src/runtime/canvas_limits.zig`): **10
 
 Budget rules of thumb: 1024 nodes is roomy for a three-pane desktop app (~500 nodes measured for a dense sidebar + markdown detail + run surface), but node count scales with what is MOUNTED, not what is visible — so bound every unbounded collection:
 
-- `virtualized` on `scroll`/`list`/`grid`/`table` (with `virtual-item-extent` for fixed-extent items) lays out only the visible window + overscan; a 10,000-item list materializes ~viewport/extent nodes. It bounds NODES, not your source data: the builder still walks every item, so derive bounded slices in the model for very large collections. Virtualized containers are app-driven for scrolling (wheel offsets do not mutate them).
+- **Dataset-scale uniform rows (feeds, logs, tables of thousands+): use the WINDOWED virtual list** (`ui.virtualWindow` + `ui.virtualList`, Zig views — see the next section). The view builds only the visible window; the runtime owns the scroll; budgets stay viewport-sized at 100k items.
+- `virtualized` on `scroll`/`list`/`grid`/`table` (with `virtual-item-extent` for fixed-extent items) lays out only the visible window + overscan; a 10,000-item list materializes ~viewport/extent nodes. It bounds NODES, not your source data: the builder still walks every item, so it suits row sets the model already holds (hundreds). Legacy virtualized containers without a declared item count are app-driven for scrolling (wheel offsets do not mutate them).
 - For non-uniform content (chat transcripts, ledgers, diffs), keep a bounded window in the model and slide it with `on-scroll` (see Messages) or explicit paging — the window follows the scrollbar instead of mounting everything.
 - Remember multi-node rows multiply: a 4-node row × 50 mounted rows is 200 nodes before chrome.
+
+## Windowed virtual lists (Zig views): 100k rows, viewport-sized budgets
+
+The honest infinite-scroll primitive. The RUNTIME owns the viewport math (retained scroll offset + viewport → visible index range, from a fixed per-item extent), the MODEL owns the data, and the view is the seam between them: ask `ui.virtualWindow` for the visible range, build ONE keyed node per item in it, hand both to `ui.virtualList`. The list is a runtime-scrolled scroll region — engine wheel/kinetic/keyboard everywhere, the native scroll driver on macOS — whose scrollbar spans the FULL virtual extent (`item_count × stride`), and every scroll observation re-derives the view so the window follows the offset with no app wiring.
+
+```zig
+const options = Ui.VirtualListOptions{
+    .id = "timeline",            // stable identity: global key + scroll-state lookup
+    .item_count = model.loaded,  // TOTAL items the model holds right now
+    .item_extent = 84,           // fixed row height (v1 contract: uniform rows)
+    .overscan = 4,
+    .grow = 1,
+    .on_reach_end = .load_more,  // infinite fetch: update appends the next batch
+};
+const window = ui.virtualWindow(options);
+const rows = ui.arena.alloc(Ui.Node, window.itemCount()) catch { ui.failed = true; return ui.column(.{}, .{}); };
+for (rows, 0..) |*row, offset| {
+    const index = window.start_index + offset;
+    var node = rowView(ui, model, index);
+    node.key = .{ .int = @intCast(index) };  // identity = the ITEM, not the slot
+    row.* = node;
+}
+return ui.virtualList(options, window, .{rows});
+```
+
+Rules:
+
+- **Key every row by item identity** (index or id). A row that scrolls away and back returns under the same structural id, so engine-owned row state and model-owned per-item state (selection washes, like counts keyed by index in the model) survive window shifts.
+- **No `on_scroll` needed.** The runtime re-derives the view on scroll for mounted virtual lists; bind `on_scroll` only when the model wants to observe the position. Do not echo an offset into `value` — `virtualList` mirrors the runtime offset itself.
+- **`on_reach_end` has hysteresis built in**: fires once when a scroll comes within one viewport of the end, re-arms past 1.5 viewports — which appending a batch causes on its own by growing the extent. One Msg per approach, never a fetch storm. It works on ANY scroll container (`on-reach-end` on `scroll` in markup).
+- **Uniform extents only (v1)**: `item_extent` is the contract that makes 100k rows arithmetic. Give rows single-line text (`wrap = false`) or fixed sub-layouts that fit the extent. Variable-height content belongs in a model-bounded window instead.
+- **First build / resize converge automatically**: `UiApp` resolves the window against retained scroll state, and re-derives once against the fresh geometry when a build's window under-covers it (first build, window grew).
+- **Markup exclusion (documented call)**: the closed grammar has no channel for a `for` binding to receive the runtime's range request, so the windowed list is builder-only; markup keeps bounded `<list virtualized>` (layout-culled) plus `on-reach-end` on `scroll` for honest infinite fetch.
+
+The `examples/feed` app is the reference: a 100,000-post deterministic corpus, reach-end batching, per-post state by index, and snapshot telemetry (`widget_nodes=`) proving the window stays viewport-sized.
 
 ## Style token attributes
 
@@ -379,7 +415,7 @@ For `<if test>`, prefer an explicit boolean predicate method over numeric truthi
 
 ## Messages
 
-`on-press`, `on-toggle`, `on-change`, `on-submit` (enter in a text field), `on-dismiss` (dismissible surfaces: dialog, drawer, sheet, dropdown-menu — dispatched when Escape or a click outside dismisses the surface, so the model owns the close), and `on-hold` (press-and-hold, see the Pickers section) take `tag` or `tag:{payload}`. The tag must be a variant of your `Msg` union; payload bindings coerce to the variant's payload type: integers, floats, enums (from tag names), `[]const u8`, bool. `on-input` is special: name a `Msg` variant whose payload is `canvas.TextInputEvent` and the runtime delivers each text edit in it. `on-scroll` (the `scroll` element only) is the same shape: name a `Msg` variant whose payload is `canvas.ScrollState` and the runtime delivers the post-scroll state — `offset`, `viewport_extent`, `content_extent`, `maxOffset()` — after every user scroll (wheel, kinetic momentum steps, keyboard, accessibility). In Zig views the constructors are `Ui.inputMsg(.tag)` / `Ui.scrollMsg(.tag)` on `on_input` / `on_scroll`.
+`on-press`, `on-toggle`, `on-change`, `on-submit` (enter in a text field), `on-dismiss` (dismissible surfaces: dialog, drawer, sheet, dropdown-menu — dispatched when Escape or a click outside dismisses the surface, so the model owns the close), and `on-hold` (press-and-hold, see the Pickers section) take `tag` or `tag:{payload}`. The tag must be a variant of your `Msg` union; payload bindings coerce to the variant's payload type: integers, floats, enums (from tag names), `[]const u8`, bool. `on-input` is special: name a `Msg` variant whose payload is `canvas.TextInputEvent` and the runtime delivers each text edit in it. `on-scroll` (the `scroll` element only) is the same shape: name a `Msg` variant whose payload is `canvas.ScrollState` and the runtime delivers the post-scroll state — `offset`, `viewport_extent`, `content_extent`, `maxOffset()` — after every user scroll (wheel, kinetic momentum steps, keyboard, accessibility). In Zig views the constructors are `Ui.inputMsg(.tag)` / `Ui.scrollMsg(.tag)` on `on_input` / `on_scroll`. `on-reach-end` (the `scroll` element only; `on_reach_end` in Zig views, any scroll container including the windowed virtual list) is a plain Msg dispatched when a user scroll comes within one viewport of the content end — the infinite-fetch signal, fired once per approach with hysteresis (re-arms past 1.5 viewports, which appending a batch causes by growing the extent).
 
 Scroll offsets follow the same mirror discipline as text: the Msg carries the offset the runtime ALREADY applied, so store it in the model and echo it back through the scroll's `value` — the echoed source value equals the runtime offset, which the scroll reconcile rule treats as "unchanged", so rebuilds never stomp live scrolling. `on-scroll` is how long content pages or lazy-loads: keep a bounded window in the model and slide it from `offset` (near-end when `offset + viewport_extent` approaches `content_extent`).
 

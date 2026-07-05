@@ -35,6 +35,7 @@ export const componentPages: ComponentPage[] = [
   { slug: "breadcrumb", name: "Breadcrumb", preview: "breadcrumb", blurb: "Hierarchy trail with separators." },
   { slug: "pagination", name: "Pagination", preview: "pagination", blurb: "Page navigation row." },
   { slug: "list", name: "List", preview: "list", blurb: "Rows with icons, selection, and virtualization." },
+  { slug: "virtual-list", name: "Virtual List", preview: "virtual-list", blurb: "Windowed rows: the view builds only what's visible." },
   { slug: "table", name: "Table", preview: "table", blurb: "Rows and cells with hairline dividers." },
   { slug: "tree", name: "Tree", preview: "tree", blurb: "Disclosure tree with one roving focus set." },
   { slug: "split", name: "Split & Resizable", preview: "split", blurb: "Draggable two-pane splitters and resizable panels." },

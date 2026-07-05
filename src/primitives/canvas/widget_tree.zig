@@ -101,6 +101,19 @@ pub fn widgetIsAnchored(widget: Widget) bool {
     return widget.layout.anchor != null;
 }
 
+/// True for the RUNTIME-SCROLLED virtual list: a virtualized
+/// `.scroll_view` that declares its TOTAL item count
+/// (`layout.virtual_item_count > 0`), so the runtime owns the scroll
+/// offset — engine wheel/kinetic/keyboard scrolling applies, native
+/// scroll drivers engage with the full virtual content extent, and the
+/// view rebuilds only the visible window (`Ui.virtualList`). Legacy
+/// virtualized containers (no declared count: children ARE the full
+/// item set, layout-culled) keep their model-driven offset contract —
+/// the engine refuses to scroll them, byte-identically to before.
+pub fn widgetVirtualRuntimeScrolled(widget: Widget) bool {
+    return widget.kind == .scroll_view and widget.layout.virtualized and widget.layout.virtual_item_count > 0;
+}
+
 pub fn widgetIndexById(layout: anytype, id: ObjectId) ?usize {
     if (id == 0) return null;
     for (layout.nodes, 0..) |node, index| {

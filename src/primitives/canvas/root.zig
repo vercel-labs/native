@@ -420,6 +420,16 @@ pub const UiKey = ui_builder.UiKey;
 pub const UiHandlerEvent = ui_builder.UiHandlerEvent;
 pub const uiKey = ui_builder.uiKey;
 pub const forSlotKey = ui_builder.forSlotKey;
+/// Windowed virtual lists (`Ui.virtualWindow` / `Ui.virtualList`): the
+/// window-source seam the app loop installs before each build, the
+/// per-build request records it reads back, and the global-key id
+/// derivation that ties a list's declared identity to its retained
+/// scroll state.
+pub const globalWidgetId = ui_builder.globalWidgetId;
+pub const VirtualWindowState = ui_builder.VirtualWindowState;
+pub const VirtualWindowSourceFn = ui_builder.VirtualWindowSourceFn;
+pub const VirtualWindowRecord = ui_builder.VirtualWindowRecord;
+pub const max_virtual_windows = ui_builder.max_virtual_windows;
 pub const ColorTokenName = ui_builder.ColorTokenName;
 pub const RadiusTokenName = ui_builder.RadiusTokenName;
 pub const StyleTokenRefs = ui_builder.StyleTokenRefs;
@@ -543,6 +553,11 @@ pub const widgetWindowDragTargetIndexFromNode = @import("widget_routing.zig").wi
 /// stack-container list all derive from).
 pub const widgetKindStacksChildren = @import("widget_layout.zig").widgetKindStacksChildren;
 pub const widgetIsAnchored = @import("widget_tree.zig").widgetIsAnchored;
+/// The runtime-scrolled virtual list predicate (widget_tree.zig): a
+/// virtualized scroll_view with a DECLARED total item count, whose
+/// scroll offset the runtime owns (engine scrolling + native drivers)
+/// and whose children are the built window, not the full item set.
+pub const widgetVirtualRuntimeScrolled = @import("widget_tree.zig").widgetVirtualRuntimeScrolled;
 pub const isWidgetHiddenInAncestors = @import("widget_tree.zig").isWidgetHiddenInAncestors;
 pub const anchoredWidgetFrame = @import("widget_layout.zig").anchoredWidgetFrame;
 /// Split-pane geometry (widget_layout.zig): divider band width, the

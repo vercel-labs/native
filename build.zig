@@ -626,6 +626,7 @@ pub fn build(b: *std.Build) void {
     addExampleTestStep(b, native_examples_step, "test-example-notes", "Run notes example tests", "examples/notes");
     addExampleTestStep(b, native_examples_step, "test-example-system-monitor", "Run system monitor example tests", "examples/system-monitor");
     addExampleTestStep(b, native_examples_step, "test-example-effects-probe", "Run effects probe example tests", "examples/effects-probe");
+    addExampleTestStep(b, native_examples_step, "test-example-feed", "Run feed example tests", "examples/feed");
     addExampleTestStep(b, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview");
     addExampleTestStep(b, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities");
     addFileContainsCheckStep(b, file_contains_checker, native_examples_step, "test-example-capabilities-events", "Verify capabilities example event bridge names", &.{
