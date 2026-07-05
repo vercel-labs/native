@@ -209,13 +209,26 @@ jobs:
         with:
           version: 0.16.0
       - run: zig build
+      - name: Scaffold and test the zero-config native app
+        run: |
+          set -euo pipefail
+          app=".zig-cache/scaffold-native-slim"
+          rm -rf "$app"
+          ./zig-out/bin/native init "$app"
+          # Slim scaffold: no build files — the CLI's generated graph drives it.
+          test ! -f "$app/build.zig"
+          test ! -f "$app/build.zig.zon"
+          ./zig-out/bin/native test "$app" -Dplatform=null
+          ./zig-out/bin/native check "$app"
+          ./zig-out/bin/native eject "$app"
+          (cd "$app" && zig build test -Dplatform=null)
       - name: Scaffold and test frontend templates
         run: |
           set -euo pipefail
           for frontend in native next vite react svelte vue; do
             app=".zig-cache/scaffold-${frontend}"
             rm -rf "$app"
-            ./zig-out/bin/native init "$app" --frontend "$frontend"
+            ./zig-out/bin/native init "$app" --frontend "$frontend" --full
             (cd "$app" && zig build test -Dplatform=null && ../../zig-out/bin/native validate app.zon)
             # Every scaffold ships a CI workflow; parse it as real YAML.
             test -s "$app/.github/workflows/ci.yml"

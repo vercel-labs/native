@@ -48,10 +48,23 @@ pub const Frontend = enum {
     }
 };
 
+/// Scaffold shape for the native frontend. `slim` is the zero-config
+/// default: app.zon + src/ + assets + README only — the `native` CLI owns
+/// the build graph (`native dev|build|test`) and `native eject` writes an
+/// owned build.zig later. `full` keeps the pre-zero-config shape
+/// (build.zig, build.zig.zon, .vscode, CI workflow) for users who want to
+/// own the build from day one. Web frontends always scaffold full: their
+/// npm build pipeline needs the expanded build.zig.
+pub const Shape = enum {
+    slim,
+    full,
+};
+
 pub const InitOptions = struct {
     app_name: []const u8,
     framework_path: []const u8 = ".",
     frontend: Frontend = .vite,
+    shape: Shape = .slim,
 };
 
 pub fn writeDefaultApp(allocator: std.mem.Allocator, io: std.Io, destination: []const u8, options: InitOptions) !void {
@@ -69,6 +82,9 @@ pub fn writeDefaultApp(allocator: std.mem.Allocator, io: std.Io, destination: []
     try app_dir.createDirPath(io, "assets");
 
     if (options.frontend == .native) {
+        if (options.shape == .slim) {
+            return writeNativeAppSlim(allocator, io, app_dir, names);
+        }
         // build.zig.zon path dependencies must be relative to the app root.
         const dependency_path = try nativeDependencyPath(allocator, io, destination, framework_path);
         defer allocator.free(dependency_path);
@@ -99,6 +115,74 @@ pub fn writeDefaultApp(allocator: std.mem.Allocator, io: std.Io, destination: []
     try writeFile(app_dir, io, "README.md", readme_md);
 
     try writeFrontendFiles(allocator, io, app_dir, names, options.frontend);
+}
+
+/// The zero-config scaffold: no build files, no editor config, no CI — the
+/// README teaches the `native` verbs and everything else is app source.
+fn writeNativeAppSlim(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames) !void {
+    const main_zig = try nativeMainZig(allocator, names);
+    defer allocator.free(main_zig);
+    const tests_zig = try nativeTestsZig(allocator, names);
+    defer allocator.free(tests_zig);
+    const app_zon = try nativeAppZon(allocator, names);
+    defer allocator.free(app_zon);
+    const readme_md = try slimNativeReadme(allocator, names);
+    defer allocator.free(readme_md);
+
+    try writeFile(app_dir, io, "src/main.zig", main_zig);
+    try writeFile(app_dir, io, "src/app.zml", nativeAppZml());
+    try writeFile(app_dir, io, "src/tests.zig", tests_zig);
+    try writeFile(app_dir, io, "app.zon", app_zon);
+    try writeFile(app_dir, io, "assets/icon.icns", default_icon_icns);
+    try writeFile(app_dir, io, ".gitignore", slimGitignore());
+    try writeFile(app_dir, io, "README.md", readme_md);
+}
+
+fn slimGitignore() []const u8 {
+    return
+    \\.native/
+    \\zig-out/
+    \\.zig-cache/
+    \\
+    ;
+}
+
+fn slimNativeReadme(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "# ");
+    try out.appendSlice(allocator, names.display_name);
+    try out.appendSlice(allocator,
+        \\
+        \\
+        \\A native-rendered Native SDK app: the view lives in `src/app.zml`
+        \\(declarative markup) and the logic in `src/main.zig` (`Model`, `Msg`,
+        \\`update`). No WebView, no npm, no build files — the `native` CLI owns
+        \\the build.
+        \\
+        \\## Commands
+        \\
+        \\```sh
+        \\native dev     # build and run the app with hot reload
+        \\native test    # run the app's test suite
+        \\native build   # produce a ReleaseFast binary in zig-out/bin/
+        \\native check   # validate src/*.zml markup and app.zon
+        \\```
+        \\
+        \\## Hot reload
+        \\
+        \\`src/app.zml` is watched while `native dev` runs: edit it and the
+        \\window updates within ~2s without losing model state. Parse failures
+        \\keep the last good view.
+        \\
+        \\## Owning the build
+        \\
+        \\Need custom build logic? `native eject` writes a build.zig and
+        \\build.zig.zon into the app — from then on the `native` verbs drive
+        \\your files through `zig build` and never regenerate them.
+        \\
+    );
+    return out.toOwnedSlice(allocator);
 }
 
 fn writeNativeApp(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames, framework_path: []const u8) !void {
@@ -2779,9 +2863,44 @@ test "writeDefaultApp emits frontend-specific Next paths" {
     try std.testing.expect(std.mem.indexOf(u8, tsconfig_text, "\"@/*\": [\"./app/*\"]") != null);
 }
 
+test "writeDefaultApp emits a slim native scaffold by default" {
+    const destination = ".zig-cache/test-native-slim-template";
+    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native });
+
+    const app_zon_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.zon");
+    defer std.testing.allocator.free(app_zon_text);
+    const main_zig_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "src/main.zig");
+    defer std.testing.allocator.free(main_zig_text);
+    const gitignore_text = try readTestFile(std.testing.allocator, std.testing.io, destination, ".gitignore");
+    defer std.testing.allocator.free(gitignore_text);
+    const readme_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "README.md");
+    defer std.testing.allocator.free(readme_text);
+    const icon = try readTestFile(std.testing.allocator, std.testing.io, destination, "assets/icon.icns");
+    defer std.testing.allocator.free(icon);
+
+    // Zero-config: no build files, no editor config, no CI workflow.
+    try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "build.zig"));
+    try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "build.zig.zon"));
+    try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, ".vscode/settings.json"));
+    try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, ".github/workflows/ci.yml"));
+
+    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "gpu_surface") != null);
+    try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "native_sdk.UiApp(Model, Msg)") != null);
+    // The generated + derived state is ignored wholesale.
+    try std.testing.expect(std.mem.indexOf(u8, gitignore_text, ".native/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, gitignore_text, "zig-out/") != null);
+    // The README teaches the native verbs, not zig build.
+    try std.testing.expect(std.mem.indexOf(u8, readme_text, "native dev") != null);
+    try std.testing.expect(std.mem.indexOf(u8, readme_text, "native test") != null);
+    try std.testing.expect(std.mem.indexOf(u8, readme_text, "native build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, readme_text, "native check") != null);
+    try std.testing.expect(std.mem.indexOf(u8, readme_text, "native eject") != null);
+    try std.testing.expect(std.mem.indexOf(u8, readme_text, "zig build run") == null);
+}
+
 test "writeDefaultApp emits native project files" {
     const destination = ".zig-cache/test-native-init-template";
-    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native });
+    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .shape = .full });
 
     const app_zon_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.zon");
     defer std.testing.allocator.free(app_zon_text);
@@ -2827,7 +2946,7 @@ test "writeDefaultApp emits native project files" {
 
 test "writeDefaultApp emits a CI workflow for native apps" {
     const destination = ".zig-cache/test-native-ci-template";
-    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native });
+    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .shape = .full });
 
     const ci_yaml_text = try readTestFile(std.testing.allocator, std.testing.io, destination, ".github/workflows/ci.yml");
     defer std.testing.allocator.free(ci_yaml_text);
@@ -2872,7 +2991,7 @@ fn expectBasicYaml(text: []const u8) !void {
     }
 }
 
-fn normalizePackageName(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+pub fn normalizePackageName(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     var last_separator = false;
@@ -2890,7 +3009,7 @@ fn normalizePackageName(allocator: std.mem.Allocator, value: []const u8) ![]cons
     return out.toOwnedSlice(allocator);
 }
 
-fn normalizeModuleName(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+pub fn normalizeModuleName(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     const max_zig_package_name_len = 32;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -2935,7 +3054,7 @@ fn displayName(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     return out.toOwnedSlice(allocator);
 }
 
-fn fingerprintForName(name: []const u8) u64 {
+pub fn fingerprintForName(name: []const u8) u64 {
     const checksum: u64 = std.hash.Crc32.hash(name);
     return (checksum << 32) | 0x5a707070;
 }

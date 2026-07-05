@@ -13,12 +13,28 @@ The `native` CLI provides project scaffolding, markup validation, automation, pa
   </thead>
   <tbody>
     <tr>
-      <td><code>native init [path] [--frontend &lt;native|next|vite|react|svelte|vue&gt;]</code> (default: native)</td>
-      <td>Scaffold a new Native SDK project with the specified frontend (<code>native</code> scaffolds a native-rendered markup app with no web frontend). Omit <code>path</code> to scaffold into the current directory.</td>
+      <td><code>native init [path] [--frontend &lt;native|next|vite|react|svelte|vue&gt;] [--full]</code> (default: native)</td>
+      <td>Scaffold a new Native SDK project with the specified frontend (<code>native</code> scaffolds a native-rendered markup app with no web frontend, and no build files — the CLI owns the build; <code>--full</code> also writes build.zig, build.zig.zon, editor config, and CI). Omit <code>path</code> to scaffold into the current directory.</td>
     </tr>
     <tr>
-      <td><code>native dev --binary &lt;path&gt;</code></td>
-      <td>Start the app with a managed frontend dev server (<code>--binary</code> is required)</td>
+      <td><code>native dev [dir]</code></td>
+      <td>Build and run the app in the current (or given) app directory, with markup hot reload; apps with a frontend dev config also get the managed dev server. With <code>--binary &lt;path&gt;</code>, only runs the frontend dev server flow against a prebuilt shell.</td>
+    </tr>
+    <tr>
+      <td><code>native build [dir]</code></td>
+      <td>Build a ReleaseFast binary into <code>zig-out/bin/</code></td>
+    </tr>
+    <tr>
+      <td><code>native test [dir]</code></td>
+      <td>Run the app's test suite</td>
+    </tr>
+    <tr>
+      <td><code>native check [dir]</code></td>
+      <td>Validate <code>src/**.zml</code> markup and <code>app.zon</code> without building</td>
+    </tr>
+    <tr>
+      <td><code>native eject [dir]</code></td>
+      <td>Write an owned <code>build.zig</code>/<code>build.zig.zon</code> into the app (once); the verbs then drive your files via <code>zig build</code></td>
     </tr>
     <tr>
       <td><code>native doctor</code></td>

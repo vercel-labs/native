@@ -27,8 +27,14 @@ const WebEngineOption = enum {
 
 pub const AppOptions = struct {
     name: []const u8,
-    /// App entry point; defaults to src/main.zig.
+    /// App entry point; defaults to src/main.zig (relative to `app_root`).
     main: []const u8 = "src/main.zig",
+    /// Root of the app source tree, relative to the build root. "." for a
+    /// build.zig that lives in the app directory (every ejected app). The
+    /// CLI's generated build graph under `<app>/.native/build/` passes
+    /// "../.." so `src/`, `app.zon`, and `assets/` keep resolving in the
+    /// app directory rather than the cache directory.
+    app_root: []const u8 = ".",
 };
 
 /// The `native_sdk_app_*` C ABI every embed static library exports.
@@ -178,7 +184,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     if (selected_platform == .windows and target.result.os.tag != .windows) {
         @panic("-Dplatform=windows requires a Windows target");
     }
-    const app_web_engine = appWebEngineConfig(b);
+    const app_web_engine = appWebEngineConfig(b, app_options.app_root);
     const web_engine = web_engine_override orelse app_web_engine.web_engine;
     const cef_dir = cef_dir_override orelse defaultCefDir(selected_platform, app_web_engine.cef_dir);
     const cef_auto_install = cef_auto_install_override orelse app_web_engine.cef_auto_install;
@@ -260,9 +266,9 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
     });
     runner_mod.addImport("native_sdk", native_sdk_mod);
     runner_mod.addImport("build_options", options_mod);
-    runner_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path("app.zon") }));
+    runner_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path(appPath(b, app_options.app_root, "app.zon")) }));
 
-    const app_mod = localModule(b, target, optimize, app_options.main);
+    const app_mod = localModule(b, target, optimize, appPath(b, app_options.app_root, app_options.main));
     app_mod.addImport("native_sdk", native_sdk_mod);
     app_mod.addImport("runner", runner_mod);
     return app_mod;
@@ -525,8 +531,16 @@ fn defaultCefDir(platform: PlatformOption, configured: []const u8) []const u8 {
     };
 }
 
-fn appWebEngineConfig(b: *std.Build) AppWebEngineConfig {
-    const source = b.build_root.handle.readFileAlloc(b.graph.io, "app.zon", b.allocator, .limited(1024 * 1024)) catch return .{};
+/// Resolve an app-relative path against `app_root` (see AppOptions). Kept
+/// lexical: `b.path` rejects absolute paths and the generated build graph
+/// hands us "../..", which openat/b.path both resolve fine.
+fn appPath(b: *std.Build, app_root: []const u8, sub_path: []const u8) []const u8 {
+    if (app_root.len == 0 or std.mem.eql(u8, app_root, ".")) return sub_path;
+    return b.pathJoin(&.{ app_root, sub_path });
+}
+
+fn appWebEngineConfig(b: *std.Build, app_root: []const u8) AppWebEngineConfig {
+    const source = b.build_root.handle.readFileAlloc(b.graph.io, appPath(b, app_root, "app.zon"), b.allocator, .limited(1024 * 1024)) catch return .{};
     var config: AppWebEngineConfig = .{};
     if (stringField(source, ".web_engine")) |value| {
         config.web_engine = parseWebEngine(value) orelse .system;

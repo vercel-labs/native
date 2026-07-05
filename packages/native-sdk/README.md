@@ -11,12 +11,12 @@ npm install -g @native-sdk/cli
 ## Usage
 
 ```bash
-native init my_app --frontend vite
+native init my_app
 cd my_app
-zig build run
+native dev
 ```
 
-The first run installs the generated frontend dependencies automatically.
+The default scaffold is a native-rendered markup app with no build files — `native dev|build|test` own the build. Web-frontend scaffolds (`--frontend vite` etc.) install their generated frontend dependencies automatically on first run.
 
 Use WebViews for rich product UI, and add native windows, menus, shortcuts, views, dialogs, clipboard, credentials, and OS services where the platform should own the interaction.
 
@@ -24,8 +24,12 @@ Use WebViews for rich product UI, and add native windows, menus, shortcuts, view
 
 | Command | Description |
 |---------|-------------|
-| `native init [name] --frontend <next\|vite\|react\|svelte\|vue>` | Scaffold a new Native SDK project |
-| `native dev --binary <path>` | Start the app with a managed frontend dev server |
+| `native init [name] [--frontend <native\|next\|vite\|react\|svelte\|vue>] [--full]` | Scaffold a new Native SDK project |
+| `native dev [dir]` | Build and run the app (markup hot reload; managed frontend dev server when configured) |
+| `native build [dir]` | Build a ReleaseFast binary into `zig-out/bin/` |
+| `native test [dir]` | Run the app's test suite |
+| `native check [dir]` | Validate `src/**.zml` markup and `app.zon` |
+| `native eject [dir]` | Write an owned build.zig/build.zig.zon into the app |
 | `native doctor` | Check host environment, WebView, manifest, and CEF |
 | `native validate` | Validate `app.zon` against the manifest schema |
 | `native package` | Package the app for distribution |

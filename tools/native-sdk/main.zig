@@ -30,13 +30,31 @@ pub fn main(init: std.process.Init) !void {
         const destination = positionalArg(args[2..]) orelse ".";
         const frontend_str = flagValue(args, "--frontend") catch fail("--frontend requires a value: native, next, vite, react, svelte, vue") orelse "native";
         const frontend = tooling.templates.Frontend.parse(frontend_str) orelse fail("invalid --frontend value: use native (default), next, vite, react, svelte, or vue");
+        const shape: tooling.templates.Shape = if (flagBool(args, "--full")) .full else .slim;
         const app_name, const free_app_name = try initAppName(allocator, init.io, destination);
         defer if (free_app_name) allocator.free(app_name);
         const framework_path, const free_framework_path = try initFrameworkPath(allocator, init.io);
         defer if (free_framework_path) allocator.free(framework_path);
-        try tooling.templates.writeDefaultApp(allocator, init.io, destination, .{ .app_name = app_name, .framework_path = framework_path, .frontend = frontend });
+        try tooling.templates.writeDefaultApp(allocator, init.io, destination, .{ .app_name = app_name, .framework_path = framework_path, .frontend = frontend, .shape = shape });
         std.debug.print("created Native SDK app at {s} ({s})\n", .{ destination, frontend_str });
-        printInitNextSteps(destination);
+        printInitNextSteps(destination, frontend, shape);
+    } else if (std.mem.eql(u8, command, "build") or std.mem.eql(u8, command, "test")) {
+        const verb: tooling.verbs.Verb = if (std.mem.eql(u8, command, "build")) .build else .@"test";
+        const verb_args = parseVerbArgs(allocator, args[2..], &.{}) catch fail("usage: native build|test [dir] [--yes] [-D... zig build flags]");
+        try enterAppDir(init.io, verb_args.dir);
+        tooling.verbs.run(allocator, init.io, verb, .{
+            .base_env = init.environ_map,
+            .assume_yes = verb_args.assume_yes,
+            .forwarded_args = verb_args.forwarded,
+        }) catch |err| return failVerb(err);
+    } else if (std.mem.eql(u8, command, "check")) {
+        const verb_args = parseVerbArgs(allocator, args[2..], &.{}) catch fail("usage: native check [dir]");
+        try enterAppDir(init.io, verb_args.dir);
+        runCheck(allocator, init.io) catch |err| return failVerb(err);
+    } else if (std.mem.eql(u8, command, "eject")) {
+        const verb_args = parseVerbArgs(allocator, args[2..], &.{}) catch fail("usage: native eject [dir]");
+        try enterAppDir(init.io, verb_args.dir);
+        runEject(allocator, init.io, init.environ_map) catch |err| return failVerb(err);
     } else if (std.mem.eql(u8, command, "doctor")) {
         try tooling.doctor.run(allocator, init.io, init.environ_map, args[2..]);
     } else if (std.mem.eql(u8, command, "cef")) {
@@ -99,17 +117,34 @@ pub fn main(init: std.process.Init) !void {
         });
         tooling.package.printDiagnostic(stats);
     } else if (std.mem.eql(u8, command, "dev")) {
-        const manifest_path = try flagValue(args, "--manifest") orelse "app.zon";
-        const metadata = try tooling.manifest.readMetadata(allocator, init.io, manifest_path);
-        const command_override = if (try flagValue(args, "--command")) |value| try splitCommand(allocator, value) else null;
-        try tooling.dev.run(allocator, init.io, .{
-            .metadata = metadata,
-            .base_env = init.environ_map,
-            .binary_path = try flagValue(args, "--binary"),
-            .url_override = try flagValue(args, "--url"),
-            .command_override = command_override,
-            .timeout_ms = if (try flagValue(args, "--timeout-ms")) |value| try std.fmt.parseUnsigned(u32, value, 10) else null,
-        });
+        if ((try flagValue(args, "--binary")) != null) {
+            // Legacy shape (`--binary` provided): the caller already built
+            // the shell — e.g. the expanded template's `zig build dev` step —
+            // so only run the frontend-server + shell flow. Unchanged.
+            const manifest_path = try flagValue(args, "--manifest") orelse "app.zon";
+            const metadata = try tooling.manifest.readMetadata(allocator, init.io, manifest_path);
+            const command_override = if (try flagValue(args, "--command")) |value| try splitCommand(allocator, value) else null;
+            try tooling.dev.run(allocator, init.io, .{
+                .metadata = metadata,
+                .base_env = init.environ_map,
+                .binary_path = try flagValue(args, "--binary"),
+                .url_override = try flagValue(args, "--url"),
+                .command_override = command_override,
+                .timeout_ms = if (try flagValue(args, "--timeout-ms")) |value| try std.fmt.parseUnsigned(u32, value, 10) else null,
+            });
+        } else {
+            const verb_args = parseVerbArgs(allocator, args[2..], &.{ "--url", "--command", "--timeout-ms" }) catch fail("usage: native dev [dir] [--yes] [--url url] [--command \"npm run dev\"] [--timeout-ms n] [-D... zig build flags]");
+            try enterAppDir(init.io, verb_args.dir);
+            const command_override = if (try flagValue(args, "--command")) |value| try splitCommand(allocator, value) else null;
+            tooling.verbs.run(allocator, init.io, .dev, .{
+                .base_env = init.environ_map,
+                .assume_yes = verb_args.assume_yes,
+                .forwarded_args = verb_args.forwarded,
+                .url_override = try flagValue(args, "--url"),
+                .command_override = command_override,
+                .timeout_ms = if (try flagValue(args, "--timeout-ms")) |value| try std.fmt.parseUnsigned(u32, value, 10) else null,
+            }) catch |err| return failVerb(err);
+        }
     } else if (std.mem.eql(u8, command, "package-windows")) {
         try packageShortcut(allocator, init.io, args, .windows, "zig-out/package/windows");
     } else if (std.mem.eql(u8, command, "package-linux")) {
@@ -159,7 +194,12 @@ fn usage() void {
         \\usage: native <command>
         \\
         \\commands:
-        \\  init [path] [--frontend <native|next|vite|react|svelte|vue>]   (default: native)
+        \\  init [path] [--frontend <native|next|vite|react|svelte|vue>] [--full]   (default: native)
+        \\  dev [dir] [--yes] [-D... zig build flags]      build and run the app (hot reload)
+        \\  build [dir] [--yes] [-D... zig build flags]    build a ReleaseFast binary into zig-out/bin/
+        \\  test [dir] [--yes] [-D... zig build flags]     run the app's test suite
+        \\  check [dir]                                    validate src/*.zml markup and app.zon
+        \\  eject [dir]                                    write an owned build.zig/build.zig.zon into the app
         \\  cef install|path|doctor [--dir path] [--version version] [--source prepared|official] [--force]
         \\  doctor [--strict] [--manifest app.zon] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install]
         \\  validate [app.zon]
@@ -183,12 +223,148 @@ fn fail(message: []const u8) noreturn {
     std.process.exit(1);
 }
 
-fn printInitNextSteps(destination: []const u8) void {
+/// Expected verb failures already printed a teaching message (or zig's own
+/// compile errors are on screen); exit without a Zig error-return trace.
+fn failVerb(err: anyerror) anyerror!void {
+    switch (err) {
+        error.MissingManifest,
+        error.MissingFramework,
+        error.ZigUnavailable,
+        error.DownloadDeclined,
+        error.UnsupportedPlatform,
+        error.ChecksumMismatch,
+        error.ZigBuildFailed,
+        error.InvalidManifest,
+        error.MarkupCheckFailed,
+        => std.process.exit(1),
+        else => return err,
+    }
+}
+
+fn printInitNextSteps(destination: []const u8, frontend: tooling.templates.Frontend, shape: tooling.templates.Shape) void {
     std.debug.print("\nNext steps:\n", .{});
     if (!std.mem.eql(u8, destination, ".")) {
         std.debug.print("  cd {s}\n", .{destination});
     }
-    std.debug.print("  zig build run\n", .{});
+    if (frontend == .native and shape == .slim) {
+        std.debug.print("  native dev\n", .{});
+    } else {
+        std.debug.print("  zig build run\n", .{});
+    }
+}
+
+const VerbArgs = struct {
+    dir: []const u8 = ".",
+    assume_yes: bool = false,
+    forwarded: []const []const u8 = &.{},
+};
+
+/// Parse `native <verb>` arguments: an optional app directory, --yes, and
+/// -D/--release flags forwarded verbatim to `zig build`. `value_flags`
+/// names verb-specific flags whose values must be skipped (handled by the
+/// caller through flagValue).
+fn parseVerbArgs(allocator: std.mem.Allocator, args: []const []const u8, value_flags: []const []const u8) !VerbArgs {
+    var out: VerbArgs = .{};
+    var forwarded: std.ArrayList([]const u8) = .empty;
+    errdefer forwarded.deinit(allocator);
+    var index: usize = 0;
+    args: while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--yes")) {
+            out.assume_yes = true;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "-D") or std.mem.startsWith(u8, arg, "--release")) {
+            try forwarded.append(allocator, arg);
+            continue;
+        }
+        for (value_flags) |flag| {
+            if (std.mem.eql(u8, arg, flag)) {
+                index += 1;
+                if (index >= args.len) return error.InvalidArguments;
+                continue :args;
+            }
+        }
+        if (std.mem.startsWith(u8, arg, "-")) return error.InvalidArguments;
+        if (!std.mem.eql(u8, out.dir, ".")) return error.InvalidArguments;
+        out.dir = arg;
+    }
+    out.forwarded = try forwarded.toOwnedSlice(allocator);
+    return out;
+}
+
+fn enterAppDir(io: std.Io, dir: []const u8) !void {
+    if (std.mem.eql(u8, dir, ".")) return;
+    std.process.setCurrentPath(io, dir) catch {
+        std.debug.print("cannot enter app directory {s}\n", .{dir});
+        return error.MissingAppDirectory;
+    };
+}
+
+/// `native check`: validate every .zml under src/ plus app.zon — the
+/// no-build confidence pass (markup vocabulary + manifest schema).
+fn runCheck(allocator: std.mem.Allocator, io: std.Io) !void {
+    if (!tooling.buildgraph.fileExists(io, "app.zon")) {
+        std.debug.print("no app.zon here — `native check` runs inside an app directory (or pass one: `native check path/to/app`)\n", .{});
+        return error.MissingManifest;
+    }
+
+    var markup_args: std.ArrayList([]const u8) = .empty;
+    defer markup_args.deinit(allocator);
+    try markup_args.append(allocator, "check");
+    try collectZmlFiles(allocator, io, "src", &markup_args);
+    if (markup_args.items.len > 1) {
+        try markup_cli.run(allocator, io, markup_args.items);
+    }
+
+    const result = try tooling.manifest.validateFile(allocator, io, "app.zon");
+    tooling.manifest.printDiagnostic(result);
+    if (!result.ok) return error.InvalidManifest;
+    const checked_markup = markup_args.items.len - 1;
+    std.debug.print("checked {d} markup file{s} and app.zon\n", .{ checked_markup, if (checked_markup == 1) "" else "s" });
+}
+
+fn collectZmlFiles(allocator: std.mem.Allocator, io: std.Io, root_path: []const u8, out: *std.ArrayList([]const u8)) !void {
+    var root = std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true }) catch return;
+    defer root.close(io);
+    var walker = try root.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.path, ".zml")) {
+            try out.append(allocator, try std.fs.path.join(allocator, &.{ root_path, entry.path }));
+        }
+    }
+}
+
+/// `native eject`: transfer build ownership to the app exactly once.
+fn runEject(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map) !void {
+    if (!tooling.buildgraph.fileExists(io, "app.zon")) {
+        std.debug.print("no app.zon here — `native eject` runs inside an app directory (or pass one: `native eject path/to/app`)\n", .{});
+        return error.MissingManifest;
+    }
+    const metadata = try tooling.manifest.readMetadata(allocator, io, "app.zon");
+    const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, io, env_map) orelse {
+        std.debug.print("cannot locate the Native SDK framework; set NATIVE_SDK_PATH to your framework checkout\n", .{});
+        return error.MissingFramework;
+    };
+    defer allocator.free(framework_root);
+
+    tooling.buildgraph.eject(allocator, io, ".", .{
+        .app_name = metadata.name,
+        .framework_root = framework_root,
+    }) catch |err| switch (err) {
+        error.AlreadyEjected => {
+            std.debug.print("build.zig or build.zig.zon already exists — eject writes the owned build exactly once and never overwrites it\n", .{});
+            std.process.exit(1);
+        },
+        else => return err,
+    };
+    std.debug.print(
+        \\ejected: build.zig and build.zig.zon now belong to this app.
+        \\`native dev|build|test` drive them via `zig build` from now on; the
+        \\generated graph under .native/ is unused and safe to delete.
+        \\
+    , .{});
 }
 
 fn initAppName(allocator: std.mem.Allocator, io: std.Io, destination: []const u8) !struct { []const u8, bool } {

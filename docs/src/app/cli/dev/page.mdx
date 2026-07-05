@@ -1,14 +1,20 @@
 # Dev Server
 
-Use `native dev` when the Native SDK should own the frontend server lifecycle. It starts the configured frontend process, waits for the port to accept connections, launches the native shell with `NATIVE_SDK_FRONTEND_URL`, sets `NATIVE_SDK_HMR=1`, and terminates the frontend when the shell exits. Framework HMR stays owned by the dev server (Vite, Next.js, etc.) because the WebView loads the dev URL directly.
+Run `native dev` in an app directory to build and launch the app. Native-rendered apps get markup hot reload (edit `src/app.zml` while the app runs); no build files are required — apps without a `build.zig` are driven through a CLI-generated build graph, apps with one through `zig build`.
+
+For apps with a frontend dev config in `app.zon`, `native dev` also owns the frontend server lifecycle. It starts the configured frontend process, waits for the port to accept connections, launches the native shell with `NATIVE_SDK_FRONTEND_URL`, sets `NATIVE_SDK_HMR=1`, and terminates the frontend when the shell exits. Framework HMR stays owned by the dev server (Vite, Next.js, etc.) because the WebView loads the dev URL directly.
 
 ## Usage
 
 ```bash
+native dev
+native dev path/to/app -Dweb-engine=chromium
 native dev --binary zig-out/bin/MyApp
 native dev --binary zig-out/bin/MyApp --url http://127.0.0.1:3000/ --command "npm run dev"
 native dev --binary zig-out/bin/MyApp --timeout-ms 60000
 ```
+
+With `--binary`, the build step is skipped and only the frontend dev flow runs against the prebuilt shell (this is what the expanded template's `zig build dev` step invokes).
 
 ## Flags
 
