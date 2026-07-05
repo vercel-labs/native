@@ -18,13 +18,112 @@ pub const CanvasWidgetCopyScratch = struct {
 
 const GpuSurfaceInputEvent = platform.GpuSurfaceInputEvent;
 
-fn canvasWidgetSemanticsById(nodes: []const canvas.WidgetSemanticsNode, id: canvas.ObjectId) ?canvas.WidgetSemanticsNode {
-    if (id == 0) return null;
-    for (nodes) |node| {
-        if (node.id == id) return node;
-    }
-    return null;
+// -------------------------------------------------- reconcile id index
+//
+// The widget reconcile answers "what did the previous rebuild retain for
+// this id?" once per node, against entry lists that scale with the view
+// (control entries, source-control entries, source semantics, text
+// entries). Linear scans made every rebuild O(n^2) at the 1024-node
+// budget — the same shape the frame planners had before
+// `plan_key_index` (see that file), and the same fix applies: an
+// open-addressing probe table of entry indices whose chain preserves
+// insertion order, so lookups return exactly what the scans returned
+// (the lowest-index entry matching the caller's predicate). Outputs are
+// byte-identical by construction; only the search cost changes.
+const plan_key_index = canvas.plan_key_index;
+
+/// Slot count sized for the per-view widget budgets (1024 nodes /
+/// semantics entries) at the probe table's half-full bound.
+const widget_id_index_slots = 2048;
+
+/// Probe-table index over any entry slice keyed by an `id` field.
+/// `build` decides per input whether the table pays for its reset
+/// (`plan_key_index.min_entries_for_index`) and fits the half-full
+/// bound; otherwise lookups keep the original linear scans, so small
+/// views (the chart-tick floor) and oversized library inputs are
+/// untouched.
+pub fn CanvasWidgetIdIndex(comptime Entry: type) type {
+    return struct {
+        const Self = @This();
+        const Slots = plan_key_index.HashSlots(widget_id_index_slots);
+
+        table: Slots = .{},
+        entries: []const Entry = &.{},
+        indexed: bool = false,
+
+        pub fn build(self: *Self, entries: []const Entry) void {
+            self.entries = entries;
+            self.indexed = entries.len >= plan_key_index.min_entries_for_index and
+                plan_key_index.fitsHashSlots(widget_id_index_slots, entries.len);
+            if (!self.indexed) return;
+            self.table.reset();
+            for (entries, 0..) |entry, index| {
+                if (entry.id == 0) continue;
+                var probe = Slots.probe(plan_key_index.mixHash(entry.id));
+                while (self.table.next(&probe)) |_| {}
+                self.table.insert(probe, @intCast(index));
+            }
+        }
+
+        /// Lowest-index entry with this id — exactly the linear scan's
+        /// result (probe chains preserve insertion order; id-0 entries
+        /// can never match because id-0 queries return null up front,
+        /// matching every existing scan's contract).
+        pub fn first(self: *const Self, id: canvas.ObjectId) ?*const Entry {
+            if (id == 0) return null;
+            if (!self.indexed) {
+                for (self.entries) |*entry| {
+                    if (entry.id == id) return entry;
+                }
+                return null;
+            }
+            var probe = Slots.probe(plan_key_index.mixHash(id));
+            while (self.table.next(&probe)) |candidate| {
+                if (self.entries[candidate].id == id) return &self.entries[candidate];
+            }
+            return null;
+        }
+
+        /// Lowest-index entry matching id AND kind — the two-field scan
+        /// predicate some reconcile passes use. Walks the whole probe
+        /// chain, so even (invalid) duplicate-id inputs resolve exactly
+        /// as the scan would.
+        pub fn firstWithKind(self: *const Self, id: canvas.ObjectId, kind: canvas.WidgetKind) ?*const Entry {
+            if (id == 0) return null;
+            if (!self.indexed) {
+                for (self.entries) |*entry| {
+                    if (entry.id == id and entry.kind == kind) return entry;
+                }
+                return null;
+            }
+            var probe = Slots.probe(plan_key_index.mixHash(id));
+            while (self.table.next(&probe)) |candidate| {
+                const entry = &self.entries[candidate];
+                if (entry.id == id and entry.kind == kind) return entry;
+            }
+            return null;
+        }
+    };
 }
+
+pub const CanvasWidgetControlEntryIndex = CanvasWidgetIdIndex(CanvasWidgetControlReconcileEntry);
+pub const CanvasWidgetSourceControlEntryIndex = CanvasWidgetIdIndex(CanvasWidgetSourceControlEntry);
+pub const CanvasWidgetTextEntryIndex = CanvasWidgetIdIndex(CanvasWidgetTextReconcileEntry);
+pub const CanvasWidgetSemanticsIndex = CanvasWidgetIdIndex(canvas.WidgetSemanticsNode);
+
+/// Shared per-pass index scratch (~8 KiB of slots per table). The two
+/// reconcile passes per rebuild (the staged reconcile, then the retained
+/// copy) run back-to-back on the single-threaded event loop and each
+/// rebuilds every table it uses, so one threadlocal set serves both —
+/// the same pattern as the planners' probe-table scratch.
+pub threadlocal var canvas_widget_reconcile_index_scratch: CanvasWidgetReconcileIndexScratch = .{};
+
+pub const CanvasWidgetReconcileIndexScratch = struct {
+    controls: CanvasWidgetControlEntryIndex = .{},
+    source_controls: CanvasWidgetSourceControlEntryIndex = .{},
+    texts: CanvasWidgetTextEntryIndex = .{},
+    semantics: CanvasWidgetSemanticsIndex = .{},
+};
 
 pub const WidgetTextStorageRange = struct {
     start: usize = 0,
@@ -138,30 +237,6 @@ pub const CanvasWidgetSourceControlEntry = struct {
 /// retained-wins contract locked by the control reconcile tests.
 pub fn canvasWidgetSourceControlKind(kind: canvas.WidgetKind) bool {
     return kind == .toggle_button or kind == .slider or canvasWidgetSelectionClearsSiblings(kind);
-}
-
-pub fn canvasWidgetSourceControlSelectedById(
-    entries: []const CanvasWidgetSourceControlEntry,
-    id: canvas.ObjectId,
-    kind: canvas.WidgetKind,
-) ?bool {
-    if (id == 0) return null;
-    for (entries) |entry| {
-        if (entry.id == id and entry.kind == kind) return entry.selected;
-    }
-    return null;
-}
-
-pub fn canvasWidgetSourceControlValueById(
-    entries: []const CanvasWidgetSourceControlEntry,
-    id: canvas.ObjectId,
-    kind: canvas.WidgetKind,
-) ?f32 {
-    if (id == 0) return null;
-    for (entries) |entry| {
-        if (entry.id == id and entry.kind == kind) return entry.value;
-    }
-    return null;
 }
 
 pub fn collectCanvasWidgetSourceControlEntries(
@@ -479,15 +554,14 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
     node: canvas.WidgetLayoutNode,
     layout: canvas.WidgetLayoutTree,
     node_index: usize,
-    previous: []const CanvasWidgetControlReconcileEntry,
-    previous_source_controls: []const CanvasWidgetSourceControlEntry,
+    previous: *const CanvasWidgetControlEntryIndex,
+    previous_source_controls: *const CanvasWidgetSourceControlEntryIndex,
 ) canvas.WidgetLayoutNode {
     var copy = node;
     if (copy.widget.id == 0 or !canvasWidgetRuntimeControlKind(copy.widget.kind)) return copy;
     if (copy.widget.state.disabled or canvasWidgetLayoutNodeHidden(layout, node_index)) return copy;
 
-    for (previous) |entry| {
-        if (entry.id != copy.widget.id or entry.kind != copy.widget.kind) continue;
+    if (previous.firstWithKind(copy.widget.id, copy.widget.kind)) |entry| {
         switch (copy.widget.kind) {
             .toggle_button => {
                 // Chips: a toggle-button whose SOURCE asserts
@@ -499,11 +573,10 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
                 // Only a toggle-button whose source has stayed
                 // unselected keeps the retained (uncontrolled) state.
                 const source_selected = canvasWidgetBooleanSelected(copy.widget);
-                const previously_selected = canvasWidgetSourceControlSelectedById(
-                    previous_source_controls,
-                    copy.widget.id,
-                    copy.widget.kind,
-                ) orelse false;
+                const previously_selected = if (previous_source_controls.firstWithKind(copy.widget.id, copy.widget.kind)) |source_entry|
+                    source_entry.selected
+                else
+                    false;
                 const selected = if (source_selected or previously_selected)
                     source_selected
                 else
@@ -525,13 +598,9 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
                 // source never moves keeps the retained (uncontrolled)
                 // contract, and a LIVE drag always keeps the thumb —
                 // a mid-gesture source tick must not yank it.
-                const previous_source = canvasWidgetSourceControlValueById(
-                    previous_source_controls,
-                    copy.widget.id,
-                    copy.widget.kind,
-                );
-                const source_moved = if (previous_source) |source_value|
-                    copy.widget.value != source_value
+                const previous_source = previous_source_controls.firstWithKind(copy.widget.id, copy.widget.kind);
+                const source_moved = if (previous_source) |source_entry|
+                    copy.widget.value != source_entry.value
                 else
                     false;
                 if (!source_moved or entry.state.pressed) copy.widget.value = entry.value;
@@ -552,12 +621,8 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
                 // (pointer-driven) selection, so uncontrolled lists and
                 // trees keep working with zero app wiring.
                 const source_selected = canvasWidgetBooleanSelected(copy.widget);
-                const previous_source = canvasWidgetSourceControlSelectedById(
-                    previous_source_controls,
-                    copy.widget.id,
-                    copy.widget.kind,
-                );
-                const source_moved = if (previous_source) |previous_selected| source_selected != previous_selected else false;
+                const previous_source = previous_source_controls.firstWithKind(copy.widget.id, copy.widget.kind);
+                const source_moved = if (previous_source) |source_entry| source_selected != source_entry.selected else false;
                 const selected = if (source_moved)
                     source_selected
                 else
@@ -567,7 +632,6 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
             },
             else => {},
         }
-        break;
     }
     return copy;
 }
@@ -576,7 +640,7 @@ pub fn canvasWidgetLayoutNodeWithTextReconcileState(
     node: canvas.WidgetLayoutNode,
     layout: canvas.WidgetLayoutTree,
     node_index: usize,
-    previous: []const CanvasWidgetTextReconcileEntry,
+    previous: *const CanvasWidgetTextEntryIndex,
 ) canvas.WidgetLayoutNode {
     var copy = node;
     if (copy.widget.id == 0) return copy;
@@ -585,30 +649,32 @@ pub fn canvasWidgetLayoutNodeWithTextReconcileState(
     if (copy.widget.kind == .text) {
         // Static text selections survive rebuilds only while the source
         // text is byte-identical; changed text drops the selection.
-        for (previous) |entry| {
-            if (entry.id != copy.widget.id or entry.kind != copy.widget.kind) continue;
+        if (previous.firstWithKind(copy.widget.id, copy.widget.kind)) |entry| {
             if (copy.widget.text_selection == null and std.mem.eql(u8, entry.text, copy.widget.text)) {
                 copy.widget.text_selection = entry.text_selection;
             }
-            break;
         }
         return copy;
     }
     if (!canvasWidgetEditableTextKind(copy.widget.kind)) return copy;
 
-    for (previous) |entry| {
-        if (entry.id != copy.widget.id or entry.kind != copy.widget.kind) continue;
+    // NOTE: this pass's scan predicate has a third clause (the
+    // source-changed-and-text-diverged entry is SKIPPED, not matched), so
+    // the id/kind lookup alone is not the match — but retained trees hold
+    // at most one entry per (id, kind) (unique widget ids), so "first
+    // id/kind match, then apply the clause" resolves identically to the
+    // scan's "first entry passing all clauses".
+    if (previous.firstWithKind(copy.widget.id, copy.widget.kind)) |entry| {
         const next_source_text = canvasWidgetSourceTextFingerprint(copy.widget.text);
         const source_unchanged = entry.source_text_len == next_source_text.len and entry.source_text_hash == next_source_text.hash;
         const source_matches_runtime_text = std.mem.eql(u8, entry.text, copy.widget.text);
-        if (!source_unchanged and !source_matches_runtime_text) continue;
+        if (!source_unchanged and !source_matches_runtime_text) return copy;
         if (source_unchanged) copy.widget.text = entry.text;
         if (copy.widget.kind == .textarea) copy.widget.value = entry.value;
         if (copy.widget.text_selection == null and copy.widget.text_composition == null) {
             copy.widget.text_selection = entry.text_selection;
             copy.widget.text_composition = entry.text_composition;
         }
-        break;
     }
     return copy;
 }
@@ -671,12 +737,18 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
         try canvas.relayoutSplitChildren(staged_nodes[index].widget, node.frame, index, node.depth, node_buffer, tokens);
     }
 
+    const index_scratch = &canvas_widget_reconcile_index_scratch;
+    index_scratch.controls.build(previous_control_states);
+    index_scratch.source_controls.build(previous_source_control_entries);
+    index_scratch.texts.build(previous_text_states);
+    index_scratch.semantics.build(source_semantics);
+
     const staged = canvas.WidgetLayoutTree{ .nodes = staged_nodes };
     for (staged_nodes, 0..) |node, index| {
-        const text_copy = canvasWidgetLayoutNodeWithTextReconcileState(node, staged, index, previous_text_states);
-        const control_copy = canvasWidgetLayoutNodeWithControlReconcileState(text_copy, staged, index, previous_control_states, previous_source_control_entries);
+        const text_copy = canvasWidgetLayoutNodeWithTextReconcileState(node, staged, index, &index_scratch.texts);
+        const control_copy = canvasWidgetLayoutNodeWithControlReconcileState(text_copy, staged, index, &index_scratch.controls, &index_scratch.source_controls);
         const scroll_copy = canvasWidgetLayoutNodeWithScrollReconcileState(control_copy, previous_runtime_offsets, previous_source_scroll_entries);
-        node_buffer[index] = canvasWidgetLayoutNodeWithSourceSemantics(scroll_copy, source_semantics);
+        node_buffer[index] = canvasWidgetLayoutNodeWithSourceSemantics(scroll_copy, &index_scratch.semantics);
     }
     const reconciled = node_buffer[0..next.nodes.len];
     clampCanvasWidgetLayoutScrollOffsets(reconciled, null);
@@ -686,10 +758,10 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
 
 pub fn canvasWidgetLayoutNodeWithSourceSemantics(
     node: canvas.WidgetLayoutNode,
-    source_semantics: []const canvas.WidgetSemanticsNode,
+    source_semantics: *const CanvasWidgetSemanticsIndex,
 ) canvas.WidgetLayoutNode {
     var copy = node;
-    if (canvasWidgetSemanticsById(source_semantics, node.widget.id)) |semantic_node| {
+    if (source_semantics.first(node.widget.id)) |semantic_node| {
         if (semantic_node.list.present) {
             copy.widget.semantics.list_item_index = semantic_node.list.item_index;
             copy.widget.semantics.list_item_count = semantic_node.list.item_count;
@@ -700,10 +772,10 @@ pub fn canvasWidgetLayoutNodeWithSourceSemantics(
 
 pub fn applyCanvasWidgetSourceScrollSemantics(
     nodes: []canvas.WidgetSemanticsNode,
-    source_semantics: []const canvas.WidgetSemanticsNode,
+    source_semantics: *const CanvasWidgetSemanticsIndex,
 ) void {
     for (nodes) |*node| {
-        const source = canvasWidgetSemanticsById(source_semantics, node.id) orelse continue;
+        const source = source_semantics.first(node.id) orelse continue;
         if (!source.scroll.present) continue;
         node.value = source.value;
         node.scroll = source.scroll;

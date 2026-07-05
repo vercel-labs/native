@@ -6,6 +6,7 @@ const token_model = @import("tokens.zig");
 const widget_model = @import("widgets.zig");
 const event_model = @import("events.zig");
 const equality_model = @import("equality.zig");
+const plan_key_index = @import("plan_key_index.zig");
 const widget_tree = @import("widget_tree.zig");
 const widget_render = @import("widget_render.zig");
 const widget_render_style = @import("widget_render_style.zig");
@@ -82,14 +83,29 @@ fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
 }
 
 pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTokens, output: []WidgetInvalidation) Error![]const WidgetInvalidation {
-    try validateUniqueWidgetIds(previous);
-    try validateUniqueWidgetIds(next);
+    // Id lookups ride the probe-table index whenever the trees are big
+    // enough to be worth a table reset and fit its half-full bound;
+    // otherwise the linear scans run as before. Same invalidations
+    // either way — the index build performs exactly the duplicate
+    // validation the linear path runs up front.
+    const use_index = (previous.nodes.len >= plan_key_index.min_entries_for_index or
+        next.nodes.len >= plan_key_index.min_entries_for_index) and
+        plan_key_index.fitsHashSlots(diff_widget_id_index_slots, previous.nodes.len) and
+        plan_key_index.fitsHashSlots(diff_widget_id_index_slots, next.nodes.len);
+    if (use_index) {
+        try buildDiffWidgetIdIndex(previous, &diff_previous_widget_id_index);
+        try buildDiffWidgetIdIndex(next, &diff_next_widget_id_index);
+    } else {
+        try validateUniqueWidgetIds(previous);
+        try validateUniqueWidgetIds(next);
+    }
 
     var len: usize = 0;
     for (previous.nodes, 0..) |previous_node, previous_index| {
         const id = previous_node.widget.id;
         if (id == 0) continue;
-        const next_ref = findWidgetNodeById(next, id) orelse {
+        const next_lookup = if (use_index) findWidgetNodeByIdIndexed(next, &diff_next_widget_id_index, id) else findWidgetNodeById(next, id);
+        const next_ref = next_lookup orelse {
             try appendWidgetInvalidation(output, &len, .{
                 .kind = .removed,
                 .id = id,
@@ -124,7 +140,8 @@ pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTok
     for (next.nodes, 0..) |next_node, next_index| {
         const id = next_node.widget.id;
         if (id == 0) continue;
-        if (findWidgetNodeById(previous, id) == null) {
+        const previous_lookup = if (use_index) findWidgetNodeByIdIndexed(previous, &diff_previous_widget_id_index, id) else findWidgetNodeById(previous, id);
+        if (previous_lookup == null) {
             try appendWidgetInvalidation(output, &len, .{
                 .kind = .added,
                 .id = id,
@@ -155,6 +172,38 @@ fn findWidgetNodeById(layout: anytype, id: ObjectId) ?WidgetNodeRef {
     if (id == 0) return null;
     for (layout.nodes, 0..) |node, index| {
         if (node.widget.id == id) return .{ .index = index, .node = node };
+    }
+    return null;
+}
+
+/// Probe-table scratch for the keyed widget diff (see plan_key_index.zig):
+/// sized for the runtime's per-view node budget (1024) at the half-full
+/// bound; small or oversized trees keep the linear scans.
+const diff_widget_id_index_slots = 2048;
+const DiffWidgetIdIndex = plan_key_index.HashSlots(diff_widget_id_index_slots);
+threadlocal var diff_previous_widget_id_index: DiffWidgetIdIndex = .{};
+threadlocal var diff_next_widget_id_index: DiffWidgetIdIndex = .{};
+
+/// Fill `table` with the keyed nodes' id->index mapping, erroring on the
+/// duplicate ids `validateUniqueWidgetIds` rejects — one pass does both
+/// jobs.
+fn buildDiffWidgetIdIndex(layout: anytype, table: *DiffWidgetIdIndex) Error!void {
+    table.reset();
+    for (layout.nodes, 0..) |node, index| {
+        const id = node.widget.id;
+        if (id == 0) continue;
+        var probe = DiffWidgetIdIndex.probe(plan_key_index.mixHash(id));
+        while (table.next(&probe)) |candidate| {
+            if (layout.nodes[candidate].widget.id == id) return error.DuplicateWidgetId;
+        }
+        table.insert(probe, @intCast(index));
+    }
+}
+
+fn findWidgetNodeByIdIndexed(layout: anytype, table: *const DiffWidgetIdIndex, id: ObjectId) ?WidgetNodeRef {
+    var probe = DiffWidgetIdIndex.probe(plan_key_index.mixHash(id));
+    while (table.next(&probe)) |candidate| {
+        if (layout.nodes[candidate].widget.id == id) return .{ .index = candidate, .node = layout.nodes[candidate] };
     }
     return null;
 }
