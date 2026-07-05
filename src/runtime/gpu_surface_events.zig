@@ -18,8 +18,12 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
     return struct {
         pub fn dispatchGpuSurfaceFrame(self: *Runtime, app: runtime_api.App(Runtime), frame_event: platform.GpuSurfaceFrameEvent) anyerror!void {
             var enriched_frame_event = frame_event;
+            var had_pending_input = false;
             if (runtimeFindViewIndex(self, frame_event.window_id, frame_event.label)) |index| {
-                const had_pending_input = self.views[index].gpu_pending_input_timestamp_ns != 0;
+                had_pending_input = self.views[index].gpu_pending_input_timestamp_ns != 0;
+                // The requested frame arrived: deferred accessibility
+                // publishes flush after this event's present (below).
+                self.views[index].gpu_canvas_frame_requested = false;
                 const first_frame_latency_was_recorded = self.views[index].gpu_first_frame_latency_recorded;
                 if (!sizesEqual(self.views[index].gpu_size, frame_event.size) or self.views[index].gpu_scale_factor != frame_event.scale_factor) {
                     self.views[index].presented_canvas_valid = false;
@@ -30,7 +34,6 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 self.views[index].gpu_timestamp_ns = frame_event.timestamp_ns;
                 self.views[index].recordGpuSurfaceFrameInterval(frame_event.frame_interval_ns);
                 self.views[index].recordGpuSurfaceFirstFrameLatency(frame_event.timestamp_ns);
-                self.views[index].recordGpuSurfaceInputLatencyForFrame(frame_event.timestamp_ns);
                 // Host-stamped packet decode/draw splits ride the frame
                 // event (zero on completion-only frames): feed the frame
                 // profile's host stages while profiling is on.
@@ -42,21 +45,19 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // republish when the runtime is invalidated, and a frame
                 // completion carrying a NEW discrete fact may have no
                 // other invalidation source, leaving the published
-                // snapshot stale forever. Three such facts invalidate:
+                // snapshot stale forever. Two such facts invalidate here
+                // (a third — a resolved input latency — is checked after
+                // the app dispatch below, where the responding present
+                // stamps it):
                 //   - the host-reported nonblank verdict changed (the
                 //     first nonblank presentation on an idle boot has no
                 //     resize and no input to piggyback on);
-                //   - this frame resolved a pending input into a recorded
-                //     input latency (an occluded window's click otherwise
-                //     never publishes the latency the perf harness waits
-                //     on);
                 //   - this frame recorded the first-frame latency.
                 // Steady-state frames carry no new fact and stay quiet —
                 // a timer-mode surface must not republish observable
                 // state 60 times a second.
-                const input_latency_recorded = had_pending_input and self.views[index].gpu_pending_input_timestamp_ns == 0;
                 const first_frame_latency_recorded = !first_frame_latency_was_recorded and self.views[index].gpu_first_frame_latency_recorded;
-                if (self.views[index].gpu_frame_nonblank != frame_event.nonblank or input_latency_recorded or first_frame_latency_recorded) {
+                if (self.views[index].gpu_frame_nonblank != frame_event.nonblank or first_frame_latency_recorded) {
                     self.invalidateFor(.state, self.views[index].frame);
                 }
                 self.views[index].gpu_frame_nonblank = frame_event.nonblank;
@@ -80,6 +81,24 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 ScrollDriverMethods().syncCanvasWidgetScrollDriversForView(self, index);
             }
             try self.dispatchEvent(app, .{ .gpu_surface_frame = enriched_frame_event });
+            // Post-present bookkeeping (the app's present ran inside the
+            // dispatch above; the view may have moved, so re-resolve it):
+            //   - gpu_input_latency stamps at the RESPONDING present's
+            //     completion (the present paths stamp it synchronously);
+            //     an input that presented nothing falls back to this
+            //     completion event's timestamp, the old pacing-channel
+            //     semantics. Either way a resolved latency is a new
+            //     discrete fact for observable snapshots.
+            //   - accessibility publishes the input dispatch deferred off
+            //     the glass path flush here, after the pixels moved.
+            if (runtimeFindViewIndex(self, frame_event.window_id, frame_event.label)) |index| {
+                self.views[index].recordGpuSurfaceInputLatencyForFrame(frame_event.timestamp_ns);
+                const input_latency_recorded = had_pending_input and self.views[index].gpu_pending_input_timestamp_ns == 0;
+                if (input_latency_recorded) {
+                    self.invalidateFor(.state, self.views[index].frame);
+                }
+            }
+            try CanvasWidgetDisplayMethods().flushDeferredCanvasWidgetAccessibility(self);
         }
 
         pub fn dispatchGpuSurfaceResized(self: *Runtime, app: runtime_api.App(Runtime), resize_event: platform.GpuSurfaceResizeEvent) anyerror!void {
@@ -117,6 +136,14 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 try self.dispatchEvent(app, .{ .gpu_surface_input = input_event });
                 return;
             }
+            // Accessibility publishes requested anywhere inside this
+            // dispatch (widget-state refreshes, the Msg rebuild's
+            // emission) defer to after the responding present: the
+            // platform publish is the single largest pre-present cost a
+            // click pays (~2 ms of host tree assembly on live macOS) and
+            // semantics consumers tolerate milliseconds.
+            self.canvas_widget_accessibility_defer_depth += 1;
+            defer self.canvas_widget_accessibility_defer_depth -= 1;
             var canvas_widget_refresh_batch_active = canvasWidgetInputBatchesDisplayListRefresh(input_event.kind);
             if (canvas_widget_refresh_batch_active) CanvasWidgetDisplayMethods().beginCanvasWidgetDisplayListRefreshBatch(self);
             // The batch now spans the app dispatches below, so an error
@@ -278,6 +305,11 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 try CanvasWidgetDisplayMethods().endCanvasWidgetDisplayListRefreshBatch(self);
                 canvas_widget_refresh_batch_active = false;
             }
+            // Deferred accessibility publishes with a frame in flight
+            // ride that frame's post-present flush; ones without (this
+            // input changed semantics but no pixels) publish now — there
+            // is no present to protect.
+            try CanvasWidgetDisplayMethods().settleDeferredCanvasWidgetAccessibility(self);
         }
 
         /// Drain the view's pending scroll-event set into

@@ -654,10 +654,15 @@ test "runtime dispatches GPU surface events" {
     } });
     try std.testing.expectEqual(@as(u32, 3), app_state.frame_count);
     try std.testing.expectEqual(@as(u64, 50_000_000), app_state.last_input_timestamp_ns);
-    try std.testing.expectEqual(@as(u64, 20_000_000), app_state.last_input_latency_ns);
+    // The latency stamps at the responding present's completion (or,
+    // with no present in this dispatch, at the completion event AFTER
+    // the app observed the frame), so the frame event that resolves a
+    // pending input carries the PREVIOUS latency; the resolved value is
+    // readable immediately after dispatch and rides the next event.
+    try std.testing.expectEqual(@as(u64, 0), app_state.last_input_latency_ns);
     try std.testing.expectEqual(@as(u64, 8_333_333), app_state.last_input_latency_budget_ns);
-    try std.testing.expectEqual(@as(usize, 1), app_state.last_input_latency_budget_exceeded_count);
-    try std.testing.expect(!app_state.last_input_latency_budget_ok);
+    try std.testing.expectEqual(@as(usize, 0), app_state.last_input_latency_budget_exceeded_count);
+    try std.testing.expect(app_state.last_input_latency_budget_ok);
     try std.testing.expectEqual(@as(u64, 8_333_333), app_state.last_frame_interval_ns);
 
     const latency_frame = try harness.runtime.gpuSurfaceFrame(1, "canvas");

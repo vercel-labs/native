@@ -231,6 +231,12 @@ pub const Runtime = struct {
     /// `context_menu_action` event. At most one menu tracks at a time.
     canvas_widget_context_menu_pending: ?runtime_canvas_widget_context_menu.PendingCanvasWidgetContextMenu = null,
     canvas_widget_display_list_refresh_batch_depth: usize = 0,
+    /// Nonzero while a gpu-surface input dispatch is live: accessibility
+    /// publishes requested inside it defer to after the responding
+    /// present (the platform publish is milliseconds-tolerant; the glass
+    /// is not). Depth-counted because automation gestures nest input
+    /// dispatches.
+    canvas_widget_accessibility_defer_depth: usize = 0,
     // Scratch for setCanvasWidgetLayout's reconcile pass: too large for the
     // stack at the current node cap, and the event loop is single-threaded.
     canvas_widget_reconcile_nodes: [canvas_limits.max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,

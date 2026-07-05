@@ -140,6 +140,11 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
 
             if (canvasWidgetAccessibilitySemanticAction(action.action)) |semantic_action| {
                 if (try AutomationWidgetMethods(Runtime).dispatchCanvasWidgetSemanticControlAction(self, app, index, action.id, semantic_action, actions)) {
+                    // The AX client that initiated this action reads the
+                    // platform tree next: force-flush the publish the
+                    // gesture's refresh batch deferred so it observes the
+                    // post-action tree, not the pre-action one.
+                    try CanvasWidgetDisplayMethods(Runtime).flushDeferredCanvasWidgetAccessibility(self);
                     return self.views[index].info();
                 }
             }
@@ -160,6 +165,10 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 .drop_files => try AutomationWidgetMethods(Runtime).dispatchAutomationCanvasWidgetFileDrop(self, app, index, action.id, action.text),
                 .dismiss => try AutomationWidgetMethods(Runtime).dismissAutomationCanvasWidget(self, app, index, action.id),
             }
+            // Key-driven action routes above dispatch real input events
+            // whose refresh batches defer the platform publish; the AX
+            // client reads the tree next, so force-flush here too.
+            try CanvasWidgetDisplayMethods(Runtime).flushDeferredCanvasWidgetAccessibility(self);
             return self.views[index].info();
         }
 

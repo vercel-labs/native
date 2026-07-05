@@ -66,6 +66,12 @@ const TestRetainedHost = struct {
         _ = try cursor.readU8(); // reserved
         const generation = try cursor.readU64();
         if (flags & 0x01 != 0) try cursor.skip(16); // scissor
+        if (flags & 0x02 != 0) { // v3 dirty rect list
+            const dirty_rect_count = try cursor.readU32();
+            try std.testing.expect(dirty_rect_count >= 1);
+            try std.testing.expect(dirty_rect_count <= canvas.max_canvas_frame_dirty_rects);
+            try cursor.skip(@as(usize, dirty_rect_count) * 16);
+        }
         // images + image actions
         const image_count = try cursor.readU32();
         try cursor.skip(@as(usize, image_count) * 24);
@@ -470,6 +476,76 @@ test "patch presents carry only the change and the snapshot reports the mode" {
     try std.testing.expect(std.mem.indexOf(u8, snapshot_writer.buffered(), "present_mode=patch") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot_writer.buffered(), "present_patch_upserts=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot_writer.buffered(), "present_retained_commands=13") != null);
+}
+
+test "rebuild dirty bounds derive from the patch edit script, not the window" {
+    // A Msg-driven rebuild replaces the whole display list; the presented
+    // summary cannot compare content, so historically the frame's dirty
+    // bounds degraded to the full window even when the retained-patch
+    // diff knew exactly one command changed. With a valid baseline the
+    // planner now derives dirty bounds from that SAME edit script.
+    var app_state: PatchHarnessApp = .{};
+    const harness = try createPatchHarness(&app_state);
+    defer harness.destroy(std.testing.allocator);
+    var buffers = try PresentBuffers.init(std.testing.allocator);
+    defer buffers.deinit(std.testing.allocator);
+
+    // 72 keyed rects (past the small-list gate) in a 8-wide grid.
+    var rects: [72]canvas.CanvasCommand = undefined;
+    const buildGrid = struct {
+        fn rectAt(index: usize) geometry.RectF {
+            const col: f32 = @floatFromInt(index % 8);
+            const row: f32 = @floatFromInt(index / 8);
+            return geometry.RectF.init(col * 38 + 2, row * 24 + 2, 30, 18);
+        }
+    };
+    for (&rects, 0..) |*command, index| {
+        command.* = .{ .fill_rect = .{
+            .id = @intCast(3_000 + index),
+            .rect = buildGrid.rectAt(index),
+            .fill = .{ .color = canvas.Color.rgb8(30, 41, 59) },
+        } };
+    }
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &rects });
+    const baseline = try presentFrame(harness, &buffers, 60);
+    try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, baseline.mode);
+    try std.testing.expect(harness.runtime.views[0].canvas_packet_baseline_valid);
+
+    // Rebuild with ONE color change: dirty is that command's rect, the
+    // present is a one-upsert patch, and the wire scissor matches.
+    rects[13].fill_rect.fill = .{ .color = canvas.Color.rgb8(37, 99, 235) };
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &rects });
+    const toggled = try presentFrame(harness, &buffers, 61);
+    try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, toggled.mode);
+    try std.testing.expectEqualDeep(buildGrid.rectAt(13), toggled.frame.dirty_bounds.?);
+    try std.testing.expectEqual(platform.GpuPresentPacketMode.patch, harness.runtime.views[0].gpu_present_packet_mode);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].gpu_present_patch_upsert_count);
+
+    // Rebuild that MOVES a command: dirty covers old and new extents.
+    const moved_from = buildGrid.rectAt(20);
+    const moved_to = geometry.RectF.init(moved_from.x + 60, moved_from.y + 30, 30, 18);
+    rects[20].fill_rect.rect = moved_to;
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &rects });
+    const moved = try presentFrame(harness, &buffers, 62);
+    try std.testing.expectEqualDeep(geometry.RectF.unionWith(moved_from, moved_to), moved.frame.dirty_bounds.?);
+
+    // Identical rebuild (revision bumps, content does not): the edit
+    // script is empty, so nothing presents at all.
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &rects });
+    const unchanged = try presentFrame(harness, &buffers, 63);
+    try std.testing.expectEqual(CanvasPresentationMode.skipped, unchanged.mode);
+
+    // Reordering unchanged commands defeats a bounds union (overlap
+    // pixels depend on z-order): refinement refuses and the frame keeps
+    // the conservative summary dirty covering the keyed scene.
+    const swap = rects[0];
+    rects[0] = rects[1];
+    rects[1] = swap;
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &rects });
+    const reordered = try presentFrame(harness, &buffers, 64);
+    try std.testing.expect(reordered.frame.dirty_bounds != null);
+    try std.testing.expect(reordered.frame.dirty_bounds.?.width > 200);
+    try std.testing.expect(reordered.frame.dirty_bounds.?.height > 100);
 }
 
 test "a host that refuses patches gets a full resync in the same frame" {

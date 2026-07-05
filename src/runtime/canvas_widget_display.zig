@@ -111,11 +111,16 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
 
         pub fn beginCanvasWidgetDisplayListRefreshBatch(self: *Runtime) void {
             self.canvas_widget_display_list_refresh_batch_depth += 1;
+            // Batched refreshes belong to an input/gesture cycle whose
+            // present follows immediately: their accessibility publishes
+            // defer past that present (see publishCanvasWidgetAccessibility).
+            self.canvas_widget_accessibility_defer_depth += 1;
         }
 
         pub fn cancelCanvasWidgetDisplayListRefreshBatch(self: *Runtime) void {
             if (self.canvas_widget_display_list_refresh_batch_depth == 0) return;
             self.canvas_widget_display_list_refresh_batch_depth -= 1;
+            self.canvas_widget_accessibility_defer_depth -= 1;
             if (self.canvas_widget_display_list_refresh_batch_depth != 0) return;
             for (0..self.canvas_widget_display_list_refresh_pending.len) |index| {
                 self.canvas_widget_display_list_refresh_pending[index] = false;
@@ -126,6 +131,10 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         pub fn endCanvasWidgetDisplayListRefreshBatch(self: *Runtime) anyerror!void {
             if (self.canvas_widget_display_list_refresh_batch_depth == 0) return;
             self.canvas_widget_display_list_refresh_batch_depth -= 1;
+            // The deferral window stays open across the flush below, so
+            // the coalesced refresh's publish rides the post-present
+            // flush instead of the pre-present gesture dispatch.
+            defer self.canvas_widget_accessibility_defer_depth -= 1;
             if (self.canvas_widget_display_list_refresh_batch_depth != 0) return;
 
             const count = @min(self.view_count, self.canvas_widget_display_list_refresh_pending.len);
@@ -136,6 +145,10 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                 self.canvas_widget_accessibility_publish_pending[index] = false;
                 _ = try refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate(self, index, publish_accessibility);
             }
+            // Deferred publishes with a frame in flight ride that frame's
+            // post-present flush; ones without publish now (no present to
+            // protect).
+            try settleDeferredCanvasWidgetAccessibility(self);
         }
 
         pub fn advanceCanvasWidgetKineticScrollForFrame(self: *Runtime, view_index: usize, frame_interval_ns: u64, skip_step: bool) anyerror!void {
@@ -183,6 +196,10 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         }
 
         pub fn publishCanvasWidgetAccessibility(self: *Runtime, view_index: usize) anyerror!void {
+            return publishCanvasWidgetAccessibilityMaybeDeferred(self, view_index, true);
+        }
+
+        fn publishCanvasWidgetAccessibilityMaybeDeferred(self: *Runtime, view_index: usize, allow_deferral: bool) anyerror!void {
             if (view_index >= self.view_count) return;
             const view = &self.views[view_index];
             if (view.kind != .gpu_surface) return;
@@ -236,7 +253,24 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             // A failed publish records nothing, so the next refresh
             // retries.
             const published_hash = hashWidgetAccessibilityNodes(nodes[0..count]);
-            if (view.widget_accessibility_published and view.widget_accessibility_published_hash == published_hash) return;
+            if (view.widget_accessibility_published and view.widget_accessibility_published_hash == published_hash) {
+                view.widget_accessibility_publish_deferred = false;
+                return;
+            }
+            // A CHANGED tree publishing during an input dispatch (or a
+            // gesture's refresh batch) comes OFF the input-to-glass path:
+            // the platform publish (~2 ms of host tree assembly on live
+            // macOS) rides the post-present flush of the frame this input
+            // produces instead of delaying that frame. The fingerprint
+            // above already filtered unchanged trees, so deferral happens
+            // only when the platform would actually be called. Direct API
+            // callers (no input dispatch live) publish synchronously as
+            // always; the settle/flush paths pass allow_deferral=false.
+            if (allow_deferral and self.canvas_widget_accessibility_defer_depth > 0) {
+                view.widget_accessibility_publish_deferred = true;
+                return;
+            }
+            view.widget_accessibility_publish_deferred = false;
             try self.options.platform.services.updateWidgetAccessibility(.{
                 .window_id = view.window_id,
                 .view_label = view.label,
@@ -244,6 +278,33 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             });
             view.widget_accessibility_published = true;
             view.widget_accessibility_published_hash = published_hash;
+        }
+
+        /// Publish the accessibility trees an input dispatch deferred —
+        /// called after the responding present (frame dispatch, same
+        /// tick) and by any reader that needs the platform tree current
+        /// NOW (accessibility-action force-publish). No-op for views with
+        /// nothing deferred.
+        pub fn flushDeferredCanvasWidgetAccessibility(self: *Runtime) anyerror!void {
+            for (0..self.view_count) |view_index| {
+                if (!self.views[view_index].widget_accessibility_publish_deferred) continue;
+                self.views[view_index].widget_accessibility_publish_deferred = false;
+                try publishCanvasWidgetAccessibilityMaybeDeferred(self, view_index, false);
+            }
+        }
+
+        /// Settle deferrals that have no post-present flush coming: a
+        /// deferred publish whose view has a frame request in flight
+        /// rides that frame's flush; one without (the input changed
+        /// semantics but no pixels) publishes here — there is no present
+        /// to protect, so inline costs the glass nothing.
+        pub fn settleDeferredCanvasWidgetAccessibility(self: *Runtime) anyerror!void {
+            for (0..self.view_count) |view_index| {
+                if (!self.views[view_index].widget_accessibility_publish_deferred) continue;
+                if (self.views[view_index].gpu_canvas_frame_requested) continue;
+                self.views[view_index].widget_accessibility_publish_deferred = false;
+                try publishCanvasWidgetAccessibilityMaybeDeferred(self, view_index, false);
+            }
         }
 
         pub fn refreshCanvasWidgetDisplayList(self: *Runtime, view_index: usize) anyerror!bool {

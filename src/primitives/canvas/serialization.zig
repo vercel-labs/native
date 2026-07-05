@@ -973,10 +973,18 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 // full command list. Generation 0 means "do not retain": the host draws
 // the frame but never answers a later patch from it.
 //
+// v3 (from v2): flags bit1 introduces an optional DIRTY RECT LIST after
+// the scissor — the exact rects the frame's edit script touches, so a
+// patch whose changes sit at opposite window corners repaints (and
+// re-uploads) two small rects instead of their bounding union. The
+// scissor stays the union of the list (hosts may honor either; pixels
+// outside every rect are unchanged by construction).
+//
 // Layout:
 //   "NSGP" u8[4] | version u8 | load_action u8 (1 load / 2 clear /
-//     3 patch) | flags u8 (bit0 scissor) | reserved u8
+//     3 patch) | flags u8 (bit0 scissor, bit1 dirty rect list) | reserved u8
 //   | generation u64 | [scissor f32[4]]
+//   | [dirty_rect_count u32 | dirty rects f32[4][]]
 //   | image_count u32 | images { image_id u64, fingerprint u64,
 //       width u32, height u32 }
 //   | image_action_count u32 | actions { kind u8 (0 upload / 1 retain /
@@ -989,7 +997,13 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 //     | order_count u32 | order keys u64[]
 
 pub const binary_packet_magic = "NSGP";
-pub const binary_packet_version: u8 = 2;
+pub const binary_packet_version: u8 = 3;
+
+/// Most dirty rects a patch header carries: enough to keep far-apart
+/// small changes (a switch plus a status line) from fusing into a
+/// window-sized union, few enough that host-side per-rect clears,
+/// clips, culls, and texture uploads stay O(1) per command.
+pub const max_binary_packet_dirty_rects: usize = 8;
 
 /// Wire code for the `patch` load action (`CanvasRenderPassLoadAction`
 /// has no patch member — patches are a transport-level edit script, not
@@ -1134,6 +1148,7 @@ pub fn writeCanvasGpuPacketBinaryHeader(
     load_action_code: u8,
     generation: u64,
     scissor: ?geometry.RectF,
+    dirty_rects: []const geometry.RectF,
     images: []const RenderImage,
     image_actions: []const RenderImageCacheAction,
     writer: anytype,
@@ -1143,10 +1158,18 @@ pub fn writeCanvasGpuPacketBinaryHeader(
     try writer.writeByte(load_action_code);
     var flags: u8 = 0;
     if (scissor != null) flags |= 0x01;
+    // The dirty rect list refines a scissor; without one it means
+    // nothing, so it never rides alone.
+    const write_dirty_rects = scissor != null and dirty_rects.len > 0 and dirty_rects.len <= max_binary_packet_dirty_rects;
+    if (write_dirty_rects) flags |= 0x02;
     try writer.writeByte(flags);
     try writer.writeByte(0);
     try writer.writeInt(u64, generation, .little);
     if (scissor) |rect| try writeBinaryRect(rect, writer);
+    if (write_dirty_rects) {
+        try writer.writeInt(u32, @intCast(dirty_rects.len), .little);
+        for (dirty_rects) |rect| try writeBinaryRect(rect, writer);
+    }
 
     try writer.writeInt(u32, @intCast(images.len), .little);
     for (images) |image| {
@@ -1180,7 +1203,7 @@ pub fn writeCanvasGpuPacketBinary(packet: CanvasGpuPacket, writer: anytype) !voi
         .skip => 0,
         .load => 1,
         .clear => 2,
-    }, packet.generation, packet.scissor, packet.images, packet.image_actions, writer);
+    }, packet.generation, packet.scissor, &.{}, packet.images, packet.image_actions, writer);
 
     try writer.writeInt(u32, @intCast(packet.commands.len), .little);
     for (packet.commands) |command| {

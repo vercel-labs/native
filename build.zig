@@ -1633,7 +1633,13 @@ pub fn build(b: *std.Build) void {
         \\if [ "$input_timestamp" -le 0 ]; then echo "components GPU input timestamp was not recorded" >&2; exit 1; fi
         \\input_latency="$(printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/components-canvas kind=gpu_surface.* gpu_input_latency_ns=\([0-9][0-9]*\).*/\1/p')"
         \\case "$input_latency" in ''|*[!0-9]*) echo "components GPU input latency was missing after widget interaction" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'gpu_input_latency_budget_exceeded=0'*'gpu_input_latency_budget_ok=true'*) ;; *) echo "components GPU input latency exceeded the frame budget" >&2; exit 1 ;; esac
+        \\# gpu_input_latency now stamps at the RESPONDING present's completion
+        \\# (input to glass), which legitimately spans the paced render wait —
+        \\# up to a couple of display intervals while animations hold the paced
+        \\# loop. Assert an explicit input-to-glass bound (the perf harness
+        \\# budgets the same channel at 100 ms) instead of the one-interval
+        \\# budget flag the old completion-channel stamp happened to satisfy.
+        \\if [ "$input_latency" -le 0 ] || [ "$input_latency" -gt 100000000 ]; then echo "components GPU input-to-glass latency was implausible: $input_latency ns" >&2; exit 1; fi
         \\echo "gpu-components smoke ok"
         ,
         "sh",

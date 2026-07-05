@@ -8,6 +8,11 @@ const frame_metrics = @import("frame_metrics.zig");
 
 const Error = canvas.Error;
 const DiffChange = canvas.DiffChange;
+
+/// Mirrors `serialization.max_binary_packet_dirty_rects`: the frame
+/// planner never produces more refined dirty rects than the retained
+/// patch header can carry.
+pub const max_canvas_frame_dirty_rects: usize = serialization.max_binary_packet_dirty_rects;
 const DisplayList = canvas.DisplayList;
 const ReferenceImage = canvas.ReferenceImage;
 const default_glyph_atlas_cache_retention_frames = canvas.default_glyph_atlas_cache_retention_frames;
@@ -301,7 +306,18 @@ pub const CanvasFrame = struct {
     image_resources: []const ReferenceImage = &.{},
     changes: []const DiffChange = &.{},
     dirty_bounds: ?geometry.RectF = null,
+    /// Optional refinement of `dirty_bounds`: the exact rects this
+    /// frame's changes touch (each inside `dirty_bounds`, which stays
+    /// their union). Zero means "no list" — consumers use the single
+    /// rect. Retained patch presents ship the list so far-apart small
+    /// changes do not repaint their bounding union.
+    dirty_rects: [max_canvas_frame_dirty_rects]geometry.RectF = undefined,
+    dirty_rect_count: usize = 0,
     budget: CanvasFrameBudget = .{},
+
+    pub fn dirtyRects(self: *const CanvasFrame) []const geometry.RectF {
+        return self.dirty_rects[0..self.dirty_rect_count];
+    }
 
     pub fn requiresRender(self: CanvasFrame) bool {
         return self.full_repaint or self.dirty_bounds != null;

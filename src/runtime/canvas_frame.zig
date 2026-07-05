@@ -31,6 +31,7 @@ pub const platformCanvasFrameProfileRisk = canvas_frame_helpers.platformCanvasFr
 pub const gpuSurfaceFrameEventFromGpuFrame = canvas_frame_helpers.gpuSurfaceFrameEventFromGpuFrame;
 
 const runtime_api = @import("api.zig");
+const runtime_clock = @import("clock.zig");
 const validation = @import("validation.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const runtime_view = @import("view.zig");
@@ -49,11 +50,15 @@ threadlocal var canvas_frame_text_layout_cache_actions_scratch: [max_canvas_text
 /// One entry of the frame's CURRENT keyed command list — the full draw
 /// order the retained packet protocol works on (never the scissor
 /// subset). `render_index` points back into the frame's render plan so
-/// upserts re-encode only the commands that changed.
+/// upserts re-encode only the commands that changed; `bounds` is the
+/// resolved render bounds, mirrored into the retained baseline so the
+/// next frame's patch-derived dirty rect can name the pixels an upsert
+/// or evict vacates.
 const CanvasPacketCurrentCommand = struct {
     key: u64,
     fingerprint: u64,
     render_index: u32,
+    bounds: geometry.RectF,
 };
 
 // Patch-derivation scratch (threadlocal, same pattern as the text-layout
@@ -65,6 +70,7 @@ threadlocal var canvas_packet_current_scratch: [max_canvas_retained_packet_comma
 threadlocal var canvas_packet_current_sort_scratch: [max_canvas_retained_packet_commands_per_view]u32 = undefined;
 threadlocal var canvas_packet_baseline_sort_scratch: [max_canvas_retained_packet_commands_per_view]u32 = undefined;
 threadlocal var canvas_packet_baseline_matched_scratch: [max_canvas_retained_packet_commands_per_view]bool = undefined;
+threadlocal var canvas_packet_baseline_stable_scratch: [max_canvas_retained_packet_commands_per_view]bool = undefined;
 threadlocal var canvas_packet_upsert_scratch: [max_canvas_retained_packet_commands_per_view]bool = undefined;
 
 const validateViewLabel = validation.validateViewLabel;
@@ -259,6 +265,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 // through the packet path. A failed attempt never stamps.
                 self.views[index].gpu_present_path = .packet;
                 clearCanvasPacketFallback(&self.views[index]);
+                recordCanvasPresentInputLatency(&self.views[index]);
             }
             return packet;
         }
@@ -314,6 +321,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                                 self.views[index].recordCanvasFramePresentationComplete(canvas_frame);
                                 self.views[index].gpu_present_path = .packet;
                                 clearCanvasPacketFallback(&self.views[index]);
+                                recordCanvasPresentInputLatency(&self.views[index]);
                             }
                             return result;
                         }
@@ -392,6 +400,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 // through the pixel path (covers the direct pixel entry
                 // points and the packet-fallback route alike).
                 self.views[index].gpu_present_path = .pixels;
+                recordCanvasPresentInputLatency(&self.views[index]);
                 // Pixels on the glass no longer match the retained
                 // command dictionary (the host drops its copy on pixel
                 // presents too): the next packet present must be FULL.
@@ -948,10 +957,52 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 storage.changes[0..0]
             else
                 try self.views[index].diffPresentedCanvasSummary(storage.changes);
+            var dirty_rects: [canvas.max_canvas_frame_dirty_rects]geometry.RectF = undefined;
+            var dirty_rect_count: usize = 0;
             const dirty_bounds = if (full_repaint)
                 canvasFullRepaintBounds(frame_options.surface_size, render_plan.bounds)
-            else
-                clippedCanvasDirtyBounds(unionRects(canvasDirtyBoundsFromChanges(changes), unionRects(render_override_dirty_bounds, render_animation_dirty_bounds)), frame_options.surface_size);
+            else dirty: {
+                const overrides_dirty = unionRects(render_override_dirty_bounds, render_animation_dirty_bounds);
+                // Msg rebuilds: the presented summary records ids and
+                // bounds but not content, so a rebuild marks every keyed
+                // command changed and the dirty rect degrades to the
+                // window even when only a handful of commands differ.
+                // When the view holds a valid retained baseline for this
+                // exact surface, derive the dirty rect from the SAME
+                // key+fingerprint edit script the patch present ships —
+                // the changed commands' union (old and new extents), not
+                // the view — and keep the per-change rect clusters so
+                // far-apart changes present as a dirty rect LIST instead
+                // of their bounding union. Refused refinements (no
+                // baseline, unkeyable list, z-order shuffle of unchanged
+                // commands) keep the conservative summary union below.
+                if (canvas_changed and
+                    render_plan.commandCount() >= canvas.plan_key_index.min_entries_for_index and
+                    self.views[index].canvas_packet_baseline_valid and
+                    sizesEqual(self.views[index].canvas_packet_baseline_surface_size, frame_options.surface_size) and
+                    self.views[index].canvas_packet_baseline_scale == frame_options.scale)
+                {
+                    if (gatherCanvasPacketCurrentCommandsFromPlan(render_plan.commands, frame_options.surface_size, render_plan.bounds)) |current| {
+                        if (canvasPacketPatchDirtyBounds(&self.views[index], current)) |patch_dirty| {
+                            var refined = patch_dirty;
+                            if (overrides_dirty) |overrides_rect| refined.add(overrides_rect);
+                            const clipped = clippedCanvasDirtyBounds(refined.bounds, frame_options.surface_size);
+                            // A list of one rect adds nothing over the
+                            // scissor; ship it only when it splits.
+                            if (clipped != null and refined.rect_count > 1) {
+                                for (refined.rects[0..refined.rect_count]) |rect| {
+                                    const clipped_rect = clippedCanvasDirtyBounds(rect, frame_options.surface_size) orelse continue;
+                                    dirty_rects[dirty_rect_count] = clipped_rect;
+                                    dirty_rect_count += 1;
+                                }
+                                if (dirty_rect_count < 2) dirty_rect_count = 0;
+                            }
+                            break :dirty clipped;
+                        }
+                    }
+                }
+                break :dirty clippedCanvasDirtyBounds(unionRects(canvasDirtyBoundsFromChanges(changes), overrides_dirty), frame_options.surface_size);
+            };
 
             const canvas_frame = canvas.CanvasFrame{
                 .frame_index = frame_options.frame_index,
@@ -980,6 +1031,8 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 .image_resources = frame_options.image_resources,
                 .changes = changes,
                 .dirty_bounds = dirty_bounds,
+                .dirty_rects = dirty_rects,
+                .dirty_rect_count = dirty_rect_count,
                 .budget = frame_options.budget,
             };
             if (record) {
@@ -1076,6 +1129,9 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 error.UnsupportedService => return,
                 else => return err,
             };
+            // A frame event is now coming for this view — the deferred
+            // accessibility settle logic keys off this.
+            self.views[view_index].gpu_canvas_frame_requested = true;
         }
 
         pub fn invalidateForCanvasChanges(self: *Runtime, view_frame: geometry.RectF, changes: []const canvas.DiffChange) void {
@@ -1107,6 +1163,18 @@ const CanvasPacketPatchStats = struct {
     evict_count: usize = 0,
 };
 
+/// Stamp `gpu_input_latency` at the RESPONDING present's completion:
+/// the present call above just returned synchronously, so the wall
+/// clock NOW (the domain every host and automation input timestamp
+/// uses) is the moment the input's pixels reached the swapchain. The
+/// paced completion event that used to stamp this arrives up to a
+/// frame interval later and measured the pacing channel, not the
+/// glass; it remains the fallback for inputs that present nothing.
+fn recordCanvasPresentInputLatency(view: anytype) void {
+    if (view.gpu_pending_input_timestamp_ns == 0) return;
+    view.recordGpuSurfaceInputLatencyForFrame(runtime_clock.timestampToU64(runtime_clock.nowNanoseconds()));
+}
+
 /// Build the frame's CURRENT keyed command list — every supported render
 /// command intersecting the full-repaint bounds, in draw order, with its
 /// retain key and content fingerprint. This is the exact set a full
@@ -1119,8 +1187,15 @@ const CanvasPacketPatchStats = struct {
 /// duplicate retain keys (which would corrupt a keyed dictionary) — those
 /// frames present through the non-retained encoding instead.
 fn gatherCanvasPacketCurrentCommands(canvas_frame: canvas.CanvasFrame) ?[]const CanvasPacketCurrentCommand {
-    const render_commands = canvas_frame.render_plan.commands;
-    const full_bounds = canvasFullRepaintBounds(canvas_frame.surface_size, canvas_frame.render_plan.bounds) orelse return null;
+    return gatherCanvasPacketCurrentCommandsFromPlan(canvas_frame.render_plan.commands, canvas_frame.surface_size, canvas_frame.render_plan.bounds);
+}
+
+/// Plan-time twin of `gatherCanvasPacketCurrentCommands`: the frame
+/// planner derives Msg-rebuild dirty bounds from the same keyed list
+/// before the `CanvasFrame` value exists. Same inputs, same scratch,
+/// byte-identical output.
+fn gatherCanvasPacketCurrentCommandsFromPlan(render_commands: []const canvas.RenderCommand, surface_size: geometry.SizeF, render_bounds: ?geometry.RectF) ?[]const CanvasPacketCurrentCommand {
+    const full_bounds = canvasFullRepaintBounds(surface_size, render_bounds) orelse return null;
     var count: usize = 0;
     for (render_commands, 0..) |command, index| {
         if (!canvas.renderCommandIntersectsDirtyBounds(command, full_bounds)) continue;
@@ -1132,6 +1207,7 @@ fn gatherCanvasPacketCurrentCommands(canvas_frame: canvas.CanvasFrame) ?[]const 
             .key = canvas.canvasGpuPacketCommandKey(gpu_command, fingerprint),
             .fingerprint = fingerprint,
             .render_index = @intCast(index),
+            .bounds = command.bounds,
         };
         count += 1;
     }
@@ -1198,6 +1274,102 @@ fn computeCanvasPacketPatchStats(view: anytype, current: []const CanvasPacketCur
     return stats;
 }
 
+/// The pixels the retained-patch edit script can touch, derived from
+/// the SAME key+fingerprint diff the patch present ships: the union of
+/// every upserted command's current bounds, the baseline bounds of the
+/// key it replaces (content changed — the OLD pixels repaint too), and
+/// every evicted baseline entry's bounds (vacated pixels). `.{ .bounds
+/// = null }` means the edit script is empty — nothing visual changed.
+/// `rects` refines the union into up to `max_canvas_frame_dirty_rects`
+/// clusters so far-apart small changes (a switch plus a status line)
+/// stay two small repaints instead of a window-sized one. Returns null
+/// (refinement refused, caller keeps its conservative dirty) when
+/// unchanged commands moved relative to each other in draw order: a
+/// z-order shuffle changes pixels only where commands overlap, which a
+/// bounds union of the CHANGED set cannot name.
+const CanvasPacketPatchDirty = struct {
+    bounds: ?geometry.RectF = null,
+    rects: [canvas.max_canvas_frame_dirty_rects]geometry.RectF = undefined,
+    rect_count: usize = 0,
+
+    /// Fold `rect` in: union with the first intersecting cluster, a new
+    /// cluster while slots remain, else the cluster whose union grows
+    /// the least. `bounds` stays the union of everything added.
+    fn add(self: *CanvasPacketPatchDirty, rect: geometry.RectF) void {
+        const normalized = rect.normalized();
+        if (normalized.isEmpty()) return;
+        self.bounds = unionRects(self.bounds, normalized);
+        for (self.rects[0..self.rect_count]) |*cluster| {
+            if (cluster.intersects(normalized)) {
+                cluster.* = geometry.RectF.unionWith(cluster.*, normalized);
+                return;
+            }
+        }
+        if (self.rect_count < self.rects.len) {
+            self.rects[self.rect_count] = normalized;
+            self.rect_count += 1;
+            return;
+        }
+        var best_index: usize = 0;
+        var best_cost: f32 = std.math.floatMax(f32);
+        for (self.rects[0..self.rect_count], 0..) |cluster, index| {
+            const merged = geometry.RectF.unionWith(cluster, normalized);
+            const cost = merged.width * merged.height - cluster.width * cluster.height;
+            if (cost < best_cost) {
+                best_cost = cost;
+                best_index = index;
+            }
+        }
+        self.rects[best_index] = geometry.RectF.unionWith(self.rects[best_index], normalized);
+    }
+};
+
+fn canvasPacketPatchDirtyBounds(view: anytype, current: []const CanvasPacketCurrentCommand) ?CanvasPacketPatchDirty {
+    const baseline_count = view.canvas_packet_baseline_count;
+    const baseline_keys = view.canvas_packet_baseline_keys[0..baseline_count];
+    const baseline_fingerprints = view.canvas_packet_baseline_fingerprints[0..baseline_count];
+    const baseline_bounds = view.canvas_packet_baseline_bounds[0..baseline_count];
+
+    const baseline_sorted = canvas_packet_baseline_sort_scratch[0..baseline_count];
+    for (baseline_sorted, 0..) |*slot, index| slot.* = @intCast(index);
+    std.sort.pdq(u32, baseline_sorted, @as([]const u64, baseline_keys), canvasPacketBaselineKeyLessThan);
+    const matched = canvas_packet_baseline_matched_scratch[0..baseline_count];
+    const stable = canvas_packet_baseline_stable_scratch[0..baseline_count];
+    @memset(matched, false);
+    @memset(stable, false);
+
+    var dirty = CanvasPacketPatchDirty{};
+    for (current, 0..) |entry, index| {
+        canvas_packet_upsert_scratch[index] = true;
+        if (findCanvasPacketBaselineIndex(baseline_keys, baseline_sorted, entry.key)) |baseline_index| {
+            matched[baseline_index] = true;
+            if (baseline_fingerprints[baseline_index] == entry.fingerprint) {
+                stable[baseline_index] = true;
+                canvas_packet_upsert_scratch[index] = false;
+                continue;
+            }
+            dirty.add(baseline_bounds[baseline_index]);
+        }
+        dirty.add(entry.bounds);
+    }
+    for (matched, 0..) |flag, index| {
+        if (!flag) dirty.add(baseline_bounds[index]);
+    }
+
+    // Order guard: the unchanged (stable) keys must appear in the same
+    // relative draw order on both sides, or overlap-dependent pixels
+    // outside the union may change.
+    var baseline_walk: usize = 0;
+    for (current, 0..) |entry, index| {
+        if (canvas_packet_upsert_scratch[index]) continue;
+        while (baseline_walk < baseline_count and !stable[baseline_walk]) baseline_walk += 1;
+        if (baseline_walk >= baseline_count or baseline_keys[baseline_walk] != entry.key) return null;
+        baseline_walk += 1;
+    }
+
+    return dirty;
+}
+
 /// Encode the incremental `patch` present: evicts (baseline keys gone
 /// from the current list), keyed upserts (new or fingerprint-changed
 /// commands, re-encoded), and the full draw-order vector. Unchanged
@@ -1223,6 +1395,7 @@ fn writeCanvasPacketPatchBinary(
         canvas.binary_packet_load_action_patch,
         view.canvas_packet_generation,
         packet.scissor,
+        canvas_frame.dirtyRects(),
         packet.images,
         packet.image_actions,
         writer,
@@ -1256,7 +1429,7 @@ fn writeCanvasPacketFullBinary(
 ) !void {
     const scissor = canvasFullRepaintBounds(canvas_frame.surface_size, canvas_frame.render_plan.bounds);
     // Load-action wire code 2 = clear (see serialization.zig's layout).
-    try canvas.writeCanvasGpuPacketBinaryHeader(2, generation, scissor, packet.images, packet.image_actions, writer);
+    try canvas.writeCanvasGpuPacketBinaryHeader(2, generation, scissor, &.{}, packet.images, packet.image_actions, writer);
     try writer.writeInt(u32, @intCast(current.len), .little);
     const render_commands = canvas_frame.render_plan.commands;
     for (current) |entry| {
@@ -1285,6 +1458,7 @@ fn adoptCanvasPacketBaseline(view: anytype, current: []const CanvasPacketCurrent
     for (current, 0..) |entry, index| {
         view.canvas_packet_baseline_keys[index] = entry.key;
         view.canvas_packet_baseline_fingerprints[index] = entry.fingerprint;
+        view.canvas_packet_baseline_bounds[index] = entry.bounds;
     }
     view.canvas_packet_baseline_count = current.len;
     view.canvas_packet_baseline_surface_size = packet.surface_size;

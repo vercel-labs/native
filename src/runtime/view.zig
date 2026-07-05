@@ -132,6 +132,13 @@ pub const RuntimeView = struct {
     canvas_packet_baseline_scale: f32 = 1,
     canvas_packet_baseline_keys: [max_canvas_retained_packet_commands_per_view]u64 = undefined,
     canvas_packet_baseline_fingerprints: [max_canvas_retained_packet_commands_per_view]u64 = undefined,
+    /// Draw-order-parallel bounds of the retained baseline commands: the
+    /// pixels each retained command covered when it last reached the
+    /// glass. The frame planner derives Msg-rebuild dirty bounds from the
+    /// SAME edit script the patch present ships (upserts + evicts), and
+    /// an upsert/evict must repaint the command's OLD extent too — these
+    /// are those extents.
+    canvas_packet_baseline_bounds: [max_canvas_retained_packet_commands_per_view]geometry.RectF = undefined,
     /// Patch telemetry surfaced on the automation snapshot view line
     /// (present_mode= / present_patch_*= / present_retained_commands=).
     gpu_present_packet_mode: platform.GpuPresentPacketMode = .none,
@@ -267,6 +274,19 @@ pub const RuntimeView = struct {
     /// tree-assembly/publish cost on every refresh.
     widget_accessibility_published: bool = false,
     widget_accessibility_published_hash: u64 = 0,
+    /// A publish requested while a gpu-surface input dispatch was live:
+    /// the platform publish is deferred off the input-to-glass path and
+    /// flushed after the next presented frame (same tick, post-present) —
+    /// semantics consumers tolerate milliseconds, the glass should not
+    /// wait ~2 ms of host tree assembly. Deferrals with no frame in
+    /// flight settle synchronously at input-dispatch end instead (there
+    /// is no present to protect), so a deferral can never strand.
+    widget_accessibility_publish_deferred: bool = false,
+    /// A canvas frame request is in flight for this view (set by
+    /// `requestCanvasFrameForView`, cleared when its frame event
+    /// arrives): the signal that a deferred accessibility publish has a
+    /// post-present flush coming.
+    gpu_canvas_frame_requested: bool = false,
     widget_revision: u64 = 0,
     widget_tokens: canvas.DesignTokens = .{},
     widget_scroll_states: [max_canvas_widget_nodes_per_view]canvas.ScrollState = undefined,

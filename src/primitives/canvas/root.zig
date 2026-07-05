@@ -223,6 +223,7 @@ pub const CanvasFrameProfileRisk = frame_model.CanvasFrameProfileRisk;
 pub const CanvasFrameProfile = frame_model.CanvasFrameProfile;
 pub const CanvasRenderPass = frame_model.CanvasRenderPass;
 pub const CanvasFrame = frame_model.CanvasFrame;
+pub const max_canvas_frame_dirty_rects = frame_model.max_canvas_frame_dirty_rects;
 pub const buildCanvasFrame = frame_model.buildCanvasFrame;
 
 // Canvas GPU packet and encoder data live in `gpu.zig`; root keeps the public API stable.

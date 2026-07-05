@@ -384,6 +384,17 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) CGFloat canvasCommandRasterCacheScale;
 @property(nonatomic, assign) NSUInteger canvasCommandRasterCachePixelWidth;
 @property(nonatomic, assign) NSUInteger canvasCommandRasterCachePixelHeight;
+/* Per-pass draw attribution for NATIVE_SDK_GPU_DRAW_TRACE=1: commands
+ * actually drawn (not scissor-culled), split into raster-cache blits,
+ * fresh cache fills, and direct (uncacheable) draws, plus the time each
+ * group cost. The timers only run while the trace env is set. */
+@property(nonatomic, assign) NSUInteger canvasTraceDrawnCount;
+@property(nonatomic, assign) NSUInteger canvasTraceCacheHitCount;
+@property(nonatomic, assign) NSUInteger canvasTraceCacheFillCount;
+@property(nonatomic, assign) NSUInteger canvasTraceDirectCount;
+@property(nonatomic, assign) uint64_t canvasTraceCacheHitNs;
+@property(nonatomic, assign) uint64_t canvasTraceCacheFillNs;
+@property(nonatomic, assign) uint64_t canvasTraceDirectNs;
 /* Incremental-verify scratch (NATIVE_SDK_GPU_VERIFY_INCREMENTAL=1): a full
  * redraw of the retained list is compared byte-for-byte against the
  * incrementally patched backing after every scissored dirty update. */
@@ -426,7 +437,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)configureWithHost:(NativeSdkAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label;
 - (BOOL)isAvailable;
 - (void)updateDrawableSize;
-- (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
+- (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight dirtyRects:(NSArray<NSValue *> *)dirtyRects rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
 - (NSInteger)presentGpuPacketWithSurfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable json:(const uint8_t *)json byteLength:(NSUInteger)byteLength;
 - (NSInteger)presentGpuPacketBinaryWithSurfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable packet:(const uint8_t *)packet byteLength:(NSUInteger)byteLength;
 - (NSInteger)presentGpuPacketObject:(NSDictionary *)packet surfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA commandCount:(NSUInteger)commandCount;
@@ -436,7 +447,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)rasterCacheStoreEntry:(NativeSdkPacketCommandRaster *)entry forKey:(NSNumber *)key;
 - (NativeSdkPacketCommandRaster *)rasterCacheFillForCommand:(NSDictionary *)command kind:(NSString *)kind key:(NSNumber *)key scale:(CGFloat)scale pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight;
 - (BOOL)drawPacketCommand:(NSDictionary *)command key:(NSNumber *)key context:(CGContextRef)context scale:(CGFloat)scale hasClip:(BOOL)hasClip clipRect:(NSRect)clipRect pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight;
-- (NSInteger)drawPacketCommands:(NSArray *)commands keys:(NSArray *)keys pixels:(NSMutableData *)pixels pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight scale:(CGFloat)scale surfaceWidth:(CGFloat)surfaceWidth surfaceHeight:(CGFloat)surfaceHeight clearColor:(NSColor *)clearColor fullSurfacePass:(BOOL)fullSurfacePass hasScissor:(BOOL)hasScissor scissorRect:(NSRect)scissorRect;
+- (NSInteger)drawPacketCommands:(NSArray *)commands keys:(NSArray *)keys pixels:(NSMutableData *)pixels pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight scale:(CGFloat)scale surfaceWidth:(CGFloat)surfaceWidth surfaceHeight:(CGFloat)surfaceHeight clearColor:(NSColor *)clearColor fullSurfacePass:(BOOL)fullSurfacePass hasScissor:(BOOL)hasScissor scissorRect:(NSRect)scissorRect dirtyRects:(NSArray<NSValue *> *)dirtyRects;
 - (void)verifyIncrementalBackingWithCommands:(NSArray *)commands keys:(NSArray *)keys pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight scale:(CGFloat)scale surfaceWidth:(CGFloat)surfaceWidth surfaceHeight:(CGFloat)surfaceHeight clearColor:(NSColor *)clearColor scissorRect:(NSRect)scissorRect;
 - (BOOL)ensureCanvasPresenter;
 - (void)updateWidgetAccessibilityWithNodes:(const native_sdk_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count;
@@ -1277,20 +1288,48 @@ static BOOL NativeSdkPacketApplyBlur(NSDictionary *effect, CGFloat opacity, CGCo
         );
     }
 
+    /* Both passes keep the ORIGINAL clamped-window box average — the
+     * window shrinks at the surface edges exactly as before — but slide
+     * the window incrementally (add the entering sample, subtract the
+     * leaving one), turning O(region x radius) into O(region). The sums
+     * are the same integers the per-pixel rescan produced, so the output
+     * is byte-identical; a full-window dirty pass that repaints a
+     * backdrop-blurred popover stops costing milliseconds of scalar
+     * resampling. */
     for (NSUInteger y = expandedMinY; y < expandedMaxY; y++) {
+        const uint8_t *sourceRow = source + (y - expandedMinY) * regionBytesPerRow;
+        uint8_t *horizontalRow = horizontal + (y - expandedMinY) * regionBytesPerRow;
+        NSUInteger windowMinX = minX > radius ? minX - radius : 0;
+        NSUInteger windowMaxX = MIN((NSUInteger)width - 1, minX + radius);
+        uint64_t sums[4] = {0, 0, 0, 0};
+        for (NSUInteger sx = windowMinX; sx <= windowMaxX; sx++) {
+            const uint8_t *pixel = sourceRow + (sx - expandedMinX) * 4;
+            sums[0] += pixel[0];
+            sums[1] += pixel[1];
+            sums[2] += pixel[2];
+            sums[3] += pixel[3];
+        }
         for (NSUInteger x = minX; x < maxX; x++) {
             NSUInteger sampleMinX = x > radius ? x - radius : 0;
             NSUInteger sampleMaxX = MIN((NSUInteger)width - 1, x + radius);
-            uint64_t sums[4] = {0, 0, 0, 0};
-            for (NSUInteger sx = sampleMinX; sx <= sampleMaxX; sx++) {
-                const uint8_t *pixel = source + (y - expandedMinY) * regionBytesPerRow + (sx - expandedMinX) * 4;
+            while (windowMaxX < sampleMaxX) {
+                windowMaxX += 1;
+                const uint8_t *pixel = sourceRow + (windowMaxX - expandedMinX) * 4;
                 sums[0] += pixel[0];
                 sums[1] += pixel[1];
                 sums[2] += pixel[2];
                 sums[3] += pixel[3];
             }
+            while (windowMinX < sampleMinX) {
+                const uint8_t *pixel = sourceRow + (windowMinX - expandedMinX) * 4;
+                sums[0] -= pixel[0];
+                sums[1] -= pixel[1];
+                sums[2] -= pixel[2];
+                sums[3] -= pixel[3];
+                windowMinX += 1;
+            }
             NSUInteger count = sampleMaxX - sampleMinX + 1;
-            uint8_t *out = horizontal + (y - expandedMinY) * regionBytesPerRow + (x - expandedMinX) * 4;
+            uint8_t *out = horizontalRow + (x - expandedMinX) * 4;
             out[0] = (uint8_t)(sums[0] / count);
             out[1] = (uint8_t)(sums[1] / count);
             out[2] = (uint8_t)(sums[2] / count);
@@ -1298,17 +1337,36 @@ static BOOL NativeSdkPacketApplyBlur(NSDictionary *effect, CGFloat opacity, CGCo
         }
     }
 
-    for (NSUInteger y = minY; y < maxY; y++) {
-        for (NSUInteger x = minX; x < maxX; x++) {
+    for (NSUInteger x = minX; x < maxX; x++) {
+        const uint8_t *horizontalColumn = horizontal + (x - expandedMinX) * 4;
+        NSUInteger windowMinY = minY > radius ? minY - radius : 0;
+        NSUInteger windowMaxY = MIN((NSUInteger)height - 1, minY + radius);
+        uint64_t sums[4] = {0, 0, 0, 0};
+        for (NSUInteger sy = windowMinY; sy <= windowMaxY; sy++) {
+            const uint8_t *pixel = horizontalColumn + (sy - expandedMinY) * regionBytesPerRow;
+            sums[0] += pixel[0];
+            sums[1] += pixel[1];
+            sums[2] += pixel[2];
+            sums[3] += pixel[3];
+        }
+        for (NSUInteger y = minY; y < maxY; y++) {
             NSUInteger sampleMinY = y > radius ? y - radius : 0;
             NSUInteger sampleMaxY = MIN((NSUInteger)height - 1, y + radius);
-            uint64_t sums[4] = {0, 0, 0, 0};
-            for (NSUInteger sy = sampleMinY; sy <= sampleMaxY; sy++) {
-                const uint8_t *pixel = horizontal + (sy - expandedMinY) * regionBytesPerRow + (x - expandedMinX) * 4;
+            while (windowMaxY < sampleMaxY) {
+                windowMaxY += 1;
+                const uint8_t *pixel = horizontalColumn + (windowMaxY - expandedMinY) * regionBytesPerRow;
                 sums[0] += pixel[0];
                 sums[1] += pixel[1];
                 sums[2] += pixel[2];
                 sums[3] += pixel[3];
+            }
+            while (windowMinY < sampleMinY) {
+                const uint8_t *pixel = horizontalColumn + (windowMinY - expandedMinY) * regionBytesPerRow;
+                sums[0] -= pixel[0];
+                sums[1] -= pixel[1];
+                sums[2] -= pixel[2];
+                sums[3] -= pixel[3];
+                windowMinY += 1;
             }
             NSUInteger count = sampleMaxY - sampleMinY + 1;
             uint8_t *out = destination + y * bytesPerRow + x * 4;
@@ -1907,11 +1965,16 @@ enum {
 
 /* A command is raster-cacheable when its painted output is a pure
  * function of the command itself: no backdrop reads (blur samples the
- * pixels beneath it), no animated transform (applied per frame via the
- * CTM), no command clip (kept off the cached raster so the cache stays
- * a plain bounds-sized image). Images stay on their own cache. */
+ * pixels beneath it) and no animated transform (applied per frame via
+ * the CTM). A command CLIP is a plain rect carried by the command, so
+ * clipped output is still a pure function of the command — the fill
+ * applies the clip and the raster extent shrinks to bounds∩clip.
+ * (Clipped panel/scroll content dominates content-heavy views; leaving
+ * it out forced a full CoreText re-raster of every clipped run on any
+ * wide dirty rect.) Images stay on their own cache. */
 static BOOL NativeSdkPacketCommandRasterCacheable(NSDictionary *command, NSString *kind) {
-    if (command[@"transform"] || command[@"clip"]) return NO;
+    if (command[@"transform"]) return NO;
+    if (command[@"clip"] && !NativeSdkPacketArray(command[@"clip"], 4)) return NO;
     if ([kind isEqualToString:@"draw_text"] || [kind isEqualToString:@"shadow"]) return YES;
     if ([kind hasPrefix:@"fill_rect"] || [kind hasPrefix:@"fill_rounded_rect"] || [kind hasPrefix:@"stroke_rect"] || [kind hasPrefix:@"draw_line"]) return YES;
     if ([kind isEqualToString:@"fill_path"] || [kind isEqualToString:@"stroke_path"]) return YES;
@@ -2326,7 +2389,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (memcmp(bytes, "NSGP", 4) != 0) return nil;
     reader.offset = 4;
     uint8_t version = NativeSdkBinaryReadU8(&reader);
-    if (version != 2) return nil;
+    if (version != 3) return nil;
     uint8_t loadActionCode = NativeSdkBinaryReadU8(&reader);
     uint8_t packetFlags = NativeSdkBinaryReadU8(&reader);
     (void)NativeSdkBinaryReadU8(&reader); /* reserved */
@@ -2340,6 +2403,20 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
         NSArray *scissor = NativeSdkBinaryReadF32Array(&reader, 4);
         if (!scissor) return nil;
         packet[@"scissorBounds"] = scissor;
+    }
+    if (packetFlags & 0x02) {
+        /* v3 dirty rect list: the exact rects the edit script touches,
+         * each inside the scissor (their union). */
+        if (!(packetFlags & 0x01)) return nil;
+        uint32_t dirtyRectCount = NativeSdkBinaryReadU32(&reader);
+        if (reader.failed || dirtyRectCount == 0 || dirtyRectCount > 8) return nil;
+        NSMutableArray *dirtyRects = [NSMutableArray arrayWithCapacity:dirtyRectCount];
+        for (uint32_t index = 0; index < dirtyRectCount; index++) {
+            NSArray *rect = NativeSdkBinaryReadF32Array(&reader, 4);
+            if (!rect) return nil;
+            [dirtyRects addObject:rect];
+        }
+        packet[@"dirtyRects"] = dirtyRects;
     }
 
     uint32_t imageCount = NativeSdkBinaryReadU32(&reader);
@@ -2633,7 +2710,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     }
 }
 
-- (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
+- (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight dirtyRects:(NSArray<NSValue *> *)dirtyRects rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
     if (![self isAvailable] || !rgba8 || width == 0 || height == 0) return NO;
     if (byteLength != width * height * 4) return NO;
     if (![self ensureCanvasPresenter]) return NO;
@@ -2651,31 +2728,11 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (!self.canvasTexture) return NO;
 
     BOOL uploadFullTexture = textureChanged || !hasDirtyRect || scale <= 0 || dirtyWidth <= 0 || dirtyHeight <= 0;
-    NSUInteger uploadX = 0;
-    NSUInteger uploadY = 0;
-    NSUInteger uploadWidth = width;
-    NSUInteger uploadHeight = height;
-    if (!uploadFullTexture) {
-        CGFloat minX = floor(dirtyX * scale);
-        CGFloat minY = floor(dirtyY * scale);
-        CGFloat maxX = ceil((dirtyX + dirtyWidth) * scale);
-        CGFloat maxY = ceil((dirtyY + dirtyHeight) * scale);
-        minX = fmax(0.0, fmin((CGFloat)width, minX));
-        minY = fmax(0.0, fmin((CGFloat)height, minY));
-        maxX = fmax(minX, fmin((CGFloat)width, maxX));
-        maxY = fmax(minY, fmin((CGFloat)height, maxY));
-        uploadX = (NSUInteger)minX;
-        uploadY = (NSUInteger)minY;
-        uploadWidth = (NSUInteger)(maxX - minX);
-        uploadHeight = (NSUInteger)(maxY - minY);
-        if (uploadWidth == 0 || uploadHeight == 0) return YES;
-    }
-
-    const uint8_t *uploadBytes = rgba8 + ((uploadY * width + uploadX) * 4);
-    [self.canvasTexture replaceRegion:MTLRegionMake2D(uploadX, uploadY, uploadWidth, uploadHeight)
-                          mipmapLevel:0
-                            withBytes:uploadBytes
-                          bytesPerRow:width * 4];
+    if (uploadFullTexture) dirtyRects = nil;
+    /* Upload each refined dirty rect (or the single dirty rect) into the
+     * texture and mirror the same bytes into the retained backing. */
+    NSUInteger uploadRectCount = dirtyRects ? dirtyRects.count : 1;
+    void *backingBytes = NULL;
     if (!self.canvasPacketPixels || self.canvasPacketPixelWidth != width || self.canvasPacketPixelHeight != height || self.canvasPacketPixels.length != byteLength) {
         self.canvasPacketPixels = [NSMutableData dataWithLength:byteLength];
         self.canvasPacketPixelWidth = width;
@@ -2683,8 +2740,49 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
         self.canvasPacketPixelsValid = NO;
     }
     if (self.canvasPacketPixels && self.canvasPacketPixels.length == byteLength) {
-        void *backingBytes = self.canvasPacketPixels.mutableBytes;
-        if ((const void *)backingBytes != (const void *)rgba8) {
+        backingBytes = self.canvasPacketPixels.mutableBytes;
+        if ((const void *)backingBytes == (const void *)rgba8) backingBytes = NULL;
+    }
+    for (NSUInteger rectIndex = 0; rectIndex < uploadRectCount; rectIndex += 1) {
+        CGFloat rectX = dirtyX;
+        CGFloat rectY = dirtyY;
+        CGFloat rectWidth = dirtyWidth;
+        CGFloat rectHeight = dirtyHeight;
+        if (dirtyRects) {
+            NSRect rect = dirtyRects[rectIndex].rectValue;
+            rectX = rect.origin.x;
+            rectY = rect.origin.y;
+            rectWidth = rect.size.width;
+            rectHeight = rect.size.height;
+        }
+        NSUInteger uploadX = 0;
+        NSUInteger uploadY = 0;
+        NSUInteger uploadWidth = width;
+        NSUInteger uploadHeight = height;
+        if (!uploadFullTexture) {
+            CGFloat minX = floor(rectX * scale);
+            CGFloat minY = floor(rectY * scale);
+            CGFloat maxX = ceil((rectX + rectWidth) * scale);
+            CGFloat maxY = ceil((rectY + rectHeight) * scale);
+            minX = fmax(0.0, fmin((CGFloat)width, minX));
+            minY = fmax(0.0, fmin((CGFloat)height, minY));
+            maxX = fmax(minX, fmin((CGFloat)width, maxX));
+            maxY = fmax(minY, fmin((CGFloat)height, maxY));
+            uploadX = (NSUInteger)minX;
+            uploadY = (NSUInteger)minY;
+            uploadWidth = (NSUInteger)(maxX - minX);
+            uploadHeight = (NSUInteger)(maxY - minY);
+            if (uploadWidth == 0 || uploadHeight == 0) {
+                if (dirtyRects) continue;
+                return YES;
+            }
+        }
+        const uint8_t *uploadBytes = rgba8 + ((uploadY * width + uploadX) * 4);
+        [self.canvasTexture replaceRegion:MTLRegionMake2D(uploadX, uploadY, uploadWidth, uploadHeight)
+                              mipmapLevel:0
+                                withBytes:uploadBytes
+                              bytesPerRow:width * 4];
+        if (backingBytes) {
             if (uploadFullTexture) {
                 memcpy(backingBytes, rgba8, byteLength);
                 /* A full foreign upload (raw-pixels present) makes the
@@ -2743,6 +2841,19 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
         self.lastPacketDrawNs = NativeSdkTimestampNanoseconds() - drawBeginNs;
     }
     return result;
+}
+
+/* Draw-trace mode (NATIVE_SDK_GPU_DRAW_TRACE=1): per-present phase and
+ * per-group draw timing on stderr. The per-command timers below only
+ * run while this is set. */
+static BOOL NativeSdkGpuDrawTraceEnabled(void) {
+    static BOOL enabled;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *value = getenv("NATIVE_SDK_GPU_DRAW_TRACE");
+        enabled = value && value[0] != 0 && strcmp(value, "0") != 0;
+    });
+    return enabled;
 }
 
 /* Incremental-verify mode: byte-compare every scissored dirty update
@@ -2813,6 +2924,18 @@ static BOOL NativeSdkGpuVerifyIncrementalEnabled(void) {
  * grid and the blit composites the same bytes a direct draw would. */
 - (NativeSdkPacketCommandRaster *)rasterCacheFillForCommand:(NSDictionary *)command kind:(NSString *)kind key:(NSNumber *)key scale:(CGFloat)scale pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight {
     NSRect bounds = CGRectStandardize(NativeSdkPacketRect(command[@"bounds"]));
+    /* A command clip bounds the visible output: the raster extent is
+     * bounds∩clip (scrolled content with mostly-offscreen bounds must
+     * not rasterize its full extent), and the fill below applies the
+     * clip so painted coverage — including the clip edge's antialiased
+     * falloff — matches the direct draw byte-for-byte. */
+    NSArray *clipArray = NativeSdkPacketArray(command[@"clip"], 4);
+    BOOL hasCommandClip = clipArray != nil;
+    NSRect commandClip = hasCommandClip ? CGRectStandardize(NativeSdkPacketRect(clipArray)) : NSZeroRect;
+    if (hasCommandClip) {
+        bounds = NSIntersectionRect(bounds, commandClip);
+        if (NSIsEmptyRect(bounds)) return nil;
+    }
     CGFloat minX = floor(NSMinX(bounds) * scale) - 1;
     CGFloat minY = floor(NSMinY(bounds) * scale) - 1;
     CGFloat maxX = ceil(NSMaxX(bounds) * scale) + 1;
@@ -2840,7 +2963,10 @@ static BOOL NativeSdkGpuVerifyIncrementalEnabled(void) {
     [NSGraphicsContext saveGraphicsState];
     [NSGraphicsContext setCurrentContext:graphics];
     CGFloat opacity = fmax(0.0, fmin(1.0, NativeSdkPacketNumber(command[@"opacity"], 1)));
-    BOOL ok = NativeSdkPacketDrawCommandBody(command, kind, opacity, bitmap, scale, NO, NSZeroRect, self.canvasImageCache);
+    if (hasCommandClip) {
+        [NSBezierPath clipRect:commandClip];
+    }
+    BOOL ok = NativeSdkPacketDrawCommandBody(command, kind, opacity, bitmap, scale, hasCommandClip, commandClip, self.canvasImageCache);
     [NSGraphicsContext restoreGraphicsState];
     CGImageRef cgImage = ok ? CGBitmapContextCreateImage(bitmap) : NULL;
     CGContextRelease(bitmap);
@@ -2865,6 +2991,9 @@ static BOOL NativeSdkGpuVerifyIncrementalEnabled(void) {
     if (!command) return NO;
     NSArray *boundsArray = NativeSdkPacketArray(command[@"bounds"], 4);
     if (hasClip && boundsArray && !NativeSdkPacketRectIntersects(NativeSdkPacketRect(boundsArray), clipRect)) return YES;
+    const BOOL tracing = NativeSdkGpuDrawTraceEnabled();
+    const uint64_t traceBeginNs = tracing ? NativeSdkTimestampNanoseconds() : 0;
+    self.canvasTraceDrawnCount += 1;
     NSString *kind = [command[@"kind"] isKindOfClass:[NSString class]] ? command[@"kind"] : @"";
     if (key && boundsArray && self.canvasCommandRasterCache && NativeSdkPacketCommandRasterCacheable(command, kind)) {
         NativeSdkPacketCommandRaster *entry = self.canvasCommandRasterCache[key];
@@ -2873,8 +3002,17 @@ static BOOL NativeSdkGpuVerifyIncrementalEnabled(void) {
             [self rasterCacheRemoveKey:key];
             entry = nil;
         }
-        if (!entry) entry = [self rasterCacheFillForCommand:command kind:kind key:key scale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight];
+        BOOL filled = NO;
+        if (!entry) {
+            entry = [self rasterCacheFillForCommand:command kind:kind key:key scale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight];
+            filled = entry != nil;
+        }
         if (entry) {
+            if (filled) {
+                self.canvasTraceCacheFillCount += 1;
+            } else {
+                self.canvasTraceCacheHitCount += 1;
+            }
             self.canvasCommandRasterCacheTick += 1;
             entry.lastUseTick = self.canvasCommandRasterCacheTick;
             /* Raw CG blit: the raster was produced under the flipped
@@ -2890,22 +3028,39 @@ static BOOL NativeSdkGpuVerifyIncrementalEnabled(void) {
             CGContextScaleCTM(context, 1, -1);
             CGContextDrawImage(context, CGRectMake(0, 0, entry.destination.size.width, entry.destination.size.height), entry.image);
             CGContextRestoreGState(context);
+            if (tracing) {
+                const uint64_t elapsed = NativeSdkTimestampNanoseconds() - traceBeginNs;
+                if (filled) self.canvasTraceCacheFillNs += elapsed; else self.canvasTraceCacheHitNs += elapsed;
+            }
             return YES;
         }
         /* Over budget or clamped empty: fall through to a direct draw. */
     }
-    return NativeSdkPacketDrawCommand(command, context, scale, hasClip, clipRect, self.canvasImageCache);
+    self.canvasTraceDirectCount += 1;
+    BOOL ok = NativeSdkPacketDrawCommand(command, context, scale, hasClip, clipRect, self.canvasImageCache);
+    if (tracing) self.canvasTraceDirectNs += NativeSdkTimestampNanoseconds() - traceBeginNs;
+    return ok;
 }
 
 /* The one shared raster pass over a command list: both packet presents
  * and the incremental verifier's reference redraw run through here, so
  * the two can never draw differently. Returns 1 on success, 0 when a
  * command is unsupported, -1 when the bitmap context cannot be built. */
-- (NSInteger)drawPacketCommands:(NSArray *)commands keys:(NSArray *)keys pixels:(NSMutableData *)pixels pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight scale:(CGFloat)scale surfaceWidth:(CGFloat)surfaceWidth surfaceHeight:(CGFloat)surfaceHeight clearColor:(NSColor *)clearColor fullSurfacePass:(BOOL)fullSurfacePass hasScissor:(BOOL)hasScissor scissorRect:(NSRect)scissorRect {
+- (NSInteger)drawPacketCommands:(NSArray *)commands keys:(NSArray *)keys pixels:(NSMutableData *)pixels pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight scale:(CGFloat)scale surfaceWidth:(CGFloat)surfaceWidth surfaceHeight:(CGFloat)surfaceHeight clearColor:(NSColor *)clearColor fullSurfacePass:(BOOL)fullSurfacePass hasScissor:(BOOL)hasScissor scissorRect:(NSRect)scissorRect dirtyRects:(NSArray<NSValue *> *)dirtyRects {
     (void)surfaceWidth;
     (void)surfaceHeight;
+    /* The dirty rect list only refines a scissored dirty update; a full
+     * pass repaints everything and must not clip to it. */
+    if (fullSurfacePass || !hasScissor || dirtyRects.count == 0) dirtyRects = nil;
     if (!self.canvasColorSpace) self.canvasColorSpace = CGColorSpaceCreateDeviceRGB();
     if (!self.canvasColorSpace) return -1;
+    self.canvasTraceDrawnCount = 0;
+    self.canvasTraceCacheHitCount = 0;
+    self.canvasTraceCacheFillCount = 0;
+    self.canvasTraceDirectCount = 0;
+    self.canvasTraceCacheHitNs = 0;
+    self.canvasTraceCacheFillNs = 0;
+    self.canvasTraceDirectNs = 0;
     CGContextRef context = CGBitmapContextCreate(pixels.mutableBytes, pixelWidth, pixelHeight, 8, pixelWidth * 4, self.canvasColorSpace, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
     if (!context) return -1;
 
@@ -2926,12 +3081,26 @@ static BOOL NativeSdkGpuVerifyIncrementalEnabled(void) {
          * REPLACES history (a translucent clear must not accumulate). */
         [clearColor setFill];
         NSRectFillUsingOperation(NSMakeRect(0, 0, (CGFloat)pixelWidth / scale, (CGFloat)pixelHeight / scale), NSCompositingOperationCopy);
+    } else if (hasScissor && dirtyRects) {
+        /* Refined pass: only the listed rects clear and repaint — the
+         * pixels between two far-apart changes stay retained. */
+        [clearColor setFill];
+        for (NSValue *value in dirtyRects) {
+            NSRectFillUsingOperation(value.rectValue, NSCompositingOperationCopy);
+        }
     } else if (hasScissor) {
         [clearColor setFill];
         NSRectFillUsingOperation(scissorRect, NSCompositingOperationCopy);
     }
     if (hasScissor) {
         [NSBezierPath clipRect:scissorRect];
+        if (dirtyRects) {
+            NSBezierPath *dirtyPath = [NSBezierPath bezierPath];
+            for (NSValue *value in dirtyRects) {
+                [dirtyPath appendBezierPathWithRect:value.rectValue];
+            }
+            [dirtyPath addClip];
+        }
     }
 
     BOOL supported = YES;
@@ -2939,6 +3108,22 @@ static BOOL NativeSdkGpuVerifyIncrementalEnabled(void) {
         NSDictionary *command = NativeSdkPacketDictionary(commands[index]);
         NSNumber *key = nil;
         if (keys && index < keys.count && [keys[index] isKindOfClass:[NSNumber class]]) key = keys[index];
+        if (dirtyRects && command) {
+            /* Cull against the refined rects: a command outside all of
+             * them cannot change a pixel this pass may touch. */
+            NSArray *boundsArray = NativeSdkPacketArray(command[@"bounds"], 4);
+            if (boundsArray) {
+                NSRect commandBounds = NativeSdkPacketRect(boundsArray);
+                BOOL intersectsDirty = NO;
+                for (NSValue *value in dirtyRects) {
+                    if (NativeSdkPacketRectIntersects(commandBounds, value.rectValue)) {
+                        intersectsDirty = YES;
+                        break;
+                    }
+                }
+                if (!intersectsDirty) continue;
+            }
+        }
         if (![self drawPacketCommand:command key:key context:context scale:scale hasClip:hasScissor clipRect:scissorRect pixelWidth:pixelWidth pixelHeight:pixelHeight]) {
             supported = NO;
             break;
@@ -2956,7 +3141,7 @@ static BOOL NativeSdkGpuVerifyIncrementalEnabled(void) {
         self.canvasVerifyPixels = [NSMutableData dataWithLength:byteLength];
     }
     if (!self.canvasVerifyPixels) return;
-    if ([self drawPacketCommands:commands keys:keys pixels:self.canvasVerifyPixels pixelWidth:pixelWidth pixelHeight:pixelHeight scale:scale surfaceWidth:surfaceWidth surfaceHeight:surfaceHeight clearColor:clearColor fullSurfacePass:YES hasScissor:NO scissorRect:NSZeroRect] != 1) {
+    if ([self drawPacketCommands:commands keys:keys pixels:self.canvasVerifyPixels pixelWidth:pixelWidth pixelHeight:pixelHeight scale:scale surfaceWidth:surfaceWidth surfaceHeight:surfaceHeight clearColor:clearColor fullSurfacePass:YES hasScissor:NO scissorRect:NSZeroRect dirtyRects:nil] != 1) {
         return;
     }
     self.canvasVerifyCheckCount += 1;
@@ -3061,6 +3246,25 @@ static BOOL NativeSdkGpuVerifyIncrementalEnabled(void) {
      * edges antialias, blending fresh paint with retained pixels at the
      * region boundary — a seam, and a byte difference vs a full redraw. */
     NSRect scissorRect = hasScissor ? NativeSdkPacketAlignRectToPixels(NativeSdkPacketRect(scissor), normalizedScale, pixelWidth, pixelHeight) : NSZeroRect;
+    /* Optional v3 refinement: the exact rects the edit script touches,
+     * snapped like the scissor and bounded by it. */
+    NSMutableArray<NSValue *> *dirtyRects = nil;
+    NSArray *dirtyRectArrays = NativeSdkPacketArray(packet[@"dirtyRects"], 0);
+    if (hasScissor && dirtyRectArrays.count > 0 && dirtyRectArrays.count <= 8) {
+        dirtyRects = [NSMutableArray arrayWithCapacity:dirtyRectArrays.count];
+        for (id rectValue in dirtyRectArrays) {
+            NSArray *rectArray = NativeSdkPacketArray(rectValue, 4);
+            if (!rectArray) {
+                dirtyRects = nil;
+                break;
+            }
+            NSRect snapped = NativeSdkPacketAlignRectToPixels(NativeSdkPacketRect(rectArray), normalizedScale, pixelWidth, pixelHeight);
+            snapped = NSIntersectionRect(snapped, scissorRect);
+            if (NSIsEmptyRect(snapped)) continue;
+            [dirtyRects addObject:[NSValue valueWithRect:snapped]];
+        }
+        if (dirtyRects.count == 0) dirtyRects = nil;
+    }
 
     /* A patch without a scissor repaints the whole surface from the
      * retained list — clear semantics over the retained backing. */
@@ -3102,7 +3306,7 @@ static BOOL NativeSdkGpuVerifyIncrementalEnabled(void) {
     }
 
     const uint64_t traceDrawBeginNs = NativeSdkTimestampNanoseconds();
-    NSInteger drawResult = [self drawPacketCommands:commands keys:drawKeys pixels:pixels pixelWidth:pixelWidth pixelHeight:pixelHeight scale:normalizedScale surfaceWidth:surfaceWidth surfaceHeight:surfaceHeight clearColor:clearColor fullSurfacePass:fullSurfacePass hasScissor:hasScissor scissorRect:scissorRect];
+    NSInteger drawResult = [self drawPacketCommands:commands keys:drawKeys pixels:pixels pixelWidth:pixelWidth pixelHeight:pixelHeight scale:normalizedScale surfaceWidth:surfaceWidth surfaceHeight:surfaceHeight clearColor:clearColor fullSurfacePass:fullSurfacePass hasScissor:hasScissor scissorRect:scissorRect dirtyRects:dirtyRects];
     const uint64_t traceDrawEndNs = NativeSdkTimestampNanoseconds();
     if (drawResult < 0) return -1;
     if (drawResult == 0) {
@@ -3119,15 +3323,23 @@ static BOOL NativeSdkGpuVerifyIncrementalEnabled(void) {
     }
 
     BOOL uploadDirtyRect = directRetainedDirtyUpdate;
-    BOOL presented = [self presentPixelsWithWidth:pixelWidth height:pixelHeight scale:normalizedScale hasDirtyRect:uploadDirtyRect dirtyX:scissorRect.origin.x dirtyY:scissorRect.origin.y dirtyWidth:scissorRect.size.width dirtyHeight:scissorRect.size.height rgba8:(const uint8_t *)pixels.bytes byteLength:pixels.length];
+    BOOL presented = [self presentPixelsWithWidth:pixelWidth height:pixelHeight scale:normalizedScale hasDirtyRect:uploadDirtyRect dirtyX:scissorRect.origin.x dirtyY:scissorRect.origin.y dirtyWidth:scissorRect.size.width dirtyHeight:scissorRect.size.height dirtyRects:(uploadDirtyRect ? dirtyRects : nil) rgba8:(const uint8_t *)pixels.bytes byteLength:pixels.length];
     if (getenv("NATIVE_SDK_GPU_DRAW_TRACE")) {
         /* Per-present phase split (draw vs texture upload + Metal present),
          * NATIVE_SDK_WINDOW_TIMING-style stderr diagnostics. */
         const uint64_t tracePresentEndNs = NativeSdkTimestampNanoseconds();
-        fprintf(stderr, "native-sdk: gpu draw-trace action=%s scissor=%d rect=%.0fx%.0f draw_us=%llu present_us=%llu\n",
+        fprintf(stderr, "native-sdk: gpu draw-trace action=%s scissor=%d rect=%.0fx%.0f rects=%lu draw_us=%llu present_us=%llu drawn=%lu hit=%lu/%lluus fill=%lu/%lluus direct=%lu/%lluus\n",
                 loadAction.UTF8String, hasScissor ? 1 : 0, scissorRect.size.width, scissorRect.size.height,
+                (unsigned long)dirtyRects.count,
                 (unsigned long long)((traceDrawEndNs - traceDrawBeginNs) / 1000),
-                (unsigned long long)((tracePresentEndNs - traceDrawEndNs) / 1000));
+                (unsigned long long)((tracePresentEndNs - traceDrawEndNs) / 1000),
+                (unsigned long)self.canvasTraceDrawnCount,
+                (unsigned long)self.canvasTraceCacheHitCount,
+                (unsigned long long)(self.canvasTraceCacheHitNs / 1000),
+                (unsigned long)self.canvasTraceCacheFillCount,
+                (unsigned long long)(self.canvasTraceCacheFillNs / 1000),
+                (unsigned long)self.canvasTraceDirectCount,
+                (unsigned long long)(self.canvasTraceDirectNs / 1000));
     }
     if (!presented) {
         if (patchLoadAction) self.hasCanvasRetainedState = NO;
@@ -4989,7 +5201,7 @@ static BOOL NativeSdkGpuVerifyIncrementalEnabled(void) {
      * resync. (The packet path calls presentPixelsWithWidth internally,
      * so the invalidation lives here at the raw entry, not inside it.) */
     surface.hasCanvasRetainedState = NO;
-    const BOOL presented = [surface presentPixelsWithWidth:width height:height scale:scale hasDirtyRect:hasDirtyRect dirtyX:dirtyX dirtyY:dirtyY dirtyWidth:dirtyWidth dirtyHeight:dirtyHeight rgba8:rgba8 byteLength:byteLength];
+    const BOOL presented = [surface presentPixelsWithWidth:width height:height scale:scale hasDirtyRect:hasDirtyRect dirtyX:dirtyX dirtyY:dirtyY dirtyWidth:dirtyWidth dirtyHeight:dirtyHeight dirtyRects:nil rgba8:rgba8 byteLength:byteLength];
     if (presented) [self showDeferredWindowIfPending:windowId reason:"first-present"];
     return presented;
 }
