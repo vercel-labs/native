@@ -14,6 +14,12 @@
                 .title = "Native SDK Soundboard",
                 .width = 1080,
                 .height = 720,
+                // The floor the layout audit sweep proves clean (the
+                // fixed four-column album rack plus header and
+                // now-playing bar): the window stops resizing here
+                // instead of clipping the grid.
+                .min_width = 1056,
+                .min_height = 600,
                 .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .views = .{

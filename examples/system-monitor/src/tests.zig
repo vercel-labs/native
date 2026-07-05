@@ -724,6 +724,43 @@ test "the stat tiles land on exact frames and the tree stays in budget" {
     }
 }
 
+test "layout audit sweep: nothing clips, overlaps, or escapes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var model = edgeModel();
+    // Full history = the widest tree this app ever mounts.
+    for (0..model_mod.history_len) |_| {
+        apply(&model, .{ .ps_done = .{ .key = model_mod.ps_key, .code = 0, .output = ps_edge_fixture } });
+        apply(&model, .{ .mem_done = .{ .key = model_mod.mem_key, .code = 0, .output = vm_stat_fixture } });
+    }
+    if (builtin.os.tag != .macos) {
+        model.mem_history_len = model_mod.history_len;
+        for (&model.mem_history) |*value| value.* = 0.5;
+    }
+
+    // The main window: machined tile geometry, so the floor is the
+    // designed content size itself (declared on the window).
+    const tree = try buildTree(arena_state.allocator(), &model);
+    try canvas.expectLayoutAuditSweepClean(testing.allocator, tree.root, .{
+        .tokens = main.tokensFromModel(&model),
+        .min_size = geometry.SizeF.init(main.window_min_width, main.window_min_height),
+        .default_size = geometry.SizeF.init(main.window_width, main.window_height),
+    });
+
+    // The settings window ships fixed-size; audit it at exactly that.
+    model.settings_open = true;
+    var ui = Ui.init(arena_state.allocator());
+    const settings = try ui.finalizeWithTokens(view_mod.settingsView(&ui, &model), main.tokensFromModel(&model));
+    const settings_size = geometry.SizeF.init(main.settings_window_width, main.settings_window_height);
+    try canvas.expectLayoutAuditSweepClean(testing.allocator, settings.root, .{
+        .tokens = main.tokensFromModel(&model),
+        .min_size = settings_size,
+        .default_size = settings_size,
+        .large_size = settings_size,
+    });
+}
+
 // -------------------------------------------------------------- snapshots
 
 test "automation snapshot names the tiles and drives pause/resume" {
@@ -918,3 +955,4 @@ fn readWholeFile(io: std.Io, path: []const u8) ![]u8 {
     var reader = file.reader(io, &read_buffer);
     return reader.interface.allocRemaining(testing.allocator, .limited(8 * 1024 * 1024));
 }
+

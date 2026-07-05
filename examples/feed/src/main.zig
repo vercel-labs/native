@@ -27,6 +27,13 @@ const geometry = native_sdk.geometry;
 pub const canvas_label = "feed-canvas";
 pub const window_width: f32 = 520;
 pub const window_height: f32 = 760;
+/// Content min-size floor the window enforces: the feed column is
+/// designed at exactly the window width (fixed-extent rows, a one-line
+/// status strip budgeted for long content), so the width floor is the
+/// designed width itself; only the height gives — proven by the layout
+/// audit sweep in tests.zig, which sweeps from exactly this floor.
+pub const window_min_width: f32 = window_width;
+pub const window_min_height: f32 = 480;
 
 const shell_views = [_]native_sdk.ShellView{
     .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .role = "Feed timeline canvas", .accessibility_label = "Feed", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
@@ -36,6 +43,8 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .title = "Native SDK Feed",
     .width = window_width,
     .height = window_height,
+    .min_width = window_min_width,
+    .min_height = window_min_height,
     .restore_state = false,
     .views = &shell_views,
 }};
@@ -261,12 +270,14 @@ pub fn view(ui: *FeedUi, model: *const Model) FeedUi.Node {
 
 fn statusLine(ui: *FeedUi, model: *const Model, window: canvas.VirtualListRange) []const u8 {
     const tail: []const u8 = if (model.atCorpusEnd()) "end of corpus" else "scroll for more";
-    return ui.fmt("posts {d}\u{2013}{d} \u{00b7} {d} mounted \u{00b7} {d} loaded \u{00b7} {d} fetches \u{00b7} {s}", .{
+    // Status bars paint one line and never elide, so this label budgets
+    // for the window's min width with long-content headroom: the visible
+    // range, the loaded total, and the tail — mounted/fetch counters
+    // live in the model (and the tests), not the strip.
+    return ui.fmt("posts {d}\u{2013}{d} \u{00b7} {d} loaded \u{00b7} {s}", .{
         window.first_visible_index,
         window.last_visible_index,
-        window.itemCount(),
         model.loaded,
-        model.fetches,
         tail,
     });
 }

@@ -6,7 +6,10 @@
   <column background="background">
     <row height="56" padding="12" gap="10" cross="center" background="surface" label="Notes header">
       <badge variant="primary">Notes</badge>
-      <text size="sm" width="76" foreground="text_muted">Native SDK</text>
+      <!-- Width-constrained caption: one honest line, clipped if the
+           text ever outgrows the band, never a second line over the
+           header row. -->
+      <text size="sm" width="76" wrap="false" foreground="text_muted">Native SDK</text>
       <spacer grow="1" />
       <!-- Clearing is the search field's own affordance: the built-in
            trailing x (and Escape) clear through the standard edit path. -->
@@ -30,7 +33,9 @@
             <panel on-press="select_folder:{f.id}" selected="{f.selected}" padding="8" role="treeitem" label="{f.label}">
               <row gap="8" cross="center">
                 <icon name="folder" width="14" height="14" foreground="text_muted" />
-                <text grow="1">{f.name}</text>
+                <!-- One-line folder row: clip a long name at the rail's
+                     width, never wrap onto the row below. -->
+                <text grow="1" wrap="false">{f.name}</text>
                 <badge variant="secondary">{f.count}</badge>
               </row>
             </panel>
@@ -56,10 +61,14 @@
               <for each="noteRows" key="id" as="n">
                 <panel on-press="open_note:{n.id}" selected="{n.active}" padding="10" role="listitem" label="{n.title}">
                   <column gap="4">
-                    <text>{n.title}</text>
+                    <!-- One-line title row: clip at the pane width, never
+                         wrap over the snippet line below. -->
+                    <text wrap="false">{n.title}</text>
                     <row gap="8" cross="center">
                       <text size="sm" foreground="text_muted" width="36">{n.time}</text>
-                      <text size="sm" foreground="text_muted" grow="1">{n.snippet}</text>
+                      <!-- One-line snippet by design: clip, never wrap
+                           into the row below. -->
+                      <text size="sm" foreground="text_muted" grow="1" wrap="false">{n.snippet}</text>
                     </row>
                   </column>
                 </panel>
@@ -78,7 +87,9 @@
         <column min-width="280">
           <if test="{hasActiveNote}">
             <row padding="10" gap="8" cross="center">
-              <text size="sm" foreground="text_muted" grow="1">{editorMeta}</text>
+              <!-- One-line meta strip: clip when the editor pane is
+                   narrow, never wrap over the toolbar row. -->
+              <text size="sm" foreground="text_muted" grow="1" wrap="false">{editorMeta}</text>
               <button size="sm" variant="outline" on-press="copy_note" label="Copy note text">Copy</button>
               <button size="sm" variant="ghost" on-press="delete_note" label="Delete note">Delete</button>
             </row>

@@ -14,6 +14,10 @@
                 .title = "Native SDK GPU Dashboard",
                 .width = 1240,
                 .height = 780,
+                // The floor the layout audit sweep proves clean
+                // (toolbar + hero rail + tiles + forecast form).
+                .min_width = 1080,
+                .min_height = 640,
                 .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .views = .{

@@ -13,6 +13,10 @@
                 .title = "Native SDK Feed",
                 .width = 520,
                 .height = 760,
+                // The floor the layout audit sweep proves clean
+                // (header + fixed-extent timeline rows).
+                .min_width = 520,
+                .min_height = 480,
                 .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .views = .{

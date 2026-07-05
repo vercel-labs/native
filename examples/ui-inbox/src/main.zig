@@ -19,6 +19,12 @@ const geometry = native_sdk.geometry;
 const canvas_label = "inbox-canvas";
 const window_width: f32 = 720;
 const window_height: f32 = 520;
+/// Content min-size floor the window enforces: the smallest size where
+/// the toolbar, filter chips, and task rows lay out without clipping —
+/// proven by the layout audit sweep in tests.zig, which sweeps from
+/// exactly this floor.
+pub const window_min_width: f32 = 520;
+pub const window_min_height: f32 = 400;
 const max_tasks = 64;
 const max_task_title = 32;
 
@@ -32,6 +38,8 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .title = "Native SDK Inbox",
     .width = window_width,
     .height = window_height,
+    .min_width = window_min_width,
+    .min_height = window_min_height,
     .restore_state = false,
     .views = &shell_views,
 }};

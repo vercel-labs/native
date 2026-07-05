@@ -18,4 +18,5 @@ test {
     _ = @import("text_span_tests.zig");
     _ = @import("markdown_tests.zig");
     _ = @import("markdown_hostile_tests.zig");
+    _ = @import("layout_audit_tests.zig");
 }

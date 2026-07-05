@@ -32,6 +32,19 @@ pub const Density = enum {
     spacious,
 };
 
+/// Minimum pointer hit-target extent in points at regular density and
+/// default widget size. 18 is the smallest interactive register the house
+/// controls ship (the checkbox/radio box), sitting inside the desktop
+/// pointer convention band (macOS guidance asks for ~24pt around small
+/// controls but AppKit's own small checkboxes are 14-18pt with row-level
+/// slop; touch platforms want 44pt and get it from the 36pt control
+/// height plus spacing). Consumers scale it through the same size/density
+/// channel every control metric uses (`widgetSizedDensityValue`), so an
+/// intentionally `sm` control at compact density keeps its floor while a
+/// control squeezed below its own register is flagged. The layout audit's
+/// `hit_target` rule is the enforcement point.
+pub const min_pointer_hit_target: f32 = 18;
+
 pub const Easing = enum {
     linear,
     standard,

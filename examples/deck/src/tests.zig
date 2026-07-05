@@ -169,6 +169,43 @@ const LiveApp = struct {
 
 // ------------------------------------------------------------------ tests
 
+test "layout audit sweep: nothing clips, overlaps, or escapes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var model = Model{};
+    apply(&model, .{ .play_track = 1 });
+    apply(&model, .{ .queue_track = 12 });
+
+    // The chassis is machined hardware at a fixed size and a pinned
+    // compact density, so the sweep runs exactly the geometry the app
+    // ships: one size, one density. No text expansion either: the
+    // stampings (VOL, the transport glyphs) are engraved hardware
+    // lettering machined into fixed wells, not translatable strings —
+    // dynamic content (titles, durations) rides the marquee and readout,
+    // which clip to their windows by design.
+    const chassis_size = geometry.SizeF.init(main.window_width, main.window_height);
+    const tree = try buildTree(arena_state.allocator(), &model);
+    try canvas.expectLayoutAuditSweepClean(testing.allocator, tree.root, .{
+        .tokens = main.tokensFromModel(&model),
+        .min_size = chassis_size,
+        .default_size = chassis_size,
+        .large_size = chassis_size,
+        .densities = &.{.compact},
+        .text_expansions = &.{1},
+    });
+
+    // The playlist rack window, same fixed-hardware contract.
+    const playlist = try buildPlaylistTree(arena_state.allocator(), &model);
+    try canvas.expectLayoutAuditSweepClean(testing.allocator, playlist.root, .{
+        .tokens = main.tokensFromModel(&model),
+        .min_size = playlist_size,
+        .default_size = playlist_size,
+        .large_size = playlist_size,
+        .densities = &.{.compact},
+    });
+}
+
 test "play, pause, and seek drive the progress timer effect" {
     const live = try LiveApp.start(true);
     defer live.stop();

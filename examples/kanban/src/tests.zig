@@ -220,6 +220,19 @@ const legacy_board_markup =
     \\</column>
 ;
 
+test "layout audit sweep: nothing clips, overlaps, or escapes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var model = Model{};
+    const tree = try buildTree(arena_state.allocator(), &model);
+    const floor = native_sdk.geometry.SizeF.init(main.window_min_width, main.window_min_height);
+    try canvas.expectLayoutAuditSweepClean(testing.allocator, tree.root, .{
+        .min_size = floor,
+        .default_size = floor,
+    });
+}
+
 test "the templated board keeps the pre-template widget ids exactly" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

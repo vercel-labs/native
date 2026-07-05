@@ -14,6 +14,11 @@
                 .title = "System Monitor",
                 .width = 1144,
                 .height = 720,
+                // The tile grid is machined for exactly this content
+                // size; the floor stops the resize where clipping would
+                // begin (proven by the layout audit sweep).
+                .min_width = 1144,
+                .min_height = 720,
                 .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .views = .{

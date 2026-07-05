@@ -147,9 +147,11 @@ fn uptimeTile(ui: *Ui, model: *const Model) Ui.Node {
         ui.paragraph(.{ .width = spark_width, .semantics = .{ .label = model.uptimeValue(ui.arena) } }, &.{
             .{ .text = model.uptimeValue(ui.arena), .weight = .bold, .scale = 1.55 },
         }),
-        ui.text(.{ .width = spark_width, .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "since boot (pid 1 elapsed time)"),
+        // One-line tile caption: clip at the tile width, never wrap
+        // over the caption line below.
+        ui.text(.{ .width = spark_width, .size = .sm, .wrap = false, .style_tokens = .{ .foreground = .text_muted } }, "since boot (pid 1 elapsed time)"),
         ui.column(.{ .height = spark_height, .main = .end, .gap = 3 }, .{
-            ui.text(.{ .width = spark_width, .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, ui.fmt("{d} samples kept · {d} s cadence", .{
+            ui.text(.{ .width = spark_width, .size = .sm, .wrap = false, .style_tokens = .{ .foreground = .text_muted } }, ui.fmt("{d} samples kept · {d} s cadence", .{
                 model_mod.history_len, model_mod.sample_interval_ms / 1000,
             })),
         }),
@@ -233,7 +235,10 @@ pub fn settingsView(ui: *Ui, model: *const Model) Ui.Node {
             model_mod.history_len, model_mod.sample_interval_ms / 1000,
         })),
         ui.spacer(1),
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Close this window (or press its close button) to keep monitoring."),
+        // A real wrapped paragraph: the sentence needs two lines at the
+        // settings width, and wrap=true reserves that height instead of
+        // painting the second line into the window's bottom padding.
+        ui.text(.{ .wrap = true, .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Close this window (or press its close button) to keep monitoring."),
     });
 }
 
@@ -364,7 +369,9 @@ fn columnHeadings(ui: *Ui) Ui.Node {
 /// `text_alignment = .end` needs a frame wider than the content to have
 /// an edge to align against.
 fn rightAlignedHint(ui: *Ui, text: []const u8) Ui.Node {
-    var node = ui.text(.{ .width = 380, .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, text);
+    // Width-constrained one-line hint: clip rather than wrap over the
+    // table header below.
+    var node = ui.text(.{ .width = 380, .size = .sm, .wrap = false, .style_tokens = .{ .foreground = .text_muted } }, text);
     node.widget.text_alignment = .end;
     return node;
 }

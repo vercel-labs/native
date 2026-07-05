@@ -10,7 +10,9 @@
 <column>
   <row height="60" padding="12" gap="12" cross="center" background="surface" label="Soundboard header">
     <badge variant="primary">Soundboard</badge>
-    <text size="sm" width="84" foreground="text_muted">Native SDK</text>
+    <!-- Width-constrained caption: one honest line, clipped if the text
+         ever outgrows the band, never a second line over the header. -->
+    <text size="sm" width="84" wrap="false" foreground="text_muted">Native SDK</text>
     <tabs gap="4">
       <button size="sm" selected="{albumsShowing}" on-press="show_albums">Albums</button>
       <button size="sm" selected="{songsShowing}" on-press="show_songs">Songs</button>

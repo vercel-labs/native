@@ -94,6 +94,20 @@ test "the inbox view lays out through the canvas engine" {
     try testing.expect(saw_button);
 }
 
+test "layout audit sweep: nothing clips, overlaps, or escapes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var model = Model{};
+    model.addTask("Write the launch announcement draft");
+    model.addTask("Second");
+    const tree = try buildTree(arena_state.allocator(), &model);
+    try canvas.expectLayoutAuditSweepClean(testing.allocator, tree.root, .{
+        .min_size = native_sdk.geometry.SizeF.init(main.window_min_width, main.window_min_height),
+        .default_size = native_sdk.geometry.SizeF.init(720, 520),
+    });
+}
+
 fn firstCheckbox(widget: canvas.Widget) ?canvas.Widget {
     if (widget.kind == .checkbox) return widget;
     for (widget.children) |child| {

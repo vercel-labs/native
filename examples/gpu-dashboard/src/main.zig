@@ -23,6 +23,12 @@ const geometry = native_sdk.geometry;
 
 const window_width: f32 = 1240;
 const window_height: f32 = 780;
+/// Content min-size floor the window enforces: the smallest size where
+/// the toolbar, hero rail, metric tiles, and forecast form lay out
+/// without clipping or overlap — proven by the layout audit sweep below,
+/// which sweeps from exactly this floor.
+pub const window_min_width: f32 = 1080;
+pub const window_min_height: f32 = 640;
 const toolbar_height: f32 = 54;
 const canvas_pixel_width: usize = @intFromFloat(window_width);
 const canvas_width: f32 = @floatFromInt(canvas_pixel_width);
@@ -62,7 +68,11 @@ const expected_dashboard_interaction_command_count: usize = 72;
 // affordance: the segment-search field holds text, so it now draws the
 // vector x over its trailing inset (reviewed via the soundboard/monitor
 // search-state captures — same emitter, same reference renderer).
-const expected_dashboard_reference_signature: u64 = 11096725754021740319;
+// Regenerated 2026-07-05 for the shortened activity-rail titles: list
+// rows paint one line and never elide, so the titles now budget for the
+// rail width with long-content headroom (enforced by the layout audit
+// sweep); reviewed via before/after reference captures.
+const expected_dashboard_reference_signature: u64 = 9741943004418608128;
 const expected_dashboard_widget_node_count: usize = 48;
 const expected_dashboard_snapshot_widget_count: usize = 48;
 const refresh_command = "dashboard.refresh";
@@ -108,6 +118,8 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .title = "Native SDK GPU Dashboard",
     .width = window_width,
     .height = window_height,
+    .min_width = window_min_width,
+    .min_height = window_min_height,
     .restore_state = false,
     .views = &shell_views,
 }};
@@ -129,11 +141,15 @@ const metric_entries = [_]DashboardEntry{
     .{ .index = 0, .title = "ARR $12.8M, up 18.4%" },
     .{ .index = 1, .title = "Activation 74.2%, up 6.1%" },
 };
+// Activity titles budget for the fixed-width activity rail with
+// long-content headroom: list rows paint one line and never elide, so a
+// title must fit the rail even when measured text runs ~1.35x longer
+// (the layout audit sweep enforces exactly that).
 const activity_entries = [_]DashboardEntry{
-    .{ .index = 0, .title = "Signed enterprise renewal" },
-    .{ .index = 1, .title = "Usage spike in EU region" },
-    .{ .index = 2, .title = "Latency budget recovered" },
-    .{ .index = 3, .title = "Queued invoice batch" },
+    .{ .index = 0, .title = "Enterprise renewal" },
+    .{ .index = 1, .title = "EU usage spike" },
+    .{ .index = 2, .title = "Latency recovered" },
+    .{ .index = 3, .title = "Queued invoices" },
 };
 const filter_entries = [_]DashboardEntry{
     .{ .index = 0, .title = "Last 30 days" },
@@ -304,8 +320,12 @@ fn toolbarView(ui: *DashboardUi) DashboardUi.Node {
     return ui.row(.{ .height = toolbar_height, .padding = 10, .gap = 12, .cross = .center }, .{
         // The chrome display list draws the "GPU Dashboard" title here.
         ui.el(.stack, .{ .width = 228 }, .{}),
+        // A width FLOOR, not a fixed width: the control keeps its
+        // designed 214pt at the shipped type scale and may only grow
+        // when measured text runs longer (wider type, longer strings),
+        // so segment labels never paint past the plate.
         textLeaf(ui, .segmented_control, .{
-            .width = 214,
+            .min_width = 214,
             .semantics = .{ .label = "Dashboard mode" },
             .on_press = .set_mode,
         }, "Overview|Revenue|Latency"),
@@ -1050,6 +1070,19 @@ test "gpu dashboard flex layout keeps controls visually separated" {
     const status_frame = try dashboardLayoutFrame(layout, status_text.id);
     const content_end = dashboardContentYForSize(default_canvas_size) + dashboardContentHeightForSize(default_canvas_size);
     try std.testing.expect(status_frame.y >= content_end);
+}
+
+test "gpu dashboard layout audit sweep: nothing clips, overlaps, or escapes" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    const model = Model{};
+    const tree = try buildTestTree(arena_state.allocator(), &model);
+    try canvas.expectLayoutAuditSweepClean(std.testing.allocator, tree.root, .{
+        .tokens = dashboardWidgetTokens(),
+        .min_size = geometry.SizeF.init(window_min_width, window_min_height),
+        .default_size = geometry.SizeF.init(window_width, window_height),
+    });
 }
 
 test "gpu dashboard typed messages drive the model" {

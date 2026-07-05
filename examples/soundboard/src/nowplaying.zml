@@ -25,9 +25,11 @@
       </else>
       <button size="sm" variant="ghost" icon="skip-forward" disabled="{idle}" on-press="next_track" label="Next track"></button>
     </row>
-    <text size="sm" foreground="text_muted" width="34">{elapsedLabel}</text>
+    <!-- Fixed time columns: one honest line each, clipped rather than
+         wrapped over the transport row. -->
+    <text size="sm" foreground="text_muted" width="34" wrap="false">{elapsedLabel}</text>
     <slider grow="1" value="{progressFraction}" disabled="{idle}" on-change="seeked" label="Seek" />
-    <text size="sm" foreground="text_muted" width="34">{durationLabel}</text>
+    <text size="sm" foreground="text_muted" width="34" wrap="false">{durationLabel}</text>
     <if test="{queue_len > 0}">
       <badge variant="secondary">{queue_len} queued</badge>
     </if>

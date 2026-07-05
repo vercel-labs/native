@@ -33,6 +33,12 @@ pub const update = model_mod.update;
 pub const canvas_label = "notes-canvas";
 pub const window_width: f32 = 1180;
 pub const window_height: f32 = 760;
+/// Content min-size floor the window enforces: the smallest size where
+/// the three panes, the note-list rows, and the editor toolbar all lay
+/// out without clipping or wrapping over each other — proven by the
+/// layout audit sweep in tests.zig, which sweeps from exactly this floor.
+pub const window_min_width: f32 = 760;
+pub const window_min_height: f32 = 520;
 
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
 const shell_views = [_]native_sdk.ShellView{
@@ -43,6 +49,8 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .title = "Native SDK Notes",
     .width = window_width,
     .height = window_height,
+    .min_width = window_min_width,
+    .min_height = window_min_height,
     .restore_state = false,
     .views = &shell_views,
 }};

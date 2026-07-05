@@ -14,6 +14,11 @@
                 .title = "Native SDK Kanban",
                 .width = 840,
                 .height = 560,
+                // The board is machined for exactly this size; the
+                // floor stops the resize where clipping would begin
+                // (proven by the layout audit sweep).
+                .min_width = 840,
+                .min_height = 560,
                 
                 .restore_state = false,
                 .restore_policy = "center_on_primary",

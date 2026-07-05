@@ -331,6 +331,20 @@ test "the initial tree renders folders, the note list, and the editor" {
     try testing.expect(findByKind(tree.root, .dialog) == null);
 }
 
+test "layout audit sweep: nothing clips, overlaps, or escapes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var clock = native_sdk.TestClock{};
+    var model = model_mod.initialModel(testClock(&clock));
+    const tree = try buildTree(arena_state.allocator(), &model);
+    try canvas.expectLayoutAuditSweepClean(testing.allocator, tree.root, .{
+        .tokens = main.notesTokens(&model),
+        .min_size = geometry.SizeF.init(main.window_min_width, main.window_min_height),
+        .default_size = geometry.SizeF.init(main.window_width, main.window_height),
+    });
+}
+
 test "the idle editor pane shows the keyboard reference" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -920,3 +934,5 @@ test "render homepage screenshots (env-gated)" {
     h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/notes-dark-artifacts", "Notes");
     try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot notes-canvas 2");
 }
+
+

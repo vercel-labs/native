@@ -522,6 +522,19 @@ test "the viewer lays out through the canvas engine at window size" {
     try testing.expect(editor_frame.?.height > 500);
 }
 
+test "layout audit sweep: nothing clips, overlaps, or escapes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var model = main.initialModel();
+    const tree = try buildTree(arena_state.allocator(), &model);
+    try canvas.expectLayoutAuditSweepClean(testing.allocator, tree.root, .{
+        .tokens = main.viewerTokens(&model),
+        .min_size = geometry.SizeF.init(main.window_min_width, main.window_min_height),
+        .default_size = geometry.SizeF.init(1200, 760),
+    });
+}
+
 // Env-gated screenshot renderer (skipped by default, never in CI): renders
 // the app OFFSCREEN through the deterministic reference renderer via the
 // automation screenshot artifact — no live window. PNGs land in

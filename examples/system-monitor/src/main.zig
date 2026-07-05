@@ -38,6 +38,11 @@ pub const rootView = view_mod.rootView;
 pub const canvas_label = "monitor-canvas";
 pub const window_width = view_mod.window_width;
 pub const window_height = view_mod.window_height;
+/// Content min-size floor the window enforces: the tile grid is machined
+/// for the full content width, so shrinking below the designed size can
+/// only clip it — the floor is the size itself.
+pub const window_min_width: f32 = view_mod.window_width;
+pub const window_min_height: f32 = view_mod.window_height;
 
 // The model-declared settings WINDOW (dev-2's SettingsView shape): the
 // gear chip dispatches `.toggle_settings`, `windows_fn` declares the
@@ -57,6 +62,11 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .title = "System Monitor",
     .width = window_width,
     .height = window_height,
+    // The tile grid is machined for exactly the content width, so the
+    // floor is the designed size itself — proven by the layout audit
+    // sweep in tests.zig, which sweeps from exactly this floor.
+    .min_width = window_min_width,
+    .min_height = window_min_height,
     .restore_state = false,
     .views = &shell_views,
 }};

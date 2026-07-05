@@ -32,6 +32,12 @@ const app_dirs = native_sdk.app_dirs;
 const canvas_label = "viewer-canvas";
 const window_width: f32 = 1200;
 const window_height: f32 = 760;
+/// Content min-size floor the window enforces: the smallest size where
+/// the sidebar, editor, and preview lay out without clipping or overlap —
+/// proven by the layout audit sweep in tests.zig, which sweeps from
+/// exactly this floor.
+pub const window_min_width: f32 = 960;
+pub const window_min_height: f32 = 560;
 /// The toolbar's natural height (28px controls + 2x10 padding): the
 /// floor `toolbar_height` falls back to when no titlebar band overlays
 /// the content (fullscreen, standard chrome, non-macOS).
@@ -68,6 +74,8 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .title = "Native SDK Markdown",
     .width = window_width,
     .height = window_height,
+    .min_width = window_min_width,
+    .min_height = window_min_height,
     .restore_state = false,
     // Tall hidden-inset titlebar (declared in app.zon too, which
     // threads it through the STARTUP window create): the toolbar row is

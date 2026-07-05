@@ -14,6 +14,10 @@
                 .title = "Native SDK Inbox",
                 .width = 720,
                 .height = 520,
+                // The floor the layout audit sweep proves clean
+                // (toolbar + filter chips + task rows).
+                .min_width = 520,
+                .min_height = 400,
                 .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .views = .{

@@ -99,8 +99,10 @@ fn albumCard(ui: *Ui, cell: *const model_mod.AlbumCell) Ui.Node {
         }, cell.initials),
         ui.row(.{ .gap = 8, .cross = .center }, .{
             ui.column(.{ .gap = 1, .grow = 1 }, .{
-                ui.text(.{}, cell.title),
-                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, cell.artist),
+                // One-line card title/artist by design: clip at the card
+                // width, never wrap over the line below.
+                ui.text(.{ .wrap = false }, cell.title),
+                ui.text(.{ .size = .sm, .wrap = false, .style_tokens = .{ .foreground = .text_muted } }, cell.artist),
             }),
             if (cell.playing)
                 ui.el(.badge, .{ .variant = .primary, .text = "Playing" }, .{})

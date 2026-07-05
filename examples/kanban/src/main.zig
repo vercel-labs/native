@@ -20,6 +20,12 @@ const geometry = native_sdk.geometry;
 const canvas_label = "kanban-canvas";
 const window_width: f32 = 840;
 const window_height: f32 = 560;
+/// Content min-size floor the window enforces: the board is machined
+/// from the designed window width, so shrinking below it can only clip
+/// the columns — the floor is the designed size itself, proven by the
+/// layout audit sweep in tests.zig.
+pub const window_min_width: f32 = window_width;
+pub const window_min_height: f32 = window_height;
 const max_cards = 64;
 const max_card_title = 32;
 
@@ -36,6 +42,8 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .title = "Native SDK Kanban",
     .width = window_width,
     .height = window_height,
+    .min_width = window_min_width,
+    .min_height = window_min_height,
     .restore_state = false,
     .views = &shell_views,
 }};

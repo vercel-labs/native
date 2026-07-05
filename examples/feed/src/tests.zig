@@ -253,6 +253,33 @@ test "reach-end fires once per approach and appends the next batch" {
     try testing.expectEqual(main.initial_batch + 2 * main.fetch_batch, h.app_state.model.loaded);
 }
 
+test "layout audit sweep: nothing clips, overlaps, or escapes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var model = Model{ .loaded = main.max_posts };
+    // The windowed virtual timeline builds per viewport, so each swept
+    // size audits a tree built at exactly that viewport (mid-corpus, so
+    // real rows with long post bodies are in the window).
+    const sizes = [_]geometry.SizeF{
+        geometry.SizeF.init(main.window_min_width, main.window_min_height),
+        geometry.SizeF.init(main.window_width, main.window_height),
+        geometry.SizeF.init(main.window_width * 1.5, main.window_height * 1.5),
+    };
+    for (sizes) |size| {
+        // Deep in the corpus: six-digit post indexes put the widest
+        // realistic numbers in the rows and the status strip.
+        const tree = try buildTreeAt(arena_state.allocator(), &model, 99_900 * main.post_row_extent, size.height);
+        try canvas.expectLayoutAuditSweepClean(testing.allocator, tree.root, .{
+            .tokens = main.feedTokens(&model),
+            .min_size = size,
+            .default_size = size,
+            .large_size = size,
+        });
+        _ = arena_state.reset(.retain_capacity);
+    }
+}
+
 test "widget_nodes stays viewport-sized at the full 100k corpus while the scrollbar spans it" {
     var h = try Harness.create(.{ .loaded = main.max_posts });
     defer h.destroy();
@@ -285,3 +312,4 @@ test "widget_nodes stays viewport-sized at the full 100k corpus while the scroll
     const layout = try h.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
     try testing.expect(layout.nodes.len < 320);
 }
+

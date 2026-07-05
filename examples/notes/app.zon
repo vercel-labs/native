@@ -31,6 +31,11 @@
                 .title = "Native SDK Notes",
                 .width = 1180,
                 .height = 760,
+                // The floor the layout audit sweep proves clean (three
+                // panes, list rows, editor toolbar): the window stops
+                // resizing here instead of clipping the panes below it.
+                .min_width = 760,
+                .min_height = 520,
                 .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .views = .{

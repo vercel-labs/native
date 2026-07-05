@@ -33,6 +33,12 @@ pub const rootView = view_mod.rootView;
 pub const canvas_label = "soundboard-canvas";
 pub const window_width: f32 = 1080;
 pub const window_height: f32 = 720;
+/// Content min-size floor the window enforces: the smallest size where
+/// the header, album grid, and now-playing rail lay out without clipping
+/// or overlap — proven by the layout audit sweep in tests.zig, which
+/// sweeps from exactly this floor.
+pub const window_min_width: f32 = 1056;
+pub const window_min_height: f32 = 600;
 
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
 const shell_views = [_]native_sdk.ShellView{
@@ -43,6 +49,8 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .title = "Native SDK Soundboard",
     .width = window_width,
     .height = window_height,
+    .min_width = window_min_width,
+    .min_height = window_min_height,
     .restore_state = false,
     .views = &shell_views,
 }};

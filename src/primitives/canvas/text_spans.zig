@@ -413,7 +413,7 @@ fn placeWord(state: *LayoutState, span_count: usize, span_index: *usize, offset:
 
     const should_wrap_word = state.options.wrap == .word and
         state.line_has_content and
-        state.pen_x + state.pending_width + total_width > state.max_width;
+        state.pen_x + state.pending_width + total_width > state.max_width + span_break_slack;
     if (should_wrap_word) {
         state.breakLine();
     } else {
@@ -422,7 +422,7 @@ fn placeWord(state: *LayoutState, span_count: usize, span_index: *usize, offset:
 
     for (pieces[0..piece_len]) |piece| {
         const slice = state.spans[piece.span_index].text[piece.start..piece.end];
-        if (state.pen_x + piece.width > state.max_width) {
+        if (state.pen_x + piece.width > state.max_width + span_break_slack) {
             placeClusterWrapped(state, piece.span_index, slice);
         } else {
             state.place(piece.span_index, slice, piece.width);
@@ -445,7 +445,7 @@ fn placeClusterWrapped(state: *LayoutState, span_index: usize, slice: []const u8
         while (end < slice.len) {
             const next = text_interaction.nextTextOffset(slice, end);
             const next_width = measureSpanSlice(span, slice[start..next], state.options);
-            if (state.pen_x + next_width > state.max_width) {
+            if (state.pen_x + next_width > state.max_width + span_break_slack) {
                 if (end == start and !state.line_has_content) {
                     // A single cluster wider than the line still occupies it.
                     end = next;
@@ -465,6 +465,16 @@ fn placeClusterWrapped(state: *LayoutState, span_index: usize, slice: []const u8
         if (start < slice.len) state.breakLine();
     }
 }
+
+/// Line-break tolerance absorbing f32 association noise. Intrinsic sizing
+/// measures a paragraph as whole slices while the breaker accumulates
+/// per-word (and per-cluster) measures, and the two sums can differ by an
+/// ulp (~1e-5 px on a realistic line) purely from addition order — enough
+/// to re-wrap a paragraph laid out at exactly its measured intrinsic
+/// width, painting its last word over the content below. 1/64 px is
+/// orders of magnitude above that noise and far below any real glyph
+/// advance, so genuine overflow still breaks exactly as before.
+const span_break_slack: f32 = 0.015625;
 
 fn isSpanBreakByte(byte: u8) bool {
     return byte == ' ' or byte == '\t';

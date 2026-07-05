@@ -579,6 +579,26 @@ pub const splitDividerExtent = @import("widget_layout.zig").splitDividerExtent;
 pub const splitFractionBounds = @import("widget_layout.zig").splitFractionBounds;
 pub const splitEffectiveFraction = @import("widget_layout.zig").splitEffectiveFraction;
 pub const relayoutSplitChildren = @import("widget_layout.zig").relayoutSplitChildren;
+/// The layout audit (layout_audit.zig): a machine pass over a laid-out
+/// tree that reports clipped/overflowing text, overlapping flow siblings,
+/// content escaping its clip scope, and undersized pointer targets — plus
+/// the sweep harness the example suites run across window sizes, density
+/// variants, and the pseudo-locale text expansion.
+pub const LayoutAuditRuleKind = @import("layout_audit.zig").LayoutAuditRuleKind;
+pub const LayoutAuditFinding = @import("layout_audit.zig").LayoutAuditFinding;
+pub const LayoutAuditIssues = @import("layout_audit.zig").LayoutAuditIssues;
+pub const LayoutAuditSweepPoint = @import("layout_audit.zig").LayoutAuditSweepPoint;
+pub const LayoutAuditSweepOptions = @import("layout_audit.zig").LayoutAuditSweepOptions;
+pub const auditWidgetLayout = @import("layout_audit.zig").auditWidgetLayout;
+pub const formatLayoutAuditFinding = @import("layout_audit.zig").formatLayoutAuditFinding;
+pub const expectLayoutAuditSweepClean = @import("layout_audit.zig").expectLayoutAuditSweepClean;
+pub const max_layout_audit_findings = @import("layout_audit.zig").max_layout_audit_findings;
+pub const max_layout_audit_nodes = @import("layout_audit.zig").max_layout_audit_nodes;
+pub const layout_audit_epsilon = @import("layout_audit.zig").layout_audit_epsilon;
+pub const pseudo_locale_text_expansion = @import("layout_audit.zig").pseudo_locale_text_expansion;
+/// Minimum pointer hit-target register (tokens.zig): the floor the layout
+/// audit's `hit_target` rule scales per widget size and density.
+pub const min_pointer_hit_target = @import("tokens.zig").min_pointer_hit_target;
 pub const WidgetTextGeometry = widget_runtime.WidgetTextGeometry;
 pub const textGeometryForWidget = widget_runtime.textGeometryForWidget;
 pub const virtualWidgetScrollContentExtent = widget_runtime.virtualWidgetScrollContentExtent;

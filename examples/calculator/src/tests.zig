@@ -632,6 +632,28 @@ test "the keypad grid lays out to exact frames inside the fixed window" {
     }
 }
 
+test "layout audit sweep: nothing clips, overlaps, or escapes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    // A live expression + result so the display block audits with real
+    // content, not the empty boot state.
+    var model = Model{};
+    const h = PressHarness{ .arena = arena_state.allocator(), .model = &model };
+    try h.presses(&.{ "1", "2", "8", "×", "9", "6", "=" });
+
+    const tree = try buildTree(arena_state.allocator(), &model);
+    // The window is fixed (precision keypad), so the sweep collapses to
+    // one size; density variants and the pseudo-locale text expansion
+    // still run against the machined geometry.
+    try canvas.expectLayoutAuditSweepClean(testing.allocator, tree.root, .{
+        .tokens = main.tokensFromModel(&model),
+        .min_size = surface_size,
+        .default_size = surface_size,
+        .large_size = surface_size,
+    });
+}
+
 // ------------------------------------------------------------- snapshots
 
 test "automation snapshot names every key and mirrors the display" {

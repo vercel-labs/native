@@ -391,8 +391,10 @@ fn ledgerRow(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
                     .{ .text = row.number, .monospace = true, .color = .text_muted, .scale = readout_scale },
                 }),
         }),
-        ui.text(.{ .grow = 1, .size = .sm, .style_tokens = if (row.now) .{ .foreground = .accent } else .{} }, row.title),
-        ui.text(.{ .width = layout.ledger_artist_width, .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, row.artist),
+        // One-line ledger columns: clip a long title/artist at the
+        // column edge, never wrap onto the row below.
+        ui.text(.{ .grow = 1, .size = .sm, .wrap = false, .style_tokens = if (row.now) .{ .foreground = .accent } else .{} }, row.title),
+        ui.text(.{ .width = layout.ledger_artist_width, .size = .sm, .wrap = false, .style_tokens = .{ .foreground = .text_muted } }, row.artist),
         // A fixed cue slot keeps the artist and duration columns aligned
         // whether or not the amber Q plate is present.
         ui.row(.{ .width = layout.ledger_cue_width, .cross = .center, .main = .end }, .{
