@@ -878,3 +878,144 @@ test "slot placement rules validate with teaching messages" {
         try testing.expectEqualStrings(case.message, info.message);
     }
 }
+
+// ------------------------------------------------------------------ spans
+
+fn expectSpansCover(source: []const u8, node: markup.MarkupNode) !void {
+    switch (node.kind) {
+        .text => {
+            // A text run's span is exactly its trimmed visible bytes.
+            try testing.expectEqualStrings(node.text, source[node.span.start..node.span.end]);
+        },
+        else => {
+            // An element/structure node spans `<` through its closing `>`.
+            try testing.expectEqual(@as(u8, '<'), source[node.span.start]);
+            try testing.expectEqual(@as(u8, '>'), source[node.span.end - 1]);
+        },
+    }
+    // The classic line/column IS the span start, in display form.
+    const node_position = markup.positionAt(source, node.span.start);
+    try testing.expectEqual(node.line, node_position.line);
+    try testing.expectEqual(node.column, node_position.column);
+    for (node.attrs) |attribute| {
+        try testing.expectEqualStrings(attribute.name, source[attribute.name_span.start..attribute.name_span.end]);
+        if (attribute.value.len > 0) {
+            try testing.expectEqualStrings(attribute.value, source[attribute.value_span.start..attribute.value_span.end]);
+        } else {
+            try testing.expectEqual(attribute.value_span.start, attribute.value_span.end);
+        }
+        const attr_position = markup.positionAt(source, attribute.name_span.start);
+        try testing.expectEqual(attribute.line, attr_position.line);
+        try testing.expectEqual(attribute.column, attr_position.column);
+    }
+    for (node.children) |child| {
+        try expectSpansCover(source, child);
+    }
+}
+
+test "nodes and attributes carry byte-range spans; line/column derive from them" {
+    // Spans are the write-back prerequisite: every node, attribute name,
+    // attribute value, and text run must map to the exact source bytes,
+    // and the parser's line/column must be re-derivable from the span
+    // start (diagnostics keep their line:column shape; spans carry the
+    // authority).
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var parser = markup.Parser.init(arena_state.allocator(), inbox_source);
+    const document = try parser.parse();
+    try expectSpansCover(inbox_source, document.root.?);
+
+    // The comptime parser stamps identical spans (both engines see one
+    // document geometry).
+    const comptime_document = comptime markup.parseComptime(inbox_source);
+    try expectSpansCover(inbox_source, comptime_document.root.?);
+    try testing.expectEqual(document.root.?.span, comptime_document.root.?.span);
+
+    // Spot-pin the root: the document's exact extent.
+    try testing.expectEqual(std.mem.indexOf(u8, inbox_source, "<column").?, document.root.?.span.start);
+    try testing.expectEqual(inbox_source.len, document.root.?.span.end);
+}
+
+test "self-closing elements and value-less attributes span correctly" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const source = "<column><separator/><text wrap=\"true\">hi</text></column>";
+    var parser = markup.Parser.init(arena_state.allocator(), source);
+    const document = try parser.parse();
+    const root = document.root.?;
+    const separator = root.children[0];
+    try testing.expectEqualStrings("<separator/>", source[separator.span.start..separator.span.end]);
+    const text = root.children[1];
+    try testing.expectEqualStrings("<text wrap=\"true\">hi</text>", source[text.span.start..text.span.end]);
+    const wrap = text.attrs[0];
+    try testing.expectEqualStrings("wrap", source[wrap.name_span.start..wrap.name_span.end]);
+    try testing.expectEqualStrings("true", source[wrap.value_span.start..wrap.value_span.end]);
+    const run = text.children[0];
+    try testing.expectEqualStrings("hi", source[run.span.start..run.span.end]);
+}
+
+// ---------------------------------------------------------- typed pass
+
+fn expectTypedMatchesClassification(node: markup.MarkupNode) !void {
+    for (node.attrs) |attribute| {
+        // Canonicalization stamped every attribute...
+        const typed = attribute.typed orelse return error.TestUnexpectedResult;
+        // ...with exactly the classification the engines' fallback
+        // computes — the pass changes cost, never meaning.
+        const fallback = markup.classifyAttrValue(attribute.name, attribute.value);
+        try testing.expectEqual(std.meta.activeTag(fallback), std.meta.activeTag(typed.*));
+        if (typed.* == .expression) {
+            // The tree parsed once, at document level.
+            try testing.expect(typed.expression.tree != null);
+            try testing.expectEqualStrings(fallback.expression.inner, typed.expression.inner);
+        }
+    }
+    if (node.kind == .text and std.mem.indexOfScalar(u8, node.text, '{') != null) {
+        try testing.expect(node.typed_text != null);
+    }
+    for (node.children) |child| {
+        try expectTypedMatchesClassification(child);
+    }
+}
+
+test "canonicalization stamps typed values that match on-the-fly classification" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source =
+        \\<column gap="8" background="surface">
+        \\  <text label="{count} items">{count} of {total(count, 2)}</text>
+        \\  <button selected="{mode == active_mode}" on-press="set:{mode}">Go</button>
+        \\  <if test="{count > 0 and not busy}">
+        \\    <badge>{count}</badge>
+        \\  </if>
+        \\</column>
+    ;
+    var parser = markup.Parser.init(arena, source);
+    const document = try parser.parse();
+    const canonical = try markup.canonicalize(arena, document);
+    try expectTypedMatchesClassification(canonical.root.?);
+
+    // The if test is a full expression whose tree parsed once.
+    const if_block = canonical.root.?.children[2];
+    const test_attr = if_block.attrEntry("test").?;
+    try testing.expect(test_attr.typed.?.* == .expression);
+    try testing.expect(test_attr.typed.?.expression.tree != null);
+
+    // on-* attributes classify as messages, payload path included.
+    const button = canonical.root.?.children[1];
+    const press = button.attrEntry("on-press").?;
+    try testing.expectEqualStrings("set", press.typed.?.message.tag);
+    try testing.expectEqualStrings("mode", press.typed.?.message.payload);
+
+    // The comptime pass stamps the same shapes for the compiled engine.
+    const comptime_canonical = comptime markup.canonicalizeComptime(markup.parseComptime(
+        \\<row><text>{a} + {b}</text></row>
+    ));
+    const run = comptime_canonical.root.?.children[0].children[0];
+    try testing.expect(run.typed_text != null);
+    try testing.expectEqual(@as(usize, 3), run.typed_text.?.len);
+    try testing.expectEqualStrings("a", run.typed_text.?[0].binding);
+    try testing.expectEqualStrings(" + ", run.typed_text.?[1].literal);
+    try testing.expectEqualStrings("b", run.typed_text.?[2].binding);
+}

@@ -42,18 +42,21 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         pub fn init(arena: std.mem.Allocator, source: []const u8) (markup.ParseError || error{OutOfMemory})!Self {
             var parser = markup.Parser.init(arena, source);
             const document = try parser.parse();
-            return .{ .document = document };
+            return .{ .document = try markup.canonicalize(arena, document) };
         }
 
         pub fn initDiagnostic(arena: std.mem.Allocator, source: []const u8, diagnostic: *markup.MarkupErrorInfo) (markup.ParseError || error{OutOfMemory})!Self {
             var parser = markup.Parser.init(arena, source);
             defer diagnostic.* = parser.diagnostic;
             const document = try parser.parse();
-            return .{ .document = document };
+            return .{ .document = try markup.canonicalize(arena, document) };
         }
 
         /// Wrap an already-resolved document (the import resolver's
-        /// output, or a parsed single-file document).
+        /// output, or a parsed single-file document). Canonicalize it
+        /// first (`markup.canonicalize`) so attribute expressions parse
+        /// once instead of per frame; an uncanonicalized document builds
+        /// identically through `attrTyped`'s fallback, just slower.
         pub fn fromDocument(document: markup.MarkupDocument) Self {
             return .{ .document = document };
         }
@@ -256,13 +259,13 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 // Closed vocabulary: a literal built-in icon name, no
                 // children. Mirrors the validator and the compiled
                 // engine's comptime checks.
-                const raw = node.attr("name") orelse return self.failNode(node, markup.icon_missing_name_message);
-                const expression = markup.parseAttrExpression(raw) orelse return self.failNode(node, markup.icon_name_message);
-                if (expression != .literal) return self.failNode(node, markup.icon_name_message);
-                if (canvas.icons.find(expression.literal) == null) return self.failNode(node, markup.icon_name_message);
+                const name_attr = node.attrEntry("name") orelse return self.failNode(node, markup.icon_missing_name_message);
+                const typed = markup.attrTyped(name_attr);
+                if (typed != .literal) return self.failNode(node, markup.icon_name_message);
+                if (canvas.icons.find(typed.literal) == null) return self.failNode(node, markup.icon_name_message);
                 if (node.children.len > 0) return self.failNode(node, markup.icon_children_message);
                 var built = ui.el(kind, options, .{});
-                built.widget.text = expression.literal;
+                built.widget.text = typed.literal;
                 return built;
             }
 
@@ -318,10 +321,10 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                         }
                     },
                     .if_block => {
-                        const test_value = child.attr("test") orelse {
+                        const test_attr = child.attrEntry("test") orelse {
                             return self.failVoid(child, "if requires a test attribute");
                         };
-                        const condition = try self.evalAttrExpression(scope, child, test_value);
+                        const condition = try self.evalAttrExpression(scope, child, test_attr);
                         var else_node: ?markup.MarkupNode = null;
                         if (index + 1 < children.len and children[index + 1].kind == .else_block) {
                             else_node = children[index + 1];
@@ -493,11 +496,9 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             for (node.attrs) |attribute| {
                 if (std.mem.eql(u8, attribute.name, "kind")) continue;
                 if (std.mem.eql(u8, attribute.name, "source")) {
-                    const expression = markup.parseAttrExpression(attribute.value) orelse {
-                        return self.failNode(node, markup.markdown_source_message);
-                    };
-                    if (expression != .binding) return self.failNode(node, markup.markdown_source_message);
-                    const value = try self.evalBinding(scope, node, expression.binding, true);
+                    const typed = markup.attrTyped(attribute);
+                    if (typed != .binding) return self.failNode(node, markup.markdown_source_message);
+                    const value = try self.evalBinding(scope, node, typed.binding, true);
                     source_text = switch (value) {
                         .string => |text| text,
                         else => return self.failNode(node, markup.markdown_source_message),
@@ -505,39 +506,37 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "on-link")) {
-                    const expression = markup.parseMessageExpression(attribute.value) orelse {
+                    const typed = markup.attrTyped(attribute);
+                    if (typed != .message or typed.message.payload.len != 0) {
                         return self.failNode(node, markup.markdown_on_link_message);
-                    };
-                    if (expression.payload.len != 0) return self.failNode(node, markup.markdown_on_link_message);
-                    options.on_link = linkConstructor(expression.tag) orelse {
+                    }
+                    options.on_link = linkConstructor(typed.message.tag) orelse {
                         return self.failNode(node, markup.markdown_on_link_message);
                     };
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "on-details")) {
-                    const expression = markup.parseMessageExpression(attribute.value) orelse {
+                    const typed = markup.attrTyped(attribute);
+                    if (typed != .message or typed.message.payload.len != 0) {
                         return self.failNode(node, markup.markdown_on_details_message);
-                    };
-                    if (expression.payload.len != 0) return self.failNode(node, markup.markdown_on_details_message);
-                    options.on_details = detailsConstructor(expression.tag) orelse {
+                    }
+                    options.on_details = detailsConstructor(typed.message.tag) orelse {
                         return self.failNode(node, markup.markdown_on_details_message);
                     };
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "details-expanded")) {
-                    const expression = markup.parseAttrExpression(attribute.value) orelse {
-                        return self.failNode(node, markup.markdown_details_expanded_message);
-                    };
-                    if (expression != .binding) return self.failNode(node, markup.markdown_details_expanded_message);
-                    options.details_expanded = try self.boolItems(ui, scope, node, expression.binding);
+                    const typed = markup.attrTyped(attribute);
+                    if (typed != .binding) return self.failNode(node, markup.markdown_details_expanded_message);
+                    options.details_expanded = try self.boolItems(ui, scope, node, typed.binding);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "issue-link-base")) {
-                    const expression = markup.parseAttrExpression(attribute.value) orelse {
+                    const typed = markup.attrTyped(attribute);
+                    if (typed == .equals or typed == .invalid) {
                         return self.failNode(node, markup.markdown_issue_link_base_message);
-                    };
-                    if (expression == .equals) return self.failNode(node, markup.markdown_issue_link_base_message);
-                    const value = try self.evalAttrExpression(scope, node, attribute.value);
+                    }
+                    const value = try self.evalAttrExpression(scope, node, attribute);
                     const text = switch (value) {
                         .string => |text| text,
                         else => return self.failNode(node, markup.markdown_issue_link_base_message),
@@ -563,7 +562,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             for (node.attrs) |attribute| {
                 if (std.mem.eql(u8, attribute.name, "kind")) continue;
                 if (std.mem.eql(u8, attribute.name, "active")) {
-                    const value = try self.evalAttrExpression(scope, node, attribute.value);
+                    const value = try self.evalAttrExpression(scope, node, attribute);
                     options.active = switch (value) {
                         .integer => |int| if (int < 0) 0 else @intCast(int),
                         else => return self.failNode(node, markup.stepper_active_message),
@@ -572,15 +571,15 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "key")) {
-                    options.key = try self.attrKey(scope, node, attribute.value);
+                    options.key = try self.attrKey(scope, node, attribute);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "global-key")) {
-                    options.global_key = try self.attrKey(scope, node, attribute.value);
+                    options.global_key = try self.attrKey(scope, node, attribute);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "label")) {
-                    options.semantics.label = try self.stringAttr(scope, node, attribute.value, "label expects text");
+                    options.semantics.label = try self.stringAttr(scope, node, attribute, "label expects text");
                     continue;
                 }
                 return self.failNode(node, markup.stepper_attr_message);
@@ -610,23 +609,23 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             for (node.attrs) |attribute| {
                 if (std.mem.eql(u8, attribute.name, "kind")) continue;
                 if (std.mem.eql(u8, attribute.name, "gap")) {
-                    options.gap = try self.floatAttr(scope, node, attribute.value);
+                    options.gap = try self.floatAttr(scope, node, attribute);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "grow")) {
-                    options.grow = try self.floatAttr(scope, node, attribute.value);
+                    options.grow = try self.floatAttr(scope, node, attribute);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "key")) {
-                    options.key = try self.attrKey(scope, node, attribute.value);
+                    options.key = try self.attrKey(scope, node, attribute);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "global-key")) {
-                    options.global_key = try self.attrKey(scope, node, attribute.value);
+                    options.global_key = try self.attrKey(scope, node, attribute);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "label")) {
-                    options.semantics.label = try self.stringAttr(scope, node, attribute.value, "label expects text");
+                    options.semantics.label = try self.stringAttr(scope, node, attribute, "label expects text");
                     continue;
                 }
                 return self.failNode(node, markup.timeline_attr_message);
@@ -648,46 +647,44 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             for (node.attrs) |attribute| {
                 if (std.mem.eql(u8, attribute.name, "kind")) continue;
                 if (std.mem.eql(u8, attribute.name, "title")) {
-                    options.title = try self.stringAttr(scope, node, attribute.value, markup.timeline_item_text_attr_message);
+                    options.title = try self.stringAttr(scope, node, attribute, markup.timeline_item_text_attr_message);
                     has_title = true;
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "description")) {
-                    options.description = try self.stringAttr(scope, node, attribute.value, markup.timeline_item_text_attr_message);
+                    options.description = try self.stringAttr(scope, node, attribute, markup.timeline_item_text_attr_message);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "meta")) {
-                    options.meta = try self.stringAttr(scope, node, attribute.value, markup.timeline_item_text_attr_message);
+                    options.meta = try self.stringAttr(scope, node, attribute, markup.timeline_item_text_attr_message);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "indicator")) {
-                    options.indicator = try self.stringAttr(scope, node, attribute.value, markup.timeline_item_text_attr_message);
+                    options.indicator = try self.stringAttr(scope, node, attribute, markup.timeline_item_text_attr_message);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "icon")) {
                     // Vector icon indicator: closed literal vocabulary,
                     // like every icon attribute.
-                    const expression = markup.parseAttrExpression(attribute.value) orelse {
-                        return self.failVoid(node, markup.button_icon_message);
-                    };
-                    if (expression != .literal) return self.failVoid(node, markup.button_icon_message);
-                    if (canvas.icons.find(expression.literal) == null) return self.failVoid(node, markup.button_icon_message);
-                    options.icon = expression.literal;
+                    const typed = markup.attrTyped(attribute);
+                    if (typed != .literal) return self.failVoid(node, markup.button_icon_message);
+                    if (canvas.icons.find(typed.literal) == null) return self.failVoid(node, markup.button_icon_message);
+                    options.icon = typed.literal;
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "variant")) {
-                    const text = try self.stringAttr(scope, node, attribute.value, "expected an option name");
+                    const text = try self.stringAttr(scope, node, attribute, "expected an option name");
                     options.variant = std.meta.stringToEnum(canvas.WidgetVariant, text) orelse {
                         return self.failNode(node, "unknown option value");
                     };
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "connector")) {
-                    options.connector = (try self.evalAttrExpression(scope, node, attribute.value)).truthy();
+                    options.connector = (try self.evalAttrExpression(scope, node, attribute)).truthy();
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "selected")) {
-                    options.selected = (try self.evalAttrExpression(scope, node, attribute.value)).truthy();
+                    options.selected = (try self.evalAttrExpression(scope, node, attribute)).truthy();
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "on-press")) {
@@ -702,11 +699,11 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     return self.failNode(node, markup.timeline_item_press_only_message);
                 }
                 if (std.mem.eql(u8, attribute.name, "key")) {
-                    options.key = try self.attrKey(scope, node, attribute.value);
+                    options.key = try self.attrKey(scope, node, attribute);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "global-key")) {
-                    options.global_key = try self.attrKey(scope, node, attribute.value);
+                    options.global_key = try self.attrKey(scope, node, attribute);
                     continue;
                 }
                 return self.failNode(node, markup.timeline_item_attr_message);
@@ -715,16 +712,16 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             return ui.timelineItem(options);
         }
 
-        fn stringAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, raw: []const u8, message: []const u8) BuildError![]const u8 {
-            const value = try self.evalAttrExpression(scope, node, raw);
+        fn stringAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, attribute: markup.MarkupAttr, message: []const u8) BuildError![]const u8 {
+            const value = try self.evalAttrExpression(scope, node, attribute);
             return switch (value) {
                 .string => |text| text,
                 else => self.failValue(node, message),
             };
         }
 
-        fn floatAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, raw: []const u8) BuildError!f32 {
-            const value = try self.evalAttrExpression(scope, node, raw);
+        fn floatAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, attribute: markup.MarkupAttr) BuildError!f32 {
+            const value = try self.evalAttrExpression(scope, node, attribute);
             return switch (value) {
                 .float => |float| float,
                 .integer => |int| @floatFromInt(int),
@@ -837,8 +834,8 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 if (saved_len + arg_count >= max_scope_depth) {
                     return self.failNode(node, "template args nest too deep");
                 }
-                const payload: ScopeEntry.Payload = if (node.attr(arg.name)) |raw|
-                    try self.argPayload(ui, scope, node, raw)
+                const payload: ScopeEntry.Payload = if (node.attrEntry(arg.name)) |arg_attr|
+                    try self.argPayload(ui, scope, node, arg_attr)
                 else if (arg.default) |default| blk: {
                     // Defaults are literals only — a default cannot see
                     // any scope (validator and compiled-engine parity).
@@ -883,13 +880,14 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         /// (in scope or on the model, the same resolution set as
         /// `for each`) binds as a slice; anything else evaluates to a
         /// `Value` at the use site.
-        fn argPayload(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, raw: []const u8) BuildError!ScopeEntry.Payload {
+        fn argPayload(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, attribute: markup.MarkupAttr) BuildError!ScopeEntry.Payload {
             @setEvalBranchQuota(scan_quota);
-            const expression = markup.parseAttrExpression(raw) orelse {
+            const typed = markup.attrTyped(attribute);
+            if (typed == .invalid) {
                 return self.failPayload(node, markup.invalid_expression_message);
-            };
-            if (expression == .binding) {
-                const path = expression.binding;
+            }
+            if (typed == .binding) {
+                const path = typed.binding;
                 if (scope.lookup(pathHead(path))) |entry| {
                     if (entry.payload == .slice and pathTail(path) == null) {
                         // Re-pass a slice arg to a nested use.
@@ -913,7 +911,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     }
                 }
             }
-            return .{ .value = try self.evalAttrExpression(scope, node, raw) };
+            return .{ .value = try self.evalAttrExpression(scope, node, attribute) };
         }
 
         fn failPayload(self: *Self, node: markup.MarkupNode, message: []const u8) BuildError {
@@ -945,15 +943,15 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "key")) {
-                    options.key = try self.attrKey(scope, node, attribute.value);
+                    options.key = try self.attrKey(scope, node, attribute);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "global-key")) {
-                    options.global_key = try self.attrKey(scope, node, attribute.value);
+                    options.global_key = try self.attrKey(scope, node, attribute);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "role")) {
-                    const value = try self.evalAttrExpression(scope, node, attribute.value);
+                    const value = try self.evalAttrExpression(scope, node, attribute);
                     const text = switch (value) {
                         .string => |text| text,
                         else => return self.failVoid(node, "role expects a role name"),
@@ -964,7 +962,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "label")) {
-                    const value = try self.evalAttrExpression(scope, node, attribute.value);
+                    const value = try self.evalAttrExpression(scope, node, attribute);
                     options.semantics.label = switch (value) {
                         .string => |text| text,
                         else => return self.failVoid(node, "label expects text"),
@@ -972,7 +970,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "image")) {
-                    try self.applyImageAttr(scope, node, options, attribute.value);
+                    try self.applyImageAttr(scope, node, options, attribute);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "name")) {
@@ -983,7 +981,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "icon")) {
-                    try self.applyButtonIconAttr(node, options, attribute.value);
+                    try self.applyButtonIconAttr(node, options, attribute);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "anchor")) {
@@ -1011,7 +1009,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         fn applyStyleTokenAttr(self: *Self, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!bool {
             inline for (color_style_attr_fields) |entry| {
                 if (std.mem.eql(u8, attribute.name, entry.markup)) {
-                    const literal = try self.styleTokenLiteral(node, attribute.value);
+                    const literal = try self.styleTokenLiteral(node, attribute);
                     @field(options.style_tokens, entry.zig) = std.meta.stringToEnum(canvas.ColorTokenName, literal) orelse {
                         return self.failVoid(node, markup.unknown_color_token_message);
                     };
@@ -1019,7 +1017,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 }
             }
             if (std.mem.eql(u8, attribute.name, "radius")) {
-                const literal = try self.styleTokenLiteral(node, attribute.value);
+                const literal = try self.styleTokenLiteral(node, attribute);
                 options.style_tokens.radius = std.meta.stringToEnum(canvas.RadiusTokenName, literal) orelse {
                     return self.failVoid(node, markup.unknown_radius_token_message);
                 };
@@ -1028,12 +1026,11 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             return false;
         }
 
-        fn styleTokenLiteral(self: *Self, node: markup.MarkupNode, raw: []const u8) BuildError![]const u8 {
-            const expression = markup.parseAttrExpression(raw) orelse {
-                return self.failPayload(node, markup.style_token_literal_message);
+        fn styleTokenLiteral(self: *Self, node: markup.MarkupNode, attribute: markup.MarkupAttr) BuildError![]const u8 {
+            return switch (markup.attrTyped(attribute)) {
+                .literal => |text| text,
+                else => self.failPayload(node, markup.style_token_literal_message),
             };
-            if (expression != .literal) return self.failPayload(node, markup.style_token_literal_message);
-            return expression.literal;
         }
 
         /// `image="{binding}"` on avatar: one binding producing a `u64`
@@ -1042,15 +1039,13 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         /// markup literal, and 0 keeps the initials fallback. Scoped to
         /// avatar; the other image-bearing widgets (image, icon,
         /// icon-button) stay Zig views.
-        fn applyImageAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, raw: []const u8) BuildError!void {
+        fn applyImageAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
             if (!std.mem.eql(u8, node.name, "avatar")) {
                 return self.failVoid(node, markup.avatar_image_element_message);
             }
-            const expression = markup.parseAttrExpression(raw) orelse {
-                return self.failVoid(node, markup.avatar_image_message);
-            };
-            if (expression != .binding) return self.failVoid(node, markup.avatar_image_message);
-            const value = try self.evalBinding(scope, node, expression.binding, true);
+            const typed = markup.attrTyped(attribute);
+            if (typed != .binding) return self.failVoid(node, markup.avatar_image_message);
+            const value = try self.evalBinding(scope, node, typed.binding, true);
             options.image = switch (value) {
                 .integer => |int| @intCast(int),
                 else => return self.failVoid(node, markup.avatar_image_message),
@@ -1062,16 +1057,14 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         /// (a typo can never rot silently), drawn inside the element so
         /// icon + label are one hit target with one tint. Mirrors the
         /// validator and the compiled engine's compile error.
-        fn applyButtonIconAttr(self: *Self, node: markup.MarkupNode, options: *Ui.ElementOptions, raw: []const u8) BuildError!void {
+        fn applyButtonIconAttr(self: *Self, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
             if (!markup.iconAttrElement(node.name)) {
                 return self.failVoid(node, markup.button_icon_element_message);
             }
-            const expression = markup.parseAttrExpression(raw) orelse {
-                return self.failVoid(node, markup.button_icon_message);
-            };
-            if (expression != .literal) return self.failVoid(node, markup.button_icon_message);
-            if (canvas.icons.find(expression.literal) == null) return self.failVoid(node, markup.button_icon_message);
-            options.icon = expression.literal;
+            const typed = markup.attrTyped(attribute);
+            if (typed != .literal) return self.failVoid(node, markup.button_icon_message);
+            if (canvas.icons.find(typed.literal) == null) return self.failVoid(node, markup.button_icon_message);
+            options.icon = typed.literal;
         }
 
         /// `anchor="below|above"` on dropdown-menu: anchored floating
@@ -1111,16 +1104,16 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         fn applyOptionAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!bool {
             inline for (attr_names) |name| {
                 if (std.mem.eql(u8, attribute.name, name.markup)) {
-                    try self.setOptionField(scope, node, options, name.zig, attribute.value);
+                    try self.setOptionField(scope, node, options, name.zig, attribute);
                     return true;
                 }
             }
             return false;
         }
 
-        fn setOptionField(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, comptime field: []const u8, raw: []const u8) BuildError!void {
+        fn setOptionField(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, comptime field: []const u8, attribute: markup.MarkupAttr) BuildError!void {
             const FieldType = @TypeOf(@field(options, field));
-            const value = try self.evalAttrExpression(scope, node, raw);
+            const value = try self.evalAttrExpression(scope, node, attribute);
             switch (@typeInfo(FieldType)) {
                 .float => @field(options, field) = switch (value) {
                     .float => |float| float,
@@ -1155,8 +1148,8 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             }
         }
 
-        fn attrKey(self: *Self, scope: *Scope, node: markup.MarkupNode, raw: []const u8) BuildError!canvas.UiKey {
-            const value = try self.evalAttrExpression(scope, node, raw);
+        fn attrKey(self: *Self, scope: *Scope, node: markup.MarkupNode, attribute: markup.MarkupAttr) BuildError!canvas.UiKey {
+            const value = try self.evalAttrExpression(scope, node, attribute);
             return switch (value) {
                 .integer => |int| canvas.uiKey(@as(u64, @intCast(int))),
                 .string => |text| canvas.uiKey(text),
@@ -1165,9 +1158,11 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         }
 
         fn applyMessageAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
-            const expression = markup.parseMessageExpression(attribute.value) orelse {
+            const typed = markup.attrTyped(attribute);
+            if (typed != .message) {
                 return self.failVoid(node, "invalid message expression: on-* takes a Msg tag (\"add\") or tag with one binding payload (\"toggle:{item.id}\")");
-            };
+            }
+            const expression = typed.message;
             const event = attribute.name[3..];
             if (std.mem.eql(u8, event, "input")) {
                 options.on_input = inputConstructor(expression.tag) orelse {
@@ -1312,11 +1307,12 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
 
         // --------------------------------------------------- expressions
 
-        fn evalAttrExpression(self: *Self, scope: *Scope, node: markup.MarkupNode, raw: []const u8) BuildError!Value {
-            const expression = markup.parseAttrExpression(raw) orelse {
-                return self.failValue(node, markup.invalid_expression_message);
-            };
-            return switch (expression) {
+        /// Evaluate an attribute's TYPED value: the canonicalized form
+        /// classified (and its expression tree parsed) once at document
+        /// level, not per frame per use — the typed-document pass's whole
+        /// point for the interpreter.
+        fn evalAttrExpression(self: *Self, scope: *Scope, node: markup.MarkupNode, attribute: markup.MarkupAttr) BuildError!Value {
+            return switch (markup.attrTyped(attribute)) {
                 .literal => |text| literalValue(text),
                 .binding => |path| try self.evalBinding(scope, node, path, true),
                 // Arena-computed bindings are excluded from equality on
@@ -1326,8 +1322,18 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     try self.evalBinding(scope, node, sides.left, false),
                     try self.evalBinding(scope, node, sides.right, false),
                 ) },
-                .expression => |inner| try self.evalExpressionTree(scope, node, inner),
+                .expression => |form| try self.evalExpressionForm(scope, node, form),
+                .message, .invalid => self.failValue(node, markup.invalid_expression_message),
             };
+        }
+
+        /// A typed expression: use the pre-parsed tree when the pass
+        /// stamped one; a missing tree means the text does not parse (or
+        /// the document was never canonicalized), and the re-parse
+        /// surfaces the exact teaching diagnostic.
+        fn evalExpressionForm(self: *Self, scope: *Scope, node: markup.MarkupNode, form: markup.TypedExprRef) BuildError!Value {
+            if (form.tree) |tree| return self.evalParsedTree(scope, node, tree);
+            return self.evalExpressionTree(scope, node, form.inner);
         }
 
         /// Evaluate a full `{expression}`: parse it (bounded, allocation-
@@ -1343,6 +1349,10 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             if (!markup.expr.parse(inner, &tree, &diagnostic)) {
                 return self.failValue(node, diagnostic.message);
             }
+            return self.evalParsedTree(scope, node, &tree);
+        }
+
+        fn evalParsedTree(self: *Self, scope: *Scope, node: markup.MarkupNode, tree: *const markup.expr.ExprTree) BuildError!Value {
             var values: [markup.expr.max_expression_nodes]Value = undefined;
             for (tree.nodes[0..tree.len], 0..) |expr_node, index| {
                 if (expr_node.kind != .binding) continue;
@@ -1350,7 +1360,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 // same teaching rule as `{a == b}`.
                 values[index] = try self.evalBinding(scope, node, expr_node.text, !expr_node.comparison_operand);
             }
-            return switch (try markup.expr.eval(&tree, &values, scope.arena)) {
+            return switch (try markup.expr.eval(tree, &values, scope.arena)) {
                 .value => |value| value,
                 .fail => |message| self.failValue(node, message),
             };
@@ -1404,13 +1414,28 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         fn interpolatedText(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError![]const u8 {
             if (node.children.len > 1) return self.failText(node, "text elements take a single run of text");
             var source: []const u8 = "";
+            var segments: ?[]const markup.TypedTextSegment = null;
             for (node.children) |child| {
                 if (child.kind != .text) return self.failText(node, "text elements may only contain text");
                 source = child.text;
+                segments = child.typed_text;
             }
             if (std.mem.indexOfScalar(u8, source, '{') == null) return source;
 
             var out: std.ArrayListUnmanaged(u8) = .empty;
+            if (segments) |typed_segments| {
+                // The canonicalized fast path: the run was split (and its
+                // expressions parsed) once at document level.
+                for (typed_segments) |segment| {
+                    switch (segment) {
+                        .literal => |text| try out.appendSlice(ui.arena, text),
+                        .binding => |path| try appendValue(&out, ui.arena, try self.evalBinding(scope, node, path, true)),
+                        .expression => |form| try appendValue(&out, ui.arena, try self.evalExpressionForm(scope, node, form)),
+                        .unterminated => return self.failText(node, "unterminated interpolation"),
+                    }
+                }
+                return out.items;
+            }
             var rest = source;
             while (std.mem.indexOfScalar(u8, rest, '{')) |open| {
                 try out.appendSlice(ui.arena, rest[0..open]);
@@ -1469,49 +1494,18 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
 
 // ----------------------------------------------------------- reflection
 
-/// Markup attribute name → `Ui.ElementOptions` field. Shared with the
-/// comptime-compiled path so both engines accept exactly the same
-/// attributes.
-pub const AttrName = struct { markup: []const u8, zig: []const u8 };
+/// Markup attribute name → `Ui.ElementOptions` field, derived from the
+/// registry (ui_schema.zig). Shared with the comptime-compiled path so
+/// both engines accept exactly the same attributes; the registry is the
+/// single statement of the mapping.
+pub const AttrName = markup.schema.NamePair;
 
-pub const attr_names: []const AttrName = &.{
-    .{ .markup = "text", .zig = "text" },
-    .{ .markup = "placeholder", .zig = "placeholder" },
-    .{ .markup = "value", .zig = "value" },
-    .{ .markup = "checked", .zig = "checked" },
-    .{ .markup = "selected", .zig = "selected" },
-    .{ .markup = "autofocus", .zig = "autofocus" },
-    .{ .markup = "disabled", .zig = "disabled" },
-    .{ .markup = "variant", .zig = "variant" },
-    .{ .markup = "size", .zig = "size" },
-    .{ .markup = "width", .zig = "width" },
-    .{ .markup = "height", .zig = "height" },
-    .{ .markup = "min-width", .zig = "min_width" },
-    .{ .markup = "expanded", .zig = "expanded" },
-    .{ .markup = "grow", .zig = "grow" },
-    .{ .markup = "gap", .zig = "gap" },
-    .{ .markup = "padding", .zig = "padding" },
-    .{ .markup = "main", .zig = "main" },
-    .{ .markup = "cross", .zig = "cross" },
-    .{ .markup = "wrap", .zig = "wrap" },
-    .{ .markup = "text-alignment", .zig = "text_alignment" },
-    .{ .markup = "columns", .zig = "columns" },
-    .{ .markup = "virtualized", .zig = "virtualized" },
-    .{ .markup = "virtual-item-extent", .zig = "virtual_item_extent" },
-    .{ .markup = "window-drag", .zig = "window_drag" },
-};
+pub const attr_names: []const AttrName = &markup.schema.option_field_pairs;
 
-/// Markup color style attribute → `StyleTokenRefs` field. Shared with the
-/// comptime-compiled path; kept consistent with
-/// `ui_markup.known_color_style_attrs` by a test.
-pub const color_style_attr_fields: []const AttrName = &.{
-    .{ .markup = "background", .zig = "background" },
-    .{ .markup = "foreground", .zig = "foreground" },
-    .{ .markup = "accent", .zig = "accent" },
-    .{ .markup = "accent-foreground", .zig = "accent_foreground" },
-    .{ .markup = "border-color", .zig = "border_color" },
-    .{ .markup = "focus-ring", .zig = "focus_ring" },
-};
+/// Markup color style attribute → `StyleTokenRefs` field, derived from
+/// the registry's style-color group. Shared with the comptime-compiled
+/// path; held consistent with the token structs by a conformance test.
+pub const color_style_attr_fields: []const AttrName = &markup.schema.color_style_field_pairs;
 
 /// Model/Msg reflection predicates shared with the compiled engine and
 /// the model-contract describe step (see ui_markup_reflect.zig — one
@@ -1651,70 +1645,49 @@ pub fn pathTail(path: []const u8) ?[]const u8 {
 
 // -------------------------------------------------------------- elements
 
+/// One registry element resolved onto the engine's `WidgetKind`, computed
+/// ONCE at comptime — resolving per lookup would re-run the enum scan per
+/// element per call site and blow the comptime quota (the registry's
+/// comptime-cost mitigation is single-pass derivation).
+pub const ElementKindEntry = struct { name: []const u8, kind: canvas.WidgetKind, takes_text: bool };
+
+fn widgetKindByName(comptime name: []const u8) canvas.WidgetKind {
+    comptime {
+        for (@typeInfo(canvas.WidgetKind).@"enum".fields) |field| {
+            if (std.mem.eql(u8, field.name, name)) return @enumFromInt(field.value);
+        }
+        @compileError("registry element names an unknown widget kind: " ++ name);
+    }
+}
+
+/// The registry's plain elements with their kinds resolved: the one
+/// name→kind table both engines dispatch through. A registry entry naming
+/// a kind that does not exist is a compile error, so the mapping cannot
+/// rot.
+pub const element_kind_table = blk: {
+    @setEvalBranchQuota(400_000);
+    var count: usize = 0;
+    for (markup.schema.elements) |entry| {
+        if (entry.widget_kind.len > 0) count += 1;
+    }
+    var entries: [count]ElementKindEntry = undefined;
+    var index: usize = 0;
+    for (markup.schema.elements) |entry| {
+        if (entry.widget_kind.len == 0) continue;
+        entries[index] = .{
+            .name = entry.name,
+            .kind = widgetKindByName(entry.widget_kind),
+            .takes_text = entry.takes_text,
+        };
+        index += 1;
+    }
+    break :blk entries;
+};
+
 pub fn elementKind(name: []const u8) ?canvas.WidgetKind {
-    const map = .{
-        .{ "row", canvas.WidgetKind.row },
-        .{ "column", canvas.WidgetKind.column },
-        .{ "stack", canvas.WidgetKind.stack },
-        .{ "panel", canvas.WidgetKind.panel },
-        .{ "scroll", canvas.WidgetKind.scroll_view },
-        .{ "list", canvas.WidgetKind.list },
-        .{ "grid", canvas.WidgetKind.grid },
-        .{ "split", canvas.WidgetKind.split },
-        .{ "tree", canvas.WidgetKind.tree },
-        .{ "card", canvas.WidgetKind.card },
-        .{ "text", canvas.WidgetKind.text },
-        .{ "button", canvas.WidgetKind.button },
-        .{ "checkbox", canvas.WidgetKind.checkbox },
-        .{ "radio", canvas.WidgetKind.radio },
-        .{ "toggle", canvas.WidgetKind.toggle },
-        .{ "slider", canvas.WidgetKind.slider },
-        .{ "progress", canvas.WidgetKind.progress },
-        .{ "text-field", canvas.WidgetKind.text_field },
-        .{ "search-field", canvas.WidgetKind.search_field },
-        .{ "textarea", canvas.WidgetKind.textarea },
-        .{ "list-item", canvas.WidgetKind.list_item },
-        .{ "menu-item", canvas.WidgetKind.menu_item },
-        .{ "status-bar", canvas.WidgetKind.status_bar },
-        .{ "separator", canvas.WidgetKind.separator },
-        .{ "badge", canvas.WidgetKind.badge },
-        .{ "spacer", canvas.WidgetKind.stack },
-        // Row containers.
-        .{ "breadcrumb", canvas.WidgetKind.breadcrumb },
-        .{ "button-group", canvas.WidgetKind.button_group },
-        .{ "pagination", canvas.WidgetKind.pagination },
-        .{ "radio-group", canvas.WidgetKind.radio_group },
-        .{ "tabs", canvas.WidgetKind.tabs },
-        .{ "toggle-group", canvas.WidgetKind.toggle_group },
-        // Vertical containers.
-        .{ "table", canvas.WidgetKind.table },
-        .{ "table-row", canvas.WidgetKind.data_row },
-        .{ "dropdown-menu", canvas.WidgetKind.dropdown_menu },
-        // Overlay/surface containers (title via the text attribute).
-        .{ "accordion", canvas.WidgetKind.accordion },
-        .{ "alert", canvas.WidgetKind.alert },
-        .{ "bubble", canvas.WidgetKind.bubble },
-        .{ "dialog", canvas.WidgetKind.dialog },
-        .{ "drawer", canvas.WidgetKind.drawer },
-        .{ "sheet", canvas.WidgetKind.sheet },
-        .{ "resizable", canvas.WidgetKind.resizable },
-        // Text-bearing leaves.
-        .{ "avatar", canvas.WidgetKind.avatar },
-        .{ "select", canvas.WidgetKind.select },
-        .{ "switch", canvas.WidgetKind.switch_control },
-        .{ "table-cell", canvas.WidgetKind.data_cell },
-        .{ "toggle-button", canvas.WidgetKind.toggle_button },
-        .{ "tooltip", canvas.WidgetKind.tooltip },
-        // Text entry leaves.
-        .{ "input", canvas.WidgetKind.input },
-        .{ "combobox", canvas.WidgetKind.combobox },
-        // Plain leaves.
-        .{ "skeleton", canvas.WidgetKind.skeleton },
-        .{ "spinner", canvas.WidgetKind.spinner },
-        .{ "icon", canvas.WidgetKind.icon },
-    };
-    inline for (map) |entry| {
-        if (std.mem.eql(u8, name, entry[0])) return entry[1];
+    @setEvalBranchQuota(20_000);
+    for (&element_kind_table) |entry| {
+        if (std.mem.eql(u8, name, entry.name)) return entry.kind;
     }
     return null;
 }
@@ -1733,9 +1706,13 @@ pub fn lowerTabsTriggers(children: anytype) void {
 }
 
 pub fn elementTakesText(kind: canvas.WidgetKind) bool {
-    return switch (kind) {
-        .text, .button, .list_item, .menu_item, .status_bar, .badge, .toggle => true,
-        .avatar, .select, .switch_control, .data_cell, .toggle_button, .tooltip => true,
-        else => false,
-    };
+    // The registry's takes-text predicate projected onto widget kinds
+    // (both engines and the validator's text-leaf list read the same
+    // registry fact).
+    @setEvalBranchQuota(20_000);
+    for (&element_kind_table) |entry| {
+        if (entry.takes_text and entry.kind == kind) return true;
+    }
+    return false;
 }
+

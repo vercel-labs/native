@@ -93,8 +93,9 @@ pub const WidgetKind = enum {
     /// Data chart leaf (line/bar/band series in `Widget.chart`), rendered
     /// through the vector path pipeline with token-driven series colors.
     /// Display-only: not a hit target, so presses fall through to the
-    /// nearest pressable ancestor like text and icons. Appended last so
-    /// existing structural ids (which hash the kind ordinal) are stable.
+    /// nearest pressable ancestor like text and icons. (Structural ids
+    /// hash `widgetKindCode`, not declaration order, so placement here
+    /// carries no meaning.)
     chart,
     /// Two-pane horizontal splitter: exactly two flow children (the
     /// panes) separated by a builder-synthesized `.split_divider` handle.
@@ -103,8 +104,7 @@ pub const WidgetKind = enum {
     /// the divider dispatches a `canvas_widget_resize` event so the
     /// model can own the fraction (`on_resize`), and the runtime keeps
     /// an uncontrolled divider position across rebuilds with the same
-    /// source-wins reconcile rule as scroll offsets. Appended after
-    /// `chart` so existing structural ids stay stable.
+    /// source-wins reconcile rule as scroll offsets.
     split,
     /// The draggable divider handle between a `.split`'s panes. Never
     /// authored directly: `Ui.finalizeNode` synthesizes it between the
@@ -122,6 +122,83 @@ pub const WidgetKind = enum {
     /// `on_toggle`/`on_press` Msgs and the view re-renders.
     tree,
 };
+
+/// STABLE code for a widget kind: assigned at birth, never reused or
+/// reassigned. This — not the enum's declaration order — is what
+/// `structuralId` hashes, so retained widget state, automation targets,
+/// and record/replay journals survive any reordering of `WidgetKind`.
+/// The codes were frozen from the declaration order at the moment of the
+/// switch (which is why they are dense), so every pre-switch structural
+/// id is preserved; a NEW kind takes the next unused code regardless of
+/// where it sits in the enum. Versioned with the UI document schema
+/// (`ui_schema.schema_version`): reassigning a code is a schema-version
+/// bump, never a silent edit. A conformance test pins the full table, so
+/// a reorder that forgets this function cannot compile into different
+/// ids.
+pub fn widgetKindCode(kind: WidgetKind) u16 {
+    return switch (kind) {
+        .stack => 0,
+        .row => 1,
+        .column => 2,
+        .grid => 3,
+        .data_grid => 4,
+        .table => 5,
+        .scroll_view => 6,
+        .list => 7,
+        .breadcrumb => 8,
+        .button_group => 9,
+        .pagination => 10,
+        .radio_group => 11,
+        .tabs => 12,
+        .toggle_group => 13,
+        .accordion => 14,
+        .bubble => 15,
+        .resizable => 16,
+        .alert => 17,
+        .card => 18,
+        .dialog => 19,
+        .drawer => 20,
+        .sheet => 21,
+        .panel => 22,
+        .popover => 23,
+        .menu_surface => 24,
+        .dropdown_menu => 25,
+        .text => 26,
+        .icon => 27,
+        .image => 28,
+        .avatar => 29,
+        .badge => 30,
+        .button => 31,
+        .toggle_button => 32,
+        .icon_button => 33,
+        .select => 34,
+        .input => 35,
+        .text_field => 36,
+        .search_field => 37,
+        .combobox => 38,
+        .textarea => 39,
+        .tooltip => 40,
+        .menu_item => 41,
+        .list_item => 42,
+        .data_row => 43,
+        .data_cell => 44,
+        .status_bar => 45,
+        .segmented_control => 46,
+        .checkbox => 47,
+        .radio => 48,
+        .switch_control => 49,
+        .toggle => 50,
+        .slider => 51,
+        .progress => 52,
+        .separator => 53,
+        .skeleton => 54,
+        .spinner => 55,
+        .chart => 56,
+        .split => 57,
+        .split_divider => 58,
+        .tree => 59,
+    };
+}
 
 pub const WidgetCursor = enum {
     arrow,

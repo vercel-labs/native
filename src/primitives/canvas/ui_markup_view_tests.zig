@@ -810,10 +810,10 @@ test "markup anchors dropdown-menus and binds dismiss and hold handlers" {
     try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(good_document));
 }
 
-test "the validator's icon name list matches the comptime registry" {
-    // ui_markup.zig is std-only (it doubles as the LSP's module root), so
-    // its icon vocabulary is a hardcoded mirror of the comptime-parsed
-    // registry; this keeps the two in lockstep.
+test "the schema registry's icon section matches the comptime icon registry" {
+    // ui_schema.zig is std-only (ui_markup.zig doubles as the LSP's module
+    // root), so its icon section is a data mirror of the comptime-parsed
+    // icon registry; this conformance test keeps the two in lockstep.
     try testing.expectEqual(canvas.icons.known_icon_names.len, canvas.ui_markup.known_icon_names.len);
     for (canvas.ui_markup.known_icon_names) |name| {
         try testing.expect(canvas.icons.find(name) != null);
@@ -823,17 +823,18 @@ test "the validator's icon name list matches the comptime registry" {
     }
 }
 
-test "the validator's element list matches the interpreter" {
+test "the registry's element vocabulary resolves through the interpreter" {
     for (canvas.ui_markup.known_element_names) |name| {
         try testing.expect(markup_view.elementKind(name) != null);
     }
 }
 
-test "the contract checker's attr kind classes match the ElementOptions field types" {
-    // The contract module is std-only, so it carries the attribute value
-    // classes as data; the engines derive them from the real field types
-    // in setOptionField. This lockstep holds the two readings equal, so
-    // the check-time pass and the build-time pass cannot drift.
+test "the registry's attr value classes match the ElementOptions field types" {
+    // The registry (and the contract rules derived from it) states the
+    // attribute value classes as data; the engines derive them from the
+    // real field types in setOptionField. This conformance test holds the
+    // two readings equal, so the registry, the check-time pass, and the
+    // build-time pass cannot drift.
     const contract = canvas.ui_markup.contract;
     inline for (markup_view.attr_names) |name| {
         const FieldType = @FieldType(InboxUi.ElementOptions, name.zig);
@@ -865,10 +866,10 @@ test "the contract checker's attr kind classes match the ElementOptions field ty
     }
 }
 
-test "the validator's non-hit-target element list matches the engine's hit-target predicate" {
+test "the registry's hit-target predicate matches the engine's" {
     // The engine predicate (canvas.widgetKindHitTarget, which the runtime's
     // pointer dispatch and both markup engines use) is the source of truth;
-    // the validator's std-only name list must mirror it exactly so an
+    // the registry's std-only predicate data must mirror it exactly so an
     // element can never accept a handler the runtime would never fire.
     for (canvas.ui_markup.known_element_names) |name| {
         const kind = markup_view.elementKind(name).?;
@@ -883,12 +884,12 @@ test "the validator's non-hit-target element list matches the engine's hit-targe
     }
 }
 
-test "the validator's stack-container element list matches the engine's stacking predicate" {
+test "the registry's stacking predicate matches the engine's" {
     // The engine predicate (canvas.widgetKindStacksChildren, which the
     // layout pass, the builder's Debug gap diagnostic, and both markup
-    // engines use) is the source of truth; the validator's std-only name
-    // list must mirror it exactly so an element can never accept a gap
-    // the layout would never apply.
+    // engines use) is the source of truth; the registry's std-only
+    // predicate data must mirror it exactly so an element can never
+    // accept a gap the layout would never apply.
     for (canvas.ui_markup.known_element_names) |name| {
         const kind = markup_view.elementKind(name).?;
         try testing.expectEqual(
@@ -902,7 +903,29 @@ test "the validator's stack-container element list matches the engine's stacking
     }
 }
 
-test "the validator's text-leaf element list matches the interpreter's takes-text set" {
+test "the registry's dismissible predicate matches the engine's dismissal machinery" {
+    // Every registry-dismissible element must lower to a widget kind the
+    // runtime's dismissal machinery (Escape, click outside, automation
+    // dismiss) actually closes — otherwise an on-dismiss the validator
+    // accepted could never fire. The engine set is wider on purpose
+    // (popover/menu-surface stay Zig views), so this is one-directional.
+    for (canvas.ui_markup.known_dismiss_element_names) |name| {
+        const kind = markup_view.elementKind(name).?;
+        try testing.expect(canvas.widgetKindDismissibleSurface(kind));
+    }
+    // ...and every markup element whose kind is dismissible is either
+    // listed or a documented exception (the tooltip LEAF shares the
+    // dismissible tooltip kind, but markup tooltips are static text with
+    // no model-owned open flag for an on-dismiss to clear).
+    for (canvas.ui_markup.known_element_names) |name| {
+        const kind = markup_view.elementKind(name).?;
+        if (canvas.widgetKindDismissibleSurface(kind) and kind != .tooltip) {
+            try testing.expect(nameListed(name, &canvas.ui_markup.known_dismiss_element_names));
+        }
+    }
+}
+
+test "the registry's takes-text predicate matches the interpreter's takes-text set" {
     for (canvas.ui_markup.known_element_names) |name| {
         const kind = markup_view.elementKind(name).?;
         try testing.expectEqual(

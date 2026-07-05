@@ -953,7 +953,12 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 }
 
 // ---------------------------------------------------------------------------
-// Compact binary gpu-surface packet encoding (wire format v2).
+// Compact binary gpu-surface packet encoding (wire format v3).
+//
+// The version this comment names, the `binary_packet_version` constant
+// below, and the host decoder's spec comment (appkit_host.m) must agree;
+// the `test-wire-format-version-prose` build check pins all three, so
+// bumping the constant without updating the prose fails the suite.
 //
 // Little-endian, length-prefixed throughout, no field names, no decimal
 // formatting, and no glyph arrays (the packet host draws text through the

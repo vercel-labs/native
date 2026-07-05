@@ -14,9 +14,20 @@
 const std = @import("std");
 const font_coverage = @import("font_coverage.zig");
 
+/// The vocabulary registry: elements, attributes, and events with stable
+/// codes, structural predicates, and rule-hook attachments — the one
+/// authoritative statement every `known_*` list below derives from (see
+/// ui_schema.zig).
+pub const schema = @import("ui_schema.zig");
+
 /// The expression core: grammar, bounds, type discipline, and the one
 /// evaluator both engines share (see ui_markup_expr.zig).
 pub const expr = @import("ui_markup_expr.zig");
+
+/// NSUI, the canonical document's serialized form: deterministic binary
+/// with registry codes, the document hash journals anchor on, and the
+/// derived JSON dump (see ui_markup_binary.zig).
+pub const binary = @import("ui_markup_binary.zig");
 
 /// The model–view contract: comptime reflection of Model/Msg into a
 /// serializable artifact, the check-time verifier of markup against it
@@ -47,11 +58,34 @@ pub const MarkupNodeKind = enum {
     slot_block,
 };
 
+/// A half-open byte range into the SOURCE FILE the owning node was parsed
+/// from (`MarkupNode.src_path` names the file after import resolution).
+/// Spans are the write-back anchor: a tool edits exactly these bytes and
+/// nothing else. The classic line/column positions on nodes, attributes,
+/// and diagnostics are derived from the same scan (`positionAt` recomputes
+/// one from the other; a conformance test holds them equal).
+pub const Span = struct {
+    start: usize = 0,
+    end: usize = 0,
+};
+
 pub const MarkupAttr = struct {
     name: []const u8,
     value: []const u8,
     line: usize,
     column: usize,
+    /// Byte range of the attribute NAME in its source file.
+    name_span: Span = .{},
+    /// Byte range of the attribute VALUE (inside the quotes); an empty
+    /// range at the name's end for value-less attributes — which is also
+    /// the insertion point a writer would use.
+    value_span: Span = .{},
+    /// The value parsed ONCE into its typed form, stamped by the
+    /// canonicalization pass (`canonicalize`/`canonicalizeComptime`).
+    /// Null on a freshly parsed document; consumers go through
+    /// `attrTyped`, which classifies on the fly when the pass has not
+    /// run, so canonicalization changes cost, never meaning.
+    typed: ?*const TypedAttrValue = null,
 };
 
 pub const MarkupNode = struct {
@@ -64,6 +98,14 @@ pub const MarkupNode = struct {
     text: []const u8 = "",
     line: usize = 0,
     column: usize = 0,
+    /// Byte range of the whole node in its source file: `<` through the
+    /// closing `>` for elements (self-closing included), the trimmed
+    /// visible bytes for text runs.
+    span: Span = .{},
+    /// For text runs that interpolate (`{...}` present): the run split
+    /// ONCE into literal/binding/expression segments by canonicalization.
+    /// Null on a freshly parsed document or a plain-literal run.
+    typed_text: ?[]const TypedTextSegment = null,
     /// Source file this node came from, relative to the markup root.
     /// Empty for single-file documents; import resolution stamps every
     /// node of every resolved file so diagnostics name the right file.
@@ -72,6 +114,13 @@ pub const MarkupNode = struct {
     pub fn attr(self: MarkupNode, name: []const u8) ?[]const u8 {
         for (self.attrs) |attribute| {
             if (std.mem.eql(u8, attribute.name, name)) return attribute.value;
+        }
+        return null;
+    }
+
+    pub fn attrEntry(self: MarkupNode, name: []const u8) ?MarkupAttr {
+        for (self.attrs) |attribute| {
+            if (std.mem.eql(u8, attribute.name, name)) return attribute;
         }
         return null;
     }
@@ -207,6 +256,7 @@ pub const Parser = struct {
     fn parseElement(self: *Parser) ParseError!MarkupNode {
         const start_line = self.line;
         const start_column = self.column;
+        const start_offset = self.index;
         if (!self.consumeByte('<')) return self.fail("expected '<' to open an element");
         const name = try self.parseName("element name");
 
@@ -217,18 +267,24 @@ pub const Parser = struct {
             if (byte == '/' or byte == '>') break;
             const attr_line = self.line;
             const attr_column = self.column;
+            const name_start = self.index;
             const attr_name = try self.parseName("attribute name");
+            const name_end = self.index;
             var value: []const u8 = "";
+            var value_span = Span{ .start = name_end, .end = name_end };
             self.skipWhitespace();
             if (self.consumeByte('=')) {
                 self.skipWhitespace();
                 value = try self.parseQuotedValue();
+                value_span = .{ .start = self.index - value.len - 1, .end = self.index - 1 };
             }
             try attrs.append(self.arena, .{
                 .name = attr_name,
                 .value = value,
                 .line = attr_line,
                 .column = attr_column,
+                .name_span = .{ .start = name_start, .end = name_end },
+                .value_span = value_span,
             });
         }
 
@@ -238,10 +294,12 @@ pub const Parser = struct {
             .attrs = attrs.items,
             .line = start_line,
             .column = start_column,
+            .span = .{ .start = start_offset, .end = start_offset },
         };
 
         if (self.consumeByte('/')) {
             if (!self.consumeByte('>')) return self.fail("expected '>' after '/' in a self-closing tag");
+            node.span.end = self.index;
             return node;
         }
         if (!self.consumeByte('>')) return self.fail("expected '>' to close the element tag");
@@ -263,6 +321,7 @@ pub const Parser = struct {
             // land on the character, not the run's end.
             const text_line = self.line;
             const text_column = self.column;
+            const text_offset = self.index;
             const text = self.takeText();
             const trimmed = std.mem.trim(u8, text, " \t\r\n");
             if (trimmed.len > 0) {
@@ -276,16 +335,19 @@ pub const Parser = struct {
                         column += 1;
                     }
                 }
+                const visible_start = text_offset + textLeadingTrim(text);
                 try children.append(self.arena, .{
                     .kind = .text,
                     .text = trimmed,
                     .line = line,
                     .column = column,
+                    .span = .{ .start = visible_start, .end = visible_start + trimmed.len },
                 });
             }
         }
 
         node.children = children.items;
+        node.span.end = self.index;
         return node;
     }
 
@@ -405,6 +467,28 @@ pub const Parser = struct {
     }
 };
 
+pub const Position = struct { line: usize, column: usize };
+
+/// Line/column (1-based; columns count bytes, matching the parser) of a
+/// byte offset in a source. This is the DERIVATION diagnostics rest on:
+/// spans are the authoritative positions, line/column their display form,
+/// and a conformance test holds the parser's stamped line/column equal to
+/// `positionAt(source, span.start)` for every node and attribute.
+pub fn positionAt(source: []const u8, offset: usize) Position {
+    var line: usize = 1;
+    var column: usize = 1;
+    const clamped = @min(offset, source.len);
+    for (source[0..clamped]) |byte| {
+        if (byte == '\n') {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    return .{ .line = line, .column = column };
+}
+
 fn nodeKindForName(name: []const u8) MarkupNodeKind {
     if (std.mem.eql(u8, name, "for")) return .for_block;
     if (std.mem.eql(u8, name, "if")) return .if_block;
@@ -473,6 +557,7 @@ const comptime_parse_quota_per_byte = 200;
 fn parseElementComptime(comptime parser: *Parser) MarkupNode {
     const start_line = parser.line;
     const start_column = parser.column;
+    const start_offset = parser.index;
     if (!parser.consumeByte('<')) failComptime(parser, parser.fail("expected '<' to open an element"));
     const name = parser.parseName("element name") catch |err| failComptime(parser, err);
 
@@ -483,18 +568,24 @@ fn parseElementComptime(comptime parser: *Parser) MarkupNode {
         if (byte == '/' or byte == '>') break;
         const attr_line = parser.line;
         const attr_column = parser.column;
+        const name_start = parser.index;
         const attr_name = parser.parseName("attribute name") catch |err| failComptime(parser, err);
+        const name_end = parser.index;
         var value: []const u8 = "";
+        var value_span = Span{ .start = name_end, .end = name_end };
         parser.skipWhitespace();
         if (parser.consumeByte('=')) {
             parser.skipWhitespace();
             value = parser.parseQuotedValue() catch |err| failComptime(parser, err);
+            value_span = .{ .start = parser.index - value.len - 1, .end = parser.index - 1 };
         }
         attrs = attrs ++ &[_]MarkupAttr{.{
             .name = attr_name,
             .value = value,
             .line = attr_line,
             .column = attr_column,
+            .name_span = .{ .start = name_start, .end = name_end },
+            .value_span = value_span,
         }};
     }
 
@@ -504,10 +595,12 @@ fn parseElementComptime(comptime parser: *Parser) MarkupNode {
         .attrs = attrs,
         .line = start_line,
         .column = start_column,
+        .span = .{ .start = start_offset, .end = start_offset },
     };
 
     if (parser.consumeByte('/')) {
         if (!parser.consumeByte('>')) failComptime(parser, parser.fail("expected '>' after '/' in a self-closing tag"));
+        node.span.end = parser.index;
         return node;
     }
     if (!parser.consumeByte('>')) failComptime(parser, parser.fail("expected '>' to close the element tag"));
@@ -526,6 +619,7 @@ fn parseElementComptime(comptime parser: *Parser) MarkupNode {
         }
         const text_line = parser.line;
         const text_column = parser.column;
+        const text_offset = parser.index;
         const text = parser.takeText();
         const trimmed = std.mem.trim(u8, text, " \t\r\n");
         if (trimmed.len > 0) {
@@ -539,16 +633,19 @@ fn parseElementComptime(comptime parser: *Parser) MarkupNode {
                     column += 1;
                 }
             }
+            const visible_start = text_offset + textLeadingTrim(text);
             children = children ++ &[_]MarkupNode{.{
                 .kind = .text,
                 .text = trimmed,
                 .line = line,
                 .column = column,
+                .span = .{ .start = visible_start, .end = visible_start + trimmed.len },
             }};
         }
     }
 
     node.children = children;
+    node.span.end = parser.index;
     return node;
 }
 
@@ -662,50 +759,294 @@ pub fn parseMessageExpression(value: []const u8) ?MessageExpression {
 
 pub const isBindingPath = expr.isBindingPath;
 
+// --------------------------------------------------- typed document pass
+//
+// The canonical form of an attribute value or interpolated text run: raw
+// strings classified and parsed ONCE, at document level, instead of at
+// every use by every engine on every frame. `canonicalize` (runtime) and
+// `canonicalizeComptime` (the compiled engine's path) stamp these onto a
+// parsed/resolved document; `attrTyped` is the accessor every consumer
+// reads, with an on-the-fly classification fallback for documents the
+// pass has not touched — canonicalization can only change cost, never
+// meaning, which is what keeps the two engines' parity suites authoritative
+// over this pass.
+
+/// A full `{expression}`: the inner text plus its tree, parsed once. The
+/// tree is null when the text does not parse — the engines re-run the
+/// parser at the use site to surface the exact teaching diagnostic, so a
+/// broken expression fails identically with or without canonicalization.
+pub const TypedExprRef = struct {
+    inner: []const u8,
+    tree: ?*const expr.ExprTree = null,
+};
+
+pub const TypedAttrValue = union(enum) {
+    literal: []const u8,
+    binding: []const u8,
+    equals: struct { left: []const u8, right: []const u8 },
+    expression: TypedExprRef,
+    /// `on-*` attributes: the message tag plus optional payload path.
+    message: MessageExpression,
+    /// The value did not classify (unterminated braces, empty `{}`, a
+    /// malformed message expression); the engines surface their
+    /// context-specific teaching message at the use site.
+    invalid,
+};
+
+/// One segment of an interpolating text run.
+pub const TypedTextSegment = union(enum) {
+    literal: []const u8,
+    binding: []const u8,
+    expression: TypedExprRef,
+    /// An unterminated `{`: preserved so the engines report the same
+    /// "unterminated interpolation" error they always did.
+    unterminated,
+};
+
+/// Classify one attribute value into its typed form (no expression-tree
+/// parse; trees are the canonicalization passes' job). The attribute NAME
+/// picks the grammar: `on-*` values are message expressions, everything
+/// else is the attr-expression grammar — exactly the split both engines
+/// already applied per use.
+pub fn classifyAttrValue(name: []const u8, value: []const u8) TypedAttrValue {
+    if (std.mem.startsWith(u8, name, "on-")) {
+        const message = parseMessageExpression(value) orelse return .invalid;
+        return .{ .message = message };
+    }
+    const expression = parseAttrExpression(value) orelse return .invalid;
+    return switch (expression) {
+        .literal => |text| .{ .literal = text },
+        .binding => |path| .{ .binding = path },
+        .equals => |sides| .{ .equals = .{ .left = sides.left, .right = sides.right } },
+        .expression => |inner| .{ .expression = .{ .inner = inner } },
+    };
+}
+
+/// The typed value of an attribute: the canonicalized form when present,
+/// else an on-the-fly classification with identical semantics (minus the
+/// pre-parsed tree).
+pub fn attrTyped(attribute: MarkupAttr) TypedAttrValue {
+    if (attribute.typed) |typed| return typed.*;
+    return classifyAttrValue(attribute.name, attribute.value);
+}
+
+/// Canonicalize a parsed (and, for imports, resolved) document: every
+/// attribute value and interpolating text run parses once into its typed
+/// form. Nodes are copied; the input document stays valid.
+pub fn canonicalize(arena: std.mem.Allocator, document: MarkupDocument) error{OutOfMemory}!MarkupDocument {
+    var out = document;
+    if (document.templates.len > 0) {
+        const templates = try arena.alloc(MarkupNode, document.templates.len);
+        for (document.templates, 0..) |template_node, index| {
+            templates[index] = try canonicalizeNode(arena, template_node);
+        }
+        out.templates = templates;
+    }
+    if (document.root) |root| {
+        out.root = try canonicalizeNode(arena, root);
+    }
+    return out;
+}
+
+fn canonicalizeNode(arena: std.mem.Allocator, node: MarkupNode) error{OutOfMemory}!MarkupNode {
+    var out = node;
+    if (node.attrs.len > 0) {
+        const attrs = try arena.alloc(MarkupAttr, node.attrs.len);
+        for (node.attrs, 0..) |attribute, index| {
+            attrs[index] = attribute;
+            const slot = try arena.create(TypedAttrValue);
+            slot.* = typedValueOf(arena, attribute) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+            attrs[index].typed = slot;
+        }
+        out.attrs = attrs;
+    }
+    if (node.kind == .text and std.mem.indexOfScalar(u8, node.text, '{') != null) {
+        out.typed_text = try typedTextSegments(arena, node.text);
+    }
+    if (node.children.len > 0) {
+        const children = try arena.alloc(MarkupNode, node.children.len);
+        for (node.children, 0..) |child, index| {
+            children[index] = try canonicalizeNode(arena, child);
+        }
+        out.children = children;
+    }
+    return out;
+}
+
+fn typedValueOf(arena: std.mem.Allocator, attribute: MarkupAttr) error{OutOfMemory}!TypedAttrValue {
+    var typed = classifyAttrValue(attribute.name, attribute.value);
+    if (typed == .expression) {
+        typed.expression.tree = try parsedTree(arena, typed.expression.inner);
+    }
+    return typed;
+}
+
+/// Parse one expression's tree into the arena; null when it does not
+/// parse (the engines re-derive the diagnostic at the use site).
+fn parsedTree(arena: std.mem.Allocator, inner: []const u8) error{OutOfMemory}!?*const expr.ExprTree {
+    const tree = try arena.create(expr.ExprTree);
+    tree.* = .{};
+    var diagnostic: expr.Diagnostic = .{};
+    if (!expr.parse(inner, tree, &diagnostic)) return null;
+    return tree;
+}
+
+/// Split an interpolating text run into typed segments, mirroring the
+/// engines' scan byte for byte: literal chunks between braces, `{path}`
+/// bindings, full expressions, and the unterminated tail case.
+fn typedTextSegments(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}![]const TypedTextSegment {
+    var segments: std.ArrayListUnmanaged(TypedTextSegment) = .empty;
+    var rest = text;
+    while (std.mem.indexOfScalar(u8, rest, '{')) |open| {
+        if (open > 0) try segments.append(arena, .{ .literal = rest[0..open] });
+        const close = std.mem.indexOfScalarPos(u8, rest, open, '}') orelse {
+            try segments.append(arena, .unterminated);
+            return segments.items;
+        };
+        const inner = std.mem.trim(u8, rest[open + 1 .. close], " ");
+        if (isBindingPath(inner)) {
+            try segments.append(arena, .{ .binding = inner });
+        } else {
+            try segments.append(arena, .{ .expression = .{ .inner = inner, .tree = try parsedTree(arena, inner) } });
+        }
+        rest = rest[close + 1 ..];
+    }
+    if (rest.len > 0) try segments.append(arena, .{ .literal = rest });
+    return segments.items;
+}
+
+/// Comptime mirror of `canonicalize` for the compiled engine's documents:
+/// same classification, same segment scan, with comptime consts in place
+/// of arena allocations. The branch quota scales with the tree it walks.
+pub fn canonicalizeComptime(comptime document: MarkupDocument) MarkupDocument {
+    comptime {
+        @setEvalBranchQuota(comptime_parse_quota_base +
+            (documentByteSize(document) + 1) * comptime_canonicalize_quota_per_byte);
+        var out = document;
+        var templates: []const MarkupNode = &.{};
+        for (document.templates) |template_node| {
+            templates = templates ++ &[_]MarkupNode{canonicalizeNodeComptime(template_node)};
+        }
+        out.templates = templates;
+        if (document.root) |root| out.root = canonicalizeNodeComptime(root);
+        return out;
+    }
+}
+
+const comptime_canonicalize_quota_per_byte = 400;
+
+fn documentByteSize(comptime document: MarkupDocument) usize {
+    comptime {
+        var total: usize = 0;
+        for (document.templates) |template_node| total += nodeByteSize(template_node);
+        if (document.root) |root| total += nodeByteSize(root);
+        return total;
+    }
+}
+
+fn nodeByteSize(comptime node: MarkupNode) usize {
+    comptime {
+        var total: usize = node.text.len + node.name.len;
+        for (node.attrs) |attribute| total += attribute.name.len + attribute.value.len;
+        for (node.children) |child| total += nodeByteSize(child);
+        return total;
+    }
+}
+
+fn canonicalizeNodeComptime(comptime node: MarkupNode) MarkupNode {
+    comptime {
+        var out = node;
+        if (node.attrs.len > 0) {
+            var attrs: []const MarkupAttr = &.{};
+            for (node.attrs) |attribute| {
+                var stamped = attribute;
+                const frozen: TypedAttrValue = typedValueComptime(attribute);
+                stamped.typed = &frozen;
+                attrs = attrs ++ &[_]MarkupAttr{stamped};
+            }
+            out.attrs = attrs;
+        }
+        if (node.kind == .text and std.mem.indexOfScalar(u8, node.text, '{') != null) {
+            out.typed_text = typedTextSegmentsComptime(node.text);
+        }
+        if (node.children.len > 0) {
+            var children: []const MarkupNode = &.{};
+            for (node.children) |child| {
+                children = children ++ &[_]MarkupNode{canonicalizeNodeComptime(child)};
+            }
+            out.children = children;
+        }
+        return out;
+    }
+}
+
+fn typedValueComptime(comptime attribute: MarkupAttr) TypedAttrValue {
+    comptime {
+        var typed = classifyAttrValue(attribute.name, attribute.value);
+        if (typed == .expression) {
+            typed.expression.tree = parsedTreeComptime(typed.expression.inner);
+        }
+        return typed;
+    }
+}
+
+fn parsedTreeComptime(comptime inner: []const u8) ?*const expr.ExprTree {
+    comptime {
+        var tree: expr.ExprTree = .{};
+        var diagnostic: expr.Diagnostic = .{};
+        if (!expr.parse(inner, &tree, &diagnostic)) return null;
+        const frozen = tree;
+        return &frozen;
+    }
+}
+
+fn typedTextSegmentsComptime(comptime text: []const u8) []const TypedTextSegment {
+    comptime {
+        var segments: []const TypedTextSegment = &.{};
+        var rest = text;
+        while (std.mem.indexOfScalar(u8, rest, '{')) |open| {
+            if (open > 0) segments = segments ++ &[_]TypedTextSegment{.{ .literal = rest[0..open] }};
+            const close = std.mem.indexOfScalarPos(u8, rest, open, '}') orelse {
+                return segments ++ &[_]TypedTextSegment{.unterminated};
+            };
+            const inner = std.mem.trim(u8, rest[open + 1 .. close], " ");
+            if (isBindingPath(inner)) {
+                segments = segments ++ &[_]TypedTextSegment{.{ .binding = inner }};
+            } else {
+                segments = segments ++ &[_]TypedTextSegment{.{ .expression = .{ .inner = inner, .tree = parsedTreeComptime(inner) } }};
+            }
+            rest = rest[close + 1 ..];
+        }
+        if (rest.len > 0) segments = segments ++ &[_]TypedTextSegment{.{ .literal = rest }};
+        return segments;
+    }
+}
+
 // ------------------------------------------------------------ validation
 
-/// Element names the interpreter accepts (kept in sync by a test in
+/// Element names the interpreter accepts, derived from the registry
+/// (ui_schema.zig; the registry↔engine conformance tests live in
 /// ui_markup_view_tests.zig). Covers every built-in component whose shape
 /// fits the closed grammar; the deliberate exclusions (image,
 /// icon-button, data-grid, popover, menu-surface, segmented-control) are
 /// documented next to the widget-kind coverage test in
 /// ui_markup_view_tests.zig — write those as Zig view functions.
-pub const known_element_names =
-    // Flex, overlay, and scrolling containers.
-    [_][]const u8{ "row", "column", "stack", "panel", "scroll", "list", "grid", "card", "split", "tree" } ++
-    // Row containers (children flow along the horizontal main axis).
-    [_][]const u8{ "breadcrumb", "button-group", "pagination", "radio-group", "tabs", "toggle-group" } ++
-    // Vertical containers.
-    [_][]const u8{ "table", "table-row", "dropdown-menu" } ++
-    // Overlay/surface containers (title via the text attribute).
-    [_][]const u8{ "accordion", "alert", "bubble", "dialog", "drawer", "sheet", "resizable" } ++
-    // Text-bearing leaves (label is the element content).
-    [_][]const u8{ "text", "badge", "button", "toggle", "list-item", "menu-item", "status-bar" } ++
-    [_][]const u8{ "avatar", "select", "switch", "table-cell", "toggle-button", "tooltip" } ++
-    // Value controls and text entry.
-    [_][]const u8{ "checkbox", "radio", "slider", "progress" } ++
-    [_][]const u8{ "text-field", "search-field", "textarea", "input", "combobox" } ++
-    // Plain leaves.
-    [_][]const u8{ "separator", "spacer", "skeleton", "spinner", "icon" };
+pub const known_element_names = schema.element_names;
 
 /// Elements whose content is a single run of text (with `{}`
-/// interpolation) and that take no element children. Kept in sync with the
-/// interpreter's `elementTakesText` by a test in ui_markup_view_tests.zig.
-pub const known_text_leaf_element_names = [_][]const u8{
-    "text",       "badge",         "button",  "toggle", "list-item",
-    "menu-item",  "status-bar",    "avatar",  "select", "switch",
-    "table-cell", "toggle-button", "tooltip",
-};
+/// interpolation) and that take no element children. Registry-derived;
+/// held equal to the interpreter's `elementTakesText` by a conformance
+/// test in ui_markup_view_tests.zig.
+pub const known_text_leaf_element_names = schema.text_leaf_element_names;
 
-pub const known_option_attrs = [_][]const u8{
-    "text",           "placeholder", "value",       "checked",             "selected", "disabled",
-    "variant",        "size",        "width",       "height",              "grow",     "gap",
-    "padding",        "main",        "cross",       "wrap",                "key",      "global-key",
-    "text-alignment", "columns",     "virtualized", "virtual-item-extent", "role",     "label",
-    "autofocus",      "min-width",   "expanded",    "window-drag",
-};
+/// The generic option attributes (registry-derived; the order is the
+/// did-you-mean/completion display order).
+pub const known_option_attrs = schema.option_attr_names;
 
-pub const known_events = [_][]const u8{ "press", "toggle", "change", "submit", "input", "scroll", "dismiss", "hold", "resize", "reach-end" };
+/// The event vocabulary (registry-derived; markup spells these `on-*`).
+pub const known_events = schema.event_names;
 
 pub const on_scroll_element_message = "on-scroll is only supported on scroll - the runtime emits scroll offsets for scroll containers, so the handler belongs on the scroll element itself";
 pub const on_reach_end_element_message = "on-reach-end is only supported on scroll - the runtime emits the approach-end signal for scroll containers, so the handler belongs on the scroll element itself";
@@ -719,14 +1060,16 @@ pub const split_children_message = "split takes exactly two element children (th
 /// outside, automation/accessibility dismiss) — the markup subset of the
 /// engine's dismissible-surface kinds (`canvas.widgetKindDismissibleSurface`;
 /// popover/menu-surface/tooltip stay Zig views or leaves).
-pub const known_dismiss_element_names = [_][]const u8{ "dialog", "drawer", "sheet", "dropdown-menu" };
+/// Registry-derived from the `dismissible` element predicate.
+pub const known_dismiss_element_names = schema.dismiss_element_names;
 
 pub const on_dismiss_element_message = "on-dismiss is only supported on dismissible surfaces (dialog, drawer, sheet, dropdown-menu) - Escape and click-outside dismiss those, and the Msg lets the model own the close (clear the open flag in update)";
 
 /// Elements that may float as anchored surfaces. dropdown-menu is the
 /// markup channel; popover/menu-surface stay Zig views (documented
 /// exclusions) and dialogs/drawers/sheets place themselves.
-pub const known_anchor_element_names = [_][]const u8{"dropdown-menu"};
+/// Registry-derived from the `anchorable` element predicate.
+pub const known_anchor_element_names = schema.anchor_element_names;
 
 pub const anchor_element_message = "anchor is only supported on dropdown-menu - it floats the surface against its PARENT's frame (put the dropdown beside its trigger inside a stack); dialogs, drawers, and sheets place themselves";
 pub const anchor_value_message = "anchor takes a literal placement: below or above (either side flips automatically when the surface does not fit and the other side has more room)";
@@ -740,26 +1083,22 @@ pub const anchor_dependent_attr_message = "anchor-alignment and anchor-offset on
 /// and presses on non-interactive content inside it fall through to it),
 /// so those two are legal everywhere; the remaining value/text handlers
 /// (`on-change`/`on-submit`/`on-input`) have no behavior to bind to on
-/// these elements and stay validation errors. Derived from the engine's
-/// kind predicate (`canvas.widgetKindHitTarget` in widget_access.zig); a
-/// test in ui_markup_view_tests.zig keeps this name list and that
-/// predicate in lockstep so drift is impossible.
-pub const known_non_hit_target_element_names = [_][]const u8{
-    "row",        "column",      "stack",     "spacer",       "grid",
-    "list",       "table",       "table-row", "breadcrumb",   "button-group",
-    "pagination", "radio-group", "tabs",      "toggle-group", "tooltip",
-    "avatar",     "badge",       "separator", "skeleton",     "spinner",
-    "icon",       "split",       "tree",
-};
+/// these elements and stay validation errors. Registry-derived from the
+/// `hit_target` element predicate, which mirrors the engine's kind
+/// predicate (`canvas.widgetKindHitTarget` in widget_access.zig); a
+/// conformance test in ui_markup_view_tests.zig keeps the registry and
+/// that predicate in lockstep so drift is impossible.
+pub const known_non_hit_target_element_names = schema.non_hit_target_element_names;
 
 /// The handlers that stay dead on layout/decoration elements: press and
 /// toggle make any element pressable, scroll has its own element-scoped
-/// rule (`on_scroll_element_message`), and these three bind control/text
-/// behavior the element does not have.
+/// rule (`on_scroll_element_message`), and the registry's
+/// `dead_on_non_hit_target` events bind control/text behavior the element
+/// does not have.
 pub fn deadHandlerOnNonHitTarget(attr_name: []const u8) bool {
-    return std.mem.eql(u8, attr_name, "on-change") or
-        std.mem.eql(u8, attr_name, "on-submit") or
-        std.mem.eql(u8, attr_name, "on-input");
+    if (!std.mem.startsWith(u8, attr_name, "on-")) return false;
+    const entry = schema.eventByName(attr_name[3..]) orelse return false;
+    return entry.dead_on_non_hit_target;
 }
 
 pub const autofocus_element_message = "autofocus is only supported on focusable controls (text fields, buttons, checkboxes, ...) - it moves keyboard focus to the element when it mounts or when the flag turns on, and nothing about this element can take focus";
@@ -769,16 +1108,14 @@ pub const non_hit_target_handler_message = "on-change/on-submit/on-input never f
 /// Elements whose widget kind layers its children on top of each other
 /// (every child gets the full content box), so `gap` can never space
 /// them. The validator rejects `gap` here instead of letting it silently
-/// do nothing. Derived from the engine's stacking predicate
-/// (`canvas.widgetKindStacksChildren` in widget_layout.zig); a test in
-/// ui_markup_view_tests.zig keeps this name list and that predicate in
-/// lockstep so drift is impossible. (`spacer` shares the stack widget
-/// kind; `scroll` and `accordion` stack children too but consume `gap`,
-/// so they are excluded there and here.)
-pub const known_stack_container_element_names = [_][]const u8{
-    "stack",  "panel",  "card",   "spacer", "alert",
-    "bubble", "dialog", "drawer", "sheet",  "resizable",
-};
+/// do nothing. Registry-derived from the `stacks_children` element
+/// predicate, which mirrors the engine's stacking predicate
+/// (`canvas.widgetKindStacksChildren` in widget_layout.zig); a
+/// conformance test in ui_markup_view_tests.zig keeps the registry and
+/// that predicate in lockstep so drift is impossible. (`spacer` shares
+/// the stack widget kind; `scroll` and `accordion` stack children too but
+/// consume `gap`, so they are excluded there and here.)
+pub const known_stack_container_element_names = schema.stack_container_element_names;
 
 pub const stack_container_gap_message = "gap does nothing here: this container layers its children on top of each other - wrap them in a column (or row) inside it for flow, or drop the gap";
 
@@ -790,20 +1127,11 @@ pub const avatar_image_message = "image takes one {binding} to a u64 ImageId the
 pub const avatar_image_element_message = "image is only supported on avatar - the other image-bearing widgets (image, icon-button) stay Zig views (ui.image with ElementOptions.image)";
 
 /// The built-in vector icon vocabulary behind `<icon name="..."/>`.
-/// std-only mirror of `canvas.icons.known_icon_names` (the comptime-parsed
-/// registry); a test in ui_markup_view_tests.zig keeps the two in
-/// lockstep so a new icon cannot ship without its markup name.
-pub const known_icon_names = [_][]const u8{
-    "alert",       "archive",       "arrow-down",   "arrow-right",      "arrow-up",
-    "check",       "check-circle",  "chevron-down", "chevron-left",     "chevron-right",
-    "chevron-up",  "circle-dot",    "clock",        "copy",             "download",
-    "edit",        "external-link", "eye",          "file-text",        "folder",
-    "folder-open", "git-branch",    "git-merge",    "git-pull-request", "info",
-    "menu",        "moon",          "music",        "pause",            "play",
-    "plus",        "refresh-cw",    "repeat",       "save",             "search",
-    "send",        "settings",      "shuffle",      "skip-back",        "skip-forward",
-    "sun",         "trash",         "volume",       "x",                "x-circle",
-};
+/// Registry section mirroring `canvas.icons.known_icon_names` (the
+/// comptime-parsed registry; this layer stays std-only); a test in
+/// ui_markup_view_tests.zig keeps the two in lockstep so a new icon
+/// cannot ship without its markup name.
+pub const known_icon_names = schema.icon_names;
 
 pub const icon_name_message = "name takes a literal built-in icon name (see canvas.icons.known_icon_names, e.g. search, plus, x, check, chevron-down, settings, trash)";
 pub const icon_name_element_message = "name is only supported on icon - it selects a built-in vector icon";
@@ -815,11 +1143,12 @@ pub const button_icon_element_message = "icon is only supported on button, toggl
 
 /// Elements whose `icon` attribute draws an inline vector icon as part
 /// of the element's OWN rendering (one hit target, one tint following
-/// enabled/disabled state). Mirrors the engine kinds that consume
-/// `Widget.icon`: buttons and toggle-buttons draw it before the label
-/// (tab strips are toggle-button children, so tabs get icons through
-/// this), list items and menu items draw it as a leading slot.
-pub const known_icon_attr_element_names = [_][]const u8{ "button", "toggle-button", "list-item", "menu-item", "badge" };
+/// enabled/disabled state). Registry-derived from the `icon_attr` element
+/// predicate; mirrors the engine kinds that consume `Widget.icon`:
+/// buttons and toggle-buttons draw it before the label (tab strips are
+/// toggle-button children, so tabs get icons through this), list items
+/// and menu items draw it as a leading slot.
+pub const known_icon_attr_element_names = schema.icon_attr_element_names;
 
 pub fn iconAttrElement(name: []const u8) bool {
     return nameInList(name, &known_icon_attr_element_names);
@@ -876,8 +1205,9 @@ pub fn firstUncoveredCodepoint(text: []const u8) ?UncoveredCodepoint {
 
 /// Markup attributes whose literal values are rendered as text (so the
 /// tofu guard applies): labels, placeholders, control text, and the
-/// timeline item's copy channels.
-pub const known_text_attr_names = [_][]const u8{ "text", "placeholder", "label", "value", "title", "description", "meta", "indicator" };
+/// timeline item's copy channels. Registry-derived from the
+/// `rendered_text` attribute flag.
+pub const known_text_attr_names = schema.rendered_text_attr_names;
 
 fn textNodeCoverageError(node: MarkupNode) ?MarkupErrorInfo {
     const found = firstUncoveredCodepoint(node.text) orelse return null;
@@ -959,23 +1289,16 @@ fn textErrorAtOffset(node: MarkupNode, offset: usize, message: []const u8) Marku
 /// must be literal `ColorTokens` field names (`known_color_token_names`);
 /// the builder resolves them against live tokens in `finalizeWithTokens`.
 /// `border-color` (not bare `border`) keeps the name free for a future
-/// border-width shorthand.
-pub const known_color_style_attrs = [_][]const u8{
-    "background", "foreground", "accent", "accent-foreground", "border-color", "focus-ring",
-};
+/// border-width shorthand. Registry-derived from the style-color group.
+pub const known_color_style_attrs = schema.color_style_attr_names;
 
-/// The field names of `canvas.ColorTokens`, kept in sync by a test in
-/// ui_markup_view_tests.zig (this module stays std-only).
-pub const known_color_token_names = [_][]const u8{
-    "background",   "surface",     "surface_subtle",   "surface_pressed",
-    "text",         "text_muted",  "border",           "accent",
-    "accent_text",  "destructive", "destructive_text", "success",
-    "success_text", "warning",     "warning_text",     "info",
-    "info_text",    "focus_ring",  "shadow",           "disabled",
-};
+/// The field names of `canvas.ColorTokens` (registry token section; kept
+/// in sync by a test in ui_markup_view_tests.zig — this module stays
+/// std-only).
+pub const known_color_token_names = schema.color_token_names;
 
 /// The field names of `canvas.RadiusTokens` (same sync test).
-pub const known_radius_token_names = [_][]const u8{ "sm", "md", "lg", "xl" };
+pub const known_radius_token_names = schema.radius_token_names;
 
 pub const style_token_literal_message = "style token attributes take a literal token name - dynamic styling stays in Zig";
 pub const unknown_color_token_message = "unknown color token: color style attributes take a canvas ColorTokens field name (background, surface, surface_subtle, surface_pressed, text, text_muted, border, accent, accent_text, destructive, destructive_text, success, success_text, warning, warning_text, info, info_text, focus_ring, shadow, disabled)";
@@ -1400,6 +1723,49 @@ fn validateTimelineItem(node: MarkupNode) ?MarkupErrorInfo {
     return null;
 }
 
+/// The rule hooks the composite registry entries name. A registry entry
+/// whose hook this table does not implement is a compile error (below),
+/// so attachment and implementation can never drift.
+const rule_hook_names = [_][]const u8{ "markdown", "stepper", "step", "timeline", "timeline-item" };
+
+comptime {
+    for (schema.elements) |entry| {
+        const hook = entry.rule_hook orelse continue;
+        var known = false;
+        for (rule_hook_names) |name| {
+            if (std.mem.eql(u8, name, hook)) known = true;
+        }
+        if (!known) @compileError("registry rule hook has no validator: " ++ hook);
+    }
+}
+
+/// Composite-element validation, dispatched by the registry's rule-hook
+/// name. Vocabulary is data; judgment stays code: forcing these shapes
+/// (markdown's closed attribute set, the stepper's step children, the
+/// timeline's parent scoping) into declarative registry data would breed
+/// a worse inner language than plain Zig.
+fn validateRuleHook(hook: []const u8, document: MarkupDocument, node: MarkupNode, parent_element: ?[]const u8, template_limit: usize, slot_rule: SlotRule) ?MarkupErrorInfo {
+    if (std.mem.eql(u8, hook, "markdown")) return validateMarkdown(node);
+    if (std.mem.eql(u8, hook, "stepper")) return validateStepper(node);
+    if (std.mem.eql(u8, hook, "step")) {
+        // Steps inside a stepper are consumed by validateStepper; one
+        // reaching the generic pass sits outside a stepper.
+        return errorAt(node, step_parent_message);
+    }
+    if (std.mem.eql(u8, hook, "timeline")) return validateTimeline(document, node, template_limit, slot_rule);
+    if (std.mem.eql(u8, hook, "timeline-item")) {
+        if (parent_element) |parent_name| {
+            if (!std.mem.eql(u8, parent_name, "timeline")) {
+                return errorAt(node, timeline_item_parent_message);
+            }
+        }
+        return validateTimelineItem(node);
+    }
+    // The comptime check above proves every registry hook lands in one of
+    // the branches; a name reaching here is not a registry hook at all.
+    unreachable;
+}
+
 /// `parent_element` is the name of the nearest enclosing element, looking
 /// through structure tags (`for`/`if`/`else`), or null at the view root and
 /// at a template body root.
@@ -1429,27 +1795,13 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
             return null;
         },
         .element => {
-            if (std.mem.eql(u8, node.name, "markdown")) {
-                return validateMarkdown(node);
-            }
-            if (std.mem.eql(u8, node.name, "stepper")) {
-                return validateStepper(node);
-            }
-            if (std.mem.eql(u8, node.name, "step")) {
-                // Steps inside a stepper are consumed by validateStepper;
-                // one reaching the generic pass sits outside a stepper.
-                return errorAt(node, step_parent_message);
-            }
-            if (std.mem.eql(u8, node.name, "timeline")) {
-                return validateTimeline(document, node, template_limit, slot_rule);
-            }
-            if (std.mem.eql(u8, node.name, "timeline-item")) {
-                if (parent_element) |parent_name| {
-                    if (!std.mem.eql(u8, parent_name, "timeline")) {
-                        return errorAt(node, timeline_item_parent_message);
-                    }
+            // Composite elements: the registry states WHICH elements
+            // carry bespoke rules (their rule-hook attachment is data);
+            // the rules themselves stay code, dispatched by hook name.
+            if (schema.elementByName(node.name)) |entry| {
+                if (entry.rule_hook) |hook| {
+                    return validateRuleHook(hook, document, node, parent_element, template_limit, slot_rule);
                 }
-                return validateTimelineItem(node);
             }
             if (!nameInList(node.name, &known_element_names)) {
                 return errorAt(node, "unknown element");

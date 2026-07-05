@@ -1436,7 +1436,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 if (err == error.MarkupSyntax or err == error.MarkupImport) self.recordMarkupDiagnostic(diagnostic);
                 return err;
             };
-            self.adoptMarkupDocument(document, next_index, hashing.hasher.final());
+            // The typed-document pass: attribute expressions parse once
+            // here instead of on every frame's build.
+            const canonical = try canvas.ui_markup.canonicalize(arena, document);
+            self.adoptMarkupDocument(canonical, next_index, hashing.hasher.final());
         }
 
         /// Activate a resolved document built into `arena_index`'s arena.
@@ -1593,7 +1596,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             };
             const hash = hashing.hasher.final();
             if (hash == self.markup_source_hash) return;
-            self.adoptMarkupDocument(document, next_index, hash);
+            // Canonicalize for per-frame cost only; on OOM the raw
+            // document builds identically through attrTyped's fallback.
+            const canonical = canvas.ui_markup.canonicalize(arena, document) catch document;
+            self.adoptMarkupDocument(canonical, next_index, hash);
             if (self.installed) self.rebuild(runtime, window_id) catch {};
         }
 

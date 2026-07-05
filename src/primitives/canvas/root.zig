@@ -569,6 +569,9 @@ pub const widgetClaimsPress = @import("widget_access.zig").widgetClaimsPress;
 /// The overlay-surface kinds the runtime's dismissal machinery closes
 /// (Escape, click outside, automation/accessibility dismiss).
 pub const widgetKindDismissibleSurface = @import("widget_access.zig").widgetKindDismissibleSurface;
+/// Stable per-kind code (assigned at birth, never reused) — the id
+/// algorithm's kind input; see widgets.zig.
+pub const widgetKindCode = @import("widgets.zig").widgetKindCode;
 /// The press fall-through walk (widget_routing.zig): the deepest widget on
 /// a hit path that claims presses.
 pub const widgetPressTargetForHit = @import("widget_routing.zig").widgetPressTargetForHit;

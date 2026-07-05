@@ -1,0 +1,1 @@
+fix: **Wire-format version prose is machine-checked**: the encoder and host-decoder spec comments said "wire format v2" while `binary_packet_version` was 3; both now say v3, and a build check (`test-wire-format-version-prose`) pins the constant and every prose site that names the version together, so a future bump cannot leave stale version prose behind.

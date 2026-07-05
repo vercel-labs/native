@@ -1295,3 +1295,103 @@ test "virtualWindow without a source falls back to the request viewport" {
     options.viewport_fallback = 0;
     try testing.expect(ui.virtualWindow(options).isEmpty());
 }
+
+
+test "widget kind codes are pinned: assigned at birth, declaration-order-independent" {
+    // The FULL golden table. `structuralId` hashes `widgetKindCode`, so
+    // this table IS the id vocabulary persisted state references:
+    // reordering the `WidgetKind` enum is free (the switch maps names,
+    // and this test would still pass), but renumbering an existing kind
+    // is a schema-version bump, never a silent edit — if a row here
+    // changed, every retained id, automation target, and journal anchor
+    // for that kind changed with it. New kinds append with the next
+    // unused code.
+    const expected = [_]struct { kind: canvas.WidgetKind, code: u16 }{
+        .{ .kind = .stack, .code = 0 },
+        .{ .kind = .row, .code = 1 },
+        .{ .kind = .column, .code = 2 },
+        .{ .kind = .grid, .code = 3 },
+        .{ .kind = .data_grid, .code = 4 },
+        .{ .kind = .table, .code = 5 },
+        .{ .kind = .scroll_view, .code = 6 },
+        .{ .kind = .list, .code = 7 },
+        .{ .kind = .breadcrumb, .code = 8 },
+        .{ .kind = .button_group, .code = 9 },
+        .{ .kind = .pagination, .code = 10 },
+        .{ .kind = .radio_group, .code = 11 },
+        .{ .kind = .tabs, .code = 12 },
+        .{ .kind = .toggle_group, .code = 13 },
+        .{ .kind = .accordion, .code = 14 },
+        .{ .kind = .bubble, .code = 15 },
+        .{ .kind = .resizable, .code = 16 },
+        .{ .kind = .alert, .code = 17 },
+        .{ .kind = .card, .code = 18 },
+        .{ .kind = .dialog, .code = 19 },
+        .{ .kind = .drawer, .code = 20 },
+        .{ .kind = .sheet, .code = 21 },
+        .{ .kind = .panel, .code = 22 },
+        .{ .kind = .popover, .code = 23 },
+        .{ .kind = .menu_surface, .code = 24 },
+        .{ .kind = .dropdown_menu, .code = 25 },
+        .{ .kind = .text, .code = 26 },
+        .{ .kind = .icon, .code = 27 },
+        .{ .kind = .image, .code = 28 },
+        .{ .kind = .avatar, .code = 29 },
+        .{ .kind = .badge, .code = 30 },
+        .{ .kind = .button, .code = 31 },
+        .{ .kind = .toggle_button, .code = 32 },
+        .{ .kind = .icon_button, .code = 33 },
+        .{ .kind = .select, .code = 34 },
+        .{ .kind = .input, .code = 35 },
+        .{ .kind = .text_field, .code = 36 },
+        .{ .kind = .search_field, .code = 37 },
+        .{ .kind = .combobox, .code = 38 },
+        .{ .kind = .textarea, .code = 39 },
+        .{ .kind = .tooltip, .code = 40 },
+        .{ .kind = .menu_item, .code = 41 },
+        .{ .kind = .list_item, .code = 42 },
+        .{ .kind = .data_row, .code = 43 },
+        .{ .kind = .data_cell, .code = 44 },
+        .{ .kind = .status_bar, .code = 45 },
+        .{ .kind = .segmented_control, .code = 46 },
+        .{ .kind = .checkbox, .code = 47 },
+        .{ .kind = .radio, .code = 48 },
+        .{ .kind = .switch_control, .code = 49 },
+        .{ .kind = .toggle, .code = 50 },
+        .{ .kind = .slider, .code = 51 },
+        .{ .kind = .progress, .code = 52 },
+        .{ .kind = .separator, .code = 53 },
+        .{ .kind = .skeleton, .code = 54 },
+        .{ .kind = .spinner, .code = 55 },
+        .{ .kind = .chart, .code = 56 },
+        .{ .kind = .split, .code = 57 },
+        .{ .kind = .split_divider, .code = 58 },
+        .{ .kind = .tree, .code = 59 },
+    };
+    try testing.expectEqual(std.enums.values(canvas.WidgetKind).len, expected.len);
+    for (expected) |entry| {
+        try testing.expectEqual(entry.code, canvas.widgetKindCode(entry.kind));
+    }
+    // Uniqueness: two kinds sharing a code would collide ids structurally.
+    for (std.enums.values(canvas.WidgetKind)) |left| {
+        for (std.enums.values(canvas.WidgetKind)) |right| {
+            if (left == right) continue;
+            try testing.expect(canvas.widgetKindCode(left) != canvas.widgetKindCode(right));
+        }
+    }
+}
+
+test "structural id goldens: the id algorithm is pinned end to end" {
+    // Exact ids for known (kind, key) pairs under the global seed. These
+    // pin the WHOLE id recipe — seed, kind code, key-tag discipline,
+    // zero-fallback — so any drift (a reorder that bypassed the code
+    // table, a hash-input change) fails here before it silently orphans
+    // retained state. The values predate the kind-code switch: codes were
+    // frozen from the ordinals at the moment of the switch, so the switch
+    // itself changed no ids.
+    try testing.expectEqual(@as(canvas.ObjectId, 1758586856932284458), canvas.globalWidgetId(.button, canvas.uiKey(@as(u64, 7))));
+    try testing.expectEqual(@as(canvas.ObjectId, 14648775719080514296), canvas.globalWidgetId(.text, canvas.uiKey("greeting")));
+    try testing.expectEqual(@as(canvas.ObjectId, 10740830058688169295), canvas.globalWidgetId(.tree, .{ .index = 3 }));
+    try testing.expectEqual(@as(canvas.ObjectId, 9835495177657875356), canvas.globalWidgetId(.split_divider, canvas.uiKey("divider")));
+}
+

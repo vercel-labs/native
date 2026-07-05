@@ -2160,7 +2160,7 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
 }
 
 /* ---------------------------------------------------------------------------
- * Compact binary gpu-surface packet decoding (wire format v2).
+ * Compact binary gpu-surface packet decoding (wire format v3).
  *
  * Little-endian, length-prefixed, mirror of the engine's binary packet
  * encoder (serialization.zig, `writeCanvasGpuPacketBinary` and the patch
@@ -2170,10 +2170,13 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
  * and resyncs (full present, then its pixel fallback) — never garbage on
  * the glass. The decoder reconstructs the exact dictionary shape the JSON
  * path produces, so every draw function above serves both encodings
- * unchanged; v2 adds a retained-state generation, a retain key per
+ * unchanged; v2 added a retained-state generation, a retain key per
  * command, and the `patch` load action carrying an edit script (evicts +
  * keyed upserts + the full draw-order vector) against the view's retained
- * command dictionary.
+ * command dictionary; v3 added the flag-gated dirty rect list after the
+ * scissor. The version this comment names and the encoder's spec comment
+ * must agree with `binary_packet_version` (serialization.zig); the
+ * `test-wire-format-version-prose` build check pins all three.
  */
 
 /* Retained commands per view; pins the engine's

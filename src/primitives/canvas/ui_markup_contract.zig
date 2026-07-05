@@ -35,6 +35,7 @@
 
 const std = @import("std");
 const markup = @import("ui_markup.zig");
+const schema = @import("ui_schema.zig");
 const expr = @import("ui_markup_expr.zig");
 const reflect = @import("ui_markup_reflect.zig");
 
@@ -334,38 +335,31 @@ pub const label_attr_message = "label expects text";
 /// What kind of value each generic option attribute consumes, mirroring
 /// how both engines apply `Ui.ElementOptions` fields (float fields take
 /// numbers, enum fields take option-name strings, bool fields take any
-/// truthy value, ...). A lockstep test in ui_markup_view_tests.zig derives
-/// the same classes from the real field types, so this table cannot drift
-/// from the engines.
+/// truthy value, ...). Derived from the registry's value classes; a
+/// conformance test in ui_markup_view_tests.zig derives the same classes
+/// from the real field types, so registry, check-time pass, and
+/// build-time pass cannot drift.
 pub const AttrClass = enum { number, whole, truthy, text, option };
 
 pub const AttrKindRule = struct { name: []const u8, class: AttrClass };
 
-pub const attr_kind_rules = [_]AttrKindRule{
-    .{ .name = "text", .class = .text },
-    .{ .name = "placeholder", .class = .text },
-    .{ .name = "value", .class = .number },
-    .{ .name = "checked", .class = .truthy },
-    .{ .name = "selected", .class = .truthy },
-    .{ .name = "autofocus", .class = .truthy },
-    .{ .name = "disabled", .class = .truthy },
-    .{ .name = "variant", .class = .option },
-    .{ .name = "size", .class = .option },
-    .{ .name = "width", .class = .number },
-    .{ .name = "height", .class = .number },
-    .{ .name = "min-width", .class = .number },
-    .{ .name = "expanded", .class = .truthy },
-    .{ .name = "grow", .class = .number },
-    .{ .name = "gap", .class = .number },
-    .{ .name = "padding", .class = .number },
-    .{ .name = "main", .class = .option },
-    .{ .name = "cross", .class = .option },
-    .{ .name = "wrap", .class = .truthy },
-    .{ .name = "text-alignment", .class = .option },
-    .{ .name = "columns", .class = .whole },
-    .{ .name = "virtualized", .class = .truthy },
-    .{ .name = "virtual-item-extent", .class = .number },
-    .{ .name = "window-drag", .class = .truthy },
+pub const attr_kind_rules = blk: {
+    @setEvalBranchQuota(10_000);
+    var rules: [schema.option_field_pairs.len]AttrKindRule = undefined;
+    var index: usize = 0;
+    for (schema.attrs) |entry| {
+        if (entry.group != .option or entry.field.len == 0) continue;
+        rules[index] = .{ .name = entry.name, .class = switch (entry.class) {
+            .text => .text,
+            .number => .number,
+            .whole => .whole,
+            .flag => .truthy,
+            .option => .option,
+            else => @compileError("field-backed option attr with a non-generic value class: " ++ entry.name),
+        } };
+        index += 1;
+    }
+    break :blk rules;
 };
 
 fn attrClass(name: []const u8) ?AttrClass {

@@ -1,0 +1,618 @@
+//! The UI schema registry: ONE authoritative statement of the markup
+//! vocabulary, as data.
+//!
+//! Every parallel list the markup stack used to keep in lockstep by hand —
+//! element names, text-leaf names, option attributes, events, the
+//! element-scoped predicate sets (hit-target, stacking, dismissible,
+//! anchorable, icon-attr), the rendered-text attribute set, and the
+//! token/icon vocabularies — is DERIVED from this one registry at comptime
+//! (see the derivation section at the bottom). The validator, both markup
+//! engines, the contract checker, the LSP, the CLI's did-you-mean, and the
+//! canonical binary encoding all consume it, so a vocabulary fact is
+//! stated exactly once.
+//!
+//! Vocabulary is data; judgment stays code. The registry names WHAT exists
+//! (elements, their codes, their attribute/event sets, their structural
+//! predicates) and, for the composite elements, WHICH named rule hook owns
+//! their bespoke validation — but the rules themselves (markdown's closed
+//! attribute set, the stepper's step-children shape, ...) remain ordinary
+//! Zig in ui_markup.zig, dispatched by hook name. Forcing them into
+//! declarative data would breed a worse inner language.
+//!
+//! Stable codes: every element, attribute, and event carries a u16 code
+//! assigned at birth and NEVER reused or reassigned — codes, not names or
+//! declaration order, are what serialized documents and hashes reference,
+//! so a rename or reorder here can never silently change what persisted
+//! artifacts mean. Code 0 is reserved (it marks "no entry" on the wire).
+//! New entries take the next unused code regardless of where they sit in
+//! the tables; the registry integrity test pins uniqueness.
+//!
+//! The engine predicates the structural fields mirror
+//! (`canvas.widgetKindHitTarget`, `canvas.widgetKindStacksChildren`,
+//! `canvas.widgetKindDismissibleSurface`) stay the source of truth for
+//! runtime behavior; registry↔engine conformance tests in
+//! ui_markup_view_tests.zig hold this data equal to those predicates over
+//! every element, so drift is impossible. This module stays std-only (it
+//! rides in the `native` CLI and the LSP standalone), which is why widget
+//! kinds are referenced by tag NAME here and resolved to `WidgetKind` by
+//! the canvas-layer consumers.
+
+const std = @import("std");
+
+/// The UI document schema version: ONE number covering the document shape,
+/// the registry's semantics (codes, classes, predicates), and the
+/// evaluation semantics — including the structural-id algorithm — because
+/// a change to any one changes what a persisted document MEANS. Additive
+/// changes (new elements, attributes, events, expression forms under
+/// fresh codes) do not bump it: codes are assigned at birth and readers
+/// refuse codes they do not know, loudly. Renames, retypes, removals, or
+/// evaluation-semantics changes bump it, and persisted artifacts (NSUI
+/// documents, journals, serialized contracts) carry it; readers reach
+/// older artifacts through document→document migrations, never silent
+/// reinterpretation.
+pub const schema_version: u16 = 1;
+
+/// Value type-class of an attribute: what shape of value the engines
+/// accept for it. `option` values name a Zig enum member (the enum itself
+/// is derived from the `ElementOptions` field type, so it cannot be
+/// restated here); `binding_only` attributes require one `{binding}` and
+/// never take literals (runtime image ids, markdown sources).
+pub const ValueClass = enum {
+    text,
+    number,
+    whole,
+    flag,
+    option,
+    key,
+    token_color,
+    token_radius,
+    icon,
+    binding_only,
+};
+
+/// Which validation surface an attribute belongs to. `option` attributes
+/// are the generic per-element set (the validator's known-option list);
+/// the others are scoped or structural and validated by their own rules.
+pub const AttrGroup = enum {
+    /// Generic option attributes every element may carry (subject to the
+    /// element-scoped rules): the engines apply the `field`-named
+    /// `ElementOptions` member, or their own special handling when
+    /// `field` is empty (key, role, label).
+    option,
+    /// Color style-token references (`background="surface"`).
+    style_color,
+    /// The radius style-token reference.
+    style_radius,
+    /// Element-scoped specials with bespoke rules (icon names, avatar
+    /// image bindings, anchor placement).
+    element,
+    /// Composite-element attributes (markdown, stepper, timeline).
+    composite,
+    /// Structure-tag attributes (`for each`, `if test`, template wiring)
+    /// and tooling hints.
+    structure,
+};
+
+pub const AttrInfo = struct {
+    /// Stable code, assigned at birth, never reused. Nonzero.
+    code: u16,
+    /// Markup attribute name (kebab-case).
+    name: []const u8,
+    class: ValueClass,
+    group: AttrGroup,
+    /// `Ui.ElementOptions` field the generic engines set; empty for
+    /// attributes the engines handle specially.
+    field: []const u8 = "",
+    /// Literal values of this attribute render as label text, so the
+    /// font-coverage (tofu) guard applies to them.
+    rendered_text: bool = false,
+};
+
+/// How an event's payload reaches the Msg: `message` events take a tag
+/// with an optional `{binding}` payload; the others require a bare tag
+/// whose payload the RUNTIME supplies (TextInputEvent, ScrollState, the
+/// split fraction).
+pub const EventPayload = enum { message, text_input, scroll_state, fraction };
+
+pub const EventInfo = struct {
+    /// Stable code, assigned at birth, never reused. Nonzero.
+    code: u16,
+    /// Event name; the markup attribute is `on-<name>`.
+    name: []const u8,
+    payload: EventPayload = .message,
+    /// The single element name the runtime emits this event for, when the
+    /// event is element-scoped (scroll offsets exist only on scroll
+    /// containers, fractions only on splits).
+    only_on_element: ?[]const u8 = null,
+    /// Only dismissible surfaces (the `dismissible` element predicate)
+    /// ever receive this event.
+    dismissible_only: bool = false,
+    /// This handler binds control/text behavior a non-hit-target element
+    /// does not have, so it is a dead handler there (press/toggle are
+    /// exempt: a bound press handler makes any element pressable).
+    dead_on_non_hit_target: bool = false,
+};
+
+pub const ElementInfo = struct {
+    /// Stable code, assigned at birth, never reused. Nonzero.
+    code: u16,
+    /// Markup element name (kebab-case).
+    name: []const u8,
+    /// `canvas.WidgetKind` tag name this element lowers to; empty for
+    /// composite elements, which lower through their library views
+    /// (markdown, stepper, timeline) or are consumed by a parent
+    /// composite (step, timeline-item).
+    widget_kind: []const u8 = "",
+    /// Content is a single run of text (with interpolation); no element
+    /// children.
+    takes_text: bool = false,
+    /// The engine hit-tests this element's widget kind. Mirrors
+    /// `canvas.widgetKindHitTarget` (conformance-tested).
+    hit_target: bool = true,
+    /// The widget kind layers children on top of each other (gap can
+    /// never space them). Mirrors `canvas.widgetKindStacksChildren`
+    /// (conformance-tested).
+    stacks_children: bool = false,
+    /// The runtime's dismissal machinery (Escape, click outside,
+    /// automation dismiss) closes this surface. Mirrors the markup subset
+    /// of `canvas.widgetKindDismissibleSurface`.
+    dismissible: bool = false,
+    /// May float as an anchored surface (`anchor="below"`).
+    anchorable: bool = false,
+    /// Its `icon` attribute draws an inline vector icon as part of the
+    /// element's own rendering (one hit target, one tint).
+    icon_attr: bool = false,
+    /// Named bespoke validation rule for composite elements. The rule's
+    /// existence and attachment are registry data; the rule itself stays
+    /// code in ui_markup.zig, dispatched by this name.
+    rule_hook: ?[]const u8 = null,
+};
+
+// --------------------------------------------------------------- elements
+//
+// Codes 1..53 are the plain elements (assigned at birth in the vocabulary's
+// documented grouping); 54..58 are the composites. The grouping comments
+// mirror the authoring docs; they carry no meaning — codes do.
+
+pub const elements = [_]ElementInfo{
+    // Flex, overlay, and scrolling containers.
+    .{ .code = 1, .name = "row", .widget_kind = "row", .hit_target = false },
+    .{ .code = 2, .name = "column", .widget_kind = "column", .hit_target = false },
+    .{ .code = 3, .name = "stack", .widget_kind = "stack", .hit_target = false, .stacks_children = true },
+    .{ .code = 4, .name = "panel", .widget_kind = "panel", .stacks_children = true },
+    .{ .code = 5, .name = "scroll", .widget_kind = "scroll_view" },
+    .{ .code = 6, .name = "list", .widget_kind = "list", .hit_target = false },
+    .{ .code = 7, .name = "grid", .widget_kind = "grid", .hit_target = false },
+    .{ .code = 8, .name = "card", .widget_kind = "card", .stacks_children = true },
+    .{ .code = 9, .name = "split", .widget_kind = "split", .hit_target = false },
+    .{ .code = 10, .name = "tree", .widget_kind = "tree", .hit_target = false },
+    // Row containers (children flow along the horizontal main axis).
+    .{ .code = 11, .name = "breadcrumb", .widget_kind = "breadcrumb", .hit_target = false },
+    .{ .code = 12, .name = "button-group", .widget_kind = "button_group", .hit_target = false },
+    .{ .code = 13, .name = "pagination", .widget_kind = "pagination", .hit_target = false },
+    .{ .code = 14, .name = "radio-group", .widget_kind = "radio_group", .hit_target = false },
+    .{ .code = 15, .name = "tabs", .widget_kind = "tabs", .hit_target = false },
+    .{ .code = 16, .name = "toggle-group", .widget_kind = "toggle_group", .hit_target = false },
+    // Vertical containers.
+    .{ .code = 17, .name = "table", .widget_kind = "table", .hit_target = false },
+    .{ .code = 18, .name = "table-row", .widget_kind = "data_row", .hit_target = false },
+    .{ .code = 19, .name = "dropdown-menu", .widget_kind = "dropdown_menu", .dismissible = true, .anchorable = true },
+    // Overlay/surface containers (title via the text attribute).
+    .{ .code = 20, .name = "accordion", .widget_kind = "accordion" },
+    .{ .code = 21, .name = "alert", .widget_kind = "alert", .stacks_children = true },
+    .{ .code = 22, .name = "bubble", .widget_kind = "bubble", .stacks_children = true },
+    .{ .code = 23, .name = "dialog", .widget_kind = "dialog", .stacks_children = true, .dismissible = true },
+    .{ .code = 24, .name = "drawer", .widget_kind = "drawer", .stacks_children = true, .dismissible = true },
+    .{ .code = 25, .name = "sheet", .widget_kind = "sheet", .stacks_children = true, .dismissible = true },
+    .{ .code = 26, .name = "resizable", .widget_kind = "resizable", .stacks_children = true },
+    // Text-bearing leaves (label is the element content).
+    .{ .code = 27, .name = "text", .widget_kind = "text", .takes_text = true },
+    .{ .code = 28, .name = "badge", .widget_kind = "badge", .takes_text = true, .hit_target = false, .icon_attr = true },
+    .{ .code = 29, .name = "button", .widget_kind = "button", .takes_text = true, .icon_attr = true },
+    .{ .code = 30, .name = "toggle", .widget_kind = "toggle", .takes_text = true },
+    .{ .code = 31, .name = "list-item", .widget_kind = "list_item", .takes_text = true, .icon_attr = true },
+    .{ .code = 32, .name = "menu-item", .widget_kind = "menu_item", .takes_text = true, .icon_attr = true },
+    .{ .code = 33, .name = "status-bar", .widget_kind = "status_bar", .takes_text = true },
+    .{ .code = 34, .name = "avatar", .widget_kind = "avatar", .takes_text = true, .hit_target = false },
+    .{ .code = 35, .name = "select", .widget_kind = "select", .takes_text = true },
+    .{ .code = 36, .name = "switch", .widget_kind = "switch_control", .takes_text = true },
+    .{ .code = 37, .name = "table-cell", .widget_kind = "data_cell", .takes_text = true },
+    .{ .code = 38, .name = "toggle-button", .widget_kind = "toggle_button", .takes_text = true, .icon_attr = true },
+    .{ .code = 39, .name = "tooltip", .widget_kind = "tooltip", .takes_text = true, .hit_target = false },
+    // Value controls and text entry.
+    .{ .code = 40, .name = "checkbox", .widget_kind = "checkbox" },
+    .{ .code = 41, .name = "radio", .widget_kind = "radio" },
+    .{ .code = 42, .name = "slider", .widget_kind = "slider" },
+    .{ .code = 43, .name = "progress", .widget_kind = "progress" },
+    .{ .code = 44, .name = "text-field", .widget_kind = "text_field" },
+    .{ .code = 45, .name = "search-field", .widget_kind = "search_field" },
+    .{ .code = 46, .name = "textarea", .widget_kind = "textarea" },
+    .{ .code = 47, .name = "input", .widget_kind = "input" },
+    .{ .code = 48, .name = "combobox", .widget_kind = "combobox" },
+    // Plain leaves.
+    .{ .code = 49, .name = "separator", .widget_kind = "separator", .hit_target = false },
+    .{ .code = 50, .name = "spacer", .widget_kind = "stack", .hit_target = false, .stacks_children = true },
+    .{ .code = 51, .name = "skeleton", .widget_kind = "skeleton", .hit_target = false },
+    .{ .code = 52, .name = "spinner", .widget_kind = "spinner", .hit_target = false },
+    .{ .code = 53, .name = "icon", .widget_kind = "icon", .hit_target = false },
+    // Composite elements: bespoke shapes validated by named rule hooks
+    // (the hooks live in ui_markup.zig) and built by bespoke builders in
+    // both engines. They lower through library views, not a single
+    // widget kind.
+    .{ .code = 54, .name = "markdown", .rule_hook = "markdown" },
+    .{ .code = 55, .name = "stepper", .rule_hook = "stepper" },
+    .{ .code = 56, .name = "step", .rule_hook = "step" },
+    .{ .code = 57, .name = "timeline", .rule_hook = "timeline" },
+    .{ .code = 58, .name = "timeline-item", .rule_hook = "timeline-item" },
+};
+
+// ------------------------------------------------------------- attributes
+//
+// Codes 1..28 are the generic option attributes (the order is also the
+// did-you-mean/completion display order), 29..35 the style-token
+// references, 36..41 the element-scoped specials, 42..50 the composite
+// attributes, and 51..57 the structure/tooling attributes.
+
+pub const attrs = [_]AttrInfo{
+    .{ .code = 1, .name = "text", .class = .text, .group = .option, .field = "text", .rendered_text = true },
+    .{ .code = 2, .name = "placeholder", .class = .text, .group = .option, .field = "placeholder", .rendered_text = true },
+    .{ .code = 3, .name = "value", .class = .number, .group = .option, .field = "value", .rendered_text = true },
+    .{ .code = 4, .name = "checked", .class = .flag, .group = .option, .field = "checked" },
+    .{ .code = 5, .name = "selected", .class = .flag, .group = .option, .field = "selected" },
+    .{ .code = 6, .name = "disabled", .class = .flag, .group = .option, .field = "disabled" },
+    .{ .code = 7, .name = "variant", .class = .option, .group = .option, .field = "variant" },
+    .{ .code = 8, .name = "size", .class = .option, .group = .option, .field = "size" },
+    .{ .code = 9, .name = "width", .class = .number, .group = .option, .field = "width" },
+    .{ .code = 10, .name = "height", .class = .number, .group = .option, .field = "height" },
+    .{ .code = 11, .name = "grow", .class = .number, .group = .option, .field = "grow" },
+    .{ .code = 12, .name = "gap", .class = .number, .group = .option, .field = "gap" },
+    .{ .code = 13, .name = "padding", .class = .number, .group = .option, .field = "padding" },
+    .{ .code = 14, .name = "main", .class = .option, .group = .option, .field = "main" },
+    .{ .code = 15, .name = "cross", .class = .option, .group = .option, .field = "cross" },
+    .{ .code = 16, .name = "wrap", .class = .flag, .group = .option, .field = "wrap" },
+    .{ .code = 17, .name = "key", .class = .key, .group = .option },
+    .{ .code = 18, .name = "global-key", .class = .key, .group = .option },
+    .{ .code = 19, .name = "text-alignment", .class = .option, .group = .option, .field = "text_alignment" },
+    .{ .code = 20, .name = "columns", .class = .whole, .group = .option, .field = "columns" },
+    .{ .code = 21, .name = "virtualized", .class = .flag, .group = .option, .field = "virtualized" },
+    .{ .code = 22, .name = "virtual-item-extent", .class = .number, .group = .option, .field = "virtual_item_extent" },
+    .{ .code = 23, .name = "role", .class = .option, .group = .option },
+    .{ .code = 24, .name = "label", .class = .text, .group = .option, .rendered_text = true },
+    .{ .code = 25, .name = "autofocus", .class = .flag, .group = .option, .field = "autofocus" },
+    .{ .code = 26, .name = "min-width", .class = .number, .group = .option, .field = "min_width" },
+    .{ .code = 27, .name = "expanded", .class = .flag, .group = .option, .field = "expanded" },
+    .{ .code = 28, .name = "window-drag", .class = .flag, .group = .option, .field = "window_drag" },
+    // Color style-token references (`StyleTokenRefs` fields) + radius.
+    .{ .code = 29, .name = "background", .class = .token_color, .group = .style_color, .field = "background" },
+    .{ .code = 30, .name = "foreground", .class = .token_color, .group = .style_color, .field = "foreground" },
+    .{ .code = 31, .name = "accent", .class = .token_color, .group = .style_color, .field = "accent" },
+    .{ .code = 32, .name = "accent-foreground", .class = .token_color, .group = .style_color, .field = "accent_foreground" },
+    .{ .code = 33, .name = "border-color", .class = .token_color, .group = .style_color, .field = "border_color" },
+    .{ .code = 34, .name = "focus-ring", .class = .token_color, .group = .style_color, .field = "focus_ring" },
+    .{ .code = 35, .name = "radius", .class = .token_radius, .group = .style_radius },
+    // Element-scoped specials.
+    .{ .code = 36, .name = "name", .class = .icon, .group = .element },
+    .{ .code = 37, .name = "icon", .class = .icon, .group = .element },
+    .{ .code = 38, .name = "image", .class = .binding_only, .group = .element },
+    .{ .code = 39, .name = "anchor", .class = .option, .group = .element },
+    .{ .code = 40, .name = "anchor-alignment", .class = .option, .group = .element },
+    .{ .code = 41, .name = "anchor-offset", .class = .number, .group = .element },
+    // Composite-element attributes.
+    .{ .code = 42, .name = "source", .class = .binding_only, .group = .composite },
+    .{ .code = 43, .name = "active", .class = .whole, .group = .composite },
+    .{ .code = 44, .name = "title", .class = .text, .group = .composite, .rendered_text = true },
+    .{ .code = 45, .name = "description", .class = .text, .group = .composite, .rendered_text = true },
+    .{ .code = 46, .name = "meta", .class = .text, .group = .composite, .rendered_text = true },
+    .{ .code = 47, .name = "indicator", .class = .text, .group = .composite, .rendered_text = true },
+    .{ .code = 48, .name = "connector", .class = .flag, .group = .composite },
+    .{ .code = 49, .name = "issue-link-base", .class = .text, .group = .composite },
+    .{ .code = 50, .name = "details-expanded", .class = .binding_only, .group = .composite },
+    // Structure-tag attributes and tooling hints.
+    .{ .code = 51, .name = "each", .class = .text, .group = .structure },
+    .{ .code = 52, .name = "as", .class = .text, .group = .structure },
+    .{ .code = 53, .name = "test", .class = .flag, .group = .structure },
+    .{ .code = 54, .name = "template", .class = .text, .group = .structure },
+    .{ .code = 55, .name = "args", .class = .text, .group = .structure },
+    .{ .code = 56, .name = "src", .class = .text, .group = .structure },
+    .{ .code = 57, .name = "kind", .class = .text, .group = .structure },
+};
+
+// ----------------------------------------------------------------- events
+
+pub const events = [_]EventInfo{
+    .{ .code = 1, .name = "press" },
+    .{ .code = 2, .name = "toggle" },
+    .{ .code = 3, .name = "change", .dead_on_non_hit_target = true },
+    .{ .code = 4, .name = "submit", .dead_on_non_hit_target = true },
+    .{ .code = 5, .name = "input", .payload = .text_input, .dead_on_non_hit_target = true },
+    .{ .code = 6, .name = "scroll", .payload = .scroll_state, .only_on_element = "scroll" },
+    .{ .code = 7, .name = "dismiss", .dismissible_only = true },
+    .{ .code = 8, .name = "hold" },
+    .{ .code = 9, .name = "resize", .payload = .fraction, .only_on_element = "split" },
+    .{ .code = 10, .name = "reach-end", .only_on_element = "scroll" },
+};
+
+// ------------------------------------------------------- token vocabulary
+//
+// Token and icon sections reference their live sources: the color/radius
+// names mirror the `canvas.ColorTokens`/`canvas.RadiusTokens` field sets
+// and the icon names mirror the comptime-parsed `canvas.icons` registry
+// (this module stays std-only, so the mirrors are data here and lockstep
+// tests in ui_markup_view_tests.zig hold them equal to the live structs).
+
+pub const color_token_names = [_][]const u8{
+    "background",   "surface",     "surface_subtle",   "surface_pressed",
+    "text",         "text_muted",  "border",           "accent",
+    "accent_text",  "destructive", "destructive_text", "success",
+    "success_text", "warning",     "warning_text",     "info",
+    "info_text",    "focus_ring",  "shadow",           "disabled",
+};
+
+pub const radius_token_names = [_][]const u8{ "sm", "md", "lg", "xl" };
+
+pub const icon_names = [_][]const u8{
+    "alert",       "archive",       "arrow-down",   "arrow-right",      "arrow-up",
+    "check",       "check-circle",  "chevron-down", "chevron-left",     "chevron-right",
+    "chevron-up",  "circle-dot",    "clock",        "copy",             "download",
+    "edit",        "external-link", "eye",          "file-text",        "folder",
+    "folder-open", "git-branch",    "git-merge",    "git-pull-request", "info",
+    "menu",        "moon",          "music",        "pause",            "play",
+    "plus",        "refresh-cw",    "repeat",       "save",             "search",
+    "send",        "settings",      "shuffle",      "skip-back",        "skip-forward",
+    "sun",         "trash",         "volume",       "x",                "x-circle",
+};
+
+// ---------------------------------------------------------------- lookups
+
+pub fn elementByName(name: []const u8) ?*const ElementInfo {
+    for (&elements) |*entry| {
+        if (std.mem.eql(u8, entry.name, name)) return entry;
+    }
+    return null;
+}
+
+pub fn elementByCode(code: u16) ?*const ElementInfo {
+    for (&elements) |*entry| {
+        if (entry.code == code) return entry;
+    }
+    return null;
+}
+
+pub fn attrByName(name: []const u8) ?*const AttrInfo {
+    for (&attrs) |*entry| {
+        if (std.mem.eql(u8, entry.name, name)) return entry;
+    }
+    return null;
+}
+
+pub fn attrByCode(code: u16) ?*const AttrInfo {
+    for (&attrs) |*entry| {
+        if (entry.code == code) return entry;
+    }
+    return null;
+}
+
+pub fn eventByName(name: []const u8) ?*const EventInfo {
+    for (&events) |*entry| {
+        if (std.mem.eql(u8, entry.name, name)) return entry;
+    }
+    return null;
+}
+
+pub fn eventByCode(code: u16) ?*const EventInfo {
+    for (&events) |*entry| {
+        if (entry.code == code) return entry;
+    }
+    return null;
+}
+
+// ------------------------------------------------------------ derivations
+//
+// The comptime-derived name lists the rest of the stack consumes. Each is
+// a plain array (so `&list` coerces to a slice exactly like the hand-kept
+// lists these replace), generated by one bounded comptime pass over the
+// registry; the quota guard is explicit so a grown registry fails loudly
+// at the derivation, never mysteriously downstream.
+
+const derivation_quota = 40_000;
+
+fn ElementPredicate(comptime field: []const u8) fn (ElementInfo) bool {
+    return struct {
+        fn includes(entry: ElementInfo) bool {
+            return @field(entry, field);
+        }
+    }.includes;
+}
+
+fn plainElement(entry: ElementInfo) bool {
+    return entry.rule_hook == null;
+}
+
+fn nonHitTargetElement(entry: ElementInfo) bool {
+    return plainElement(entry) and !entry.hit_target;
+}
+
+fn elementNamesWhere(comptime includes: fn (ElementInfo) bool) [countElements(includes)][]const u8 {
+    comptime {
+        @setEvalBranchQuota(derivation_quota);
+        var names: [countElements(includes)][]const u8 = undefined;
+        var index: usize = 0;
+        for (elements) |entry| {
+            if (!includes(entry)) continue;
+            names[index] = entry.name;
+            index += 1;
+        }
+        return names;
+    }
+}
+
+fn countElements(comptime includes: fn (ElementInfo) bool) usize {
+    comptime {
+        @setEvalBranchQuota(derivation_quota);
+        var count: usize = 0;
+        for (elements) |entry| {
+            if (includes(entry)) count += 1;
+        }
+        return count;
+    }
+}
+
+fn attrNamesWhere(comptime includes: fn (AttrInfo) bool) [countAttrs(includes)][]const u8 {
+    comptime {
+        @setEvalBranchQuota(derivation_quota);
+        var names: [countAttrs(includes)][]const u8 = undefined;
+        var index: usize = 0;
+        for (attrs) |entry| {
+            if (!includes(entry)) continue;
+            names[index] = entry.name;
+            index += 1;
+        }
+        return names;
+    }
+}
+
+fn countAttrs(comptime includes: fn (AttrInfo) bool) usize {
+    comptime {
+        @setEvalBranchQuota(derivation_quota);
+        var count: usize = 0;
+        for (attrs) |entry| {
+            if (includes(entry)) count += 1;
+        }
+        return count;
+    }
+}
+
+fn optionAttr(entry: AttrInfo) bool {
+    return entry.group == .option;
+}
+
+fn styleColorAttr(entry: AttrInfo) bool {
+    return entry.group == .style_color;
+}
+
+fn renderedTextAttr(entry: AttrInfo) bool {
+    return entry.rendered_text;
+}
+
+/// Element names the grammar accepts as plain (non-composite) elements —
+/// the validator's element vocabulary and the did-you-mean list.
+pub const element_names = elementNamesWhere(plainElement);
+
+/// Elements whose content is a single run of text.
+pub const text_leaf_element_names = elementNamesWhere(ElementPredicate("takes_text"));
+
+/// Elements whose widget kind the engine never hit-tests.
+pub const non_hit_target_element_names = elementNamesWhere(nonHitTargetElement);
+
+/// Elements whose widget kind layers its children (gap is dead there).
+pub const stack_container_element_names = elementNamesWhere(ElementPredicate("stacks_children"));
+
+/// Elements the runtime's dismissal machinery closes.
+pub const dismiss_element_names = elementNamesWhere(ElementPredicate("dismissible"));
+
+/// Elements that may float as anchored surfaces.
+pub const anchor_element_names = elementNamesWhere(ElementPredicate("anchorable"));
+
+/// Elements whose `icon` attribute draws an inline vector icon.
+pub const icon_attr_element_names = elementNamesWhere(ElementPredicate("icon_attr"));
+
+/// The generic option attributes (the validator's known-attribute set).
+pub const option_attr_names = attrNamesWhere(optionAttr);
+
+/// The color style-token attributes.
+pub const color_style_attr_names = attrNamesWhere(styleColorAttr);
+
+/// Attributes whose literal values render as label text (tofu guard).
+pub const rendered_text_attr_names = attrNamesWhere(renderedTextAttr);
+
+/// The events' markup ATTRIBUTE spellings (`on-<name>`), index-aligned
+/// with `events` — the serialized form and the engines restore attribute
+/// names from these, so the spelling exists exactly once.
+pub const event_attr_names = blk: {
+    @setEvalBranchQuota(derivation_quota);
+    var names: [events.len][]const u8 = undefined;
+    for (events, 0..) |entry, index| {
+        names[index] = "on-" ++ entry.name;
+    }
+    break :blk names;
+};
+
+/// The event attribute spelling for a registry event code.
+pub fn eventAttrNameByCode(code: u16) ?[]const u8 {
+    for (&events, 0..) |*entry, index| {
+        if (entry.code == code) return event_attr_names[index];
+    }
+    return null;
+}
+
+/// The event vocabulary (markup attributes are `on-<name>`).
+pub const event_names = blk: {
+    @setEvalBranchQuota(derivation_quota);
+    var names: [events.len][]const u8 = undefined;
+    for (events, 0..) |entry, index| {
+        names[index] = entry.name;
+    }
+    break :blk names;
+};
+
+/// Markup attribute name → engine field-name pairs, for the engines'
+/// generic option application and the style-token table. The pair type is
+/// declared here so ui_markup_view.zig and the contract stay one import
+/// away from the registry (std-only both ways).
+pub const NamePair = struct { markup: []const u8, zig: []const u8 };
+
+fn fieldBackedOption(entry: AttrInfo) bool {
+    return entry.group == .option and entry.field.len > 0;
+}
+
+fn pairsWhere(comptime includes: fn (AttrInfo) bool) [countAttrs(includes)]NamePair {
+    comptime {
+        @setEvalBranchQuota(derivation_quota);
+        var pairs: [countAttrs(includes)]NamePair = undefined;
+        var index: usize = 0;
+        for (attrs) |entry| {
+            if (!includes(entry)) continue;
+            pairs[index] = .{ .markup = entry.name, .zig = entry.field };
+            index += 1;
+        }
+        return pairs;
+    }
+}
+
+/// Generic option attributes backed by an `ElementOptions` field.
+pub const option_field_pairs = pairsWhere(fieldBackedOption);
+
+/// Color style attributes → `StyleTokenRefs` fields.
+pub const color_style_field_pairs = pairsWhere(styleColorAttr);
+
+// ---------------------------------------------------------- registry law
+//
+// Integrity invariants a comptime block enforces at build time (cheaper
+// and earlier than a test): codes are nonzero and unique per table, and
+// names are unique per table. Reuse of a retired code or a copy-pasted
+// duplicate cannot compile.
+
+comptime {
+    @setEvalBranchQuota(derivation_quota);
+    for (elements, 0..) |entry, index| {
+        if (entry.code == 0) @compileError("element code 0 is reserved: " ++ entry.name);
+        for (elements[0..index]) |earlier| {
+            if (earlier.code == entry.code) @compileError("duplicate element code: " ++ entry.name);
+            if (std.mem.eql(u8, earlier.name, entry.name)) @compileError("duplicate element name: " ++ entry.name);
+        }
+    }
+    for (attrs, 0..) |entry, index| {
+        if (entry.code == 0) @compileError("attr code 0 is reserved: " ++ entry.name);
+        for (attrs[0..index]) |earlier| {
+            if (earlier.code == entry.code) @compileError("duplicate attr code: " ++ entry.name);
+            if (std.mem.eql(u8, earlier.name, entry.name)) @compileError("duplicate attr name: " ++ entry.name);
+        }
+    }
+    for (events, 0..) |entry, index| {
+        if (entry.code == 0) @compileError("event code 0 is reserved: " ++ entry.name);
+        for (events[0..index]) |earlier| {
+            if (earlier.code == entry.code) @compileError("duplicate event code: " ++ entry.name);
+            if (std.mem.eql(u8, earlier.name, entry.name)) @compileError("duplicate event name: " ++ entry.name);
+        }
+    }
+}

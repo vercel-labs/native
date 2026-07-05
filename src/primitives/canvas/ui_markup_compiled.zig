@@ -57,12 +57,16 @@ pub fn CompiledMarkupImports(comptime ModelT: type, comptime MsgT: type, comptim
     return CompiledMarkupDocument(ModelT, MsgT, markup.resolveImportsComptime(root_name, sources));
 }
 
-/// Shared engine over an already-resolved comptime document.
+/// Shared engine over an already-resolved comptime document. The document
+/// is canonicalized first (the typed-document pass), so both engines
+/// consume the same typed form; this engine's binding/message resolution
+/// stays comptime-unrolled, so the pass changes nothing about the code it
+/// emits — the parity suite is the proof.
 pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, comptime resolved_document: markup.MarkupDocument) type {
     return struct {
         pub const Ui = canvas.Ui(MsgT);
 
-        pub const document = resolved_document;
+        pub const document = markup.canonicalizeComptime(resolved_document);
 
         /// Loop variables, template args, and slot captures in scope at a
         /// point in the tree. Names, kinds, and item types are comptime;

@@ -1945,7 +1945,12 @@ fn isSubmitKeyboard(widget: Widget, keyboard: canvas.WidgetKeyboardEvent) bool {
 
 fn structuralId(parent_id: ObjectId, kind: WidgetKind, key: UiKey) ObjectId {
     var hasher = std.hash.Wyhash.init(parent_id);
-    hasher.update(std.mem.asBytes(&@as(u16, @intFromEnum(kind))));
+    // The kind's STABLE code, never its ordinal: reordering `WidgetKind`
+    // must never renumber retained ids, automation targets, or journal
+    // anchors. The id algorithm (seed, code, key-tag discipline) is part
+    // of the versioned document schema (`ui_schema.schema_version`).
+    const kind_code: u16 = canvas.widgetKindCode(kind);
+    hasher.update(std.mem.asBytes(&kind_code));
     switch (key) {
         .index => |index| {
             hasher.update(&[_]u8{0});

@@ -6,6 +6,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     if (args.len >= 1 and std.mem.eql(u8, args[0], "lsp")) {
         return runLsp(allocator, io);
     }
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "dump")) {
+        return runDump(allocator, io, args[1..]);
+    }
     if (args.len < 1 or !std.mem.eql(u8, args[0], "check")) {
         usage();
         return error.MarkupCommandFailed;
@@ -142,6 +145,83 @@ fn runLsp(allocator: std.mem.Allocator, io: std.Io) !void {
     var server = markup_lsp.Server.init(allocator, &stdin_reader.interface, &stdout_writer.interface);
     defer server.deinit();
     try server.run();
+}
+
+/// `native markup dump <file.zml> [--out doc.nsui]`: resolve, validate,
+/// and canonicalize a view, encode it as NSUI (the canonical binary), and
+/// print the JSON inspection view DERIVED FROM THE DECODED BINARY — what
+/// you read is what the artifact of record says, not what the source
+/// said. `--out` additionally writes the binary artifact.
+fn runDump(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !void {
+    var file_path: ?[]const u8 = null;
+    var out_path: ?[]const u8 = null;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--out")) {
+            index += 1;
+            if (index >= args.len) {
+                std.debug.print("error: --out requires a path\n", .{});
+                return error.MarkupCommandFailed;
+            }
+            out_path = args[index];
+            continue;
+        }
+        if (file_path != null) {
+            std.debug.print("error: markup dump takes one file\n", .{});
+            return error.MarkupCommandFailed;
+        }
+        file_path = args[index];
+    }
+    const path = file_path orelse {
+        std.debug.print("usage: native markup dump <file.zml> [--out doc.nsui]\n", .{});
+        return error.MarkupCommandFailed;
+    };
+
+    const source = readFile(allocator, io, path) catch |err| {
+        std.debug.print("error: {s}: unable to read file ({s})\n", .{ path, @errorName(err) });
+        return err;
+    };
+    defer allocator.free(source);
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var disk_loader = DiskLoader{ .io = io };
+    var diagnostic: ui_markup.MarkupErrorInfo = .{};
+    const document = ui_markup.resolveImports(arena, path, source, disk_loader.loader(), &diagnostic) catch |err| {
+        const info_path = if (diagnostic.path.len > 0) diagnostic.path else path;
+        std.debug.print("{s}:{d}:{d}: error: {s}\n", .{ info_path, diagnostic.line, diagnostic.column, diagnostic.message });
+        return err;
+    };
+    if (ui_markup.validate(document)) |info| {
+        const info_path = if (info.path.len > 0) info.path else path;
+        std.debug.print("{s}:{d}:{d}: error: {s}\n", .{ info_path, info.line, info.column, info.message });
+        return error.MarkupInvalid;
+    }
+    const canonical = try ui_markup.canonicalize(arena, document);
+
+    var codec_diagnostic: ui_markup.binary.CodecDiagnostic = .{};
+    const bytes = ui_markup.binary.encode(arena, canonical, .{}, &codec_diagnostic) catch |err| {
+        std.debug.print("error: {s}: {s}\n", .{ path, codec_diagnostic.message });
+        return err;
+    };
+    if (out_path) |artifact_path| {
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = artifact_path, .data = bytes });
+    }
+    // The JSON view derives from the DECODED binary, round-tripping the
+    // artifact so the dump can never show something the bytes do not say.
+    const decoded = ui_markup.binary.decode(arena, bytes, &codec_diagnostic) catch |err| {
+        std.debug.print("error: {s}: {s}\n", .{ path, codec_diagnostic.message });
+        return err;
+    };
+    const hash = ui_markup.binary.documentHash(arena, decoded) catch |err| {
+        std.debug.print("error: {s}: {s}\n", .{ path, codec_diagnostic.message });
+        return err;
+    };
+    var stdout_buffer: [64 * 1024]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    try ui_markup.binary.writeJson(decoded, hash, &stdout_writer.interface);
+    try stdout_writer.interface.flush();
 }
 
 const FileCheckContext = struct {
@@ -393,6 +473,7 @@ fn readFile(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8) ![]
 fn usage() void {
     std.debug.print(
         \\usage: native markup check <file.zml> [more files...] [--strict]
+        \\       native markup dump <file.zml> [--out doc.nsui]
         \\       native markup lsp
         \\
         \\check: parses and validates markup views: grammar, expression forms,
@@ -411,6 +492,11 @@ fn usage() void {
         \\Msg). A missing or stale artifact degrades to structural checking
         \\with a note - never a false pass; binding paths are then validated
         \\against your Model/Msg when the app builds.
+        \\
+        \\dump: resolves and validates a view, encodes the canonical NSUI
+        \\binary (schema-versioned, registry codes, byte-range spans), and
+        \\prints the JSON inspection view derived from the decoded binary;
+        \\--out also writes the .nsui artifact.
         \\
         \\lsp: speaks the Language Server Protocol over stdio (diagnostics,
         \\completion, hover) for .zml files; wire it into your editor's LSP

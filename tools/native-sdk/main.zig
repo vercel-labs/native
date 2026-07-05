@@ -248,7 +248,7 @@ fn usage() void {
         \\  package-linux [--output path] [--binary path]
         \\  package-ios [--output path] [--binary path]
         \\  package-android [--output path] [--binary path]
-        \\  markup check <file.zml> [more files...] [--strict] | markup lsp
+        \\  markup check <file.zml> [more files...] [--strict] | markup dump <file.zml> [--out doc.nsui] | markup lsp
         \\  automate <command>
         \\  skills list|get
         \\  version
