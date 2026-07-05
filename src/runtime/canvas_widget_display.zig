@@ -228,11 +228,22 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                     .actions = platformWidgetAccessibilityActions(node.actions),
                 };
             }
+            // Publish only when the assembled tree actually changed: the
+            // fingerprint covers every field the platform receives, so
+            // typing, animations, and hover churn republish exactly when
+            // they alter a node (text value, selection, state flags) and
+            // skip the host's full tree-assembly/publish cost otherwise.
+            // A failed publish records nothing, so the next refresh
+            // retries.
+            const published_hash = hashWidgetAccessibilityNodes(nodes[0..count]);
+            if (view.widget_accessibility_published and view.widget_accessibility_published_hash == published_hash) return;
             try self.options.platform.services.updateWidgetAccessibility(.{
                 .window_id = view.window_id,
                 .view_label = view.label,
                 .nodes = nodes[0..count],
             });
+            view.widget_accessibility_published = true;
+            view.widget_accessibility_published_hash = published_hash;
         }
 
         pub fn refreshCanvasWidgetDisplayList(self: *Runtime, view_index: usize) anyerror!bool {
@@ -398,6 +409,89 @@ const CanvasWidgetCaretBlinkTarget = struct {
     command_id: canvas.ObjectId,
     bounds: geometry.RectF,
 };
+
+/// Fingerprint of everything `updateWidgetAccessibility` receives:
+/// every scalar field, every string's bytes (length-prefixed so
+/// adjacent fields can never alias across boundaries), every optional's
+/// presence. Two trees hash equal only when the platform would receive
+/// identical content (modulo the 64-bit collision odds a change-
+/// detection fingerprint accepts); a differing hash always republishes.
+fn hashWidgetAccessibilityNodes(nodes: []const platform.WidgetAccessibilityNode) u64 {
+    var hasher = std.hash.Wyhash.init(0x6131_3179_7075_626c); // "a11ypubl"
+    hashAccessibilityValue(&hasher, nodes.len);
+    for (nodes) |node| {
+        hashAccessibilityValue(&hasher, node.id);
+        hashAccessibilityOptional(&hasher, node.parent_id);
+        hashAccessibilityValue(&hasher, @intFromEnum(node.role));
+        hashAccessibilityBytes(&hasher, node.label);
+        hashAccessibilityBytes(&hasher, node.text_value);
+        hashAccessibilityBytes(&hasher, node.placeholder);
+        hashAccessibilityTextRange(&hasher, node.text_selection);
+        hashAccessibilityTextRange(&hasher, node.text_composition);
+        hashAccessibilityOptional(&hasher, node.value);
+        hashAccessibilityValue(&hasher, node.bounds.x);
+        hashAccessibilityValue(&hasher, node.bounds.y);
+        hashAccessibilityValue(&hasher, node.bounds.width);
+        hashAccessibilityValue(&hasher, node.bounds.height);
+        hashAccessibilityOptional(&hasher, node.grid_row_index);
+        hashAccessibilityOptional(&hasher, node.grid_column_index);
+        hashAccessibilityOptional(&hasher, node.grid_row_count);
+        hashAccessibilityOptional(&hasher, node.grid_column_count);
+        hashAccessibilityOptional(&hasher, node.list_item_index);
+        hashAccessibilityOptional(&hasher, node.list_item_count);
+        hashAccessibilityOptional(&hasher, node.scroll_offset);
+        hashAccessibilityOptional(&hasher, node.scroll_viewport_extent);
+        hashAccessibilityOptional(&hasher, node.scroll_content_extent);
+        hashAccessibilityValue(&hasher, node.enabled);
+        hashAccessibilityValue(&hasher, node.focused);
+        hashAccessibilityValue(&hasher, node.hovered);
+        hashAccessibilityValue(&hasher, node.pressed);
+        hashAccessibilityValue(&hasher, node.selected);
+        hashAccessibilityOptional(&hasher, node.expanded);
+        hashAccessibilityValue(&hasher, node.required);
+        hashAccessibilityValue(&hasher, node.read_only);
+        hashAccessibilityValue(&hasher, node.invalid);
+        hashAccessibilityValue(&hasher, node.focusable);
+        inline for (comptime std.meta.fieldNames(platform.WidgetAccessibilityActions)) |field_name| {
+            hashAccessibilityValue(&hasher, @field(node.actions, field_name));
+        }
+    }
+    return hasher.final();
+}
+
+fn hashAccessibilityValue(hasher: *std.hash.Wyhash, value: anytype) void {
+    switch (@typeInfo(@TypeOf(value))) {
+        .bool => hasher.update(&.{@intFromBool(value)}),
+        else => {
+            const stable = value;
+            hasher.update(std.mem.asBytes(&stable));
+        },
+    }
+}
+
+fn hashAccessibilityOptional(hasher: *std.hash.Wyhash, value: anytype) void {
+    if (value) |inner| {
+        hasher.update(&.{1});
+        hashAccessibilityValue(hasher, inner);
+    } else {
+        hasher.update(&.{0});
+    }
+}
+
+fn hashAccessibilityBytes(hasher: *std.hash.Wyhash, bytes: []const u8) void {
+    hashAccessibilityValue(hasher, bytes.len);
+    hasher.update(bytes);
+}
+
+fn hashAccessibilityTextRange(hasher: *std.hash.Wyhash, range: ?platform.WidgetAccessibilityTextRange) void {
+    if (range) |value| {
+        hasher.update(&.{1});
+        hashAccessibilityValue(hasher, value.start);
+        hashAccessibilityValue(hasher, value.end);
+    } else {
+        hasher.update(&.{0});
+    }
+}
 
 /// One full spinner revolution — linear, so the wrap seam is invisible.
 const spinner_rotation_turn_ms: u32 = 1000;

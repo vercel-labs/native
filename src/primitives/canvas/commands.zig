@@ -7,6 +7,7 @@ const render_model = @import("render.zig");
 const frame_model = @import("frame.zig");
 const equality_model = @import("equality.zig");
 const serialization = @import("serialization.zig");
+const plan_key_index = @import("plan_key_index.zig");
 
 const ObjectId = u64;
 const Error = canvas.Error;
@@ -184,9 +185,56 @@ pub const DisplayList = struct {
     }
 };
 
+/// Probe-table scratch for the keyed diff (see plan_key_index.zig):
+/// sized for the runtime's per-view command budget (2048) at the
+/// half-full bound; small or oversized lists keep the linear scans.
+const diff_id_index_slots = 4096;
+const DiffIdIndex = plan_key_index.HashSlots(diff_id_index_slots);
+threadlocal var diff_previous_id_index: DiffIdIndex = .{};
+threadlocal var diff_next_id_index: DiffIdIndex = .{};
+
+/// Fill `table` with the keyed commands' id->index mapping, erroring on
+/// the duplicate ids `validateUniqueObjectIds` rejects — one pass does
+/// both jobs.
+fn buildDiffIdIndex(display_list: DisplayList, table: *DiffIdIndex) Error!void {
+    table.reset();
+    for (display_list.commands, 0..) |command, index| {
+        const id = command.objectId() orelse continue;
+        var p = DiffIdIndex.probe(plan_key_index.mixHash(id));
+        while (table.next(&p)) |candidate| {
+            if (display_list.commands[candidate].objectId() == id) return error.DuplicateObjectId;
+        }
+        table.insert(p, @intCast(index));
+    }
+}
+
+fn findCommandByIdIndexed(display_list: DisplayList, table: *const DiffIdIndex, id: ObjectId) ?CommandRef {
+    var p = DiffIdIndex.probe(plan_key_index.mixHash(id));
+    while (table.next(&p)) |candidate| {
+        if (display_list.commands[candidate].objectId() == id) {
+            return .{ .index = candidate, .command = display_list.commands[candidate] };
+        }
+    }
+    return null;
+}
+
 fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChange) Error![]const DiffChange {
-    try validateUniqueObjectIds(previous);
-    try validateUniqueObjectIds(next);
+    // Id lookups ride the probe-table index whenever the lists are big
+    // enough to be worth a table reset and fit its half-full bound;
+    // otherwise the linear scans run as before. Same changes either
+    // way — the index build performs exactly the duplicate validation
+    // the linear path runs up front.
+    const use_index = (previous.commands.len >= plan_key_index.min_entries_for_index or
+        next.commands.len >= plan_key_index.min_entries_for_index) and
+        plan_key_index.fitsHashSlots(diff_id_index_slots, previous.commands.len) and
+        plan_key_index.fitsHashSlots(diff_id_index_slots, next.commands.len);
+    if (use_index) {
+        try buildDiffIdIndex(previous, &diff_previous_id_index);
+        try buildDiffIdIndex(next, &diff_next_id_index);
+    } else {
+        try validateUniqueObjectIds(previous);
+        try validateUniqueObjectIds(next);
+    }
 
     var len: usize = 0;
     if (previous.commands.len == 0 and next.commands.len == 0) return output[0..0];
@@ -211,7 +259,8 @@ fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChan
 
     for (previous.commands, 0..) |previous_command, previous_index| {
         const id = previous_command.objectId() orelse continue;
-        const next_ref = next.findCommandById(id) orelse {
+        const next_lookup = if (use_index) findCommandByIdIndexed(next, &diff_next_id_index, id) else next.findCommandById(id);
+        const next_ref = next_lookup orelse {
             try appendDiffChange(output, &len, .{
                 .kind = .removed,
                 .id = id,
@@ -234,7 +283,8 @@ fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChan
 
     for (next.commands, 0..) |next_command, next_index| {
         const id = next_command.objectId() orelse continue;
-        if (previous.findCommandById(id) == null) {
+        const previous_lookup = if (use_index) findCommandByIdIndexed(previous, &diff_previous_id_index, id) else previous.findCommandById(id);
+        if (previous_lookup == null) {
             try appendDiffChange(output, &len, .{
                 .kind = .added,
                 .id = id,

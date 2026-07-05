@@ -399,6 +399,10 @@ pub const max_chart_path_elements_per_frame = chart.max_chart_path_elements_per_
 // model) lives in `markdown.zig`; also exported as `native_sdk.markdown`.
 pub const markdown = @import("markdown.zig");
 
+// Deterministic key-lookup scratch shared by the per-frame planners and
+// the runtime's keyed diffs (see plan_key_index.zig).
+pub const plan_key_index = @import("plan_key_index.zig");
+
 // Experimental markup front-end lives in `ui_markup.zig` / `ui_markup_view.zig`
 // (runtime parse + interpret: the dev/hot-reload engine) and
 // `ui_markup_compiled.zig` (comptime parse: the release engine, no parser in

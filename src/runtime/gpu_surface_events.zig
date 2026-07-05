@@ -119,8 +119,14 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             }
             var canvas_widget_refresh_batch_active = canvasWidgetInputBatchesDisplayListRefresh(input_event.kind);
             if (canvas_widget_refresh_batch_active) CanvasWidgetDisplayMethods().beginCanvasWidgetDisplayListRefreshBatch(self);
+            // The batch now spans the app dispatches below, so an error
+            // mid-dispatch must FLUSH the deferred refreshes rather than
+            // drop them — widget state already changed, and a dropped
+            // refresh would leave the retained display list stale.
             errdefer {
-                if (canvas_widget_refresh_batch_active) CanvasWidgetDisplayMethods().cancelCanvasWidgetDisplayListRefreshBatch(self);
+                if (canvas_widget_refresh_batch_active) CanvasWidgetDisplayMethods().endCanvasWidgetDisplayListRefreshBatch(self) catch {
+                    CanvasWidgetDisplayMethods().cancelCanvasWidgetDisplayListRefreshBatch(self);
+                };
             }
 
             if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
@@ -224,10 +230,15 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             if (widget_text_input_event) |text_input_event| {
                 try CanvasWidgetEventMethods().updateCanvasWidgetTextFromKeyboard(self, text_input_event);
             }
-            if (canvas_widget_refresh_batch_active) {
-                try CanvasWidgetDisplayMethods().endCanvasWidgetDisplayListRefreshBatch(self);
-                canvas_widget_refresh_batch_active = false;
-            }
+            // The refresh batch stays open across the app dispatches
+            // below: a click's pointer-up used to emit once for the
+            // widget-state change and once more for the Msg-driven
+            // rebuild (whose setCanvasWidgetLayout refresh is
+            // batch-aware) — the same display list built twice in one
+            // input cycle. One batch spanning input mutation AND app
+            // dispatch coalesces them into a single emission at the end
+            // of this function, after which the display list is exactly
+            // what the two-emission sequence produced.
             // Dismissal reaches the app first (the model closes its open
             // flag before any press-family Msg from the same input), and
             // only here — after every runtime-side mutation above stopped
@@ -263,6 +274,10 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 try dispatchPendingCanvasWidgetResizeEvents(self, app, index);
             }
             try self.dispatchEvent(app, .{ .gpu_surface_input = input_event });
+            if (canvas_widget_refresh_batch_active) {
+                try CanvasWidgetDisplayMethods().endCanvasWidgetDisplayListRefreshBatch(self);
+                canvas_widget_refresh_batch_active = false;
+            }
         }
 
         /// Drain the view's pending scroll-event set into

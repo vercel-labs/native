@@ -260,6 +260,13 @@ pub const RuntimeView = struct {
     widget_layout_node_count: usize = 0,
     widget_semantics_nodes: [max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
     widget_semantics_node_count: usize = 0,
+    /// Fingerprint of the last accessibility tree actually handed to the
+    /// platform (and whether one ever was): the publish path skips the
+    /// platform call when the assembled nodes are unchanged, so typing
+    /// and animation refreshes stop paying the host's full
+    /// tree-assembly/publish cost on every refresh.
+    widget_accessibility_published: bool = false,
+    widget_accessibility_published_hash: u64 = 0,
     widget_revision: u64 = 0,
     widget_tokens: canvas.DesignTokens = .{},
     widget_scroll_states: [max_canvas_widget_nodes_per_view]canvas.ScrollState = undefined,

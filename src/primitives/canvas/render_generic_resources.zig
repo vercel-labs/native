@@ -3,6 +3,7 @@ const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
 const text_model = @import("text.zig");
 const fingerprints = @import("render_fingerprints.zig");
+const plan_key_index = @import("plan_key_index.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -221,8 +222,52 @@ pub const RenderResourceCachePlanner = struct {
 
     pub fn build(self: *RenderResourceCachePlanner, resource_plan: RenderResourcePlan, previous: []const RenderResourceCacheEntry, frame_index: u64) Error!RenderResourceCachePlan {
         self.reset();
+        // Keyed lookups ride the probe-table index whenever the inputs
+        // fit its half-full bound (the runtime budgets always do);
+        // oversized library inputs keep the linear scans. Same outputs
+        // either way — the index resolves to the lowest-index equal
+        // entry exactly like the scans it replaces.
+        const use_index = (resource_plan.resources.len >= plan_key_index.min_entries_for_index or
+            previous.len >= plan_key_index.min_entries_for_index) and
+            plan_key_index.fitsHashSlots(resource_cache_index_slots, previous.len) and
+            plan_key_index.fitsHashSlots(resource_cache_index_slots, resource_plan.resources.len);
+        if (use_index) {
+            resource_cache_previous_index.reset();
+            for (previous, 0..) |entry, index| {
+                var p = ResourceCacheIndex.probe(renderResourceKeyHash(entry.key));
+                while (resource_cache_previous_index.next(&p)) |_| {}
+                resource_cache_previous_index.insert(p, @intCast(index));
+            }
+            resource_cache_entry_index.reset();
+        }
+
         for (resource_plan.resources, 0..) |resource, resource_index| {
             const key = renderResourceKey(resource);
+            const key_hash = if (use_index) renderResourceKeyHash(key) else 0;
+            if (use_index) {
+                var p = ResourceCacheIndex.probe(key_hash);
+                var duplicate = false;
+                while (resource_cache_entry_index.next(&p)) |candidate| {
+                    if (renderResourceKeysEqual(self.entries[candidate].key, key)) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (duplicate) continue;
+                const previous_index = findRenderResourceCacheEntryIndexed(previous, key, key_hash);
+                try self.appendAction(.{
+                    .kind = if (previous_index == null) .upload else .retain,
+                    .key = key,
+                    .resource_index = resource_index,
+                    .cache_index = previous_index,
+                });
+                try self.appendEntry(.{
+                    .key = key,
+                    .last_used_frame = frame_index,
+                });
+                resource_cache_entry_index.insert(p, @intCast(self.entry_len - 1));
+                continue;
+            }
             if (findRenderResourceCacheEntry(self.entries[0..self.entry_len], key) != null) continue;
 
             const previous_index = findRenderResourceCacheEntry(previous, key);
@@ -239,7 +284,19 @@ pub const RenderResourceCachePlanner = struct {
         }
 
         for (previous, 0..) |entry, cache_index| {
-            if (findRenderResourceCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
+            if (use_index) {
+                var p = ResourceCacheIndex.probe(renderResourceKeyHash(entry.key));
+                var kept = false;
+                while (resource_cache_entry_index.next(&p)) |candidate| {
+                    if (renderResourceKeysEqual(self.entries[candidate].key, entry.key)) {
+                        kept = true;
+                        break;
+                    }
+                }
+                if (kept) continue;
+            } else if (findRenderResourceCacheEntry(self.entries[0..self.entry_len], entry.key) != null) {
+                continue;
+            }
             try self.appendAction(.{
                 .kind = .evict,
                 .key = entry.key,
@@ -282,6 +339,31 @@ fn findRenderResourceCacheEntry(entries: []const RenderResourceCacheEntry, key: 
         if (renderResourceKeysEqual(entry.key, key)) return index;
     }
     return null;
+}
+
+/// Probe-table scratch for the cache planner (see plan_key_index.zig):
+/// sized for the runtime's per-view resource budget (2048) at the
+/// half-full bound; bigger inputs fall back to the linear scans.
+const resource_cache_index_slots = 4096;
+const ResourceCacheIndex = plan_key_index.HashSlots(resource_cache_index_slots);
+threadlocal var resource_cache_previous_index: ResourceCacheIndex = .{};
+threadlocal var resource_cache_entry_index: ResourceCacheIndex = .{};
+
+/// The chain's first equal candidate is the lowest-index equal entry —
+/// the exact value the linear scan returned.
+fn findRenderResourceCacheEntryIndexed(previous: []const RenderResourceCacheEntry, key: RenderResourceKey, key_hash: u64) ?usize {
+    var p = ResourceCacheIndex.probe(key_hash);
+    while (resource_cache_previous_index.next(&p)) |candidate| {
+        if (renderResourceKeysEqual(previous[candidate].key, key)) return candidate;
+    }
+    return null;
+}
+
+fn renderResourceKeyHash(key: RenderResourceKey) u64 {
+    var hash = plan_key_index.mixHash(key.fingerprint ^ @as(u64, @intFromEnum(key.kind)));
+    hash = plan_key_index.mixHash(hash ^ @as(u64, key.id orelse 0) ^ @as(u64, @intCast(key.command_index)));
+    hash = plan_key_index.mixHash(hash ^ @as(u64, key.image_id) ^ @as(u64, key.font_id) ^ @as(u64, @intFromBool(key.id != null)));
+    return hash;
 }
 
 fn renderResourceKeysEqual(a: RenderResourceKey, b: RenderResourceKey) bool {

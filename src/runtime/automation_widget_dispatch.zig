@@ -103,6 +103,22 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             const label = self.views[view_index].label;
             const timestamp_ns = automationInputTimestampNs();
 
+            // One synthetic click is one atomic gesture: the down and up
+            // land in the same automation dispatch with no present in
+            // between, so an outer refresh batch (the per-input batches
+            // nest inside it) coalesces the whole click — press state,
+            // release state, and the Msg-driven rebuild — into a single
+            // display-list emission with the same final content.
+            CanvasWidgetDisplayMethods().beginCanvasWidgetDisplayListRefreshBatch(self);
+            var click_batch_active = true;
+            errdefer if (click_batch_active) {
+                // Flush, not drop: half a click may already have changed
+                // widget state that must reach the retained display list.
+                CanvasWidgetDisplayMethods().endCanvasWidgetDisplayListRefreshBatch(self) catch {
+                    CanvasWidgetDisplayMethods().cancelCanvasWidgetDisplayListRefreshBatch(self);
+                };
+            };
+
             try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = window_id,
                 .label = label,
@@ -121,6 +137,8 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 .y = point.y,
                 .button = 0,
             } });
+            try CanvasWidgetDisplayMethods().endCanvasWidgetDisplayListRefreshBatch(self);
+            click_batch_active = false;
         }
 
         /// Drive a press-and-hold gesture through the real pointer+timer

@@ -1,6 +1,7 @@
 const std = @import("std");
 const canvas = @import("root.zig");
 const text_interaction = @import("text_interaction.zig");
+const plan_key_index = @import("plan_key_index.zig");
 
 const Error = canvas.Error;
 const FontId = canvas.FontId;
@@ -64,16 +65,31 @@ pub const GlyphAtlasPlanner = struct {
 
     pub fn build(self: *GlyphAtlasPlanner, display_list: anytype) Error!GlyphAtlasPlan {
         self.reset();
+        // Per-glyph dedupe rides the probe-table index whenever the
+        // glyph volume is worth a table reset and the output buffer
+        // fits the half-full bound (the runtime budget always does);
+        // small views and bigger buffers keep the linear scan. Same
+        // entries either way.
+        var estimated_glyphs: usize = 0;
+        for (display_list.commands) |command| {
+            switch (command) {
+                .draw_text => |value| estimated_glyphs += if (value.glyphs.len > 0) value.glyphs.len else value.text.len,
+                else => {},
+            }
+        }
+        const use_index = estimated_glyphs >= plan_key_index.min_entries_for_index and
+            plan_key_index.fitsHashSlots(glyph_atlas_index_slots, self.entries.len);
+        if (use_index) glyph_atlas_plan_index.reset();
         for (display_list.commands, 0..) |command, command_index| {
             switch (command) {
-                .draw_text => |value| try self.consumeText(value, command_index),
+                .draw_text => |value| try self.consumeText(value, command_index, use_index),
                 else => {},
             }
         }
         return .{ .entries = self.entries[0..self.len] };
     }
 
-    fn consumeText(self: *GlyphAtlasPlanner, text: anytype, command_index: usize) Error!void {
+    fn consumeText(self: *GlyphAtlasPlanner, text: anytype, command_index: usize, use_index: bool) Error!void {
         if (text.glyphs.len > 0) {
             for (text.glyphs, 0..) |glyph, glyph_index| {
                 const key = GlyphAtlasKey{
@@ -83,7 +99,7 @@ pub const GlyphAtlasPlanner = struct {
                     .subpixel_x = subpixelBucket(text.origin.x + glyph.x),
                     .subpixel_y = subpixelBucket(text.origin.y + glyph.y),
                 };
-                try self.appendUnique(key, command_index, glyph_index);
+                try self.appendUnique(key, command_index, glyph_index, use_index);
             }
             return;
         }
@@ -105,13 +121,21 @@ pub const GlyphAtlasPlanner = struct {
                 .subpixel_x = subpixelBucket(text.origin.x + @as(f32, @floatFromInt(scalar_index)) * text.size * 0.5),
                 .subpixel_y = subpixelBucket(text.origin.y),
             };
-            try self.appendUnique(key, command_index, scalar_index);
+            try self.appendUnique(key, command_index, scalar_index, use_index);
         }
     }
 
-    fn appendUnique(self: *GlyphAtlasPlanner, key: GlyphAtlasKey, command_index: usize, glyph_index: usize) Error!void {
-        for (self.entries[0..self.len]) |entry| {
-            if (glyphAtlasKeysEqual(entry.key, key)) return;
+    fn appendUnique(self: *GlyphAtlasPlanner, key: GlyphAtlasKey, command_index: usize, glyph_index: usize, use_index: bool) Error!void {
+        var probe: GlyphAtlasIndex.Probe = undefined;
+        if (use_index) {
+            probe = GlyphAtlasIndex.probe(glyphAtlasKeyHash(key));
+            while (glyph_atlas_plan_index.next(&probe)) |candidate| {
+                if (glyphAtlasKeysEqual(self.entries[candidate].key, key)) return;
+            }
+        } else {
+            for (self.entries[0..self.len]) |entry| {
+                if (glyphAtlasKeysEqual(entry.key, key)) return;
+            }
         }
         if (self.len >= self.entries.len) return error.GlyphAtlasListFull;
         self.entries[self.len] = .{
@@ -120,6 +144,7 @@ pub const GlyphAtlasPlanner = struct {
             .glyph_index = glyph_index,
         };
         self.len += 1;
+        if (use_index) glyph_atlas_plan_index.insert(probe, @intCast(self.len - 1));
     }
 };
 
@@ -191,15 +216,39 @@ pub const GlyphAtlasCachePlanner = struct {
 
     pub fn build(self: *GlyphAtlasCachePlanner, plan: GlyphAtlasPlan, previous: []const GlyphAtlasCacheEntry, frame_index: u64, retention_frames: u64) Error!GlyphAtlasCachePlan {
         self.reset();
+        // Keyed lookups ride the probe-table index whenever the inputs
+        // fit its half-full bound (the runtime budgets always do);
+        // oversized library inputs keep the linear scans. Same outputs
+        // either way. Entries appended by BOTH loops feed the entry
+        // index, bounded by plan.entries.len + previous.len.
+        const use_index = (plan.entries.len >= plan_key_index.min_entries_for_index or
+            previous.len >= plan_key_index.min_entries_for_index) and
+            plan_key_index.fitsHashSlots(glyph_atlas_cache_index_slots, previous.len) and
+            plan_key_index.fitsHashSlots(glyph_atlas_cache_index_slots, plan.entries.len + previous.len);
+        if (use_index) {
+            glyph_atlas_cache_previous_index.reset();
+            for (previous, 0..) |entry, index| {
+                var p = GlyphAtlasCacheIndex.probe(glyphAtlasKeyHash(entry.key));
+                while (glyph_atlas_cache_previous_index.next(&p)) |_| {}
+                glyph_atlas_cache_previous_index.insert(p, @intCast(index));
+            }
+            glyph_atlas_cache_entry_index.reset();
+        }
 
         for (plan.entries, 0..) |entry, atlas_index| {
-            if (findGlyphAtlasCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
-
-            const previous_index = findGlyphAtlasCacheEntry(previous, entry.key);
-            try self.appendEntry(.{
+            const previous_index = blk: {
+                if (use_index) {
+                    const key_hash = glyphAtlasKeyHash(entry.key);
+                    if (self.entryIndexProbe(entry.key, key_hash)) |_| continue;
+                    break :blk findGlyphAtlasCacheEntryIndexed(previous, entry.key, key_hash);
+                }
+                if (findGlyphAtlasCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
+                break :blk findGlyphAtlasCacheEntry(previous, entry.key);
+            };
+            try self.appendEntryMaybeIndexed(.{
                 .key = entry.key,
                 .last_used_frame = frame_index,
-            });
+            }, use_index);
             try self.appendAction(.{
                 .kind = if (previous_index == null) .upload else .retain,
                 .key = entry.key,
@@ -209,9 +258,13 @@ pub const GlyphAtlasCachePlanner = struct {
         }
 
         for (previous, 0..) |entry, previous_index| {
-            if (findGlyphAtlasCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
+            if (use_index) {
+                if (self.entryIndexProbe(entry.key, glyphAtlasKeyHash(entry.key))) |_| continue;
+            } else if (findGlyphAtlasCacheEntry(self.entries[0..self.entry_len], entry.key) != null) {
+                continue;
+            }
             if (shouldRetainUnusedCacheEntry(frame_index, entry.last_used_frame, retention_frames) and self.hasEntryCapacity()) {
-                try self.appendEntry(entry);
+                try self.appendEntryMaybeIndexed(entry, use_index);
                 try self.appendAction(.{
                     .kind = .retain,
                     .key = entry.key,
@@ -230,6 +283,26 @@ pub const GlyphAtlasCachePlanner = struct {
             .entries = self.entries[0..self.entry_len],
             .actions = self.actions[0..self.action_len],
         };
+    }
+
+    /// First appended entry equal to `key`, walking the entry index's
+    /// probe chain — the indexed equivalent of scanning
+    /// `self.entries[0..self.entry_len]`.
+    fn entryIndexProbe(self: *GlyphAtlasCachePlanner, key: GlyphAtlasKey, key_hash: u64) ?usize {
+        var p = GlyphAtlasCacheIndex.probe(key_hash);
+        while (glyph_atlas_cache_entry_index.next(&p)) |candidate| {
+            if (glyphAtlasKeysEqual(self.entries[candidate].key, key)) return candidate;
+        }
+        return null;
+    }
+
+    fn appendEntryMaybeIndexed(self: *GlyphAtlasCachePlanner, entry: GlyphAtlasCacheEntry, use_index: bool) Error!void {
+        try self.appendEntry(entry);
+        if (use_index) {
+            var p = GlyphAtlasCacheIndex.probe(glyphAtlasKeyHash(entry.key));
+            while (glyph_atlas_cache_entry_index.next(&p)) |_| {}
+            glyph_atlas_cache_entry_index.insert(p, @intCast(self.entry_len - 1));
+        }
     }
 
     fn appendEntry(self: *GlyphAtlasCachePlanner, entry: GlyphAtlasCacheEntry) Error!void {
@@ -283,6 +356,35 @@ fn findGlyphAtlasCacheEntry(entries: []const GlyphAtlasCacheEntry, key: GlyphAtl
         if (glyphAtlasKeysEqual(entry.key, key)) return index;
     }
     return null;
+}
+
+/// Probe-table scratch for the atlas planners (see plan_key_index.zig):
+/// sized so the runtime's per-view glyph budget (8192) stays under the
+/// half-full bound; the cache tables allow plan entries plus retained
+/// previous entries. Bigger inputs fall back to the linear scans.
+const glyph_atlas_index_slots = 16384;
+const glyph_atlas_cache_index_slots = 32768;
+const GlyphAtlasIndex = plan_key_index.HashSlots(glyph_atlas_index_slots);
+const GlyphAtlasCacheIndex = plan_key_index.HashSlots(glyph_atlas_cache_index_slots);
+threadlocal var glyph_atlas_plan_index: GlyphAtlasIndex = .{};
+threadlocal var glyph_atlas_cache_previous_index: GlyphAtlasCacheIndex = .{};
+threadlocal var glyph_atlas_cache_entry_index: GlyphAtlasCacheIndex = .{};
+
+fn findGlyphAtlasCacheEntryIndexed(previous: []const GlyphAtlasCacheEntry, key: GlyphAtlasKey, key_hash: u64) ?usize {
+    var p = GlyphAtlasCacheIndex.probe(key_hash);
+    while (glyph_atlas_cache_previous_index.next(&p)) |candidate| {
+        if (glyphAtlasKeysEqual(previous[candidate].key, key)) return candidate;
+    }
+    return null;
+}
+
+/// Hash agreeing with `glyphAtlasKeysEqual`: `size` folds negative zero
+/// onto zero (`mixF32`) so `==`-equal keys always hash equal.
+fn glyphAtlasKeyHash(key: GlyphAtlasKey) u64 {
+    var hash = plan_key_index.mixHash(@as(u64, key.font_id) ^ (@as(u64, key.glyph_id) << 32));
+    hash = plan_key_index.mixF32(hash, key.size);
+    hash = plan_key_index.mixHash(hash ^ @as(u64, key.subpixel_x) ^ (@as(u64, key.subpixel_y) << 8));
+    return hash;
 }
 
 fn isPlanTextSpace(byte: u8) bool {

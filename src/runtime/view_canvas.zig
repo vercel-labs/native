@@ -204,6 +204,14 @@ fn addCanvasCount(value: *usize, amount: usize, max_value: usize, comptime failu
     value.* += amount;
 }
 
+/// Probe-table scratch for the presented-summary diff (see canvas
+/// plan_key_index.zig): sized for the per-view command budget (2048) at
+/// the half-full bound; small lists keep the linear scans.
+const summary_id_index_slots = 4096;
+const SummaryIdIndex = canvas.plan_key_index.HashSlots(summary_id_index_slots);
+threadlocal var summary_current_id_index: SummaryIdIndex = .{};
+threadlocal var summary_presented_id_index: SummaryIdIndex = .{};
+
 pub const PresentedCanvasCommand = struct {
     id: ?canvas.ObjectId = null,
     bounds: ?geometry.RectF = null,
@@ -594,11 +602,15 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             for (display_list.commands) |command| {
                 if (self.presented_canvas_command_count >= self.presented_canvas_commands.len) return error.CanvasCommandLimitReached;
                 const id = command.objectId();
+                // `bounds()` re-derives text layout for wrapped runs;
+                // compute it once for both the summary and the unkeyed
+                // check.
+                const command_bounds = command.bounds();
                 self.presented_canvas_commands[self.presented_canvas_command_count] = .{
                     .id = id,
-                    .bounds = command.bounds(),
+                    .bounds = command_bounds,
                 };
-                if (id == null and command.bounds() != null) self.presented_canvas_has_unkeyed = true;
+                if (id == null and command_bounds != null) self.presented_canvas_has_unkeyed = true;
                 self.presented_canvas_command_count += 1;
             }
             self.presented_canvas_revision = self.canvas_revision;
@@ -624,10 +636,42 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         pub fn diffPresentedCanvasSummary(self: *const RuntimeView, output: []canvas.DiffChange) anyerror![]const canvas.DiffChange {
             if (self.canvas_revision == self.presented_canvas_revision) return output[0..0];
 
+            // Id lookups ride the probe-table index whenever the lists
+            // are worth a table reset and fit its half-full bound;
+            // otherwise the linear scans run as before. Same changes
+            // either way — the indexed lookup resolves to the
+            // lowest-index match exactly like the scans.
+            const current_commands = self.canvasDisplayList().commands;
+            const presented = self.presented_canvas_commands[0..self.presented_canvas_command_count];
+            const use_index = (current_commands.len >= canvas.plan_key_index.min_entries_for_index or
+                presented.len >= canvas.plan_key_index.min_entries_for_index) and
+                canvas.plan_key_index.fitsHashSlots(summary_id_index_slots, current_commands.len) and
+                canvas.plan_key_index.fitsHashSlots(summary_id_index_slots, presented.len);
+            if (use_index) {
+                summary_current_id_index.reset();
+                for (current_commands, 0..) |command, index| {
+                    const id = command.objectId() orelse continue;
+                    var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
+                    while (summary_current_id_index.next(&p)) |_| {}
+                    summary_current_id_index.insert(p, @intCast(index));
+                }
+                summary_presented_id_index.reset();
+                for (presented, 0..) |command, index| {
+                    const id = command.id orelse continue;
+                    var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
+                    while (summary_presented_id_index.next(&p)) |_| {}
+                    summary_presented_id_index.insert(p, @intCast(index));
+                }
+            }
+
             var len: usize = 0;
-            for (self.presented_canvas_commands[0..self.presented_canvas_command_count]) |previous| {
+            for (presented) |previous| {
                 const id = previous.id orelse continue;
-                if (self.currentCanvasCommandById(id) == null) {
+                const current_ref = if (use_index)
+                    currentCanvasCommandByIdIndexed(current_commands, id)
+                else
+                    self.currentCanvasCommandById(id);
+                if (current_ref == null) {
                     try appendCanvasSummaryChange(output, &len, .{
                         .kind = .removed,
                         .id = id,
@@ -636,10 +680,14 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
                 }
             }
 
-            for (self.canvasDisplayList().commands, 0..) |command, index| {
+            for (current_commands, 0..) |command, index| {
                 const id = command.objectId() orelse continue;
                 const bounds = command.bounds();
-                if (self.presentedCanvasCommandById(id)) |previous| {
+                const previous_ref = if (use_index)
+                    presentedCanvasCommandByIdIndexed(presented, id)
+                else
+                    self.presentedCanvasCommandById(id);
+                if (previous_ref) |previous| {
                     try appendCanvasSummaryChange(output, &len, .{
                         .kind = .changed,
                         .id = id,
@@ -658,6 +706,22 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             }
 
             return output[0..len];
+        }
+
+        fn currentCanvasCommandByIdIndexed(commands: []const canvas.CanvasCommand, id: canvas.ObjectId) ?canvas.CommandRef {
+            var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
+            while (summary_current_id_index.next(&p)) |candidate| {
+                if (commands[candidate].objectId() == id) return .{ .index = candidate, .command = commands[candidate] };
+            }
+            return null;
+        }
+
+        fn presentedCanvasCommandByIdIndexed(presented: []const PresentedCanvasCommand, id: canvas.ObjectId) ?PresentedCanvasCommandRef {
+            var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
+            while (summary_presented_id_index.next(&p)) |candidate| {
+                if (presented[candidate].id == id) return .{ .index = candidate, .command = presented[candidate] };
+            }
+            return null;
         }
 
         pub fn currentCanvasCommandById(self: *const RuntimeView, id: canvas.ObjectId) ?canvas.CommandRef {
