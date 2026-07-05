@@ -244,6 +244,12 @@ typedef struct {
      * menu_item_id the selected context-menu item (0 = dismissed). */
     double scroll_driver_offset_y;
     uint32_t menu_item_id;
+    /* GPU_SURFACE_FRAME payloads: host-stamped durations of the most
+     * recent packet present's decode and draw (0 when no packet present
+     * happened since the last frame event), so the engine's frame
+     * profile can attribute host time without a second channel. */
+    uint64_t packet_decode_ns;
+    uint64_t packet_draw_ns;
 } native_sdk_appkit_event_t;
 
 typedef void (*native_sdk_appkit_event_callback_t)(void *context, const native_sdk_appkit_event_t *event);

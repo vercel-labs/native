@@ -237,6 +237,22 @@ pub fn build(b: *std.Build) void {
     const docs_previews_step = b.step("docs-component-previews", "Render built-in component previews and vocab JSON into docs/");
     docs_previews_step.dependOn(&run_docs_previews.step);
 
+    // Render macro-benchmark: deterministic scenarios through the REAL
+    // engine pipeline (UiApp + Runtime + null-platform binary packet
+    // presents), reporting end-to-end and per-stage p50/p90 per
+    // interaction. Baselines should come from
+    // `zig build bench-render -Doptimize=ReleaseFast`.
+    const bench_render_mod = module(b, target, optimize, "tools/bench_render.zig");
+    bench_render_mod.addImport("native_sdk", desktop_mod);
+    const bench_render_exe = b.addExecutable(.{
+        .name = "bench-render",
+        .root_module = bench_render_mod,
+    });
+    const run_bench_render = b.addRunArtifact(bench_render_exe);
+    run_bench_render.has_side_effects = true;
+    const bench_render_step = b.step("bench-render", "Run the render macro-benchmark (deterministic scenarios; pass -Doptimize=ReleaseFast for baselines)");
+    bench_render_step.dependOn(&run_bench_render.step);
+
     // Live docs previews: the same scene catalog compiled to
     // wasm32-freestanding (tools/docs_wasm_preview.zig) so the docs
     // upgrade the static webp tiles to interactive engine instances.

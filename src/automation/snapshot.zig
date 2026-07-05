@@ -39,6 +39,26 @@ pub const Diagnostics = struct {
     dropped_trace_records: u64 = 0,
 };
 
+/// One stage of the runtime's per-stage frame profile (`profile on`):
+/// nearest-rank percentiles over the rolling sample window plus the
+/// lifetime sample count. `name` references the stage enum's static tag
+/// name, so entries are plain values.
+pub const FrameProfileStage = struct {
+    name: []const u8 = "",
+    p50_us: u64 = 0,
+    p90_us: u64 = 0,
+    max_us: u64 = 0,
+    /// Lifetime samples recorded for this stage since enable.
+    count: u64 = 0,
+};
+
+/// The frame profile as one snapshot line's worth of data: present only
+/// while profiling is on (the runtime stamps stage slices into
+/// runtime-owned storage; this only references it).
+pub const FrameProfile = struct {
+    stages: []const FrameProfileStage = &.{},
+};
+
 /// One degraded dispatch failure: a handler or update error the runtime
 /// caught, recorded, and continued past (never a process exit). `event`
 /// and `error_name` reference static strings (event names and
@@ -161,6 +181,9 @@ pub const Input = struct {
     views: []const platform.ViewInfo = &.{},
     widgets: []const Widget = &.{},
     diagnostics: Diagnostics = .{},
+    /// Per-stage frame timing, non-null while `profile on` is active —
+    /// printed as the `frame_profile` line right after the header.
+    frame_profile: ?FrameProfile = null,
     /// Per-view widget budgets (`canvas_limits.max_canvas_widget_*`),
     /// stamped by the runtime so gpu_surface view lines can report
     /// `widget_nodes=current/budget` headroom.
@@ -195,6 +218,22 @@ pub fn writeText(input: Input, writer: anytype) !void {
         input.diagnostics.dropped_trace_records,
         input.diagnostics.publisher_pid,
     });
+    // Per-stage frame timing (`profile on`): rolling p50/p90 in
+    // microseconds per pipeline stage, one greppable key per number so
+    // harnesses extract them the way the perf script reads gpu_* fields.
+    // Stages that recorded nothing yet print zeros with `_n=0`.
+    if (input.frame_profile) |profile| {
+        try writer.writeAll("frame_profile");
+        for (profile.stages) |stage| {
+            try writer.print(" {s}_p50_us={d} {s}_p90_us={d} {s}_max_us={d} {s}_n={d}", .{
+                stage.name, stage.p50_us,
+                stage.name, stage.p90_us,
+                stage.name, stage.max_us,
+                stage.name, stage.count,
+            });
+        }
+        try writer.writeByte('\n');
+    }
     for (input.windows) |window| {
         try writer.print(
             "window @w{d} \"{s}\" bounds=({d},{d} {d}x{d}) focused={any} frame={d} commands={d}\n",
@@ -663,6 +702,28 @@ test "snapshot emits window and source" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "text=\"Main content\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "focused=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "source kind=html") != null);
+}
+
+test "snapshot emits the frame_profile line only while profiling" {
+    var buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    const windows = [_]Window{.{ .title = "Test", .bounds = geometry.RectF.init(0, 0, 100, 100) }};
+    const stages = [_]FrameProfileStage{
+        .{ .name = "rebuild", .p50_us = 120, .p90_us = 340, .max_us = 900, .count = 12 },
+        .{ .name = "encode", .p50_us = 8, .p90_us = 15, .max_us = 22, .count = 60 },
+    };
+    try writeText(.{
+        .windows = &windows,
+        .frame_profile = .{ .stages = &stages },
+    }, &writer);
+    const text = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, text, "\nframe_profile rebuild_p50_us=120 rebuild_p90_us=340 rebuild_max_us=900 rebuild_n=12 encode_p50_us=8 encode_p90_us=15 encode_max_us=22 encode_n=60\n") != null);
+
+    // Profiling off -> no frame_profile line.
+    var off_buffer: [512]u8 = undefined;
+    var off_writer = std.Io.Writer.fixed(&off_buffer);
+    try writeText(.{ .windows = &windows }, &off_writer);
+    try std.testing.expect(std.mem.indexOf(u8, off_writer.buffered(), "frame_profile") == null);
 }
 
 test "snapshot emits tray title and dropdown items" {

@@ -16,8 +16,10 @@ pub const max_command_bytes: usize = 16 * 1024 + 64;
 /// `.zig-cache/native-sdk-automation`, publisher_pid liveness, stdout
 /// payloads). 2 = the gesture verbs (`widget-hold`,
 /// `widget-context-press`) and per-window snapshot view/widget scoping.
+/// 3 = the `profile on|off` verb and the snapshot's `frame_profile`
+/// per-stage timing line.
 /// Snapshots without a `protocol=` field predate the handshake entirely.
-pub const version: u32 = 2;
+pub const version: u32 = 3;
 
 pub const Error = error{
     InvalidCommand,
@@ -44,6 +46,9 @@ pub const Action = enum {
     focus_view,
     focus_next_view,
     focus_previous_view,
+    /// `profile on|off`: toggle per-stage frame timing; while on, the
+    /// snapshot carries a `frame_profile` line of rolling p50/p90s.
+    profile,
 };
 
 pub const Command = struct {
@@ -75,6 +80,9 @@ pub const Command = struct {
         if (std.mem.eql(u8, action_text, "focus") and value.len > 0) return .{ .action = .focus_view, .value = value };
         if (std.mem.eql(u8, action_text, "focus-next")) return .{ .action = .focus_next_view };
         if (std.mem.eql(u8, action_text, "focus-previous")) return .{ .action = .focus_previous_view };
+        if (std.mem.eql(u8, action_text, "profile") and (std.mem.eql(u8, value, "on") or std.mem.eql(u8, value, "off"))) {
+            return .{ .action = .profile, .value = value };
+        }
         return error.InvalidCommand;
     }
 };
@@ -169,6 +177,14 @@ test "commands parse reload and wait" {
     try std.testing.expectEqual(Action.focus_next_view, focus_next.action);
     const focus_previous = try Command.parse("focus-previous");
     try std.testing.expectEqual(Action.focus_previous_view, focus_previous.action);
+    const profile_on = try Command.parse("profile on");
+    try std.testing.expectEqual(Action.profile, profile_on.action);
+    try std.testing.expectEqualStrings("on", profile_on.value);
+    const profile_off = try Command.parse("profile off");
+    try std.testing.expectEqual(Action.profile, profile_off.action);
+    try std.testing.expectEqualStrings("off", profile_off.value);
+    try std.testing.expectError(error.InvalidCommand, Command.parse("profile"));
+    try std.testing.expectError(error.InvalidCommand, Command.parse("profile maybe"));
 }
 
 test "screenshot file names stay inside the automation directory" {

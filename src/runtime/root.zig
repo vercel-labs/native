@@ -45,6 +45,12 @@ pub const UiApp = @import("ui_app.zig").UiApp;
 pub const UiAppWithFeatures = @import("ui_app.zig").UiAppWithFeatures;
 pub const UiAppFeatures = @import("ui_app.zig").UiAppFeatures;
 
+const runtime_frame_profile = @import("frame_profile.zig");
+pub const FrameProfile = runtime_frame_profile.FrameProfile;
+pub const FrameProfileStage = runtime_frame_profile.FrameProfileStage;
+pub const FrameProfileStageStats = runtime_frame_profile.FrameProfileStageStats;
+pub const max_frame_profile_samples = runtime_frame_profile.max_frame_profile_samples;
+
 const runtime_effects = @import("effects.zig");
 pub const Effects = runtime_effects.Effects;
 pub const EffectLine = runtime_effects.EffectLine;

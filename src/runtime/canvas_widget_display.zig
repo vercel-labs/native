@@ -186,6 +186,11 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             if (view_index >= self.view_count) return;
             const view = &self.views[view_index];
             if (view.kind != .gpu_surface) return;
+            // Frame-profile `a11y` stage: node assembly + the platform
+            // publish, riding every owned refresh. No-op unless
+            // profiling is on.
+            const a11y_begin = self.frame_profile.begin();
+            defer self.frame_profile.end(.a11y, a11y_begin);
             var nodes: [platform.max_widget_accessibility_nodes]platform.WidgetAccessibilityNode = undefined;
             const semantics = view.widgetSemantics();
             const count = @min(semantics.len, nodes.len);
@@ -233,6 +238,13 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         pub fn refreshCanvasWidgetDisplayList(self: *Runtime, view_index: usize) anyerror!bool {
             if (view_index >= self.view_count) return error.ViewNotFound;
             if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
+
+            // Frame-profile `emit` stage: every display-list emission
+            // funnels through this refresh (install, rebuild, and the
+            // input-driven widget-state refreshes alike). No-op unless
+            // profiling is on.
+            const emit_begin = self.frame_profile.begin();
+            defer self.frame_profile.end(.emit, emit_begin);
 
             var commands: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
             var chrome_storage = CanvasDisplayListScratch{};

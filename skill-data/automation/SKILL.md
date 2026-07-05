@@ -71,6 +71,8 @@ native automate widget-drag canvas 4 0.25 0.82
 native automate widget-wheel canvas 5 18
 native automate widget-key canvas tab
 native automate widget-key canvas cmd+c
+native automate profile on
+native automate profile off
 native automate bridge '{"id":"smoke","command":"native.ping","payload":{"source":"automation"}}'
 ```
 
@@ -114,6 +116,7 @@ Semantics:
 11. Use `native automate screenshot <view-label> [scale]` to capture the named `gpu_surface` view's canvas as `screenshot-<view-label>.png` (the CLI prints the artifact path and waits for the file).
 12. Use `native automate tray-action <item-id>` to select a status-item dropdown row through the same platform event a real menu-bar click emits (command dispatch with source `.tray`). The live tray is visible in `snapshot.txt` as a `tray title="..." items=N` line followed by `  tray-item #id label="..." command="..." enabled=...` rows — the macOS menu bar is outside every window capture, so the snapshot is the only automation evidence the model-driven tray exists, and the `#id` there is what `tray-action` takes. Unknown ids degrade into the dispatch-error ring as `automation.tray_action`.
 13. Use `native automate reload` to request a WebView reload.
+14. Use `native automate profile on` to enable per-stage frame timing: while on, `snapshot.txt` carries a `frame_profile` line with rolling p50/p90/max microseconds per pipeline stage (`rebuild`, `layout`, `reconcile`, `emit`, `a11y`, `plan`, `patch`, `encode`, `present`, `host_decode`, `host_draw`), each with a lifetime sample count (`<stage>_n=`). Drive some interactions, then `native automate snapshot | grep -o 'frame_profile.*'` to read where frame time goes; `profile off` stops recording and drops the line. Turning it on starts a fresh sample window.
 
 ## Screenshots
 
@@ -176,7 +179,7 @@ The default directory is `.zig-cache/native-sdk-automation/`, resolved against t
 
 Files:
 
-- `snapshot.txt`: app name, readiness, source kind, source size, window metadata, accessibility summary. The `ready=true` line also carries `protocol=<n>` (the CLI/app handshake: the CLI refuses snapshots — and command queues to a live app — whose protocol version is not its own, naming both versions; the fix is rebuilding whichever binary is stale and comparing `native version`), `dispatch_errors=<total>` and `dropped_trace_records=<total>`, and recent degraded handler/update errors appear as `  error event=<tag> name=<ErrorName> timestamp_ns=...` lines — a handler error no longer exits the app, so grep these to notice one happened.
+- `snapshot.txt`: app name, readiness, source kind, source size, window metadata, accessibility summary. The `ready=true` line also carries `protocol=<n>` (the CLI/app handshake: the CLI refuses snapshots — and command queues to a live app — whose protocol version is not its own, naming both versions; the fix is rebuilding whichever binary is stale and comparing `native version`), `dispatch_errors=<total>` and `dropped_trace_records=<total>`, and recent degraded handler/update errors appear as `  error event=<tag> name=<ErrorName> timestamp_ns=...` lines — a handler error no longer exits the app, so grep these to notice one happened. While `profile on` is active, a `frame_profile <stage>_p50_us=... <stage>_p90_us=... <stage>_max_us=... <stage>_n=...` line follows the header with per-stage frame timing.
 - `windows.txt`: window list.
 - `command.txt`: command input written by CLI and consumed by runtime.
 - `bridge-response.txt`: last bridge response.

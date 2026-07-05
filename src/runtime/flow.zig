@@ -744,6 +744,19 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .focus_previous_view => {
                     _ = try WindowViewMethods().focusPreviousView(self, 1);
                 },
+                .profile => {
+                    // Toggle per-stage frame timing. Turning it on
+                    // starts a fresh window (stale samples from an
+                    // earlier session would skew the percentiles);
+                    // turning it off stops recording and drops the
+                    // snapshot's `frame_profile` line.
+                    self.command_count += 1;
+                    const enable = std.mem.eql(u8, command.value, "on");
+                    if (!enable and !std.mem.eql(u8, command.value, "off")) return error.InvalidCommand;
+                    if (enable and !self.frame_profile.enabled) self.frame_profile.reset();
+                    self.frame_profile.enabled = enable;
+                    self.invalidateFor(.command, null);
+                },
                 .wait => {},
             }
         }

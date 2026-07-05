@@ -6,6 +6,7 @@ const automation = @import("../automation/root.zig");
 const platform = @import("../platform/root.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const runtime_clock = @import("clock.zig");
+const runtime_frame_profile = @import("frame_profile.zig");
 const widget_bridge = @import("widget_bridge.zig");
 const runtime_api = @import("api.zig");
 
@@ -30,6 +31,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                     .views = &.{},
                     .widgets = &.{},
                     .diagnostics = automationDiagnostics(self),
+                    .frame_profile = automationFrameProfile(self),
                     .tray = automationTray(self),
                     .errors = self.dispatchErrors(),
                     .source = self.loaded_source,
@@ -60,6 +62,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                 .views = self.automation_views[0..view_count],
                 .widgets = self.automation_widgets[0..widget_count],
                 .diagnostics = automationDiagnostics(self),
+                .frame_profile = automationFrameProfile(self),
                 .tray = automationTray(self),
                 .errors = self.dispatchErrors(),
                 .source = self.loaded_source,
@@ -91,6 +94,25 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                 .title = self.tray_title,
                 .items = self.automation_tray_items[0..count],
             };
+        }
+
+        /// The frame profile's per-stage p50/p90 stats, non-null while
+        /// `profile on` is active. Percentile sorting happens HERE — the
+        /// snapshot path — never in the frame path; entries land in
+        /// runtime-owned storage so the returned slices stay plain values.
+        fn automationFrameProfile(self: *Runtime) ?automation.snapshot.FrameProfile {
+            if (!self.frame_profile.enabled) return null;
+            inline for (comptime std.enums.values(runtime_frame_profile.FrameProfileStage), 0..) |stage, index| {
+                const stats = self.frame_profile.stats(stage);
+                self.automation_frame_profile_stages[index] = .{
+                    .name = stage.name(),
+                    .p50_us = stats.p50_us,
+                    .p90_us = stats.p90_us,
+                    .max_us = stats.max_us,
+                    .count = stats.total,
+                };
+            }
+            return .{ .stages = &self.automation_frame_profile_stages };
         }
 
         fn automationDiagnostics(self: *Runtime) automation.snapshot.Diagnostics {

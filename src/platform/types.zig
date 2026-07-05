@@ -1211,6 +1211,12 @@ pub const GpuSurfaceFrameEvent = struct {
     first_frame_latency_budget_ok: bool = true,
     nonblank: bool = false,
     sample_color: u32 = 0,
+    /// Host-stamped durations of the most recent packet present's
+    /// decode and draw (0 when no packet present happened since the
+    /// last frame event) — recorded into the runtime's frame profile
+    /// as the `host_decode`/`host_draw` stages while profiling is on.
+    packet_decode_ns: u64 = 0,
+    packet_draw_ns: u64 = 0,
     backend: GpuSurfaceBackend = .metal,
     pixel_format: GpuSurfacePixelFormat = .bgra8_unorm,
     present_mode: GpuSurfacePresentMode = .timer,

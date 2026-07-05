@@ -721,14 +721,22 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const next_index = self.arena_index ^ 1;
             _ = self.arenas[next_index].reset(.retain_capacity);
             var ui = Ui.init(self.arenas[next_index].allocator());
+            // Frame-profile stamps (no-ops unless profiling is on): the
+            // view build fn + tree finalize is the `rebuild` stage, the
+            // flex pass below is `layout`; reconcile/emit are stamped at
+            // their runtime-side choke points so input-driven refreshes
+            // are attributed too.
+            const rebuild_begin = runtime.frame_profile.begin();
             const node = try self.buildViewNode(&ui);
             const tree = try ui.finalizeWithTokens(node, tokens);
+            runtime.frame_profile.end(.rebuild, rebuild_begin);
 
             // Widget layout is inset by the runtime's viewport chrome
             // (safe areas + keyboard on mobile, zero on desktop); the
             // canvas itself stays surface-sized so chrome and the clear
             // color still paint edge to edge under notches and bars.
             const bounds = geometry.RectF.fromSize(self.canvas_size).deflate(runtime.viewportInsetsForWindow(window_id));
+            const layout_begin = runtime.frame_profile.begin();
             const layout = canvas.layoutWidgetTreeWithTokens(tree.root, bounds, tokens, &self.layout_nodes) catch |err| {
                 // Teach the fix at the failure site: the error name
                 // alone never says which budget or where to trim.
@@ -740,6 +748,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 }
                 return err;
             };
+            runtime.frame_profile.end(.layout, layout_begin);
 
             if (self.options.chrome) |chrome| {
                 try self.installChromeDisplayList(runtime, window_id, chrome, layout, tokens);

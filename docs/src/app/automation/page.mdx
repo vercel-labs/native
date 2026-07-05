@@ -141,6 +141,10 @@ The runtime polls `command.txt` and processes these actions:
       <td><code>focus-next</code> / <code>focus-previous</code></td>
       <td>Move focus through visible, enabled views in runtime order</td>
     </tr>
+    <tr>
+      <td><code>profile &lt;on|off&gt;</code></td>
+      <td>Toggle per-stage frame timing. While on, the snapshot carries a <code>frame_profile</code> line with rolling p50/p90/max microseconds per pipeline stage (<code>rebuild</code>, <code>layout</code>, <code>reconcile</code>, <code>emit</code>, <code>a11y</code>, <code>plan</code>, <code>patch</code>, <code>encode</code>, <code>present</code>, <code>host_decode</code>, <code>host_draw</code>)</td>
+    </tr>
   </tbody>
 </table>
 
@@ -191,6 +195,12 @@ native automate widget-context-press canvas 3   # right-click
 native automate focus refresh-button
 native automate focus-next
 native automate focus-previous
+
+# Toggle per-stage frame timing; the snapshot then carries a
+# frame_profile line (rolling p50/p90/max us per pipeline stage)
+native automate profile on
+native automate snapshot | grep -o 'frame_profile.*'
+native automate profile off
 
 # Send a bridge command and get the response
 native automate bridge '{"id":"1","command":"native.ping","payload":{"source":"automation"}}'

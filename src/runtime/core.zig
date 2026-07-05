@@ -21,6 +21,7 @@ const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 const runtime_canvas_widget_scroll_drivers = @import("canvas_widget_scroll_drivers.zig");
 const runtime_canvas_widget_state = @import("canvas_widget_state.zig");
 const runtime_canvas_widget_runtime = @import("canvas_widget_runtime.zig");
+const runtime_frame_profile = @import("frame_profile.zig");
 const runtime_gpu_surface_events = @import("gpu_surface_events.zig");
 const runtime_flow = @import("flow.zig");
 const runtime_state = @import("state.zig");
@@ -211,8 +212,16 @@ pub const Runtime = struct {
     /// Trace records dropped because a sink was full or failing; a
     /// logging failure never fails dispatch.
     dropped_trace_records: u64 = 0,
+    /// Per-stage frame timing (rolling p50/p90 windows), toggled at
+    /// runtime by `native automate profile on|off` and read by the
+    /// snapshot's `frame_profile` line. Larger than the small-default
+    /// copy bound, so `initAt` assigns it explicitly.
+    frame_profile: runtime_frame_profile.FrameProfile = .{},
     async_bridge_responses: [max_async_bridge_responses]AsyncBridgeResponseSlot = [_]AsyncBridgeResponseSlot{.{}} ** max_async_bridge_responses,
     automation_windows: [automation.snapshot.max_windows]automation.snapshot.Window = undefined,
+    /// Snapshot-side storage for the frame profile's per-stage stats
+    /// (the snapshot Input only references runtime-owned memory).
+    automation_frame_profile_stages: [runtime_frame_profile.frame_profile_stage_count]automation.snapshot.FrameProfileStage = undefined,
     automation_views: [automation.snapshot.max_views]platform.ViewInfo = undefined,
     automation_widgets: [automation.snapshot.max_widgets]automation.snapshot.Widget = undefined,
     automation_tray_items: [platform.max_tray_items]automation.snapshot.TrayItem = undefined,
@@ -293,6 +302,9 @@ pub const Runtime = struct {
         }
         self.options = options;
         self.surface = options.platform.surface();
+        // The profile rings exceed the small-default copy bound above;
+        // assign explicitly so the disabled state is never undefined.
+        self.frame_profile = .{};
         self.started_timestamp_ns = timestampToU64(nowNanoseconds());
         self.text_measure_provider = if (options.platform.services.measure_text_fn) |measure_fn|
             .{ .context = options.platform.services.context, .measure_fn = measure_fn }

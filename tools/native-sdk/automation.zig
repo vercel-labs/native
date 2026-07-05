@@ -99,6 +99,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     } else if (std.mem.eql(u8, command, "focus-previous")) {
         if (args.len != 1) return usage();
         try sendCommand(allocator, io, "focus-previous", "");
+    } else if (std.mem.eql(u8, command, "profile")) {
+        if (args.len != 2 or (!std.mem.eql(u8, args[1], "on") and !std.mem.eql(u8, args[1], "off"))) return usage();
+        try sendCommand(allocator, io, "profile", args[1]);
     } else if (std.mem.eql(u8, command, "wait")) {
         try waitForFile(allocator, io, "snapshot.txt", "ready=true", .require_live_publisher);
     } else if (std.mem.eql(u8, command, "assert")) {
@@ -137,6 +140,7 @@ fn usage() void {
         \\  focus <view-label>
         \\  focus-next
         \\  focus-previous
+        \\  profile <on|off>   (per-stage frame timing; snapshots then carry a frame_profile line of rolling p50/p90s in us)
         \\  wait
         \\  assert [--absent] [--timeout-ms 30000] <pattern> [more patterns...]
         \\      (each pattern is a regex that must match snapshot.txt; --absent

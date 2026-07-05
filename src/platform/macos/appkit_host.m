@@ -341,6 +341,12 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) NSMutableArray<NSNumber *> *canvasRetainedOrder;
 @property(nonatomic, assign) uint64_t canvasRetainedGeneration;
 @property(nonatomic, assign) BOOL hasCanvasRetainedState;
+/* Host-side frame-profile stamps: durations of the most recent packet
+ * present's payload decode and draw, carried on the next frame event and
+ * cleared after it, so completion-only frames never re-report a stale
+ * sample. Two clock reads per packet present — noise-level cost. */
+@property(nonatomic, assign) uint64_t lastPacketDecodeNs;
+@property(nonatomic, assign) uint64_t lastPacketDrawNs;
 @property(nonatomic, strong) NSCursor *surfaceCursor;
 @property(nonatomic, strong) NSTrackingArea *surfaceTrackingArea;
 @property(nonatomic, copy) NSString *markedText;
@@ -2579,12 +2585,19 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (!requiresRender) return 1;
     if (!representable || unsupportedCommandCount != 0 || !json || byteLength == 0 || surfaceWidth <= 0 || surfaceHeight <= 0) return 0;
 
+    const uint64_t decodeBeginNs = NativeSdkTimestampNanoseconds();
     NSData *packetData = [NSData dataWithBytes:json length:byteLength];
     NSError *jsonError = nil;
     id packetObject = [NSJSONSerialization JSONObjectWithData:packetData options:0 error:&jsonError];
     NSDictionary *packet = NativeSdkPacketDictionary(packetObject);
     if (!packet || jsonError) return 0;
-    return [self presentGpuPacketObject:packet surfaceWidth:surfaceWidth height:surfaceHeight scale:scale clearR:clearR clearG:clearG clearB:clearB clearA:clearA commandCount:commandCount];
+    const uint64_t drawBeginNs = NativeSdkTimestampNanoseconds();
+    const NSInteger result = [self presentGpuPacketObject:packet surfaceWidth:surfaceWidth height:surfaceHeight scale:scale clearR:clearR clearG:clearG clearB:clearB clearA:clearA commandCount:commandCount];
+    if (result == 1) {
+        self.lastPacketDecodeNs = drawBeginNs - decodeBeginNs;
+        self.lastPacketDrawNs = NativeSdkTimestampNanoseconds() - drawBeginNs;
+    }
+    return result;
 }
 
 /* Compact binary packet present: same guards and same shared present
@@ -2595,9 +2608,16 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (!requiresRender) return 1;
     if (!representable || unsupportedCommandCount != 0 || !packet || byteLength == 0 || surfaceWidth <= 0 || surfaceHeight <= 0) return 0;
 
+    const uint64_t decodeBeginNs = NativeSdkTimestampNanoseconds();
     NSDictionary *decoded = NativeSdkPacketDictionaryFromBinary(packet, byteLength);
     if (!decoded) return 0;
-    return [self presentGpuPacketObject:decoded surfaceWidth:surfaceWidth height:surfaceHeight scale:scale clearR:clearR clearG:clearG clearB:clearB clearA:clearA commandCount:commandCount];
+    const uint64_t drawBeginNs = NativeSdkTimestampNanoseconds();
+    const NSInteger result = [self presentGpuPacketObject:decoded surfaceWidth:surfaceWidth height:surfaceHeight scale:scale clearR:clearR clearG:clearG clearB:clearB clearA:clearA commandCount:commandCount];
+    if (result == 1) {
+        self.lastPacketDecodeNs = drawBeginNs - decodeBeginNs;
+        self.lastPacketDrawNs = NativeSdkTimestampNanoseconds() - drawBeginNs;
+    }
+    return result;
 }
 
 - (NSInteger)presentGpuPacketObject:(NSDictionary *)packet surfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA commandCount:(NSUInteger)commandCount {
@@ -3200,6 +3220,14 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 - (void)emitFrameEventWithFrameIndex:(NSUInteger)frameIndex sampleColor:(uint32_t)sampleColor nonblank:(BOOL)nonblank {
     if (!self.host || self.surfaceLabel.length == 0) return;
     const char *labelBytes = self.surfaceLabel.UTF8String ?: "";
+    /* Capture-and-clear BEFORE the emit: the engine presents the next
+     * packet synchronously INSIDE this event dispatch, so a post-emit
+     * reset would clobber the stamps that present just recorded. One
+     * report per packet present; completion-only frames carry zeros. */
+    const uint64_t packetDecodeNs = self.lastPacketDecodeNs;
+    const uint64_t packetDrawNs = self.lastPacketDrawNs;
+    self.lastPacketDecodeNs = 0;
+    self.lastPacketDrawNs = 0;
     [self.host emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_GPU_SURFACE_FRAME,
         .window_id = self.windowId,
@@ -3213,6 +3241,8 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
         .frame_interval_ns = NativeSdkRetainedFrameIntervalNanoseconds(self.window.screen ?: NSScreen.mainScreen),
         .nonblank = nonblank ? 1 : 0,
         .sample_color = sampleColor,
+        .packet_decode_ns = packetDecodeNs,
+        .packet_draw_ns = packetDrawNs,
     }];
     [self.host scheduleFrame];
 }

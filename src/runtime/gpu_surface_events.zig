@@ -31,6 +31,11 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 self.views[index].recordGpuSurfaceFrameInterval(frame_event.frame_interval_ns);
                 self.views[index].recordGpuSurfaceFirstFrameLatency(frame_event.timestamp_ns);
                 self.views[index].recordGpuSurfaceInputLatencyForFrame(frame_event.timestamp_ns);
+                // Host-stamped packet decode/draw splits ride the frame
+                // event (zero on completion-only frames): feed the frame
+                // profile's host stages while profiling is on.
+                if (frame_event.packet_decode_ns > 0) self.frame_profile.recordNs(.host_decode, frame_event.packet_decode_ns);
+                if (frame_event.packet_draw_ns > 0) self.frame_profile.recordNs(.host_draw, frame_event.packet_draw_ns);
                 try CanvasWidgetDisplayMethods().advanceCanvasWidgetKineticScrollForFrame(self, index, frame_event.frame_interval_ns, had_pending_input);
                 try dispatchPendingCanvasWidgetScrollEvents(self, app, index);
                 // Observable snapshots (automation, bridge state) only

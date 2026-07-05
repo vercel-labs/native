@@ -34,6 +34,12 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             if (layout.nodes.len > max_canvas_widget_nodes_per_view) return error.WidgetNodeLimitReached;
 
+            // Frame-profile `reconcile` stage: reconcile + diff + state
+            // copies, ending BEFORE the display-list refresh below so the
+            // `emit` stage (stamped at its own choke point) is never
+            // double-counted. No-op unless profiling is on.
+            const reconcile_begin = self.frame_profile.begin();
+
             // Source-driven autofocus resolves against the PREVIOUS
             // rebuild's flags (edge-triggered) before any state is
             // replaced; the focus applies after the new tree lands.
@@ -95,6 +101,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                     try AutomationWidgetMethods(Runtime).focusAutomationCanvasWidget(self, index, autofocus_id);
                 }
             }
+            self.frame_profile.end(.reconcile, reconcile_begin);
             const requested_frame = try CanvasWidgetDisplayMethods(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, index);
             if ((layout_dirty or widget_revision_changed) and !requested_frame) try CanvasFrameMethods(Runtime).requestCanvasFrameForView(self, index);
             return self.views[index].info();

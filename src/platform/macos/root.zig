@@ -87,6 +87,10 @@ const AppKitEvent = extern struct {
     timer_id: u64,
     scroll_driver_offset_y: f64,
     menu_item_id: u32,
+    /// Host-stamped packet decode/draw durations riding the frame
+    /// event (0 when no packet present happened since the last one).
+    packet_decode_ns: u64,
+    packet_draw_ns: u64,
 };
 
 const AppKitCallback = *const fn (context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) void;
@@ -555,6 +559,8 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             .frame_interval_ns = event.frame_interval_ns,
             .nonblank = event.nonblank != 0,
             .sample_color = event.sample_color,
+            .packet_decode_ns = event.packet_decode_ns,
+            .packet_draw_ns = event.packet_draw_ns,
             .backend = .metal,
             .pixel_format = .bgra8_unorm,
             .present_mode = .timer,

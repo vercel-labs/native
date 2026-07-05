@@ -371,6 +371,11 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             else
                 try canvas.ReferenceRenderSurface.init(pixel_size.width, pixel_size.height, pixels);
             surface = surface.withImages(canvas_frame.image_resources);
+            // Frame-profile `present` stage for the CPU pixel path: the
+            // reference raster + the host present call (the software
+            // equivalent of the packet host's decode+draw).
+            const present_begin = self.frame_profile.begin();
+            defer self.frame_profile.end(.present, present_begin);
             try surface.renderPass(canvas_frame.renderPass(), clear_color);
             try self.options.platform.services.presentGpuSurfacePixels(.{
                 .window_id = window_id,
@@ -497,20 +502,33 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             if (services.present_gpu_surface_packet_binary_fn != null) binary: {
                 const binary_buffer = packet_bytes_buffer[0..@min(packet_bytes_buffer.len, platform.max_gpu_surface_packet_binary_bytes)];
                 const view_index = runtimeFindViewIndex(self, window_id, label);
+                // Frame-profile `patch` stage: gathering the keyed list +
+                // diffing it against the retained baseline. Stamps no-op
+                // unless profiling is on.
+                const patch_begin = self.frame_profile.begin();
                 // The retained protocol works on the frame's FULL keyed
                 // draw order (never the scissor subset); null when the
                 // full list is unrepresentable, over the retained budget,
                 // or carries duplicate keys — those frames present
                 // through the non-retained encoding below.
                 const current = if (view_index != null) gatherCanvasPacketCurrentCommands(canvas_frame) else null;
+                // Patch derivation runs eagerly with the gather (one
+                // profile stage, one scratch fill the encoder below
+                // reads); null when the view holds no usable baseline.
+                const patch_stats: ?CanvasPacketPatchStats = stats: {
+                    const current_commands = current orelse break :stats null;
+                    const view = &self.views[view_index.?];
+                    if (!view.canvas_packet_baseline_valid) break :stats null;
+                    if (!sizesEqual(view.canvas_packet_baseline_surface_size, packet.surface_size) or
+                        view.canvas_packet_baseline_scale != packet.scale) break :stats null;
+                    break :stats computeCanvasPacketPatchStats(view, current_commands);
+                };
+                self.frame_profile.end(.patch, patch_begin);
 
                 // ---- incremental attempt: patch the host's retained list.
                 if (current) |current_commands| patch: {
                     const view = &self.views[view_index.?];
-                    if (!view.canvas_packet_baseline_valid) break :patch;
-                    if (!sizesEqual(view.canvas_packet_baseline_surface_size, packet.surface_size) or
-                        view.canvas_packet_baseline_scale != packet.scale) break :patch;
-                    const stats = computeCanvasPacketPatchStats(view, current_commands);
+                    const stats = patch_stats orelse break :patch;
                     // A patch that re-encodes EVERY command is strictly
                     // larger than the keyed full present (same upserts
                     // plus the order vector), so frames where everything
@@ -522,10 +540,13 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                     // A patch that outgrows the transport is not a
                     // failure — the full present below is the compact
                     // form.
+                    const encode_begin = self.frame_profile.begin();
                     writeCanvasPacketPatchBinary(view, canvas_frame, packet, current_commands, stats, &writer) catch break :patch;
+                    self.frame_profile.end(.encode, encode_begin);
                     base.binary = writer.buffered();
                     base.json = "";
                     base.command_count = current_commands.len;
+                    const present_begin = self.frame_profile.begin();
                     services.presentGpuSurfacePacketBinary(base) catch |err| switch (err) {
                         error.UnsupportedService => {
                             // Host refused the patch (retained state
@@ -538,6 +559,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                         },
                         else => return err,
                     };
+                    self.frame_profile.end(.present, present_begin);
                     adoptCanvasPacketBaseline(view, current_commands, packet);
                     view.gpu_present_packet_mode = .patch;
                     view.gpu_present_patch_bytes = base.binary.len;
@@ -552,6 +574,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                     const view = &self.views[view_index.?];
                     const generation = if (view.canvas_packet_generation == std.math.maxInt(u64)) 1 else view.canvas_packet_generation + 1;
                     var writer = std.Io.Writer.fixed(binary_buffer);
+                    const encode_begin = self.frame_profile.begin();
                     writeCanvasPacketFullBinary(canvas_frame, packet, current_commands, generation, &writer) catch {
                         view.canvas_packet_baseline_valid = false;
                         if (services.present_gpu_surface_packet_fn == null) {
@@ -564,9 +587,11 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                         }
                         break :binary;
                     };
+                    self.frame_profile.end(.encode, encode_begin);
                     base.binary = writer.buffered();
                     base.json = "";
                     base.command_count = current_commands.len;
+                    const present_begin = self.frame_profile.begin();
                     services.presentGpuSurfacePacketBinary(base) catch |err| switch (err) {
                         // A host that refuses the keyed full present is
                         // refusing this binary encoding, not the retained
@@ -577,6 +602,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                         },
                         else => return err,
                     };
+                    self.frame_profile.end(.present, present_begin);
                     view.canvas_packet_generation = generation;
                     adoptCanvasPacketBaseline(view, current_commands, packet);
                     view.gpu_present_packet_mode = .full;
@@ -592,6 +618,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 // host draws but never retains.
                 if (view_index) |index| self.views[index].canvas_packet_baseline_valid = false;
                 var writer = std.Io.Writer.fixed(binary_buffer);
+                const encode_begin = self.frame_profile.begin();
                 packet.writeBinary(&writer) catch {
                     // A frame too big for the binary encoding might
                     // still matter to a JSON-only host (whose binary
@@ -609,15 +636,18 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                     }
                     break :binary;
                 };
+                self.frame_profile.end(.encode, encode_begin);
                 base.binary = writer.buffered();
                 base.json = "";
                 base.command_count = packet.commandCount();
+                const present_begin = self.frame_profile.begin();
                 services.presentGpuSurfacePacketBinary(base) catch |err| switch (err) {
                     // The platform wires the binary seam but declines at
                     // call time: negotiate down to JSON.
                     error.UnsupportedService => break :binary,
                     else => return err,
                 };
+                self.frame_profile.end(.present, present_begin);
                 if (view_index) |index| recordCanvasPacketFullPresent(&self.views[index]);
                 return true;
             }
@@ -631,6 +661,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             // of tripping the service wrapper's validation.
             const json_buffer = packet_bytes_buffer[0..@min(packet_bytes_buffer.len, platform.max_gpu_surface_packet_json_bytes)];
             var writer = std.Io.Writer.fixed(json_buffer);
+            const encode_begin = self.frame_profile.begin();
             packet.writeJson(&writer) catch {
                 recordCanvasPacketFallback(self, window_id, label, .{
                     .reason = .json_overflow,
@@ -639,9 +670,11 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 });
                 return false;
             };
+            self.frame_profile.end(.encode, encode_begin);
             base.json = writer.buffered();
             base.binary = "";
             base.command_count = packet.commandCount();
+            const present_begin = self.frame_profile.begin();
             services.presentGpuSurfacePacket(base) catch |err| switch (err) {
                 error.UnsupportedService => {
                     recordCanvasPacketFallback(self, window_id, label, refusal);
@@ -649,6 +682,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 },
                 else => return err,
             };
+            self.frame_profile.end(.present, present_begin);
             // JSON presents bypass the retained protocol entirely (the
             // host invalidates its retained state on them too).
             if (runtimeFindViewIndex(self, window_id, label)) |index| {
@@ -729,6 +763,13 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
         }
 
         pub fn planCanvasFrameForView(self: *Runtime, index: usize, options: canvas.CanvasFrameOptions, storage: canvas.CanvasFrameStorage, record: bool) anyerror!canvas.CanvasFrame {
+            // Frame-profile `plan` stage: the whole render-plan cascade
+            // (batches, caches, text layout, diff). Recording plans only —
+            // diagnostic previews and screenshots re-plan without
+            // presenting and would double-count. No-op unless profiling
+            // is on.
+            const plan_begin = if (record) self.frame_profile.begin() else 0;
+            defer if (record) self.frame_profile.end(.plan, plan_begin);
             var frame_options = options;
             if (frame_options.surface_size.isEmpty()) {
                 frame_options.surface_size = if (self.views[index].gpu_size.isEmpty()) self.views[index].frame.size() else self.views[index].gpu_size;
