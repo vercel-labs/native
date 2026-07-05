@@ -1,3 +1,4 @@
+// This example owns its build: it adds the frontend install/build/dev-server steps and the hand-wired WebView shell that the generated app graph does not provide.
 const std = @import("std");
 
 const PlatformOption = enum {

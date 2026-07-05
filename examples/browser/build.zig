@@ -1,3 +1,4 @@
+// This example owns its build: it hand-wires the framework modules, platform hosts, and the -Dweb-engine/-Dcef-dir engine link flags that the generated app graph does not expose.
 const std = @import("std");
 
 const PlatformOption = enum {

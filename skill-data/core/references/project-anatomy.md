@@ -4,7 +4,9 @@ Use this when creating, orienting in, or restructuring a Native SDK app.
 
 ## Generated project files
 
-- `build.zig`: Zig build graph. Generated examples expose platform selection, trace mode, debug overlay, automation, JS bridge, web engine overrides, frontend install/build/dev steps, tests, and package steps.
+A zero-config app ships no build files at all — just `app.zon` + `src/` (+ `assets/`); the `native dev|test|build` verbs synthesize the build graph into `.native/build/` (gitignored). `build.zig`/`build.zig.zon` appear only in apps that own their build (`native eject`, the `--full` scaffold, or an expanded example):
+
+- `build.zig`: Zig build graph. Expanded scaffolds expose platform selection, trace mode, debug overlay, automation, JS bridge, web engine overrides, frontend install/build/dev steps, tests, and package steps.
 - `build.zig.zon`: Zig package manifest and dependency declaration.
 - `app.zon`: app manifest read by CLI/build/package/doctor tooling.
 - `src/main.zig`: app state, `app()` method, source resolver, optional bridge dispatcher, lifecycle callbacks.

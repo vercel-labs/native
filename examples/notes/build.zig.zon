@@ -1,8 +1,0 @@
-.{
-    .name = .notes,
-    .fingerprint = 0x11ba68c7d5e0ac9,
-    .version = "0.1.0",
-    .minimum_zig_version = "0.16.0",
-    .dependencies = .{ .native_sdk = .{ .path = "../.." } },
-    .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "app.zon" },
-}

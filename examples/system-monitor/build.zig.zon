@@ -1,8 +1,0 @@
-.{
-    .name = .system_monitor,
-    .fingerprint = 0xd66e516c55e5175,
-    .version = "0.1.0",
-    .minimum_zig_version = "0.16.0",
-    .dependencies = .{ .native_sdk = .{ .path = "../.." } },
-    .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "app.zon" },
-}

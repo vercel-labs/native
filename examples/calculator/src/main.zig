@@ -117,9 +117,11 @@ fn onAppearance(appearance: native_sdk.Appearance) ?Msg {
 
 // ----------------------------------------------------------------- mobile
 
-/// Mobile embed seam (`zig build lib -Dmobile=true` via `addMobileLib`):
-/// the same Model/Msg/update/view compiled into the embed static library
-/// with the canonical single-surface mobile scene.
+/// Mobile embed seam (compiled when a build wires this app through the
+/// framework's `addMobileLib` helper — see examples/ui-inbox for a build
+/// that keeps such a `lib` step): the same Model/Msg/update/view compiled
+/// into the embed static library with the canonical single-surface mobile
+/// scene.
 pub fn initModel() Model {
     return .{};
 }

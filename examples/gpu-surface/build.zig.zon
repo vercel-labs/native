@@ -1,8 +1,0 @@
-.{
-    .name = .gpu_surface,
-    .fingerprint = 0xf33e912fb35aeb35,
-    .version = "0.1.0",
-    .minimum_zig_version = "0.16.0",
-    .dependencies = .{ .native_sdk = .{ .path = "../.." } },
-    .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "app.zon", "README.md" },
-}

@@ -11,12 +11,24 @@ OUT=/out
 mkdir -p "$OUT"
 start_xvfb
 
+# The CLI drives every app build below (most showcase apps are zero-config:
+# app.zon + src only, no build.zig — the CLI synthesizes their build graph
+# into .native/build). Build it first; automation commands need it anyway.
+echo "==== build native CLI ===="
+(cd /work && zig build) >/tmp/cli-build.log 2>&1 || {
+  echo "CLI BUILD FAIL"
+  tail -30 /tmp/cli-build.log
+  exit 1
+}
+
 for app in $APPS; do
   dir="/work/examples/$app"
   out="$OUT/$app"
   mkdir -p "$out"
   echo "==== $app ===="
-  (cd "$dir" && zig build -Dplatform=linux -Dweb-engine=system -Dautomation=true) \
+  # -Doptimize=Debug: keep recon binaries at the debug shape (`native
+  # build` alone would inject ReleaseFast).
+  (cd "$dir" && "$CLI" build -Dplatform=linux -Dweb-engine=system -Dautomation=true -Doptimize=Debug) \
     >"$out/build.log" 2>&1
   if [ $? -ne 0 ]; then
     echo "BUILD FAIL"

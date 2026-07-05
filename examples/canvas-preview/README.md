@@ -10,7 +10,7 @@ The "native, web, or both per window" proof: one window hosting a Native SDK can
 Run it:
 
 ```sh
-zig build run -Dplatform=macos
+native dev
 ```
 
 Automation smoke (from the repo root):
@@ -22,5 +22,5 @@ zig build test-canvas-preview-smoke
 Headless tests:
 
 ```sh
-zig build test
+native test
 ```

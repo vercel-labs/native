@@ -9,13 +9,13 @@ The stream command is platform-conditional: `/bin/sh` paces one line every 200ms
 ## Run
 
 ```bash
-zig build run
+native dev
 ```
 
 ## Verify through the automation harness
 
 ```bash
-zig build -Dplatform=macos -Dweb-engine=system -Dautomation=true
+native build -Dautomation=true
 ./zig-out/bin/effects-probe &
 native automate wait
 # click Start (find the id in snapshot.txt), watch "stream line N" grow,
@@ -25,7 +25,7 @@ native automate wait
 ## Test
 
 ```bash
-zig build test -Dplatform=null
+native test -Dplatform=null
 ```
 
 The tests drive the same `update` through the fake effect executor: spawn requests are asserted on (argv, key), synthetic lines and exits are fed back as dispatched Msgs, and cancel semantics are proven without running a process.

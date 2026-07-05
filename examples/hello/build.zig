@@ -1,3 +1,4 @@
+// This example owns its build: it hand-wires the framework modules, src/runner.zig, and the -Dtrace/-Dweb-engine platform link options that the generated app graph does not expose.
 const std = @import("std");
 
 const PlatformOption = enum {

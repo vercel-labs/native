@@ -95,7 +95,10 @@ widget_id() {
 
 # ---- build ----------------------------------------------------------------
 (cd "$repo_root" && zig build) || fail "root zig build (CLI) failed"
-(cd "$app_dir" && zig build -Dtarget=x86_64-windows-gnu -Dplatform=windows -Dweb-engine=system -Dautomation=true) \
+# effects-probe is a zero-config app (app.zon + src, no build.zig): the CLI
+# synthesizes its build graph. -Doptimize=Debug keeps the smoke binary at
+# the debug shape (`native build` alone would inject ReleaseFast).
+"$cli" build "$app_dir" -Dtarget=x86_64-windows-gnu -Dplatform=windows -Dweb-engine=system -Dautomation=true -Doptimize=Debug \
   || fail "effects-probe Windows cross-compile failed"
 
 # ---- wineprefix -----------------------------------------------------------

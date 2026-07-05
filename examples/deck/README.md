@@ -75,19 +75,19 @@ Registered app shortcuts (`app.zon`, delivered as command events): `primary+P` p
 ## Run
 
 ```sh
-zig build run -Dplatform=macos -Dweb-engine=system
+native dev
 ```
 
 Run the deterministic suite (transport/queue/search dispatch through the fake effects executor, the playlist window round-trip through real dispatch, spectrum and marquee determinism, texture registration + codec-less fallback, engine parity, theming, chrome command counts, layout budgets, automation click-through):
 
 ```sh
-zig build test -Dplatform=null
+native test -Dplatform=null
 ```
 
 Verify live through the automation harness:
 
 ```sh
-zig build -Dplatform=macos -Dweb-engine=system -Dautomation=true
+native build -Dautomation=true
 ./zig-out/bin/deck &
 native automate assert 'gpu_nonblank=true' 'role=button name="Play or pause"' 'role=button name="Playlist window"'
 ```

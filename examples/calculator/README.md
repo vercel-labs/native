@@ -39,7 +39,7 @@ The expression line is a real `text_field` and it is the app's keyboard path: cl
 ## Run
 
 ```sh
-zig build run -Dplatform=macos -Dweb-engine=system
+native dev
 ```
 
 Click the expression line and type `12+7⏎`, or press the keys. Escape clears from anywhere. The app follows the system appearance live — flip the OS to dark and the board follows.
@@ -47,13 +47,13 @@ Click the expression line and type `12+7⏎`, or press the keys. Escape clears f
 Run the deterministic suite (exhaustive arithmetic through `msgForPointer` on every key, keyboard through real `gpu_surface_input` events, the Escape shortcut through the platform event path, formatting, theming, markup engine parity, snapshot assertions, and the exact-frame keypad layout check):
 
 ```sh
-zig build test -Dplatform=null
+native test -Dplatform=null
 ```
 
 Verify live through the automation harness:
 
 ```sh
-zig build -Dplatform=macos -Dweb-engine=system -Dautomation=true
+native build -Dautomation=true
 ./zig-out/bin/calculator &
 native automate assert 'gpu_nonblank=true' 'role=button name="Equals"' 'role=textbox name="Expression"'
 # Keyboard rides the focused expression field: focus it (widget-click its

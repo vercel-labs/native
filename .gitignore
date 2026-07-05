@@ -1,6 +1,9 @@
 .DS_Store
 .zig-cache/
 zig-out/
+# CLI-generated build graph for zero-config apps (the examples here) — the
+# same entry `native init` writes into a new app's .gitignore.
+.native/
 
 # Native binaries in the @native-sdk/cli npm package (built by CI or locally)
 packages/native-sdk/bin/native-sdk-*

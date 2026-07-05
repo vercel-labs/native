@@ -14,7 +14,7 @@ The markup compiles to the same widget tree a hand-written `canvas.Ui(Msg)` buil
 
 Editors highlight `.zml` well in HTML mode — projects ship `.vscode/settings.json` with `"files.associations": {"*.zml": "html"}` (add it if missing).
 
-Start a new app by copying `examples/habits/` (smallest) or `examples/ui-inbox/`: change `app_exe_name` in build.zig, the name/id in app.zon, and put `0x0` as the fingerprint in build.zig.zon — the first build error prints the correct value to paste in. `src/runner.zig` and `assets/` copy verbatim.
+Start a new app with `native init` (zero-config: app.zon + src + assets, the CLI generates the build graph), or copy `examples/habits/` (smallest): change the name/id in app.zon and `assets/` copies verbatim — there are no build files to edit. The `native dev|test|build` verbs drive any app directory shaped this way.
 
 ## App wiring
 
@@ -358,7 +358,7 @@ Anything stateful or beyond the grammar is a Zig model function you bind to (`ea
 
 A path like `{h.streak}` resolves left to right, starting from the model or a `for` variable:
 
-- everything bindable is declared INSIDE the Model struct: fields, and `pub fn` METHODS in the struct body. A file-scope `pub fn visibleRows(model: *const Model, ...)` written NEXT TO the struct is invisible to bindings and `for each` — a model-free `native markup check` still passes (grammar-only), and the view then fails at test/run time with "each does not name an iterable"; with a fresh model contract (`zig build model-contract`), `native check` catches it instantly with a did-you-mean. If a binding or `each` cannot find your fn, first check it lives inside `pub const Model = struct { ... }`
+- everything bindable is declared INSIDE the Model struct: fields, and `pub fn` METHODS in the struct body. A file-scope `pub fn visibleRows(model: *const Model, ...)` written NEXT TO the struct is invisible to bindings and `for each` — a model-free `native markup check` still passes (grammar-only), and the view then fails at test/run time with "each does not name an iterable"; with a fresh model contract (refreshed by `native test`), `native check` catches it instantly with a did-you-mean. If a binding or `each` cannot find your fn, first check it lives inside `pub const Model = struct { ... }`
 - struct fields bind directly: `{habit_count}`, `{h.done}`
 - zero-arg pub methods bind like fields: `{totalDays}` calls `pub fn totalDays(m: *const Model) usize`
 - arena-taking scalar methods bind the same way: `{summary}` calls `pub fn summary(m: *const Model, arena: std.mem.Allocator) []const u8` — format derived display strings straight into the build arena (it lives exactly one view build). Works anywhere a scalar binding does — text interpolation, attribute values, message payloads, expression function arguments (`{upper(summary)}`) — EXCEPT as a comparison operand (`==`, `<`, ...), which rejects arena-computed values with a teaching error: compare the source fields, or bind a `pub fn ... bool`
@@ -929,7 +929,7 @@ Md.view(ui, model.body_markdown, .{
 
 `native markup check src/view.zml` — instant grammar/structure validation with `file:line:column` errors, including the font-coverage tofu guard: literal text with a codepoint outside the bundled face (⌘, ✓, ⑂, dingbats, CJK) is a teaching error naming the character, because it renders as a tofu box on the reference/screenshot and mobile paths — use a vector icon (`icon=` / `<icon name>`) or plain words. Dynamic strings get the same lesson as a Debug-build `zero_canvas_ui` diagnostic when the view builds. The accessibility lint rides the same pass: unnamed interactive controls and role misuse are errors, unnamed images and redundant labels are warnings (`--strict` promotes).
 
-The model side checks at check time too: `zig build model-contract` (also refreshed by `zig build test`) reflects Model/Msg into `zig-out/model-contract.zon`, and `native check` (or `markup check` run in the app directory) then verifies every binding path, iterable, `key` field, message tag, payload type, and expression type against the app's real surface — did-you-mean over your actual field names, and type errors naming the field's Zig type. It also WARNS on model state and Msg tags no view uses; opt update-only names out with `pub const view_unbound = .{ "next_id" };` on Model or Msg (`--strict` turns the warnings into failures). A stale artifact degrades to grammar-only checking with a note; binding paths and message tags are always re-enforced when the app builds (and on hot reload).
+The model side checks at check time too: the model-contract step (refreshed by `native test`, or run directly as `zig build model-contract` in an app that owns its build) reflects Model/Msg into `zig-out/model-contract.zon`, and `native check` (or `markup check` run in the app directory) then verifies every binding path, iterable, `key` field, message tag, payload type, and expression type against the app's real surface — did-you-mean over your actual field names, and type errors naming the field's Zig type. It also WARNS on model state and Msg tags no view uses; opt update-only names out with `pub const view_unbound = .{ "next_id" };` on Model or Msg (`--strict` turns the warnings into failures). A stale artifact degrades to grammar-only checking with a note; binding paths and message tags are always re-enforced when the app builds (and on hot reload).
 
 ## Testing pattern
 
@@ -953,7 +953,7 @@ Runtime-integration tests use `native_sdk.TestHarness()` on the null platform; h
 ## Verify live through the automation harness
 
 ```bash
-zig build -Dplatform=macos -Dweb-engine=system -Dautomation=true
+native build -Dautomation=true
 ./zig-out/bin/<app> &   # run from the example directory
 native automate wait                     # blocks until ready=true
 cat .zig-cache/native-sdk-automation/snapshot.txt   # widgets with ids, roles, names, bounds, state

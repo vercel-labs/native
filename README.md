@@ -18,7 +18,7 @@ Create and run an app:
 native init my_app            # native-rendered app (default)
 native init my_app --frontend next   # or a WebView app with a web frontend
 cd my_app
-zig build run
+native dev
 ```
 
 The default app is native-rendered: a declarative `.zml` view plus Zig logic, with hot reload of the view while the app runs. With a web frontend selected, the first run installs frontend dependencies and opens a desktop window rendering your WebView content.
@@ -134,6 +134,8 @@ Native-first examples are available too:
 - `examples/gpu-components` - built-in component lab rendered through the retained GPU canvas
 - `examples/capabilities` - guarded OS services such as notifications, clipboard, dialogs, credentials, file drops, and recent documents
 - `examples/mobile-shell` - shared metadata for the iOS and Android native shell hosts
+
+Most native-rendered showcase apps (`examples/calculator`, `examples/notes`, `examples/kanban`, and more — see [examples/README.md](./examples/README.md)) are zero-config: `app.zon` + `src/` and no build files, driven entirely by `native dev|test|build`.
 
 Mobile embedding examples are available too:
 

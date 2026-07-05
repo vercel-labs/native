@@ -3,7 +3,7 @@
 A split-pane markdown editor/preview authored in markup + Zig: the left pane is a `textarea` mirrored elm-style into the model, the right pane is one `<markdown>` element bound to the same bytes, so the preview tracks every keystroke with no debounce and no drift. The whole view lives in `src/viewer.zml` (hot-reloaded in dev builds); `src/main.zig` is the logic — `Model`, `Msg`, `update`, effects, and a two-mode custom theme.
 
 ```sh
-zig build run
+native dev
 ```
 
 ## What it demonstrates
@@ -27,4 +27,4 @@ Documents cap at 16 KiB (`max_document_bytes` — the view retains editor + prev
 
 ## Tests
 
-`zig build test` (or root `zig build test-example-markdown-viewer`) drives the real dispatch paths: open/save/save-as round-trips and recent-list persistence through the fake effect executor, link clicks spawning the browser command, details toggling via automation `widget-click`, editor edits updating the preview and derived counts, the system appearance re-deriving the tokens live through platform events, the controlled preview scroll round-trip, compiled/interpreter markup parity, and automation snapshot assertions over links, table cells, and task checkboxes.
+`native test` (or root `zig build test-example-markdown-viewer`) drives the real dispatch paths: open/save/save-as round-trips and recent-list persistence through the fake effect executor, link clicks spawning the browser command, details toggling via automation `widget-click`, editor edits updating the preview and derived counts, the system appearance re-deriving the tokens live through platform events, the controlled preview scroll round-trip, compiled/interpreter markup parity, and automation snapshot assertions over links, table cells, and task checkboxes.

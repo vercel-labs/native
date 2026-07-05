@@ -1,8 +1,0 @@
-.{
-    .name = .deck,
-    .fingerprint = 0x4fac3637ad855a81,
-    .version = "0.1.0",
-    .minimum_zig_version = "0.16.0",
-    .dependencies = .{ .native_sdk = .{ .path = "../.." } },
-    .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "app.zon" },
-}

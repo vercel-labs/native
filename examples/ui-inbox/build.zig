@@ -1,3 +1,4 @@
+// This example owns its build: the -Dmobile `lib` step builds the mobile embed static library that the iOS/Android host shims consume, which the generated app graph does not provide.
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 

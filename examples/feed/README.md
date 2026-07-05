@@ -3,7 +3,7 @@
 The infinite-scroll timeline — the windowed virtual list proof. A 100,000-post synthetic corpus (every post derives deterministically from its index; no network, no storage) scrolls through one `ui.virtualList`, and the view only ever builds the rows on screen.
 
 ```sh
-zig build run
+native dev
 ```
 
 ## What it demonstrates
@@ -21,4 +21,4 @@ The corpus caps at 100,000 posts (`max_posts`); the model boots with 500 (`initi
 
 ## Tests
 
-`zig build test` (or root `zig build test-example-feed`) drives the real dispatch paths: deterministic post derivation, batch appends against the corpus cap, window-only tree builds with stable row identity across shifts, wheel scrolling through the runtime with the view re-windowing (no scroll Msg bound), like-state surviving a scroll away and back under the same structural id, reach-end firing once per approach through real dispatch, and snapshot telemetry showing `widget_nodes` viewport-sized at 100k posts while the scroll semantics report the full extent.
+`native test` (or root `zig build test-example-feed`) drives the real dispatch paths: deterministic post derivation, batch appends against the corpus cap, window-only tree builds with stable row identity across shifts, wheel scrolling through the runtime with the view re-windowing (no scroll Msg bound), like-state surviving a scroll away and back under the same structural id, reach-end firing once per approach through real dispatch, and snapshot telemetry showing `widget_nodes` viewport-sized at 100k posts while the scroll semantics report the full extent.

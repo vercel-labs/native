@@ -10,11 +10,11 @@ This example shows a real GPU-backed child surface in the native view tree:
 Run with the macOS system backend. The GPU surface example defaults to `ReleaseFast`; pass `-Doptimize=Debug` only when debugging renderer internals.
 
 ```sh
-zig build run -Dplatform=macos -Dweb-engine=system
+native dev
 ```
 
 Run the headless declaration test:
 
 ```sh
-zig build test -Dplatform=null
+native test -Dplatform=null
 ```

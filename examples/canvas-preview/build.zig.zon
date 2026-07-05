@@ -1,8 +1,0 @@
-.{
-    .name = .canvas_preview,
-    .fingerprint = 0x7a727632f1530888,
-    .version = "0.1.0",
-    .minimum_zig_version = "0.16.0",
-    .dependencies = .{ .native_sdk = .{ .path = "../.." } },
-    .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "app.zon", "README.md" },
-}

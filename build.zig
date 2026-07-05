@@ -613,10 +613,10 @@ pub fn build(b: *std.Build) void {
     browser_system_link_step.dependOn(&build_browser_system.step);
 
     const frontend_examples_step = b.step("test-examples-frontends", "Run frontend example tests");
-    addExampleTestStep(b, frontend_examples_step, "test-example-next", "Run Next example tests", "examples/next");
-    addExampleTestStep(b, frontend_examples_step, "test-example-react", "Run React example tests", "examples/react");
-    addExampleTestStep(b, frontend_examples_step, "test-example-svelte", "Run Svelte example tests", "examples/svelte");
-    addExampleTestStep(b, frontend_examples_step, "test-example-vue", "Run Vue example tests", "examples/vue");
+    addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-next", "Run Next example tests", "examples/next", .owned);
+    addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-react", "Run React example tests", "examples/react", .owned);
+    addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-svelte", "Run Svelte example tests", "examples/svelte", .owned);
+    addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-vue", "Run Vue example tests", "examples/vue", .owned);
     addFileContainsCheckStep(b, file_contains_checker, frontend_examples_step, "test-example-frontend-positioning", "Verify frontend example native shell positioning", &.{
         .{ .path = "examples/next/README.md", .pattern = "opens the native app shell with WebView content." },
         .{ .path = "examples/react/README.md", .pattern = "opens the native app shell with WebView content." },
@@ -625,25 +625,25 @@ pub fn build(b: *std.Build) void {
     });
 
     const native_examples_step = b.step("test-examples-native", "Run native-first example tests");
-    addExampleTestStep(b, native_examples_step, "test-example-command-app", "Run command app example tests", "examples/command-app");
-    addExampleTestStep(b, native_examples_step, "test-example-native-shell", "Run native shell example tests", "examples/native-shell");
-    addExampleTestStep(b, native_examples_step, "test-example-native-panels", "Run native panels example tests", "examples/native-panels");
-    addExampleTestStep(b, native_examples_step, "test-example-gpu-surface", "Run GPU surface example tests", "examples/gpu-surface");
-    addExampleTestStep(b, native_examples_step, "test-example-gpu-dashboard", "Run GPU dashboard example tests", "examples/gpu-dashboard");
-    addExampleTestStep(b, native_examples_step, "test-example-gpu-components", "Run GPU components example tests", "examples/gpu-components");
-    addExampleTestStep(b, native_examples_step, "test-example-ui-inbox", "Run ui builder inbox example tests", "examples/ui-inbox");
-    addExampleTestStep(b, native_examples_step, "test-example-kanban", "Run ui builder kanban example tests", "examples/kanban");
-    addExampleTestStep(b, native_examples_step, "test-example-habits", "Run markup habits example tests", "examples/habits");
-    addExampleTestStep(b, native_examples_step, "test-example-soundboard", "Run soundboard example tests", "examples/soundboard");
-    addExampleTestStep(b, native_examples_step, "test-example-deck", "Run deck example tests", "examples/deck");
-    addExampleTestStep(b, native_examples_step, "test-example-markdown-viewer", "Run markdown viewer example tests", "examples/markdown-viewer");
-    addExampleTestStep(b, native_examples_step, "test-example-calculator", "Run calculator example tests", "examples/calculator");
-    addExampleTestStep(b, native_examples_step, "test-example-notes", "Run notes example tests", "examples/notes");
-    addExampleTestStep(b, native_examples_step, "test-example-system-monitor", "Run system monitor example tests", "examples/system-monitor");
-    addExampleTestStep(b, native_examples_step, "test-example-effects-probe", "Run effects probe example tests", "examples/effects-probe");
-    addExampleTestStep(b, native_examples_step, "test-example-feed", "Run feed example tests", "examples/feed");
-    addExampleTestStep(b, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview");
-    addExampleTestStep(b, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities");
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-command-app", "Run command app example tests", "examples/command-app", .owned);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-native-shell", "Run native shell example tests", "examples/native-shell", .owned);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-native-panels", "Run native panels example tests", "examples/native-panels", .owned);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-surface", "Run GPU surface example tests", "examples/gpu-surface", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-dashboard", "Run GPU dashboard example tests", "examples/gpu-dashboard", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-components", "Run GPU components example tests", "examples/gpu-components", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-ui-inbox", "Run ui builder inbox example tests", "examples/ui-inbox", .owned);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-kanban", "Run ui builder kanban example tests", "examples/kanban", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-habits", "Run markup habits example tests", "examples/habits", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-soundboard", "Run soundboard example tests", "examples/soundboard", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-deck", "Run deck example tests", "examples/deck", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-markdown-viewer", "Run markdown viewer example tests", "examples/markdown-viewer", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-calculator", "Run calculator example tests", "examples/calculator", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-notes", "Run notes example tests", "examples/notes", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-system-monitor", "Run system monitor example tests", "examples/system-monitor", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-effects-probe", "Run effects probe example tests", "examples/effects-probe", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-feed", "Run feed example tests", "examples/feed", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned);
     addFileContainsCheckStep(b, file_contains_checker, native_examples_step, "test-example-capabilities-events", "Verify capabilities example event bridge names", &.{
         .{ .path = "examples/capabilities/src/main.zig", .pattern = "native-sdk:drop:files" },
     });
@@ -942,7 +942,11 @@ pub fn build(b: *std.Build) void {
     native_shell_smoke_step.dependOn(&native_shell_smoke_run.step);
 
     const gpu_surface_smoke_step = b.step("test-gpu-surface-smoke", "Run macOS GPU surface automation smoke test");
-    const gpu_surface_smoke_build = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true" });
+    // The GPU smoke apps are managed examples (no build.zig of their own),
+    // so their binaries come from the CLI verb. -Doptimize=Debug keeps the
+    // smoke binary at the debug shape the in-dir builds used (`native
+    // build` injects ReleaseFast when no optimize flag is passed).
+    const gpu_surface_smoke_build = managedExampleRun(b, cli_exe, &.{ "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true", "-Doptimize=Debug" });
     gpu_surface_smoke_build.setCwd(b.path("examples/gpu-surface"));
     const gpu_surface_smoke_run = b.addSystemCommand(&.{
         "sh", "-c",
@@ -1094,7 +1098,7 @@ pub fn build(b: *std.Build) void {
     writeback_smoke_step.dependOn(&writeback_smoke_run.step);
 
     const gpu_dashboard_smoke_step = b.step("test-gpu-dashboard-smoke", "Run macOS GPU dashboard automation smoke test");
-    const gpu_dashboard_smoke_build = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true" });
+    const gpu_dashboard_smoke_build = managedExampleRun(b, cli_exe, &.{ "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true", "-Doptimize=Debug" });
     gpu_dashboard_smoke_build.setCwd(b.path("examples/gpu-dashboard"));
     const gpu_dashboard_smoke_run = b.addSystemCommand(&.{
         "sh", "-c",
@@ -1306,7 +1310,7 @@ pub fn build(b: *std.Build) void {
     // Knobs: NATIVE_SDK_PERF_LAUNCHES, NATIVE_SDK_PERF_INTERACTIONS, NATIVE_SDK_PERF_BUDGET_MS,
     // NATIVE_SDK_PERF_INPUT_BUDGET_MS — see scripts/perf-gpu-dashboard.sh.
     const gpu_dashboard_perf_step = b.step("test-gpu-dashboard-perf", "Run macOS GPU dashboard percentile performance check (N launches; slow)");
-    const gpu_dashboard_perf_build = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true" });
+    const gpu_dashboard_perf_build = managedExampleRun(b, cli_exe, &.{ "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true", "-Doptimize=Debug" });
     gpu_dashboard_perf_build.setCwd(b.path("examples/gpu-dashboard"));
     const gpu_dashboard_perf_run = b.addSystemCommand(&.{ "sh", "scripts/perf-gpu-dashboard.sh" });
     gpu_dashboard_perf_run.addFileArg(cli_exe.getEmittedBin());
@@ -1315,7 +1319,7 @@ pub fn build(b: *std.Build) void {
     gpu_dashboard_perf_step.dependOn(&gpu_dashboard_perf_run.step);
 
     const canvas_preview_smoke_step = b.step("test-canvas-preview-smoke", "Run macOS canvas + webview (both-in-one-window) automation smoke test");
-    const canvas_preview_smoke_build = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true" });
+    const canvas_preview_smoke_build = managedExampleRun(b, cli_exe, &.{ "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true", "-Doptimize=Debug" });
     canvas_preview_smoke_build.setCwd(b.path("examples/canvas-preview"));
     const canvas_preview_smoke_run = b.addSystemCommand(&.{
         "sh", "-c",
@@ -1363,7 +1367,7 @@ pub fn build(b: *std.Build) void {
     canvas_preview_smoke_step.dependOn(&canvas_preview_smoke_run.step);
 
     const gpu_components_smoke_step = b.step("test-gpu-components-smoke", "Run macOS GPU components automation smoke test");
-    const gpu_components_smoke_build = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true" });
+    const gpu_components_smoke_build = managedExampleRun(b, cli_exe, &.{ "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true", "-Doptimize=Debug" });
     gpu_components_smoke_build.setCwd(b.path("examples/gpu-components"));
     const gpu_components_smoke_run = b.addSystemCommand(&.{
         "sh", "-c",
@@ -2011,12 +2015,34 @@ fn addTestStep(b: *std.Build, name: []const u8, description: []const u8, artifac
     step.dependOn(&b.addRunArtifact(artifact).step);
 }
 
-fn addExampleTestStep(b: *std.Build, group: *std.Build.Step, name: []const u8, description: []const u8, example_path: []const u8) void {
-    const run = b.addSystemCommand(&.{ "zig", "build", "test", "-Dplatform=null" });
+/// How an example's build is driven. `managed` examples carry only
+/// app.zon + src (+ assets): the `native` CLI synthesizes their build
+/// graph, so their suites run through the CLI verbs — exactly what a user
+/// gets from `native init`. `owned` examples keep a build.zig of their own
+/// (extra steps or flags the generated graph does not provide) and are
+/// driven through plain in-dir `zig build`.
+const ExampleBuildShape = enum { managed, owned };
+
+fn addExampleTestStep(b: *std.Build, cli_exe: *std.Build.Step.Compile, group: *std.Build.Step, name: []const u8, description: []const u8, example_path: []const u8, shape: ExampleBuildShape) void {
+    const run = switch (shape) {
+        .owned => b.addSystemCommand(&.{ "zig", "build", "test", "-Dplatform=null" }),
+        .managed => managedExampleRun(b, cli_exe, &.{ "test", "-Dplatform=null" }),
+    };
     run.setCwd(b.path(example_path));
     const step = b.step(name, description);
     step.dependOn(&run.step);
     group.dependOn(&run.step);
+}
+
+/// Run a `native` CLI verb (argv tail) against a managed example. The CLI
+/// artifact runs from the build cache, where its executable location does
+/// not reveal the framework checkout, so NATIVE_SDK_PATH pins the generated
+/// graph's framework dependency to this repository.
+fn managedExampleRun(b: *std.Build, cli_exe: *std.Build.Step.Compile, argv_tail: []const []const u8) *std.Build.Step.Run {
+    const run = b.addRunArtifact(cli_exe);
+    run.addArgs(argv_tail);
+    run.setEnvironmentVariable("NATIVE_SDK_PATH", b.pathFromRoot("."));
+    return run;
 }
 
 fn addLayoutCheckStep(b: *std.Build, group: *std.Build.Step, name: []const u8, description: []const u8, paths: []const []const u8) void {

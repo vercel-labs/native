@@ -51,7 +51,7 @@ Bridge and IPC coverage lives in the headless desktop tests: they inject platfor
 
 `test-examples` runs all repository example checks. Use the narrower example groups when you want a faster pass over one slice.
 
-`test-examples-native` runs the headless tests for `examples/command-app`, `examples/native-shell`, `examples/native-panels`, and `examples/capabilities` with `-Dplatform=null`. This keeps command routing, native view composition, and guarded OS capability examples covered from the repository root.
+`test-examples-native` runs every native-first example's headless suite with `-Dplatform=null` from the repository root. Zero-config examples (app.zon + src, no build files) are driven through the `native` CLI's generated build graph — the same path `native test` takes in any app directory — while examples that own a `build.zig` run their in-directory `zig build test`.
 
 `test-examples-mobile` verifies the iOS, Android, and shared `mobile-shell` example layouts so the embedded host scaffolds stay present. It also checks the shared mobile-shell platform, capability, and command metadata.
 

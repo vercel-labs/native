@@ -3,7 +3,7 @@
 The daily-driver shape — folders sidebar, note list, editor — authored in markup + Zig. The whole view lives in `src/notes.zml` (compiled at comptime, hot-reloaded in dev builds); `src/model.zig` is the logic: folders and notes as model-owned tables, everything showable derived per rebuild, and persistence as one store file through the effects channel. `src/main.zig` is the wiring — shell scene, the paper/evergreen theme, the store path, and the keyboard map.
 
 ```sh
-zig build run
+native dev
 ```
 
 ## What it demonstrates
@@ -26,4 +26,4 @@ Folders cap at 6 (`max_folders` — the create button disables, the shortcut pat
 
 ## Tests
 
-`zig build test` (or root `zig build test-example-notes`) drives the real dispatch paths: title/snippet/relative-time derivation, store round-trips (including garbage, header-only, and orphaned-note inputs), edit → debounce timer → serialized write → pending-save re-persist through the fake effect executor, boot-time restore into the widget tree, the dialog flow through automation `widget-click` (create, duplicate-name hint, rename prefill, scrim click-away, capacity), the whole shortcut map through platform shortcut events, live search filtering and the built-in clear affordance through raw pointer events, folder/note row clicks through the hotspot overlays, compiled/interpreter markup parity with the dialog closed and open, the system appearance re-deriving the tokens live through platform events, the controlled note-list scroll round-trip, and three-pane layout at window size.
+`native test` (or root `zig build test-example-notes`) drives the real dispatch paths: title/snippet/relative-time derivation, store round-trips (including garbage, header-only, and orphaned-note inputs), edit → debounce timer → serialized write → pending-save re-persist through the fake effect executor, boot-time restore into the widget tree, the dialog flow through automation `widget-click` (create, duplicate-name hint, rename prefill, scrim click-away, capacity), the whole shortcut map through platform shortcut events, live search filtering and the built-in clear affordance through raw pointer events, folder/note row clicks through the hotspot overlays, compiled/interpreter markup parity with the dialog closed and open, the system appearance re-deriving the tokens live through platform events, the controlled note-list scroll round-trip, and three-pane layout at window size.

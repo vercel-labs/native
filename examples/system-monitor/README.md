@@ -46,7 +46,7 @@ The toolbar gear opens **Settings** in its own window — the model-declared win
 ## Run
 
 ```sh
-zig build run -Dplatform=macos -Dweb-engine=system
+native dev
 ```
 
 Watch the tiles fill in, filter the table, flip the sort chips, pause and resume sampling. Right-click a row you own (a `sleep 600 &` makes a safe target) and confirm the SIGTERM.
@@ -54,7 +54,7 @@ Watch the tiles fill in, filter the table, flip the sort chips, pause and resume
 Run the deterministic suite (fixture parsers, the sampling loop through the fake effects executor with TestClock timestamps, the history ring, sort/search/kill through typed dispatch, theming, markup parity, snapshot assertions, and the exact-frame tile layout):
 
 ```sh
-zig build test -Dplatform=null
+native test -Dplatform=null
 ```
 
 The suite also carries an env-gated screenshot renderer (`SYSTEM_MONITOR_SHOTS=1`, skipped by default): it replays real `ps`/`vm_stat` captures through the normal update path and renders both themes OFFSCREEN through the deterministic reference renderer — no live window, no screen access, no macOS screen-recording permission. See the test's comment for the capture loop.
@@ -62,7 +62,7 @@ The suite also carries an env-gated screenshot renderer (`SYSTEM_MONITOR_SHOTS=1
 Verify live through the automation harness:
 
 ```sh
-zig build -Dplatform=macos -Dweb-engine=system -Dautomation=true
+native build -Dautomation=true
 ./zig-out/bin/system-monitor &
 native automate assert 'gpu_nonblank=true' 'role=button name="Pause or resume sampling"' 'name="CPU tile"'
 native automate screenshot monitor-canvas
