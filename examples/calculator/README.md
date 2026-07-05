@@ -1,6 +1,16 @@
 # Native SDK calculator example
 
-A real four-function calculator built to showcase precision Native SDK layout: the classic keypad grid with exact 66x54 keys, a live expression + result display with the last calculation remembered above it, full keyboard input, and a near-monochrome theme with a single calculator-orange accent. The window is fixed at 320x496 — every frame in it is deliberate, and the test suite asserts the keypad's frames to the point.
+A real four-function calculator built to showcase precision Native SDK layout: the classic keypad grid with exact 66x54 keys, a live expression + result display with the last calculation remembered above it, full keyboard input, and a chromeless window that is nothing but keys and digits. The window is fixed at 320x490 — every frame in it is deliberate, and the test suite asserts the keypad's frames to the point.
+
+## Design brief
+
+The calculator is a precision instrument in the house register: pure neutrals, hairline borders, and exactly one accent — action blue — that appears only when something is live. Nothing at rest is colored.
+
+- **Surfaces.** Paper white and true graphite. Light: white keys lifted off a near-white window by hairlines. Dark: graphite keys on near-black. Key faces separate by one gray step, never by shadows.
+- **The strong column.** The operator column and equals are the inverted monochrome keys — near-black faces with white glyphs in light mode, near-white faces with dark glyphs in dark mode. The board reads black-and-white until an operator goes pending, when that key fills with the accent.
+- **One accent.** Action blue marks live state only: the pending operator, the press flash on any key, the focus ring on the expression line. It is the sole color in the app.
+- **The readout.** The result is tight monospace digits (the bundled mono face), right-aligned, the loudest thing in the window; the memory line above it is the same mono two sizes down. Digits align column-over-column as you type.
+- **No mark, no chrome.** Hidden-inset titlebar; the top band is an empty window drag region. No logo, no wordmark, no placeholder text, no app-name label, no theme control — the identity comes from the craft: the readout, the key rhythm, the tight mono numerals. The app follows the system appearance live.
 
 ## Arithmetic model (documented, tested)
 
@@ -21,11 +31,10 @@ The expression line is a real `text_field` and it is the app's keyboard path: cl
 
 ## Authoring split (markup-first)
 
-- `src/keypad.zml` — the entire keypad, key by key: function keys `secondary`, the operator column and equals `primary` (the one accent), digits default surfaces, the pending operator highlighted via a model-sourced `selected=`. Markup message payloads are bindings, so each key dispatches its own void `Msg` arm — which also reads exactly like the keypad it is.
-- `src/header.zml` — brand label + the theme cycle button (auto → light → dark).
-- `src/view.zig` — the one Zig-only section: the display block, because the big result line needs a scaled, right-aligned paragraph (markup text tops out at the `lg` body size). Also documented there: text fields are start-aligned by the engine (caret math), so the expression line stays left-aligned.
+- `src/keypad.zml` — the entire keypad, key by key: function keys `secondary`, the operator column and equals `primary` (the inverted monochrome column), digits default surfaces, the pending operator highlighted via a model-sourced `selected=`. Markup message payloads are bindings, so each key dispatches its own void `Msg` arm — which also reads exactly like the keypad it is.
+- `src/view.zig` — the Zig-only sections: the drag band (hidden-inset titlebar, `window_drag`, deliberately empty) and the display block, because the big result line needs a scaled, right-aligned monospace paragraph (markup text tops out at the `lg` body size). Also documented there: text fields are start-aligned by the engine (caret math), so the expression line stays left-aligned.
 - `src/model.zig` — the whole engine and the **plain-form TEA update**: no effects, no timers, no I/O. This is the smallest real Native SDK app shape.
-- `src/theme.zig` — graphite + calculator-orange tokens for both modes, high-contrast falling back to the framework palettes, 18px keypad glyphs via `typography.button_size`, and a deeper active-orange for the pending operator via `controls.button_primary.active_background`.
+- `src/theme.zig` — the neutral palettes for both modes, the inverted-monochrome operator column, and the one blue accent through `controls.button_primary.active_background`; high-contrast falls back to the framework palettes, and keypad glyphs render at 18px via `typography.button_size`.
 
 ## Run
 
@@ -33,7 +42,7 @@ The expression line is a real `text_field` and it is the app's keyboard path: cl
 zig build run -Dplatform=macos -Dweb-engine=system
 ```
 
-Click the expression line and type `12+7⏎`, or press the keys. Escape clears from anywhere. The theme button cycles auto/light/dark; auto follows the system appearance live.
+Click the expression line and type `12+7⏎`, or press the keys. Escape clears from anywhere. The app follows the system appearance live — flip the OS to dark and the board follows.
 
 Run the deterministic suite (exhaustive arithmetic through `msgForPointer` on every key, keyboard through real `gpu_surface_input` events, the Escape shortcut through the platform event path, formatting, theming, markup engine parity, snapshot assertions, and the exact-frame keypad layout check):
 

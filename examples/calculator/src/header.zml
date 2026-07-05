@@ -1,8 +1,0 @@
-<!-- The calculator header: a quiet brand label and the theme cycle
-     button (auto -> light -> dark). Compiled at comptime
-     (canvas.CompiledMarkupView) and composed under the Zig root view. -->
-<row height="30" cross="center" gap="8" label="Calculator header">
-  <text size="sm" foreground="text_muted">Calculator</text>
-  <spacer grow="1" />
-  <button size="sm" variant="ghost" on-press="cycle_theme" label="Theme">{themeLabel}</button>
-</row>

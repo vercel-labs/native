@@ -484,19 +484,44 @@ test "search filters by name and pid through typed dispatch" {
     model.search_buffer = canvas.TextBuffer(model_mod.max_search).init("204");
     try testing.expectEqual(@as(usize, 2), model.matchCount(arena));
 
-    // Clear through the toolbar chip restores everything.
+    // Clear restores everything. The filter field carries the BUILT-IN
+    // trailing clear affordance (no external chip): the press stamps a
+    // `.clear` edit through the same on-input channel keystrokes use.
     tree = try buildTree(arena, &model);
-    const clear = findByLabel(tree.root, "Clear filter").?;
-    apply(&model, tree.msgForPointer(clear.id, .up).?);
+    const searching_field = findByKind(tree.root, .search_field).?;
+    apply(&model, tree.msgForTextEdit(searching_field.id, .clear).?);
     try testing.expectEqualStrings("", model.search());
     tree = try buildTree(arena, &model);
     try testing.expectEqual(@as(usize, 5), countListItems(tree.root));
+    try testing.expect(findByLabel(tree.root, "Clear filter") == null);
 
     // No matches renders the empty state instead of a list.
     model.search_buffer = canvas.TextBuffer(model_mod.max_search).init("zzzz");
     tree = try buildTree(arena, &model);
     try testing.expectEqual(@as(usize, 0), countListItems(tree.root));
     try testing.expect(findByLabel(tree.root, "No processes match") != null);
+}
+
+test "the process rows are flat list rows and the table scroll is controlled" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var model = edgeModel();
+
+    // Rows are the flat list_item composite (one full-width wash per
+    // row, no per-row card chrome) with the table cells as children.
+    var tree = try buildTree(arena, &model);
+    const row = findByLabel(tree.root, "renderfarm-worker pid 842").?;
+    try testing.expectEqual(canvas.WidgetKind.list_item, row.kind);
+    try testing.expect(findByText(row, .text, "renderfarm-worker") != null);
+
+    // The scroll echoes the model-owned offset: the applied offset lands
+    // in the model and the next build carries it.
+    apply(&model, .{ .table_scrolled = .{ .offset = 66 } });
+    try testing.expectEqual(@as(f32, 66), model.table_scroll);
+    tree = try buildTree(arena, &model);
+    const scroll = findByKind(tree.root, .scroll_view).?;
+    try testing.expectEqual(@as(f32, 66), scroll.value);
 }
 
 // -------------------------------------------------------------- kill flow
@@ -596,7 +621,7 @@ test "kill and copy exits land as status notes through the live loop" {
 
 // ---------------------------------------------------------------- theming
 
-test "theme preference and system appearance derive the ops tokens" {
+test "the system appearance drives the ops tokens live" {
     if (!sampler.supported) return error.SkipZigTest;
     const live = try LiveApp.start();
     defer live.stop();
@@ -604,16 +629,17 @@ test "theme preference and system appearance derive the ops tokens" {
 
     try testing.expectEqualDeep(theme.light_colors, main.tokensFromModel(&app_state.model).colors);
 
+    // The OS flips to dark; the app follows it — there is no in-window
+    // theme control by design.
     try live.harness.runtime.dispatchPlatformEvent(live.app, .{ .appearance_changed = .{ .color_scheme = .dark } });
     try testing.expectEqualDeep(theme.dark_colors, (try live.harness.runtime.canvasWidgetDesignTokens(1, main.canvas_label)).colors);
 
-    try live.dispatch(.{ .set_theme = .light });
+    try live.harness.runtime.dispatchPlatformEvent(live.app, .{ .appearance_changed = .{ .color_scheme = .light } });
     try testing.expectEqualDeep(theme.light_colors, (try live.harness.runtime.canvasWidgetDesignTokens(1, main.canvas_label)).colors);
 
     // High contrast falls back to the framework palette (accessibility
     // beats brand).
     try live.harness.runtime.dispatchPlatformEvent(live.app, .{ .appearance_changed = .{ .color_scheme = .dark, .high_contrast = true } });
-    try live.dispatch(.{ .set_theme = .auto });
     try testing.expectEqualDeep(canvas.ColorTokens.highContrastDark(), (try live.harness.runtime.canvasWidgetDesignTokens(1, main.canvas_label)).colors);
 }
 
@@ -625,7 +651,7 @@ test "markup engine parity: the header builds identical trees" {
     const arena = arena_state.allocator();
 
     var model = Model{};
-    apply(&model, .{ .set_theme = .dark });
+    apply(&model, .{ .set_appearance = .{ .color_scheme = .dark } });
 
     var interpreter = try canvas.MarkupView(Model, Msg).init(arena, view_mod.header_markup);
     var compiled_ui = Ui.init(arena);
@@ -752,7 +778,7 @@ fn settingsWidgetIdByLabel(live: LiveApp, window_id: u64, label: []const u8) !?c
     return null;
 }
 
-test "the settings window opens by Msg, drives the theme from its own canvas, and round-trips close" {
+test "the settings window opens by Msg, drives sampling from its own canvas, and round-trips close" {
     if (!sampler.supported) return error.SkipZigTest;
     const live = try LiveApp.start();
     defer live.stop();
@@ -782,13 +808,15 @@ test "the settings window opens by Msg, drives the theme from its own canvas, an
         .nonblank = true,
     } });
 
-    // Pick the dark theme INSIDE the settings window, by automation
-    // verb addressed at the settings canvas label: one dispatch
-    // restyles both windows (same model, same tokens_fn).
-    const dark_id = (try settingsWidgetIdByLabel(live, info.id, "Dark")) orelse return error.TestUnexpectedResult;
-    const dark_press = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ main.settings_canvas_label, dark_id });
-    try live.harness.runtime.dispatchAutomationCommand(live.app, dark_press);
-    try testing.expectEqual(model_mod.ThemePref.dark, model.theme_pref);
+    // Pause sampling INSIDE the settings window, by automation verb
+    // addressed at the settings canvas label: one dispatch updates both
+    // windows (same model). Appearance is not a setting — the system
+    // scheme reaches BOTH canvases through on_appearance.
+    const pause_id = (try settingsWidgetIdByLabel(live, info.id, "Pause or resume sampling")) orelse return error.TestUnexpectedResult;
+    const pause_press = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ main.settings_canvas_label, pause_id });
+    try live.harness.runtime.dispatchAutomationCommand(live.app, pause_press);
+    try testing.expect(model.paused);
+    try live.harness.runtime.dispatchPlatformEvent(live.app, .{ .appearance_changed = .{ .color_scheme = .dark } });
     try testing.expectEqualDeep(theme.dark_colors, (try live.harness.runtime.canvasWidgetDesignTokens(1, main.canvas_label)).colors);
     try testing.expectEqualDeep(theme.dark_colors, (try live.harness.runtime.canvasWidgetDesignTokens(info.id, main.settings_canvas_label)).colors);
 
@@ -869,11 +897,11 @@ test "render showcase screenshots from replayed real samples (env-gated)" {
     // tokens, and offscreen screenshots clear with those LIVE tokens (the
     // old contract cleared with the last PRESENTED color and needed a
     // frame per theme; this test now proves the fix).
-    try live.dispatch(.{ .set_theme = .dark });
+    try live.harness.runtime.dispatchPlatformEvent(live.app, .{ .appearance_changed = .{ .color_scheme = .dark } });
     live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/system-monitor-shots/dark-artifacts", "System Monitor");
     try live.harness.runtime.dispatchAutomationCommand(live.app, "screenshot monitor-canvas 2");
 
-    try live.dispatch(.{ .set_theme = .light });
+    try live.harness.runtime.dispatchPlatformEvent(live.app, .{ .appearance_changed = .{ .color_scheme = .light } });
     live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/system-monitor-shots/light-artifacts", "System Monitor");
     try live.harness.runtime.dispatchAutomationCommand(live.app, "screenshot monitor-canvas 2");
 

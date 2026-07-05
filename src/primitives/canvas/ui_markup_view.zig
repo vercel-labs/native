@@ -252,6 +252,14 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
 
             var children: std.ArrayListUnmanaged(Ui.Node) = .empty;
             try self.buildChildren(ui, scope, node, &children);
+            // Tab triggers ARE segmented controls: markup composes the
+            // strip from `<button>` children (segmented-control is a
+            // documented markup exclusion), and the engine lowers them to
+            // the widget kind tab strips are built on — so the active
+            // trigger lifts to the surface with a hairline exactly like
+            // the Zig builder's tabs. Handlers ride the widget id, so
+            // `selected=`/`on-press` bindings are untouched.
+            if (kind == .tabs) lowerTabsTriggers(children.items);
             return ui.el(kind, options, @as([]const Ui.Node, children.items));
         }
 
@@ -1618,6 +1626,19 @@ pub fn elementKind(name: []const u8) ?canvas.WidgetKind {
         if (std.mem.eql(u8, name, entry[0])) return entry[1];
     }
     return null;
+}
+
+/// Tab triggers ARE segmented controls: markup composes the strip from
+/// `<button>` children (segmented-control is a documented markup
+/// exclusion), and both engines lower them to the widget kind the
+/// engine's tab strips are built on, so the active trigger lifts to the
+/// surface with a hairline exactly like the Zig builder's tabs.
+/// Handlers ride the widget id, so bindings are untouched; toggle-button
+/// children keep their kind (their on-toggle contract is different).
+pub fn lowerTabsTriggers(children: anytype) void {
+    for (children) |*child| {
+        if (child.widget.kind == .button) child.widget.kind = .segmented_control;
+    }
 }
 
 pub fn elementTakesText(kind: canvas.WidgetKind) bool {

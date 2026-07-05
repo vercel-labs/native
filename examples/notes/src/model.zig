@@ -111,8 +111,9 @@ pub const DialogMode = enum { closed, create_folder, rename_folder };
 
 pub const Msg = union(enum) {
     edit: canvas.TextInputEvent,
+    /// Search field edits — typing, and the field's built-in clear
+    /// affordance (the trailing x / Escape), which arrives as `.clear`.
     search_edit: canvas.TextInputEvent,
-    clear_search,
     folder_field_edit: canvas.TextInputEvent,
     select_folder: u32,
     /// Sidebar position (0 = All Notes) — the cmd+digit shortcuts.
@@ -134,7 +135,10 @@ pub const Msg = union(enum) {
     /// controlled pattern (rebuilds re-lay the panes exactly).
     sidebar_resized: f32,
     list_resized: f32,
-    toggle_theme,
+    /// Note-list scrolls: the runtime already applied the offset; storing
+    /// it and echoing it back through the scroll's `value` is the
+    /// controlled pattern (rebuilds keep the list's place).
+    note_list_scrolled: canvas.ScrollState,
     system_scheme: canvas.ColorScheme,
     refresh_tick: native_sdk.EffectTimer,
     save_tick: native_sdk.EffectTimer,
@@ -168,10 +172,9 @@ pub const Model = struct {
     /// Exactly-one-write-in-flight bookkeeping.
     store_write_inflight: bool = false,
     save_pending: bool = false,
-    /// Theme: the system scheme flows in through `on_appearance`; the
-    /// header toggle overrides it until the app restarts.
+    /// Theme: the app follows the system appearance — the scheme flows
+    /// in through `on_appearance` and the tokens re-derive from it.
     system_scheme: canvas.ColorScheme = .light,
-    override_scheme: ?canvas.ColorScheme = null,
     /// Time seam (`native_sdk.Clock`): relative timestamps and note
     /// mutation times read it, so tests substitute a `TestClock`.
     clock: native_sdk.Clock = .system,
@@ -183,6 +186,9 @@ pub const Model = struct {
     /// the classic 216 / 304 / rest three-pane proportions.
     sidebar_split: f32 = 0.19,
     list_split: f32 = 0.33,
+    /// Note-list scroll offset (model-owned; the runtime echoes scrolls
+    /// back through `note_list_scrolled`).
+    note_list_scroll: f32 = 0,
 
     /// Keyboard reference rendered in the idle editor pane. Spelled-out
     /// key names on purpose: the bundled glyph set has no ⌘/⌥ coverage,
@@ -273,22 +279,6 @@ pub const Model = struct {
 
     pub fn searching(model: *const Model) bool {
         return model.search().len > 0;
-    }
-
-    pub fn themeLabel(model: *const Model) []const u8 {
-        return switch (model.effectiveScheme()) {
-            .light => "Dark mode",
-            .dark => "Light mode",
-        };
-    }
-
-    pub fn effectiveScheme(model: *const Model) canvas.ColorScheme {
-        return model.override_scheme orelse model.system_scheme;
-    }
-
-    /// `<if test="{isDark}">` predicate for the theme toggle's icon arms.
-    pub fn isDark(model: *const Model) bool {
-        return model.effectiveScheme() == .dark;
     }
 
     pub fn foldersFull(model: *const Model) bool {
@@ -739,7 +729,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             scheduleSave(fx);
         },
         .search_edit => |edit| model.search_buffer.apply(edit),
-        .clear_search => model.search_buffer.apply(.clear),
         .folder_field_edit => |edit| {
             model.folder_field.apply(edit);
             model.dialog_hint = "";
@@ -750,6 +739,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         // never fight the reconcile.
         .sidebar_resized => |fraction| model.sidebar_split = fraction,
         .list_resized => |fraction| model.list_split = fraction,
+        // Same controlled pattern for the note-list scroll: store the
+        // applied offset, echo it back through the scroll's value.
+        .note_list_scrolled => |state| model.note_list_scroll = state.offset,
         .select_folder_at => |position| {
             if (position == 0) return selectFolder(model, all_folder_id);
             if (position <= model.folder_count) selectFolder(model, model.folders[position - 1].id);
@@ -821,10 +813,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.search_buffer.apply(.clear);
             }
         },
-        .toggle_theme => model.override_scheme = switch (model.effectiveScheme()) {
-            .light => .dark,
-            .dark => .light,
-        },
         .system_scheme => |scheme| model.system_scheme = scheme,
         // The rebuild that follows every dispatch re-derives the relative
         // timestamps; the tick itself carries no state.
@@ -871,6 +859,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
 fn selectFolder(model: *Model, id: u32) void {
     if (id != all_folder_id and model.folderById(id) == null) return;
     model.selected_folder = id;
+    // Jumping to a folder shows its top — the controlled scroll would
+    // otherwise echo the previous folder's offset into the new list.
+    model.note_list_scroll = 0;
     model.selectTopNote();
 }
 

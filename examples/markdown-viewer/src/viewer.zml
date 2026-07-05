@@ -36,15 +36,7 @@
     <button size="sm" variant="outline" icon="folder-open" on-press="open_doc" disabled="{pathEmpty}">Open</button>
     <button size="sm" variant="outline" icon="save" on-press="save_doc" disabled="{cannotSave}">Save</button>
     <button size="sm" variant="outline" on-press="save_as" disabled="{pathEmpty}">Save As</button>
-    <!-- Icon-only theme toggle: sun in dark mode, moon in light. The two
-         arms share a key so the button keeps its identity when the icon
-         swaps; the label carries the accessible name. -->
-    <if test="{isDark}">
-      <button key="theme-toggle" size="sm" variant="ghost" icon="sun" on-press="toggle_theme" label="{themeLabel}"></button>
-    </if>
-    <else>
-      <button key="theme-toggle" size="sm" variant="ghost" icon="moon" on-press="toggle_theme" label="{themeLabel}"></button>
-    </else>
+    <spacer width="{chrome_trailing}" />
   </row>
   <separator />
   <row grow="1">
@@ -80,7 +72,10 @@
       <row padding="10" cross="center">
         <text foreground="text_muted" grow="1">Preview</text>
       </row>
-      <scroll grow="1">
+      <!-- Controlled scroll: the model owns the offset — on-scroll stores
+           the applied value, the binding echoes it back, so the preview
+           keeps its place across every rebuild. -->
+      <scroll grow="1" value="{doc_scroll}" on-scroll="doc_scrolled" label="Preview">
         <column padding="24">
           <markdown source="{document}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" />
         </column>

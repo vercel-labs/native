@@ -121,10 +121,9 @@ pub const Model = struct {
     /// dropdown exists only while this is true; `close_sample_picker`
     /// (the surface's on-dismiss) and picking both clear it.
     sample_picker_open: bool = false,
-    /// Theme: the system scheme flows in through `on_appearance`; the
-    /// toolbar toggle overrides it until the app restarts.
+    /// Theme: the app follows the system appearance — the scheme flows
+    /// in through `on_appearance` and the tokens re-derive from it.
     system_scheme: canvas.ColorScheme = .light,
-    override_scheme: ?canvas.ColorScheme = null,
     /// One-line activity note for the status bar ("Saved", "Open failed…").
     note_storage: [max_note_bytes]u8 = undefined,
     note_len: usize = 0,
@@ -139,6 +138,9 @@ pub const Model = struct {
     chrome_leading: f32 = 0,
     chrome_trailing: f32 = 0,
     toolbar_height: f32 = toolbar_natural_height,
+    /// Preview scroll offset (model-owned; the runtime echoes scrolls
+    /// back through `doc_scrolled` and the view's `value` binding).
+    doc_scroll: f32 = 0,
 
     pub const samples = [_]Sample{
         .{ .id = welcome_sample_id, .title = "Welcome", .body = @embedFile("samples/welcome.md") },
@@ -180,21 +182,6 @@ pub const Model = struct {
         if (sampleById(model.active_sample_id)) |sample| return sample.title;
         if (model.current_path_len > 0) return pathBasename(model.currentPath());
         return "Untitled";
-    }
-
-    /// The accessible name for the icon-only theme toggle (the sun/moon
-    /// vector icons carry the visual; dingbats rendered as tofu and are
-    /// long gone).
-    pub fn themeLabel(model: *const Model) []const u8 {
-        return switch (model.effectiveScheme()) {
-            .light => "Dark mode",
-            .dark => "Light mode",
-        };
-    }
-
-    /// `<if test="{isDark}">` predicate for the theme toggle's icon arms.
-    pub fn isDark(model: *const Model) bool {
-        return model.effectiveScheme() == .dark;
     }
 
     pub const RecentDoc = struct {
@@ -245,6 +232,9 @@ pub const Model = struct {
         model.active_sample_id = id;
         model.current_path_len = 0;
         model.details_expanded = [_]bool{false} ** max_details;
+        // A different document starts at its top — the controlled scroll
+        // would otherwise echo the old document's offset into the new one.
+        model.doc_scroll = 0;
         model.note_len = 0;
     }
 
@@ -329,10 +319,6 @@ pub const Model = struct {
         }
         return buffer[0..len];
     }
-
-    pub fn effectiveScheme(model: *const Model) canvas.ColorScheme {
-        return model.override_scheme orelse model.system_scheme;
-    }
 };
 
 pub fn countWords(text: []const u8) usize {
@@ -379,9 +365,12 @@ pub const Msg = union(enum) {
     open_doc,
     save_doc,
     save_as,
-    toggle_theme,
     system_scheme: canvas.ColorScheme,
     chrome_changed: native_sdk.WindowChrome,
+    /// Preview scrolls: the runtime already applied the offset; storing
+    /// it and echoing it back through the scroll's `value` is the
+    /// controlled pattern (rebuilds keep the preview's place).
+    doc_scrolled: canvas.ScrollState,
     toggle_details: usize,
     open_url: []const u8,
     file_done: native_sdk.EffectFileResult,
@@ -476,11 +465,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .open_doc => openPath(model, fx, std.mem.trim(u8, model.path_field.text(), " ")),
         .save_doc => savePath(model, fx, model.currentPath()),
         .save_as => savePath(model, fx, std.mem.trim(u8, model.path_field.text(), " ")),
-        .toggle_theme => model.override_scheme = switch (model.effectiveScheme()) {
-            .light => .dark,
-            .dark => .light,
-        },
         .system_scheme => |scheme| model.system_scheme = scheme,
+        // Echo the applied scroll offset back through the model: the next
+        // rebuild lays the preview at exactly this value, so scrolling
+        // never fights the reconcile.
+        .doc_scrolled => |state| model.doc_scroll = state.offset,
         .chrome_changed => |chrome| {
             model.chrome_leading = chrome.insets.left;
             model.chrome_trailing = chrome.insets.right;
@@ -503,6 +492,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     model.editor.set(result.bytes);
                     model.active_sample_id = 0;
                     model.details_expanded = [_]bool{false} ** max_details;
+                    model.doc_scroll = 0;
                     model.adoptPendingPath();
                     model.pushRecent(model.currentPath());
                     model.setNote("Opened {s}", .{model.docTitle()});
@@ -511,6 +501,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .truncated => {
                     model.editor.set(result.bytes);
                     model.active_sample_id = 0;
+                    model.doc_scroll = 0;
                     model.setNote("Opened a cut copy: file exceeds the {d} KiB document cap", .{max_document_bytes / 1024});
                 },
                 else => model.setNote("Open failed: {s}", .{@tagName(result.outcome)}),
@@ -549,7 +540,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
 /// per rebuild from the model's scheme; the runtime stamps the surface
 /// scale afterwards.
 pub fn viewerTokens(model: *const Model) canvas.DesignTokens {
-    const scheme = model.effectiveScheme();
+    const scheme = model.system_scheme;
     var tokens = canvas.DesignTokens.theme(.{ .color_scheme = scheme });
     tokens.colors = switch (scheme) {
         .light => .{
@@ -596,8 +587,8 @@ pub fn viewerTokens(model: *const Model) canvas.DesignTokens {
     return tokens;
 }
 
-/// System appearance flows into the model; an explicit toolbar override
-/// keeps winning because `effectiveScheme` consults it first.
+/// System appearance flows into the model and the tokens re-derive from
+/// it — the app follows the OS scheme live, with no in-window theme UI.
 pub fn onAppearance(appearance: native_sdk.Appearance) ?Msg {
     return .{ .system_scheme = switch (appearance.color_scheme) {
         .light => .light,

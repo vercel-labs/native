@@ -1200,11 +1200,14 @@ test "runtime applies text input to focused canvas search fields" {
     const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{search_field} }, geometry.RectF.init(0, 0, 240, 120), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
 
+    // Mid-field, past the text's end but clear of the trailing
+    // clear-affordance zone (which consumes presses instead of
+    // placing the caret).
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = "canvas",
         .kind = .pointer_down,
-        .x = 188,
+        .x = 120,
         .y = 24,
     } });
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
@@ -1305,6 +1308,106 @@ test "runtime applies text input to focused canvas search fields" {
         }
     }
     try std.testing.expect(saw_search_placeholder);
+}
+
+test "search field clear affordance: press clears through the text-edit path" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-search-clear", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+
+    const search_field = canvas.Widget{
+        .id = 2,
+        .kind = .search_field,
+        .frame = geometry.RectF.init(12, 16, 180, 36),
+        .text = "Query",
+        .semantics = .{ .label = "Search" },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{search_field} }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    const tokens = try harness.runtime.canvasWidgetDesignTokens(1, "canvas");
+
+    // The x renders inside the field whenever it holds text — the icon
+    // rect and the (wider) hit rect share geometry.
+    const live = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const icon_rect = canvas.textInputClearButtonRect(live.nodes[1].widget, tokens).?;
+    const hit_rect = canvas.textInputClearButtonHitRect(live.nodes[1].widget, tokens).?;
+    try std.testing.expect(hit_rect.containsRect(icon_rect));
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+    var display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    var saw_clear_icon = false;
+    for (display_list.commands) |command| {
+        switch (command) {
+            .stroke_path => |path| {
+                // The x is two stroke shapes from slot 15: strokes land
+                // on part slots 16 and 18.
+                if (path.id == testCanvasWidgetPartId(2, 16)) saw_clear_icon = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_clear_icon);
+
+    // Pressing inside the clear region clears the field through the
+    // standard text-edit path — no caret placement, selection reset.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = icon_rect.x + icon_rect.width * 0.5,
+        .y = icon_rect.y + icon_rect.height * 0.5,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_up,
+        .x = icon_rect.x + icon_rect.width * 0.5,
+        .y = icon_rect.y + icon_rect.height * 0.5,
+    } });
+    const cleared = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("", cleared.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), cleared.nodes[1].widget.text_selection.?);
+
+    // Empty field: no affordance, and a press at the same point places
+    // the caret like any other in-field click instead of clearing.
+    try std.testing.expect(canvas.textInputClearButtonRect(cleared.nodes[1].widget, tokens) == null);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+    display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    for (display_list.commands) |command| {
+        switch (command) {
+            .stroke_path => |path| try std.testing.expect(path.id != testCanvasWidgetPartId(2, 16)),
+            else => {},
+        }
+    }
+
+    // A disabled search field with text shows no affordance either.
+    var disabled_field = search_field;
+    disabled_field.state = .{ .disabled = true };
+    try std.testing.expect(canvas.textInputClearButtonRect(disabled_field, tokens) == null);
+    // Text fields and comboboxes never grow one (the combobox trailing
+    // slot is the chevron's).
+    var plain_field = search_field;
+    plain_field.kind = .text_field;
+    try std.testing.expect(canvas.textInputClearButtonRect(plain_field, tokens) == null);
+    var combo_field = search_field;
+    combo_field.kind = .combobox;
+    try std.testing.expect(canvas.textInputClearButtonRect(combo_field, tokens) == null);
 }
 
 test "runtime click focus shows caret, ring, and blink; blur drops them" {

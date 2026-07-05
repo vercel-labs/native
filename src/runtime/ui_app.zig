@@ -1623,6 +1623,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 },
                 else => {},
             }
+            // A pointer gesture that performed a text edit (the search
+            // field's built-in clear) maps to the field's `on_input`
+            // Msg — the runtime already applied the edit; the model
+            // hears it here so a source-owned buffer clears too.
+            if (pointer_event.edit) |edit| {
+                if (pointer_event.target) |edit_target| {
+                    if (tree.msgForTextEdit(edit_target.id, edit)) |msg| {
+                        try self.dispatch(runtime, pointer_event.window_id, msg);
+                    }
+                }
+            }
             const target = pointer_event.press_target orelse return;
             if (tree.msgForPointer(target.id, pointer_event.pointer.phase)) |msg| {
                 try self.dispatch(runtime, pointer_event.window_id, msg);

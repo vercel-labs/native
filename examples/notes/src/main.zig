@@ -118,7 +118,7 @@ pub fn boot(model: *Model, fx: *Effects) void {
 /// backdrop panel with `background="shadow"`), and nothing else in this
 /// app casts shadows.
 pub fn notesTokens(model: *const Model) canvas.DesignTokens {
-    const scheme = model.effectiveScheme();
+    const scheme = model.system_scheme;
     var tokens = canvas.DesignTokens.theme(.{ .color_scheme = scheme });
     tokens.colors = switch (scheme) {
         .light => .{
@@ -166,8 +166,8 @@ pub fn notesTokens(model: *const Model) canvas.DesignTokens {
     return tokens;
 }
 
-/// System appearance flows into the model; an explicit header override
-/// keeps winning because `effectiveScheme` consults it first.
+/// System appearance flows into the model and the tokens re-derive from
+/// it — the app follows the OS scheme live, with no in-window theme UI.
 pub fn onAppearance(appearance: native_sdk.Appearance) ?Msg {
     return .{ .system_scheme = switch (appearance.color_scheme) {
         .light => .light,

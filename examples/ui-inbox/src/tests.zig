@@ -59,7 +59,9 @@ test "a full user session drives the model through typed dispatch" {
     try testing.expect(rebuilt_checkbox.state.selected);
 
     // Switch to the done filter; only completed rows remain visible.
-    const done_button = findByText(rebuilt.root, .button, "done").?;
+    // Tab triggers are `<button>`s in markup, lowered to segmented
+    // controls by the engine (the house tab treatment).
+    const done_button = findByText(rebuilt.root, .segmented_control, "done").?;
     main.update(&model, rebuilt.msgForPointer(done_button.id, .up).?);
     const filtered = try buildTree(arena, &model);
     try testing.expectEqual(@as(usize, 1), countKind(filtered.root, .checkbox));

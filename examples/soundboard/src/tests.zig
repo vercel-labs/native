@@ -192,6 +192,78 @@ test "play, pause, and seek drive the progress timer effect" {
     try testing.expectApproxEqAbs(expected, @as(f32, @floatFromInt(app_state.model.elapsed_ms)), 1);
 }
 
+test "the seek bar's rendered value advances with playback ticks" {
+    // Regression: the slider reconcile used to retain its runtime value
+    // unconditionally, so the model-driven `value="{progressFraction}"`
+    // binding froze at 0 after mount - elapsed time ticked, the bar did
+    // not. The reconcile now follows the source when it moves.
+    const live = try LiveApp.start(true);
+    defer live.stop();
+    const app_state = live.app_state;
+
+    try live.dispatch(.{ .play_track = 1 });
+    const duration: f32 = @floatFromInt(model_mod.trackById(1).duration_ms);
+
+    // Four timer fires through the fake effects executor: elapsed and
+    // the RENDERED slider value advance in lockstep.
+    for (1..5) |ticks| {
+        try app_state.effects.fireTimer(model_mod.progress_timer_key);
+        try live.wake();
+        const expected_ms: u32 = @intCast(model_mod.tick_ms * ticks);
+        try testing.expectEqual(expected_ms, app_state.model.elapsed_ms);
+
+        const layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+        var slider_value: ?f32 = null;
+        for (layout.nodes) |node| {
+            if (node.widget.kind == .slider) slider_value = node.widget.value;
+        }
+        const expected_fraction = @as(f32, @floatFromInt(expected_ms)) / duration;
+        try testing.expectApproxEqAbs(expected_fraction, slider_value.?, 0.0001);
+    }
+}
+
+test "controlled scroll: the album grid keeps its offset through playback rebuilds" {
+    // The scroll regions are CONTROLLED: on_scroll stores the applied
+    // offset and value echoes it back, so a rebuild mid-scroll (the
+    // 500 ms progress tick) can never restore an unechoed offset - and
+    // on macOS an id churn cannot make the native scroll driver snap
+    // the OS scroller back to the source offset.
+    const live = try LiveApp.start(true);
+    defer live.stop();
+    const app_state = live.app_state;
+
+    try live.dispatch(.{ .play_track = 1 });
+
+    // Wheel the album grid down through the real input path.
+    try live.harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = main.canvas_label,
+        .kind = .scroll,
+        .x = main.window_width / 2,
+        .y = main.window_height / 2,
+        .delta_y = 180,
+    } });
+    try testing.expect(app_state.model.grid_scroll > 0);
+    const scrolled_offset = app_state.model.grid_scroll;
+
+    // A playback tick rebuilds the whole tree; the grid must hold.
+    try app_state.effects.fireTimer(model_mod.progress_timer_key);
+    try live.wake();
+    const layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+    var grid_offset: ?f32 = null;
+    for (layout.nodes) |node| {
+        if (node.widget.kind == .scroll_view) grid_offset = node.widget.value;
+    }
+    try testing.expectApproxEqAbs(scrolled_offset, grid_offset.?, 0.0001);
+    try testing.expectApproxEqAbs(scrolled_offset, app_state.model.grid_scroll, 0.0001);
+
+    // Opening a record resets the DETAIL region to its top while the
+    // grid offset stays owned by the model.
+    try live.dispatch(.{ .open_album = 2 });
+    try testing.expectEqual(@as(f32, 0), app_state.model.detail_scroll);
+    try testing.expectApproxEqAbs(scrolled_offset, app_state.model.grid_scroll, 0.0001);
+}
+
 test "track end auto-advances; the play-next queue wins over album order" {
     const live = try LiveApp.start(true);
     defer live.stop();
@@ -275,17 +347,18 @@ test "search filters albums and songs through typed dispatch" {
     tree = try buildTree(arena, &model);
     try testing.expectEqual(@as(usize, model_mod.tracks_per_album), countListItems(tree.root));
 
-    // Clear restores the full library. The clear control is an
-    // icon-only button: the "x" rides the button's own icon channel
-    // (widget.icon), so there is exactly one widget and one hit target.
-    const clear = findByLabel(tree.root, "Clear search").?;
-    try testing.expectEqual(canvas.WidgetKind.button, clear.kind);
-    try testing.expectEqualStrings("x", clear.icon);
-    try testing.expectEqualStrings("", clear.text);
-    apply(&model, tree.msgForPointer(clear.id, .up).?);
+    // Clear restores the full library. The search field carries the
+    // BUILT-IN trailing clear affordance (no external button): the
+    // press stamps a `.clear` edit that reaches the model through the
+    // same on-input channel every keystroke uses.
+    const searching_field = findByKind(tree.root, .search_field).?;
+    apply(&model, tree.msgForTextEdit(searching_field.id, .clear).?);
     try testing.expectEqualStrings("", model.search());
     tree = try buildTree(arena, &model);
     try testing.expectEqual(model_mod.tracks.len, countListItems(tree.root));
+    // Nothing else in the header claims the clear: the external button
+    // is gone.
+    try testing.expect(findByLabel(tree.root, "Clear search") == null);
 
     // No matches renders the empty state instead of a list.
     apply(&model, .show_albums);
@@ -368,43 +441,43 @@ test "a full session: open an album, play it, and use the context menus" {
     try testing.expect(findByText(tree.root, .badge, "Playing") != null);
 }
 
-test "theme preference and system appearance derive the custom tokens" {
+test "the system appearance drives the custom tokens live" {
     const live = try LiveApp.start(true);
     defer live.stop();
     const app_state = live.app_state;
 
-    // Default: auto + light system appearance = custom light palette.
+    // Default: light system appearance = custom light palette.
     try testing.expectEqualDeep(theme.light_colors, main.tokensFromModel(&app_state.model).colors);
 
-    // The OS flips to dark; auto follows it.
+    // The OS flips to dark; the app follows it - there is no in-window
+    // theme control by design.
     try live.harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .appearance_changed = .{ .color_scheme = .dark } });
     try testing.expectEqualDeep(theme.dark_colors, main.tokensFromModel(&app_state.model).colors);
     try testing.expectEqualDeep(theme.dark_colors, (try live.harness.runtime.canvasWidgetDesignTokens(1, main.canvas_label)).colors);
 
-    // An explicit light preference overrides the dark system scheme.
-    try live.dispatch(.{ .set_theme = .light });
+    // And back to light.
+    try live.harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .appearance_changed = .{ .color_scheme = .light } });
     try testing.expectEqualDeep(theme.light_colors, (try live.harness.runtime.canvasWidgetDesignTokens(1, main.canvas_label)).colors);
 
     // High contrast falls back to the framework palette (accessibility
     // beats brand).
     try live.harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .appearance_changed = .{ .color_scheme = .dark, .high_contrast = true } });
-    try live.dispatch(.{ .set_theme = .auto });
     try testing.expectEqualDeep(canvas.ColorTokens.highContrastDark(), (try live.harness.runtime.canvasWidgetDesignTokens(1, main.canvas_label)).colors);
 }
 
-test "theme chips are a model-driven exclusive group across rebuilds" {
-    // The header's theme chips are real toggle-buttons
-    // whose selected= comes from the model. Pressing chips through the
-    // real widget path must always leave exactly the model's selection
-    // active — never every chip ever pressed.
+test "the Albums/Songs tabs render as segmented triggers with one active" {
+    // The header authors the strip as `<tabs>` + `<button selected=...>`;
+    // the markup engines lower those buttons to `segmented_control`
+    // widgets, so the active tab lifts to the surface per the house
+    // treatment instead of vanishing into the strip's wash.
     const live = try LiveApp.start(true);
     defer live.stop();
     const app_state = live.app_state;
 
-    const ThemeChips = struct {
-        fn chipId(layout: canvas.WidgetLayoutTree, label: []const u8) ?canvas.ObjectId {
+    const Tabs = struct {
+        fn triggerId(layout: canvas.WidgetLayoutTree, label: []const u8) ?canvas.ObjectId {
             for (layout.nodes) |node| {
-                if (node.widget.kind != .toggle_button) continue;
+                if (node.widget.kind != .segmented_control) continue;
                 if (std.mem.eql(u8, node.widget.text, label)) return node.widget.id;
             }
             return null;
@@ -414,7 +487,7 @@ test "theme chips are a model-driven exclusive group across rebuilds" {
             var active: usize = 0;
             var active_matches = false;
             for (layout.nodes) |node| {
-                if (node.widget.kind != .toggle_button) continue;
+                if (node.widget.kind != .segmented_control) continue;
                 if (!node.widget.state.selected) continue;
                 active += 1;
                 if (std.mem.eql(u8, node.widget.text, label)) active_matches = true;
@@ -424,40 +497,27 @@ test "theme chips are a model-driven exclusive group across rebuilds" {
         }
     };
 
-    // Default preference is auto: exactly one chip active.
+    // Default tab is Albums: exactly one active trigger.
     var layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
-    try ThemeChips.expectExactlyOneActive(layout, "auto");
+    try Tabs.expectExactlyOneActive(layout, "Albums");
 
-    // Press "dark" through the real widget path (runtime toggle +
-    // dispatched Msg + rebuild): exactly one active chip.
+    // Click Songs through the real widget path: the model switches and
+    // exactly one trigger stays active.
     var command_buffer: [96]u8 = undefined;
-    const dark_id = ThemeChips.chipId(layout, "dark").?;
-    const press_dark = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} toggle", .{ main.canvas_label, dark_id });
-    try live.harness.runtime.dispatchAutomationCommand(app_state.app(), press_dark);
-    try testing.expectEqual(model_mod.ThemePref.dark, app_state.model.theme_pref);
+    const songs_id = Tabs.triggerId(layout, "Songs").?;
+    const click_songs = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ main.canvas_label, songs_id });
+    try live.harness.runtime.dispatchAutomationCommand(app_state.app(), click_songs);
+    try testing.expectEqual(model_mod.Tab.songs, app_state.model.tab);
     layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
-    try ThemeChips.expectExactlyOneActive(layout, "dark");
+    try Tabs.expectExactlyOneActive(layout, "Songs");
 
-    // Then "light": the previously active chip deactivates.
-    const light_id = ThemeChips.chipId(layout, "light").?;
-    const press_light = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} toggle", .{ main.canvas_label, light_id });
-    try live.harness.runtime.dispatchAutomationCommand(app_state.app(), press_light);
-    try testing.expectEqual(model_mod.ThemePref.light, app_state.model.theme_pref);
+    // And back to Albums.
+    const albums_id = Tabs.triggerId(layout, "Albums").?;
+    const click_albums = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ main.canvas_label, albums_id });
+    try live.harness.runtime.dispatchAutomationCommand(app_state.app(), click_albums);
+    try testing.expectEqual(model_mod.Tab.albums, app_state.model.tab);
     layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
-    try ThemeChips.expectExactlyOneActive(layout, "light");
-
-    // Pressing the ACTIVE chip keeps the model's selection: the
-    // runtime toggle is overridden by the model-driven rebuild.
-    try live.harness.runtime.dispatchAutomationCommand(app_state.app(), press_light);
-    try testing.expectEqual(model_mod.ThemePref.light, app_state.model.theme_pref);
-    layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
-    try ThemeChips.expectExactlyOneActive(layout, "light");
-
-    // An unrelated rebuild (search edit) never resurrects old chips.
-    apply(&app_state.model, .{ .play_track = 1 });
-    try live.dispatch(.toggle_play);
-    layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
-    try ThemeChips.expectExactlyOneActive(layout, "light");
+    try Tabs.expectExactlyOneActive(layout, "Albums");
 }
 
 test "the track-change animation window opens on play and closes after" {
@@ -600,16 +660,19 @@ test "render homepage screenshots (env-gated)" {
     defer live.stop();
 
     // The hero state: album grid, covers decoded, a track playing so the
-    // now-playing bar and transport are on screen.
+    // now-playing bar and transport are on screen - a minute in, so the
+    // seek bar carries real progress. The app follows the system
+    // appearance, so each scheme arrives as a platform event.
     try live.dispatch(.{ .play_track = 7 });
-    try live.dispatch(.{ .set_theme = .light });
+    live.app_state.model.elapsed_ms = 67_500;
+    try live.harness.runtime.dispatchPlatformEvent(live.app_state.app(), .{ .appearance_changed = .{ .color_scheme = .light } });
     try presentShotFrame(live, 2);
     live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/soundboard-light-artifacts", "Soundboard");
     try live.harness.runtime.dispatchAutomationCommand(live.app_state.app(), "screenshot soundboard-canvas 2");
 
     // Same state, dark scheme: the dispatch re-emits the display list
     // with the re-derived tokens, so no present is needed in between.
-    try live.dispatch(.{ .set_theme = .dark });
+    try live.harness.runtime.dispatchPlatformEvent(live.app_state.app(), .{ .appearance_changed = .{ .color_scheme = .dark } });
     live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/soundboard-dark-artifacts", "Soundboard");
     try live.harness.runtime.dispatchAutomationCommand(live.app_state.app(), "screenshot soundboard-canvas 2");
 }

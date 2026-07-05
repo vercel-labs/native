@@ -445,7 +445,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             _ = try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, index);
         }
 
-        pub fn updateCanvasWidgetTextFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
+        pub fn updateCanvasWidgetTextFromPointer(self: *Runtime, pointer_event: *CanvasWidgetPointerEvent) anyerror!void {
             const index = runtimeFindViewIndex(self, pointer_event.window_id, pointer_event.view_label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
 
@@ -466,6 +466,18 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             }
             if (target_id == 0) return;
 
+            // The search field's built-in clear affordance: a press
+            // inside the trailing clear region clears through the
+            // standard text-edit path instead of placing the caret, and
+            // the edit is stamped onto the event so the app's `on_input`
+            // hears it (the clipboard cut/paste precedent).
+            if (pointer_event.pointer.phase == .down) {
+                if (try applyCanvasWidgetClearButtonPress(self, index, target_id, pointer_event.pointer.point)) {
+                    pointer_event.edit = .clear;
+                    return;
+                }
+            }
+
             const dirty = try self.views[index].applyCanvasWidgetTextPointer(
                 target_id,
                 pointer_event.pointer.point,
@@ -477,6 +489,25 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 self.invalidateFor(.state, self.views[index].frame);
             }
             _ = try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, index);
+        }
+
+        /// Apply the search field's built-in clear when `point` presses
+        /// its trailing clear region: the standard text-edit path (so
+        /// selection/composition state resets exactly like Escape's
+        /// clear). Returns whether the press was consumed.
+        fn applyCanvasWidgetClearButtonPress(self: *Runtime, index: usize, target_id: canvas.ObjectId, point: geometry.PointF) anyerror!bool {
+            const node_index = self.views[index].canvasWidgetNodeIndexById(target_id) orelse return false;
+            const widget = self.views[index].widget_layout_nodes[node_index].widget;
+            const hit_rect = canvas.textInputClearButtonHitRect(widget, self.views[index].widget_tokens) orelse return false;
+            if (!hit_rect.containsPoint(point)) return false;
+            const dirty = try self.views[index].applyCanvasWidgetTextEdit(target_id, .clear) orelse return true;
+            if (canvasDirtyRegionForView(self.views[index].frame, dirty)) |dirty_region| {
+                self.invalidateFor(.state, dirty_region);
+            } else {
+                self.invalidateFor(.state, self.views[index].frame);
+            }
+            _ = try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, index);
+            return true;
         }
 
         pub fn updateCanvasWidgetControlFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {

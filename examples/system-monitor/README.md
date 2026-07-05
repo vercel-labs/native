@@ -21,15 +21,15 @@ Right/ctrl-click a table row for the native context menu. **Terminate (SIGTERM)�
 
 ## The settings window (model-declared)
 
-The toolbar gear opens **Settings** in its own window — the model-declared window pattern: `windows_fn` declares the window descriptor while `model.settings_open` is set, `window_view` renders `settingsView` (theme preference + sampling pause) from the same model as the main canvas, so picking a theme there restyles both windows on one dispatch. Close it by the gear (a Msg stops declaring it), or with the window's close button — the platform close dispatches `.settings_closed` and the model clears its flag. Automation drives it like any canvas: its widgets are in the snapshot and `widget-click settings-canvas <id>` works while it is open.
+The toolbar gear opens **Settings** in its own window — the model-declared window pattern: `windows_fn` declares the window descriptor while `model.settings_open` is set, `window_view` renders `settingsView` (sampling pause + cadence facts) from the same model as the main canvas, so pausing there updates both windows on one dispatch — and a system appearance change rethemes both canvases through `on_appearance`. Close it by the gear (a Msg stops declaring it), or with the window's close button — the platform close dispatches `.settings_closed` and the model clears its flag. Automation drives it like any canvas: its widgets are in the snapshot and `widget-click settings-canvas <id>` works while it is open.
 
 ## Authoring split (markup-first)
 
-- `src/header.zml` — brand, live/paused status line, model-driven exclusive theme chips.
-- `src/view.zig` — the Zig sections: stat tiles, `ui.chart` sparklines, the toolbar (vector icons paired with press handlers — play/pause, x, chevrons; markup buttons carry text only), the process table with per-row context menus, and the modal confirmation overlaid through a z-stack root.
+- `src/header.zml` — brand and the live/paused status line holding the trailing corner. The app follows the system appearance; there is no in-window theme control.
+- `src/view.zig` — the Zig sections: stat tiles, `ui.chart` sparklines, the toolbar (vector icons paired with press handlers — play/pause, chevrons; the filter field's clear is the search component's own built-in affordance), the process table as flat `list_item` rows under a hairline-separated heading (one surface, full-width hover washes, per-row context menus) with a controlled scroll (the model echoes the applied offset, so the 2 s sample rebuild never resets it mid-gesture), and the modal confirmation overlaid through a z-stack root.
 - `src/sampler.zig` — the pure parsers and per-OS command lines; no effects, no allocation.
 - `src/model.zig` — sampling state, history, table derivations, `update`, `boot`.
-- `src/theme.zig` — the teal/slate "ops room" token set for both modes; high-contrast falls back to the framework palettes.
+- `src/theme.zig` — the teal/slate "ops room" token set for both modes, derived live from the system appearance; high-contrast falls back to the framework palettes.
 
 ## Fixtures (committed real output)
 

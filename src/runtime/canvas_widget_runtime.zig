@@ -112,22 +112,27 @@ pub const CanvasWidgetSourceTextEntry = struct {
     text_hash: u64 = 0,
 };
 
-/// The SOURCE-side selected state of one control on the previous
-/// rebuild, kept per view so the control reconcile can tell a
-/// model-driven (controlled) widget from an uncontrolled one.
+/// The SOURCE-side selected state (and value, for sliders) of one
+/// control on the previous rebuild, kept per view so the control
+/// reconcile can tell a model-driven (controlled) widget from an
+/// uncontrolled one.
 pub const CanvasWidgetSourceControlEntry = struct {
     id: canvas.ObjectId = 0,
     kind: canvas.WidgetKind = .toggle_button,
     selected: bool = false,
+    value: f32 = 0,
 };
 
-/// Which control kinds track their SOURCE selected state across
-/// rebuilds. Only `toggle_button` today: chips are the one boolean
-/// control whose retained toggle fights model-driven exclusive groups;
-/// toggles/checkboxes/list selections keep the retained-wins
-/// contract locked by the control reconcile tests.
+/// Which control kinds track their SOURCE state across rebuilds.
+/// `toggle_button`: chips are the one boolean control whose retained
+/// toggle fights model-driven exclusive groups. `slider`: the one
+/// continuous control whose retained value fights a model-driven value
+/// (progress-style sliders) — it follows the scroll reconcile rule
+/// (source-side change wins, otherwise the retained drag survives).
+/// Toggles/checkboxes/list selections keep the retained-wins contract
+/// locked by the control reconcile tests.
 pub fn canvasWidgetSourceControlKind(kind: canvas.WidgetKind) bool {
-    return kind == .toggle_button;
+    return kind == .toggle_button or kind == .slider;
 }
 
 pub fn canvasWidgetSourceControlSelectedById(
@@ -138,6 +143,18 @@ pub fn canvasWidgetSourceControlSelectedById(
     if (id == 0) return null;
     for (entries) |entry| {
         if (entry.id == id and entry.kind == kind) return entry.selected;
+    }
+    return null;
+}
+
+pub fn canvasWidgetSourceControlValueById(
+    entries: []const CanvasWidgetSourceControlEntry,
+    id: canvas.ObjectId,
+    kind: canvas.WidgetKind,
+) ?f32 {
+    if (id == 0) return null;
+    for (entries) |entry| {
+        if (entry.id == id and entry.kind == kind) return entry.value;
     }
     return null;
 }
@@ -154,6 +171,7 @@ pub fn collectCanvasWidgetSourceControlEntries(
             .id = node.widget.id,
             .kind = node.widget.kind,
             .selected = canvasWidgetBooleanSelected(node.widget),
+            .value = node.widget.value,
         };
         len += 1;
     }
@@ -494,7 +512,25 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
                 copy.widget.value = if (selected) 1 else 0;
             },
             .slider => {
-                copy.widget.value = std.math.clamp(entry.value, 0, 1);
+                // Sliders follow the scroll reconcile rule: the
+                // runtime-owned value (a user drag) survives rebuilds
+                // only while the SOURCE value is unchanged; a
+                // source-side move (a model-driven value — playback
+                // progress, a synced setting) wins. A slider whose
+                // source never moves keeps the retained (uncontrolled)
+                // contract, and a LIVE drag always keeps the thumb —
+                // a mid-gesture source tick must not yank it.
+                const previous_source = canvasWidgetSourceControlValueById(
+                    previous_source_controls,
+                    copy.widget.id,
+                    copy.widget.kind,
+                );
+                const source_moved = if (previous_source) |source_value|
+                    copy.widget.value != source_value
+                else
+                    false;
+                if (!source_moved or entry.state.pressed) copy.widget.value = entry.value;
+                copy.widget.value = std.math.clamp(copy.widget.value, 0, 1);
             },
             .resizable => {
                 const width = @max(canvasWidgetResizableMinWidth(copy.widget), entry.value);

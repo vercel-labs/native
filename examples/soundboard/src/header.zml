@@ -1,31 +1,22 @@
-<!-- The soundboard header bar: brand, library tabs, search, and the theme
-     toggle. Compiled at comptime (canvas.CompiledMarkupView) and composed
-     under the Zig root view next to the Zig-only sections (album grid,
-     track rows) the closed markup grammar cannot express. -->
+<!-- The soundboard header bar: brand, library tabs, and search. Compiled
+     at comptime (canvas.CompiledMarkupView) and composed under the Zig
+     root view next to the Zig-only sections (album grid, track rows) the
+     closed markup grammar cannot express. The app follows the system
+     appearance (on_appearance); there is no in-window theme control.
+     The tab buttons lower to segmented triggers inside <tabs>, so the
+     active tab lifts to the surface per the house treatment. The search
+     field carries the built-in trailing clear affordance whenever it
+     holds text — no external Clear button. -->
 <column>
   <row height="60" padding="12" gap="12" cross="center" background="surface" label="Soundboard header">
     <badge variant="primary">Soundboard</badge>
     <text size="sm" width="84" foreground="text_muted">Native SDK</text>
     <tabs gap="4">
-      <button size="sm" variant="ghost" selected="{albumsShowing}" on-press="show_albums">Albums</button>
-      <button size="sm" variant="ghost" selected="{songsShowing}" on-press="show_songs">Songs</button>
+      <button size="sm" selected="{albumsShowing}" on-press="show_albums">Albums</button>
+      <button size="sm" selected="{songsShowing}" on-press="show_songs">Songs</button>
     </tabs>
     <spacer grow="1" />
     <search-field text="{search}" placeholder="Search albums, artists, songs…" width="280" on-input="search_edit" label="Search library" />
-    <if test="{searching}">
-      <!-- Icon-only button: the x is part of the button's own rendering
-           (one hit target, one tint) — the empty content makes it
-           square, the label carries the accessible name. -->
-      <button size="sm" variant="ghost" icon="x" on-press="clear_search" label="Clear search"></button>
-    </if>
-    <!-- Model-driven exclusive chips: a toggle-button whose
-         selected= comes from the model is source-owned across rebuilds,
-         so exactly the model's selection is active. -->
-    <toggle-group gap="2" label="Theme">
-      <for each="theme_prefs" as="p">
-        <toggle-button size="sm" selected="{p == theme_pref}" on-toggle="set_theme:{p}">{p}</toggle-button>
-      </for>
-    </toggle-group>
   </row>
   <separator />
 </column>

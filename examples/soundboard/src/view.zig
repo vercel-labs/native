@@ -50,7 +50,15 @@ fn contentView(ui: *Ui, model: *const Model) Ui.Node {
 
 fn albumGridView(ui: *Ui, model: *const Model) Ui.Node {
     const cells = model.visibleAlbums(ui.arena);
-    return ui.scroll(.{ .grow = 1, .semantics = .{ .label = "Album grid" } }, ui.column(.{ .padding = content_padding, .gap = 18 }, .{
+    // Controlled scroll: the model stores the applied offset
+    // (`grid_scrolled`) and echoes it back, so a rebuild mid-gesture
+    // (a progress tick, a search keystroke) can never reset the region.
+    return ui.scroll(.{
+        .grow = 1,
+        .value = model.grid_scroll,
+        .on_scroll = Ui.scrollMsg(.grid_scrolled),
+        .semantics = .{ .label = "Album grid" },
+    }, ui.column(.{ .padding = content_padding, .gap = 18 }, .{
         sectionHeading(ui, "Albums", ui.fmt("{d} of {d}", .{ cells.len, model_mod.albums.len })),
         if (cells.len == 0) emptyState(ui, model) else albumGrid(ui, cells),
     }));
@@ -118,7 +126,12 @@ fn emptyState(ui: *Ui, model: *const Model) Ui.Node {
 fn albumDetailView(ui: *Ui, model: *const Model, album_id: u8) Ui.Node {
     const album = model_mod.albumById(album_id);
     const rows = model.albumTrackRows(ui.arena, album_id);
-    return ui.scroll(.{ .grow = 1, .semantics = .{ .label = "Album detail" } }, ui.column(.{ .padding = content_padding, .gap = 18 }, .{
+    return ui.scroll(.{
+        .grow = 1,
+        .value = model.detail_scroll,
+        .on_scroll = Ui.scrollMsg(.detail_scrolled),
+        .semantics = .{ .label = "Album detail" },
+    }, ui.column(.{ .padding = content_padding, .gap = 18 }, .{
         ui.row(.{}, .{
             backButton(ui),
             ui.spacer(1),
@@ -175,7 +188,12 @@ fn playAlbumButton(ui: *Ui, album_id: u8) Ui.Node {
 
 fn songsView(ui: *Ui, model: *const Model) Ui.Node {
     const rows = model.visibleTracks(ui.arena);
-    return ui.scroll(.{ .grow = 1, .semantics = .{ .label = "All songs" } }, ui.column(.{ .padding = content_padding, .gap = 18 }, .{
+    return ui.scroll(.{
+        .grow = 1,
+        .value = model.songs_scroll,
+        .on_scroll = Ui.scrollMsg(.songs_scrolled),
+        .semantics = .{ .label = "All songs" },
+    }, ui.column(.{ .padding = content_padding, .gap = 18 }, .{
         sectionHeading(ui, "Songs", ui.fmt("{d} of {d}", .{ rows.len, model_mod.tracks.len })),
         if (rows.len == 0) emptyState(ui, model) else trackList(ui, rows, "Songs"),
     }));

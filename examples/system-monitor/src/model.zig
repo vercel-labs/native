@@ -52,8 +52,6 @@ pub const copy_key: u64 = 6;
 
 // ----------------------------------------------------------------- types
 
-pub const ThemePref = enum { auto, light, dark };
-
 pub const SortKey = enum { cpu, mem, pid, name };
 
 pub const Msg = union(enum) {
@@ -68,7 +66,10 @@ pub const Msg = union(enum) {
     /// Pause/resume sampling (cancels or restarts the repeating timer).
     toggle_sampling,
     search_edit: canvas.TextInputEvent,
-    clear_search,
+    /// Controlled scroll: the process table's applied offset lands here
+    /// and the view echoes it back, so a sample-tick rebuild mid-gesture
+    /// can never reset the table.
+    table_scrolled: canvas.ScrollState,
     /// Sort chip pressed: switch to this key, or flip direction when it
     /// is already active.
     set_sort: SortKey,
@@ -84,7 +85,6 @@ pub const Msg = union(enum) {
     /// Context menu: copy the process name to the system clipboard.
     copy_name: u32,
     copied: native_sdk.EffectClipboardResult,
-    set_theme: ThemePref,
     set_appearance: native_sdk.Appearance,
     /// Toolbar gear: show/hide the settings WINDOW (model-declared —
     /// the window exists exactly while this flag is set).
@@ -147,11 +147,14 @@ pub const Model = struct {
     sort_key: SortKey = .cpu,
     sort_descending: bool = true,
     pending_kill: ?PendingKill = null,
+    /// Controlled scroll offset for the process table: the model
+    /// observes the applied offset and echoes it back.
+    table_scroll: f32 = 0,
 
-    // Status note + theme.
+    // Status note + appearance (the app follows the system; no
+    // in-window theme control by design).
     note_storage: [max_note]u8 = undefined,
     note_len: usize = 0,
-    theme_pref: ThemePref = .auto,
     appearance: native_sdk.Appearance = .{},
     /// The settings window's open flag: `windows_fn` declares the
     /// window while this is set, so a Msg opens it and a Msg (or the
@@ -180,14 +183,8 @@ pub const Model = struct {
         model.note_len = written.len;
     }
 
-    pub const theme_prefs = [_]ThemePref{ .auto, .light, .dark };
-
     pub fn colorScheme(model: *const Model) native_sdk.ColorScheme {
-        return switch (model.theme_pref) {
-            .auto => model.appearance.color_scheme,
-            .light => .light,
-            .dark => .dark,
-        };
+        return model.appearance.color_scheme;
     }
 
     pub fn sampling(model: *const Model) bool {
@@ -495,7 +492,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .toggle_sampling => setSampling(model, fx, model.paused),
         .search_edit => |edit| model.search_buffer.apply(edit),
-        .clear_search => model.search_buffer.apply(.clear),
+        .table_scrolled => |state| model.table_scroll = state.offset,
         .set_sort => |key| {
             if (model.sort_key == key) {
                 model.sort_descending = !model.sort_descending;
@@ -558,7 +555,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.setNote("copy failed ({s})", .{@tagName(result.outcome)});
             }
         },
-        .set_theme => |pref| model.theme_pref = pref,
         .set_appearance => |appearance| model.appearance = appearance,
         .toggle_settings => model.settings_open = !model.settings_open,
         .settings_closed => model.settings_open = false,

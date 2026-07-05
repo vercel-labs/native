@@ -498,35 +498,27 @@ test "the Escape chrome shortcut clears without any widget focus" {
 
 // ---------------------------------------------------------------- theming
 
-test "theme cycling and system appearance derive the custom tokens" {
+test "system appearance drives the custom tokens live" {
     const live = try LiveApp.start();
     defer live.stop();
     const app_state = live.app_state;
 
-    // Default: auto + light system appearance = custom light palette.
+    // Default: light system appearance = custom light palette.
     try testing.expectEqualDeep(theme.light_colors, main.tokensFromModel(&app_state.model).colors);
 
-    // The OS flips to dark; auto follows it, live, into the runtime.
+    // The OS flips to dark; the app follows it, live, into the runtime -
+    // there is no in-window theme control by design.
     try live.harness.runtime.dispatchPlatformEvent(live.app, .{ .appearance_changed = .{ .color_scheme = .dark } });
     try testing.expectEqualDeep(theme.dark_colors, (try live.harness.runtime.canvasWidgetDesignTokens(1, main.canvas_label)).colors);
 
-    // The header button cycles auto -> light -> dark through the real
-    // widget-action path.
-    const layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
-    var theme_button: ?canvas.ObjectId = null;
-    for (layout.nodes) |node| {
-        if (node.widget.kind == .button and std.mem.eql(u8, node.widget.semantics.label, "Theme")) theme_button = node.widget.id;
-    }
-    var command_buffer: [96]u8 = undefined;
-    const press_theme = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} press", .{ main.canvas_label, theme_button.? });
-    try live.harness.runtime.dispatchAutomationCommand(live.app, press_theme);
-    try testing.expectEqual(model_mod.ThemePref.light, app_state.model.theme_pref);
+    // And back to light.
+    try live.harness.runtime.dispatchPlatformEvent(live.app, .{ .appearance_changed = .{ .color_scheme = .light } });
     try testing.expectEqualDeep(theme.light_colors, (try live.harness.runtime.canvasWidgetDesignTokens(1, main.canvas_label)).colors);
-    try live.harness.runtime.dispatchAutomationCommand(live.app, press_theme);
-    try testing.expectEqual(model_mod.ThemePref.dark, app_state.model.theme_pref);
-    try testing.expectEqualDeep(theme.dark_colors, (try live.harness.runtime.canvasWidgetDesignTokens(1, main.canvas_label)).colors);
-    try live.harness.runtime.dispatchAutomationCommand(live.app, press_theme);
-    try testing.expectEqual(model_mod.ThemePref.auto, app_state.model.theme_pref);
+
+    // The pending operator is the one accent: primary keys at rest are
+    // the inverted monochrome, selected fills with accent.
+    const tokens = main.tokensFromModel(&app_state.model);
+    try testing.expectEqualDeep(theme.light_colors.accent, tokens.controls.button_primary.active_background.?);
 
     // High contrast falls back to the framework palette (accessibility
     // beats brand) and restores the brand palette when it lifts.
@@ -536,7 +528,7 @@ test "theme cycling and system appearance derive the custom tokens" {
 
 // ----------------------------------------------------------------- markup
 
-test "markup engine parity: header and keypad build identical trees" {
+test "markup engine parity: the keypad builds identical trees" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -546,7 +538,6 @@ test "markup engine parity: header and keypad build identical trees" {
     model.press(.multiply);
 
     inline for (.{
-        .{ view_mod.header_markup, view_mod.CompiledHeaderView },
         .{ view_mod.keypad_markup, view_mod.CompiledKeypadView },
     }) |case| {
         var interpreter = try canvas.MarkupView(Model, Msg).init(arena, case[0]);
@@ -594,8 +585,6 @@ test "the keypad grid lays out to exact frames inside the fixed window" {
     var rows_seen: usize = 0;
     for (layout.nodes) |node| {
         if (node.widget.kind != .button) continue;
-        // The theme button is the only non-keypad button.
-        if (std.mem.eql(u8, node.widget.semantics.label, "Theme")) continue;
         buttons_seen += 1;
 
         // Every key is exactly 66x54 — except the double-width zero.
@@ -713,14 +702,13 @@ test "render homepage screenshots (env-gated)" {
         try live.app_state.dispatch(&live.harness.runtime, 1, msg);
     }
 
-    // theme_pref cycles auto -> light -> dark.
-    try live.app_state.dispatch(&live.harness.runtime, 1, .cycle_theme);
+    // The app follows the system appearance: drive the platform event
+    // once per scheme, the same channel the OS uses.
+    try live.harness.runtime.dispatchPlatformEvent(live.app, .{ .appearance_changed = .{ .color_scheme = .light } });
     live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/calculator-light-artifacts", "Calculator");
     try live.harness.runtime.dispatchAutomationCommand(live.app, "screenshot calc-canvas 2");
 
-    // Same state, dark scheme: the dispatch re-emits the display list
-    // with the re-derived tokens, so no present is needed in between.
-    try live.app_state.dispatch(&live.harness.runtime, 1, .cycle_theme);
+    try live.harness.runtime.dispatchPlatformEvent(live.app, .{ .appearance_changed = .{ .color_scheme = .dark } });
     live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/calculator-dark-artifacts", "Calculator");
     try live.harness.runtime.dispatchAutomationCommand(live.app, "screenshot calc-canvas 2");
 }

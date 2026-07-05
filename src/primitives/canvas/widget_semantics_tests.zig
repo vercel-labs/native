@@ -1177,14 +1177,15 @@ test "widget search fields expose textbox semantics and render search chrome" {
         .colors = .{ .focus_ring = Color.rgb8(1, 2, 3), .text_muted = Color.rgb8(90, 91, 92) },
         .stroke = .{ .focus = 3 },
     };
-    var commands: [9]CanvasCommand = undefined;
+    var commands: [13]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, search_field, tokens);
     const display_list = builder.displayList();
     // Fill, border, offset focus ring, then the vector magnifier
     // (transform, circle + handle stroke paths, inverse transform),
-    // text, caret.
-    try std.testing.expectEqual(@as(usize, 9), display_list.commandCount());
+    // text, caret, and the trailing clear affordance (transform, two
+    // stroke paths, inverse transform) since the field holds text.
+    try std.testing.expectEqual(@as(usize, 13), display_list.commandCount());
     switch (display_list.commands[2]) {
         .stroke_rect => |stroke| {
             try std.testing.expectEqual(@as(f32, 3), stroke.stroke.width);
@@ -1204,6 +1205,16 @@ test "widget search fields expose textbox semantics and render search chrome" {
     }
     switch (display_list.commands[7]) {
         .draw_text => |text| try std.testing.expectEqualStrings("customers", text.text),
+        else => return error.TestUnexpectedResult,
+    }
+    // The built-in clear affordance: the registry `x` icon over the
+    // trailing inset (its two strokes land on part slots 16 and 18).
+    switch (display_list.commands[10]) {
+        .stroke_path => |stroke| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(10, 16)), stroke.id);
+            const registered = canvas.icons.find("x").?;
+            try std.testing.expectEqual(registered.elements.ptr, stroke.elements.ptr);
+        },
         else => return error.TestUnexpectedResult,
     }
 }

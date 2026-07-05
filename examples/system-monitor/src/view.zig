@@ -191,6 +191,8 @@ fn sparklineView(ui: *Ui, label: []const u8, history: []const f32, scale: SparkS
 fn toolbarView(ui: *Ui, model: *const Model) Ui.Node {
     return ui.row(.{ .gap = 10, .cross = .center, .semantics = .{ .label = "Table toolbar" } }, .{
         samplingChip(ui, model),
+        // The search field carries the built-in trailing clear
+        // affordance whenever it holds text — no external Clear chip.
         ui.el(.search_field, .{
             .width = 260,
             .text = model.search(),
@@ -198,10 +200,6 @@ fn toolbarView(ui: *Ui, model: *const Model) Ui.Node {
             .on_input = Ui.inputMsg(.search_edit),
             .semantics = .{ .label = "Filter processes" },
         }, .{}),
-        if (model.searching())
-            iconChip(ui, "x", "Clear", .clear_search, "Clear filter")
-        else
-            ui.el(.stack, .{}, .{}),
         ui.spacer(1),
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Sort"),
         sortChips(ui, model),
@@ -214,8 +212,10 @@ fn toolbarView(ui: *Ui, model: *const Model) Ui.Node {
 
 /// The settings WINDOW's whole canvas: a model-declared secondary
 /// window (`windows_fn` declares it while `settings_open` is set), so
-/// this view rebuilds from the same model as the main canvas — picking
-/// a theme here restyles both windows on the same dispatch.
+/// this view rebuilds from the same model as the main canvas — pausing
+/// sampling here updates both windows on the same dispatch. Appearance
+/// is not a setting: the app follows the system, so both windows
+/// retheme together through `on_appearance`.
 pub fn settingsView(ui: *Ui, model: *const Model) Ui.Node {
     return ui.column(.{
         .grow = 1,
@@ -227,25 +227,14 @@ pub fn settingsView(ui: *Ui, model: *const Model) Ui.Node {
         ui.paragraph(.{ .semantics = .{ .label = "Settings title" } }, &.{
             .{ .text = "Settings", .weight = .bold, .scale = 1.3 },
         }),
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Theme"),
-        ui.el(.toggle_group, .{ .gap = 2, .semantics = .{ .label = "Theme preference" } }, .{
-            themeChoice(ui, model, .auto, "Auto"),
-            themeChoice(ui, model, .light, "Light"),
-            themeChoice(ui, model, .dark, "Dark"),
-        }),
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Sampling"),
         samplingChip(ui, model),
+        ui.text(.{ .wrap = true, .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, ui.fmt("{d} samples kept · one every {d} s while live.", .{
+            model_mod.history_len, model_mod.sample_interval_ms / 1000,
+        })),
         ui.spacer(1),
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Close this window (or press its close button) to keep monitoring."),
     });
-}
-
-fn themeChoice(ui: *Ui, model: *const Model, pref: model_mod.ThemePref, label: []const u8) Ui.Node {
-    return ui.el(.toggle_button, .{
-        .selected = model.theme_pref == pref,
-        .on_toggle = Msg{ .set_theme = pref },
-        .semantics = .{ .label = label },
-    }, .{ui.text(.{ .size = .sm }, label)});
 }
 
 /// Pause/resume: a pressable panel pairing the play/pause vector icon
@@ -327,7 +316,7 @@ fn tableView(ui: *Ui, model: *const Model) Ui.Node {
     const rows = model.visibleRows(ui.arena);
     return ui.column(.{ .grow = 1, .gap = 6 }, .{
         tableHeading(ui, model, rows.len),
-        if (rows.len == 0) emptyState(ui, model) else processList(ui, rows),
+        if (rows.len == 0) emptyState(ui, model) else processList(ui, model, rows),
     });
 }
 
@@ -343,10 +332,22 @@ fn tableHeading(ui: *Ui, model: *const Model, shown: usize) Ui.Node {
     });
 }
 
-fn processList(ui: *Ui, rows: []const model_mod.TableRow) Ui.Node {
-    return ui.scroll(.{ .grow = 1, .semantics = .{ .label = "Process table" } }, ui.column(.{ .gap = 2 }, .{
+/// The table is ONE flat surface: the column headings sit above a
+/// hairline, and the rows are flat `list_item` composites — no borders,
+/// no per-row card chrome; hover is a full-width edge-to-edge wash. The
+/// scroll is CONTROLLED (the model stores the applied offset and echoes
+/// it back), so the 2 s sample rebuild can never reset the table
+/// mid-gesture.
+fn processList(ui: *Ui, model: *const Model, rows: []const model_mod.TableRow) Ui.Node {
+    return ui.scroll(.{
+        .grow = 1,
+        .value = model.table_scroll,
+        .on_scroll = Ui.scrollMsg(.table_scrolled),
+        .semantics = .{ .label = "Process table" },
+    }, ui.column(.{}, .{
         columnHeadings(ui),
-        ui.el(.list, .{ .gap = 2, .semantics = .{ .role = .list, .label = "Processes by CPU" } }, ui.each(rows, rowKey, rowView)),
+        ui.separator(.{}),
+        ui.el(.list, .{ .semantics = .{ .role = .list, .label = "Processes by CPU" } }, ui.each(rows, rowKey, rowView)),
     }));
 }
 
@@ -372,27 +373,30 @@ fn rowKey(row: *const model_mod.TableRow) canvas.UiKey {
     return canvas.uiKey(row.pid);
 }
 
-/// One process row. The native context menu is the kill seam: Terminate
-/// opens the confirmation dialog (never the signal directly), Copy Name
-/// runs the clipboard effect.
+/// One process row: a FLAT list row (the list_item composite — no
+/// border, no card chrome; hover is a full-width wash), with the table
+/// cells flowing horizontally inside the wash. The native context menu
+/// is the kill seam: Terminate opens the confirmation dialog (never the
+/// signal directly), Copy Name runs the clipboard effect.
 fn rowView(ui: *Ui, row: *const model_mod.TableRow) Ui.Node {
-    return ui.panel(.{
+    return ui.el(.list_item, .{
         .global_key = canvas.uiKey(row.pid),
         .height = table_row_height,
         .padding = 8,
+        .gap = 12,
+        .cross = .center,
         .context_menu = &.{
             .{ .label = "Terminate (SIGTERM)…", .msg = Msg{ .request_kill = row.pid } },
             .{ .separator = true },
             .{ .label = "Copy Name", .msg = Msg{ .copy_name = row.pid } },
         },
-        .style_tokens = .{ .radius = .md },
         .semantics = .{ .role = .listitem, .label = ui.fmt("{s} pid {s}", .{ row.name, row.pid_text }) },
-    }, ui.row(.{ .gap = 12, .cross = .center }, .{
+    }, .{
         ui.text(.{ .width = 64, .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, row.pid_text),
         ui.text(.{ .grow = 1 }, row.name),
         alignedCell(ui, 64, row.cpu_text, .text),
         alignedCell(ui, 84, row.mem_text, .text_muted),
-    }));
+    });
 }
 
 /// Right-aligned fixed-width numeric cell. The fixed width is a table

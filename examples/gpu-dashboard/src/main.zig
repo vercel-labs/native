@@ -43,8 +43,8 @@ const dashboard_chrome_prefix_commands: usize = 6;
 // UNSELECTED segmented control is transparent (its muted wash moved to
 // the tabs-list container), so the toolbar's mode trigger paints one
 // fewer fill.
-const expected_dashboard_command_count: usize = 68;
-const expected_dashboard_interaction_command_count: usize = 68;
+const expected_dashboard_command_count: usize = 72;
+const expected_dashboard_interaction_command_count: usize = 72;
 // Regenerated 2026-07-04: layout measures with the bundled face's real
 // advance table (estimator wave); spot-reviewed before/after — sub-pixel
 // text shifts only, no layout change.
@@ -58,7 +58,11 @@ const expected_dashboard_interaction_command_count: usize = 68;
 // same reference renderer).
 // Regenerated 2026-07-04 with the same sweep (transparent unselected
 // tab trigger); reviewed via the docs tabs before/after captures.
-const expected_dashboard_reference_signature: u64 = 15711892093832014950;
+// Regenerated 2026-07-04 for the search field's built-in trailing clear
+// affordance: the segment-search field holds text, so it now draws the
+// vector x over its trailing inset (reviewed via the soundboard/monitor
+// search-state captures — same emitter, same reference renderer).
+const expected_dashboard_reference_signature: u64 = 11096725754021740319;
 const expected_dashboard_widget_node_count: usize = 48;
 const expected_dashboard_snapshot_widget_count: usize = 48;
 const refresh_command = "dashboard.refresh";
@@ -1159,10 +1163,11 @@ test "gpu dashboard display list renders through the reference surface" {
     try std.testing.expect(frame.batch_plan.batchCount() >= 8);
     try std.testing.expect(frame.pipeline_cache_plan.entryCount() >= 4);
     try std.testing.expect(frame.pipeline_cache_plan.uploadCount() >= 4);
-    // Two layers: the vector magnifier draws under its own transform,
-    // splitting the otherwise-identity command run.
-    try std.testing.expectEqual(@as(usize, 2), frame.layer_plan.layerCount());
-    try std.testing.expectEqual(@as(usize, 2), frame.layer_cache_plan.uploadCount());
+    // Five layers: the vector magnifier and the search field's built-in
+    // clear affordance each draw under their own transform, splitting
+    // the otherwise-identity command run.
+    try std.testing.expectEqual(@as(usize, 5), frame.layer_plan.layerCount());
+    try std.testing.expectEqual(@as(usize, 5), frame.layer_cache_plan.uploadCount());
     try std.testing.expect(frame.resource_plan.resourceCount() >= 8);
     try std.testing.expect(frame.visual_effect_plan.effectCount() >= 4);
     try std.testing.expect(frame.visual_effect_plan.shadowCount() >= 3);
@@ -1252,9 +1257,9 @@ test "gpu dashboard render overrides animate without rebuilding commands" {
 
     try std.testing.expect(frame.requiresRender());
     try std.testing.expect(frame.pipeline_cache_plan.entryCount() >= 4);
-    try std.testing.expectEqual(@as(usize, 3), frame.layer_plan.layerCount());
-    try std.testing.expectEqual(@as(usize, 3), frame.layer_cache_plan.uploadCount());
-    try std.testing.expectEqual(@as(usize, 3), frame.renderPass().layerActionCount());
+    try std.testing.expectEqual(@as(usize, 7), frame.layer_plan.layerCount());
+    try std.testing.expectEqual(@as(usize, 7), frame.layer_cache_plan.uploadCount());
+    try std.testing.expectEqual(@as(usize, 7), frame.renderPass().layerActionCount());
     try std.testing.expect(frame.visual_effect_plan.effectCount() >= 4);
     try std.testing.expectEqual(@as(usize, 0), frame.changes.len);
     try std.testing.expect(frame.dirty_bounds != null);

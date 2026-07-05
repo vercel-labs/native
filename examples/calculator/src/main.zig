@@ -1,12 +1,14 @@
 //! calculator: a real four-function calculator showcasing precision
 //! Native SDK layout — the classic keypad grid, a live expression +
-//! result display, keyboard input, and a near-monochrome theme with one
-//! calculator-orange accent.
+//! result display, keyboard input, and a chromeless hidden-inset window
+//! in the house register: pure neutrals, one action-blue accent.
 //!
-//! Authoring split (markup-first): the header and the entire keypad are
-//! `.zml` views compiled at comptime; the only Zig view is the display
-//! block, which needs a scaled right-aligned result paragraph (markup
-//! text tops out at the `lg` body size). See `src/view.zig`.
+//! Authoring split (markup-first): the entire keypad is a `.zml` view
+//! compiled at comptime; the Zig views are the drag band (the
+//! hidden-inset titlebar's drag region, deliberately empty) and the
+//! display block, which needs a scaled right-aligned mono result
+//! paragraph (markup text tops out at the `lg` body size). See
+//! `src/view.zig`.
 //!
 //! Keyboard: the expression line is a real `text_field` — click it (or
 //! Tab to it) and digits, operators, backspace, and enter flow through
@@ -38,7 +40,7 @@ pub const rootView = view_mod.rootView;
 
 pub const canvas_label = "calc-canvas";
 pub const window_width: f32 = 320;
-pub const window_height: f32 = 496;
+pub const window_height: f32 = 490;
 
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
 const shell_views = [_]native_sdk.ShellView{
@@ -50,9 +52,12 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .width = window_width,
     .height = window_height,
     // Precision layout: the keypad grid is sized in points, so the
-    // window is fixed (like every calculator worth using).
+    // window is fixed (like every calculator worth using). No titlebar:
+    // the in-canvas drag band carries the window (see view.zig), and
+    // app.zon's startup window declares the same style.
     .resizable = false,
     .restore_state = false,
+    .titlebar = .hidden_inset,
     .views = &shell_views,
 }};
 pub const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };

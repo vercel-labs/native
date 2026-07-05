@@ -162,7 +162,7 @@ function InlineCode({ children }: { children: React.ReactNode }) {
 // the app's src/ markup + Zig, tests excluded.
 const stats = [
   {
-    value: "2.5 MB",
+    value: "2.7 MB",
     label: "The whole calculator — engine, widgets, renderer — as one static release binary.",
   },
   {
@@ -170,7 +170,7 @@ const stats = [
     label: "Embedded browsers, script engines, or interpreters inside that binary.",
   },
   {
-    value: "918",
+    value: "959",
     label: "Lines of markup and logic for that entire calculator app.",
   },
   {
@@ -554,7 +554,7 @@ export default function HomePage() {
             <Terminal title="examples — release builds">
               <Prompt>zig build -Doptimize=ReleaseFast</Prompt>
               <Prompt>ls -lh */zig-out/bin</Prompt>
-              <Muted>2.5M calculator</Muted>
+              <Muted>2.7M calculator</Muted>
               <Muted>3.2M deck</Muted>
               <Muted>2.6M markdown-viewer</Muted>
               <Muted>2.5M notes</Muted>

@@ -199,7 +199,51 @@ pub fn widgetTextInputInset(widget: Widget, tokens: DesignTokens) f32 {
 
 fn widgetTextInputTrailingInset(widget: Widget, text_size: f32, inset: f32) f32 {
     if (widget.kind == .combobox) return inset + @max(8, text_size - 4);
+    // A search field holding text reserves the trailing slot for the
+    // built-in clear affordance so the text never runs under the x.
+    if (widgetTextInputShowsClearButton(widget)) return inset + widgetTextInputClearIconSize(text_size);
     return inset;
+}
+
+/// Whether the field currently shows the built-in trailing clear
+/// affordance: search fields (the searchable kind) show it whenever they
+/// hold text — zero attributes, exactly like the leading glass.
+pub fn widgetTextInputShowsClearButton(widget: Widget) bool {
+    return widget.kind == .search_field and widget.text.len > 0 and !widget.state.disabled;
+}
+
+fn widgetTextInputClearIconSize(text_size: f32) f32 {
+    return @max(8, text_size - 4);
+}
+
+/// The clear affordance's ICON rect (the drawn x). Render and hit-test
+/// share this geometry; null when the field shows no clear button.
+pub fn textInputClearButtonRect(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
+    if (!widgetTextInputShowsClearButton(widget)) return null;
+    const text_size = widgetTextInputSize(widget, tokens);
+    const icon_size = widgetTextInputClearIconSize(text_size);
+    const inset = widget_metrics.widgetControlInset(widget, tokens, tokens.spacing.md);
+    return geometry.RectF.init(
+        widget.frame.x + widget.frame.width - inset - icon_size,
+        widget.frame.y + @max(0, (widget.frame.height - icon_size) * 0.5),
+        icon_size,
+        icon_size,
+    );
+}
+
+/// The clear affordance's HIT rect: the icon zone widened to the field's
+/// trailing edge and full height, so the target meets pointer-size
+/// expectations without growing the drawn glyph.
+pub fn textInputClearButtonHitRect(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
+    const icon = textInputClearButtonRect(widget, tokens) orelse return null;
+    const pad = tokens.spacing.sm;
+    const left = @max(widget.frame.x, icon.x - pad);
+    return geometry.RectF.init(
+        left,
+        widget.frame.y,
+        @max(0, widget.frame.x + widget.frame.width - left),
+        widget.frame.height,
+    );
 }
 
 pub const WidgetTextGeometry = struct {

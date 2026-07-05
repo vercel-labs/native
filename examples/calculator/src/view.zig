@@ -1,8 +1,10 @@
-//! calculator views. Markup-first: the header and the whole keypad are
-//! compiled `.zml` views; this file holds the one section the closed
-//! markup grammar cannot express — the display block, which needs a
-//! scaled, right-aligned result paragraph (markup text tops out at the
-//! `lg` body size) — plus the root view composing all three.
+//! calculator views. Markup-first: the whole keypad is a compiled
+//! `.zml` view; this file holds the sections the closed markup grammar
+//! cannot express — the drag band (the hidden-inset titlebar's
+//! `window_drag` region: empty by design, the window has no chrome) and
+//! the display block, which needs a scaled, right-aligned monospace
+//! result paragraph (markup text tops out at the `lg` body size) — plus
+//! the root view composing all three.
 //!
 //! The display's expression line is a real `text_field` and it is the
 //! app's keyboard seam: focusing it (click, or Tab) routes every typed
@@ -21,9 +23,7 @@ pub const Model = model_mod.Model;
 pub const Msg = model_mod.Msg;
 pub const Ui = canvas.Ui(Msg);
 
-pub const header_markup = @embedFile("header.zml");
 pub const keypad_markup = @embedFile("keypad.zml");
-pub const CompiledHeaderView = canvas.CompiledMarkupView(Model, Msg, header_markup);
 pub const CompiledKeypadView = canvas.CompiledMarkupView(Model, Msg, keypad_markup);
 
 // Keypad metrics (kept in lockstep with keypad.zml; the layout test
@@ -35,9 +35,15 @@ pub const zero_width: f32 = key_width * 2 + key_gap; // 140
 pub const content_width: f32 = key_width * 4 + key_gap * 3; // 288
 pub const window_padding: f32 = 16;
 
-/// The big result line: body size x scale = 36px digits, 12 typed digits
-/// wide inside the 288pt content column.
+/// The drag band under the hidden-inset titlebar: tall enough to clear
+/// the window controls in the leading corner.
+pub const band_height: f32 = 24;
+
+/// The big result line: body size x scale = 36px digits; the mono pitch
+/// (0.6 em) fits the 12-digit entry window inside the 288pt column.
 pub const result_scale: f32 = 2.6;
+
+// ----------------------------------------------------------------- root
 
 pub fn rootView(ui: *Ui, model: *const Model) Ui.Node {
     return ui.column(.{
@@ -46,9 +52,23 @@ pub fn rootView(ui: *Ui, model: *const Model) Ui.Node {
         .grow = 1,
         .style_tokens = .{ .background = .background },
     }, .{
-        CompiledHeaderView.build(ui, model),
+        dragBand(ui),
         displayView(ui, model),
         CompiledKeypadView.build(ui, model),
+    });
+}
+
+/// The chromeless top band: the window drag region (hidden-inset
+/// titlebar). Deliberately empty — no logo, no label; the identity is
+/// the readout and the key rhythm, and the window controls own the
+/// leading corner.
+fn dragBand(ui: *Ui) Ui.Node {
+    return ui.row(.{
+        .height = band_height,
+        .window_drag = true,
+        .semantics = .{ .label = "Window drag area" },
+    }, .{
+        ui.spacer(1),
     });
 }
 
@@ -64,29 +84,32 @@ fn displayView(ui: *Ui, model: *const Model) Ui.Node {
     });
 }
 
-/// The last completed calculation, right-aligned and quiet. The explicit
+/// The last completed calculation, right-aligned and quiet, in the same
+/// mono as the result so digits stack column-over-column. The explicit
 /// height keeps the layout steady while it is empty.
 fn memoryLine(ui: *Ui, model: *const Model) Ui.Node {
-    var node = ui.text(.{
+    var node = ui.paragraph(.{
         .width = content_width,
         .height = 18,
         .size = .sm,
         .style_tokens = .{ .foreground = .text_muted },
         .semantics = .{ .label = "Last calculation" },
-    }, model.memoryText(ui.arena));
+    }, &.{
+        .{ .text = model.memoryText(ui.arena), .monospace = true },
+    });
     node.widget.text_alignment = .end;
     return node;
 }
 
 /// The live expression and the keyboard seam (see the module doc). The
-/// field blends into the background until focused, when the theme's
-/// focus ring shows exactly where keystrokes go.
+/// field blends into the background until focused, when the accent
+/// focus ring shows exactly where keystrokes go. No placeholder: an
+/// empty expression line is quiet, not chatty.
 fn expressionField(ui: *Ui, model: *const Model) Ui.Node {
     return ui.el(.text_field, .{
         .width = content_width,
         .height = 32,
         .text = model.expressionText(ui.arena),
-        .placeholder = "Type a calculation",
         .on_input = Ui.inputMsg(.typed),
         .on_submit = .equals,
         .style_tokens = .{ .background = .background, .border_color = .background },
@@ -94,18 +117,18 @@ fn expressionField(ui: *Ui, model: *const Model) Ui.Node {
     }, .{});
 }
 
-/// The result: one scaled span, right-aligned. The explicit width spans
-/// the whole content column — it is the alignment box that keeps the
-/// right-aligned result flush with the keypad edge. Its semantic label
-/// IS the value, so assistive tech (and the automation snapshot) reads
-/// the result directly.
+/// The result: one scaled mono span, right-aligned. The explicit width
+/// spans the whole content column — it is the alignment box that keeps
+/// the right-aligned result flush with the keypad edge. Its semantic
+/// label IS the value, so assistive tech (and the automation snapshot)
+/// reads the result directly.
 fn resultLine(ui: *Ui, model: *const Model) Ui.Node {
     const value = model.displayText(ui.arena);
     var node = ui.paragraph(.{
         .width = content_width,
         .semantics = .{ .label = value },
     }, &.{
-        .{ .text = value, .weight = .medium, .scale = result_scale },
+        .{ .text = value, .weight = .medium, .monospace = true, .scale = result_scale },
     });
     node.widget.text_alignment = .end;
     return node;

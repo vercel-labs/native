@@ -33,8 +33,8 @@ const apps: ShowcaseApp[] = [
     detail:
       "Headings, tables, task lists, links, and blockquotes on the right are ordinary widgets rendered live from the editor on the left — keystroke for keystroke, with no WebView and no HTML.",
     facts: [
-      { label: "App source", value: "779 lines" },
-      { label: "Binary", value: "2.6 MB" },
+      { label: "App source", value: "765 lines" },
+      { label: "Binary", value: "2.7 MB" },
     ],
     width: 2400,
     height: 1520,
@@ -46,8 +46,8 @@ const apps: ShowcaseApp[] = [
     detail:
       "Album covers are PNGs decoded and registered by the engine itself. Playback runs on effect timers, the seek bar mirrors runtime state, and queueing a track is a native context menu.",
     facts: [
-      { label: "App source", value: "1,155 lines" },
-      { label: "Binary", value: "4.6 MB" },
+      { label: "App source", value: "1,170 lines" },
+      { label: "Binary", value: "4.8 MB" },
     ],
     width: 2160,
     height: 1440,
@@ -59,8 +59,8 @@ const apps: ShowcaseApp[] = [
     detail:
       "The same library, transport, queue, and search in two fixed windows: a 460×180 player chassis and a playlist rack the PL key docks beneath it. The chassis — bevels, screws, seven-segment timecode — is a custom chrome pass over the same widgets, dark-only by design.",
     facts: [
-      { label: "App source", value: "2,148 lines" },
-      { label: "Binary", value: "3.2 MB" },
+      { label: "App source", value: "2,089 lines" },
+      { label: "Binary", value: "3.3 MB" },
     ],
     width: 920,
     height: 360,
@@ -87,8 +87,8 @@ const apps: ShowcaseApp[] = [
     detail:
       "The list re-sorts by edit time, the first line of a note becomes its title, and everything persists across launches through the same typed file effects the app uses for export.",
     facts: [
-      { label: "App source", value: "1,432 lines" },
-      { label: "Binary", value: "2.5 MB" },
+      { label: "App source", value: "1,415 lines" },
+      { label: "Binary", value: "2.7 MB" },
     ],
     width: 2360,
     height: 1520,
@@ -100,8 +100,8 @@ const apps: ShowcaseApp[] = [
     detail:
       "Process spawns run off the loop on a 2-second cadence and land back in update as plain messages. Sort, filter, pause, and send SIGTERM from a native confirmation dialog.",
     facts: [
-      { label: "App source", value: "1,633 lines" },
-      { label: "Binary", value: "2.7 MB" },
+      { label: "App source", value: "1,630 lines" },
+      { label: "Binary", value: "2.8 MB" },
     ],
     width: 2288,
     height: 1440,
@@ -113,11 +113,11 @@ const apps: ShowcaseApp[] = [
     detail:
       "Every keypad face dispatches a typed message, the keyboard routes through real focus and text-input events, and the whole app — engine, widgets, renderer — is one small static binary.",
     facts: [
-      { label: "App source", value: "918 lines" },
-      { label: "Binary", value: "2.5 MB" },
+      { label: "App source", value: "959 lines" },
+      { label: "Binary", value: "2.7 MB" },
     ],
     width: 640,
-    height: 992,
+    height: 980,
     portrait: true,
   },
 ];

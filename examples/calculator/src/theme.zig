@@ -1,14 +1,15 @@
-//! calculator theme: near-monochrome graphite with one strong accent —
-//! the classic calculator orange — reserved for the operator column and
-//! equals key. Digit keys are quiet surfaces, function keys one step
-//! darker, and the display sits directly on the window background so the
-//! numbers are the loudest thing on screen.
+//! calculator theme: the house register — pure neutrals, hairline
+//! borders, and exactly one accent (action blue) that only appears when
+//! something is live: the pending operator, the press flash on any key,
+//! the focus ring. The operator column and equals are the inverted
+//! monochrome keys (near-black faces on light, near-white faces on
+//! dark), so the board reads black-and-white at rest.
 //!
 //! High-contrast requests fall back to the framework's high-contrast
 //! palettes (accessibility beats brand) and reduce-motion zeroes the
 //! motion tokens through the theme options. Keypad glyphs render at 18px
-//! through `typography.button_size`; the active operator inverts to a
-//! deeper orange through `controls.button_primary.active_background`.
+//! through `typography.button_size`; the pending operator fills with the
+//! accent through `controls.button_primary.active_background`.
 
 const native_sdk = @import("native_sdk");
 
@@ -29,11 +30,24 @@ pub fn tokens(scheme: native_sdk.ColorScheme, high_contrast: bool, reduce_motion
             .light => light_colors,
             .dark => dark_colors,
         };
-        // The active (pending) operator key inverts to a deeper orange so
-        // the selected state reads even against the accent fill.
-        out.controls.button_primary.active_background = switch (scheme) {
-            .light => Color.rgb8(154, 52, 18),
-            .dark => Color.rgb8(255, 190, 92),
+        // The strong column: operator keys and equals invert to the
+        // monochrome extreme of each scheme; the pending operator (and
+        // any press) fills with the one accent.
+        out.controls.button_primary = switch (scheme) {
+            .light => .{
+                .background = Color.rgb8(23, 23, 23),
+                .hover_background = Color.rgb8(56, 56, 56),
+                .active_background = light_colors.accent,
+                .foreground = Color.rgb8(255, 255, 255),
+                .border = Color.rgb8(23, 23, 23),
+            },
+            .dark => .{
+                .background = Color.rgb8(237, 237, 237),
+                .hover_background = Color.rgb8(255, 255, 255),
+                .active_background = dark_colors.accent,
+                .foreground = Color.rgb8(10, 10, 10),
+                .border = Color.rgb8(237, 237, 237),
+            },
         };
     }
     // Calculator keys carry 18px glyphs; the sm theme button derives 17.
@@ -43,47 +57,48 @@ pub fn tokens(scheme: native_sdk.ColorScheme, high_contrast: bool, reduce_motion
     return out;
 }
 
-/// Warm paper neutrals; deep orange tuned for white key glyphs.
+/// Paper white: white keys lifted off a near-white window by hairlines;
+/// action blue as the only color.
 pub const light_colors = canvas.ColorTokens{
-    .background = Color.rgb8(245, 244, 241),
+    .background = Color.rgb8(250, 250, 250),
     .surface = Color.rgb8(255, 255, 255),
-    .surface_subtle = Color.rgb8(233, 232, 227),
-    .surface_pressed = Color.rgb8(219, 217, 211),
-    .text = Color.rgb8(28, 27, 25),
-    .text_muted = Color.rgb8(138, 134, 126),
-    .border = Color.rgb8(226, 224, 218),
-    .accent = Color.rgb8(234, 88, 12),
-    .accent_text = Color.rgb8(255, 251, 247),
-    .destructive = Color.rgb8(206, 44, 49),
-    .destructive_text = Color.rgb8(255, 251, 251),
-    .success = Color.rgb8(22, 137, 80),
-    .success_text = Color.rgb8(247, 253, 250),
-    .warning = Color.rgb8(184, 119, 8),
-    .warning_text = Color.rgb8(255, 252, 245),
-    .focus_ring = Color.rgb8(234, 88, 12),
-    .shadow = Color.rgba8(40, 34, 24, 26),
-    .disabled = Color.rgb8(236, 234, 229),
+    .surface_subtle = Color.rgb8(240, 240, 240),
+    .surface_pressed = Color.rgb8(229, 229, 229),
+    .text = Color.rgb8(23, 23, 23),
+    .text_muted = Color.rgb8(102, 102, 102),
+    .border = Color.rgb8(232, 232, 232),
+    .accent = Color.rgb8(0, 112, 243),
+    .accent_text = Color.rgb8(255, 255, 255),
+    .destructive = Color.rgb8(217, 48, 55),
+    .destructive_text = Color.rgb8(255, 255, 255),
+    .success = Color.rgb8(23, 125, 66),
+    .success_text = Color.rgb8(255, 255, 255),
+    .warning = Color.rgb8(170, 90, 0),
+    .warning_text = Color.rgb8(255, 255, 255),
+    .focus_ring = Color.rgb8(0, 112, 243),
+    .shadow = Color.rgba8(0, 0, 0, 24),
+    .disabled = Color.rgb8(244, 244, 244),
 };
 
-/// True graphite; the accent brightens to the iOS-calculator orange and
-/// flips to near-black glyphs for contrast.
+/// True graphite: near-black window, graphite keys; the accent lightens
+/// one step so dark glyphs sit on it.
 pub const dark_colors = canvas.ColorTokens{
-    .background = Color.rgb8(16, 16, 17),
-    .surface = Color.rgb8(30, 30, 32),
-    .surface_subtle = Color.rgb8(44, 44, 47),
-    .surface_pressed = Color.rgb8(58, 58, 62),
-    .text = Color.rgb8(244, 244, 245),
-    .text_muted = Color.rgb8(150, 150, 156),
-    .border = Color.rgb8(44, 44, 47),
-    .accent = Color.rgb8(255, 159, 10),
-    .accent_text = Color.rgb8(38, 23, 3),
-    .destructive = Color.rgb8(244, 106, 106),
-    .destructive_text = Color.rgb8(31, 14, 14),
-    .success = Color.rgb8(94, 210, 141),
-    .success_text = Color.rgb8(10, 28, 18),
-    .warning = Color.rgb8(240, 177, 62),
-    .warning_text = Color.rgb8(33, 23, 5),
-    .focus_ring = Color.rgb8(255, 178, 66),
+    .background = Color.rgb8(10, 10, 10),
+    .surface = Color.rgb8(23, 23, 23),
+    .surface_subtle = Color.rgb8(38, 38, 38),
+    .surface_pressed = Color.rgb8(51, 51, 51),
+    .text = Color.rgb8(237, 237, 237),
+    .text_muted = Color.rgb8(161, 161, 161),
+    .border = Color.rgb8(46, 46, 46),
+    .accent = Color.rgb8(50, 145, 255),
+    .accent_text = Color.rgb8(10, 10, 10),
+    .destructive = Color.rgb8(255, 97, 102),
+    .destructive_text = Color.rgb8(10, 10, 10),
+    .success = Color.rgb8(69, 222, 143),
+    .success_text = Color.rgb8(10, 10, 10),
+    .warning = Color.rgb8(255, 176, 32),
+    .warning_text = Color.rgb8(10, 10, 10),
+    .focus_ring = Color.rgb8(50, 145, 255),
     .shadow = Color.rgba8(0, 0, 0, 150),
-    .disabled = Color.rgb8(40, 40, 43),
+    .disabled = Color.rgb8(32, 32, 32),
 };

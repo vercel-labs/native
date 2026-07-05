@@ -32,6 +32,7 @@ fn viewerOptions() ViewerApp.Options {
         .update_fx = main.update,
         .init_fx = main.boot,
         .tokens_fn = main.viewerTokens,
+        .on_appearance = main.onAppearance,
         .view = main.CompiledViewerView.build,
     };
 }
@@ -178,11 +179,6 @@ test "the initial tree renders the welcome sample in editor and preview" {
     try testing.expect(save.state.disabled);
     try testing.expectEqualStrings("save", save.icon);
     try testing.expect(findByText(tree.root, .button, "Save As") != null);
-
-    // The icon-only theme toggle wears moon in light mode and swaps to
-    // sun in dark mode, keeping its accessible name.
-    const toggle = findByLabel(tree.root, "Dark mode").?;
-    try testing.expectEqualStrings("moon", toggle.icon);
 
     // The editor pane heading carries the built-in "edit" vector icon
     // (kind .icon with the registry name as its text/semantics).
@@ -419,23 +415,59 @@ fn subtreeHasTextInSnapshot(snapshot: native_sdk.automation.snapshot.Input, need
     return false;
 }
 
-test "the theme toggle flips the derived tokens" {
+test "the system appearance re-derives the tokens live, both directions" {
+    var fx = ViewerApp.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    // Model level: the scheme Msg flips the derived palette both ways —
+    // there is no in-window theme control by design.
+    var model = main.initialModel();
+    const light_tokens = main.viewerTokens(&model);
+    main.update(&model, .{ .system_scheme = .dark }, &fx);
+    const dark_tokens = main.viewerTokens(&model);
+    try testing.expect(!std.meta.eql(light_tokens.colors.background, dark_tokens.colors.background));
+    main.update(&model, .{ .system_scheme = .light }, &fx);
+    try testing.expect(std.meta.eql(light_tokens.colors.background, main.viewerTokens(&model).colors.background));
+
+    // End to end: the OS appearance event reaches the canvas tokens
+    // through `on_appearance`, live, in both directions.
+    var h = try Harness.create();
+    defer h.destroy();
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .appearance_changed = .{ .color_scheme = .dark } });
+    const dark_live = try h.harness.runtime.canvasWidgetDesignTokens(1, "viewer-canvas");
+    try testing.expect(std.meta.eql(dark_tokens.colors.background, dark_live.colors.background));
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .appearance_changed = .{ .color_scheme = .light } });
+    const light_live = try h.harness.runtime.canvasWidgetDesignTokens(1, "viewer-canvas");
+    try testing.expect(std.meta.eql(light_tokens.colors.background, light_live.colors.background));
+}
+
+test "the preview scroll offset round-trips through the model" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
     var fx = ViewerApp.Effects.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
 
     var model = main.initialModel();
-    const light_tokens = main.viewerTokens(&model);
-    main.update(&model, .toggle_theme, &fx);
-    const dark_tokens = main.viewerTokens(&model);
-    try testing.expect(!std.meta.eql(light_tokens.colors.background, dark_tokens.colors.background));
-    try testing.expectEqual(canvas.ColorScheme.dark, model.effectiveScheme());
 
-    // The system scheme flows in but the explicit override keeps winning.
-    main.update(&model, .{ .system_scheme = .light }, &fx);
-    try testing.expectEqual(canvas.ColorScheme.dark, model.effectiveScheme());
-    main.update(&model, .toggle_theme, &fx);
-    try testing.expectEqual(canvas.ColorScheme.light, model.effectiveScheme());
+    // The runtime delivers the applied offset; the model stores it…
+    main.update(&model, .{ .doc_scrolled = .{ .offset = 120, .viewport_extent = 600, .content_extent = 2400 } }, &fx);
+    try testing.expectEqual(@as(f32, 120), model.doc_scroll);
+
+    // …and the rebuilt tree echoes it back through the scroll's value,
+    // so rebuilds re-lay the preview at exactly the scrolled place.
+    const tree = try buildTree(arena, &model);
+    const preview = findByLabel(tree.root, "Preview") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(canvas.WidgetKind.scroll_view, preview.kind);
+    try testing.expectEqual(@as(f32, 120), preview.value);
+
+    // Loading a different document resets the offset: the new preview
+    // starts at its top instead of inheriting the old document's scroll.
+    main.update(&model, .{ .load_sample = 2 }, &fx);
+    try testing.expectEqual(@as(f32, 0), model.doc_scroll);
 }
 
 test "chrome geometry pads the toolbar and matches its height to the tall band" {
@@ -504,14 +536,38 @@ test "render icon-batch screenshots (env-gated)" {
     defer h.destroy();
 
     // Light mode: toolbar with folder-open/save inline icons (Save
-    // disabled — icon and label grey out together) and the moon toggle.
+    // disabled — icon and label grey out together).
     h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/icon-batch-shots/markdown-viewer-light-artifacts", "Markdown Viewer");
     try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot viewer-canvas 2");
 
-    // Dark mode: the toggle swaps to the sun icon.
-    try h.dispatch(.toggle_theme);
+    // Dark mode: the same icons over the re-derived dark tokens.
+    try h.dispatch(.{ .system_scheme = .dark });
     try h.presentFrame(2);
     h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/icon-batch-shots/markdown-viewer-dark-artifacts", "Markdown Viewer");
+    try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot viewer-canvas 2");
+}
+
+// Env-gated homepage screenshot renderer (skipped by default, never in
+// CI): the docs-homepage showcase state — the welcome sample in the split
+// editor/preview — once per color scheme, same state in both. PNGs land
+// in /tmp/homepage-shots/markdown-viewer-{light,dark}-artifacts/. To use:
+//
+//   HOMEPAGE_SHOTS=1 zig build test
+test "render homepage screenshots (env-gated)" {
+    if (std.c.getenv("HOMEPAGE_SHOTS") == null) return error.SkipZigTest;
+    const io = testing.io;
+
+    var h = try Harness.create();
+    defer h.destroy();
+
+    // The app follows the system appearance: drive the platform event
+    // once per scheme, the same channel the OS uses.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .appearance_changed = .{ .color_scheme = .light } });
+    h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/markdown-viewer-light-artifacts", "Markdown Viewer");
+    try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot viewer-canvas 2");
+
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .appearance_changed = .{ .color_scheme = .dark } });
+    h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/markdown-viewer-dark-artifacts", "Markdown Viewer");
     try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot viewer-canvas 2");
 }
 

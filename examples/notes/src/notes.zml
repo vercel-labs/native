@@ -8,20 +8,9 @@
       <badge variant="primary">Notes</badge>
       <text size="sm" width="76" foreground="text_muted">Native SDK</text>
       <spacer grow="1" />
+      <!-- Clearing is the search field's own affordance: the built-in
+           trailing x (and Escape) clear through the standard edit path. -->
       <search-field text="{search}" placeholder="Search all notes…" width="300" on-input="search_edit" label="Search notes" />
-      <if test="{searching}">
-        <!-- Icon-only clear: the x rides the button's own icon channel —
-             one hit target, one tint, label for the accessible name. -->
-        <button size="sm" variant="ghost" icon="x" on-press="clear_search" label="Clear search"></button>
-      </if>
-      <!-- Icon-only theme toggle: sun in dark mode, moon in light; the
-           arms share a key so the button keeps its identity. -->
-      <if test="{isDark}">
-        <button key="theme-toggle" size="sm" variant="ghost" icon="sun" on-press="toggle_theme" label="{themeLabel}"></button>
-      </if>
-      <else>
-        <button key="theme-toggle" size="sm" variant="ghost" icon="moon" on-press="toggle_theme" label="{themeLabel}"></button>
-      </else>
       <button variant="primary" icon="plus" on-press="new_note" label="New note">New note</button>
     </row>
     <separator />
@@ -59,7 +48,10 @@
             <text size="sm" foreground="text_muted" grow="1">{listTitle}</text>
             <badge variant="secondary">{noteCount}</badge>
           </row>
-          <scroll grow="1" label="Note list">
+          <!-- Controlled scroll: the model owns the offset — on-scroll
+               stores the applied value, the binding echoes it back, so
+               the list keeps its place across every rebuild. -->
+          <scroll grow="1" value="{note_list_scroll}" on-scroll="note_list_scrolled" label="Note list">
             <column gap="4">
               <for each="noteRows" key="id" as="n">
                 <panel on-press="open_note:{n.id}" selected="{n.active}" padding="10" role="listitem" label="{n.title}">

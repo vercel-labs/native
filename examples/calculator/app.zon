@@ -16,10 +16,11 @@
                 .label = "main",
                 .title = "Calculator",
                 .width = 320,
-                .height = 496,
+                .height = 490,
                 .resizable = false,
                 .restore_state = false,
                 .restore_policy = "center_on_primary",
+                .titlebar = "hidden_inset",
                 .views = .{
                     .{ .label = "calc-canvas", .kind = "gpu_surface", .fill = true, .role = "Calculator canvas", .accessibility_label = "Calculator", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
                 },

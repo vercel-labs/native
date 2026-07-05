@@ -1525,9 +1525,12 @@ pub fn handCatalogView(ui: *CatalogUi, model: *const CatalogModel) CatalogUi.Nod
             ui.text(.{}, "Home"),
             ui.text(.{}, "Products"),
         }),
+        // Tab triggers ARE segmented controls: the markup engines lower
+        // `<button>` children of `<tabs>` to the segmented kind, so the
+        // hand-written equivalent builds segments directly.
         ui.el(.tabs, .{ .gap = 4 }, .{
-            ui.button(.{ .selected = model.tab == model.overview_tab, .on_press = CatalogMsg{ .set_tab = model.overview_tab } }, "Overview"),
-            ui.button(.{ .selected = model.tab == model.data_tab, .on_press = CatalogMsg{ .set_tab = model.data_tab } }, "Data"),
+            textLeaf(ui, .segmented_control, .{ .selected = model.tab == model.overview_tab, .on_press = CatalogMsg{ .set_tab = model.overview_tab } }, "Overview"),
+            textLeaf(ui, .segmented_control, .{ .selected = model.tab == model.data_tab, .on_press = CatalogMsg{ .set_tab = model.data_tab } }, "Data"),
         }),
         ui.row(.{ .gap = 8, .cross = .center }, .{
             textLeaf(ui, .avatar, .{}, "CT"),

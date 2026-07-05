@@ -157,6 +157,15 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 self.widgetLayoutTree().nodes,
                 &scratch.control_entries,
             );
+            // A live pointer press is VIEW state (`canvas_widget_pressed_id`),
+            // never stamped on retained widgets: mark the pressed control's
+            // entry so the control reconcile can protect a mid-gesture drag
+            // (a slider mid-drag keeps its thumb through a source move).
+            if (self.canvas_widget_pressed_id != 0) {
+                for (scratch.control_entries[0..previous_control_states.len]) |*entry| {
+                    if (entry.id == self.canvas_widget_pressed_id) entry.state.pressed = true;
+                }
+            }
             const previous_scroll_states = collectCanvasWidgetScrollReconcileEntries(
                 self.widgetLayoutTree().nodes,
                 self.widget_scroll_states[0..self.widget_layout_node_count],

@@ -40,6 +40,7 @@ const widgetTextInputOrigin = widget_text_input.widgetTextInputOrigin;
 const widgetTextInputClipRect = widget_text_input.widgetTextInputClipRect;
 const widgetTextInputDrawText = widget_text_input.widgetTextInputDrawText;
 const widgetTextInputInset = widget_text_input.widgetTextInputInset;
+const textInputClearButtonRect = widget_text_input.textInputClearButtonRect;
 const widgetButtonTextSize = widget_metrics.widgetButtonTextSize;
 const widgetBodyTextSize = widget_metrics.widgetBodyTextSize;
 const widgetLabelTextSize = widget_metrics.widgetLabelTextSize;
@@ -494,6 +495,18 @@ pub fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTo
     if (widget.kind == .combobox) {
         try emitComboboxChevron(builder, widget, tokens, visual, text_size);
     }
+    try emitSearchFieldClearButton(builder, widget, tokens, visual);
+}
+
+/// The built-in trailing clear affordance: a small x over the trailing
+/// inset whenever a search field holds text. Geometry comes from
+/// `textInputClearButtonRect`, the same rect the runtime hit-tests, so
+/// the drawn glyph and the press target can never drift apart.
+fn emitSearchFieldClearButton(builder: *Builder, widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Error!void {
+    const icon_frame = textInputClearButtonRect(widget, tokens) orelse return;
+    const icon = icon_model.resolve("x") orelse return;
+    const color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
+    try emitVectorIcon(builder, widget.id, 15, icon_frame, color, icon);
 }
 
 fn emitComboboxChevron(builder: *Builder, widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens, text_size: f32) Error!void {

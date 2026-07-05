@@ -232,6 +232,11 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
 
             var children: std.ArrayListUnmanaged(Ui.Node) = .empty;
             buildChildren(node, entries, ui, model, scope, &children);
+            // Interpreter parity: tab triggers ARE segmented controls -
+            // `<button>` children of a `<tabs>` strip lower to the
+            // widget kind tab strips are built on (see
+            // `interpreter.lowerTabsTriggers`).
+            if (comptime (kind == .tabs)) interpreter.lowerTabsTriggers(children.items);
             return ui.el(kind, options, @as([]const Ui.Node, children.items));
         }
 

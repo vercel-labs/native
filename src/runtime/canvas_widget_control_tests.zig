@@ -869,6 +869,101 @@ test "model-driven exclusive toggle-button chips follow the source across rebuil
     try std.testing.expect(!retained.findById(23).?.widget.state.selected);
 }
 
+test "model-driven slider values follow the source across rebuilds" {
+    // Sliders used to retain their runtime value unconditionally, so a
+    // model-driven value binding (playback progress on a seek bar)
+    // froze at whatever the runtime last held. The slider now follows
+    // the scroll reconcile rule: a source-side MOVE wins; a source
+    // that replays the same value keeps the retained (user-dragged)
+    // state — uncontrolled sliders keep working with zero app wiring.
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-slider-reconcile", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const Seek = struct {
+        fn layout(source_value: f32, nodes: []canvas.WidgetLayoutNode) !canvas.WidgetLayoutTree {
+            const sliders = [_]canvas.Widget{.{
+                .id = 41,
+                .kind = .slider,
+                .frame = geometry.RectF.init(10, 10, 200, 32),
+                .value = source_value,
+            }};
+            return canvas.layoutWidgetTree(.{ .kind = .stack, .children = &sliders }, geometry.RectF.init(0, 0, 240, 60), nodes);
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 60),
+    });
+
+    // Rebuild 1: the model says 0.2.
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Seek.layout(0.2, &nodes));
+
+    // The user drags to 0.8; a rebuild replaying the SAME source value
+    // keeps the drag (the uncontrolled contract).
+    try harness.runtime.dispatchAutomationCommand(app, "widget-drag canvas 41 0.2 0.8");
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Seek.layout(0.2, &nodes));
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectApproxEqAbs(@as(f32, 0.8), retained.findById(41).?.widget.value, 0.001);
+
+    // The source MOVES (model-driven progress): the source wins.
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Seek.layout(0.5, &nodes));
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), retained.findById(41).?.widget.value, 0.001);
+
+    // And keeps winning on every subsequent move — the advancing
+    // progress renders each tick.
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Seek.layout(0.6, &nodes));
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectApproxEqAbs(@as(f32, 0.6), retained.findById(41).?.widget.value, 0.001);
+
+    // A later drag still lands and survives a same-source rebuild.
+    try harness.runtime.dispatchAutomationCommand(app, "widget-drag canvas 41 0.6 0.9");
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Seek.layout(0.6, &nodes));
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectApproxEqAbs(@as(f32, 0.9), retained.findById(41).?.widget.value, 0.001);
+
+    // A LIVE drag is never yanked: while the thumb is pressed, a
+    // source move (the playback tick landing mid-gesture) keeps the
+    // dragged value; the source wins again after release.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 40,
+        .y = 26,
+    } });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const dragged_value = retained.findById(41).?.widget.value;
+    try std.testing.expectEqual(@as(canvas.ObjectId, 41), harness.runtime.views[0].canvas_widget_pressed_id);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Seek.layout(0.7, &nodes));
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectApproxEqAbs(dragged_value, retained.findById(41).?.widget.value, 0.001);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_up,
+        .x = 40,
+        .y = 26,
+    } });
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Seek.layout(0.75, &nodes));
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), retained.findById(41).?.widget.value, 0.001);
+}
+
 test "uncontrolled toggle-buttons keep their retained state across rebuilds" {
     // The other half of the source-selected contract: a toggle-button whose source
     // never asserts selected stays runtime-owned — multi-select

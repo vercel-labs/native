@@ -2,11 +2,11 @@
      key by key (markup message payloads are bindings, so every key
      dispatches its own void Msg arm — which also reads exactly like the
      keypad it is). Function keys are `secondary`, the operator column and
-     equals are `primary` (the one accent), digits are default surfaces.
-     The pending operator highlights through `selected=`, sourced from the
-     model so it survives rebuilds. Key metrics (66x54, gap 8, the wide
-     140 zero) line up with the display width in view.zig: 4*66 + 3*8 =
-     288 points. -->
+     equals are `primary` (the inverted monochrome column), digits are
+     default surfaces. The pending operator highlights through
+     `selected=` — the one accent — sourced from the model so it survives
+     rebuilds. Key metrics (66x54, gap 8, the wide 140 zero) line up with
+     the display width in view.zig: 4*66 + 3*8 = 288 points. -->
 <column gap="8" label="Keypad">
   <row gap="8">
     <button width="66" height="54" variant="secondary" on-press="clear" label="All clear">AC</button>

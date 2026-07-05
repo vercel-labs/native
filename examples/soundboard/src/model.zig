@@ -137,15 +137,12 @@ pub const copy_key: u64 = 2;
 // ------------------------------------------------------------------- model
 
 pub const Tab = enum { albums, songs };
-pub const ThemePref = enum { auto, light, dark };
 
 pub const Msg = union(enum) {
     show_albums,
     show_songs,
-    set_theme: ThemePref,
     set_appearance: native_sdk.Appearance,
     search_edit: canvas.TextInputEvent,
-    clear_search,
     open_album: u8,
     close_album,
     play_album: u8,
@@ -157,6 +154,11 @@ pub const Msg = union(enum) {
     /// `sync` hook (`seek_fraction`) before this message is applied.
     seeked,
     tick: native_sdk.EffectTimer,
+    /// Controlled scroll: each region's applied offset lands here and the
+    /// view echoes it back, so a rebuild mid-gesture can never reset it.
+    grid_scrolled: canvas.ScrollState,
+    detail_scrolled: canvas.ScrollState,
+    songs_scrolled: canvas.ScrollState,
     /// Context menu: queue a track to play after the current one.
     queue_track: u8,
     /// Context menu: copy the track title to the clipboard via `pbcopy`
@@ -168,9 +170,13 @@ pub const Msg = union(enum) {
 pub const Model = struct {
     // Source-of-truth state only; everything else is derived per rebuild.
     tab: Tab = .albums,
-    theme_pref: ThemePref = .auto,
     appearance: native_sdk.Appearance = .{},
     open_album: ?u8 = null,
+    /// Controlled scroll offsets (album grid, album detail, all songs):
+    /// the model observes the applied offset and echoes it back.
+    grid_scroll: f32 = 0,
+    detail_scroll: f32 = 0,
+    songs_scroll: f32 = 0,
     now: ?u8 = null, // playing track id
     playing: bool = false,
     elapsed_ms: u32 = 0,
@@ -212,14 +218,8 @@ pub const Model = struct {
         return model.tab == .songs;
     }
 
-    pub const theme_prefs = [_]ThemePref{ .auto, .light, .dark };
-
     pub fn colorScheme(model: *const Model) native_sdk.ColorScheme {
-        return switch (model.theme_pref) {
-            .auto => model.appearance.color_scheme,
-            .light => .light,
-            .dark => .dark,
-        };
+        return model.appearance.color_scheme;
     }
 
     pub fn coverFor(model: *const Model, album_id: u8) canvas.ImageId {
@@ -438,13 +438,16 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     switch (msg) {
         .show_albums => model.tab = .albums,
         .show_songs => model.tab = .songs,
-        .set_theme => |pref| model.theme_pref = pref,
         .set_appearance => |appearance| model.appearance = appearance,
         .search_edit => |edit| model.search_buffer.apply(edit),
-        .clear_search => model.search_buffer.apply(.clear),
+        .grid_scrolled => |state| model.grid_scroll = state.offset,
+        .detail_scrolled => |state| model.detail_scroll = state.offset,
+        .songs_scrolled => |state| model.songs_scroll = state.offset,
         .open_album => |id| {
             model.open_album = id;
             model.tab = .albums;
+            // A fresh record opens at its top.
+            model.detail_scroll = 0;
         },
         .close_album => model.open_album = null,
         .play_album => |id| startTrack(model, fx, albumTracks(id)[0].id),

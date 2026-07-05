@@ -3,7 +3,7 @@ import { AttrTable } from "@/components/attr-table";
 
 # Tabs
 
-A tab strip: ONE muted rounded container (the house tab-strip treatment) whose triggers sit inside it — the active trigger lifts to the surface with a hairline, inactive triggers stay muted on the container's wash. The children are [buttons](/components/button) whose `selected` state marks the active tab — usually an equality against a model field — and whose `on-press` switches it. The segmented-control foundation is what the engine renders tab triggers with (the builder uses `segmented_control` children directly). The panel itself is ordinary conditional content: an `if` per tab under the strip.
+A tab strip: ONE muted rounded container (the house tab-strip treatment) whose triggers sit inside it — the active trigger lifts to the surface with a hairline, inactive triggers stay muted on the container's wash. The children are [buttons](/components/button) whose `selected` state marks the active tab — usually an equality against a model field — and whose `on-press` switches it. The segmented-control foundation is what the engine renders tab triggers with: both markup engines lower `<button>` children of `<tabs>` to `segmented_control` widgets (the builder uses `segmented_control` children directly), so the strip renders identically however it is authored. The panel itself is ordinary conditional content: an `if` per tab under the strip.
 
 <ComponentPreview name="tabs" alt="A tab strip rendered by the engine" caption="Account selected in a three-tab strip" />
 

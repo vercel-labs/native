@@ -41,6 +41,7 @@ fn notesOptions() NotesApp.Options {
         .update_fx = main.update,
         .init_fx = main.boot,
         .tokens_fn = main.notesTokens,
+        .on_appearance = main.onAppearance,
         .on_command = main.command,
         .view = main.CompiledNotesView.build,
     };
@@ -648,7 +649,7 @@ test "the keyboard map drives the whole app through shortcut commands" {
     try testing.expectEqualStrings("Copied to clipboard", model.status());
 }
 
-test "search filters live and the empty state explains itself" {
+test "search filters live and the built-in clear affordance resets it" {
     var clock = native_sdk.TestClock{};
     var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
     defer h.destroy();
@@ -658,17 +659,37 @@ test "search filters live and the empty state explains itself" {
     var snapshot = h.snapshot();
     try testing.expect(snapshotWidgetNamed(snapshot, "listitem", "Groceries") != null);
     try testing.expect(snapshotWidgetNamed(snapshot, "listitem", "Piranesi") == null);
-    try testing.expect(snapshotWidgetNamed(snapshot, "button", "Clear search") != null);
 
     try h.dispatch(.{ .search_edit = .{ .insert_text = " nowhere" } });
     snapshot = h.snapshot();
     try testing.expect(snapshotWidgetNamed(snapshot, "text", "No matches") != null);
 
-    try h.dispatch(.clear_search);
+    // Clearing is the search field's own affordance now: a field holding
+    // text renders a trailing x, and pressing it clears through the
+    // standard edit path (the on-input handler receives `.clear`). Hit
+    // the real rect through raw pointer events.
+    const layout = try h.harness.runtime.canvasWidgetLayout(1, "notes-canvas");
+    const tokens = try h.harness.runtime.canvasWidgetDesignTokens(1, "notes-canvas");
+    var clear_rect: ?geometry.RectF = null;
+    for (layout.nodes) |node| {
+        if (node.widget.kind != .search_field) continue;
+        var field = node.widget;
+        field.frame = node.frame;
+        clear_rect = canvas.textInputClearButtonRect(field, tokens);
+        break;
+    }
+    const rect = clear_rect orelse return error.TestUnexpectedResult;
+    try h.clickPoint(rect.x + rect.width * 0.5, rect.y + rect.height * 0.5);
     try testing.expect(!model.searching());
     snapshot = h.snapshot();
     try testing.expect(snapshotWidgetNamed(snapshot, "listitem", "Piranesi") != null);
-    try testing.expect(snapshotWidgetNamed(snapshot, "button", "Clear search") == null);
+
+    // The same clear arrives as a plain `.clear` edit through on-input —
+    // the model path the affordance rides.
+    try h.dispatch(.{ .search_edit = .{ .insert_text = "walk" } });
+    try testing.expect(model.searching());
+    try h.dispatch(.{ .search_edit = .clear });
+    try testing.expect(!model.searching());
 }
 
 test "folder and note rows dispatch selection through real clicks" {
@@ -775,24 +796,61 @@ test "folder tree keys move the selection through real key dispatch" {
     try testing.expect(snapshotWidgetNamed(snapshot, "treeitem", "All Notes folder").?.selected);
 }
 
-test "the theme toggle flips the derived tokens and the system scheme flows in" {
+test "the system appearance re-derives the tokens live, both directions" {
+    var fx = NotesApp.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    // Model level: the scheme Msg flips the derived palette both ways —
+    // there is no in-window theme control by design.
+    var clock = native_sdk.TestClock{};
+    var model = model_mod.initialModel(testClock(&clock));
+    const light_tokens = main.notesTokens(&model);
+    main.update(&model, .{ .system_scheme = .dark }, &fx);
+    const dark_tokens = main.notesTokens(&model);
+    try testing.expect(!std.meta.eql(light_tokens.colors.background, dark_tokens.colors.background));
+    main.update(&model, .{ .system_scheme = .light }, &fx);
+    try testing.expect(std.meta.eql(light_tokens.colors.background, main.notesTokens(&model).colors.background));
+
+    // End to end: the OS appearance event reaches the canvas tokens
+    // through `on_appearance`, live, in both directions.
+    var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
+    defer h.destroy();
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .appearance_changed = .{ .color_scheme = .dark } });
+    const dark_live = try h.harness.runtime.canvasWidgetDesignTokens(1, "notes-canvas");
+    try testing.expect(std.meta.eql(dark_tokens.colors.background, dark_live.colors.background));
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .appearance_changed = .{ .color_scheme = .light } });
+    const light_live = try h.harness.runtime.canvasWidgetDesignTokens(1, "notes-canvas");
+    try testing.expect(std.meta.eql(light_tokens.colors.background, light_live.colors.background));
+}
+
+test "the note list scroll offset round-trips through the model" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
     var fx = NotesApp.Effects.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
 
     var clock = native_sdk.TestClock{};
     var model = model_mod.initialModel(testClock(&clock));
-    const light_tokens = main.notesTokens(&model);
-    main.update(&model, .toggle_theme, &fx);
-    const dark_tokens = main.notesTokens(&model);
-    try testing.expect(!std.meta.eql(light_tokens.colors.background, dark_tokens.colors.background));
-    try testing.expectEqual(canvas.ColorScheme.dark, model.effectiveScheme());
 
-    // The system scheme flows in but the explicit override keeps winning.
-    main.update(&model, .{ .system_scheme = .light }, &fx);
-    try testing.expectEqual(canvas.ColorScheme.dark, model.effectiveScheme());
-    main.update(&model, .toggle_theme, &fx);
-    try testing.expectEqual(canvas.ColorScheme.light, model.effectiveScheme());
+    // The runtime delivers the applied offset; the model stores it…
+    main.update(&model, .{ .note_list_scrolled = .{ .offset = 42, .viewport_extent = 500, .content_extent = 900 } }, &fx);
+    try testing.expectEqual(@as(f32, 42), model.note_list_scroll);
+
+    // …and the rebuilt tree echoes it back through the scroll's value,
+    // so rebuilds re-lay the list at exactly the scrolled place.
+    const tree = try buildTree(arena, &model);
+    const list = findByLabel(tree.root, "Note list") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(canvas.WidgetKind.scroll_view, list.kind);
+    try testing.expectEqual(@as(f32, 42), list.value);
+
+    // Jumping to a folder resets the offset: the new list starts at its
+    // top instead of inheriting the previous folder's scroll.
+    main.update(&model, .{ .select_folder = 2 }, &fx);
+    try testing.expectEqual(@as(f32, 0), model.note_list_scroll);
 }
 
 // Env-gated screenshot renderer (skipped by default, never in CI): renders
@@ -809,14 +867,14 @@ test "render icon-batch screenshots (env-gated)" {
     var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
     defer h.destroy();
 
-    // Light mode: folder icons on the sidebar rows, plus New note and the
-    // moon theme toggle in the header.
+    // Light mode: folder icons on the sidebar rows, plus the New note
+    // button in the header.
     h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/icon-batch-shots/notes-light-artifacts", "Notes");
     try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot notes-canvas 2");
 
-    // Dark mode while searching: the sun toggle and the icon-only clear
-    // button.
-    try h.dispatch(.toggle_theme);
+    // Dark mode while searching: the search field's built-in trailing
+    // clear x.
+    try h.dispatch(.{ .system_scheme = .dark });
     try h.dispatch(.{ .search_edit = .{ .insert_text = "walk" } });
     try presentShotFrame(&h, 2);
     h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/icon-batch-shots/notes-dark-artifacts", "Notes");
@@ -851,9 +909,10 @@ test "render homepage screenshots (env-gated)" {
     h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/notes-light-artifacts", "Notes");
     try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot notes-canvas 2");
 
-    // Same state, dark scheme: the dispatch re-emits the display list
-    // with the re-derived tokens, so no present is needed in between.
-    try h.dispatch(.toggle_theme);
+    // Same state, dark scheme via the OS appearance channel (the app
+    // follows the system appearance): the dispatch re-emits the display
+    // list with the re-derived tokens, so no present is needed in between.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .appearance_changed = .{ .color_scheme = .dark } });
     h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/notes-dark-artifacts", "Notes");
     try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot notes-canvas 2");
 }

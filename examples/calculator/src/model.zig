@@ -136,8 +136,6 @@ pub const Calculation = struct {
 
 // ----------------------------------------------------------------- model
 
-pub const ThemePref = enum { auto, light, dark };
-
 pub const Key = enum {
     d0,
     d1,
@@ -186,8 +184,8 @@ pub const Msg = union(enum) {
     /// Keyboard input through the expression field (the widget keyboard
     /// path): every typed character and backspace arrives here.
     typed: canvas.TextInputEvent,
-    /// Header theme button: auto -> light -> dark -> auto.
-    cycle_theme,
+    /// System appearance (scheme, contrast, reduced motion) flowing in
+    /// through `on_appearance`; the app follows it live.
     set_appearance: native_sdk.Appearance,
 };
 
@@ -208,26 +206,14 @@ pub const Model = struct {
     /// (classic behavior: 2 + 3 = = = walks 5, 8, 11).
     repeat: ?struct { op: Op, operand: f64 } = null,
 
-    // Theme state.
-    theme_pref: ThemePref = .auto,
+    // Appearance state (the app follows the system; no in-window theme
+    // control by design).
     appearance: native_sdk.Appearance = .{},
 
     // ------------------------------------------------------------ queries
 
     pub fn colorScheme(model: *const Model) native_sdk.ColorScheme {
-        return switch (model.theme_pref) {
-            .auto => model.appearance.color_scheme,
-            .light => .light,
-            .dark => .dark,
-        };
-    }
-
-    pub fn themeLabel(model: *const Model) []const u8 {
-        return switch (model.theme_pref) {
-            .auto => "Auto",
-            .light => "Light",
-            .dark => "Dark",
-        };
+        return model.appearance.color_scheme;
     }
 
     fn currentOperand(model: *const Model) f64 {
@@ -480,11 +466,6 @@ pub fn update(model: *Model, msg: Msg) void {
         .negate => model.press(.negate),
         .clear => model.press(.clear),
         .typed => |edit| model.applyTyped(edit),
-        .cycle_theme => model.theme_pref = switch (model.theme_pref) {
-            .auto => .light,
-            .light => .dark,
-            .dark => .auto,
-        },
         .set_appearance => |appearance| model.appearance = appearance,
     }
 }

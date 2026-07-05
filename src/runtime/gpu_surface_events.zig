@@ -130,7 +130,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 },
                 else => {},
             }
-            const widget_pointer_event = CanvasWidgetEventMethods().routeCanvasWidgetPointerInput(self, input_event, &self.widget_event_route_entries) catch |err| switch (err) {
+            var widget_pointer_event = CanvasWidgetEventMethods().routeCanvasWidgetPointerInput(self, input_event, &self.widget_event_route_entries) catch |err| switch (err) {
                 error.WindowNotFound,
                 error.ViewNotFound,
                 error.InvalidViewOptions,
@@ -139,8 +139,8 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             };
             var dismissed_surface_id: canvas.ObjectId = 0;
             var window_drag_started = false;
-            if (widget_pointer_event) |pointer_event| {
-                dismissed_surface_id = try CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromPointerInput(self, pointer_event);
+            if (widget_pointer_event) |*pointer_event| {
+                dismissed_surface_id = try CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromPointerInput(self, pointer_event.*);
                 // A down consumed by a window-drag region skips the whole
                 // widget press pipeline: the OS owns the pointer from here
                 // (the matching move/up may never reach the view), so no
@@ -148,13 +148,15 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // and keyboard focus stays where it was — exactly like a
                 // click on the native titlebar. Dismissal above still ran:
                 // clicking the header closes an open surface first.
-                window_drag_started = try CanvasWidgetEventMethods().startCanvasWidgetWindowDragFromPointer(self, input_event, pointer_event);
+                window_drag_started = try CanvasWidgetEventMethods().startCanvasWidgetWindowDragFromPointer(self, input_event, pointer_event.*);
                 if (!window_drag_started) {
-                    try CanvasWidgetEventMethods().updateCanvasWidgetControlFromPointer(self, pointer_event);
-                    try CanvasWidgetEventMethods().updateCanvasWidgetInteractionFromPointer(self, pointer_event);
+                    try CanvasWidgetEventMethods().updateCanvasWidgetControlFromPointer(self, pointer_event.*);
+                    try CanvasWidgetEventMethods().updateCanvasWidgetInteractionFromPointer(self, pointer_event.*);
+                    // The text pass may stamp a clear edit onto the
+                    // event for the app dispatch below.
                     try CanvasWidgetEventMethods().updateCanvasWidgetTextFromPointer(self, pointer_event);
-                    try CanvasWidgetEventMethods().updateCanvasWidgetScrollFromPointer(self, pointer_event);
-                    try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromPointer(self, pointer_event);
+                    try CanvasWidgetEventMethods().updateCanvasWidgetScrollFromPointer(self, pointer_event.*);
+                    try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromPointer(self, pointer_event.*);
                 }
             }
             const widget_drag_event = CanvasWidgetEventMethods().routeCanvasWidgetDragInput(self, input_event, &self.widget_event_route_entries) catch |err| switch (err) {
