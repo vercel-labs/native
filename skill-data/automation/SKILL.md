@@ -111,7 +111,7 @@ Semantics:
 6. Use `native automate widget-action <view-label> <widget-id> <action> [value]` to exercise retained canvas widget actions. `set_text` routes through the SAME input path real typing uses (focus, select-all, then a text-input event), so a TEA app's `on_input` mirror receives the edits and model state stays consistent with the on-screen field — it is not a presentation-only write.
 7. Use `native automate widget-click <view-label> <widget-id>` to exercise pointer-style retained widget routing. `widget-hold <view-label> <widget-id>` drives a press-and-hold through the same path — pointer down, the reserved hold timer fired, then the suppressed release — so `on_hold` Msgs are live-drivable (a target without `on_hold` degrades to the click a real long press is). `widget-context-press <view-label> <widget-id>` is the secondary click: it presents the widget's context menu, or dispatches `on_hold` immediately when the route declares none.
 8. Use `native automate widget-drag <view-label> <widget-id> <start-x-ratio> <end-x-ratio> [start-y-ratio end-y-ratio]` for continuous pointer controls.
-9. Use `native automate widget-wheel <view-label> <widget-id> <delta-y>` for retained widget scroll input.
+9. Use `native automate widget-wheel <view-label> <widget-id> <delta-y>` for retained widget scroll input. Wheel targets must be interactive/scrollable widgets — a plain layout column or text node is not a wheel target; aim at the scroll/list widget id from the snapshot. Failures land in the snapshot as named reasons: `error event=automation.widget_wheel name=WheelTargetUnknown|WheelTargetNotInteractive|WheelTargetHasEmptyBounds detail="<command args>"`.
 10. Use `native automate widget-key <view-label> <key> [text]` for focused retained widget keyboard input. The key accepts modifier chords — `cmd+a`, `cmd+c`, `cmd+v`, `cmd+x`, `ctrl+shift+arrowleft` (`cmd` sets the primary shortcut modifier on every platform) — so select-all/copy/cut/paste and shift-extended selection are drivable; after a copy, widget lines in the snapshot show the live selection as `selection=a..b`, and the copied text lands on the real system clipboard (`pbpaste` on macOS).
 11. Use `native automate screenshot <view-label> [scale]` to capture the named `gpu_surface` view's canvas as `screenshot-<view-label>.png` (the CLI prints the artifact path and waits for the file).
 12. Use `native automate tray-action <item-id>` to select a status-item dropdown row through the same platform event a real menu-bar click emits (command dispatch with source `.tray`). The live tray is visible in `snapshot.txt` as a `tray title="..." items=N` line followed by `  tray-item #id label="..." command="..." enabled=...` rows — the macOS menu bar is outside every window capture, so the snapshot is the only automation evidence the model-driven tray exists, and the `#id` there is what `tray-action` takes. Unknown ids degrade into the dispatch-error ring as `automation.tray_action`.
@@ -179,9 +179,9 @@ The default directory is `.zig-cache/native-sdk-automation/`, resolved against t
 
 Files:
 
-- `snapshot.txt`: app name, readiness, source kind, source size, window metadata, accessibility summary. The `ready=true` line also carries `protocol=<n>` (the CLI/app handshake: the CLI refuses snapshots — and command queues to a live app — whose protocol version is not its own, naming both versions; the fix is rebuilding whichever binary is stale and comparing `native version`), `dispatch_errors=<total>` and `dropped_trace_records=<total>`, and recent degraded handler/update errors appear as `  error event=<tag> name=<ErrorName> timestamp_ns=...` lines — a handler error no longer exits the app, so grep these to notice one happened. While `profile on` is active, a `frame_profile <stage>_p50_us=... <stage>_p90_us=... <stage>_max_us=... <stage>_n=...` line follows the header with per-stage frame timing.
+- `snapshot.txt`: app name, readiness, source kind, source size, window metadata, accessibility summary. The `ready=true` line also carries `protocol=<n>` (the CLI/app handshake: the CLI refuses snapshots — and command queues to a live app — whose protocol version is not its own, naming both versions; the fix is rebuilding whichever binary is stale and comparing `native version`), `dispatch_errors=<total>` and `dropped_trace_records=<total>`, and recent degraded handler/update errors appear as `  error event=<tag> name=<ErrorName> timestamp_ns=...` lines — a handler error no longer exits the app, so grep these to notice one happened. While `profile on` is active, a `frame_profile <stage>_p50_us=... <stage>_p90_us=... <stage>_max_us=... <stage>_n=...` line follows the header with per-stage frame timing. The header also carries `markup_watch=armed|off` — whether the markup hot-reload watch is armed (armed only in builds where the app wired `.markup` with a `watch_path` and `io`, i.e. Debug dev builds).
 - `windows.txt`: window list.
-- `command.txt`: command input written by CLI and consumed by runtime.
+- `command.txt`: command input written by CLI and consumed by runtime. The slot is single-entry and the app consumes one command per presented frame: `native automate <command>` WAITS for the running app to consume it and prints `delivered <action> -> <dir>` on success — it refuses/fails loudly instead of silently overwriting an unconsumed command, and exits non-zero if the app never consumes it.
 - `bridge-response.txt`: last bridge response.
 - `screenshot-<view-label>.png`: deterministic reference-rendered PNG of a `gpu_surface` view, written by the `screenshot` command.
 
@@ -189,7 +189,7 @@ The runtime polls `command.txt`. After processing a command, it writes `done`.
 
 ## Debugging automation failures
 
-If `native automate wait` times out:
+If `native automate wait` times out with NO snapshot file at all, it prints a teaching error naming the automation dir it watched and pointing at `-Dautomation=true` and the working directory — start from that message. Otherwise:
 
 1. Confirm the app is still running.
 2. Confirm it was built with `-Dautomation=true`.
@@ -199,6 +199,8 @@ If `native automate wait` times out:
 6. Run with more tracing, for example `zig build run -Dtrace=all`.
 
 If the CLI reports an automation protocol mismatch (or a snapshot with no protocol version): the `native` binary and the app were built from different framework versions — rebuild the older side (stale `zig-out/bin` copies of the CLI are the classic cause; `native version` prints the commit the binary was built from).
+
+Stale INSTANCES are called out too: automate verbs print a LOUD warning when the publishing app's process started BEFORE the newest binary in `zig-out/bin` was built — a leftover instance from an earlier run impersonating the new build. Kill it and relaunch the fresh binary before trusting any snapshot.
 
 If `snapshot` says no app connected:
 
@@ -233,7 +235,7 @@ A good smoke test:
 6. Exercises builtin windows/WebViews if the app enables them.
 7. Fails on timeout or unexpected bridge response.
 
-Apps scaffolded by `native init` ship this as `.github/workflows/ci.yml`: a null-platform `zig build test` job plus a Linux Xvfb smoke job that launches the binary, runs `automate wait`, asserts on the snapshot with `automate assert`, and checks a non-empty `automate screenshot` artifact. Extend that file rather than writing grep chains by hand.
+Apps scaffolded with `native init --full` ship this as `.github/workflows/ci.yml` (the zero-config default scaffold skips CI): a null-platform `zig build test` job plus a Linux Xvfb smoke job that launches the binary, runs `automate wait`, asserts on the snapshot with `automate assert`, and checks a non-empty `automate screenshot` artifact. Extend that file rather than writing grep chains by hand.
 
 Do not use automation for exhaustive UI testing. It is a runtime and bridge smoke layer.
 

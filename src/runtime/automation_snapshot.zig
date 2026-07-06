@@ -125,6 +125,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                 .dispatch_error_count = self.dispatch_error_total,
                 .dropped_trace_records = self.dropped_trace_records,
                 .publisher_pid = currentProcessId(),
+                .markup_watch_armed = self.markup_watch_armed,
             };
         }
 

@@ -113,7 +113,7 @@ That is the whole loop: the model holds state, messages describe what happened, 
 
 ## Edit while it runs
 
-`src/app.native` is embedded into the binary and watched while `native dev` runs. Edit it — change a label, add a button — and the window updates within a couple of seconds without losing the count. Parse failures keep the last good view on screen.
+`src/app.native` is embedded into the binary and watched while `native dev` runs — `native dev` runs a Debug build by default, which is what arms the hot-reload watcher. Edit it — change a label, add a button — and the window updates within a couple of seconds without losing the count. Parse failures keep the last good view on screen.
 
 ## Check and test
 
@@ -149,7 +149,7 @@ This produces an optimized binary and tells you where it landed:
 built zig-out/bin/my-app (ReleaseFast)
 ```
 
-(The binary name comes from `app.zon`: `native init my_app` sets `.name = "my-app"`.) From there, [Packaging](/packaging) turns it into a distributable app bundle with `native package`.
+(The binary name comes from `app.zon`: `native init my_app` sets `.name = "my-app"`.) Where `native dev` runs a Debug build to arm hot reload, `native build` produces an optimized ReleaseFast binary. From there, [Packaging](/packaging) turns it into a distributable app bundle with `native package`.
 
 ## Escape hatch: own the build
 

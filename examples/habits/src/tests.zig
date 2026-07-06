@@ -103,10 +103,10 @@ test "a full session: add, done, and filter drive the model through typed dispat
     try testing.expect(!subtreeHasText(meditate_after, "12 days"));
     try testing.expect(findByText(tree.root, .status_bar, "4 habits · 22 total days") != null);
 
-    // Switch to the active filter (a toggle-button in the toggle-group):
-    // zero-streak habits disappear, and the Meditate row keeps its widget
-    // id across the filtering.
-    const active_button = findByText(tree.root, .toggle_button, "active").?;
+    // Switch to the active filter (a radio in the radio-group): zero-streak
+    // habits disappear, and the Meditate row keeps its widget id across
+    // the filtering.
+    const active_button = findByText(tree.root, .radio, "active").?;
     main.update(&model, tree.msgForPointer(active_button.id, .up).?);
     try testing.expectEqual(main.Filter.active, model.filter);
 
@@ -124,7 +124,7 @@ test "a full session: add, done, and filter drive the model through typed dispat
     try testing.expectEqual(@as(u32, 14), model.habitById(1).?.streak);
 
     // Back to "all": every row returns, identities intact.
-    const all_button = findByText(tree.root, .toggle_button, "all").?;
+    const all_button = findByText(tree.root, .radio, "all").?;
     main.update(&model, tree.msgForPointer(all_button.id, .up).?);
     tree = try buildTree(arena, &model);
     try testing.expectEqual(@as(usize, 4), countRows(tree.root));

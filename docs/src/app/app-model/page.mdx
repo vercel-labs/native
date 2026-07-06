@@ -75,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
 
 After every `update`, the runtime rebuilds the view from the model. Rebuilds are cheap and safe by design:
 
-- **Widget identity is structural.** A widget keeps its id across rebuilds, reorders, and hot reloads, so engine-owned state — scroll offsets, text carets, focus — survives. List items carry `key` (or `global-key` for items that move between containers) to keep identity through reorders.
+- **Widget identity is structural.** A widget keeps its id across rebuilds, reorders, and hot reloads, so engine-owned state — scroll offsets, text carets, focus — survives. List items carry `key` (or `global-key` for items that move between containers) to keep identity through reorders. Unkeyed same-kind siblings take positional identity (sibling index), so an `<if>` that inserts or removes an earlier same-kind sibling re-disambiguates the trailing ones — engine-owned state like carets and scroll can hop; keyed items and keyed ancestors hold identity.
 - **The source wins.** Engine-retained state (a scroll offset, a toggle) survives rebuilds until the model asserts a different value; then the model's value applies. This is why controlled patterns echo runtime-applied values back through the model — see [State & Data Flow](/state).
 - **Errors degrade, they never crash.** A failing `update` arm is caught, recorded in a bounded error ring (visible in [automation](/automation) snapshots as `dispatch_errors=`), and the app keeps running.
 
@@ -97,6 +97,28 @@ const CompiledView = canvas.CompiledMarkupView(Model, Msg, @embedFile("app.nativ
 ```
 
 Both engines produce the identical widget tree — same structural ids, same typed handler table — so tests, automation scripts, and goldens hold across dev and release.
+
+## Hybrid views: a Zig root composing markup fragments
+
+Compiled markup views compose the other way too: a hand-written Zig builder root can build markup fragments as ordinary children. This is the pattern for charts-in-markup apps and any UI that mixes custom Zig panes with declarative markup — the root places what the closed grammar cannot express (a `ui.chart` pane, a scaled display block), and the markup keeps everything it can:
+
+```zig
+const CompiledHeaderView = canvas.CompiledMarkupView(Model, Msg, @embedFile("header.native"));
+
+pub fn rootView(ui: *Ui, model: *const Model) Ui.Node {
+    return ui.column(.{ .gap = 12, .grow = 1 }, .{
+        CompiledHeaderView.build(ui, model),   // the markup fragment, as a child
+        ui.chart(.{ .grow = 1, .height = 220, .y_min = 0 }, &.{
+            .{ .kind = .line, .values = model.cpuHistory(), .fill = true, .color = .accent, .label = "cpu" },
+        }),
+    });
+}
+// options: .view = rootView,
+```
+
+`examples/calculator` is the smallest live reference (`CompiledKeypadView.build(ui, model)` inside a hand-written root); `system-monitor`, `soundboard`, and `deck` use the same shape. Widget ids, handlers, and dispatch are identical to a pure-markup tree, so tests and automation address the fragment's widgets the usual way.
+
+A Zig-root app keeps dev-time hot reload for its embedded fragments too: build with `UiAppWithFeatures(Model, Msg, .{ .runtime_markup = dev_markup_reload })` and pass `.markup = .{ .source = ..., .watch_path = "src/header.native", .io = init.io }` gated on `builtin.mode == .Debug` (`null` otherwise) — the wiring in `examples/notes`. Debug builds then reload edits to the watched file in place; release builds compile the runtime engine out entirely.
 
 ## Side effects
 

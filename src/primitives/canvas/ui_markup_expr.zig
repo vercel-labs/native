@@ -124,7 +124,7 @@ pub const comparison_chain_message = "comparisons do not chain - split a < b < c
 pub const unterminated_string_message = "unterminated string - expression strings use single quotes ('done') and have no escapes";
 pub const integer_literal_overflow_message = "integer literal does not fit in 64 bits";
 pub const number_literal_range_message = "number literal is out of range";
-pub const unknown_function_message = "unknown expression function - the library is closed (fixed, thousands, percent, date, time, datetime, upper, lower, trim, min, max, abs, round, floor, ceil, plural); anything else is a model fn";
+pub const unknown_function_message = "unknown expression function - the library is closed (fixed, thousands, percent, date, time, datetime, upper, lower, trim, min, max, abs, round, floor, ceil, plural, pad); anything else is a model fn";
 pub const clock_function_message = "reading the clock is an effect - expressions only format model data; keep a timestamp field that update/fx maintains and format it with date()/time()/datetime()";
 pub const expected_operand_message = "expected a value: a number, 'string', true/false, a binding path, a function call, or ( )";
 pub const expected_operator_message = "expected an operator (+ - * / ++ == != < <= > >= and or) or the end of the expression";
@@ -165,6 +165,8 @@ pub const FunctionId = enum {
     floor,
     ceil,
     plural,
+    // Appended, never reordered: additive growth keeps existing ids stable.
+    pad,
 };
 
 pub const FunctionSpec = struct {
@@ -193,6 +195,7 @@ pub const function_specs = [_]FunctionSpec{
     .{ .id = .floor, .name = "floor", .min_args = 1, .max_args = 1, .signature = "floor takes one number and returns the nearest whole number at or below it" },
     .{ .id = .ceil, .name = "ceil", .min_args = 1, .max_args = 1, .signature = "ceil takes one number and returns the nearest whole number at or above it" },
     .{ .id = .plural, .name = "plural", .min_args = 3, .max_args = 3, .signature = "plural takes (count, singular, plural) - a count of exactly 1 picks the singular" },
+    .{ .id = .pad, .name = "pad", .min_args = 2, .max_args = 2, .signature = "pad takes (whole number, width) with width 0-6 (round() a float first) and zero-pads on the left to width digits - a - sign does not count toward width" },
 };
 
 pub fn findFunction(name: []const u8) ?FunctionSpec {
@@ -759,6 +762,13 @@ fn checkCall(node: ExprNode, kinds: *[max_expression_nodes]?ValueKind, diagnosti
             if (definitelyNotKind(kinds[node.args[2]], .string)) return failType(diagnostic, node.offset, signature);
             return .string;
         },
+        .pad => {
+            // The value takes whole numbers like thousands; the width is an
+            // integer exactly like fixed's digits argument.
+            if (definitelyNotKind(kinds[node.args[0]], .integer)) return failType(diagnostic, node.offset, signature);
+            if (definitelyNotKind(kinds[node.args[1]], .integer)) return failType(diagnostic, node.offset, signature);
+            return .string;
+        },
     }
 }
 
@@ -994,6 +1004,11 @@ fn evalCall(node: ExprNode, values: *[max_expression_nodes]Value, arena: std.mem
             if (singular != .string or plural_form != .string) return .{ .fail = signature };
             return .{ .value = .{ .string = if (a.integer == 1) singular.string else plural_form.string } };
         },
+        .pad => {
+            const width = digitsArg(values[node.args[1]]) orelse return .{ .fail = digits_range_message };
+            if (a != .integer) return .{ .fail = signature };
+            return .{ .value = .{ .string = try formatPadded(arena, a.integer, width) } };
+        },
     }
 }
 
@@ -1039,6 +1054,21 @@ fn formatThousands(arena: std.mem.Allocator, value: i64) error{OutOfMemory}![]co
         if (index > 0 and (body.len - index) % 3 == 0) try out.append(arena, ',');
         try out.append(arena, byte);
     }
+    return out.items;
+}
+
+/// Zero-pad a whole number on the left to `width` digits: pad(7, 2) is
+/// "07". The sign precedes the zeros and does not count toward the width
+/// (pad(-7, 3) is "-007"), and a number wider than `width` prints in full.
+fn formatPadded(arena: std.mem.Allocator, value: i64, width: usize) error{OutOfMemory}![]const u8 {
+    var buffer: [32]u8 = undefined;
+    const digits = std.fmt.bufPrint(&buffer, "{d}", .{value}) catch return error.OutOfMemory;
+    const negative = digits.len > 0 and digits[0] == '-';
+    const body = if (negative) digits[1..] else digits;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    if (negative) try out.append(arena, '-');
+    if (body.len < width) try out.appendNTimes(arena, '0', width - body.len);
+    try out.appendSlice(arena, body);
     return out.items;
 }
 

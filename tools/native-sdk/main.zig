@@ -11,11 +11,17 @@ const version = "0.3.0";
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
-    if (args.len <= 1) return usage();
+    if (args.len <= 1) {
+        usage();
+        std.process.exit(1);
+    }
 
     const command = args[1];
     if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "help")) {
-        return usage();
+        // Asked-for help is a success: print it and exit 0 (usage() alone
+        // is reserved for the exit-1 "you didn't tell me what to do" path).
+        usage();
+        return;
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "version")) {
         // Payload, not a diagnostic: scripts parse `native version`, so it
         // belongs on stdout (see automation.zig's emitPayload contract).
@@ -27,6 +33,11 @@ pub fn main(init: std.process.Init) !void {
         try stdout_writer.interface.print("native {s} (commit {s}, automation protocol v{d})\n", .{ version, cli_build_info.build_commit, automation_protocol.version });
         try stdout_writer.interface.flush();
     } else if (std.mem.eql(u8, command, "init")) {
+        checkVerbFlags("init", args[2..], .{
+            .usage = "init [path] [--frontend <native|next|vite|react|svelte|vue>] [--framework <sdk path>] [--full]",
+            .value_flags = &.{ "--frontend", "--framework" },
+            .bool_flags = &.{"--full"},
+        });
         const destination = positionalArg(args[2..]) orelse ".";
         const frontend_str = flagValue(args, "--frontend") catch fail("--frontend requires a value: native, next, vite, react, svelte, vue") orelse "native";
         const frontend = tooling.templates.Frontend.parse(frontend_str) orelse fail("invalid --frontend value: use native (default), next, vite, react, svelte, or vue");
@@ -55,6 +66,11 @@ pub fn main(init: std.process.Init) !void {
         printInitNextSteps(destination, frontend, shape);
     } else if (std.mem.eql(u8, command, "build") or std.mem.eql(u8, command, "test")) {
         const verb: tooling.verbs.Verb = if (std.mem.eql(u8, command, "build")) .build else .@"test";
+        checkVerbFlags(command, args[2..], .{
+            .usage = if (verb == .build) "build [dir] [--yes] [-D... zig build flags]" else "test [dir] [--yes] [-D... zig build flags]",
+            .bool_flags = &.{"--yes"},
+            .forwards_build_flags = true,
+        });
         const verb_args = parseVerbArgs(allocator, args[2..], &.{}) catch fail("usage: native build|test [dir] [--yes] [-D... zig build flags]");
         try enterAppDir(init.io, verb_args.dir);
         tooling.verbs.run(allocator, init.io, verb, .{
@@ -63,10 +79,18 @@ pub fn main(init: std.process.Init) !void {
             .forwarded_args = verb_args.forwarded,
         }) catch |err| return failVerb(err);
     } else if (std.mem.eql(u8, command, "check")) {
+        checkVerbFlags("check", args[2..], .{
+            .usage = "check [dir] [--strict]",
+            .bool_flags = &.{ "--strict", "--yes" },
+        });
         const verb_args = parseVerbArgs(allocator, args[2..], &.{}) catch fail("usage: native check [dir] [--strict]");
         try enterAppDir(init.io, verb_args.dir);
         runCheck(allocator, init.io, flagBool(args, "--strict")) catch |err| return failVerb(err);
     } else if (std.mem.eql(u8, command, "eject")) {
+        checkVerbFlags("eject", args[2..], .{
+            .usage = "eject [dir]",
+            .bool_flags = &.{"--yes"},
+        });
         const verb_args = parseVerbArgs(allocator, args[2..], &.{}) catch fail("usage: native eject [dir]");
         try enterAppDir(init.io, verb_args.dir);
         runEject(allocator, init.io, init.environ_map) catch |err| return failVerb(err);
@@ -85,6 +109,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, command, "markup")) {
         try markup_cli.run(allocator, init.io, args[2..]);
     } else if (std.mem.eql(u8, command, "validate")) {
+        checkVerbFlags("validate", args[2..], .{ .usage = "validate [app.zon]" });
         const path = if (args.len >= 3) args[2] else "app.zon";
         const result = tooling.manifest.validateFile(allocator, init.io, path) catch |err| switch (err) {
             error.FileNotFound => {
@@ -98,6 +123,7 @@ pub fn main(init: std.process.Init) !void {
         // returned error would bury it under the CLI's own return trace.
         if (!result.ok) std.process.exit(1);
     } else if (std.mem.eql(u8, command, "bundle-assets")) {
+        checkVerbFlags("bundle-assets", args[2..], .{ .usage = "bundle-assets [app.zon] [assets] [output]" });
         const manifest_path = if (args.len >= 3) args[2] else "app.zon";
         const metadata = try tooling.manifest.readMetadata(allocator, init.io, manifest_path);
         const assets_dir = if (args.len >= 4) args[3] else if (metadata.frontend) |frontend| frontend.dist else "assets";
@@ -105,6 +131,11 @@ pub fn main(init: std.process.Init) !void {
         const stats = try tooling.assets.bundle(allocator, init.io, assets_dir, output_dir);
         std.debug.print("bundled {d} assets into {s}\n", .{ stats.asset_count, output_dir });
     } else if (std.mem.eql(u8, command, "package")) {
+        checkVerbFlags("package", args[2..], .{
+            .usage = "package [--target macos] [--output path] [--binary path] [--assets path] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]",
+            .value_flags = &.{ "--manifest", "--target", "--output", "--binary", "--assets", "--web-engine", "--cef-dir", "--signing", "--identity", "--entitlements", "--team-id", "--optimize" },
+            .bool_flags = &.{ "--cef-auto-install", "--archive" },
+        });
         const manifest_path = try flagValue(args, "--manifest") orelse "app.zon";
         const metadata = tooling.manifest.readMetadata(allocator, init.io, manifest_path) catch |err| switch (err) {
             error.FileNotFound => {
@@ -155,6 +186,12 @@ pub fn main(init: std.process.Init) !void {
         });
         tooling.package.printDiagnostic(stats);
     } else if (std.mem.eql(u8, command, "dev")) {
+        checkVerbFlags("dev", args[2..], .{
+            .usage = "dev [dir] [--yes] [--url url] [--command \"npm run dev\"] [--timeout-ms n] [-D... zig build flags]\n       native dev [--manifest app.zon] --binary path [--url url] [--command \"npm run dev\"] [--timeout-ms n]",
+            .value_flags = &.{ "--url", "--command", "--timeout-ms", "--binary", "--manifest" },
+            .bool_flags = &.{"--yes"},
+            .forwards_build_flags = true,
+        });
         if ((try flagValue(args, "--binary")) != null) {
             // Legacy shape (`--binary` provided): the caller already built
             // the shell — e.g. the expanded template's `zig build dev` step —
@@ -184,10 +221,13 @@ pub fn main(init: std.process.Init) !void {
             }) catch |err| return failVerb(err);
         }
     } else if (std.mem.eql(u8, command, "package-windows")) {
+        checkPackageShortcutFlags(command, args[2..]);
         try packageShortcut(allocator, init.io, args, .windows, "zig-out/package/windows");
     } else if (std.mem.eql(u8, command, "package-linux")) {
+        checkPackageShortcutFlags(command, args[2..]);
         try packageShortcut(allocator, init.io, args, .linux, "zig-out/package/linux");
     } else if (std.mem.eql(u8, command, "package-ios")) {
+        checkPackageShortcutFlags(command, args[2..]);
         const metadata = try tooling.manifest.readMetadata(allocator, init.io, try flagValue(args, "--manifest") orelse "app.zon");
         const web_engine = try tooling.web_engine.resolve(.{ .web_engine = metadata.web_engine, .cef = metadata.cef }, .{});
         const stats = try tooling.package.createPackage(allocator, init.io, .{
@@ -202,6 +242,7 @@ pub fn main(init: std.process.Init) !void {
         });
         tooling.package.printDiagnostic(stats);
     } else if (std.mem.eql(u8, command, "package-android")) {
+        checkPackageShortcutFlags(command, args[2..]);
         const metadata = try tooling.manifest.readMetadata(allocator, init.io, try flagValue(args, "--manifest") orelse "app.zon");
         const web_engine = try tooling.web_engine.resolve(.{ .web_engine = metadata.web_engine, .cef = metadata.cef }, .{});
         const stats = try tooling.package.createPackage(allocator, init.io, .{
@@ -223,7 +264,9 @@ pub fn main(init: std.process.Init) !void {
             else => return err,
         };
     } else {
-        return usage();
+        std.debug.print("unknown command: {s}\n\n", .{command});
+        usage();
+        std.process.exit(1);
     }
 }
 
@@ -233,7 +276,7 @@ fn usage() void {
         \\
         \\commands:
         \\  init [path] [--frontend <native|next|vite|react|svelte|vue>] [--framework <sdk path>] [--full]   (default: native)
-        \\  dev [dir] [--yes] [-D... zig build flags]      build and run the app (hot reload)
+        \\  dev [dir] [--yes] [-D... zig build flags]      build a Debug binary and run it (markup hot reload)
         \\  build [dir] [--yes] [-D... zig build flags]    build a ReleaseFast binary into zig-out/bin/
         \\  test [dir] [--yes] [-D... zig build flags]     run the app's test suite
         \\  check [dir] [--strict]                         validate src/*.native markup and app.zon (uses zig-out/model-contract.zon when fresh)
@@ -259,6 +302,53 @@ fn usage() void {
 fn fail(message: []const u8) noreturn {
     std.debug.print("{s}\n", .{message});
     std.process.exit(1);
+}
+
+/// Flag discipline for every verb parsed here: `<verb> --help` prints the
+/// verb's usage and exits 0, and an unrecognized flag prints the same usage
+/// and exits 1. A flag typo must never fall through to a real run (`native
+/// init --help` once scaffolded a real app named after the cwd).
+const VerbSpec = struct {
+    usage: []const u8,
+    /// Flags that consume the following argument.
+    value_flags: []const []const u8 = &.{},
+    /// Boolean flags.
+    bool_flags: []const []const u8 = &.{},
+    /// Verb forwards -D.../--release... to `zig build`.
+    forwards_build_flags: bool = false,
+};
+
+fn checkPackageShortcutFlags(verb: []const u8, args: []const []const u8) void {
+    var usage_buffer: [128]u8 = undefined;
+    const usage_text = std.fmt.bufPrint(&usage_buffer, "{s} [--output path] [--binary path] [--manifest app.zon] [--assets path]", .{verb}) catch verb;
+    checkVerbFlags(verb, args, .{
+        .usage = usage_text,
+        .value_flags = &.{ "--manifest", "--output", "--binary", "--assets" },
+    });
+}
+
+fn checkVerbFlags(verb: []const u8, args: []const []const u8, spec: VerbSpec) void {
+    var index: usize = 0;
+    args: while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            std.debug.print("usage: native {s}\n", .{spec.usage});
+            std.process.exit(0);
+        }
+        if (!std.mem.startsWith(u8, arg, "-")) continue;
+        if (spec.forwards_build_flags and (std.mem.startsWith(u8, arg, "-D") or std.mem.startsWith(u8, arg, "--release"))) continue;
+        for (spec.bool_flags) |flag| {
+            if (std.mem.eql(u8, arg, flag)) continue :args;
+        }
+        for (spec.value_flags) |flag| {
+            if (std.mem.eql(u8, arg, flag)) {
+                index += 1;
+                continue :args;
+            }
+        }
+        std.debug.print("unknown flag {s} for `native {s}`\nusage: native {s}\n", .{ arg, verb, spec.usage });
+        std.process.exit(1);
+    }
 }
 
 /// Expected verb failures already printed a teaching message (or zig's own
@@ -343,8 +433,8 @@ fn enterAppDir(io: std.Io, dir: []const u8) !void {
 
 /// `native check`: validate every markup file under src/ plus app.zon — the
 /// no-build confidence pass (markup vocabulary + manifest schema). With a
-/// fresh model-contract artifact in zig-out (emitted by the app's
-/// `zig build model-contract` step), the markup pass also verifies
+/// fresh model-contract artifact in zig-out (refreshed by `native test`),
+/// the markup pass also verifies
 /// bindings, iterables, message tags, and expression types against the
 /// app's actual Model/Msg, and reports unused model state as warnings
 /// (--strict promotes warnings to failures).

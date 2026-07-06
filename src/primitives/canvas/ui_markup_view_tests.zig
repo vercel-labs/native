@@ -2409,6 +2409,12 @@ test "slot, default, and component-file misuse fails the interpreter build with 
             .message = canvas.ui_markup.template_default_literal_message,
         },
         .{
+            // Quote characters in a default are literal text, not string
+            // delimiters.
+            .source = "<template name=\"t\" args=\"tone='soft'\"><text>{tone}</text></template>\n<row>\n  <use template=\"t\" />\n</row>",
+            .message = canvas.ui_markup.template_default_quoted_message,
+        },
+        .{
             // A component file (all templates) is not a view.
             .source = "<template name=\"t\"><text>x</text></template>",
             .message = canvas.ui_markup.component_file_view_message,
@@ -2448,4 +2454,65 @@ test "interpreter defaults resolve per use site and literals only" {
     const tree = try ui.finalize(try view.build(&ui, &model));
     try testing.expect(findByText(tree.root, .badge, "a flat 0") != null);
     try testing.expect(findByText(tree.root, .badge, "b up 3") != null);
+}
+
+test "a bare name= declares an empty-string default that renders as empty" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    const source =
+        \\<template name="tag" args="label suffix=">
+        \\  <badge>{label}{suffix}!</badge>
+        \\</template>
+        \\<row gap="4">
+        \\  <use template="tag" label="a" />
+        \\  <use template="tag" label="b" suffix="-x" />
+        \\</row>
+    ;
+    // The bare form passes structural validation (only quoted and
+    // {binding} defaults are rejected)...
+    var parser = canvas.ui_markup.Parser.init(arena, source);
+    try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(try parser.parse()));
+    // ...and the omitted arg interpolates as the empty string.
+    var view = try InboxMarkup.init(arena, source);
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    try testing.expect(findByText(tree.root, .badge, "a!") != null);
+    try testing.expect(findByText(tree.root, .badge, "b-x!") != null);
+}
+
+test "binding a TextBuffer field directly fails with the edit-model teaching message" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const DraftModel = struct {
+        draft_buffer: canvas.TextBuffer(32) = .{},
+
+        pub fn draft(model: *const @This()) []const u8 {
+            return model.draft_buffer.text();
+        }
+    };
+    const DraftMsg = union(enum) { input: canvas.TextInputEvent };
+    const DraftMarkup = markup_view.MarkupView(DraftModel, DraftMsg);
+    const DraftUi = canvas.Ui(DraftMsg);
+
+    var model = DraftModel{};
+    model.draft_buffer.set("hello");
+
+    // The buffer is the edit model, not the text: binding it directly
+    // teaches the pub fn accessor shape instead of the generic miss.
+    var bad = try DraftMarkup.init(arena, "<column>\n  <text>{draft_buffer}</text>\n</column>");
+    var bad_ui = DraftUi.init(arena);
+    try testing.expectError(error.MarkupBuild, bad.build(&bad_ui, &model));
+    try testing.expectEqualStrings(canvas.ui_markup.binding_text_buffer_message, bad.diagnostic.message);
+    try testing.expect(bad.diagnostic.line > 0);
+
+    // The taught shape works: a pub fn returning the buffer's text.
+    var good = try DraftMarkup.init(arena, "<column>\n  <text>{draft}</text>\n</column>");
+    var good_ui = DraftUi.init(arena);
+    const tree = try good_ui.finalize(try good.build(&good_ui, &model));
+    try testing.expect(findByText(tree.root, .text, "hello") != null);
 }

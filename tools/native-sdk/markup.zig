@@ -7,6 +7,11 @@ const markup_lsp = @import("markup_lsp");
 pub const hasMarkupExtension = ui_markup.hasMarkupExtension;
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !void {
+    if (args.len >= 1 and (std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "-h") or std.mem.eql(u8, args[0], "help"))) {
+        // Asked-for help is a success: print it and exit 0.
+        usage();
+        return;
+    }
     if (args.len >= 1 and std.mem.eql(u8, args[0], "lsp")) {
         return runLsp(allocator, io);
     }
@@ -64,19 +69,24 @@ pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []con
 
     var outcome = CheckOutcome{};
     var contract_value: ?ui_markup.contract.Contract = null;
+    // The degraded structural-only modes share one loud, consistent line in
+    // both `native check` and `native markup check`. The refresh command is
+    // `native test` (which works in every app shape); an app that owns its
+    // build.zig can also run the underlying `zig build model-contract` step.
+    const refresh_hint: []const u8 = if (fileExists(io, "build.zig")) "run `native test` (or `zig build model-contract`)" else "run `native test`";
     switch (discoverContract(arena, io)) {
         .no_app => {},
         .missing => std.debug.print(
-            "model contract: no artifact at {s} - bindings and messages were checked structurally only (run `zig build model-contract` in the app to enable model checks)\n",
-            .{ui_markup.contract.default_artifact_path},
+            "model contract: not yet built - bindings checked structurally only; {s} to enable typed checks\n",
+            .{refresh_hint},
         ),
         .unreadable => std.debug.print(
-            "model contract: {s} could not be parsed (it may come from a different toolkit version) - bindings and messages were checked structurally only (re-run `zig build model-contract`)\n",
-            .{ui_markup.contract.default_artifact_path},
+            "model contract: {s} could not be parsed (it may come from a different toolkit version) - bindings checked structurally only; {s} to rebuild it\n",
+            .{ ui_markup.contract.default_artifact_path, refresh_hint },
         ),
         .stale => std.debug.print(
-            "model contract: {s} is stale (the app's Zig sources changed since it was emitted) - bindings and messages were checked structurally only (re-run `zig build model-contract`)\n",
-            .{ui_markup.contract.default_artifact_path},
+            "model contract: {s} is stale (the app's Zig sources changed since it was emitted) - bindings checked structurally only; {s} to refresh it\n",
+            .{ ui_markup.contract.default_artifact_path, refresh_hint },
         ),
         .ok => |parsed| contract_value = parsed,
     }
@@ -86,6 +96,10 @@ pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []con
         usage_state = try ui_markup.contract.Usage.init(arena, parsed);
     }
     var views_checked: usize = 0;
+    // Basenames every `@embedFile("...")` under src/ references, gathered
+    // once per run on the first failing file (a passing run never pays
+    // for the scan).
+    var embedded_basenames: ?[]const []const u8 = null;
     for (files) |file_path| {
         // The rename window: `.zml` (the format's former extension) still
         // checks and loads, with a nudge toward the current name. Not a
@@ -99,6 +113,7 @@ pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []con
         }) catch {
             outcome.failures += 1;
             if (legacy_extension) printRenameNote(file_path);
+            printOrphanHint(arena, io, file_path, &embedded_basenames);
             continue;
         };
         if (checked.had_view) views_checked += 1;
@@ -125,6 +140,49 @@ pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []con
 /// The gentle nudge for files still on the format's former extension.
 fn printRenameNote(file_path: []const u8) void {
     std.debug.print("{s}: note: rename to .native — .zml keeps working for now\n", .{file_path});
+}
+
+/// After a markup file fails inside an app directory, say out loud when
+/// NOTHING under src/ embeds it: a failing file no Zig source references
+/// is usually a refactor leftover, and fixing its errors is wasted work.
+/// The embed scan runs once per check run, on the first failure.
+fn printOrphanHint(arena: std.mem.Allocator, io: std.Io, file_path: []const u8, cache: *?[]const []const u8) void {
+    if (!fileExists(io, "app.zon")) return;
+    const basenames = cache.* orelse blk: {
+        const collected = collectEmbeddedBasenames(arena, io) catch return;
+        cache.* = collected;
+        break :blk collected;
+    };
+    const failing = std.fs.path.basename(file_path);
+    for (basenames) |name| {
+        if (std.mem.eql(u8, name, failing)) return;
+    }
+    std.debug.print("{s}: note: no Zig source under src/ embeds this file - if it is a leftover, delete it; otherwise embed it with @embedFile\n", .{file_path});
+}
+
+/// The basename of every `@embedFile("...")` argument across the .zig
+/// sources under src/, each file read once.
+fn collectEmbeddedBasenames(arena: std.mem.Allocator, io: std.Io) ![]const []const u8 {
+    var out: std.ArrayListUnmanaged([]const u8) = .empty;
+    var root = std.Io.Dir.cwd().openDir(io, "src", .{ .iterate = true }) catch return out.items;
+    defer root.close(io);
+    var walker = try root.walk(arena);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
+        const full_path = try std.fs.path.join(arena, &.{ "src", entry.path });
+        const source = readFile(arena, io, full_path) catch continue;
+        const marker = "@embedFile(";
+        var rest = source;
+        while (std.mem.indexOf(u8, rest, marker)) |start| {
+            rest = rest[start + marker.len ..];
+            if (rest.len == 0 or rest[0] != '"') continue;
+            const close = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse break;
+            try out.append(arena, std.fs.path.basename(rest[1..close]));
+            rest = rest[close + 1 ..];
+        }
+    }
+    return out.items;
 }
 
 const ContractState = union(enum) {
@@ -278,6 +336,21 @@ fn checkFile(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8, co
         return err;
     };
     if (ui_markup.validate(document)) |info| {
+        // A11y findings are independent per control, so one failing run
+        // reports ALL of them (fix everything in one pass). Every other
+        // validation error keeps the first-error behavior: the tree is
+        // structurally broken, and later findings would be noise.
+        if (isA11yErrorMessage(info.message)) {
+            var a11y_error_storage: [ui_markup.max_a11y_warnings]ui_markup.MarkupErrorInfo = undefined;
+            const findings = ui_markup.collectA11yErrors(document, &a11y_error_storage);
+            if (findings.len > 0) {
+                for (findings) |finding| {
+                    const finding_path = if (finding.path.len > 0) finding.path else file_path;
+                    std.debug.print("{s}:{d}:{d}: error: {s}\n", .{ finding_path, finding.line, finding.column, finding.message });
+                }
+                return error.MarkupInvalid;
+            }
+        }
         const info_path = if (info.path.len > 0) info.path else file_path;
         // The position-into-source refinements (tofu codepoint, vocabulary
         // suggestion) read the ROOT file's source; an error inside an
@@ -332,6 +405,23 @@ fn checkFile(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8, co
     }
     std.debug.print("{s}: ok\n", .{file_path});
     return .{ .had_view = document.root != null, .warnings = a11y_warnings.len };
+}
+
+/// True when a validation error is one of the a11y lint's error-class
+/// findings — the only validation errors that are independent per node,
+/// so the checker reports all of them at once instead of one per re-run.
+fn isA11yErrorMessage(message: []const u8) bool {
+    const a11y_error_messages = [_][]const u8{
+        ui_markup.a11y_unlabeled_control_message,
+        ui_markup.a11y_icon_only_message,
+        ui_markup.a11y_unlabeled_editable_message,
+        ui_markup.a11y_unknown_role_message,
+        ui_markup.a11y_container_role_message,
+    };
+    for (a11y_error_messages) |candidate| {
+        if (std.mem.eql(u8, message, candidate)) return true;
+    }
+    return false;
 }
 
 /// Import loading for the checker: resolver paths are already joined
@@ -514,7 +604,7 @@ fn usage() void {
         \\unnamed images and redundant labels are warnings).
         \\
         \\Inside an app directory with a fresh zig-out/model-contract.zon
-        \\(emit it with `zig build model-contract`), the check also verifies
+        \\(refresh it with `native test`), the check also verifies
         \\bindings, iterables, message tags, and expression types against
         \\the app's actual Model/Msg, and reports model state and Msg tags
         \\no view uses as warnings (--strict promotes warnings to failures;

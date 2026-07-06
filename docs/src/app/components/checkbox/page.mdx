@@ -3,7 +3,7 @@ import { AttrTable } from "@/components/attr-table";
 
 # Checkbox & Radio
 
-Value controls: the label is the element's content, the model binds `checked`, and `on-toggle` dispatches its Msg — the engine never flips state on its own. `radio` is the single-selection variant, grouped by a `radio-group` row container; render the group's selection with `{a == b}` equalities and let each radio's `on-toggle` set the model field.
+Value controls: the label rides the `text` attribute — checkbox and radio are not text-bearing elements, so text content between the tags is rejected with a teaching error (`label="..."` alone names one for accessibility without a visible label). The model binds `checked`, and `on-toggle` dispatches its Msg — the engine never flips state on its own. `radio` is the single-selection variant, grouped by a `radio-group` row container; render the group's selection with `{a == b}` equalities and let each radio's `on-toggle` set the model field.
 
 <ComponentPreview name="checkbox" alt="Checkboxes rendered by the engine" caption="checked, unchecked, and disabled checkboxes" />
 
@@ -11,9 +11,9 @@ Value controls: the label is the element's content, the model binds `checked`, a
 
 ```html
 <column gap="12">
-  <checkbox checked="{accepted}" on-toggle="toggle_terms">Accept terms and conditions</checkbox>
-  <checkbox checked="{reports}" on-toggle="toggle_reports">Send usage reports</checkbox>
-  <checkbox checked="true" disabled="true">Managed by your organization</checkbox>
+  <checkbox checked="{accepted}" on-toggle="toggle_terms" text="Accept terms and conditions" />
+  <checkbox checked="{reports}" on-toggle="toggle_reports" text="Send usage reports" />
+  <checkbox checked="true" disabled="true" text="Managed by your organization" />
 </column>
 ```
 
@@ -35,9 +35,9 @@ One model field holds the selection; each radio compares against it and dispatch
 
 ```html
 <radio-group gap="12">
-  <radio checked="{density == default}" on-toggle="set_default">Default</radio>
-  <radio checked="{density == comfortable}" on-toggle="set_comfortable">Comfortable</radio>
-  <radio checked="{density == compact}" disabled="true">Compact</radio>
+  <radio checked="{density == default}" on-toggle="set_default" text="Default" />
+  <radio checked="{density == comfortable}" on-toggle="set_comfortable" text="Comfortable" />
+  <radio checked="{density == compact}" disabled="true" text="Compact" />
 </radio-group>
 ```
 

@@ -257,14 +257,38 @@ test "numeric functions: min, max, abs, round, floor, ceil, plural" {
     try expectString("plural(2, 'card', 'cards') ++ ' left'", "cards left");
 }
 
+test "pad zero-pads whole numbers for mm:ss counters" {
+    try expectString("pad(7, 2)", "07");
+    try expectString("pad(0, 4)", "0000");
+    try expectString("pad(59, 2)", "59");
+    // The sign precedes the zeros and does not count toward the width.
+    try expectString("pad(-7, 3)", "-007");
+    // Wider than the width prints in full, never truncates.
+    try expectString("pad(1234, 2)", "1234");
+    try expectString("pad(-1234, 2)", "-1234");
+    // The motivating case: a seconds counter formatted as mm:ss.
+    try expectString("pad(floor(125 / 60), 2) ++ ':' ++ pad(125 - 60 * floor(125 / 60), 2)", "02:05");
+    // Floats mirror thousands: whole numbers only, round() a float first.
+    try expectEvalFail("pad(7.9, 2)", findSignature("pad"));
+    try expectString("pad(round(7.9), 2)", "08");
+    // Width mirrors fixed's digits bound (0-6), taught one past each end.
+    try expectString("pad(7, 6)", "000007");
+    try expectEvalFail("pad(7, 7)", expr.digits_range_message);
+    try expectEvalFail("pad(7, -1)", expr.digits_range_message);
+}
+
 test "function misuse fails with the signature as the teaching message" {
     try expectParseFail("fixed(1)", findSignature("fixed"));
     try expectParseFail("plural(1, 'a')", findSignature("plural"));
     try expectParseFail("upper('a', 'b')", findSignature("upper"));
+    try expectParseFail("pad(7)", findSignature("pad"));
+    try expectParseFail("pad(7, 2, 3)", findSignature("pad"));
     try expectParseFail("sparkle(1)", expr.unknown_function_message);
     try expectEvalFail("thousands(1.5)", findSignature("thousands"));
     try expectEvalFail("upper(3)", findSignature("upper"));
     try expectEvalFail("plural('x', 'a', 'b')", findSignature("plural"));
+    try expectEvalFail("pad('x', 2)", findSignature("pad"));
+    try expectEvalFail("pad(7, 'x')", expr.digits_range_message);
 }
 
 fn findSignature(name: []const u8) []const u8 {
@@ -540,6 +564,7 @@ const parity_source =
     \\  <text>{plural(count, 'item', 'items')} · {upper(trim(label))} · {lower('SHOUT')}</text>
     \\  <text>{date(stamp)} {time(stamp)} {datetime(stamp)}</text>
     \\  <text>{min(count, 2)} {max(count, 2)} {abs(0 - count)} {round(price)} {floor(price)} {ceil(fraction)}</text>
+    \\  <text>{pad(count, 2)}:{pad(doneCount, 2)} {pad(0 - count, 3)} {pad(total * 100, 2)}</text>
     \\  <text>{-price} {not busy} {count > 1 and not busy} {count == 3 or busy} {fraction >= 0.5}</text>
     \\  <progress value="{fraction * 100}" />
     \\  <if test="{count > 0 and doneCount >= 9}">
@@ -609,6 +634,7 @@ test "expression parity: interpreter and compiled engine agree on every operator
     try expectHasText(interpreted_texts.items, "items · MIXED CASE · shout");
     try expectHasText(interpreted_texts.items, "2026-07-05 14:03 2026-07-05 14:03");
     try expectHasText(interpreted_texts.items, "2 3 3 20 19 1");
+    try expectHasText(interpreted_texts.items, "03:09 -003 1200");
     try expectHasText(interpreted_texts.items, "-19.99 true true true false");
     try expectHasText(interpreted_texts.items, "on track");
     try expectHasText(interpreted_texts.items, "unit 11");

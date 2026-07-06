@@ -856,6 +856,12 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
                     if (std.mem.indexOfScalar(u8, default, '{') != null) {
                         fail(template_node, markup.template_default_literal_message);
                     }
+                    // Quotes are not string delimiters in a default; they
+                    // would render verbatim (interpreter and validator
+                    // parity).
+                    if (default.len > 0 and (default[0] == '\'' or default[0] == '"')) {
+                        fail(template_node, markup.template_default_quoted_message);
+                    }
                     specs = specs ++ &[_]ArgSpec{.{
                         .name = arg.name,
                         .raw = default,
@@ -1570,6 +1576,9 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
                 return OnType(ModelT, path, allow_arena) orelse {
                     if (!allow_arena and OnType(ModelT, path, true) != null) {
                         fail(node, markup.arena_scalar_equality_message);
+                    }
+                    if (interpreter.fieldIsTextBuffer(ModelT, head)) {
+                        fail(node, markup.binding_text_buffer_message);
                     }
                     fail(node, "binding does not name a model field");
                 };

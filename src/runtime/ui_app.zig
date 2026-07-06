@@ -1630,6 +1630,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 self.markup_source_hash = self.embeddedMarkupClosureHash(markup_options);
             }
             runtime.startTimer(markup_watch_timer_id, markup_watch_interval_ns, true) catch {};
+            // Make the armed watch observable: the automation snapshot
+            // header reports `markup_watch=armed|off`, so a dev loop can
+            // check the watch instead of bisecting an app that never
+            // reloads (release builds compile the watch out entirely).
+            if (comptime @hasDecl(Runtime, "setMarkupWatchArmed")) {
+                runtime.setMarkupWatchArmed(true);
+            }
         }
 
         fn embeddedMarkupClosureHash(self: *Self, markup_options: MarkupOptions) u64 {

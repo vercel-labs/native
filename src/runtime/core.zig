@@ -216,6 +216,9 @@ pub const Runtime = struct {
     /// Trace records dropped because a sink was full or failing; a
     /// logging failure never fails dispatch.
     dropped_trace_records: u64 = 0,
+    /// Whether an installing UiApp armed the markup hot-reload watch
+    /// (see `setMarkupWatchArmed`); stamped into the snapshot header.
+    markup_watch_armed: bool = false,
     /// Per-stage frame timing (rolling p50/p90 windows), toggled at
     /// runtime by `native automate profile on|off` and read by the
     /// snapshot's `frame_profile` line. Larger than the small-default
@@ -375,6 +378,14 @@ pub const Runtime = struct {
     /// bounded ring has since dropped.
     pub fn dispatchErrorTotal(self: *const Runtime) u64 {
         return self.dispatch_error_total;
+    }
+
+    /// Called by an installing UiApp when it arms (or skips) the markup
+    /// hot-reload watch; published in the automation snapshot header as
+    /// `markup_watch=armed|off` so a dev loop can prove — without
+    /// bisecting — whether editing a .native source will reload the app.
+    pub fn setMarkupWatchArmed(self: *Runtime, armed: bool) void {
+        self.markup_watch_armed = armed;
     }
 
     const FlowMethods = runtime_flow.RuntimeFlow(Runtime);

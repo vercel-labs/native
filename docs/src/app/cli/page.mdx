@@ -1,6 +1,6 @@
 # CLI Reference
 
-The `native` CLI provides project scaffolding, markup validation, automation, packaging, and debugging tools.
+The `native` CLI provides project scaffolding, markup validation, automation, packaging, and debugging tools. Every verb accepts `--help` (prints usage and exits 0); unknown flags error with the usage text.
 
 ## Commands
 
@@ -18,19 +18,19 @@ The `native` CLI provides project scaffolding, markup validation, automation, pa
     </tr>
     <tr>
       <td><code>native dev [dir]</code></td>
-      <td>Build and run the app in the current (or given) app directory, with markup hot reload; apps with a frontend dev config also get the managed dev server. With <code>--binary &lt;path&gt;</code>, only runs the frontend dev server flow against a prebuilt shell.</td>
+      <td>Build and run the app in the current (or given) app directory — a Debug build by default (the markup hot-reload watcher and the Debug-only teaching diagnostics are compiled in only in Debug; pass <code>-Doptimize=...</code> to override), printing a one-line completion and naming any failing step; apps with a frontend dev config also get the managed dev server. With <code>--binary &lt;path&gt;</code>, only runs the frontend dev server flow against a prebuilt shell.</td>
     </tr>
     <tr>
       <td><code>native build [dir]</code></td>
-      <td>Build a ReleaseFast binary into <code>zig-out/bin/</code></td>
+      <td>Build a ReleaseFast binary into <code>zig-out/bin/</code>, printing a one-line completion and naming any failing step</td>
     </tr>
     <tr>
       <td><code>native test [dir]</code></td>
-      <td>Run the app's test suite</td>
+      <td>Run the app's test suite, printing the zig build summary (step/test tally) plus a final <code>native test: passed</code> line; it also refreshes the model-contract artifact <code>native check</code> reads</td>
     </tr>
     <tr>
       <td><code>native check [dir] [--strict]</code></td>
-      <td>Validate <code>src/**.native</code> markup and <code>app.zon</code> without building; with a fresh <code>zig-out/model-contract.zon</code> (<code>zig build model-contract</code>) it also checks bindings, iterables, and message tags against your <code>Model</code>/<code>Msg</code> and warns on model state no view uses (<code>--strict</code> fails on warnings)</td>
+      <td>Validate <code>src/**.native</code> markup and <code>app.zon</code> without building; with a fresh <code>zig-out/model-contract.zon</code> (refreshed by <code>native test</code>) it also checks bindings, iterables, and message tags against your <code>Model</code>/<code>Msg</code> and warns on model state no view uses (<code>--strict</code> fails on warnings). Without the artifact it degrades to structural checking and says so loudly: "model contract: not yet built - bindings checked structurally only; run <code>native test</code> to enable typed checks". Markup accessibility findings are reported per-file in full, and a failing <code>src/*.native</code> file that no Zig source embeds gets a leftover-file hint</td>
     </tr>
     <tr>
       <td><code>native eject [dir]</code></td>
@@ -255,8 +255,8 @@ Core maintainers who need to build CEF before a Native SDK runtime release exist
   </thead>
   <tbody>
     <tr>
-      <td><code>--binary</code> (required)</td>
-      <td>Path to the compiled app binary</td>
+      <td><code>--binary</code></td>
+      <td>Path to a prebuilt app binary — the legacy prebuilt-shell form: the build step is skipped and only the frontend dev flow runs (required only for that form; ordinary <code>native dev</code> builds the app itself)</td>
     </tr>
     <tr>
       <td><code>--manifest</code></td>

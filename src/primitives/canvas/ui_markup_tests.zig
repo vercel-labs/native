@@ -581,6 +581,40 @@ test "the a11y lint: unnamed images and redundant labels are warnings, not error
     try testing.expectEqual(@as(usize, 0), markup.collectA11yWarnings(adds_doc, &storage).len);
 }
 
+test "collectA11yErrors reports every a11y error in one pass with validate's positions" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var storage: [markup.max_a11y_warnings]markup.MarkupErrorInfo = undefined;
+
+    // validate stops at the first offender; the collector reports both.
+    const two_unlabeled = "<column>\n  <button on-press=\"add\"></button>\n  <button on-press=\"remove\"></button>\n</column>";
+    var parser = markup.Parser.init(arena, two_unlabeled);
+    const document = try parser.parse();
+    const first = markup.validate(document) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(markup.a11y_unlabeled_control_message, first.message);
+    const findings = markup.collectA11yErrors(document, &storage);
+    try testing.expectEqual(@as(usize, 2), findings.len);
+    try testing.expectEqualStrings(markup.a11y_unlabeled_control_message, findings[0].message);
+    try testing.expectEqual(first.line, findings[0].line);
+    try testing.expectEqual(first.column, findings[0].column);
+    try testing.expectEqualStrings(markup.a11y_unlabeled_control_message, findings[1].message);
+    try testing.expect(findings[1].line > findings[0].line);
+
+    // Mixed classes collect together: an unnamed control and a role
+    // misuse (positioned at the role attribute, like validate).
+    const mixed = "<column>\n  <slider value=\"0.5\" on-change=\"scale\" />\n  <button role=\"tree\" on-press=\"add\">Add</button>\n</column>";
+    var mixed_parser = markup.Parser.init(arena, mixed);
+    const mixed_findings = markup.collectA11yErrors(try mixed_parser.parse(), &storage);
+    try testing.expectEqual(@as(usize, 2), mixed_findings.len);
+    try testing.expectEqualStrings(markup.a11y_unlabeled_control_message, mixed_findings[0].message);
+    try testing.expectEqualStrings(markup.a11y_container_role_message, mixed_findings[1].message);
+
+    // A clean document collects nothing.
+    var clean_parser = markup.Parser.init(arena, "<column>\n  <button on-press=\"add\">Add</button>\n</column>");
+    try testing.expectEqual(@as(usize, 0), markup.collectA11yErrors(try clean_parser.parse(), &storage).len);
+}
+
 test "press and toggle handlers are legal on layout elements (press fall-through makes them pressable)" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1004,6 +1038,10 @@ test "template arg defaults parse and validate as literals only" {
     const cases = [_]struct { source: []const u8, message: []const u8 }{
         .{ .source = "<template name=\"t\" args=\"title trend=flat\"><text>{title}</text></template>\n<row>\n  <use template=\"t\" trend=\"up\" />\n</row>", .message = markup.use_missing_arg_message },
         .{ .source = "<template name=\"t\" args=\"trend={title}\"><text>{trend}</text></template>\n<row />", .message = markup.template_default_literal_message },
+        // Quote characters in a default are literal text, not string
+        // delimiters - rejected with the bare-form teaching instead of
+        // silently rendering the quotes.
+        .{ .source = "<template name=\"t\" args=\"trend='flat'\"><text>{trend}</text></template>\n<row />", .message = markup.template_default_quoted_message },
     };
     for (cases) |case| {
         var parser = markup.Parser.init(arena, case.source);

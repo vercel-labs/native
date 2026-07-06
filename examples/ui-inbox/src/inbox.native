@@ -1,6 +1,7 @@
 <!-- The inbox view. Compiled into the binary and, in dev, watched and
-     hot-reloaded: edit this file while `zig build run` is running and the
-     window updates without losing task state. -->
+     hot-reloaded: edit this file while `native dev` is running (a Debug
+     build - release builds compile the watcher out) and the window
+     updates without losing task state. -->
 <column gap="12" padding="16">
   <row gap="8" cross="center">
     <text grow="1">Inbox</text>

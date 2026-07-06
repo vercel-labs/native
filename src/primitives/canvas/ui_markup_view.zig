@@ -888,6 +888,11 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     if (std.mem.indexOfScalar(u8, default, '{') != null) {
                         return self.failNode(template_node, markup.template_default_literal_message);
                     }
+                    // Quotes are not string delimiters in a default; they
+                    // would render verbatim (validator parity).
+                    if (default.len > 0 and (default[0] == '\'' or default[0] == '"')) {
+                        return self.failNode(template_node, markup.template_default_quoted_message);
+                    }
                     break :blk .{ .value = literalValue(default) };
                 } else return self.failNode(node, markup.use_missing_arg_message);
                 scope.entries[saved_len + arg_count] = .{ .name = arg.name, .payload = payload };
@@ -1471,6 +1476,9 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             if (!allow_arena and resolveOn(ModelT, scope.model, path, scope.arena) != null) {
                 return self.failValue(node, markup.arena_scalar_equality_message);
             }
+            if (fieldIsTextBuffer(ModelT, head)) {
+                return self.failValue(node, markup.binding_text_buffer_message);
+            }
             return self.failValue(node, "binding does not name a model field");
         }
 
@@ -1666,6 +1674,21 @@ fn resolveOn(comptime T: type, value: *const T, path: []const u8, arena: ?std.me
         },
         else => return null,
     }
+}
+
+/// True when `head` names a struct field whose type is a
+/// `canvas.TextBuffer(N)` editor. Such a field is the EDIT MODEL, not
+/// bindable text, so both engines and the contract checker turn the
+/// generic missing-binding failure into a teaching message pointing at
+/// the buffer's text() accessor. Comptime-callable (the compiled engine
+/// runs it inside its comptime binding resolution).
+pub fn fieldIsTextBuffer(comptime T: type, head: []const u8) bool {
+    @setEvalBranchQuota(comptime typeScanQuota(T));
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        const is_buffer = comptime (std.mem.indexOf(u8, @typeName(field.type), "TextBuffer(") != null);
+        if (is_buffer and std.mem.eql(u8, field.name, head)) return true;
+    }
+    return false;
 }
 
 fn resolveNested(comptime T: type, ptr: anytype, path: []const u8, arena: ?std.mem.Allocator) ?Value {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const manifest_tool = @import("manifest.zig");
+const process_tree = @import("process_tree.zig");
 
 pub const Error = error{
     MissingFrontend,
@@ -25,6 +26,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     const command = options.command_override orelse dev.command;
     const timeout_ms = options.timeout_ms orelse dev.timeout_ms;
 
+    // Both children go into their own process groups (see process_tree):
+    // a dev-server command spawns the real server as ITS child, and the
+    // app must die with the session even when this CLI is signalled —
+    // an orphaned automation-enabled app keeps publishing snapshots that
+    // impersonate the next build.
     var dev_child: ?std.process.Child = null;
     if (command.len > 0) {
         dev_child = try std.process.spawn(io, .{
@@ -32,10 +38,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             .stdin = .ignore,
             .stdout = .inherit,
             .stderr = .inherit,
+            .pgid = process_tree.spawnPgid(),
         });
     }
+    // Capture group ids at spawn: wait()/kill() clear the child's id.
+    const dev_group: i32 = if (dev_child) |*child| (if (child.id) |id| @as(i32, @intCast(id)) else 0) else 0;
+    if (dev_group > 0) process_tree.own(dev_group);
     defer if (dev_child) |*child| {
         child.kill(io);
+        if (dev_group > 0) process_tree.releaseAndKill(dev_group);
     };
 
     try waitUntilReady(io, url, dev.ready_path, timeout_ms);
@@ -59,7 +70,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         .stdout = .inherit,
         .stderr = .inherit,
         .environ_map = &env,
+        .pgid = process_tree.spawnPgid(),
     });
+    const app_group: i32 = if (app_child.id) |id| @as(i32, @intCast(id)) else 0;
+    if (app_group > 0) process_tree.own(app_group);
+    defer if (app_group > 0) process_tree.releaseAndKill(app_group);
     _ = try app_child.wait(io);
 }
 

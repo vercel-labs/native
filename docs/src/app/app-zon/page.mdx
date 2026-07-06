@@ -210,6 +210,8 @@ Tooling parses and validates the schema. Runtime code can return the same shape 
 
 When an app uses both `windows` and `shell.windows`, labels must stay unique across both lists. Use `windows` for the simple compatibility path or `shell.windows` for native-first structure; do not define two window entries with the same label.
 
+For a scene-first app — a `UiApp` passing its Zig scene (`shell_scene`) to the runner — the scene is authoritative at runtime: it re-applies size, title, and views when it loads. `app.zon`'s `.shell.windows[0]` exists because the host creates the startup window before the scene loads, and create-time-only properties must come from the manifest: `titlebar` chrome, `min_width`/`min_height` floors, and the show mode (canvas-first windows are created hidden and shown after the first frame presents). The numbers appearing in both places is by design — edit the scene for anything that can change after create (size, title, views), and the manifest for create-time chrome and floors.
+
 ```zig
 .shell = .{
     .windows = .{

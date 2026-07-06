@@ -1303,6 +1303,37 @@ fn collectNodeA11yWarnings(node: MarkupNode, storage: []MarkupErrorInfo, len: *u
     }
 }
 
+/// The a11y ERRORS for a document, all of them: the same findings
+/// `validate` fails on one at a time (unnamed controls, icon-only
+/// controls, unnamed text entry, and role misuse), collected per node so
+/// a checker can report every offender in one pass instead of one per
+/// re-run. Positions match `validate`'s emission exactly: the element
+/// for name errors, the role attribute for role errors.
+pub fn collectA11yErrors(document: MarkupDocument, storage: []MarkupErrorInfo) []const MarkupErrorInfo {
+    var len: usize = 0;
+    for (document.templates) |template_node| {
+        collectNodeA11yErrors(template_node, storage, &len);
+    }
+    if (document.root) |root| {
+        collectNodeA11yErrors(root, storage, &len);
+    }
+    return storage[0..len];
+}
+
+fn collectNodeA11yErrors(node: MarkupNode, storage: []MarkupErrorInfo, len: *usize) void {
+    if (node.kind == .element) {
+        if (a11yNameError(node)) |message| {
+            appendWarning(storage, len, errorAt(node, message));
+        }
+        if (a11yRoleError(node)) |message| {
+            appendWarning(storage, len, attrError(node, node.attrEntry("role").?, message));
+        }
+    }
+    for (node.children) |child| {
+        collectNodeA11yErrors(child, storage, len);
+    }
+}
+
 fn appendWarning(storage: []MarkupErrorInfo, len: *usize, info: MarkupErrorInfo) void {
     if (len.* >= storage.len) return;
     storage[len.*] = info;
@@ -1490,6 +1521,7 @@ pub const invalid_expression_message = "invalid expression: values are a literal
 pub const if_test_expression_message = "invalid expression: test takes one {expression} - a binding, a comparison, or boolean logic";
 pub const unterminated_interpolation_message = "unterminated interpolation";
 pub const arena_scalar_equality_message = "arena-computed bindings cannot be compared with == - compare the source fields directly, or bind a pub fn returning bool";
+pub const binding_text_buffer_message = "this binding names a TextBuffer field - the buffer is the edit model, not the text; bind a pub fn returning its text (pub fn draft(model: *const Model) []const u8 { return model.draft_buffer.text(); })";
 pub const markdown_source_message = "markdown requires a source attribute with one {binding} naming the markdown text (a []const u8 field or fn - arena fns work)";
 pub const markdown_children_message = "markdown takes no children or text content - the source binding provides the markdown";
 pub const markdown_attr_message = "unknown attribute for markdown - it takes source, on-link, on-details, details-expanded, and issue-link-base";
@@ -1518,6 +1550,7 @@ pub const template_name_message = "template requires a name attribute";
 pub const template_unique_name_message = "template names must be unique";
 pub const template_args_message = "template args must be space-separated names, each optionally with a literal default (args=\"title cards trend=flat\")";
 pub const template_default_literal_message = "template arg defaults are literals only - a default cannot see any scope ({bindings} are rejected); pass the value at the use site instead";
+pub const template_default_quoted_message = "quotes are literal in template arg defaults - write args=\"name=fallback\" (bare name= declares an empty-string default)";
 pub const template_attrs_message = "template takes only name and args attributes";
 pub const template_one_child_message = "template takes exactly one element child (wrap siblings in a container)";
 pub const template_one_slot_message = "a template body takes at most one <slot/> (one unnamed slot; named slots are not supported yet)";
@@ -1645,6 +1678,12 @@ fn validateTemplate(document: MarkupDocument, node: MarkupNode, index: usize) ?M
                     // binding (or equality) there could never resolve.
                     if (std.mem.indexOfScalar(u8, default, '{') != null) {
                         return attrError(node, attribute, template_default_literal_message);
+                    }
+                    // Quotes are not string delimiters here - the default
+                    // is already text, so quote characters would render
+                    // verbatim in the expanded template.
+                    if (default.len > 0 and (default[0] == '\'' or default[0] == '"')) {
+                        return attrError(node, attribute, template_default_quoted_message);
                     }
                 }
             }

@@ -67,6 +67,7 @@ const Model = struct {
     profile: Profile = .{},
     cards: [2]Card = .{ .{ .id = 1 }, .{ .id = 2 } },
     hidden: u8 = 0,
+    draft_buffer: canvas.TextBuffer(16) = .{},
 
     pub fn total(model: *const Model) i64 {
         return @intCast(model.count);
@@ -180,6 +181,19 @@ const fixtures = [_]Fixture{
         \\</column>
         ,
         .expect = "binding does not name a model field",
+    },
+    .{
+        // The buffer is the edit model, not the text: both checkers
+        // teach the pub fn accessor shape with the SAME message (the
+        // shared constant pins the vocabularies together, like
+        // binding_model_message).
+        .name = "binding a TextBuffer field directly rejects with the edit-model teaching",
+        .source =
+        \\<column>
+        \\  <text>{draft_buffer}</text>
+        \\</column>
+        ,
+        .expect = markup.binding_text_buffer_message,
     },
     .{
         .name = "a missing loop item field rejects",
@@ -441,6 +455,24 @@ test "the contract check is total where the interpreter is lazy" {
     try testing.expectEqual(null, try interpreterMessage(arena, document));
     const message = (try contractMessage(arena, document, null)).?;
     try testing.expect(std.mem.startsWith(u8, message, contract.binding_model_message));
+}
+
+test "the TextBuffer teaching message is byte-identical between checker and interpreter" {
+    // The conformance fixture pins the interpreter to the shared
+    // constant and the checker to its prefix; this pins the checker to
+    // the WHOLE message (no token suffix - the field is named in the
+    // teaching text itself).
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const document = try parseFixture(arena,
+        \\<column>
+        \\  <text>{draft_buffer}</text>
+        \\</column>
+    );
+    const message = (try contractMessage(arena, document, null)).?;
+    try testing.expectEqualStrings(markup.binding_text_buffer_message, message);
 }
 
 test "unknown names get a did-you-mean over the model's actual vocabulary" {

@@ -37,6 +37,11 @@ pub const Diagnostics = struct {
     /// Trace records dropped because a sink was full or failing —
     /// logging failures never take dispatch down.
     dropped_trace_records: u64 = 0,
+    /// Whether the app armed a markup hot-reload watch this run.
+    /// Published as `markup_watch=armed|off` so a dev loop can prove —
+    /// without bisecting — that editing a .native source will (or will
+    /// not) reload the running app.
+    markup_watch_armed: bool = false,
 };
 
 /// One stage of the runtime's per-stage frame profile (`profile on`):
@@ -62,12 +67,31 @@ pub const FrameProfile = struct {
 /// One degraded dispatch failure: a handler or update error the runtime
 /// caught, recorded, and continued past (never a process exit). `event`
 /// and `error_name` reference static strings (event names and
-/// `@errorName` data), so records are plain values.
+/// `@errorName` data), so records are plain values. `detail` is a small
+/// owned copy of failure context — for automation commands, the command
+/// arguments, so the snapshot's error line names the widget a failed
+/// verb targeted.
 pub const DispatchError = struct {
     timestamp_ns: u64 = 0,
     event: []const u8 = "",
     error_name: []const u8 = "",
+    detail_storage: [max_dispatch_error_detail_bytes]u8 = undefined,
+    detail_len: u8 = 0,
+
+    pub fn detail(self: *const DispatchError) []const u8 {
+        return self.detail_storage[0..self.detail_len];
+    }
+
+    pub fn setDetail(self: *DispatchError, text: []const u8) void {
+        const len = @min(text.len, self.detail_storage.len);
+        @memcpy(self.detail_storage[0..len], text[0..len]);
+        self.detail_len = @intCast(len);
+    }
 };
+
+/// Detail context kept per degraded dispatch error (a truncated copy of
+/// the failing automation command's arguments).
+pub const max_dispatch_error_detail_bytes: usize = 48;
 
 pub const WidgetActions = struct {
     focus: bool = false,
@@ -209,7 +233,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
     // stamps ITS baked-in protocol version so a stale `native` binary
     // (or a stale app) is refused loudly instead of silently driving
     // yesterday's dropbox shape.
-    try writer.print("ready=true protocol={d} frame={d} commands={d} runtime_uptime_ns={d} dispatch_errors={d} dropped_trace_records={d} publisher_pid={d}\n", .{
+    try writer.print("ready=true protocol={d} frame={d} commands={d} runtime_uptime_ns={d} dispatch_errors={d} dropped_trace_records={d} publisher_pid={d} markup_watch={s}\n", .{
         protocol.version,
         input.diagnostics.frame_index,
         input.diagnostics.command_count,
@@ -217,6 +241,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
         input.diagnostics.dispatch_error_count,
         input.diagnostics.dropped_trace_records,
         input.diagnostics.publisher_pid,
+        if (input.diagnostics.markup_watch_armed) "armed" else "off",
     });
     // Per-stage frame timing (`profile on`): rolling p50/p90 in
     // microseconds per pipeline stage, one greppable key per number so
@@ -492,11 +517,20 @@ pub fn writeText(input: Input, writer: anytype) !void {
         }
     }
     for (input.errors) |dispatch_error| {
-        try writer.print("  error event={s} name={s} timestamp_ns={d}\n", .{
-            dispatch_error.event,
-            dispatch_error.error_name,
-            dispatch_error.timestamp_ns,
-        });
+        if (dispatch_error.detail_len > 0) {
+            try writer.print("  error event={s} name={s} detail=\"{s}\" timestamp_ns={d}\n", .{
+                dispatch_error.event,
+                dispatch_error.error_name,
+                dispatch_error.detail(),
+                dispatch_error.timestamp_ns,
+            });
+        } else {
+            try writer.print("  error event={s} name={s} timestamp_ns={d}\n", .{
+                dispatch_error.event,
+                dispatch_error.error_name,
+                dispatch_error.timestamp_ns,
+            });
+        }
     }
     if (input.source) |source| {
         try writer.print("  source kind={s} bytes={d}\n", .{ @tagName(source.kind), source.bytes.len });

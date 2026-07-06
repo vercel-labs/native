@@ -36,11 +36,11 @@ When the runtime publishes a snapshot, it writes these files to the automation d
   <tbody>
     <tr>
       <td><code>snapshot.txt</code></td>
-      <td>Runtime state: source kind, window metadata, native/WebView metadata including role, accessibility label, text, and focus state, <code>ready=true/false</code></td>
+      <td>Runtime state: source kind, window metadata, native/WebView metadata including role, accessibility label, text, and focus state, <code>ready=true/false</code>, and <code>markup_watch=armed|off</code> in the header — whether the markup hot-reload watch is armed (only in builds where the app wired <code>.markup</code> with a <code>watch_path</code> and <code>io</code>, i.e. Debug dev builds)</td>
     </tr>
     <tr>
       <td><code>accessibility.txt</code></td>
-      <td>Accessibility tree summary with native view roles and accessible names. Explicit accessibility labels are used before visible text.</td>
+      <td>Accessibility tree summary with native view roles and accessible names. An explicit <code>label=</code> REPLACES the visible text as the accessible name — snapshot greps and screen readers see the label, not the text, so don't label an element whose visible text your assertions grep for.</td>
     </tr>
     <tr>
       <td><code>windows.txt</code></td>
@@ -156,7 +156,7 @@ The runtime polls `command.txt` and processes these actions:
   </tbody>
 </table>
 
-After processing a command, the runtime writes `done` to `command.txt`.
+After processing a command, the runtime writes `done` to `command.txt`. The command slot is single-entry and the app consumes one command per presented frame: `native automate <command>` waits for the running app to consume it and prints `delivered <action> -> <dir>` on success — it fails loudly instead of silently overwriting an unconsumed command, and exits non-zero if the app never consumes it.
 
 Widget verbs and `screenshot` address a `gpu_surface` view by its label across ALL open windows — snapshots enumerate every window's views and widgets, so a model-declared secondary window's canvas (a settings window) is drivable and capturable exactly like the main one, with no window argument.
 

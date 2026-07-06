@@ -39,7 +39,7 @@ No `on_scroll` binding is required: the runtime owns the offset (wheel, kinetic,
 
 ## Reach-end
 
-`on_reach_end` is the infinite-fetch signal for any scroll container (markup: `on-reach-end` on `scroll`): dispatched when a user scroll comes within one viewport of the content end, with hysteresis — it fires once per approach and re-arms only after the offset retreats past one and a half viewports, which appending a batch causes on its own by growing the extent. `update` appends the next batch; nothing else is required.
+`on_reach_end` is the infinite-fetch signal for any scroll container (markup: `on-reach-end` on `scroll`): dispatched when a user scroll comes within one viewport of the content end, with hysteresis — it fires once per approach and re-arms only after the offset retreats past one and a half viewports, which appending a batch causes on its own by growing the extent. A programmatic jump to the end fires once and never re-arms while the offset stays near the end — re-arming needs a post-scroll observation at least 1.5 viewports from it. `update` appends the next batch; nothing else is required.
 
 <AttrTable attrs={["on-reach-end"]} />
 

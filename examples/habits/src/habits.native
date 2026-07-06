@@ -6,11 +6,15 @@
     <text grow="1">Habits</text>
     <button variant="primary" on-press="add">New habit</button>
   </row>
-  <toggle-group gap="8">
+  <!-- Single selection is radio semantics: the group renders selection
+       from {f == filter} equalities, each radio's on-toggle sets the
+       model field, and the visible label rides text= (radio is not a
+       text-bearing element). -->
+  <radio-group gap="8" label="Filter">
     <for each="filters" as="f">
-      <toggle-button size="sm" selected="{f == filter}" on-toggle="set_filter:{f}">{f}</toggle-button>
+      <radio checked="{f == filter}" on-toggle="set_filter:{f}" text="{f}" />
     </for>
-  </toggle-group>
+  </radio-group>
   <if test="{habit_count}">
     <scroll grow="1">
       <column gap="2">

@@ -137,7 +137,7 @@ When the same subtree repeats with different data, define it once — templates 
 
 A `<use>` is allowed anywhere an element is, and its attributes must match the template's declared `args` exactly. Args bind like `for` variables: a `{binding}` naming an iterable (the same set `for each` accepts) is iterable inside the template; anything else — a literal or a scalar binding — is a value for bindings and interpolation. The body is built in place of the `<use>`, so widget ids are identical to writing it out by hand: converting copy-pasted markup to a template changes no ids. Templates may only reference templates defined earlier in the file, which keeps expansion finite; bindings stay zero-argument, so per-case queries (`todoCards`, `doingCards`) remain named model functions.
 
-An arg can declare a literal default with `name=value`, and a use site may then omit it — `args="title trend=flat"` makes `trend` optional. Defaults are literals only: they evaluate in no scope, so a `{binding}` default is rejected with a teaching error, and a missing arg without a default keeps its error too.
+An arg can declare a literal default with `name=value`, and a use site may then omit it — `args="title trend=flat"` makes `trend` optional. Defaults are literals only: they evaluate in no scope, so a `{binding}` default is rejected with a teaching error, and a missing arg without a default keeps its error too. `args="name="` declares an empty-string default, and defaults are unquoted — quotes in a default would be literal characters, so a quoted default (`name='x'`) is rejected with a teaching error.
 
 ## Components
 
@@ -186,7 +186,7 @@ Operators: arithmetic `+ - * /` (division always produces a float — wrap in `r
 
 Type discipline is teaching errors over silent coercion: a string minus a number is an error at check/compile time when the types are known, and a loud build failure when they are not — never a NaN. Both engines evaluate through one shared evaluator, so results (float formatting included) are identical bit for bit.
 
-The function library is closed — sixteen functions, and growing the set is a toolkit change: `fixed(x, digits)` (exact decimals), `thousands(n)` (`1,234,567`), `percent(fraction, digits?)` (`0.42` → `42%`), `date(ts)`/`time(ts)`/`datetime(ts)` (a model unix timestamp in seconds, formatted in UTC — formatting model time is pure; *reading the clock* is an effect, so `now()` is a teaching error pointing at the model/fx loop), `upper`/`lower`/`trim` (ASCII case mapping; other characters pass through), `min`/`max`/`abs`, `round`/`floor`/`ceil` (number → whole number), and `plural(count, singular, plural)` (`{plural(n, 'item', 'items')}`).
+The function library is closed — seventeen functions, and growing the set is a toolkit change: `fixed(x, digits)` (exact decimals), `thousands(n)` (`1,234,567`), `percent(fraction, digits?)` (`0.42` → `42%`), `date(ts)`/`time(ts)`/`datetime(ts)` (a model unix timestamp in seconds, formatted in UTC — formatting model time is pure; *reading the clock* is an effect, so `now()` is a teaching error pointing at the model/fx loop), `upper`/`lower`/`trim` (ASCII case mapping; other characters pass through), `min`/`max`/`abs`, `round`/`floor`/`ceil` (number → whole number), `plural(count, singular, plural)` (`{plural(n, 'item', 'items')}`), and `pad(x, width)` (zero-pads the integer value of x to `width` digits — `pad(7, 2)` → `07`, a negative sign precedes the zeros without counting toward the width, and numbers wider than `width` print in full; the mm:ss counter function: `{pad(minutes, 2)}:{pad(seconds, 2)}`).
 
 Complexity is bounded and taught one past the bound: at most 256 bytes, 64 terms, and 16 nesting levels per expression — anything larger is a named model function by design.
 
@@ -196,13 +196,16 @@ Scalar bindings take the allocator form too: `{summary}` binds `pub fn summary(m
 
 ## Messages
 
-`on-press`, `on-toggle`, `on-change`, and `on-submit` name a variant of your `Msg` union, optionally with one binding payload (`toggle:{t.id}`). `on-input` names a variant whose payload is `canvas.TextInputEvent`; pair it with `canvas.TextBuffer` in the model for editor state that survives rebuilds:
+`on-press`, `on-toggle`, `on-change`, and `on-submit` name a variant of your `Msg` union, optionally with one binding payload (`toggle:{t.id}`). `on-input` names a variant whose payload is `canvas.TextInputEvent`; pair it with `canvas.TextBuffer` in the model for editor state that survives rebuilds — the markup binds a `pub fn` returning the text (`text="{draft}"`), and binding the `TextBuffer` field itself directly is a teaching error pointing at this pattern:
 
 ```zig
-draft: canvas.TextBuffer(64) = .{},
+draft_buffer: canvas.TextBuffer(64) = .{},
+pub fn draft(model: *const Model) []const u8 {
+    return model.draft_buffer.text();
+}
 // in update:
-.draft_edit => |edit| model.draft.apply(edit),
-.add => { model.addTask(model.draft.text()); model.draft.clear(); },
+.draft_edit => |edit| model.draft_buffer.apply(edit),
+.add => { model.addTask(model.draft_buffer.text()); model.draft_buffer.clear(); },
 ```
 
 `on-scroll` (on the `scroll` element; `Ui.scrollMsg(.tag)` on `on_scroll` in Zig views) names a variant whose payload is `canvas.ScrollState`: after every user scroll — wheel, kinetic momentum, keyboard, accessibility — the runtime delivers the post-scroll `offset`, `viewport_extent`, and `content_extent`, so long content can page or lazy-load a bounded window that follows the scrollbar. The payload carries the offset the runtime already applied: store it in the model and echo it back through the scroll's `value`, and rebuilds never fight live scrolling.
@@ -484,7 +487,7 @@ Long series are safe: `ui.chart` downsamples every series past 256 points with d
 
 Semantics: role `chart`, a generated series summary as the label (`"chart: stars 10000 pts last 9999.00; cpu 3 pts last 0.75"` — describing the source series, pre-decimation) unless you set one, and the first series' latest value as the accessibility value, so automation can assert on live data without pixel access. Charts are display-only and never hit targets: clicks fall through to the nearest pressable ancestor, so a chart inside a pressable row keeps the row clickable.
 
-Charts are Zig-only in v1: markup's scalar bindings cannot carry series arrays (the same closed-grammar constraint as select options), so chart panes are Zig views composed into markup apps the usual way.
+Charts are Zig-only in v1: markup's scalar bindings cannot carry series arrays (the same closed-grammar constraint as select options), so a charts-in-markup app inverts the composition — the root view is a Zig builder function that places the `ui.chart` panes and builds the markup fragments in as `CompiledMarkupView(...).build(ui, model)` children. See [App Model: Hybrid views](/app-model#hybrid-views-a-zig-root-composing-markup-fragments).
 
 ## Accessibility
 
@@ -502,12 +505,12 @@ Zig-built views get the same discipline at tree level: `canvas.expectA11yAuditSw
 
 ### The model–view contract
 
-`zig build model-contract` (part of every scaffolded app's build; `zig build test` refreshes it too) reflects your `Model`/`Msg` into `zig-out/model-contract.zon`. With that artifact fresh, `native check` verifies markup against your app's actual surface — no app compile in the loop:
+The model-contract artifact — `zig-out/model-contract.zon`, a reflection of your `Model`/`Msg` — is refreshed by `native test` in every app shape (apps that own their build can also run `zig build model-contract` directly). With that artifact fresh, `native check` verifies markup against your app's actual surface — no app compile in the loop:
 
 - View → model: every binding path, `for each` iterable, `key` field, message tag, and payload type must exist on the model with the right shape, and expressions type-check with the real binding types — `{count > 'a'}` is an error naming `count` and its Zig type. Unknown names get a did-you-mean over your model's actual fields.
 - Model → view: model fields, query fns, and `Msg` tags that no view binds or dispatches are reported as **warnings** — state only `update`/fx logic touches is legitimate, so declare it: `pub const view_unbound = .{ "next_id" };` on `Model` or `Msg` opts names out. `--strict` promotes the warnings to failures.
 - Template args are part of a template's interface: the kinds of use-site arguments flow into the template body (a string passed into a `width` arg fails at the use), slot content checks in the consumer's scope, and the check follows the whole `<import>` closure.
 
-A missing or stale artifact (the artifact carries a hash of your Zig sources) degrades to structural checking with a note — never a false pass; the compiled engine still enforces the same contract at build time, and a conformance suite holds the two checkers to identical accept/reject sets.
+A missing or stale artifact (the artifact carries a hash of your Zig sources) degrades to structural checking with one loud line ("model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks") — never a false pass; the compiled engine still enforces the same contract at build time, and a conformance suite holds the two checkers to identical accept/reject sets. Model state consumed only by a Zig-built view needs `view_unbound` too — the markup checker cannot see Zig view reads.
 
 For the component catalog and styling model, see [Built-in Components](/built-in-components). For dropping down to the programmatic API, the `canvas.Ui(Msg)` builder produces exactly the same trees the markup compiles to.

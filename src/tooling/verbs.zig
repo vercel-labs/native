@@ -14,6 +14,7 @@ const buildgraph = @import("buildgraph.zig");
 const toolchain = @import("toolchain.zig");
 const manifest_tool = @import("manifest.zig");
 const dev_tool = @import("dev.zig");
+const process_tree = @import("process_tree.zig");
 
 pub const Error = error{
     MissingManifest,
@@ -88,8 +89,20 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
 
     const wants_frontend_dev = verb == .dev and metadata.frontend != null and metadata.frontend.?.dev != null;
     var release_fast = false;
+    var dev_debug = false;
     switch (verb) {
-        .dev => if (!wants_frontend_dev) try argv.append(allocator, "run"),
+        .dev => {
+            if (!wants_frontend_dev) try argv.append(allocator, "run");
+            if (!hasOptimizeFlag(options.forwarded_args)) {
+                // The dev loop is a Debug loop: the markup hot-reload
+                // watcher and the teaching diagnostics are compiled in only
+                // when builtin.mode == .Debug, so a release-mode dev run
+                // would silently ship a binary that never reloads. Pass an
+                // optimize flag explicitly to override.
+                try argv.append(allocator, "-Doptimize=Debug");
+                dev_debug = true;
+            }
+        },
         .build => {
             if (!hasOptimizeFlag(options.forwarded_args)) {
                 // Both build shapes register -Doptimize (addApp and the
@@ -98,27 +111,47 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
                 release_fast = true;
             }
         },
-        .@"test" => try argv.append(allocator, "test"),
+        .@"test" => {
+            try argv.append(allocator, "test");
+            // Never end a passing run in silence: the build summary names
+            // the steps that ran and the test tally.
+            try argv.appendSlice(allocator, &.{ "--summary", "all" });
+        },
     }
     try argv.appendSlice(allocator, options.forwarded_args);
 
-    try runZig(io, argv.items);
+    if (verb == .dev and !wants_frontend_dev) {
+        std.debug.print("native dev: building and running {s} ({s}) — hot reload arms in Debug builds\n", .{
+            metadata.name,
+            if (dev_debug) "Debug" else "optimize forwarded",
+        });
+    }
+
+    try runZig(io, verb, argv.items);
 
     if (wants_frontend_dev) {
         // WebView apps with a dev server config: the binary is built, now
         // hand off to the frontend dev flow (server + shell + HMR env).
         const binary_path = try std.fs.path.join(allocator, &.{ "zig-out", "bin", metadata.name });
         defer allocator.free(binary_path);
-        try dev_tool.run(allocator, io, .{
+        dev_tool.run(allocator, io, .{
             .metadata = metadata,
             .base_env = options.base_env,
             .binary_path = binary_path,
             .url_override = options.url_override,
             .command_override = options.command_override,
             .timeout_ms = options.timeout_ms,
-        });
-    } else if (verb == .build) {
-        std.debug.print("built zig-out/bin/{s}{s}\n", .{ metadata.name, if (release_fast) " (ReleaseFast)" else "" });
+        }) catch |err| {
+            // Never fail in silence: name the step that died before the
+            // error propagates to a quiet exit.
+            std.debug.print("native dev: frontend dev flow failed ({t})\n", .{err});
+            return err;
+        };
+        std.debug.print("native dev: app exited\n", .{});
+    } else switch (verb) {
+        .build => std.debug.print("native build: built zig-out/bin/{s}{s}\n", .{ metadata.name, if (release_fast) " (ReleaseFast)" else "" }),
+        .@"test" => std.debug.print("native test: passed (test tally in the build summary above)\n", .{}),
+        .dev => std.debug.print("native dev: app exited\n", .{}),
     }
 }
 
@@ -130,17 +163,35 @@ fn hasOptimizeFlag(args: []const []const u8) bool {
     return false;
 }
 
-fn runZig(io: std.Io, argv: []const []const u8) !void {
+fn runZig(io: std.Io, verb: Verb, argv: []const []const u8) !void {
+    // The dev verb owns a whole process TREE: `zig build run` spawns the
+    // app as its child, and a `native dev` that dies (Ctrl-C, a driver
+    // killing the CLI) must not leave that app running — an orphaned
+    // automation-enabled app keeps publishing snapshots and impersonates
+    // the next build. Dev children get their own process group, killed on
+    // exit signals and swept after a normal wait.
+    const own_tree = verb == .dev and process_tree.supported;
     var child = try std.process.spawn(io, .{
         .argv = argv,
         .stdin = .inherit,
         .stdout = .inherit,
         .stderr = .inherit,
+        .pgid = if (own_tree) process_tree.spawnPgid() else null,
     });
+    // Capture the group id at spawn: wait() clears the child's id.
+    const group_pid: i32 = if (own_tree) (if (child.id) |id| @as(i32, @intCast(id)) else 0) else 0;
+    if (group_pid > 0) process_tree.own(group_pid);
+    defer if (group_pid > 0) process_tree.releaseAndKill(group_pid);
     const term = try child.wait(io);
     switch (term) {
         .exited => |code| if (code == 0) return,
         else => {},
+    }
+    // A failing exit must never be silent: even when the child printed
+    // nothing (or was killed), name the step that failed.
+    switch (term) {
+        .exited => |code| std.debug.print("native {t}: `zig build` step failed (exit code {d})\n", .{ verb, code }),
+        else => std.debug.print("native {t}: `zig build` step terminated abnormally ({t})\n", .{ verb, term }),
     }
     return error.ZigBuildFailed;
 }

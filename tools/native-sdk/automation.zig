@@ -8,6 +8,11 @@ const automation_dir = protocol.default_dir;
 pub fn run(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.Environ.Map, args: []const []const u8) !void {
     if (args.len == 0) return usage();
     const command = args[0];
+    if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "help")) {
+        // Asked-for help is a success: print the command table and exit 0.
+        printUsage();
+        std.process.exit(0);
+    }
     if (std.mem.eql(u8, command, "record")) {
         return runSessionLaunch(allocator, io, environ_map, args[1..], .record);
     } else if (std.mem.eql(u8, command, "replay")) {
@@ -407,7 +412,15 @@ fn runSessionLaunch(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.
     }
 }
 
-fn usage() void {
+/// Missing or malformed arguments: print the command table and exit 1 (a
+/// misuse must never exit 0). Asked-for help goes through printUsage + exit
+/// 0 in run() instead.
+fn usage() noreturn {
+    printUsage();
+    std.process.exit(1);
+}
+
+fn printUsage() void {
     std.debug.print(
         \\usage: native automate <command>
         \\
@@ -460,10 +473,72 @@ fn sendCommand(allocator: std.mem.Allocator, io: std.Io, action: []const u8, val
     // A live publisher already on another protocol makes the queue write
     // provably useless (or worse, misread) — refuse before writing.
     try requireCompatibleSnapshotIfPresent(allocator, io);
+    // The command slot is single-entry: overwriting a line the app has
+    // not consumed yet silently drops that command. The app drains one
+    // command per presented frame and acks by rewriting the slot to
+    // `done`, so wait for a pending predecessor to drain first...
+    try awaitCommandSlot(allocator, io, action, .free);
     var command_path: [256]u8 = undefined;
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path(&command_path, "command.txt"), .data = line });
+    // ...and only report success once OUR line was consumed, so
+    // back-to-back `native automate` invocations can never race each
+    // other out of the slot and a dead/frozen app fails loudly here
+    // instead of a "queued" line that went nowhere.
+    try awaitCommandSlot(allocator, io, action, .{ .consumed = line });
     var dir_buffer: [1024]u8 = undefined;
-    std.debug.print("queued {s} -> {s}\n", .{ action, automationDirDescription(io, &dir_buffer) });
+    std.debug.print("delivered {s} -> {s}\n", .{ action, automationDirDescription(io, &dir_buffer) });
+}
+
+const CommandSlotCondition = union(enum) {
+    /// The slot holds no pending command (missing, empty, or `done`).
+    free,
+    /// The slot no longer holds this exact line (the app consumed it and
+    /// wrote `done`).
+    consumed: []const u8,
+};
+
+/// Poll the single-entry command slot until `condition` holds. ~10s
+/// budget at 25ms: consumption normally takes one presented frame, so
+/// hitting the timeout means the app is gone, frozen, or not presenting.
+fn awaitCommandSlot(allocator: std.mem.Allocator, io: std.Io, action: []const u8, condition: CommandSlotCondition) error{AutomationCommandFailed}!void {
+    var attempts: usize = 0;
+    while (attempts < 400) : (attempts += 1) {
+        if (commandSlotSatisfies(allocator, io, condition)) return;
+        std.Io.sleep(io, std.Io.Duration.fromNanoseconds(25 * std.time.ns_per_ms), .awake) catch {};
+    }
+    var dir_buffer: [1024]u8 = undefined;
+    switch (condition) {
+        .free => std.debug.print(
+            "error: refusing to send {s} - an earlier command is still unconsumed in {s}/command.txt\n" ++
+                "       (the app drains one command per presented frame; it appears to have stopped\n" ++
+                "        consuming - check the app is still running and presenting frames, e.g.\n" ++
+                "        `native automate wait`, and that the snapshot's publisher_pid is your app)\n",
+            .{ action, automationDirDescription(io, &dir_buffer) },
+        ),
+        .consumed => std.debug.print(
+            "error: the app never consumed {s} (still in {s}/command.txt after 10s)\n" ++
+                "       (the app drains one command per presented frame and acks it with `done`;\n" ++
+                "        a silent timeout here means the app exited, froze, or stopped presenting -\n" ++
+                "        check `native automate wait` and the snapshot's publisher_pid)\n",
+            .{ action, automationDirDescription(io, &dir_buffer) },
+        ),
+    }
+    return error.AutomationCommandFailed;
+}
+
+fn commandSlotSatisfies(allocator: std.mem.Allocator, io: std.Io, condition: CommandSlotCondition) bool {
+    var command_path: [256]u8 = undefined;
+    const bytes = readFile(allocator, io, path(&command_path, "command.txt")) catch {
+        // No slot file yet: free for a new command; and a consumed check
+        // treats a vanished slot as consumed (the dir owner removed it).
+        return true;
+    };
+    defer allocator.free(bytes);
+    const trimmed = std.mem.trim(u8, bytes, " \r\n\t");
+    return switch (condition) {
+        .free => trimmed.len == 0 or std.mem.eql(u8, trimmed, "done"),
+        .consumed => |line| !std.mem.eql(u8, trimmed, std.mem.trim(u8, line, " \r\n\t")),
+    };
 }
 
 /// Error out (loudly, with the absolute path) when the automation dir
@@ -551,6 +626,84 @@ fn publisherPid(bytes: []const u8) ?u32 {
     return headerField(bytes, "publisher_pid=");
 }
 
+/// Like `headerField`, for values that overflow u32 (nanosecond fields).
+fn headerField64(bytes: []const u8, marker: []const u8) ?u64 {
+    var search: usize = 0;
+    while (std.mem.indexOfPos(u8, bytes, search, marker)) |index| {
+        search = index + marker.len;
+        if (index > 0 and bytes[index - 1] != ' ' and bytes[index - 1] != '\n') continue;
+        var end = search;
+        while (end < bytes.len and std.ascii.isDigit(bytes[end])) end += 1;
+        if (end == search) continue;
+        return std.fmt.parseUnsigned(u64, bytes[search..end], 10) catch continue;
+    }
+    return null;
+}
+
+// -------------------------------------------------- stale-instance guard
+//
+// A LIVE publisher can still be the WRONG app: an instance launched
+// before the last rebuild keeps publishing plausible snapshots into the
+// same dropbox, and every read then describes yesterday's binary (two
+// full misdiagnosis rounds came from exactly this). The snapshot header
+// carries `runtime_uptime_ns`, so the publisher's start time is
+// `now - uptime`; when the newest binary in zig-out/bin was built AFTER
+// the publisher started, the publisher cannot be that binary — warn
+// loudly on every snapshot-interpreting verb (never fatal: running an
+// older build on purpose is legitimate).
+fn warnStaleInstanceIfDetectable(bytes: []const u8, io: std.Io) void {
+    const uptime_ns = headerField64(bytes, "runtime_uptime_ns=") orelse return;
+    const pid = publisherPid(bytes) orelse return;
+    const now_ns: i128 = std.Io.Timestamp.now(io, .real).nanoseconds;
+    if (now_ns <= 0) return;
+    const started_ns: i128 = now_ns - @as(i128, uptime_ns);
+    const newest = newestBinaryInZigOut(io) orelse return;
+    // Two seconds of slack absorbs clock steps and the write/stat skew.
+    if (newest.mtime_ns > started_ns + 2 * std.time.ns_per_s) {
+        std.debug.print(
+            "warning: the publishing app (pid {d}) started BEFORE zig-out/bin/{s} was last built -\n" ++
+                "         this snapshot comes from an OLDER instance, not the binary you just built;\n" ++
+                "         quit that instance (kill {d}) and relaunch, or its state will keep\n" ++
+                "         impersonating the new build\n",
+            .{ pid, newest.name, pid },
+        );
+    }
+}
+
+const NewestBinary = struct {
+    name_storage: [128]u8 = undefined,
+    name_len: usize = 0,
+    mtime_ns: i128 = 0,
+
+    fn name(self: *const NewestBinary) []const u8 {
+        return self.name_storage[0..self.name_len];
+    }
+};
+
+fn newestBinaryInZigOut(io: std.Io) ?struct { name: []const u8, mtime_ns: i128 } {
+    const S = struct {
+        var newest: NewestBinary = .{};
+    };
+    var dir = std.Io.Dir.cwd().openDir(io, "zig-out/bin", .{ .iterate = true }) catch return null;
+    defer dir.close(io);
+    var found = false;
+    var iterator = dir.iterate();
+    while (iterator.next(io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        const stat = dir.statFile(io, entry.name, .{}) catch continue;
+        const mtime_ns: i128 = stat.mtime.nanoseconds;
+        if (!found or mtime_ns > S.newest.mtime_ns) {
+            found = true;
+            S.newest.mtime_ns = mtime_ns;
+            const len = @min(entry.name.len, S.newest.name_storage.len);
+            @memcpy(S.newest.name_storage[0..len], entry.name[0..len]);
+            S.newest.name_len = len;
+        }
+    }
+    if (!found) return null;
+    return .{ .name = S.newest.name(), .mtime_ns = S.newest.mtime_ns };
+}
+
 // ----------------------------------------------------- protocol handshake
 //
 // A stale `native` binary beside a fresh app (or the reverse) can drive
@@ -624,6 +777,7 @@ fn requireCompatibleSnapshotIfPresent(allocator: std.mem.Allocator, io: std.Io) 
     defer allocator.free(bytes);
     if (snapshotLiveness(bytes, pidIsAlive) != .live) return;
     try requireProtocolMatch(bytes, io);
+    warnStaleInstanceIfDetectable(bytes, io);
 }
 
 /// Classify a snapshot's publisher against the live process table via
@@ -675,7 +829,11 @@ fn requireLiveSnapshotFile(allocator: std.mem.Allocator, io: std.Io) !void {
     const bytes = readFile(allocator, io, path(&file_path, "snapshot.txt")) catch return;
     defer allocator.free(bytes);
     const liveness = snapshotLiveness(bytes, pidIsAlive);
-    if (liveness == .live) return requireProtocolMatch(bytes, io);
+    if (liveness == .live) {
+        try requireProtocolMatch(bytes, io);
+        warnStaleInstanceIfDetectable(bytes, io);
+        return;
+    }
     describeStaleness(liveness, io);
     return error.AutomationCommandFailed;
 }
@@ -685,6 +843,7 @@ fn waitForFile(allocator: std.mem.Allocator, io: std.Io, name: []const u8, marke
     // and a GTK/software-EGL launch on a loaded shared CI runner routinely
     // needs more than the 5s this used to allow.
     var last_liveness: Liveness = .live;
+    var saw_file = false;
     var attempts: usize = 0;
     while (attempts < 300) : (attempts += 1) {
         var file_path: [256]u8 = undefined;
@@ -692,6 +851,7 @@ fn waitForFile(allocator: std.mem.Allocator, io: std.Io, name: []const u8, marke
             try std.Io.sleep(io, std.Io.Duration.fromNanoseconds(100 * std.time.ns_per_ms), .awake);
             continue;
         };
+        saw_file = true;
         if (marker.len == 0 or std.mem.indexOf(u8, bytes, marker) != null) {
             // A marker match in a stale file is yesterday's app looking
             // ready; keep polling for a live publisher instead.
@@ -701,11 +861,26 @@ fn waitForFile(allocator: std.mem.Allocator, io: std.Io, name: []const u8, marke
                 // A LIVE publisher speaking the wrong protocol never gets
                 // better by polling: fail fast, naming both versions.
                 if (policy == .require_live_publisher) try requireProtocolMatch(bytes, io);
+                warnStaleInstanceIfDetectable(bytes, io);
                 return emitPayload(io, &.{bytes});
             }
         }
         allocator.free(bytes);
         try std.Io.sleep(io, std.Io.Duration.fromNanoseconds(100 * std.time.ns_per_ms), .awake);
+    }
+    if (!saw_file) {
+        // The common cold-start miss: nothing was ever published here.
+        // Name the two usual causes instead of a bare timeout — the app
+        // was not built with -Dautomation=true, or this is the wrong cwd.
+        var dir_buffer: [1024]u8 = undefined;
+        std.debug.print(
+            "error: timed out waiting for automation - no {s} ever appeared at {s}\n" ++
+                "       (the app publishes it on every presented frame when built with\n" ++
+                "        -Dautomation=true; check the app is running, that it was built with\n" ++
+                "        -Dautomation=true, and that you run this from the app's directory)\n",
+            .{ name, automationDirDescription(io, &dir_buffer) },
+        );
+        return error.AutomationCommandFailed;
     }
     describeStaleness(last_liveness, io);
     return fail("timed out waiting for automation");
@@ -830,6 +1005,7 @@ fn runAssert(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8)
             // A stale dropbox (dead or pid-less publisher) can neither
             // satisfy nor refute assertions — keep polling for live state.
             if (snapshotLiveness(bytes, pidIsAlive) == .live and assertSatisfied(bytes, spec.patterns, spec.absent)) {
+                warnStaleInstanceIfDetectable(bytes, io);
                 std.debug.print("assert ok: {d} pattern(s) {s} after {d}ms\n", .{
                     spec.patterns.len,
                     if (spec.absent) "absent" else "matched",

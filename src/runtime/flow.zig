@@ -668,7 +668,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 return;
             }) orelse return;
             dispatchAutomationProtocolCommand(self, app, command) catch |err| {
-                recordDispatchError(self, automationCommandEventName(command.action), err);
+                recordDispatchErrorDetail(self, automationCommandEventName(command.action), err, command.value);
             };
         }
 
@@ -1020,12 +1020,21 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         /// `Runtime.dispatchErrors` and the automation snapshot), trace
         /// it at `.err`, and republish observable state.
         fn recordDispatchError(self: *Runtime, event_name: []const u8, err: anyerror) void {
+            recordDispatchErrorDetail(self, event_name, err, "");
+        }
+
+        /// `detail` is copied (truncated) into the record so the snapshot
+        /// error line carries failure context — for automation commands,
+        /// the command arguments, so a failed widget verb names its
+        /// target.
+        fn recordDispatchErrorDetail(self: *Runtime, event_name: []const u8, err: anyerror, detail: []const u8) void {
             self.dispatch_error_total +%= 1;
-            const record: automation.snapshot.DispatchError = .{
+            var record: automation.snapshot.DispatchError = .{
                 .timestamp_ns = runtime_clock.timestampToU64(nowNanoseconds()),
                 .event = event_name,
                 .error_name = @errorName(err),
             };
+            record.setDetail(detail);
             if (self.dispatch_error_len == self.dispatch_errors.len) {
                 std.mem.copyForwards(automation.snapshot.DispatchError, self.dispatch_errors[0 .. self.dispatch_errors.len - 1], self.dispatch_errors[1..]);
                 self.dispatch_errors[self.dispatch_errors.len - 1] = record;

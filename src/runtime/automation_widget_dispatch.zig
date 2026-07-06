@@ -242,10 +242,15 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         pub fn dispatchAutomationWidgetWheel(self: *Runtime, app: runtime_api.App(Runtime), wheel: AutomationWidgetWheel) anyerror!void {
             const view_index = try automationWidgetTargetViewIndex(self, wheel.target);
             const layout = self.views[view_index].widgetLayoutTree();
-            if (!canvasWidgetInteractionTargetExists(layout, wheel.target.id)) return error.InvalidCommand;
-            const node = layout.findById(wheel.target.id) orelse return error.InvalidCommand;
+            // Named reasons, not a blanket InvalidCommand: the snapshot's
+            // degraded error line carries the error NAME (plus the command
+            // arguments as detail), so a failed wheel says WHY. The common
+            // trap is aiming at a plain layout node — wheel the scrollable
+            // widget (scroll/list/grid id from the snapshot) instead.
+            const node = layout.findById(wheel.target.id) orelse return error.WheelTargetUnknown;
+            if (!canvasWidgetInteractionTargetExists(layout, wheel.target.id)) return error.WheelTargetNotInteractive;
             const bounds = node.frame.normalized();
-            if (bounds.isEmpty()) return error.InvalidCommand;
+            if (bounds.isEmpty()) return error.WheelTargetHasEmptyBounds;
             const point = bounds.center();
             const timestamp_ns = automationInputTimestampNs();
             try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{

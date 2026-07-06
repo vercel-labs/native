@@ -446,9 +446,9 @@ pub fn deadState(arena: std.mem.Allocator, contract: *const Contract, usage: *co
         if (nameListed(reported.items, scalar.name)) continue;
         try reported.append(arena, scalar.name);
         const message = if (scalar.fn_backed)
-            try std.fmt.allocPrint(arena, "model fn \"{s}\" ({s}) is never bound in markup - bind it, remove it, or add it to pub const view_unbound", .{ scalar.name, scalar.type_name })
+            try std.fmt.allocPrint(arena, "model fn \"{s}\" ({s}) is never bound in markup - bind it, remove it, or add it to pub const view_unbound if only update/fx logic or a Zig-built view calls it", .{ scalar.name, scalar.type_name })
         else
-            try std.fmt.allocPrint(arena, "model field \"{s}\" ({s}) is never bound in markup - bind it, or add it to pub const view_unbound if only update/fx logic reads it", .{ scalar.name, scalar.type_name });
+            try std.fmt.allocPrint(arena, "model field \"{s}\" ({s}) is never bound in markup - bind it, or add it to pub const view_unbound if only update/fx logic or a Zig-built view reads it", .{ scalar.name, scalar.type_name });
         try out.append(arena, .{ .message = message });
     }
     for (contract.model.groups, 0..) |group, index| {
@@ -457,7 +457,7 @@ pub fn deadState(arena: std.mem.Allocator, contract: *const Contract, usage: *co
         if (nameListed(contract.model_unbound, group.name)) continue;
         if (nameListed(reported.items, group.name)) continue;
         try reported.append(arena, group.name);
-        try out.append(arena, .{ .message = try std.fmt.allocPrint(arena, "model field \"{s}\" ({s}) has no markup binding into any of its fields - bind one, or add it to pub const view_unbound", .{ group.name, group.type_name }) });
+        try out.append(arena, .{ .message = try std.fmt.allocPrint(arena, "model field \"{s}\" ({s}) has no markup binding into any of its fields - bind one, or add it to pub const view_unbound if only update/fx logic or a Zig-built view reads it", .{ group.name, group.type_name }) });
     }
     for (contract.iterables, 0..) |iterable, index| {
         if (usage.iterable_used[index]) continue;
@@ -466,7 +466,7 @@ pub fn deadState(arena: std.mem.Allocator, contract: *const Contract, usage: *co
         if (std.mem.eql(u8, iterable.name, opt_out_decl)) continue;
         if (nameListed(reported.items, iterable.name)) continue;
         try reported.append(arena, iterable.name);
-        try out.append(arena, .{ .message = try std.fmt.allocPrint(arena, "model iterable \"{s}\" (items: {s}) is never iterated in markup - use it with for each, or add it to pub const view_unbound", .{ iterable.name, iterable.item_type }) });
+        try out.append(arena, .{ .message = try std.fmt.allocPrint(arena, "model iterable \"{s}\" (items: {s}) is never iterated in markup - use it with for each, or add it to pub const view_unbound if only update/fx logic or a Zig-built view reads it", .{ iterable.name, iterable.item_type }) });
     }
     for (contract.msgs, 0..) |tag, index| {
         if (usage.msg_used[index]) continue;
@@ -656,7 +656,17 @@ const Checker = struct {
                 return resolved;
             },
             .arena_blocked => return self.fail(node, markup.arena_scalar_equality_message),
-            .missing => return self.failNamed(node, binding_model_message, path, .{ .model = self.contract }),
+            .missing => {
+                // A TextBuffer field is the edit model, not bindable
+                // text: the reflected contract carries it as a group
+                // whose type name spells the buffer out (engine parity).
+                for (self.contract.model.groups) |group| {
+                    if (std.mem.eql(u8, group.name, head) and std.mem.indexOf(u8, group.type_name, "TextBuffer(") != null) {
+                        return self.fail(node, markup.binding_text_buffer_message);
+                    }
+                }
+                return self.failNamed(node, binding_model_message, path, .{ .model = self.contract });
+            },
         }
     }
 
@@ -901,6 +911,11 @@ const Checker = struct {
             else if (arg.default) |default| blk: {
                 if (std.mem.indexOfScalar(u8, default, '{') != null) {
                     return self.fail(template_node, markup.template_default_literal_message);
+                }
+                // Quotes are not string delimiters in a default; they
+                // would render verbatim (engine and validator parity).
+                if (default.len > 0 and (default[0] == '\'' or default[0] == '"')) {
+                    return self.fail(template_node, markup.template_default_quoted_message);
                 }
                 break :blk .{ .value = expr.kindOf(reflect.literalValue(default)) };
             } else return self.fail(node, markup.use_missing_arg_message);

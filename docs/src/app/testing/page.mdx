@@ -16,7 +16,7 @@ main.update(&model, tree.msgForPointer(plus.id, .up).?); // dispatch like the ru
 try testing.expectEqual(@as(i64, 1), model.count);
 ```
 
-Two `msgForPointer` traps: a disabled control yields `null` (assert `== null` rather than unwrapping when testing disabled states), and the tree is a snapshot — after each dispatch, rebuild the view before pressing anything again. Widget ids are stable across rebuilds, so asserting an id stayed constant while its text changed is the standard way to prove keyed identity.
+Two `msgForPointer` traps: a disabled control yields `null` (assert `== null` rather than unwrapping when testing disabled states), and the tree is a snapshot — after each dispatch, rebuild the view before pressing anything again. Widget ids are stable across rebuilds, so asserting an id stayed constant while its text changed is the standard way to prove keyed identity. Sliders have their own split: `msgForValue(id, value)` fires only a Zig builder's `on_value` constructor and returns `null` for a markup slider — a markup slider binds a plain `on-change`, so assert its dispatch with `msgFor(id, .change)`.
 
 The same tests can push the tree through the layout engine (`canvas.layoutWidgetTree`) to assert real frames — see the generated `src/tests.zig` for both patterns. Effects-using apps swap in the fake executor (`app_state.effects.executor = .fake`) to assert on spawn/fetch/file requests and feed results back deterministically — see [Native UI: Effects](/native-ui#effects).
 
