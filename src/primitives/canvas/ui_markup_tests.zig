@@ -738,6 +738,50 @@ test "wrap and issue-link-base validate as vocabulary with teaching errors" {
     }
 }
 
+test "overscroll validates as scroll-scoped with a closed value vocabulary" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Valid: every vocabulary value on scroll, and a binding (resolved
+    // by the engines at build).
+    const valid_sources = [_][]const u8{
+        "<column>\n  <scroll overscroll=\"none\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+        "<column>\n  <scroll overscroll=\"rubber_band\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+        "<column>\n  <scroll overscroll=\"default\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+        "<column>\n  <scroll overscroll=\"{edge_mode}\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+    };
+    for (valid_sources) |source| {
+        var parser = markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        // Edge behavior exists only where the runtime scrolls; anywhere
+        // else the option is silently inert (same policy as columns off
+        // grid).
+        .{
+            .source = "<column>\n  <row overscroll=\"rubber_band\">\n    <text>a</text>\n  </row>\n</column>",
+            .message = markup.overscroll_element_message,
+        },
+        .{
+            .source = "<column>\n  <list overscroll=\"none\">\n    <list-item>a</list-item>\n  </list>\n</column>",
+            .message = markup.overscroll_element_message,
+        },
+        // Literal values outside the closed vocabulary teach the set.
+        .{
+            .source = "<column>\n  <scroll overscroll=\"bouncy\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+            .message = markup.overscroll_value_message,
+        },
+    };
+    for (cases) |case| {
+        var parser = markup.Parser.init(arena, case.source);
+        const info = markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+        try testing.expect(info.line > 0);
+    }
+}
+
 test "size validates as the two-axis closed vocabulary with teaching errors" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

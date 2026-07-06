@@ -1904,6 +1904,7 @@ test "design token overrides compose with built-in themes" {
         },
         .scroll = .{
             .wheel_multiplier = 1.25,
+            .overscroll = .rubber_band,
             .rubberband_max_extent = 120,
         },
         .layer = .{ .overlay = 240 },
@@ -2119,6 +2120,7 @@ test "design token overrides compose with built-in themes" {
     try std.testing.expectEqual(Easing.emphasized, tokens.motion.easing);
     try std.testing.expectEqual(@as(f32, 20), tokens.motion.spring.damping);
     try std.testing.expectEqual(@as(f32, 1.25), tokens.scroll.wheel_multiplier);
+    try std.testing.expectEqual(canvas.ScrollOverscroll.rubber_band, tokens.scroll.overscroll);
     try std.testing.expectEqual(@as(f32, 120), tokens.scroll.rubberband_max_extent);
     try std.testing.expectEqual(@as(i32, 240), tokens.layer.overlay);
     try std.testing.expect(tokens.pixel_snap.geometry);

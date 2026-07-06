@@ -651,6 +651,40 @@ test "window-drag marks an element as a window-drag region without claiming pres
     try testing.expect(!canvas.widgetIsHitTarget(plain_tree.root.children[0]));
 }
 
+test "overscroll on scroll stamps the region's edge behavior" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    // A region opting into rubber-band; unset regions keep `.default`
+    // (follow the ScrollPhysics.overscroll token, off unless a theme
+    // flips it).
+    var view = try InboxMarkup.init(arena, "<column>\n  <scroll overscroll=\"rubber_band\">\n    <column><text>a</text></column>\n  </scroll>\n  <scroll>\n    <column><text>b</text></column>\n  </scroll>\n</column>");
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const bouncy = tree.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.scroll_view, bouncy.kind);
+    try testing.expectEqual(canvas.WidgetOverscroll.rubber_band, bouncy.overscroll);
+    try testing.expectEqual(canvas.WidgetOverscroll.default, tree.root.children[1].overscroll);
+
+    // The per-region override resolves onto the physics token for both
+    // scroll paths.
+    const physics = canvas.ScrollPhysics{};
+    try testing.expectEqual(canvas.ScrollOverscroll.rubber_band, canvas.widgetScrollPhysics(bouncy, physics).overscroll);
+    try testing.expectEqual(canvas.ScrollOverscroll.none, canvas.widgetScrollPhysics(tree.root.children[1], physics).overscroll);
+}
+
+test "overscroll value vocabulary mirrors the live WidgetOverscroll enum" {
+    // The validator's std-only mirror of the enum's member names; a new
+    // member cannot ship without its markup spelling.
+    const fields = @typeInfo(canvas.WidgetOverscroll).@"enum".fields;
+    try testing.expectEqual(fields.len, canvas.ui_markup.overscroll_value_names.len);
+    inline for (fields, 0..) |field, index| {
+        try testing.expectEqualStrings(field.name, canvas.ui_markup.overscroll_value_names[index]);
+    }
+}
+
 test "gap on stacking containers fails the build with the teaching message" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

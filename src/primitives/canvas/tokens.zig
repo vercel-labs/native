@@ -443,12 +443,32 @@ pub const BlurTokenRef = enum {
     md,
 };
 
+/// Edge behavior of a scrollable region: `.none` pins the offset at the
+/// content edges (wheel input clamps, kinetic motion stops cleanly at the
+/// boundary), `.rubber_band` lets the offset travel past an edge under
+/// resistance and spring back. `ScrollPhysics.overscroll` is the global
+/// default; a scroll region overrides it per region through
+/// `Widget.overscroll` (builder `overscroll:`, markup `overscroll=`).
+pub const ScrollOverscroll = enum {
+    none,
+    rubber_band,
+};
+
 pub const ScrollPhysics = struct {
     wheel_multiplier: f32 = 1,
     wheel_velocity_scale: f32 = 60,
     deceleration_per_second: f32 = 0.86,
     stop_velocity: f32 = 5,
-    rubberband_extent_ratio: f32 = 0,
+    /// Global default edge behavior for scroll regions. Off by default:
+    /// scrolling stops at the content edges. Regions opt in individually
+    /// (`Widget.overscroll = .rubber_band`), or a theme flips this token
+    /// to make bouncing the app-wide default.
+    overscroll: ScrollOverscroll = .none,
+    /// Shape of the rubber-band excursion when overscroll is enabled.
+    /// The extent ratio bounds how far past an edge the offset may
+    /// travel (a fraction of the viewport); `rubberband_max_extent`
+    /// caps it in points (0 = ratio only).
+    rubberband_extent_ratio: f32 = 0.35,
     rubberband_max_extent: f32 = 0,
     rubberband_resistance: f32 = 0.38,
     rubberband_return_per_second: f32 = 18,
@@ -475,7 +495,7 @@ pub const ScrollState = struct {
     }
 
     pub fn applyWheel(self: ScrollState, delta: f32, physics: ScrollPhysics) ScrollState {
-        return self.applyWheelWithRubberband(delta, physics, true);
+        return self.applyWheelWithRubberband(delta, physics, physics.overscroll == .rubber_band);
     }
 
     pub fn applyWheelClamped(self: ScrollState, delta: f32, physics: ScrollPhysics) ScrollState {
@@ -515,6 +535,11 @@ pub const ScrollState = struct {
     pub fn stepKinetic(self: ScrollState, dt_ms: f32, physics: ScrollPhysics) ScrollState {
         var next = self;
         const dt_seconds = nonNegative(dt_ms) / 1000.0;
+        // With overscroll off there is never an excursion to recover
+        // from: pin any out-of-range offset immediately (content shrank,
+        // a stale state) and run the plain decay path — velocity zeroes
+        // the moment the offset reaches an edge, the clean-stop feel.
+        if (physics.overscroll == .none) next = next.clamped();
         if (@abs(next.overscroll()) > 0.01) {
             const bounded = next.visualOffset();
             const overscroll_delta = next.offset - bounded;
@@ -542,6 +567,7 @@ pub const ScrollState = struct {
     }
 
     fn rubberbanded(self: ScrollState, physics: ScrollPhysics) ScrollState {
+        if (physics.overscroll == .none) return self.clamped();
         const extent = self.rubberbandExtent(physics);
         if (extent <= 0) return self.clamped();
         var next = self;
@@ -849,6 +875,7 @@ pub const ScrollPhysicsOverrides = struct {
     wheel_velocity_scale: ?f32 = null,
     deceleration_per_second: ?f32 = null,
     stop_velocity: ?f32 = null,
+    overscroll: ?ScrollOverscroll = null,
     rubberband_extent_ratio: ?f32 = null,
     rubberband_max_extent: ?f32 = null,
     rubberband_resistance: ?f32 = null,

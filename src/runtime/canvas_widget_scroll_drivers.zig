@@ -1,7 +1,7 @@
 //! Native scroll drivers: per-scrollable-region invisible OS
 //! scrollers (macOS `NSScrollView`) own scroll input and physics —
-//! momentum, rubber-band, overlay scrollbars — while the engine keeps
-//! rendering the content. The runtime:
+//! momentum, overlay scrollbars, and rubber-band for regions that opt
+//! into it — while the engine keeps rendering the content. The runtime:
 //!
 //! - stamps `widget.native_scroll` on every non-virtualized `.scroll_view`
 //!   (and every RUNTIME-SCROLLED virtual list — a virtualized scroll_view
@@ -92,6 +92,11 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
                     .content_size = .{ .width = frame.width, .height = content_height },
                     .offset_y = offset,
                     .set_offset = push,
+                    // Per-region edge behavior, resolved the same way the
+                    // engine physics resolve it (region override onto the
+                    // scroll-physics token): off pins the OS scroller at
+                    // the content edges, on lets it bounce.
+                    .rubber_band = canvas.widgetScrollPhysics(node.widget, view.widget_tokens.scroll).overscroll == .rubber_band,
                 };
                 ids[count] = node.widget.id;
                 offsets[count] = offset;

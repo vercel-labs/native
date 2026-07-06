@@ -1146,6 +1146,16 @@ pub const text_size_element_message = "heading and display are typography rungs 
 
 pub const grid_columns_element_message = "columns is only supported on grid - it fixes the grid's column count (omit it for the derived near-square grid)";
 
+pub const overscroll_element_message = "overscroll is only supported on scroll - it names a scroll region's edge behavior (none pins at the content edges, rubber_band lets the region bounce past them, default follows the ScrollPhysics.overscroll token); anywhere else it would be silently inert";
+
+/// The `overscroll` attribute's closed value vocabulary: the member names
+/// of `canvas.WidgetOverscroll`, mirrored as data here (this layer stays
+/// std-only) with a lockstep test in ui_markup_view_tests.zig holding the
+/// mirror equal to the live enum.
+pub const overscroll_value_names = [_][]const u8{ "default", "none", "rubber_band" };
+
+pub const overscroll_value_message = "unknown overscroll value - scroll takes default (follow the ScrollPhysics.overscroll token, off unless a theme flips it), none (pin at the content edges), or rubber_band (bounce past them)";
+
 pub const avatar_image_message = "image takes one {binding} to a u64 ImageId the app registered at runtime (fx.registerImageBytes) - runtime image ids are model data, not markup literals; 0 renders the initials fallback";
 pub const avatar_image_element_message = "image is only supported on avatar - the other image-bearing widgets (image, icon-button) stay Zig views (ui.image with ElementOptions.image)";
 
@@ -2409,6 +2419,23 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     // comments asserting wrapping that never happened
                     // (same policy as gap on stacking containers).
                     return attrError(node, attribute, wrap_element_message);
+                }
+                if (std.mem.eql(u8, attribute.name, "overscroll")) {
+                    // Edge behavior exists only where the runtime scrolls:
+                    // anywhere but a scroll container the option is
+                    // silently inert (same policy as columns off grid).
+                    if (!std.mem.eql(u8, node.name, "scroll")) {
+                        return attrError(node, attribute, overscroll_element_message);
+                    }
+                    // The closed value vocabulary, checked on literals
+                    // here so the teaching error lands at validation
+                    // (bindings resolve at build, where the engines
+                    // enforce the same set).
+                    if (parseAttrExpression(attribute.value)) |expression| {
+                        if (expression == .literal and !nameInList(expression.literal, &overscroll_value_names)) {
+                            return attrError(node, attribute, overscroll_value_message);
+                        }
+                    }
                 }
                 if (std.mem.eql(u8, attribute.name, "size")) {
                     // The size register's closed literal vocabulary

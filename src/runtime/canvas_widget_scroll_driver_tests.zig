@@ -69,6 +69,10 @@ test "layout install publishes native scroll drivers and suppresses engine scrol
     try std.testing.expectEqual(@as(f32, 120), drivers[0].content_size.height);
     try std.testing.expectEqual(@as(f32, 24), drivers[0].offset_y);
     try std.testing.expect(drivers[0].set_offset);
+    // Edge behavior defaults off: the native scroller pins at the
+    // content edges unless the region (or the scroll-physics token)
+    // opts into rubber-band.
+    try std.testing.expect(!drivers[0].rubber_band);
 
     // The retained scroll node is marked natively driven and the engine
     // scrollbar (widget part slots 2 and 3) is not emitted.
@@ -91,6 +95,43 @@ test "layout install publishes native scroll drivers and suppresses engine scrol
     try std.testing.expect(snapshot.widgets[0].scroll.present);
     try std.testing.expectEqual(@as(f32, 24.0), snapshot.widgets[0].scroll.offset);
     try std.testing.expectEqual(@as(f32, 120.0), snapshot.widgets[0].scroll.content_extent);
+}
+
+test "a region's rubber-band opt-in reaches its driver spec" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: PassiveApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    // The same scroll fixture with the per-region opt-in stamped: the
+    // driver spec asks the OS scroller for elastic edges.
+    var nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "One" },
+        .{ .id = 3, .kind = .button, .frame = geometry.RectF.init(0, 44, 0, 32), .text = "Two" },
+        .{ .id = 4, .kind = .button, .frame = geometry.RectF.init(0, 88, 0, 32), .text = "Three" },
+    };
+    const scroll = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .overscroll = .rubber_band,
+        .children = &children,
+    };
+    const layout = try canvas.layoutWidgetTree(scroll, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    const drivers = harness.null_platform.scrollDrivers();
+    try std.testing.expectEqual(@as(usize, 1), drivers.len);
+    try std.testing.expect(drivers[0].rubber_band);
 }
 
 test "driver offsets scroll retained scroll views and pass through overscroll" {

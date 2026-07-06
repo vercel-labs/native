@@ -443,6 +443,9 @@ typedef struct {
     double content_height;
     double offset_y;
     int set_offset;
+    /* Edge behavior: 0 pins scrolling at the content edges, nonzero lets
+     * the scroller bounce past them (vertical elasticity). */
+    int rubber_band;
 } native_sdk_appkit_scroll_driver_t;
 
 /* One native context-menu entry. */

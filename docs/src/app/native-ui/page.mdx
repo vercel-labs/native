@@ -221,7 +221,9 @@ Presses follow one rule: a click lands on the nearest pressable widget under the
 
 ## Native scrolling and context menus
 
-On macOS, every non-virtualized `scroll` region is driven by an invisible `NSScrollView`: momentum, rubber-band overscroll, and the system overlay scrollbar are all OS-computed while the engine renders the content. This needs no app code — scroll offsets stay on the widget (`sync`, snapshot offsets, and programmatic scrolls work unchanged), and the engine's drawn scrollbar stands down for natively driven regions. Other platforms keep the engine's wheel physics.
+On macOS, every non-virtualized `scroll` region is driven by an invisible `NSScrollView`: momentum and the system overlay scrollbar are OS-computed while the engine renders the content. This needs no app code — scroll offsets stay on the widget (`sync`, snapshot offsets, and programmatic scrolls work unchanged), and the engine's drawn scrollbar stands down for natively driven regions. Other platforms keep the engine's wheel physics.
+
+Scroll regions pin at their content edges by default on every path — no rubber-band bounce; kinetic motion stops cleanly at the boundary. Bouncing is a per-region opt-in: `overscroll="rubber_band"` in markup or `ElementOptions.overscroll = .rubber_band` in Zig views (the native macOS scroller gets elastic edges, the engine physics overscroll under resistance and spring back). The `ScrollPhysics.overscroll` design token flips the app-wide default; per-region values override it, and `overscroll="none"` pins a region regardless of the token.
 
 Right/ctrl-click presents a real OS context menu (`NSMenu` on macOS). Declare per-widget items with typed messages from a Zig view function (`canvas.Ui` builder — the closed markup grammar has no list-valued attributes):
 

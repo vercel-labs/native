@@ -111,6 +111,10 @@ No `on_scroll` binding is required: the runtime owns the offset (wheel, kinetic,
       <td><code>on_reach_start</code></td>
       <td>The approach-START Msg (load older history), with the same hysteresis as reach-end; a prepend re-arms it by growing the offset.</td>
     </tr>
+    <tr>
+      <td><code>overscroll</code></td>
+      <td>Edge behavior of the list's scroll region. <code>.default</code> follows the <code>ScrollPhysics.overscroll</code> token — off unless a theme flips it, so scrolling pins at the content edges; <code>.rubber_band</code> lets this list bounce past them; <code>.none</code> pins it regardless of the token.</td>
+    </tr>
   </tbody>
 </table>
 

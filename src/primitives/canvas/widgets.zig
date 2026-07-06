@@ -639,6 +639,18 @@ pub const WidgetContextMenuItem = struct {
     separator: bool = false,
 };
 
+/// Per-region edge behavior of a scroll container. `.default` follows
+/// the `ScrollPhysics.overscroll` design token (off by default: scroll
+/// regions pin at their content edges); `.none` and `.rubber_band` pin
+/// or bounce this region regardless of the token. Meaningful on scroll
+/// containers only — the ui builder and the markup validator keep it
+/// off other elements.
+pub const WidgetOverscroll = enum {
+    default,
+    none,
+    rubber_band,
+};
+
 pub const Widget = struct {
     id: ObjectId = 0,
     kind: WidgetKind,
@@ -713,6 +725,13 @@ pub const Widget = struct {
     /// `.scroll_view`: the engine's drawn scrollbar and kinetic physics
     /// stand down — the OS scroller owns feel and the overlay scroller.
     native_scroll: bool = false,
+    /// Per-region edge behavior for scroll containers (`overscroll:` in
+    /// the builder, `overscroll=` in markup): `.default` follows the
+    /// `ScrollPhysics.overscroll` token (off unless a theme flips it),
+    /// `.none` pins scrolling at the content edges, `.rubber_band` lets
+    /// this region bounce past them. Honored by both scroll paths — the
+    /// engine's wheel/kinetic physics and the native OS scroller.
+    overscroll: WidgetOverscroll = .default,
     /// Window-drag surface (`window-drag="true"` / `.window_drag`): a
     /// pointer press that lands here — or falls through plain text /
     /// icons / decorations onto it — moves the WINDOW instead of

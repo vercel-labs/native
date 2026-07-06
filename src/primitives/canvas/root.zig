@@ -302,6 +302,7 @@ pub const MotionTokens = token_model.MotionTokens;
 pub const SpringToken = token_model.SpringToken;
 pub const BlurTokenRef = token_model.BlurTokenRef;
 pub const ScrollPhysics = token_model.ScrollPhysics;
+pub const ScrollOverscroll = token_model.ScrollOverscroll;
 pub const ScrollState = token_model.ScrollState;
 pub const VirtualListOptions = token_model.VirtualListOptions;
 pub const VirtualListRange = token_model.VirtualListRange;
@@ -351,6 +352,7 @@ pub const WidgetAnchorPlacement = widget_model.WidgetAnchorPlacement;
 pub const WidgetAnchorAlignment = widget_model.WidgetAnchorAlignment;
 pub const WidgetStyle = widget_model.WidgetStyle;
 pub const WidgetVariant = widget_model.WidgetVariant;
+pub const WidgetOverscroll = widget_model.WidgetOverscroll;
 pub const WidgetSize = widget_model.WidgetSize;
 pub const WidgetRole = widget_model.WidgetRole;
 pub const BuiltinComponentStyle = widget_model.BuiltinComponentStyle;
@@ -609,6 +611,7 @@ pub const widgetIsAnchored = @import("widget_tree.zig").widgetIsAnchored;
 /// scroll offset the runtime owns (engine scrolling + native drivers)
 /// and whose children are the built window, not the full item set.
 pub const widgetVirtualRuntimeScrolled = @import("widget_tree.zig").widgetVirtualRuntimeScrolled;
+pub const widgetScrollPhysics = @import("widget_tree.zig").widgetScrollPhysics;
 pub const isWidgetHiddenInAncestors = @import("widget_tree.zig").isWidgetHiddenInAncestors;
 pub const anchoredWidgetFrame = @import("widget_layout.zig").anchoredWidgetFrame;
 /// Split-pane geometry (widget_layout.zig): divider band width, the

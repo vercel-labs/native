@@ -114,6 +114,22 @@ pub fn widgetVirtualRuntimeScrolled(widget: Widget) bool {
     return widget.kind == .scroll_view and widget.layout.virtualized and widget.layout.virtual_item_count > 0;
 }
 
+/// The effective scroll physics for one scroll region: the shared
+/// `ScrollPhysics` token with the region's `Widget.overscroll` override
+/// resolved onto `physics.overscroll` (`.default` keeps the token's
+/// global default). Both scroll paths resolve through this — the
+/// engine's wheel/kinetic stepping and the native scroll driver sync —
+/// so a region's edge behavior has exactly one derivation.
+pub fn widgetScrollPhysics(widget: Widget, base: token_model.ScrollPhysics) token_model.ScrollPhysics {
+    var physics = base;
+    switch (widget.overscroll) {
+        .default => {},
+        .none => physics.overscroll = .none,
+        .rubber_band => physics.overscroll = .rubber_band,
+    }
+    return physics;
+}
+
 pub fn widgetIndexById(layout: anytype, id: ObjectId) ?usize {
     if (id == 0) return null;
     for (layout.nodes, 0..) |node, index| {

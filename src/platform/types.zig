@@ -1405,6 +1405,11 @@ pub const GpuSurfaceScrollDriver = struct {
     /// must write `offset_y` into the native scroller. False leaves the
     /// native scroller alone — the driver owns the offset.
     set_offset: bool = false,
+    /// Edge behavior for this region's native scroller: false (the
+    /// default) pins scrolling at the content edges, true lets the OS
+    /// scroller bounce past them (vertical elasticity). Reconciled on
+    /// every push like the frame and content size.
+    rubber_band: bool = false,
 };
 
 /// A native scroll driver reported a new content offset (the user

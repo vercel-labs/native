@@ -367,6 +367,42 @@ test "compiled on-scroll binds the ScrollState constructor identically to the in
     try testing.expectEqual(interpreted.msgForReachEnd(feed.id).?, compiled.msgForReachEnd(feed.id).?);
 }
 
+// ------------------------------------------------ overscroll parity
+
+const overscroll_feed_markup =
+    \\<scroll overscroll="rubber_band">
+    \\  <column gap="4">
+    \\    <for each="entries" as="e" key="id">
+    \\      <text>{e.label}</text>
+    \\    </for>
+    \\  </column>
+    \\</scroll>
+;
+
+const OverscrollFeedCompiled = canvas.CompiledMarkupView(EntriesModel, EntriesMsg, overscroll_feed_markup);
+
+test "compiled overscroll stamps the region edge behavior identically to the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const entries = [_]Entry{.{ .id = 11, .label = "first" }};
+    const model = EntriesModel{ .entries = &entries };
+
+    var view = try markup_view.MarkupView(EntriesModel, EntriesMsg).init(arena, overscroll_feed_markup);
+    var interpreter_ui = EntriesUi.init(arena);
+    const interpreted = try interpreter_ui.finalize(try view.build(&interpreter_ui, &model));
+    var compiled_ui = EntriesUi.init(arena);
+    const compiled = try compiled_ui.finalize(OverscrollFeedCompiled.build(&compiled_ui, &model));
+    try expectSameTree(EntriesMsg, interpreted, compiled);
+
+    // Both engines stamp the per-region opt-in on the scroll widget.
+    const compiled_feed = fixture.findByKind(compiled.root, .scroll_view).?;
+    const interpreted_feed = fixture.findByKind(interpreted.root, .scroll_view).?;
+    try testing.expectEqual(canvas.WidgetOverscroll.rubber_band, compiled_feed.overscroll);
+    try testing.expectEqual(canvas.WidgetOverscroll.rubber_band, interpreted_feed.overscroll);
+}
+
 // --------------------- multi-child for bodies and the for-empty else
 
 const multi_entries_markup =

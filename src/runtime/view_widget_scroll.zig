@@ -31,7 +31,8 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                 if (node.widget.native_scroll) continue;
                 const viewport = node.frame.inset(node.widget.layout.padding).normalized();
                 if (viewport.isEmpty()) continue;
-                if (self.canvasWidgetScrollState(index, node, viewport).needsKineticStep(self.widget_tokens.scroll)) return true;
+                const physics = canvas.widgetScrollPhysics(node.widget, self.widget_tokens.scroll);
+                if (self.canvasWidgetScrollState(index, node, viewport).needsKineticStep(physics)) return true;
             }
             return false;
         }
@@ -142,16 +143,21 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             if (viewport.isEmpty()) return null;
 
             const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
-            // Native-driven regions take engine wheel input (automation's
-            // widget-wheel command) clamped: their rubber-band recovery
-            // lives in the OS scroller, so an engine overscroll here would
-            // have no kinetic step to pull it back.
+            // Per-region edge behavior: the region's overscroll override
+            // resolved onto the scroll-physics token (off by default —
+            // `applyWheel` clamps unless the effective mode is
+            // rubber_band). Native-driven regions and nested-scroll
+            // handoff take wheel input clamped regardless: a native
+            // region's rubber-band recovery lives in the OS scroller, so
+            // an engine overscroll here would have no kinetic step to
+            // pull it back.
+            const physics = canvas.widgetScrollPhysics(scroll_node.widget, self.widget_tokens.scroll);
             const rubberband = allow_rubberband and !scroll_node.widget.native_scroll;
             const next = switch (source) {
                 .wheel => if (rubberband)
-                    current.applyWheel(delta_y, self.widget_tokens.scroll)
+                    current.applyWheel(delta_y, physics)
                 else
-                    current.applyWheelClamped(delta_y, self.widget_tokens.scroll),
+                    current.applyWheelClamped(delta_y, physics),
                 .discrete => discrete: {
                     var state = current;
                     state.offset += delta_y;
@@ -261,7 +267,6 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         pub fn stepCanvasWidgetKineticScroll(self: *RuntimeView, dt_ms: f32) anyerror!?geometry.RectF {
             var dirty: ?geometry.RectF = null;
             var changed = false;
-            const physics = self.widget_tokens.scroll;
 
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |scroll_node, scroll_index| {
                 if (scroll_node.widget.kind != .scroll_view or canvasWidgetModelDrivenVirtual(scroll_node.widget)) continue;
@@ -274,6 +279,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                     continue;
                 }
 
+                const physics = canvas.widgetScrollPhysics(scroll_node.widget, self.widget_tokens.scroll);
                 const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
                 if (!current.needsKineticStep(physics)) {
                     self.widget_scroll_states[scroll_index].velocity = 0;

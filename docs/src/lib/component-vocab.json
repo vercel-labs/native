@@ -389,6 +389,10 @@
       "doc": "Marks the element as a window-drag surface (the hidden-titlebar pattern): pressing its background - or plain text/icons inside - moves the window; double-click zooms per the OS convention. Buttons and other press-claiming children inside stay clickable. macOS-only; elsewhere the press is dead space."
     },
     {
+      "name": "overscroll",
+      "doc": "scroll only: edge behavior of the region. none pins scrolling at the content edges (the shipped default via the ScrollPhysics.overscroll token), rubber_band lets this region bounce past them, default follows the token. Honored by the engine's scroll physics and the native OS scroller alike."
+    },
+    {
       "name": "background",
       "doc": "Background color token (literal ColorTokens field name: background, surface, surface_subtle, ...)."
     },

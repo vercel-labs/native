@@ -44,14 +44,14 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // the new fingerprint ONLY for additions; renames/renumbers are
     // schema-version-bump events, not silent edits.
     try testing.expectEqual(@as(usize, 60), schema.elements.len);
-    try testing.expectEqual(@as(usize, 64), schema.attrs.len);
+    try testing.expectEqual(@as(usize, 65), schema.attrs.len);
     try testing.expectEqual(@as(usize, 10), schema.events.len);
     try testing.expectEqual(
         @as(u64, 0x72e4017547fa0140),
         tableFingerprint(schema.ElementInfo, &schema.elements),
     );
     try testing.expectEqual(
-        @as(u64, 0x9c872d94150c47e8),
+        @as(u64, 0x3629706fecb6efe3),
         tableFingerprint(schema.AttrInfo, &schema.attrs),
     );
     try testing.expectEqual(

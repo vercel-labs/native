@@ -1270,6 +1270,57 @@ test "scroll state applies wheel deltas kinetic decay and bounds" {
     try std.testing.expectEqual(@as(f32, 0), clamped.velocity);
 }
 
+test "scroll overscroll gates rubber-band: none pins at the edges, rubber_band excursions recover" {
+    const start = ScrollState{
+        .offset = 250,
+        .viewport_extent = 100,
+        .content_extent = 360,
+    };
+
+    // Overscroll off (the default): a wheel past the edge clamps and
+    // zeroes velocity — the clean stop — and kinetic stepping never
+    // carries the offset past the boundary.
+    const pinned_physics = ScrollPhysics{};
+    try std.testing.expectEqual(canvas.ScrollOverscroll.none, pinned_physics.overscroll);
+    const pinned = start.applyWheel(1000, pinned_physics);
+    try std.testing.expectEqual(@as(f32, 260), pinned.offset);
+    try std.testing.expectEqual(@as(f32, 0), pinned.velocity);
+    var rolling = ScrollState{
+        .offset = 250,
+        .velocity = 400,
+        .viewport_extent = 100,
+        .content_extent = 360,
+    };
+    rolling = rolling.stepKinetic(100, pinned_physics);
+    try std.testing.expectEqual(@as(f32, 260), rolling.offset);
+    try std.testing.expectEqual(@as(f32, 0), rolling.velocity);
+    try std.testing.expect(!rolling.needsKineticStep(pinned_physics));
+
+    // Overscroll on: the same wheel travels past the edge under
+    // resistance, and kinetic steps pull the excursion back to the edge.
+    const bouncy_physics = ScrollPhysics{ .overscroll = .rubber_band };
+    const bounced = start.applyWheel(1000, bouncy_physics);
+    try std.testing.expect(bounced.offset > 260);
+    try std.testing.expect(bounced.overscroll() > 0);
+    var recovering = bounced;
+    recovering.velocity = 0;
+    var steps: usize = 0;
+    while (recovering.overscroll() != 0 and steps < 200) : (steps += 1) {
+        recovering = recovering.stepKinetic(16, bouncy_physics);
+    }
+    try std.testing.expectEqual(@as(f32, 260), recovering.offset);
+
+    // A stale out-of-range offset on a pinned region self-heals in one
+    // kinetic step instead of animating a return.
+    const stale = ScrollState{
+        .offset = 300,
+        .viewport_extent = 100,
+        .content_extent = 360,
+    };
+    const healed = stale.stepKinetic(16, pinned_physics);
+    try std.testing.expectEqual(@as(f32, 260), healed.offset);
+}
+
 test "virtual list range computes visible and overscan windows" {
     const range = virtualListRange(.{
         .item_count = 100,

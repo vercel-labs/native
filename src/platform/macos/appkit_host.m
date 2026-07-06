@@ -5254,9 +5254,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 // Each scrollable canvas region gets an invisible NSScrollView subview
 // sized to the region and backed by a flipped document view sized to the
 // content extent. Wheel events over a region forward to its driver, so
-// the OS computes momentum + rubber-band and draws the overlay scroller;
-// the clip view's bounds origin y IS the canvas scroll offset, reported
-// back per frame interval through GPU_SURFACE_SCROLL_DRIVER events.
+// the OS computes momentum (and rubber-band, for regions whose spec asks
+// for it) and draws the overlay scroller; the clip view's bounds origin y
+// IS the canvas scroll offset, reported back per frame interval through
+// GPU_SURFACE_SCROLL_DRIVER events.
 
 - (void)setScrollDrivers:(const native_sdk_appkit_scroll_driver_t *)drivers count:(NSUInteger)count {
     if (!self.scrollDrivers) self.scrollDrivers = [[NSMutableArray alloc] init];
@@ -5293,7 +5294,6 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             driver.hasHorizontalScroller = NO;
             driver.scrollerStyle = NSScrollerStyleOverlay;
             driver.autohidesScrollers = YES;
-            driver.verticalScrollElasticity = NSScrollElasticityAllowed;
             driver.horizontalScrollElasticity = NSScrollElasticityNone;
             driver.automaticallyAdjustsContentInsets = NO;
             NativeSdkScrollDriverDocumentView *document = [[NativeSdkScrollDriverDocumentView alloc] initWithFrame:NSMakeRect(0, 0, MAX(desired.content_width, 1), MAX(desired.content_height, 1))];
@@ -5305,6 +5305,11 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         }
         // Reconcile against the live view state every push — comparing
         // against anything but the actual frame races with relayout.
+        // Elasticity rides the same reconcile: a region's edge behavior
+        // (pin at the edges vs bounce past them) is per-region state the
+        // runtime owns.
+        NSScrollElasticity elasticity = desired.rubber_band ? NSScrollElasticityAllowed : NSScrollElasticityNone;
+        if (driver.verticalScrollElasticity != elasticity) driver.verticalScrollElasticity = elasticity;
         NSRect target = NSMakeRect(desired.x, self.bounds.size.height - desired.y - desired.height, desired.width, desired.height);
         if (!NSEqualRects(driver.frame, target)) driver.frame = target;
         NSSize contentSize = NSMakeSize(MAX(desired.content_width, 1), MAX(desired.content_height, 1));

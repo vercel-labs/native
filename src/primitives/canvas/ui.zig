@@ -487,6 +487,15 @@ pub fn Ui(comptime Msg: type) type {
             /// platforms without the channel treat the press as dead
             /// space.
             window_drag: bool = false,
+            /// Edge behavior for scroll containers (`scroll`,
+            /// `virtualList`): `.default` follows the
+            /// `ScrollPhysics.overscroll` design token — off unless a
+            /// theme flips it, so scrolling pins at the content edges
+            /// with a clean stop. `.rubber_band` lets THIS region bounce
+            /// past its edges (engine physics and the native OS scroller
+            /// both honor it); `.none` pins it regardless of the token.
+            /// Meaningless on non-scroll elements.
+            overscroll: canvas.WidgetOverscroll = .default,
             style: canvas.WidgetStyle = .{},
             /// Named token references resolved against design tokens in
             /// `finalizeWithTokens`; explicit `style` values win.
@@ -1011,6 +1020,12 @@ pub fn Ui(comptime Msg: type) type {
             /// viewport). Uniform lists may use it too — `item_extent`
             /// doubles as the estimate.
             anchor: VirtualListAnchor = .leading,
+            /// Edge behavior of the list's scroll region (see
+            /// `ElementOptions.overscroll`): `.default` follows the
+            /// `ScrollPhysics.overscroll` token — off unless a theme
+            /// flips it — and `.rubber_band` lets this list bounce past
+            /// its edges.
+            overscroll: canvas.WidgetOverscroll = .default,
         };
 
         /// Anchoring contract of a windowed virtual list (see
@@ -1187,6 +1202,7 @@ pub fn Ui(comptime Msg: type) type {
                 .style = options.style,
                 .style_tokens = options.style_tokens,
                 .semantics = semantics,
+                .overscroll = options.overscroll,
                 .on_scroll = options.on_scroll,
                 .on_reach_end = options.on_reach_end,
                 .on_reach_start = options.on_reach_start,
@@ -2136,6 +2152,7 @@ pub fn Ui(comptime Msg: type) type {
                 .style = options.style,
                 .semantics = options.semantics,
                 .window_drag = options.window_drag,
+                .overscroll = options.overscroll,
             };
             applyKindDefaultLayout(kind, options, &widget.layout);
             return widget;

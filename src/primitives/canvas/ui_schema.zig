@@ -284,8 +284,9 @@ pub const elements = [_]ElementInfo{
 // Codes 1..28 are the generic option attributes (the order is also the
 // did-you-mean/completion display order), 29..35 the style-token
 // references, 36..41 the element-scoped specials, 42..50 the composite
-// attributes, 51..57 the structure/tooling attributes, and 58..64 the
-// chart composite attributes.
+// attributes, 51..57 the structure/tooling attributes, 58..64 the
+// chart composite attributes, and 65 onward later additions under fresh
+// codes (grouping comments carry no meaning — codes do).
 
 pub const attrs = [_]AttrInfo{
     .{ .code = 1, .name = "text", .class = .text, .group = .option, .field = "text", .rendered_text = true },
@@ -357,6 +358,8 @@ pub const attrs = [_]AttrInfo{
     .{ .code = 62, .name = "baseline", .class = .flag, .group = .composite },
     .{ .code = 63, .name = "stroke-width", .class = .number, .group = .composite },
     .{ .code = 64, .name = "color", .class = .token_color, .group = .composite },
+    // Scroll-region edge behavior (scroll only; the validator scopes it).
+    .{ .code = 65, .name = "overscroll", .class = .option, .group = .option, .field = "overscroll" },
 };
 
 // ----------------------------------------------------------------- events
