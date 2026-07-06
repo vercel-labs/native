@@ -46,14 +46,15 @@ const max_line_bytes = 64;
 /// so cmd's `for /L` paces with the classic `ping -n 2 127.0.0.1` ~1s
 /// delay (`timeout /t` refuses to wait without a console, and Wine's
 /// stub returns immediately, so ping is also what keeps the stream slow
-/// under the Wine effects verification). Two Wine cmd parser quirks shape
-/// the exact spelling: `@(...)` groups are silently dropped (exit 0, no
-/// output; /c lines never echo commands, so `@` is unnecessary anyway),
+/// under the Wine effects verification). Cmd parser quirks shape the
+/// exact spelling: real cmd echoes each loop-body command with a prompt
+/// line unless echo is off — `/q` turns it off portably, while an `@(...)`
+/// group is silently dropped by the Wine parser (exit 0, no output) —
 /// and a redirect filename directly before `)` swallows the paren,
 /// creating a literal `nul)` file — so ping runs first and echo closes
 /// the group.
 pub const stream_argv = if (builtin.os.tag == .windows) [_][]const u8{
-    "cmd", "/c", "for /L %i in (1,1,500) do (ping -n 2 127.0.0.1 > nul & echo stream line %i)",
+    "cmd", "/q", "/c", "for /L %i in (1,1,500) do (ping -n 2 127.0.0.1 > nul & echo stream line %i)",
 } else [_][]const u8{
     "/bin/sh", "-c", "i=0; while [ $i -lt 500 ]; do i=$((i+1)); echo \"stream line $i\"; sleep 0.2; done",
 };

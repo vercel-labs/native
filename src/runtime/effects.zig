@@ -555,6 +555,9 @@ fn classifyFetchError(err: anyerror) EffectFetchOutcome {
         error.NetworkUnreachable,
         error.NetworkDown,
         error.Timeout,
+        // The worker's marker for an untyped failure while establishing
+        // the connection (see `runFetch`).
+        error.ConnectPhaseFailed,
         => .connect_failed,
         // TLS.
         error.TlsInitializationFailed,
@@ -3193,13 +3196,22 @@ pub fn Effects(comptime Msg: type) type {
             const uri = try std.Uri.parse(slot.fetchUrl());
             var client: std.http.Client = .{ .allocator = self.allocator, .io = io };
             defer client.deinit();
-            var request = try client.request(slot.method, uri, .{
+            var request = client.request(slot.method, uri, .{
                 .keep_alive = false,
                 .extra_headers = slot.fetchHeaders(),
                 // Mirrors `std.http.Client.fetch`: payloads cannot be
                 // replayed across redirects.
                 .redirect_behavior = if (slot.payload_len > 0) .unhandled else @enumFromInt(3),
-            });
+            }) catch |err| {
+                // Establishing the connection is what `request` does, so
+                // an UNTYPED failure here is a connect failure. (The
+                // Windows net layer surfaces refused/unreachable connects
+                // as NTSTATUS codes it does not translate into typed
+                // errors; without this, those reported `.protocol_failed`
+                // even though no protocol exchange ever began.)
+                if (err == error.Unexpected) return error.ConnectPhaseFailed;
+                return err;
+            };
             defer request.deinit();
             if (slot.payload_len > 0) {
                 request.transfer_encoding = .{ .content_length = slot.payload_len };

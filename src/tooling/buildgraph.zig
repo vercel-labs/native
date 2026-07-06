@@ -263,6 +263,16 @@ test "generated build.zig.zon wires the framework path dependency" {
     try std.testing.expect(std.mem.indexOf(u8, text, ".paths = .{ \"build.zig\", \"build.zig.zon\" }") != null);
 }
 
+/// Path equality where '/' in the expected value also matches the
+/// platform separator, so tests written with forward slashes hold on
+/// Windows (where std.fs.path.join emits backslashes).
+fn expectPathEqualStrings(expected: []const u8, actual: []const u8) !void {
+    const matches = expected.len == actual.len and for (expected, actual) |e, a| {
+        if (e != a and !(e == '/' and a == std.fs.path.sep)) break false;
+    } else true;
+    if (!matches) try std.testing.expectEqualStrings(expected, actual);
+}
+
 test "ensureGeneratedBuild synthesizes and refreshes the cache graph" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -275,7 +285,9 @@ test "ensureGeneratedBuild synthesizes and refreshes the cache graph" {
 
     const build_file = try ensureGeneratedBuild(allocator, io, root, .{ .app_name = "demo", .framework_root = framework });
     defer allocator.free(build_file);
-    try std.testing.expectEqualStrings(generated_dir ++ "/build.zig", build_file);
+    // The returned path is joined with the platform separator (backslash
+    // on Windows), so compare separator-agnostically.
+    try expectPathEqualStrings(generated_dir ++ "/build.zig", build_file);
 
     var dir = try cwd.openDir(io, root ++ "/" ++ generated_dir, .{});
     defer dir.close(io);

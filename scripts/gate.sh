@@ -326,7 +326,9 @@ else # full
     zig build || return 1
     # shellcheck disable=SC2046
     # .zml is the format's former extension; it keeps checking during the rename window.
-    ./zig-out/bin/native markup check $(find examples -name '*.native' -o -name '*.zml' | sort)
+    # -type f: zero-config app builds leave a .native/ cache DIRECTORY in
+    # example dirs, which the name pattern would otherwise match.
+    ./zig-out/bin/native markup check $(find examples \( -name '*.native' -o -name '*.zml' \) -type f | sort)
   }
   run_step "markup-check" markup_check
 

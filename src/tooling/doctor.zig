@@ -155,6 +155,11 @@ pub fn reportForCurrentHostWithProbe(
         try addCommandCheck(buffers, allocator, io, probe, "webview-system", &.{ "pkg-config", "--exists", "webkitgtk-6.0" }, "WebKitGTK 6.0 system WebView backend is available", "WebKitGTK 6.0 was not found (install libwebkitgtk-6.0-dev or webkitgtk-6.0)");
         try addCommandCheck(buffers, allocator, io, probe, "webkitgtk", &.{ "pkg-config", "--exists", "webkitgtk-6.0" }, "WebKitGTK 6.0 development libraries are available", "WebKitGTK 6.0 was not found (install libwebkitgtk-6.0-dev or webkitgtk-6.0)");
         try addCommandCheck(buffers, allocator, io, probe, "gtk4", &.{ "pkg-config", "--exists", "gtk4" }, "GTK4 development libraries are available", "GTK4 was not found (install libgtk-4-dev or gtk4)");
+    } else if (target.os == .windows) {
+        // The Windows system engine is the OS WebView2 runtime, loaded by
+        // apps at run time; the Evergreen runtime registers this client id
+        // in the registry (per-machine or per-user).
+        try addCommandCheck(buffers, allocator, io, probe, "webview-system", &.{ "reg", "query", "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}", "/v", "pv" }, "WebView2 system WebView runtime is installed", "WebView2 runtime was not found (install the Evergreen WebView2 Runtime)");
     } else if (target.os != .macos) {
         try buffers.add("webview-system", .unsupported, "system WebView backend is not wired for this host yet", .{});
     }
@@ -174,6 +179,12 @@ pub fn reportForCurrentHostWithProbe(
     const cef_platform = cef.Platform.current() catch null;
     if (cef_platform == null) {
         try buffers.add("webview-chromium", .unsupported, "Chromium/CEF backend is not wired for this host", .{});
+    } else if (target.os == .windows) {
+        // The Windows CEF host is a placeholder: build and package
+        // tooling reject the chromium engine on Windows until CEF browser
+        // creation is wired, so report it honestly instead of implying an
+        // available backend.
+        try buffers.add("webview-chromium", .unsupported, "Chromium/CEF desktop engine is not wired on Windows yet; the system engine (WebView2) is the Windows backend", .{});
     } else if (resolved_engine.engine == .chromium) {
         const cef_dir = if (resolved_engine.cef_dir.len == 0) cef_platform.?.defaultDir() else resolved_engine.cef_dir;
         try addCefLayoutCheck(buffers, io, probe, cef_platform.?, cef_dir);

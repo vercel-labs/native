@@ -76,6 +76,7 @@ pub const RunOptions = struct {
             // shown after its first canvas frame presents, so launch
             // never flashes a blank window.
             info.main_window.titlebar = manifestShellStartupTitlebar();
+            info.main_window.resizable = manifestShellStartupResizable();
             info.main_window.show = manifestShellStartupShowMode();
             // Min-size floors ride the create call like the titlebar:
             // the scene re-applies size/title later, but the window's
@@ -175,6 +176,16 @@ fn manifestShellStartupTitlebar() native_sdk.WindowTitlebarStyle {
     if (comptime !@hasField(@TypeOf(shell), "windows")) return .standard;
     if (comptime shell.windows.len == 0) return .standard;
     return windowTitlebarStyle(shell.windows[0]);
+}
+
+/// The startup window's resizability for scene-first apps: like the
+/// titlebar style, resizable is window chrome fixed at create time.
+fn manifestShellStartupResizable() bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return true;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return true;
+    if (comptime shell.windows.len == 0) return true;
+    return windowBool(shell.windows[0], "resizable", true);
 }
 
 /// The startup window's content min-size floor for scene-first apps:

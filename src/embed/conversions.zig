@@ -337,15 +337,10 @@ pub fn mobileTextRangeEnd(range: ?canvas.TextRange) isize {
     const value = range orelse return -1;
     return mobileOptionalIndex(value.end);
 }
+/// Wall-clock nanoseconds for embed input timestamps, through the
+/// runtime clock seam (which covers Windows via the NT precise system
+/// time and degrades to 0 only on targets without a readable clock).
 pub fn nowNanoseconds() u64 {
-    switch (@import("builtin").os.tag) {
-        .windows, .wasi => return 0,
-        else => {
-            var ts: std.posix.timespec = undefined;
-            switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
-                .SUCCESS => return @intCast(@as(i128, ts.sec) * std.time.ns_per_s + ts.nsec),
-                else => return 0,
-            }
-        },
-    }
+    const ns = runtime.nowNanoseconds();
+    return if (ns > 0) @intCast(ns) else 0;
 }

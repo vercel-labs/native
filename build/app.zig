@@ -497,6 +497,10 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         app_mod.linkSystemLibrary("c", .{});
         if (web_engine == .chromium) app_mod.linkSystemLibrary("stdc++", .{});
     } else if (platform == .windows) {
+        // Common-controls v6 side-by-side dependency: without this
+        // manifest the loader binds the system-default v5 assembly, which
+        // renders classic-styled controls and lacks the v6-only exports.
+        exe.win32_manifest = dep.path("assets/native-sdk.manifest");
         switch (web_engine) {
             .system => app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/webview2_host.cpp"), .flags = &.{"-std=c++17"} }),
             .chromium => {

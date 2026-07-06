@@ -30,6 +30,11 @@ using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
 #else
 #define NATIVE_SDK_HAS_WEBVIEW2 0
+/* Loud on purpose: without the WebView2 SDK header on the include path
+ * the host builds with the embedded WebView layer stubbed out — canvas
+ * apps are unaffected, but apps that load a WebView report
+ * WebViewNotFound at start. */
+#pragma message("WebView2.h not found: building the Windows host without the embedded WebView layer (canvas apps unaffected; WebView loads will report WebViewNotFound)")
 #endif
 
 namespace {
@@ -51,6 +56,8 @@ enum EventKind {
     kGpuSurfaceResize = 13,
     kGpuSurfaceInput = 14,
     kWake = 15,
+    kTimer = 16,
+    kAppearance = 17,
 };
 
 constexpr uint32_t kShortcutModifierPrimary = 1u << 0;
@@ -129,6 +136,10 @@ struct WindowsEvent {
     size_t input_text_len;
     int has_composition_cursor;
     size_t composition_cursor;
+    uint64_t timer_id;
+    int color_scheme;
+    int reduce_motion;
+    int high_contrast;
 };
 
 struct WindowsOpenDialogOpts {
@@ -186,6 +197,15 @@ struct Window {
     double y = 0;
     double width = 720;
     double height = 480;
+    bool resizable = true;
+    /* 0 standard, 1 hidden_inset, 2 hidden_inset_tall. The hidden styles
+     * mean the app draws its own chrome (drag regions, close affordances);
+     * the Win32 equivalent is a caption-less window. */
+    int titlebar_style = 0;
+    /* Declared content min-size floor for user resizes; axes <= 0 keep
+     * the natural minimum (WM_GETMINMAXINFO applies the floor). */
+    double min_width = 0;
+    double min_height = 0;
 };
 
 struct ChildWebView {
@@ -289,6 +309,22 @@ struct HostLifetime {
     bool alive = true;
 };
 
+/* App timers (runtime `startTimer`) on the Win32 message loop: each slot
+ * owns the SetTimer id kAppTimerIdBase + slot index, scheduled on the
+ * first live top-level window so WM_TIMER lands in windowProc. */
+constexpr size_t kMaxAppTimers = 64;
+constexpr UINT_PTR kAppTimerIdBase = 0x1000;
+/* The 16 ms per-window frame-pump timer (SetTimer id on each top-level
+ * window; distinct from the app-timer id range). */
+constexpr UINT_PTR kFrameTimerId = 1;
+
+struct AppTimer {
+    uint64_t id = 0;
+    HWND hwnd = nullptr;
+    bool repeats = false;
+    bool in_use = false;
+};
+
 struct Host {
     HINSTANCE instance = GetModuleHandleW(nullptr);
     std::string app_name;
@@ -314,6 +350,13 @@ struct Host {
     bool app_active = false;
     bool notification_icon_added = false;
     bool tray_active = false;
+    AppTimer app_timers[kMaxAppTimers];
+    /* Last emitted appearance values; -1 = nothing emitted yet, so the
+     * post-start emission always fires and setting-change re-reads only
+     * emit when something actually changed. */
+    int appearance_color_scheme = -1;
+    int appearance_reduce_motion = -1;
+    int appearance_high_contrast = -1;
     std::shared_ptr<HostLifetime> lifetime = std::make_shared<HostLifetime>();
 };
 
@@ -2365,6 +2408,82 @@ static Host *hostFromWindow(HWND hwnd) {
     return reinterpret_cast<Host *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 }
 
+/* The user's app color preference: AppsUseLightTheme == 0 means dark.
+ * Read through advapi32 dynamically (the credential store does the same)
+ * so no extra import library is needed; a missing value (very old
+ * builds) reads as light. */
+static bool windowsAppsUseDarkTheme() {
+    HMODULE advapi = LoadLibraryW(L"advapi32.dll");
+    if (!advapi) return false;
+    using RegGetValueWFn = LSTATUS(WINAPI *)(HKEY, LPCWSTR, LPCWSTR, DWORD, LPDWORD, PVOID, LPDWORD);
+    auto reg_get_value = reinterpret_cast<RegGetValueWFn>(
+        reinterpret_cast<void *>(GetProcAddress(advapi, "RegGetValueW")));
+    bool dark = false;
+    if (reg_get_value) {
+        DWORD value = 1;
+        DWORD size = sizeof(value);
+        if (reg_get_value(HKEY_CURRENT_USER,
+                          L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                          L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS) {
+            dark = value == 0;
+        }
+    }
+    FreeLibrary(advapi);
+    return dark;
+}
+
+/* Appearance from OS settings: the apps dark preference, disabled
+ * client-area animations as the reduce-motion signal, and the high
+ * contrast accessibility flag. Emitted once after START and again
+ * whenever a settings broadcast changes any of the three values. */
+static void emitAppearanceIfChanged(Host *host, bool force) {
+    if (!host || !host->callback) return;
+    const int dark = windowsAppsUseDarkTheme() ? 1 : 0;
+    BOOL animations = TRUE;
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animations, 0);
+    const int reduce_motion = animations ? 0 : 1;
+    HIGHCONTRASTW contrast = {};
+    contrast.cbSize = sizeof(contrast);
+    int high_contrast = 0;
+    if (SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0)) {
+        high_contrast = (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0 ? 1 : 0;
+    }
+    if (!force && dark == host->appearance_color_scheme && reduce_motion == host->appearance_reduce_motion && high_contrast == host->appearance_high_contrast) return;
+    host->appearance_color_scheme = dark;
+    host->appearance_reduce_motion = reduce_motion;
+    host->appearance_high_contrast = high_contrast;
+    WindowsEvent event = {};
+    event.kind = kAppearance;
+    event.color_scheme = dark;
+    event.reduce_motion = reduce_motion;
+    event.high_contrast = high_contrast;
+    host->callback(host->callback_context, &event);
+}
+
+/* WM_TIMER for an id in the app-timer range: emit kTimer for the slot's
+ * app timer id. A non-repeating timer frees its slot BEFORE emitting so
+ * the handler may re-arm the same id (same contract as the AppKit and
+ * GTK hosts). */
+static bool handleAppTimerMessage(Host *host, WPARAM wparam) {
+    if (!host || wparam < kAppTimerIdBase || wparam >= kAppTimerIdBase + kMaxAppTimers) return false;
+    AppTimer &slot = host->app_timers[wparam - kAppTimerIdBase];
+    if (!slot.in_use) return true;
+    const uint64_t timer_id = slot.id;
+    if (!slot.repeats) {
+        if (slot.hwnd) KillTimer(slot.hwnd, wparam);
+        slot.in_use = false;
+        slot.hwnd = nullptr;
+    }
+    if (host->callback) {
+        WindowsEvent event = {};
+        event.kind = kTimer;
+        event.timer_id = timer_id;
+        event.timestamp_ns = gpuTimestampNs();
+        host->callback(host->callback_context, &event);
+    }
+    return true;
+}
+
 static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_NCCREATE) {
         auto *create = reinterpret_cast<CREATESTRUCTW *>(lparam);
@@ -2466,10 +2585,35 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             }
             return 0;
         case WM_TIMER:
-            if (host) {
+            if (host && handleAppTimerMessage(host, wparam)) return 0;
+            if (host && wparam == kFrameTimerId) {
                 for (auto &entry : host->windows) emit(host, entry.second, kFrame);
             }
             return 0;
+        case WM_GETMINMAXINFO:
+            if (host) {
+                for (auto &entry : host->windows) {
+                    Window &window = entry.second;
+                    if (window.hwnd != hwnd) continue;
+                    if (window.min_width <= 0 && window.min_height <= 0) break;
+                    /* The declared floor is a CONTENT size; convert to the
+                     * outer track size for this window's current style. */
+                    RECT frame = { 0, 0, (LONG)(window.min_width > 0 ? window.min_width : 0), (LONG)(window.min_height > 0 ? window.min_height : 0) };
+                    const DWORD style = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE);
+                    const DWORD ex_style = (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                    AdjustWindowRectEx(&frame, style, GetMenu(hwnd) != nullptr, ex_style);
+                    MINMAXINFO *info = reinterpret_cast<MINMAXINFO *>(lparam);
+                    if (window.min_width > 0) info->ptMinTrackSize.x = frame.right - frame.left;
+                    if (window.min_height > 0) info->ptMinTrackSize.y = frame.bottom - frame.top;
+                    return 0;
+                }
+            }
+            break;
+        case WM_SETTINGCHANGE:
+        case WM_THEMECHANGED:
+        case WM_SYSCOLORCHANGE:
+            if (host) emitAppearanceIfChanged(host, false);
+            break;
         case WM_CLOSE:
             DestroyWindow(hwnd);
             return 0;
@@ -2506,15 +2650,30 @@ static ATOM registerClass(Host *host) {
 static bool createNativeWindow(Host *host, Window &window) {
     registerClass(host);
     std::wstring title = widen(window.title.empty() ? host->window_title : window.title);
+    DWORD style = WS_OVERLAPPEDWINDOW;
+    if (!window.resizable) style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    if (window.titlebar_style >= 1) {
+        /* Hidden titlebar styles: the app draws its own chrome, so drop
+         * the caption entirely (keeping the resize frame when the window
+         * is resizable). */
+        style = WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX;
+        if (window.resizable) style |= WS_THICKFRAME | WS_MAXIMIZEBOX;
+    }
+    /* The requested frame is a CONTENT size (the other hosts size the
+     * content area); grow it to the outer size for this style so the
+     * client rect lands at the request. The menu bar is attached after
+     * creation, so account for it here when menus are declared. */
+    RECT frame = { 0, 0, (LONG)window.width, (LONG)window.height };
+    AdjustWindowRectEx(&frame, style, host->menus.empty() ? FALSE : TRUE, 0);
     HWND hwnd = CreateWindowExW(
         0,
         L"NativeSdkWindowsHost",
         title.c_str(),
-        WS_OVERLAPPEDWINDOW,
+        style,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        (int)window.width,
-        (int)window.height,
+        frame.right - frame.left,
+        frame.bottom - frame.top,
         nullptr,
         nullptr,
         host->instance,
@@ -2525,7 +2684,7 @@ static bool createNativeWindow(Host *host, Window &window) {
     applyMenusToWindow(host, window);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
-    SetTimer(hwnd, 1, 16, nullptr);
+    SetTimer(hwnd, kFrameTimerId, 16, nullptr);
     return true;
 }
 
@@ -2538,8 +2697,9 @@ void native_sdk_windows_bridge_respond_window(Host *host, uint64_t window_id, co
 void native_sdk_windows_bridge_respond_webview(Host *host, uint64_t window_id, const char *webview_label, size_t webview_label_len, const char *response, size_t response_len);
 size_t native_sdk_windows_clipboard_read_data(Host *host, const char *mime_type, size_t mime_type_len, char *buffer, size_t buffer_len);
 int native_sdk_windows_clipboard_write_data(Host *host, const char *mime_type, size_t mime_type_len, const char *bytes, size_t bytes_len);
+void native_sdk_windows_cancel_timer(Host *host, uint64_t timer_id);
 
-Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {
+Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height) {
     (void)restore_frame;
     INITCOMMONCONTROLSEX controls = {};
     controls.dwSize = sizeof(controls);
@@ -2559,6 +2719,10 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
     window.y = y;
     window.width = width;
     window.height = height;
+    window.resizable = resizable != 0;
+    window.titlebar_style = titlebar_style;
+    window.min_width = min_width;
+    window.min_height = min_height;
     host->windows[window.id] = window;
     return host;
 }
@@ -2568,6 +2732,18 @@ void native_sdk_windows_destroy(Host *host) {
     std::shared_ptr<HostLifetime> lifetime = host->lifetime;
     std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
     lifetime->alive = false;
+    /* DestroyWindow below dispatches WM_DESTROY/WM_ACTIVATEAPP
+     * synchronously through windowProc; the run loop's handler state is
+     * already gone by the time destroy is called, so those teardown
+     * messages must not emit. */
+    host->callback = nullptr;
+    host->bridge_callback = nullptr;
+    for (size_t index = 0; index < kMaxAppTimers; ++index) {
+        AppTimer &slot = host->app_timers[index];
+        if (slot.in_use && slot.hwnd) KillTimer(slot.hwnd, kAppTimerIdBase + index);
+        slot.in_use = false;
+        slot.hwnd = nullptr;
+    }
     removeNotificationIcon(host);
     destroyAllWindows(host);
     delete host;
@@ -2583,6 +2759,7 @@ void native_sdk_windows_run(Host *host, EventCallback callback, void *context) {
     start.kind = kStart;
     start.window_id = 1;
     callback(context, &start);
+    emitAppearanceIfChanged(host, true);
     for (auto &entry : host->windows) {
         emit(host, entry.second, kResize);
         emit(host, entry.second, kWindowFrame);
@@ -2884,7 +3061,7 @@ void native_sdk_windows_set_shortcuts(Host *host, const char *const *ids, const 
     }
 }
 
-int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {
+int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height) {
     (void)restore_frame;
     if (!host || host->windows.find(window_id) != host->windows.end()) return 0;
     Window window;
@@ -2895,9 +3072,76 @@ int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char 
     window.y = y;
     window.width = width;
     window.height = height;
+    window.resizable = resizable != 0;
+    window.titlebar_style = titlebar_style;
+    window.min_width = min_width;
+    window.min_height = min_height;
     bool ok = createNativeWindow(host, window);
     if (!ok) return 0;
     host->windows[window_id] = window;
+    return 1;
+}
+
+void native_sdk_windows_start_timer(Host *host, uint64_t timer_id, uint64_t interval_ns, int repeats) {
+    if (!host) return;
+    native_sdk_windows_cancel_timer(host, timer_id);
+    HWND hwnd = parentWindow(host);
+    if (!hwnd) return;
+    AppTimer *slot = nullptr;
+    UINT_PTR win32_id = 0;
+    for (size_t index = 0; index < kMaxAppTimers; ++index) {
+        if (!host->app_timers[index].in_use) {
+            slot = &host->app_timers[index];
+            win32_id = kAppTimerIdBase + index;
+            break;
+        }
+    }
+    if (!slot) return;
+    UINT interval_ms = (UINT)(interval_ns / 1000000ull);
+    if (interval_ms == 0) interval_ms = 1;
+    slot->id = timer_id;
+    slot->hwnd = hwnd;
+    slot->repeats = repeats != 0;
+    slot->in_use = true;
+    SetTimer(hwnd, win32_id, interval_ms, nullptr);
+}
+
+void native_sdk_windows_cancel_timer(Host *host, uint64_t timer_id) {
+    if (!host) return;
+    for (size_t index = 0; index < kMaxAppTimers; ++index) {
+        AppTimer &slot = host->app_timers[index];
+        if (slot.in_use && slot.id == timer_id) {
+            if (slot.hwnd) KillTimer(slot.hwnd, kAppTimerIdBase + index);
+            slot.in_use = false;
+            slot.hwnd = nullptr;
+        }
+    }
+}
+
+int native_sdk_windows_start_window_drag(Host *host, uint64_t window_id) {
+    if (!host) return 0;
+    auto found = host->windows.find(window_id);
+    if (found == host->windows.end() || !found->second.hwnd) return 0;
+    /* An interactive move needs a live pointer press on one of the
+     * window's canvas views. Without one (synthetic automation input, or
+     * a drag request outside any pointer gesture) succeed as a no-op —
+     * only an unknown window is an error, matching the other hosts. */
+    NativeView *pressed = nullptr;
+    for (auto &entry : host->native_views) {
+        NativeView &view = entry.second;
+        if (view.window_id == window_id && view.kind == kViewGpuSurface && view.gpu_pointer_down) {
+            pressed = &view;
+            break;
+        }
+    }
+    if (!pressed) return 1;
+    /* Hand the press to the system move loop: release the canvas capture
+     * (its WM_CAPTURECHANGED emits pointer_cancel, closing the gesture
+     * for the runtime) and post the caption-drag that begins the move.
+     * Posted, not sent: the move loop is modal and must not run inside
+     * this call. */
+    ReleaseCapture();
+    PostMessageW(found->second.hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
     return 1;
 }
 
@@ -3311,11 +3555,40 @@ int native_sdk_windows_show_message_dialog(Host *host, const WindowsMessageDialo
     config.nDefaultButton = 100;
     config.pszMainIcon = opts->style == 2 ? TD_ERROR_ICON : (opts->style == 1 ? TD_WARNING_ICON : TD_INFORMATION_ICON);
 
-    int pressed = 100;
-    HRESULT hr = TaskDialogIndirect(&config, &pressed, nullptr, nullptr);
-    if (FAILED(hr)) return 0;
-    if (pressed == 101) return 1;
-    if (pressed == 102) return 2;
+    /* TaskDialogIndirect is a comctl32 v6 export: it only resolves when
+     * the process activates the v6 side-by-side assembly (application
+     * manifest). A static import would abort the whole process at load
+     * time with STATUS_ENTRYPOINT_NOT_FOUND on the system default v5, so
+     * resolve it dynamically and fall back to MessageBoxW (fixed button
+     * captions, same 0/1/2 result contract) when only v5 is available. */
+    using TaskDialogIndirectFn = HRESULT(WINAPI *)(const TASKDIALOGCONFIG *, int *, int *, BOOL *);
+    static TaskDialogIndirectFn task_dialog = reinterpret_cast<TaskDialogIndirectFn>(
+        reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"comctl32.dll"), "TaskDialogIndirect")));
+    if (task_dialog) {
+        int pressed = 100;
+        HRESULT hr = task_dialog(&config, &pressed, nullptr, nullptr);
+        if (FAILED(hr)) return 0;
+        if (pressed == 101) return 1;
+        if (pressed == 102) return 2;
+        return 0;
+    }
+
+    UINT type = MB_OK;
+    if (button_count == 2) type = MB_OKCANCEL;
+    if (button_count == 3) type = MB_YESNOCANCEL;
+    type |= opts->style == 2 ? MB_ICONERROR : (opts->style == 1 ? MB_ICONWARNING : MB_ICONINFORMATION);
+    std::wstring text = message;
+    if (!informative.empty()) {
+        if (!text.empty()) text += L"\n\n";
+        text += informative;
+    }
+    const int result = MessageBoxW(parentWindow(host), text.c_str(), title.empty() ? L"native-sdk" : title.c_str(), type);
+    if (button_count == 3) {
+        if (result == IDNO) return 1;
+        if (result == IDCANCEL) return 2;
+        return 0;
+    }
+    if (result == IDCANCEL) return 1;
     return 0;
 }
 
@@ -3619,7 +3892,10 @@ int native_sdk_windows_set_webview_zoom(Host *host, uint64_t window_id, const ch
 int native_sdk_windows_set_webview_layer(Host *host, uint64_t window_id, const char *label, size_t label_len, int layer) {
     if (!host || label_len == 0) return 0;
     std::string label_string = slice(label, label_len);
-    if (label_string == "main") return 0;
+    /* The window WebView participates in the same layer channel as the
+     * child views (it lives in the webviews map under "main" with layer 0
+     * and creation order 0, so it stays bottom-most until an app sinks it
+     * under — or floats it over — sibling views). */
     auto found = host->webviews.find(webViewKey(window_id, label_string));
     if (found == host->webviews.end() || !found->second.hwnd) return 0;
     found->second.layer = layer;

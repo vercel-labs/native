@@ -331,13 +331,23 @@ test "version compatibility pins major.minor and floors the patch" {
     try std.testing.expect(!versionCompatible("garbage", "0.16.0"));
 }
 
+/// Path equality where '/' in the expected value also matches the
+/// platform separator, so tests written with forward slashes hold on
+/// Windows (where std.fs.path.join emits backslashes).
+fn expectPathEqualStrings(expected: []const u8, actual: []const u8) !void {
+    const matches = expected.len == actual.len and for (expected, actual) |e, a| {
+        if (e != a and !(e == '/' and a == std.fs.path.sep)) break false;
+    } else true;
+    if (!matches) try std.testing.expectEqualStrings(expected, actual);
+}
+
 test "managed toolchain lives under ~/.native/toolchains" {
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
     try env.put("HOME", "/Users/alice");
     const path = try managedZigPath(std.testing.allocator, &env);
     defer std.testing.allocator.free(path);
-    try std.testing.expectEqualStrings("/Users/alice/.native/toolchains/zig-" ++ pinned_zig_version ++ "/zig", path);
+    try expectPathEqualStrings("/Users/alice/.native/toolchains/zig-" ++ pinned_zig_version ++ "/zig", path);
 }
 
 test "NATIVE_SDK_HOME overrides the toolchain root" {
@@ -347,7 +357,7 @@ test "NATIVE_SDK_HOME overrides the toolchain root" {
     try env.put("NATIVE_SDK_HOME", "/durable/native");
     const path = try managedZigPath(std.testing.allocator, &env);
     defer std.testing.allocator.free(path);
-    try std.testing.expectEqualStrings("/durable/native/toolchains/zig-" ++ pinned_zig_version ++ "/zig", path);
+    try expectPathEqualStrings("/durable/native/toolchains/zig-" ++ pinned_zig_version ++ "/zig", path);
 }
 
 test "NATIVE_SDK_ZIG overrides resolution" {
