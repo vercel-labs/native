@@ -164,8 +164,14 @@ pub const ElementInfo = struct {
     /// composite (step, timeline-item).
     widget_kind: []const u8 = "",
     /// Content is a single run of text (with interpolation); no element
-    /// children.
+    /// children (unless `takes_children` also holds).
     takes_text: bool = false,
+    /// Content may ALSO be element children instead of the text run (the
+    /// list-row composite): with children the element is a flow container
+    /// inside its own chrome, with a text run it draws that label itself,
+    /// and mixing the two is a teaching error. Only meaningful alongside
+    /// `takes_text`.
+    takes_children: bool = false,
     /// The engine hit-tests this element's widget kind. Mirrors
     /// `canvas.widgetKindHitTarget` (conformance-tested).
     hit_target: bool = true,
@@ -235,7 +241,7 @@ pub const elements = [_]ElementInfo{
     .{ .code = 28, .name = "badge", .widget_kind = "badge", .takes_text = true, .hit_target = false, .icon_attr = true },
     .{ .code = 29, .name = "button", .widget_kind = "button", .takes_text = true, .icon_attr = true, .a11y_name = .control },
     .{ .code = 30, .name = "toggle", .widget_kind = "toggle", .takes_text = true, .a11y_name = .control },
-    .{ .code = 31, .name = "list-item", .widget_kind = "list_item", .takes_text = true, .icon_attr = true, .a11y_name = .control },
+    .{ .code = 31, .name = "list-item", .widget_kind = "list_item", .takes_text = true, .takes_children = true, .icon_attr = true, .a11y_name = .control },
     .{ .code = 32, .name = "menu-item", .widget_kind = "menu_item", .takes_text = true, .icon_attr = true, .a11y_name = .control },
     .{ .code = 33, .name = "status-bar", .widget_kind = "status_bar", .takes_text = true },
     .{ .code = 34, .name = "avatar", .widget_kind = "avatar", .takes_text = true, .hit_target = false, .a11y_name = .image },
@@ -414,6 +420,7 @@ pub const container_role_names = [_][]const u8{
 /// misuse. Other leaves (separator, value controls) structurally accept
 /// children, so the lint stays quiet about them.
 pub fn elementHoldsChildren(entry: *const ElementInfo) bool {
+    if (entry.takes_children) return true;
     if (entry.takes_text) return false;
     return !std.mem.eql(u8, entry.name, "icon");
 }
@@ -556,6 +563,10 @@ pub const element_names = elementNamesWhere(plainElement);
 
 /// Elements whose content is a single run of text.
 pub const text_leaf_element_names = elementNamesWhere(ElementPredicate("takes_text"));
+
+/// Text-taking elements that ALSO accept element children in place of
+/// the text run (the list-row composite).
+pub const text_or_children_element_names = elementNamesWhere(ElementPredicate("takes_children"));
 
 /// Elements whose widget kind the engine never hit-tests.
 pub const non_hit_target_element_names = elementNamesWhere(nonHitTargetElement);

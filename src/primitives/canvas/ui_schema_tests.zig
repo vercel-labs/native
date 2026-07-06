@@ -109,6 +109,11 @@ test "derived name lists mirror the registry" {
     for (schema.text_leaf_element_names) |name| {
         try testing.expect(schema.elementByName(name).?.takes_text);
     }
+    for (schema.text_or_children_element_names) |name| {
+        const entry = schema.elementByName(name).?;
+        // The flag refines a text leaf; it never stands alone.
+        try testing.expect(entry.takes_children and entry.takes_text);
+    }
     for (schema.non_hit_target_element_names) |name| {
         try testing.expect(!schema.elementByName(name).?.hit_target);
     }

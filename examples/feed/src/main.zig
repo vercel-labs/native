@@ -283,11 +283,12 @@ fn statusLine(ui: *FeedUi, model: *const Model, window: canvas.VirtualListRange)
 }
 
 /// One timeline row: avatar, author line, single-line body, actions.
-/// Fixed 84pt extent (the v1 uniform-height contract), flat wash chrome
-/// — no cards, no borders; the selection is a full-width wash.
+/// Fixed 84pt extent (the v1 uniform-height contract), a FLAT list row
+/// (the list_item composite — no border, no card chrome; hover and the
+/// selection are full-width washes).
 fn postRow(ui: *FeedUi, model: *const Model, index: usize) FeedUi.Node {
     const post = postAt(index);
-    var node = ui.el(.panel, .{
+    var node = ui.el(.list_item, .{
         .height = post_row_extent,
         .padding = 12,
         .selected = model.selected != null and model.selected.? == index,
@@ -298,7 +299,7 @@ fn postRow(ui: *FeedUi, model: *const Model, index: usize) FeedUi.Node {
         // duplicate-sibling-label rule holds this honest).
         .semantics = .{ .role = .listitem, .label = ui.fmt("Post {d} by {s}", .{ index, post.author }), .focusable = true },
     }, .{
-        ui.row(.{ .gap = 10 }, .{
+        ui.row(.{ .grow = 1, .gap = 10 }, .{
             ui.avatar(.{ .width = 36, .height = 36 }, post.initials),
             ui.column(.{ .grow = 1, .gap = 3 }, .{
                 ui.row(.{ .gap = 6, .cross = .center }, .{

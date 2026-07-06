@@ -7,6 +7,12 @@
     <text foreground="text_muted">{title}</text>
     <column gap="8">
       <for each="cards" key="id" as="c">
+        <!-- Board cards are the deliberate CARD treatment: draggable
+             spatial objects, not list rows, so each opts into the
+             surface fill + radius explicitly (background/radius here;
+             style_tokens or control-token overrides in Zig views). List
+             rows never carry this — flat list-item washes are the
+             default register. -->
         <row global-key="{c.id}" background="surface" radius="md" gap="8" padding="8" cross="center" role="listitem" label="{c.title}">
           <text grow="1">{c.title}</text>
           <if test="{c.movable}">

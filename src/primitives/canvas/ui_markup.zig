@@ -1047,6 +1047,13 @@ pub const known_element_names = schema.element_names;
 /// test in ui_markup_view_tests.zig.
 pub const known_text_leaf_element_names = schema.text_leaf_element_names;
 
+/// Text-taking elements that ALSO accept element children in place of the
+/// text run (the list-row composite: children flow inside the element's
+/// own chrome). Registry-derived; held equal to the interpreter's
+/// `elementTakesChildren` by a conformance test in
+/// ui_markup_view_tests.zig.
+pub const known_text_or_children_element_names = schema.text_or_children_element_names;
+
 /// The generic option attributes (registry-derived; the order is the
 /// did-you-mean/completion display order).
 pub const known_option_attrs = schema.option_attr_names;
@@ -1238,6 +1245,16 @@ pub fn a11yRoleError(node: MarkupNode) ?[]const u8 {
         return a11y_container_role_message;
     }
     return null;
+}
+
+/// Whether the node carries element content (elements or structure tags,
+/// as opposed to text runs) — the list-row composite discriminator.
+/// Shared by the validator and both engines; comptime-callable.
+pub fn nodeHasElementContent(node: MarkupNode) bool {
+    for (node.children) |child| {
+        if (child.kind != .text) return true;
+    }
+    return false;
 }
 
 fn a11yNodeHasName(node: MarkupNode) bool {
@@ -1543,6 +1560,7 @@ pub const timeline_item_children_message = "timeline-item takes no children - th
 pub const timeline_item_press_only_message = "timeline-item dispatches presses only - use on-press (other on-* events have no surface here)";
 pub const text_leaf_children_message = "this element takes text content only - wrap element children in a container (row, column, stack)";
 pub const text_leaf_single_run_message = "text elements take a single run of text";
+pub const text_or_children_content_message = "this element takes either one run of text or element children - not both; move the text into a <text> child (and keep label= for the accessible name)";
 pub const table_row_parent_message = "table-row is only allowed inside a table (structure tags in between are fine)";
 pub const table_cell_parent_message = "table-cell is only allowed inside a table-row (structure tags in between are fine)";
 pub const template_top_level_message = "template definitions are only allowed at the top of the file, before the view root";
@@ -2052,9 +2070,19 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                 }
             }
             if (nameInList(node.name, &known_text_leaf_element_names)) {
+                // Elements that also take children (the list-row
+                // composite) hold EITHER one text run OR element
+                // children; mixing the two is a teaching error. Pure
+                // text keeps the classic single-run rule.
+                const takes_children = nameInList(node.name, &known_text_or_children_element_names);
+                const has_elements = takes_children and nodeHasElementContent(node);
                 var text_runs: usize = 0;
                 for (node.children) |child| {
-                    if (child.kind != .text) return errorAt(child, text_leaf_children_message);
+                    if (child.kind != .text) {
+                        if (!takes_children) return errorAt(child, text_leaf_children_message);
+                        continue;
+                    }
+                    if (has_elements) return errorAt(child, text_or_children_content_message);
                     text_runs += 1;
                     if (text_runs > 1) return errorAt(child, text_leaf_single_run_message);
                 }

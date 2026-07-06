@@ -540,6 +540,47 @@ test "compiled button icons match the interpreter and carry the validated name" 
     }
 }
 
+const list_row_markup_source =
+    "<column>\n" ++
+    "  <list-item on-press=\"add\" label=\"Groceries row\" padding=\"8\" gap=\"8\">\n" ++
+    "    <text grow=\"1\">Groceries</text>\n" ++
+    "    <badge variant=\"secondary\">3</badge>\n" ++
+    "  </list-item>\n" ++
+    "  <list-item on-press=\"add\">Piranesi</list-item>\n" ++
+    "</column>";
+
+test "compiled list-row composites match the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = fixture.Model{};
+
+    var interpreter_view = try InboxInterpreter.init(arena, list_row_markup_source);
+    var interpreter_ui = InboxUi.init(arena);
+    const interpreted = try interpreter_ui.finalize(try interpreter_view.build(&interpreter_ui, &model));
+
+    const Compiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, list_row_markup_source);
+    var compiled_ui = InboxUi.init(arena);
+    const compiled = try compiled_ui.finalize(Compiled.build(&compiled_ui, &model));
+
+    try expectSameTree(fixture.Msg, interpreted, compiled);
+    for ([_]InboxUi.Tree{ interpreted, compiled }) |tree| {
+        // Element children in place of the text run: the row keeps the
+        // flat list-item kind and flows the children inside it.
+        const composite = tree.root.children[0];
+        try testing.expectEqual(canvas.WidgetKind.list_item, composite.kind);
+        try testing.expectEqual(@as(usize, 2), composite.children.len);
+        try testing.expectEqual(@as(usize, 0), composite.text.len);
+        try testing.expectEqualStrings("Groceries row", composite.semantics.label);
+        try testing.expect(tree.msgFor(composite.id, .press) != null);
+        // The classic text leaf keeps working next to it.
+        const leaf = tree.root.children[1];
+        try testing.expectEqual(canvas.WidgetKind.list_item, leaf.kind);
+        try testing.expectEqualStrings("Piranesi", leaf.text);
+        try testing.expectEqual(@as(usize, 0), leaf.children.len);
+    }
+}
+
 // --------------------------------------------- component catalog parity
 
 const CatalogUi = fixture.CatalogUi;

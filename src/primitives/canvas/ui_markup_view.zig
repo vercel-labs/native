@@ -312,7 +312,19 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 return built;
             }
 
-            if (elementTakesText(kind)) {
+            // The list-row composite: a text-taking element whose content
+            // is element children instead of the text run flows those
+            // children inside its own chrome (mixing text and elements is
+            // a teaching error; the text path below would silently drop
+            // the elements). Mirrors the validator and the compiled
+            // engine.
+            const composite_children = elementTakesChildren(kind) and markup.nodeHasElementContent(node);
+            if (composite_children) {
+                for (node.children) |child| {
+                    if (child.kind == .text) return self.failNode(child, markup.text_or_children_content_message);
+                }
+            }
+            if (elementTakesText(kind) and !composite_children) {
                 const text = try self.interpolatedText(ui, scope, node);
                 var built = ui.el(kind, options, .{});
                 built.widget.text = text;
@@ -1735,7 +1747,7 @@ pub fn pathTail(path: []const u8) ?[]const u8 {
 /// ONCE at comptime — resolving per lookup would re-run the enum scan per
 /// element per call site and blow the comptime quota (the registry's
 /// comptime-cost mitigation is single-pass derivation).
-pub const ElementKindEntry = struct { name: []const u8, kind: canvas.WidgetKind, takes_text: bool };
+pub const ElementKindEntry = struct { name: []const u8, kind: canvas.WidgetKind, takes_text: bool, takes_children: bool };
 
 fn widgetKindByName(comptime name: []const u8) canvas.WidgetKind {
     comptime {
@@ -1764,6 +1776,7 @@ pub const element_kind_table = blk: {
             .name = entry.name,
             .kind = widgetKindByName(entry.widget_kind),
             .takes_text = entry.takes_text,
+            .takes_children = entry.takes_children,
         };
         index += 1;
     }
@@ -1798,6 +1811,17 @@ pub fn elementTakesText(kind: canvas.WidgetKind) bool {
     @setEvalBranchQuota(20_000);
     for (&element_kind_table) |entry| {
         if (entry.takes_text and entry.kind == kind) return true;
+    }
+    return false;
+}
+
+pub fn elementTakesChildren(kind: canvas.WidgetKind) bool {
+    // The registry's takes-children predicate projected onto widget
+    // kinds: text-taking elements that ALSO accept element children in
+    // place of the text run (the list-row composite).
+    @setEvalBranchQuota(20_000);
+    for (&element_kind_table) |entry| {
+        if (entry.takes_children and entry.kind == kind) return true;
     }
     return false;
 }

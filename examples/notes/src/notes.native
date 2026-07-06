@@ -28,17 +28,19 @@
              leaf): Up/Down move the selection through the rows, Home/End
              jump to the edges, Enter/Space select, and selection follows
              focus through each row's on-press. -->
-        <tree gap="2" label="Folders">
+        <!-- Flat house rows: list-item children flow inside the row's
+             own wash chrome (hover/selected are full-width washes, no
+             per-row border or fill at rest), and the rows sit flush —
+             the washes are the only separation. -->
+        <tree label="Folders">
           <for each="folderRows" key="id" as="f">
-            <panel on-press="select_folder:{f.id}" selected="{f.selected}" padding="8" role="treeitem" label="{f.label}">
-              <row gap="8" cross="center">
-                <icon name="folder" width="14" height="14" foreground="text_muted" />
-                <!-- One-line folder row: clip a long name at the rail's
-                     width, never wrap onto the row below. -->
-                <text grow="1" wrap="false">{f.name}</text>
-                <badge variant="secondary">{f.count}</badge>
-              </row>
-            </panel>
+            <list-item on-press="select_folder:{f.id}" selected="{f.selected}" padding="8" gap="8" cross="center" role="treeitem" label="{f.label}">
+              <icon name="folder" width="14" height="14" foreground="text_muted" />
+              <!-- One-line folder row: clip a long name at the rail's
+                   width, never wrap onto the row below. -->
+              <text grow="1" wrap="false">{f.name}</text>
+              <badge variant="secondary">{f.count}</badge>
+            </list-item>
           </for>
         </tree>
         <spacer grow="1" />
@@ -57,10 +59,13 @@
                stores the applied value, the binding echoes it back, so
                the list keeps its place across every rebuild. -->
           <scroll grow="1" value="{note_list_scroll}" on-scroll="note_list_scrolled" label="Note list">
-            <column gap="4">
+            <!-- Flat house rows, flush like the folder rail: each note is
+                 a list-item whose selected/hover washes span the full
+                 pane width. -->
+            <column>
               <for each="noteRows" key="id" as="n">
-                <panel on-press="open_note:{n.id}" selected="{n.active}" padding="10" role="listitem" label="{n.title}">
-                  <column gap="4">
+                <list-item on-press="open_note:{n.id}" selected="{n.active}" padding="10" label="{n.title}">
+                  <column gap="4" grow="1">
                     <!-- One-line title row: clip at the pane width, never
                          wrap over the snippet line below. -->
                     <text wrap="false">{n.title}</text>
@@ -71,7 +76,7 @@
                       <text size="sm" foreground="text_muted" grow="1" wrap="false">{n.snippet}</text>
                     </row>
                   </column>
-                </panel>
+                </list-item>
               </for>
               <else>
                 <panel padding="14" label="Empty note list">

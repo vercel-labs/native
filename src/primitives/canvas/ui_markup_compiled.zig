@@ -272,7 +272,19 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
                 return built;
             }
 
-            if (comptime interpreter.elementTakesText(kind)) {
+            // Interpreter parity: the list-row composite — a text-taking
+            // element whose content is element children instead of the
+            // text run flows those children inside its own chrome, and
+            // mixing text and elements is a compile error here.
+            const composite_children = comptime (interpreter.elementTakesChildren(kind) and markup.nodeHasElementContent(node));
+            comptime {
+                if (composite_children) {
+                    for (node.children) |child| {
+                        if (child.kind == .text) fail(child, markup.text_or_children_content_message);
+                    }
+                }
+            }
+            if (comptime (interpreter.elementTakesText(kind) and !composite_children)) {
                 var built = ui.el(kind, options, .{});
                 built.widget.text = interpolatedText(node, entries, ui, model, scope);
                 // Avatars clip their runtime image to the avatar circle,

@@ -563,6 +563,42 @@ test "dead value handlers on non-hit-target elements fail the build with the tea
     _ = try view.build(&ui, &model);
 }
 
+test "list-item element children build the list-row composite" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    // Element children in place of the text run: the row keeps its flat
+    // list-item chrome (wash states, focus ring) and flows the children
+    // horizontally inside it — no bordered container needed for a
+    // composite row.
+    var view = try InboxMarkup.init(arena, "<column>\n  <list-item on-press=\"add\" label=\"Groceries row\" padding=\"8\" gap=\"8\">\n    <text grow=\"1\">Groceries</text>\n    <badge variant=\"secondary\">3</badge>\n  </list-item>\n</column>");
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const item = tree.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.list_item, item.kind);
+    try testing.expectEqual(@as(usize, 2), item.children.len);
+    try testing.expectEqual(canvas.WidgetKind.text, item.children[0].kind);
+    try testing.expectEqual(canvas.WidgetKind.badge, item.children[1].kind);
+    // The composite carries no text run of its own; the label names it.
+    try testing.expectEqual(@as(usize, 0), item.text.len);
+    try testing.expect(item.semantics.actions.press);
+    try testing.expectEqual(Msg.add, tree.msgForPointer(item.id, .up).?);
+}
+
+test "mixed text and element content inside a list-item is a teaching error" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, "<column>\n  <list-item on-press=\"add\" label=\"Groceries row\">Groceries<badge>3</badge></list-item>\n</column>");
+    var ui = InboxUi.init(arena);
+    try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
+    try testing.expectEqualStrings(canvas.ui_markup.text_or_children_content_message, view.diagnostic.message);
+}
+
 test "press handlers on layout elements build and stamp the press action" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -977,6 +1013,22 @@ test "the registry's takes-text predicate matches the interpreter's takes-text s
     // Every listed text leaf is a known element.
     for (canvas.ui_markup.known_text_leaf_element_names) |name| {
         try testing.expect(nameListed(name, &canvas.ui_markup.known_element_names));
+    }
+}
+
+test "the registry's takes-children predicate matches the interpreter's takes-children set" {
+    for (canvas.ui_markup.known_element_names) |name| {
+        const kind = markup_view.elementKind(name).?;
+        try testing.expectEqual(
+            markup_view.elementTakesChildren(kind),
+            nameListed(name, &canvas.ui_markup.known_text_or_children_element_names),
+        );
+    }
+    // Every text-or-children element also takes text (the flag refines
+    // the text leaf, it never stands alone) and is a known element.
+    for (canvas.ui_markup.known_text_or_children_element_names) |name| {
+        try testing.expect(nameListed(name, &canvas.ui_markup.known_element_names));
+        try testing.expect(nameListed(name, &canvas.ui_markup.known_text_leaf_element_names));
     }
 }
 
@@ -1819,6 +1871,12 @@ test "new element misuse is validated with positions and teaching messages" {
             .source = "<row>\n  <avatar><text>CT</text></avatar>\n</row>",
             .message = canvas.ui_markup.text_leaf_children_message,
         },
+        .{
+            // A list-item holds EITHER one text run OR element children
+            // (the list-row composite), never both at once.
+            .source = "<column>\n  <list-item on-press=\"pick\" label=\"Row\">Pears<badge>3</badge></list-item>\n</column>",
+            .message = canvas.ui_markup.text_or_children_content_message,
+        },
     };
     for (cases) |case| {
         var parser = canvas.ui_markup.Parser.init(arena, case.source);
@@ -1831,6 +1889,11 @@ test "new element misuse is validated with positions and teaching messages" {
     // Structure tags between a table and its rows are fine.
     var parser = canvas.ui_markup.Parser.init(arena, "<table><for each=\"rows\" as=\"r\"><table-row><table-cell>{r.name}</table-cell></table-row></for></table>");
     try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(try parser.parse()));
+
+    // The list-row composite validates: element children (including
+    // structure tags) in place of the list-item's text run.
+    var composite_parser = canvas.ui_markup.Parser.init(arena, "<column>\n  <list-item on-press=\"pick\" label=\"Pears row\" padding=\"8\" gap=\"8\">\n    <text grow=\"1\">Pears</text>\n    <badge variant=\"secondary\">3</badge>\n  </list-item>\n</column>");
+    try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(try composite_parser.parse()));
 }
 
 // --------------------------------------------------------- text wrapping
