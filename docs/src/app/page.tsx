@@ -207,7 +207,7 @@ const principles = [
 
 const nativeFeel = [
   { name: "OS scroll physics", detail: "momentum and rubber-band overscroll on macOS" },
-  { name: "Context menus", detail: "native menus from markup, with submenus and separators" },
+  { name: "Context menus", detail: "right-click menus in markup, native OS menus from Zig views" },
   { name: "Menu bar & tray", detail: "app menus and menu-bar extras driven by the model" },
   { name: "Dialogs & file drop", detail: "native open/save panels and drop events as messages" },
   { name: "IME composition", detail: "real text input on macOS, Linux, and Windows" },

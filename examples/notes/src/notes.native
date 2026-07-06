@@ -35,27 +35,39 @@
              own wash chrome (hover/selected are full-width washes, no
              per-row border or fill at rest), and the rows sit flush —
              the washes are the only separation. -->
+        <!-- Row actions live in a context menu, not buttons: on-hold
+             fires on right/ctrl-click (and press-and-hold), the model
+             owns which row's menu is open, and the anchored menu floats
+             against the row. At most one menu mounts at a time (the
+             per-row if), so the anchored-surface budget never binds. -->
         <tree label="Folders">
           <for each="folderRows" key="id" as="f">
-            <list-item on-press="select_folder:{f.id}" selected="{f.selected}" padding="8" gap="8" cross="center" role="treeitem" label="{f.label}">
+            <list-item on-press="select_folder:{f.id}" on-hold="folder_menu:{f.id}" selected="{f.selected}" padding="8" gap="8" cross="center" role="treeitem" label="{f.label}">
               <icon name="folder" width="14" height="14" foreground="text_muted" />
               <!-- One-line folder row: clip a long name at the rail's
                    width, never wrap onto the row below. -->
               <text grow="1" wrap="false">{f.name}</text>
               <badge variant="secondary">{f.count}</badge>
+              <if test="{f.menu_open}">
+                <dropdown-menu anchor="below" on-dismiss="close_menu" label="Folder actions">
+                  <menu-item on-press="rename_folder:{f.id}">Rename</menu-item>
+                  <menu-item on-press="delete_folder:{f.id}">Delete</menu-item>
+                </dropdown-menu>
+              </if>
             </list-item>
           </for>
+          <!-- Recently Deleted exists only while deleted notes do —
+               presence by availability, never a dead row. -->
+          <if test="{trashAvailable}">
+            <list-item on-press="select_trash" selected="{trashSelected}" padding="8" gap="8" cross="center" role="treeitem" label="Recently Deleted folder">
+              <icon name="trash" width="14" height="14" foreground="text_muted" />
+              <text grow="1" wrap="false">Recently Deleted</text>
+              <badge variant="secondary">{trashCount}</badge>
+            </list-item>
+          </if>
         </tree>
         <spacer grow="1" />
-        <column gap="4">
-          <button size="sm" variant="outline" on-press="open_create_folder" disabled="{foldersFull}" label="New folder">New Folder</button>
-          <!-- Rename appears only when a real folder is selected — state
-               is shown by presence, never by a permanently dead button
-               (All Notes cannot be renamed). -->
-          <if test="{renameAvailable}">
-            <button size="sm" variant="ghost" on-press="open_rename_folder" label="Rename folder">Rename</button>
-          </if>
-        </column>
+        <button size="sm" variant="outline" on-press="open_create_folder" disabled="{foldersFull}" label="New folder">New Folder</button>
       </column>
       <split value="{list_split}" on-resize="list_resized">
         <column min-width="220" gap="8" padding="10">
@@ -72,18 +84,31 @@
                  pane width. -->
             <column>
               <for each="noteRows" key="id" as="n">
-                <list-item on-press="open_note:{n.id}" selected="{n.active}" padding="10" label="{n.title}">
+                <list-item on-press="open_note:{n.id}" on-hold="note_menu:{n.id}" selected="{n.active}" padding="10" label="{n.title}">
                   <column gap="4" grow="1">
-                    <!-- One-line title row: clip at the pane width, never
-                         wrap over the snippet line below. -->
-                    <text wrap="false">{n.title}</text>
+                    <!-- Title leads, the age trails the same line; the
+                         snippet gets the full second line. Titles clip
+                         at the pane width, never wrap over the snippet. -->
                     <row gap="8" cross="center">
-                      <text size="sm" foreground="text_muted" width="36">{n.time}</text>
-                      <!-- One-line snippet by design: clip, never wrap
-                           into the row below. -->
-                      <text size="sm" foreground="text_muted" grow="1" wrap="false">{n.snippet}</text>
+                      <text grow="1" wrap="false">{n.title}</text>
+                      <text size="sm" foreground="text_muted">{n.time}</text>
                     </row>
+                    <!-- One-line snippet by design: clip, never wrap
+                         into the row below. -->
+                    <text size="sm" foreground="text_muted" wrap="false">{n.snippet}</text>
                   </column>
+                  <if test="{n.menu_open}">
+                    <dropdown-menu anchor="below" on-dismiss="close_menu" label="Note actions">
+                      <if test="{n.deleted}">
+                        <menu-item on-press="restore_note:{n.id}">Restore</menu-item>
+                        <menu-item on-press="purge_note:{n.id}">Delete Permanently</menu-item>
+                      </if>
+                      <else>
+                        <menu-item on-press="copy_note_id:{n.id}">Copy</menu-item>
+                        <menu-item on-press="trash_note:{n.id}">Delete</menu-item>
+                      </else>
+                    </dropdown-menu>
+                  </if>
                 </list-item>
               </for>
               <else>
@@ -97,18 +122,45 @@
             </column>
           </scroll>
         </column>
+        <!-- The editor IS the pane: the textarea's control chrome (fill,
+             border, focus ring) dissolves into the pane's background, so
+             the note text sits directly on the same field as the list —
+             the split hairline is the only seam. The only other element
+             is one quiet meta line; actions live in the note's context
+             menu and the keyboard map, not in a button row above the
+             text. -->
         <column min-width="280">
           <if test="{hasActiveNote}">
-            <row padding="10" gap="8" cross="center">
-              <!-- One-line meta strip: clip when the editor pane is
-                   narrow, never wrap over the toolbar row. -->
-              <text size="sm" foreground="text_muted" grow="1" wrap="false">{editorMeta}</text>
-              <button size="sm" variant="outline" on-press="copy_note" label="Copy note text">Copy</button>
-              <button size="sm" variant="ghost" on-press="delete_note" label="Delete note">Delete</button>
-            </row>
-            <column grow="1" padding="10">
-              <textarea text="{editorText}" on-input="edit" grow="1" placeholder="Start writing — the first line becomes the title" label="Note editor" />
-            </column>
+            <if test="{activeNoteLive}">
+              <!-- The meta line's inset matches the textarea's own text
+                   inset below it (pane padding + the control's text
+                   inset), so the metadata and the note text share one
+                   left edge. -->
+              <column grow="1" padding="10" gap="2">
+                <row padding="10" cross="center">
+                  <text size="sm" foreground="text_muted" grow="1" wrap="false">{editorMeta}</text>
+                </row>
+                <!-- Focus shows as the caret, as editors do — a focus
+                     ring around the whole pane would read as chrome. -->
+                <textarea text="{editorText}" on-input="edit" grow="1" background="background" border-color="background" focus-ring="background" placeholder="Start writing — the first line becomes the title" label="Note editor" />
+              </column>
+            </if>
+            <else>
+              <!-- A Recently Deleted note reads, never edits: restore is
+                   the pane's one action, permanent delete stays in the
+                   row's menu (and Cmd+Backspace). -->
+              <column grow="1" padding="10" gap="2">
+                <row padding="10" gap="10" cross="center">
+                  <text size="sm" foreground="text_muted" grow="1" wrap="false">{editorMeta}</text>
+                  <button size="sm" variant="outline" on-press="restore_note:{active_note}" label="Restore note">Restore</button>
+                </row>
+                <scroll grow="1" label="Deleted note">
+                  <column padding="10">
+                    <text wrap="true">{editorText}</text>
+                  </column>
+                </scroll>
+              </column>
+            </else>
           </if>
           <else>
             <column grow="1" padding="24" main="center" cross="center" gap="10">
@@ -136,7 +188,10 @@
         <dialog width="380" height="190" label="{dialogTitle}">
           <column padding="18" gap="10">
             <text>{dialogTitle}</text>
-            <text-field text="{folderName}" placeholder="Folder name" on-input="folder_field_edit" on-submit="confirm_dialog" label="Folder name" />
+            <!-- The field mounts with the dialog, so autofocus lands the
+                 keyboard in it the moment the dialog opens — type, Enter,
+                 done, no click in between. -->
+            <text-field text="{folderName}" placeholder="Folder name" autofocus="true" on-input="folder_field_edit" on-submit="confirm_dialog" label="Folder name" />
             <if test="{dialog_hint}">
               <text size="sm" foreground="destructive">{dialog_hint}</text>
             </if>

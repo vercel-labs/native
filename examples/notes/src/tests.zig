@@ -165,6 +165,24 @@ const Harness = struct {
         try self.harness.runtime.dispatchAutomationCommand(self.app, command);
     }
 
+    /// The automation right-click: a full secondary-button pointer
+    /// stream at the widget. No native menu is declared anywhere in this
+    /// app, so the press lands as the row's on-hold Msg — the same path
+    /// a real right/ctrl-click (or press-and-hold) takes.
+    fn contextPress(self: *Harness, id: u64) !void {
+        var command_buffer: [96]u8 = undefined;
+        const command = try std.fmt.bufPrint(&command_buffer, "widget-context-press notes-canvas {d}", .{id});
+        try self.harness.runtime.dispatchAutomationCommand(self.app, command);
+    }
+
+    /// The id of the widget keyboard focus is on (0 = none).
+    fn focusedWidgetId(self: *Harness) canvas.ObjectId {
+        for (self.harness.runtime.views[0..self.harness.runtime.view_count]) |view| {
+            if (std.mem.eql(u8, view.label, "notes-canvas")) return view.canvas_widget_focused_id;
+        }
+        return 0;
+    }
+
     /// A raw pointer click at a canvas point — for targets whose center
     /// is covered by something else (the dialog backdrop scrim).
     fn clickPoint(self: *Harness, x: f32, y: f32) !void {
@@ -252,10 +270,67 @@ test "the store serializes and restores losslessly, and rejects garbage" {
     try testing.expectEqual(model.note_count, untouched.note_count);
 
     // A note whose folder record was lost files under the first folder.
-    const orphan = model_mod.store_header ++ "\nfolder 1 Inbox\nnote 9 42 5 5 2\nhi\n";
+    const orphan = model_mod.store_header ++ "\nfolder 1 Inbox\nnote 9 42 5 5 0 2\nhi\n";
     var adopted = Model{ .clock = clock.clock() };
     try testing.expect(adopted.restoreStore(orphan));
     try testing.expectEqual(@as(u32, 1), adopted.notes[0].folder);
+}
+
+test "the store round-trips the Recently Deleted state" {
+    var clock = native_sdk.TestClock{};
+    var model = model_mod.initialModel(testClock(&clock));
+    var fx = model_mod.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    fx.clock = model.clock;
+
+    // Trash one note; its record must carry the deleted timestamp.
+    const doomed = model.notes[0].id;
+    model_mod.update(&model, .{ .trash_note = doomed }, &fx);
+    try testing.expect(model.noteById(doomed).?.isDeleted());
+
+    var buffer: [model_mod.max_store_bytes]u8 = undefined;
+    const bytes = model.serializeStore(&buffer);
+    var restored = Model{ .clock = clock.clock() };
+    try testing.expect(restored.restoreStore(bytes));
+    try testing.expectEqual(model.note_count, restored.note_count);
+    try testing.expectEqual(model.noteById(doomed).?.deleted_ms, restored.noteById(doomed).?.deleted_ms);
+    try testing.expect(restored.trashAvailable());
+    try testing.expectEqual(@as(usize, 1), restored.deletedNoteCount());
+}
+
+test "a v1 store migrates cleanly: every note loads live, the next save writes v2" {
+    var clock = native_sdk.TestClock{};
+
+    // A store exactly as the previous release wrote it: v1 header, note
+    // records without the deleted field.
+    const v1_store = model_mod.store_header_v1 ++ "\n" ++
+        "folder 1 Inbox\n" ++
+        "folder 2 Ideas\n" ++
+        "note 1 1 5000 6000 11\n" ++ "Old note\nhi\n" ++
+        "note 2 2 7000 8000 5\n" ++ "Later\n";
+
+    var model = Model{ .clock = clock.clock() };
+    try testing.expect(model.restoreStore(v1_store));
+    try testing.expectEqual(@as(usize, 2), model.folder_count);
+    try testing.expectEqual(@as(usize, 2), model.note_count);
+    try testing.expectEqualStrings("Old note\nhi", model.notes[0].body.text());
+    try testing.expectEqual(@as(i64, 8000), model.notes[1].updated_ms);
+    // The migration: v1 records carry no deleted state, so everything
+    // loads live — no Recently Deleted row appears out of nowhere.
+    for (model.notes[0..model.note_count]) |*note| {
+        try testing.expect(!note.isDeleted());
+    }
+    try testing.expect(!model.trashAvailable());
+
+    // The next serialization writes the current version.
+    var buffer: [model_mod.max_store_bytes]u8 = undefined;
+    const bytes = model.serializeStore(&buffer);
+    try testing.expect(std.mem.startsWith(u8, bytes, model_mod.store_header ++ "\n"));
+    try testing.expect(std.mem.indexOf(u8, bytes, "note 1 1 5000 6000 0 11\n") != null);
+    var reread = Model{ .clock = clock.clock() };
+    try testing.expect(reread.restoreStore(bytes));
+    try testing.expectEqual(@as(usize, 2), reread.note_count);
 }
 
 test "visible notes are folder-scoped, search-filtered, and newest first" {
@@ -327,36 +402,63 @@ test "the initial tree renders folders, the note list, and the editor" {
     const status = findByKind(tree.root, .status_bar).?;
     try testing.expect(std.mem.startsWith(u8, status.text, "7 notes · 7 shown"));
 
-    // No dialog until one is requested.
+    // The editor is the pane: no button row above the text — copy and
+    // delete live in the note's context menu and the keyboard map.
+    try testing.expect(findByText(tree.root, .button, "Copy") == null);
+    try testing.expect(findByText(tree.root, .button, "Delete") == null);
+    // Folder rename likewise lives in the folder's context menu.
+    try testing.expect(findByText(tree.root, .button, "Rename") == null);
+
+    // No dialog, no row menus, and no Recently Deleted row until they
+    // have a reason to exist.
     try testing.expect(findByKind(tree.root, .dialog) == null);
+    try testing.expect(findByKind(tree.root, .dropdown_menu) == null);
+    try testing.expect(findByText(tree.root, .text, "Recently Deleted") == null);
+}
+
+/// The audit-swept model states: the plain app, each row menu open, and
+/// the Recently Deleted scope with a trashed note open read-only — every
+/// conditional surface this round added renders in at least one state.
+fn sweepStates(clock: *native_sdk.TestClock) [4]Model {
+    var states: [4]Model = undefined;
+    states[0] = model_mod.initialModel(testClock(clock));
+    states[1] = states[0];
+    states[1].menu_note = states[1].notes[0].id;
+    states[2] = states[0];
+    states[2].menu_folder = states[2].folders[0].id;
+    states[3] = states[0];
+    states[3].notes[0].deleted_ms = test_wall_ms - std.time.ms_per_hour;
+    states[3].selected_folder = model_mod.deleted_scope_id;
+    states[3].active_note = states[3].notes[0].id;
+    return states;
 }
 
 test "layout audit sweep: nothing clips, overlaps, or escapes" {
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-
     var clock = native_sdk.TestClock{};
-    var model = model_mod.initialModel(testClock(&clock));
-    const tree = try buildTree(arena_state.allocator(), &model);
-    try canvas.expectLayoutAuditSweepClean(testing.allocator, tree.root, .{
-        .tokens = main.notesTokens(&model),
-        .min_size = geometry.SizeF.init(main.window_min_width, main.window_min_height),
-        .default_size = geometry.SizeF.init(main.window_width, main.window_height),
-    });
+    for (sweepStates(&clock)) |model| {
+        var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_state.deinit();
+        const tree = try buildTree(arena_state.allocator(), &model);
+        try canvas.expectLayoutAuditSweepClean(testing.allocator, tree.root, .{
+            .tokens = main.notesTokens(&model),
+            .min_size = geometry.SizeF.init(main.window_min_width, main.window_min_height),
+            .default_size = geometry.SizeF.init(main.window_width, main.window_height),
+        });
+    }
 }
 
 test "a11y audit sweep: every interactive widget is named, reachable, and unambiguous" {
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-
     var clock = native_sdk.TestClock{};
-    var model = model_mod.initialModel(testClock(&clock));
-    const tree = try buildTree(arena_state.allocator(), &model);
-    try canvas.expectA11yAuditSweepClean(testing.allocator, tree.root, .{
-        .tokens = main.notesTokens(&model),
-        .min_size = geometry.SizeF.init(main.window_min_width, main.window_min_height),
-        .default_size = geometry.SizeF.init(main.window_width, main.window_height),
-    });
+    for (sweepStates(&clock)) |model| {
+        var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_state.deinit();
+        const tree = try buildTree(arena_state.allocator(), &model);
+        try canvas.expectA11yAuditSweepClean(testing.allocator, tree.root, .{
+            .tokens = main.notesTokens(&model),
+            .min_size = geometry.SizeF.init(main.window_min_width, main.window_min_height),
+            .default_size = geometry.SizeF.init(main.window_width, main.window_height),
+        });
+    }
 }
 
 test "the idle editor pane shows the keyboard reference" {
@@ -381,11 +483,12 @@ test "the compiled view and the hot-reload interpreter build the same tree" {
     const arena = arena_state.allocator();
 
     var clock = native_sdk.TestClock{};
-    var model = model_mod.initialModel(testClock(&clock));
 
-    // Parity with the dialog closed and open (the conditional surface).
-    for ([_]model_mod.DialogMode{ .closed, .create_folder }) |mode| {
-        model.dialog = mode;
+    // Parity across every conditional surface: the dialog, the row
+    // context menus, and the Recently Deleted scope.
+    var states = sweepStates(&clock);
+    states[0].dialog = .create_folder;
+    for (states) |model| {
         const compiled = try buildTree(arena, &model);
         const interpreted = try interpretTree(arena, &model);
 
@@ -650,13 +753,31 @@ test "the keyboard map drives the whole app through shortcut commands" {
     try fx.feedFileResult(model_mod.store_write_key, .ok, "");
     try h.wake();
 
-    // Cmd+Backspace deletes it and the selection falls to the next note.
+    // Cmd+Backspace moves it to Recently Deleted (the record stays for
+    // restore) and the selection falls to the next note.
+    const doomed = model.active_note;
     try h.shortcut(main.cmd_delete_note);
-    try testing.expectEqual(@as(usize, 7), model.note_count);
-    try testing.expect(std.mem.indexOf(u8, model.status(), "Deleted \"Untitled\"") != null);
+    try testing.expectEqual(@as(usize, 8), model.note_count);
+    try testing.expectEqual(@as(usize, 1), model.deletedNoteCount());
+    try testing.expect(std.mem.indexOf(u8, model.status(), "Moved \"Untitled\" to Recently Deleted") != null);
     try testing.expectEqual(first, model.active_note);
     try fx.feedFileResult(model_mod.store_write_key, .ok, "");
     try h.wake();
+
+    // In the Recently Deleted scope the same key deletes permanently.
+    try h.dispatch(.select_trash);
+    try testing.expectEqual(doomed, model.active_note);
+    try h.shortcut(main.cmd_delete_note);
+    try testing.expectEqual(@as(usize, 7), model.note_count);
+    try testing.expect(std.mem.indexOf(u8, model.status(), "Deleted \"Untitled\" permanently") != null);
+    // The trash emptied, so its row is gone and the selection fell back.
+    try testing.expectEqual(model_mod.all_folder_id, model.selected_folder);
+    try testing.expectEqual(first, model.active_note);
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+    // Back where the walk started: Cmd+2's folder scope was left behind
+    // by the trash round-trip, so re-enter it for the copy leg below.
+    try h.shortcut(main.folder_command_prefix ++ "2");
 
     // Cmd+Shift+N opens the dialog; Escape dismisses it.
     try h.shortcut(main.cmd_new_folder);
@@ -743,6 +864,247 @@ test "folder and note rows dispatch selection through real clicks" {
     const queue_row = snapshotWidgetNamed(snapshot, "listitem", "Reading queue mechanics").?;
     try h.clickWidget(queue_row.id);
     try testing.expect(std.mem.startsWith(u8, model.activeNote().?.body.text(), "Reading queue mechanics"));
+}
+
+test "a note row's context menu copies, deletes, restores, and purges through real dispatch" {
+    var clock = native_sdk.TestClock{};
+    var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    const model = &h.app_state.model;
+    model.setStorePath("/tmp/zn-notes-test/store.txt");
+
+    // Right-click a note row: the menu opens for that row without
+    // changing the note selection.
+    var snapshot = h.snapshot();
+    const active_before = model.active_note;
+    const groceries_row = snapshotWidgetNamed(snapshot, "listitem", "Groceries").?;
+    try h.contextPress(groceries_row.id);
+    const groceries_id = blk: {
+        for (model.notes[0..model.note_count]) |*note| {
+            if (std.mem.startsWith(u8, note.body.text(), "Groceries")) break :blk note.id;
+        }
+        return error.TestUnexpectedResult;
+    };
+    try testing.expectEqual(groceries_id, model.menu_note);
+    try testing.expectEqual(active_before, model.active_note);
+
+    // The live-note menu offers Copy and Delete; Copy pipes the row's
+    // body (not the open note's) through the clipboard effect.
+    snapshot = h.snapshot();
+    const copy_item = snapshotWidgetNamed(snapshot, "menuitem", "Copy").?;
+    try h.clickWidget(copy_item.id);
+    try testing.expectEqual(@as(u32, 0), model.menu_note);
+    const copy_request = fx.pendingClipboardAt(0).?;
+    try testing.expect(std.mem.startsWith(u8, copy_request.text, "Groceries"));
+    try fx.feedClipboardResult(model_mod.copy_key, .ok, "");
+    try h.wake();
+
+    // Delete from the menu moves the note to Recently Deleted and the
+    // sidebar row appears — it exists only while trash is non-empty.
+    try h.contextPress(groceries_row.id);
+    snapshot = h.snapshot();
+    const delete_item = snapshotWidgetNamed(snapshot, "menuitem", "Delete").?;
+    try h.clickWidget(delete_item.id);
+    try testing.expect(model.noteById(groceries_id).?.isDeleted());
+    try testing.expect(std.mem.indexOf(u8, model.status(), "Moved \"Groceries\" to Recently Deleted") != null);
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+    snapshot = h.snapshot();
+    try testing.expect(snapshotWidgetNamed(snapshot, "listitem", "Groceries") == null);
+    const trash_row = snapshotWidgetNamed(snapshot, "treeitem", "Recently Deleted folder").?;
+
+    // Inside Recently Deleted the same row's menu becomes Restore /
+    // Delete Permanently.
+    try h.clickWidget(trash_row.id);
+    try testing.expectEqual(model_mod.deleted_scope_id, model.selected_folder);
+    try testing.expectEqualStrings("Recently Deleted", model.listTitle());
+    snapshot = h.snapshot();
+    const trashed_row = snapshotWidgetNamed(snapshot, "listitem", "Groceries").?;
+    try h.contextPress(trashed_row.id);
+    snapshot = h.snapshot();
+    try testing.expect(snapshotWidgetNamed(snapshot, "menuitem", "Copy") == null);
+    const restore_item = snapshotWidgetNamed(snapshot, "menuitem", "Restore").?;
+    try testing.expect(snapshotWidgetNamed(snapshot, "menuitem", "Delete Permanently") != null);
+
+    // Restore puts the note back in its folder; the emptied trash row
+    // disappears and the selection falls back to All Notes.
+    try h.clickWidget(restore_item.id);
+    try testing.expect(!model.noteById(groceries_id).?.isDeleted());
+    try testing.expectEqual(model_mod.all_folder_id, model.selected_folder);
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+    snapshot = h.snapshot();
+    try testing.expect(snapshotWidgetNamed(snapshot, "listitem", "Groceries") != null);
+    try testing.expect(snapshotWidgetNamed(snapshot, "treeitem", "Recently Deleted folder") == null);
+
+    // Delete Permanently is the one path that removes the record.
+    const before_purge = model.note_count;
+    try h.dispatch(.{ .trash_note = groceries_id });
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+    try h.dispatch(.{ .purge_note = groceries_id });
+    try testing.expectEqual(before_purge - 1, model.note_count);
+    try testing.expect(model.noteById(groceries_id) == null);
+    try testing.expect(std.mem.indexOf(u8, model.status(), "Deleted \"Groceries\" permanently") != null);
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+}
+
+test "a folder row's context menu renames and deletes through real dispatch" {
+    var clock = native_sdk.TestClock{};
+    var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    const model = &h.app_state.model;
+    model.setStorePath("/tmp/zn-notes-test/store.txt");
+
+    // Right-click the Ideas row (not selected — menus act on their own
+    // row, selection stays put).
+    var snapshot = h.snapshot();
+    const ideas_row = snapshotWidgetNamed(snapshot, "treeitem", "Ideas folder").?;
+    try h.contextPress(ideas_row.id);
+    try testing.expectEqual(@as(u32, 2), model.menu_folder);
+    try testing.expectEqual(model_mod.all_folder_id, model.selected_folder);
+
+    // Rename opens the same dialog flow the keyboard uses, prefilled,
+    // targeting the row's folder rather than the selection.
+    snapshot = h.snapshot();
+    const rename_item = snapshotWidgetNamed(snapshot, "menuitem", "Rename").?;
+    try h.clickWidget(rename_item.id);
+    try testing.expectEqual(model_mod.DialogMode.rename_folder, model.dialog);
+    try testing.expectEqual(@as(u32, 2), model.dialog_folder);
+    try testing.expectEqualStrings("Ideas", model.folderName());
+    try h.dispatch(.{ .folder_field_edit = .clear });
+    try h.dispatch(.{ .folder_field_edit = .{ .insert_text = "Sketches" } });
+    try h.dispatch(.confirm_dialog);
+    try testing.expectEqualStrings("Sketches", model.folderById(2).?.name());
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+
+    // The synthetic All Notes row never opens a menu.
+    snapshot = h.snapshot();
+    const all_row = snapshotWidgetNamed(snapshot, "treeitem", "All Notes folder").?;
+    try h.contextPress(all_row.id);
+    try testing.expectEqual(@as(u32, 0), model.menu_folder);
+
+    // Delete moves the folder's live notes to Recently Deleted and drops
+    // the folder.
+    const notes_before = model.note_count;
+    snapshot = h.snapshot();
+    const sketches_row = snapshotWidgetNamed(snapshot, "treeitem", "Sketches folder").?;
+    try h.contextPress(sketches_row.id);
+    snapshot = h.snapshot();
+    const delete_item = snapshotWidgetNamed(snapshot, "menuitem", "Delete").?;
+    try h.clickWidget(delete_item.id);
+    try testing.expect(model.folderById(2) == null);
+    try testing.expectEqual(notes_before, model.note_count);
+    try testing.expectEqual(@as(usize, 2), model.deletedNoteCount());
+    try testing.expect(std.mem.indexOf(u8, model.status(), "Deleted folder \"Sketches\" · 2 notes to Recently Deleted") != null);
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+    snapshot = h.snapshot();
+    try testing.expect(snapshotWidgetNamed(snapshot, "treeitem", "Sketches folder") == null);
+    try testing.expect(snapshotWidgetNamed(snapshot, "treeitem", "Recently Deleted folder") != null);
+
+    // Restored notes from a deleted folder file under the first folder.
+    var indexes: [model_mod.max_notes]usize = undefined;
+    model.selected_folder = model_mod.deleted_scope_id;
+    const trash_count = model.visibleNoteIndexes(&indexes);
+    try testing.expectEqual(@as(usize, 2), trash_count);
+    const orphan_id = model.notes[indexes[0]].id;
+    try h.dispatch(.{ .restore_note = orphan_id });
+    try testing.expectEqual(model.folders[0].id, model.noteById(orphan_id).?.folder);
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+
+    // The last folder refuses deletion — a new note always needs a home.
+    main.update(model, .{ .delete_folder = model.folders[1].id }, fx);
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+    try testing.expectEqual(@as(usize, 1), model.folder_count);
+    try h.dispatch(.{ .delete_folder = model.folders[0].id });
+    try testing.expectEqual(@as(usize, 1), model.folder_count);
+    try testing.expect(std.mem.indexOf(u8, model.status(), "Keep at least one folder") != null);
+}
+
+test "the folder dialog autofocuses its name field the moment it opens" {
+    var clock = native_sdk.TestClock{};
+    var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
+    defer h.destroy();
+    const model = &h.app_state.model;
+
+    // Nothing is focused until the user acts.
+    try testing.expectEqual(@as(canvas.ObjectId, 0), h.focusedWidgetId());
+
+    // Clicking New Folder mounts the dialog; the autofocus edge lands
+    // the keyboard in the name field with no second click.
+    var snapshot = h.snapshot();
+    const new_folder_button = snapshotWidgetNamed(snapshot, "button", "New folder").?;
+    try h.clickWidget(new_folder_button.id);
+    try testing.expectEqual(model_mod.DialogMode.create_folder, model.dialog);
+    snapshot = h.snapshot();
+    const name_field = snapshotWidgetNamed(snapshot, "textbox", "Folder name").?;
+    try testing.expectEqual(@as(canvas.ObjectId, @intCast(name_field.id)), h.focusedWidgetId());
+
+    // Typing lands in the field through the ordinary key path — no
+    // click in between.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "notes-canvas",
+        .kind = .key_down,
+        .key = "P",
+        .text = "P",
+    } });
+    try testing.expectEqualStrings("P", model.folderName());
+
+    // Reopening after a close re-focuses (edge-triggered on mount).
+    try h.dispatch(.close_dialog);
+    try h.dispatch(.open_create_folder);
+    snapshot = h.snapshot();
+    const refocused = snapshotWidgetNamed(snapshot, "textbox", "Folder name").?;
+    try testing.expectEqual(@as(canvas.ObjectId, @intCast(refocused.id)), h.focusedWidgetId());
+}
+
+test "a Recently Deleted note opens read-only with the restore affordance" {
+    var clock = native_sdk.TestClock{};
+    var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    const model = &h.app_state.model;
+    model.setStorePath("/tmp/zn-notes-test/store.txt");
+
+    const doomed = model.active_note;
+    try h.dispatch(.{ .trash_note = doomed });
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
+    try h.dispatch(.select_trash);
+    try testing.expectEqual(doomed, model.active_note);
+
+    // The pane renders the body as plain text with one action — no
+    // textarea, no edits.
+    var snapshot = h.snapshot();
+    try testing.expect(snapshotWidgetNamed(snapshot, "button", "Restore note") != null);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const tree = try buildTree(arena_state.allocator(), model);
+    try testing.expect(findByKind(tree.root, .textarea) == null);
+    try testing.expect(subtreeHasText(tree.root, "Deleted just now"));
+    const body_before = model.noteById(doomed).?.body.text().len;
+    try h.dispatch(.{ .edit = .{ .insert_text = "sneaky edit" } });
+    try testing.expectEqual(body_before, model.noteById(doomed).?.body.text().len);
+
+    // Restore through the pane's button: the note is live again and
+    // stays open (the emptied trash fell back to All Notes, where the
+    // note is visible).
+    snapshot = h.snapshot();
+    const restore_button = snapshotWidgetNamed(snapshot, "button", "Restore note").?;
+    try h.clickWidget(restore_button.id);
+    try testing.expect(!model.noteById(doomed).?.isDeleted());
+    try testing.expectEqual(model_mod.all_folder_id, model.selected_folder);
+    try testing.expectEqual(doomed, model.active_note);
+    try fx.feedFileResult(model_mod.store_write_key, .ok, "");
+    try h.wake();
 }
 
 test "splitter drags resize the panes through the model-owned fraction" {
@@ -946,6 +1308,56 @@ test "render homepage screenshots (env-gated)" {
     // list with the re-derived tokens, so no present is needed in between.
     try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .appearance_changed = .{ .color_scheme = .dark } });
     h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/notes-dark-artifacts", "Notes");
+    try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot notes-canvas 2");
+}
+
+// Env-gated state-shot renderer (skipped by default, never in CI): the
+// conditional surfaces a static screenshot cannot show — a note row's
+// context menu, a folder row's menu, and the Recently Deleted scope with
+// a trashed note open read-only. Driven through the same automation
+// right-click path a live session uses. PNGs land in
+// /tmp/notes-state-shots/<state>-artifacts/. To use:
+//
+//   NOTES_STATE_SHOTS=1 zig build test
+test "render state screenshots (env-gated)" {
+    if (!envGateSet("NOTES_STATE_SHOTS")) return error.SkipZigTest;
+    const io = testing.io;
+
+    var clock = native_sdk.TestClock{};
+    var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
+    defer h.destroy();
+
+    // A note row's menu, opened by the automation right-click.
+    var snapshot = h.snapshot();
+    const groceries_row = snapshotWidgetNamed(snapshot, "listitem", "Groceries").?;
+    try h.contextPress(groceries_row.id);
+    try presentShotFrame(&h, 2);
+    h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/notes-state-shots/note-menu-artifacts", "Notes");
+    try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot notes-canvas 2");
+
+    // A folder row's menu.
+    try h.dispatch(.close_menu);
+    snapshot = h.snapshot();
+    const ideas_row = snapshotWidgetNamed(snapshot, "treeitem", "Ideas folder").?;
+    try h.contextPress(ideas_row.id);
+    try presentShotFrame(&h, 3);
+    h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/notes-state-shots/folder-menu-artifacts", "Notes");
+    try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot notes-canvas 2");
+
+    // Recently Deleted selected, its rows' menu open over the read-only
+    // note pane (Restore in both places).
+    try h.dispatch(.close_menu);
+    try h.dispatch(.{ .trash_note = h.app_state.model.active_note });
+    try h.dispatch(.select_trash);
+    try presentShotFrame(&h, 4);
+    h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/notes-state-shots/recently-deleted-artifacts", "Notes");
+    try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot notes-canvas 2");
+
+    snapshot = h.snapshot();
+    const trashed_row = snapshotWidgetNamed(snapshot, "listitem", "Welcome to Notes").?;
+    try h.contextPress(trashed_row.id);
+    try presentShotFrame(&h, 5);
+    h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/notes-state-shots/trash-menu-artifacts", "Notes");
     try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot notes-canvas 2");
 }
 
