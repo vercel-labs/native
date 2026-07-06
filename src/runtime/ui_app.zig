@@ -56,6 +56,24 @@ pub const max_web_panes: usize = 4;
 pub const reach_end_fire_ratio: f32 = 1.0;
 pub const reach_end_rearm_ratio: f32 = 1.5;
 
+/// Approach-START hysteresis for `on_reach_start` (load older history in
+/// tail-anchored transcripts): the mirror of the reach-end band — fire
+/// when the offset comes within one viewport of the content start,
+/// re-arm only past one and a half. Prepending a batch re-arms on its
+/// own because the offset grows by the prepended extent (the viewport
+/// anchor), exactly as appending re-arms reach-end by growing the
+/// extent.
+pub const reach_start_fire_ratio: f32 = 1.0;
+pub const reach_start_rearm_ratio: f32 = 1.5;
+
+/// A correction of at least this many points (the anchor-preserving
+/// offset delta a variable-extent window left pending after the measure
+/// step) earns the one coverage-style retry build, so the first
+/// presented frame after a mount or a big estimate miss is already
+/// correction-consumed. Below it, the delta rides to the next rebuild —
+/// offsets and geometry still shift together, atomically.
+pub const virtual_correction_retry_threshold: f32 = 0.5;
+
 /// Comptime feature selection for `UiAppWithFeatures`.
 pub const UiAppFeatures = struct {
     /// Ship the runtime markup engine (parser + interpreter) in the app.
@@ -609,6 +627,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Scroll regions whose `on_reach_end` fired and has not re-armed
         /// (the approach-end hysteresis state, keyed by widget id).
         reach_end_fired_ids: [canvas.max_virtual_windows]canvas.ObjectId = [_]canvas.ObjectId{0} ** canvas.max_virtual_windows,
+        /// The approach-START mirror (`on_reach_start` hysteresis).
+        reach_start_fired_ids: [canvas.max_virtual_windows]canvas.ObjectId = [_]canvas.ObjectId{0} ** canvas.max_virtual_windows,
+        /// Retained offset tables for VARIABLE-extent virtual lists,
+        /// claimed per list identity during builds (`Ui.virtualWindow`
+        /// through the extent source) and patched by the post-layout
+        /// measure step. Budgeted like the windows themselves — one per
+        /// declarable window; a build declaring more variable lists than
+        /// slots drops the excess to estimate-only math with a debug
+        /// warning.
+        virtual_extent_tables: [canvas.max_virtual_windows]canvas.VirtualExtentTable = [_]canvas.VirtualExtentTable{.{}} ** canvas.max_virtual_windows,
         /// Live model-declared secondary windows (`Options.windows_fn`),
         /// keyed by window label.
         window_slots: [max_ui_windows]WindowSlot,
@@ -896,6 +924,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 var ui = Ui.init(self.arenas[next_index].allocator());
                 ui.virtual_window_context = @ptrCast(&window_source);
                 ui.virtual_window_source = VirtualWindowResolver.resolve;
+                ui.virtual_extent_context = @ptrCast(self);
+                ui.virtual_extent_source = virtualExtentResolve;
                 if (comptime features.runtime_markup) {
                     if (self.markup_view != null and runtime.options.automation != null) {
                         self.provenance.resetRecords();
@@ -927,8 +957,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 runtime.frame_profile.end(.layout, layout_begin);
 
                 self.rememberVirtualWindows(&ui);
+                // Measure the mounted rows of every variable-extent
+                // list against the fresh layout and patch the retained
+                // offset tables (anchored — see the table's contract).
+                // A material correction earns the same one-retry pass a
+                // coverage miss does, so the installed frame already
+                // consumed it; a residual delta rides to the next
+                // rebuild, atomically with the geometry either way.
+                const corrected = self.measureVirtualWindows(layout);
                 pass += 1;
-                if (pass >= 2 or !self.virtualWindowsUndercovered(layout)) break;
+                if (pass >= 2 or (!corrected and !self.virtualWindowsUndercovered(layout))) break;
                 window_source.fresh = layout;
             }
             launch_timing.lapOnce("first_view_built");
@@ -979,7 +1017,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
             fn stateForNode(node: canvas.WidgetLayoutNode) canvas.VirtualWindowState {
                 const viewport = node.frame.inset(node.widget.layout.padding).normalized();
-                return .{ .offset = node.widget.value, .viewport_extent = viewport.height };
+                return .{ .offset = node.widget.value, .viewport_extent = viewport.height, .mounted = true };
             }
         };
 
@@ -1000,6 +1038,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 const node = layout.findById(record.id) orelse continue;
                 const viewport = node.frame.inset(node.widget.layout.padding).normalized();
                 if (viewport.isEmpty()) continue;
+                if (record.variable) {
+                    const table = self.virtualExtentTableForId(record.id) orelse continue;
+                    if (record.item_count == 0) continue;
+                    const offset = @max(0, node.widget.value);
+                    const first_visible = table.indexAtOffset(offset);
+                    const visible_end = @min(record.item_count, table.indexAtOffset(offset + viewport.height) + 1);
+                    const start = if (first_visible > record.overscan) first_visible - record.overscan else 0;
+                    const end = @min(record.item_count, visible_end + record.overscan);
+                    if (start < record.start_index or end > record.end_index) return true;
+                    continue;
+                }
                 const item_extent = if (node.widget.layout.virtual_item_extent > 0)
                     node.widget.layout.virtual_item_extent
                 else
@@ -1015,6 +1064,95 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 if (range.start_index < record.start_index or range.end_index > record.end_index) return true;
             }
             return false;
+        }
+
+        /// The extent source backing `Ui.virtualWindow` for
+        /// variable-extent lists: resolve (or claim) the retained offset
+        /// table for a list identity. Slots follow the window budget;
+        /// a stale table (its list no longer declared) is recycled
+        /// before giving up.
+        fn virtualExtentResolve(context: ?*anyopaque, id: canvas.ObjectId) ?*canvas.VirtualExtentTable {
+            const self: *Self = @ptrCast(@alignCast(context orelse return null));
+            return self.claimVirtualExtentTable(id);
+        }
+
+        fn virtualExtentTableForId(self: *const Self, id: canvas.ObjectId) ?*canvas.VirtualExtentTable {
+            if (id == 0) return null;
+            for (&self.virtual_extent_tables) |*table| {
+                if (table.id == id) return @constCast(table);
+            }
+            return null;
+        }
+
+        fn claimVirtualExtentTable(self: *Self, id: canvas.ObjectId) ?*canvas.VirtualExtentTable {
+            if (id == 0) return null;
+            for (&self.virtual_extent_tables) |*table| {
+                if (table.id == id) return table;
+            }
+            for (&self.virtual_extent_tables) |*table| {
+                if (table.id == 0) return table;
+            }
+            // All slots busy: recycle one whose list the LAST build no
+            // longer declared (per-document lists come and go; their
+            // measured state is rebuildable by scrolling).
+            recycle: for (&self.virtual_extent_tables) |*table| {
+                for (self.virtual_windows[0..self.virtual_window_count]) |record| {
+                    if (record.id == table.id) continue :recycle;
+                }
+                table.reset();
+                return table;
+            }
+            ui_app_log.warn(
+                "more than {d} variable-extent virtual lists alive at once (canvas.ui_builder.max_virtual_windows) - the excess builds from estimates alone, without measured corrections",
+                .{canvas.max_virtual_windows},
+            );
+            return null;
+        }
+
+        /// Post-layout measure step for variable-extent virtual lists:
+        /// read the freshly laid-out extent of every mounted row (the
+        /// intrinsic heights the flex pass just computed) into the
+        /// retained offset table, anchored on the first visible row so
+        /// the pending offset delta keeps it visually fixed. Returns
+        /// whether any table accumulated a correction worth the retry
+        /// pass.
+        fn measureVirtualWindows(self: *Self, layout: canvas.WidgetLayoutTree) bool {
+            var corrected = false;
+            for (self.virtual_windows[0..self.virtual_window_count]) |record| {
+                if (!record.variable or record.item_count == 0) continue;
+                const table = self.virtualExtentTableForId(record.id) orelse continue;
+                var list_index: usize = 0;
+                var found = false;
+                for (layout.nodes, 0..) |node, index| {
+                    if (node.widget.id == record.id) {
+                        list_index = index;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) continue;
+                const list_node = layout.nodes[list_index];
+                const content = list_node.frame.inset(list_node.widget.layout.padding).normalized();
+                if (content.isEmpty()) continue;
+                // The correction anchor is the row the layout pass
+                // anchored the window on: it was PLACED at the table's
+                // leading edge for it, so the table-belief baseline is
+                // exactly its rendered position — corrections shift
+                // the pending offset by however much the batch moves
+                // that edge, and the anchored row stays under the
+                // user's eyes.
+                table.beginCorrections(list_node.widget.layout.virtual_anchor_index, null);
+                for (layout.nodes) |node| {
+                    const parent = node.parent_index orelse continue;
+                    if (parent != list_index) continue;
+                    if (node.widget.layout.anchor != null) continue;
+                    const physical = node.widget.semantics.list_item_index orelse continue;
+                    table.recordMeasured(@intCast(physical), node.frame.normalized().height);
+                }
+                table.endCorrections();
+                if (@abs(table.pending_offset_delta) > virtual_correction_retry_threshold) corrected = true;
+            }
+            return corrected;
         }
 
         fn isVirtualWindowId(self: *const Self, id: canvas.ObjectId) bool {
@@ -1063,6 +1201,51 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn clearReachEndFired(self: *Self, id: canvas.ObjectId) void {
             for (&self.reach_end_fired_ids) |*slot| {
+                if (slot.* == id) slot.* = 0;
+            }
+        }
+
+        /// Approach-START hysteresis (`on_reach_start`): the mirror of
+        /// `reachEndShouldFire` measured from the content start — fire
+        /// when a scroll lands within `reach_start_fire_ratio` viewports
+        /// of offset 0 and the region is armed; re-arm once the offset
+        /// sits more than `reach_start_rearm_ratio` viewports from the
+        /// start, which prepending a batch causes on its own (the
+        /// viewport anchor grows the offset by the prepended extent).
+        /// Same programmatic-jump nuance as reach-end: hysteresis state
+        /// only moves on scroll OBSERVATIONS, so a programmatic jump out
+        /// of the band re-arms on the next user scroll, not instantly.
+        fn reachStartShouldFire(self: *Self, id: canvas.ObjectId, scroll_state: canvas.ScrollState) bool {
+            if (id == 0 or scroll_state.viewport_extent <= 0) return false;
+            const remaining = scroll_state.offset;
+            if (remaining > scroll_state.viewport_extent * reach_start_rearm_ratio) {
+                self.clearReachStartFired(id);
+                return false;
+            }
+            if (remaining > scroll_state.viewport_extent * reach_start_fire_ratio) return false;
+            if (self.reachStartFired(id)) return false;
+            self.markReachStartFired(id);
+            return true;
+        }
+
+        fn reachStartFired(self: *const Self, id: canvas.ObjectId) bool {
+            for (self.reach_start_fired_ids) |fired| {
+                if (fired == id) return true;
+            }
+            return false;
+        }
+
+        fn markReachStartFired(self: *Self, id: canvas.ObjectId) void {
+            for (&self.reach_start_fired_ids) |*slot| {
+                if (slot.* == 0 or slot.* == id) {
+                    slot.* = id;
+                    return;
+                }
+            }
+        }
+
+        fn clearReachStartFired(self: *Self, id: canvas.ObjectId) void {
+            for (&self.reach_start_fired_ids) |*slot| {
                 if (slot.* == id) slot.* = 0;
             }
         }
@@ -2316,6 +2499,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             if (tree.msgForReachEnd(scroll_event.id)) |msg| {
                 if (self.reachEndShouldFire(scroll_event.id, scroll_event.scroll)) {
+                    try self.dispatch(runtime, scroll_event.window_id, msg);
+                    rebuilt = true;
+                }
+            }
+            if (tree.msgForReachStart(scroll_event.id)) |msg| {
+                if (self.reachStartShouldFire(scroll_event.id, scroll_event.scroll)) {
                     try self.dispatch(runtime, scroll_event.window_id, msg);
                     rebuilt = true;
                 }

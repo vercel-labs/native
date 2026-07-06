@@ -25,6 +25,15 @@ fn feedOptions() FeedApp.Options {
     };
 }
 
+/// ESTIMATED leading edge of post `index` (prefix sum over the same
+/// estimate fn the view hands the engine) — how tests aim the pinned
+/// window source at a post's neighborhood.
+fn estimatedOffsetAt(index: usize) f32 {
+    var offset: f32 = 0;
+    for (0..index) |i| offset += main.postExtentEstimate(null, @intCast(i));
+    return offset;
+}
+
 // ------------------------------------------------------------ tree helpers
 
 fn findByLabel(widget: canvas.Widget, label: []const u8) ?canvas.Widget {
@@ -56,7 +65,7 @@ const PinnedSource = struct {
 };
 
 fn buildTreeAt(arena: std.mem.Allocator, model: *const Model, offset: f32, viewport: f32) !FeedUi.Tree {
-    var source = PinnedSource{ .state = .{ .offset = offset, .viewport_extent = viewport } };
+    var source = PinnedSource{ .state = .{ .offset = offset, .viewport_extent = viewport, .mounted = true } };
     var ui = FeedUi.init(arena);
     ui.virtual_window_context = @ptrCast(&source);
     ui.virtual_window_source = PinnedSource.resolve;
@@ -79,6 +88,34 @@ test "posts derive deterministically from their index" {
         std.mem.eql(u8, a.subject, c.subject) and
         a.likes == c.likes;
     try testing.expect(!same);
+}
+
+test "bodies are mixed-height on purpose and the estimate is a pure model fact" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The corpus really is mixed: shorts, longer takes (every 13th),
+    // and long-form walls (every 47th).
+    try testing.expect(main.postBodySentences(1) <= 3);
+    try testing.expect(main.postBodySentences(13) >= 6);
+    try testing.expect(main.postBodySentences(47) >= 14);
+
+    // postBodyLength prices the body without building it.
+    for ([_]usize{ 0, 1, 13, 47, 99_999 }) |index| {
+        try testing.expectEqual(main.postBody(arena, index).len, main.postBodyLength(index));
+    }
+
+    // Estimates vary by a real factor across the corpus — this is the
+    // variable-extent showcase, not a uniform list in disguise.
+    var min_estimate: f32 = std.math.floatMax(f32);
+    var max_estimate: f32 = 0;
+    for (0..200) |i| {
+        const estimate = main.postExtentEstimate(null, @intCast(i));
+        min_estimate = @min(min_estimate, estimate);
+        max_estimate = @max(max_estimate, estimate);
+    }
+    try testing.expect(max_estimate > min_estimate * 2);
 }
 
 test "update appends batches to the corpus cap and keys interaction by post index" {
@@ -118,17 +155,21 @@ test "the view builds only the visible window, with stable row identity across s
 
     var model = Model{ .loaded = main.max_posts };
 
-    // Scrolled to post 500 (offset 500 x 84): the tree holds the window
+    // Scrolled to post 500's estimated edge: the tree holds the window
     // around it — never 100k rows.
-    const tree_a = try buildTreeAt(arena, &model, 500 * main.post_row_extent, 700);
+    const tree_a = try buildTreeAt(arena, &model, estimatedOffsetAt(500), 700);
     const list_a = findByLabel(tree_a.root, "Timeline").?;
     try testing.expectEqual(timeline_id, list_a.id);
     try testing.expectEqual(@as(usize, main.max_posts), list_a.layout.virtual_item_count);
     try testing.expect(list_a.children.len < 30);
     try testing.expectEqual(@as(usize, 500 - main.post_overscan), list_a.layout.virtual_first_index);
+    // The variable contract is stamped: a declared total extent, no
+    // uniform stride.
+    try testing.expect(list_a.layout.virtual_total_extent > 0);
+    try testing.expectEqual(@as(f32, 0), list_a.layout.virtual_item_extent);
 
-    // Two rows apart: the overlapping post keeps its structural id.
-    const tree_b = try buildTreeAt(arena, &model, 502 * main.post_row_extent, 700);
+    // Two rows down: the overlapping post keeps its structural id.
+    const tree_b = try buildTreeAt(arena, &model, estimatedOffsetAt(502), 700);
     const row_a = findByLabel(tree_a.root, "Like post 503").?;
     const row_b = findByLabel(tree_b.root, "Like post 503").?;
     try testing.expectEqual(row_a.id, row_b.id);
@@ -183,9 +224,8 @@ const Harness = struct {
         try self.harness.runtime.dispatchAutomationCommand(self.app, command);
     }
 
-    fn retainedOffset(self: *Harness) !f32 {
-        const layout = try self.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
-        return layout.findById(timeline_id).?.widget.value;
+    fn scrollState(self: *Harness) canvas.ScrollState {
+        return self.harness.runtime.views[0].canvasWidgetScrollStateById(timeline_id).?;
     }
 
     fn root(self: *Harness) canvas.Widget {
@@ -211,14 +251,17 @@ test "the timeline scrolls through the runtime, re-windows, and keeps liked rows
 
     // Scroll far enough that post 2 unmounts (no on_scroll binding —
     // the scroll observation itself re-derives the view).
-    try h.wheel(200 * main.post_row_extent);
-    try testing.expectEqual(@as(f32, 200 * main.post_row_extent), try h.retainedOffset());
+    try h.wheel(estimatedOffsetAt(200));
     try testing.expect(findByLabel(h.root(), "Like post 2") == null);
-    try testing.expect(findByLabel(h.root(), "Like post 200") != null);
+    try testing.expect(h.scrollState().offset > 0);
 
-    // Scroll back: the row returns under the SAME structural id with
-    // its liked state intact — identity is the post, not the slot.
-    try h.wheel(-200 * main.post_row_extent);
+    // Scroll back to the very top: the row returns under the SAME
+    // structural id with its liked state intact — identity is the
+    // post, not the slot.
+    var guard: usize = 0;
+    while (h.scrollState().offset > 0 and guard < 200) : (guard += 1) {
+        try h.wheel(-main.window_height * 4);
+    }
     const returned = findByLabel(h.root(), "Like post 2").?;
     try testing.expectEqual(like_id, returned.id);
     try testing.expect(returned.state.selected);
@@ -232,13 +275,13 @@ test "reach-end fires once per approach and appends the next batch" {
     var h = try Harness.create(.{});
     defer h.destroy();
 
-    // Ride to the end of the initial 500 posts. The viewport is the
-    // window height minus header/status chrome, so aim past the max
-    // offset — the engine clamps (rubber-band aside) and the observation
-    // carries the honest extents.
+    // Ride to the end of the initial 500 posts: the approach-end signal
+    // fires ONCE (hysteresis) and update appends a batch.
     try testing.expectEqual(@as(u32, 0), h.app_state.model.fetches);
-    const content: f32 = @as(f32, @floatFromInt(main.initial_batch)) * main.post_row_extent;
-    try h.wheel(content); // overshoots; clamps near max
+    var guard: usize = 0;
+    while (h.app_state.model.fetches == 0 and guard < 2_000) : (guard += 1) {
+        try h.wheel(main.window_height);
+    }
     try testing.expectEqual(@as(u32, 1), h.app_state.model.fetches);
     try testing.expectEqual(main.initial_batch + main.fetch_batch, h.app_state.model.loaded);
 
@@ -248,9 +291,95 @@ test "reach-end fires once per approach and appends the next batch" {
     try testing.expectEqual(@as(u32, 1), h.app_state.model.fetches);
 
     // The next approach fires again.
-    try h.wheel(@as(f32, @floatFromInt(main.fetch_batch)) * main.post_row_extent);
+    guard = 0;
+    while (h.app_state.model.fetches == 1 and guard < 2_000) : (guard += 1) {
+        try h.wheel(main.window_height);
+    }
     try testing.expectEqual(@as(u32, 2), h.app_state.model.fetches);
     try testing.expectEqual(main.initial_batch + 2 * main.fetch_batch, h.app_state.model.loaded);
+}
+
+test "scroll storm: measured corrections never move the rows the user is reading" {
+    var h = try Harness.create(.{ .loaded = 5_000 });
+    defer h.destroy();
+
+    // Mixed steps and deep jumps across a corpus whose estimates are
+    // rough on purpose: at every step, a row still visible after the
+    // wheel must land exactly wheel-delta from where it was. The
+    // engine's anchored corrections may reprice everything OFF screen
+    // (that is the honest scrollbar-drift contract) — visible content
+    // never jumps.
+    var seed = std.Random.DefaultPrng.init(0x5eed_feed);
+    const random = seed.random();
+    var checked: usize = 0;
+    var step: usize = 0;
+    while (step < 150) : (step += 1) {
+        const before_state = h.scrollState();
+        const delta: f32 = switch (random.uintLessThan(u8, 8)) {
+            0, 1, 2 => main.window_height / 2,
+            3, 4 => -main.window_height / 2,
+            5 => main.window_height * 6,
+            6 => -main.window_height * 6,
+            else => before_state.maxOffset() * 0.5 - before_state.offset,
+        };
+
+        // Probe: the first row overlapping mid-viewport, by frame.
+        const layout = try h.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+        var list_index: usize = 0;
+        for (layout.nodes, 0..) |node, index| {
+            if (node.widget.id == timeline_id) list_index = index;
+        }
+        const list_frame = layout.nodes[list_index].frame.normalized();
+        var probe_index: ?u32 = null;
+        var probe_y: f32 = 0;
+        for (layout.nodes) |node| {
+            const parent = node.parent_index orelse continue;
+            if (parent != list_index) continue;
+            const item = node.widget.semantics.list_item_index orelse continue;
+            const frame = node.frame.normalized();
+            if (frame.y <= list_frame.y + main.window_height / 2 and frame.maxY() >= list_frame.y + main.window_height / 2) {
+                probe_index = item;
+                probe_y = frame.y;
+                break;
+            }
+        }
+
+        try h.wheel(delta);
+
+        // The invariant protects what the user SEES: after a wheel
+        // landing comfortably inside the scroll range, a row still
+        // (partly) visible must sit exactly wheel-delta from where it
+        // was — the offset absorbs any measured correction; the pixels
+        // never move by anything but the wheel. Edge-clamped steps are
+        // skipped (the applied wheel is not the asked wheel there by
+        // design).
+        const interior = before_state.offset + delta >= main.window_height and
+            before_state.offset + delta <= before_state.maxOffset() - 2 * main.window_height and
+            before_state.offset >= main.window_height and
+            before_state.offset <= before_state.maxOffset() - 2 * main.window_height;
+        if (interior) {
+            if (probe_index) |item| {
+                const after_layout = try h.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+                var after_list: usize = 0;
+                for (after_layout.nodes, 0..) |node, index| {
+                    if (node.widget.id == timeline_id) after_list = index;
+                }
+                for (after_layout.nodes) |node| {
+                    const parent = node.parent_index orelse continue;
+                    if (parent != after_list) continue;
+                    const after_item = node.widget.semantics.list_item_index orelse continue;
+                    if (after_item != item) continue;
+                    const frame = node.frame.normalized();
+                    if (frame.maxY() > list_frame.y and frame.y < list_frame.y + main.window_height) {
+                        try testing.expectApproxEqAbs(probe_y - delta, frame.y, 1.0);
+                        checked += 1;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    try testing.expect(checked > 40);
 }
 
 test "layout audit sweep: nothing clips, overlaps, or escapes" {
@@ -260,7 +389,7 @@ test "layout audit sweep: nothing clips, overlaps, or escapes" {
     var model = Model{ .loaded = main.max_posts };
     // The windowed virtual timeline builds per viewport, so each swept
     // size audits a tree built at exactly that viewport (mid-corpus, so
-    // real rows with long post bodies are in the window).
+    // real rows — including a long-form wall — are in the window).
     const sizes = [_]geometry.SizeF{
         geometry.SizeF.init(main.window_min_width, main.window_min_height),
         geometry.SizeF.init(main.window_width, main.window_height),
@@ -269,7 +398,7 @@ test "layout audit sweep: nothing clips, overlaps, or escapes" {
     for (sizes) |size| {
         // Deep in the corpus: six-digit post indexes put the widest
         // realistic numbers in the rows and the status strip.
-        const tree = try buildTreeAt(arena_state.allocator(), &model, 99_900 * main.post_row_extent, size.height);
+        const tree = try buildTreeAt(arena_state.allocator(), &model, estimatedOffsetAt(99_900), size.height);
         try canvas.expectLayoutAuditSweepClean(testing.allocator, tree.root, .{
             .tokens = main.feedTokens(&model),
             .min_size = size,
@@ -294,7 +423,7 @@ test "a11y audit sweep: every interactive widget is named, reachable, and unambi
         geometry.SizeF.init(main.window_width * 1.5, main.window_height * 1.5),
     };
     for (sizes) |size| {
-        const tree = try buildTreeAt(arena_state.allocator(), &model, 99_900 * main.post_row_extent, size.height);
+        const tree = try buildTreeAt(arena_state.allocator(), &model, estimatedOffsetAt(99_900), size.height);
         try canvas.expectA11yAuditSweepClean(testing.allocator, tree.root, .{
             .tokens = main.feedTokens(&model),
             .min_size = size,
@@ -310,8 +439,9 @@ test "widget_nodes stays viewport-sized at the full 100k corpus while the scroll
     defer h.destroy();
 
     // Snapshot telemetry: the retained node count is the WINDOW, deep
-    // under the 1024 budget, while the scroll semantics report the whole
-    // 100k-post extent (8.4M points) — the scrollbar tells the truth.
+    // under the 1024 budget, while the scroll semantics report the
+    // estimate-priced full corpus (converging toward measured truth as
+    // rows are visited) — the scrollbar tells the truth it has.
     const snapshot = h.harness.runtime.automationSnapshot("Feed");
     var found_view = false;
     for (snapshot.views) |view| {
@@ -327,14 +457,17 @@ test "widget_nodes stays viewport-sized at the full 100k corpus while the scroll
         if (widget.id != timeline_id) continue;
         found_scroll = true;
         try testing.expect(widget.scroll.present);
-        try testing.expectEqual(@as(f32, @floatFromInt(main.max_posts)) * main.post_row_extent, widget.scroll.content_extent);
+        // 100k mixed-height posts: even the roughest honest pricing
+        // puts the timeline in the millions of points.
+        try testing.expect(widget.scroll.content_extent > @as(f32, @floatFromInt(main.max_posts)) * main.post_chrome_extent);
     }
     try testing.expect(found_scroll);
 
-    // Jump deep into the corpus: still the same bounded window.
-    try h.wheel(90_000 * main.post_row_extent);
-    try testing.expect(findByLabel(h.root(), "Like post 90000") != null);
+    // Jump deep into the corpus: still the same bounded window, still
+    // six-digit posts on screen.
+    try h.wheel(estimatedOffsetAt(90_000));
     const layout = try h.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
     try testing.expect(layout.nodes.len < 320);
+    const list = findByLabel(h.root(), "Timeline").?;
+    try testing.expect(list.layout.virtual_first_index > 80_000);
 }
-

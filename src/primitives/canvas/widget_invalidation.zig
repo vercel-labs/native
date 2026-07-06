@@ -596,6 +596,9 @@ fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {
         a.virtual_overscan == b.virtual_overscan and
         a.virtual_item_count == b.virtual_item_count and
         a.virtual_first_index == b.virtual_first_index and
+        a.virtual_anchor_index == b.virtual_anchor_index and
+        a.virtual_anchor_extent == b.virtual_anchor_extent and
+        a.virtual_total_extent == b.virtual_total_extent and
         sizesEqual(a.min_size, b.min_size) and
         sizesEqual(a.max_size, b.max_size);
 }

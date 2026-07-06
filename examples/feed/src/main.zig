@@ -1,12 +1,19 @@
-//! feed: the infinite-scroll timeline, proving the windowed virtual list.
+//! feed: the infinite-scroll timeline, proving the VARIABLE-extent
+//! windowed virtual list.
 //!
 //! A 100k-post synthetic corpus (every post derives deterministically
 //! from its index — no network, no storage) scrolls through ONE
-//! `ui.virtualList`: the view asks `ui.virtualWindow` which rows are
-//! visible, builds ONLY those (a handful of rows plus overscan, never
-//! the dataset), and the runtime owns the scroll — engine wheel and
-//! kinetic physics everywhere, the native scroll driver on macOS, with
-//! the scrollbar spanning the full virtual extent. Approaching the end
+//! `ui.virtualList` with MIXED-HEIGHT rows — the real timeline shape:
+//! one-liners, multi-sentence posts, and the occasional long-form wall
+//! of text, each row sized by its wrapped body. The view provides a
+//! cheap per-post extent ESTIMATE (character count over an assumed
+//! line width — rough on purpose); the engine measures the rows it
+//! mounts and corrects the scroll geometry as you ride, anchored so
+//! corrections never move what you are reading. The view asks
+//! `ui.virtualWindow` which rows are visible, builds ONLY those, and
+//! the runtime owns the scroll — engine wheel and kinetic physics
+//! everywhere, the native scroll driver on macOS, with the scrollbar
+//! spanning the full (converging) virtual extent. Approaching the end
 //! dispatches `on_reach_end` (once per approach, hysteresis built in)
 //! and `update` appends the next batch, so the timeline grows to the
 //! whole corpus as you ride it.
@@ -58,9 +65,6 @@ pub const max_posts: usize = 100_000;
 pub const initial_batch: usize = 500;
 /// Posts each reach-end fetch appends.
 pub const fetch_batch: usize = 500;
-/// The fixed row extent — the windowed virtual list's v1 contract:
-/// uniform rows, so 100k of them are pure arithmetic.
-pub const post_row_extent: f32 = 84;
 /// Rows built beyond the visible range on each side.
 pub const post_overscan: usize = 4;
 
@@ -156,6 +160,74 @@ pub fn postTimeLabel(arena: std.mem.Allocator, minutes_ago: u32) []const u8 {
     return std.fmt.allocPrint(arena, "{d}h", .{minutes_ago / 60}) catch "today";
 }
 
+/// How many sentences post `index` carries: most posts are short (one
+/// to three), every 13th is a longer take, every 47th the long-form
+/// wall of text — the real timeline's mixed-height shape, derived from
+/// the index alone like everything else in the corpus.
+pub fn postBodySentences(index: usize) usize {
+    const seed = std.hash.Wyhash.hash(0xfeed_0002, std.mem.asBytes(&@as(u64, index)));
+    if (index % 47 == 0) return 14 + seed % 6;
+    if (index % 13 == 0) return 6 + seed % 4;
+    return 1 + seed % 3;
+}
+
+/// The k-th extra sentence of post `index` (deterministic, like the
+/// post itself).
+pub fn postBodySentence(index: usize, k: usize) []const u8 {
+    const seed = std.hash.Wyhash.hash(0xfeed_0003 +% @as(u64, k), std.mem.asBytes(&@as(u64, index)));
+    return subjects[seed % subjects.len];
+}
+
+/// The post's full body: "{opener} {subject}. {extra sentences…} {closer}".
+pub fn postBody(arena: std.mem.Allocator, index: usize) []const u8 {
+    const post = postAt(index);
+    var builder: std.ArrayListUnmanaged(u8) = .empty;
+    const extras = postBodySentences(index) - 1;
+    builder.ensureTotalCapacity(arena, postBodyLength(index)) catch return post.subject;
+    builder.appendSliceAssumeCapacity(post.opener);
+    builder.appendAssumeCapacity(' ');
+    builder.appendSliceAssumeCapacity(post.subject);
+    builder.appendAssumeCapacity('.');
+    for (0..extras) |k| {
+        builder.appendAssumeCapacity(' ');
+        builder.appendSliceAssumeCapacity(postBodySentence(index, k));
+        builder.appendAssumeCapacity('.');
+    }
+    builder.appendAssumeCapacity(' ');
+    builder.appendSliceAssumeCapacity(post.closer);
+    return builder.items;
+}
+
+/// Byte length of `postBody` WITHOUT building it — the model fact the
+/// extent estimate reads (an estimate must never require the content
+/// to be materialized, let alone laid out).
+pub fn postBodyLength(index: usize) usize {
+    const post = postAt(index);
+    var len = post.opener.len + 1 + post.subject.len + 1;
+    for (0..postBodySentences(index) - 1) |k| {
+        len += 1 + postBodySentence(index, k).len + 1;
+    }
+    return len + 1 + post.closer.len;
+}
+
+/// Estimate knobs: assumed characters per wrapped body line at the
+/// designed width, the body line height, and the fixed per-row chrome
+/// (padding, author line, actions row, column gaps). Rough on purpose —
+/// the engine measures mounted rows and corrects, and the anchored
+/// correction contract means a rough estimate costs scrollbar drift,
+/// never a visible jump.
+pub const estimate_chars_per_line: f32 = 52;
+pub const post_line_height: f32 = 20;
+pub const post_chrome_extent: f32 = 78;
+
+/// The per-post extent estimate handed to the virtual list.
+pub fn postExtentEstimate(context: ?*const anyopaque, index: u64) f32 {
+    _ = context;
+    const chars: f32 = @floatFromInt(postBodyLength(@intCast(index)));
+    const lines = @max(1, @ceil(chars / estimate_chars_per_line));
+    return post_chrome_extent + lines * post_line_height;
+}
+
 // ------------------------------------------------------------------ model
 
 const LikedSet = std.StaticBitSet(max_posts);
@@ -235,7 +307,11 @@ pub fn timelineOptions(model: *const Model) FeedUi.VirtualListOptions {
     return .{
         .id = "timeline",
         .item_count = model.loaded,
-        .item_extent = post_row_extent,
+        // VARIABLE-extent mode: rows size to their wrapped bodies; the
+        // estimate prices unmounted rows and the engine's measured
+        // corrections converge the scrollbar as the user rides.
+        .item_extent = 0,
+        .extent_estimate = postExtentEstimate,
         .overscan = post_overscan,
         .grow = 1,
         .viewport_fallback = window_height,
@@ -282,14 +358,14 @@ fn statusLine(ui: *FeedUi, model: *const Model, window: canvas.VirtualListRange)
     });
 }
 
-/// One timeline row: avatar, author line, single-line body, actions.
-/// Fixed 84pt extent (the v1 uniform-height contract), a FLAT list row
-/// (the list_item composite — no border, no card chrome; hover and the
-/// selection are full-width washes).
+/// One timeline row: avatar, author line, wrapped multi-line body,
+/// actions. NO fixed extent — the row is as tall as its wrapped body
+/// (the variable-extent contract), a FLAT list row (the list_item
+/// composite — no border, no card chrome; hover and the selection are
+/// full-width washes).
 fn postRow(ui: *FeedUi, model: *const Model, index: usize) FeedUi.Node {
     const post = postAt(index);
     var node = ui.el(.list_item, .{
-        .height = post_row_extent,
         .padding = 12,
         .selected = model.selected != null and model.selected.? == index,
         .on_press = Msg{ .select_post = index },
@@ -308,7 +384,7 @@ fn postRow(ui: *FeedUi, model: *const Model, index: usize) FeedUi.Node {
                     ui.spacer(1),
                     ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, postTimeLabel(ui.arena, post.minutes_ago)),
                 }),
-                ui.text(.{ .wrap = false }, ui.fmt("{s} {s} {s}", .{ post.opener, post.subject, post.closer })),
+                ui.text(.{ .wrap = true }, postBody(ui.arena, index)),
                 ui.row(.{ .gap = 14, .cross = .center }, .{
                     actionChip(ui, "arrow-up", model.likeCount(index), model.liked.isSet(index), Msg{ .toggle_like = index }, ui.fmt("Like post {d}", .{index})),
                     actionChip(ui, "repeat", model.boostCount(index), model.boosted.isSet(index), Msg{ .toggle_boost = index }, ui.fmt("Boost post {d}", .{index})),

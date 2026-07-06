@@ -302,6 +302,25 @@ pub const WidgetLayoutStyle = struct {
     /// anywhere in the list lands exactly where the full list would put
     /// it. Only meaningful with `virtual_item_count > 0`.
     virtual_first_index: usize = 0,
+    /// VARIABLE-extent windowed virtual list (`virtual_total_extent >
+    /// 0`): the absolute index of the window's ANCHOR row — the first
+    /// visible row at the offset the window was computed for. The
+    /// layout pass places the anchor at `virtual_anchor_extent` and
+    /// stacks the other built rows around it at their INTRINSIC
+    /// heights (downward below, upward above), so the estimate error
+    /// of freshly mounted rows surfaces off-screen above the anchor
+    /// and never displaces what the user is looking at.
+    virtual_anchor_index: usize = 0,
+    /// The offset table's leading edge for the anchor row (estimates
+    /// patched by measured actuals).
+    virtual_anchor_extent: f32 = 0,
+    /// Total content extent of a variable-extent windowed virtual list
+    /// (estimates + measured corrections + inter-row gaps). Non-zero
+    /// selects the variable layout contract and becomes the scroll
+    /// content extent (scrollbar, native driver content size, scroll
+    /// semantics). 0 keeps every uniform and legacy contract
+    /// byte-identical.
+    virtual_total_extent: f32 = 0,
     /// Anchored floating placement: non-null makes this widget a floating
     /// surface positioned against its parent (see `WidgetAnchor`).
     anchor: ?WidgetAnchor = null,
@@ -1112,6 +1131,9 @@ fn widgetLayoutStyleIsDefault(layout: WidgetLayoutStyle) bool {
         layout.virtual_overscan == 0 and
         layout.virtual_item_count == 0 and
         layout.virtual_first_index == 0 and
+        layout.virtual_anchor_index == 0 and
+        layout.virtual_anchor_extent == 0 and
+        layout.virtual_total_extent == 0 and
         layout.min_size.width == 0 and
         layout.min_size.height == 0 and
         layout.max_size.width == 0 and

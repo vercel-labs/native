@@ -734,6 +734,19 @@ fn layoutVirtualVerticalChildren(
 ) Error!void {
     if (children.len == 0) return;
 
+    // A VARIABLE-extent windowed virtual list (`virtual_total_extent >
+    // 0`): the window's offset table already priced everything outside
+    // the built slice — `virtual_anchor_extent` is the anchor row's
+    // absolute leading edge and `virtual_total_extent` the scroll
+    // content extent. Inside the window the rows stack at their
+    // INTRINSIC heights (the width-aware wrapped extent) around the
+    // anchor, so the content under the user's eyes never carries
+    // estimate error; the measure step reads these frames back to
+    // correct the table for the unmounted ranges.
+    if (style.virtual_total_extent > 0 and style.virtual_item_count > 0) {
+        return layoutVariableVirtualChildren(children, content, parent_index, depth, output, len, scroll_y, style, tokens);
+    }
+
     // A windowed virtual list (`virtual_item_count > 0`) holds only the
     // built slice in `children`: `first_index` names the virtual index of
     // children[0], the declared count drives the range math (content
@@ -780,6 +793,119 @@ fn layoutVirtualVerticalChildren(
         );
         _ = try layoutWidgetDepth(child, child_frame, parent_index, depth + 1, output, len, tokens);
     }
+}
+
+/// The variable-extent windowed virtual list's layout: the ANCHOR row
+/// (the first visible one at the offset the window was computed for)
+/// lands exactly at the offset table's leading edge for it, and the
+/// other built rows stack around it at their intrinsic (width-aware
+/// wrapped) heights — downward below the anchor, upward above it. The
+/// asymmetry is the point: rows entering the window from above are
+/// priced by ESTIMATES until the measure step corrects the table, and
+/// upward stacking puts that pricing error off-screen above the anchor
+/// instead of displacing the content under the user's eyes. The scroll
+/// offset clamps against the table's total extent — the same value the
+/// scrollbar and the native driver's content size report — with the
+/// uniform path's rubber-band band on the layout offset.
+fn layoutVariableVirtualChildren(
+    children: []const Widget,
+    content: geometry.RectF,
+    parent_index: usize,
+    depth: usize,
+    output: []WidgetLayoutNode,
+    len: *usize,
+    scroll_y: f32,
+    style: WidgetLayoutStyle,
+    tokens: DesignTokens,
+) Error!void {
+    const first_index = style.virtual_first_index;
+    const item_count = @max(style.virtual_item_count, first_index + children.len);
+    const gap = nonNegative(style.gap);
+    const total_extent = @max(0, style.virtual_total_extent);
+    const max_offset = @max(0, total_extent - content.height);
+    const raw_offset = if (std.math.isFinite(scroll_y)) scroll_y else 0;
+    const layout_offset = std.math.clamp(raw_offset, -content.height, max_offset + content.height);
+
+    output[parent_index].widget.semantics.list_item_count = saturatingU32(item_count);
+
+    const anchor_child = std.math.clamp(style.virtual_anchor_index -| first_index, 0, children.len - 1);
+    const anchor_y = content.y + @max(0, style.virtual_anchor_extent) - layout_offset;
+
+    // Pre-pass: back the start edge out of the anchor position by the
+    // above-anchor rows' intrinsic extents (the upward stack), then
+    // emit every row in window order so layout-node order — which
+    // semantics and hit routing walk — matches the source order.
+    var y = anchor_y;
+    for (children[0..anchor_child]) |child| {
+        y -= variableVirtualChildExtent(child, content.width, tokens, depth) + gap;
+    }
+    for (children, 0..) |child, offset| {
+        const height = variableVirtualChildExtent(child, content.width, tokens, depth);
+        if (child.layout.anchor == null) {
+            try layoutVariableVirtualChild(child, content, y, height, first_index + offset, item_count, parent_index, depth, output, len, tokens);
+        }
+        y += height + gap;
+    }
+}
+
+fn variableVirtualChildExtent(child: Widget, width: f32, tokens: DesignTokens, depth: usize) f32 {
+    return clampIntrinsicAxis(
+        if (child.frame.height > 0) child.frame.height else variableVirtualRowExtent(child, width, tokens, depth + 1),
+        child.layout.min_size.height,
+        child.layout.max_size.height,
+    );
+}
+
+fn layoutVariableVirtualChild(
+    child_source: Widget,
+    content: geometry.RectF,
+    y: f32,
+    height: f32,
+    item_index: usize,
+    item_count: usize,
+    parent_index: usize,
+    depth: usize,
+    output: []WidgetLayoutNode,
+    len: *usize,
+    tokens: DesignTokens,
+) Error!void {
+    var child = child_source;
+    child.semantics.list_item_index = saturatingU32(item_index);
+    child.semantics.list_item_count = saturatingU32(item_count);
+    const width = clampIntrinsicAxis(if (child.frame.width > 0) child.frame.width else content.width, child.layout.min_size.width, child.layout.max_size.width);
+    const child_frame = geometry.RectF.init(
+        content.x + child.frame.x,
+        y + child.frame.y,
+        width,
+        height,
+    );
+    _ = try layoutWidgetDepth(child, child_frame, parent_index, depth + 1, output, len, tokens);
+}
+
+/// Intrinsic height of one variable-extent virtual row at the window
+/// width. `.list_item` rows measure like the `.row` family — the max of
+/// their children's WIDTH-AWARE wrapped heights at their real widths —
+/// because their children flow horizontally and routinely hold wrapped
+/// paragraph columns. Scoped to the variable virtual path so every
+/// non-virtual list_item keeps its classic intrinsic sizing
+/// byte-identically.
+fn variableVirtualRowExtent(child: Widget, width: f32, tokens: DesignTokens, depth: usize) f32 {
+    if (child.kind != .list_item) return wrappedVerticalExtentForWidth(child, width, tokens, depth);
+    if (depth >= max_widget_depth) return preferredMainExtent(child, .vertical, tokens);
+    if (child.frame.height > 0) return clampMainExtent(child, .vertical, child.frame.height);
+    const padding = child.layout.padding;
+    const inner_width = @max(0, width - padding.left - padding.right);
+    var max_height: f32 = 0;
+    for (child.children, 0..) |grand, index| {
+        if (grand.layout.anchor != null) continue;
+        max_height = @max(max_height, wrappedVerticalExtentForWidth(
+            grand,
+            rowChildWidth(child, inner_width, index, tokens),
+            tokens,
+            depth + 1,
+        ));
+    }
+    return clampMainExtent(child, .vertical, max_height + padding.top + padding.bottom);
 }
 
 /// Width of a split's divider band (the hit target; the painted line is
@@ -1436,6 +1562,14 @@ pub fn virtualWidgetScrollContentExtent(widget: Widget, viewport_extent: f32) f3
 }
 
 pub fn virtualWidgetScrollContentExtentWithTokens(widget: Widget, viewport_extent: f32, tokens: DesignTokens) f32 {
+    // A variable-extent windowed virtual list DECLARES its content
+    // extent: the window's offset table already summed estimates plus
+    // measured corrections plus gaps, and stamping it here is what
+    // keeps the engine scrollbar, the scroll semantics, and the native
+    // driver's content size telling the same (converging) truth.
+    if (widget.layout.virtual_total_extent > 0 and widget.layout.virtual_item_count > 0) {
+        return widget.layout.virtual_total_extent;
+    }
     const item_count = virtualWidgetScrollItemCount(widget);
     if (item_count == 0) return 0;
     const item_extent = if (widget.layout.virtual_item_extent > 0)

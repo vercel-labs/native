@@ -536,6 +536,12 @@ pub const VirtualListRange = struct {
     content_extent: f32 = 0,
     before_extent: f32 = 0,
     after_extent: f32 = 0,
+    /// VARIABLE-extent windows only (`item_extent == 0`): the offset
+    /// table's leading edge for `first_visible_index` — the row the
+    /// layout pass anchors the built window on, so estimate error in
+    /// freshly mounted rows surfaces off-screen (above the anchor),
+    /// never under the user's eyes. Uniform windows leave it 0.
+    anchor_extent: f32 = 0,
 
     pub fn itemCount(self: VirtualListRange) usize {
         return self.end_index - self.start_index;

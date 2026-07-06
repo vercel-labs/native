@@ -157,6 +157,12 @@ pub const max_virtual_windows: usize = 8;
 pub const VirtualWindowState = struct {
     offset: f32 = 0,
     viewport_extent: f32 = 0,
+    /// Whether the offset comes from a MOUNTED list's retained state
+    /// (false: a fallback the source synthesized for a list it has no
+    /// layout for yet). Uniform windows ignore it; the trailing anchor
+    /// needs it to tell "first build" (open at the bottom) from "the
+    /// user scrolled to offset 0" (stay at the top).
+    mounted: bool = false,
 };
 
 /// The window source seam: installed on the `Ui` by the app loop before
@@ -165,6 +171,16 @@ pub const VirtualWindowState = struct {
 /// means "no runtime state yet" (first build, list not mounted) and
 /// falls back to offset 0 at the request's fallback viewport.
 pub const VirtualWindowSourceFn = *const fn (context: ?*anyopaque, id: ObjectId) ?VirtualWindowState;
+
+/// The extent-table seam of VARIABLE-extent virtual lists: installed by
+/// the app loop next to the window source, it resolves the RETAINED
+/// offset table (estimate prefix sums patched by measured actuals) for
+/// a list identity — the state that makes scrollbar geometry converge
+/// to truth as the user scrolls. Returning null (no source installed,
+/// or the app loop's table budget — one per declarable window — is
+/// exhausted) drops the build to stateless estimate-only math: still
+/// correct within the window, just without cross-frame corrections.
+pub const VirtualExtentSourceFn = *const fn (context: ?*anyopaque, id: ObjectId) ?*canvas.VirtualExtentTable;
 
 /// One windowed virtual list the current build declared: enough for the
 /// app loop to re-check the window against the freshly laid-out
@@ -179,6 +195,13 @@ pub const VirtualWindowRecord = struct {
     overscan: usize = 0,
     start_index: usize = 0,
     end_index: usize = 0,
+    /// VARIABLE-extent list: the app loop measures this window's
+    /// mounted rows after layout and patches the retained offset table
+    /// (anchored, so corrections never move visible content).
+    variable: bool = false,
+    /// Logical index of physical item 0 at build time (prepend-stable
+    /// identity for the measure step).
+    index_base: u64 = 0,
 };
 
 pub const UiHandlerEvent = enum {
@@ -203,6 +226,13 @@ pub const UiHandlerEvent = enum {
     /// (appending items grows the extent, so a fresh batch re-arms the
     /// next approach on its own).
     reach_end,
+    /// Approach-the-start counterpart (load-older-history for
+    /// tail-anchored transcripts): dispatched with the same hysteresis
+    /// when a user scroll brings the offset within one viewport of the
+    /// content START, re-armed past one and a half viewports — which
+    /// prepending a batch causes on its own, since the offset grows by
+    /// the prepended extent to keep the viewport anchored.
+    reach_start,
 };
 
 /// A color design token referenced by name (the fields of
@@ -280,6 +310,11 @@ pub fn Ui(comptime Msg: type) type {
         /// request's `viewport_fallback` at offset 0.
         virtual_window_context: ?*anyopaque = null,
         virtual_window_source: ?VirtualWindowSourceFn = null,
+        /// Extent-table source for VARIABLE-extent virtual lists (see
+        /// `VirtualExtentSourceFn`): null outside an app loop, where
+        /// variable windows compute from estimates alone.
+        virtual_extent_context: ?*anyopaque = null,
+        virtual_extent_source: ?VirtualExtentSourceFn = null,
         /// The windowed virtual lists this build declared (`virtualList`),
         /// for the app loop's coverage check and scroll re-derivation.
         virtual_window_records: [max_virtual_windows]VirtualWindowRecord = [_]VirtualWindowRecord{.{}} ** max_virtual_windows,
@@ -418,6 +453,14 @@ pub fn Ui(comptime Msg: type) type {
             /// Virtual index of the first child in a windowed virtual
             /// list (see `Widget.layout.virtual_first_index`).
             virtual_first_index: usize = 0,
+            /// VARIABLE-extent windowed virtual list plumbing (see
+            /// `Widget.layout.virtual_anchor_index` /
+            /// `virtual_anchor_extent` / `virtual_total_extent`).
+            /// Prefer the `virtualList` sugar, which computes all three
+            /// from the window's offset table.
+            virtual_anchor_index: usize = 0,
+            virtual_anchor_extent: f32 = 0,
+            virtual_total_extent: f32 = 0,
             /// Marks the element as a WINDOW-drag surface (the hidden
             /// titlebar pattern): pressing its own background — or plain
             /// text/icons inside it — moves the window, and double-click
@@ -472,6 +515,17 @@ pub fn Ui(comptime Msg: type) type {
             /// fetch storm. Pair with an `update` that appends a batch;
             /// the runtime never calls into the model itself.
             on_reach_end: ?Msg = null,
+            /// Approach-START Msg for scroll containers — the
+            /// load-older-history signal for tail-anchored transcripts:
+            /// dispatched when a user scroll brings the offset within
+            /// one viewport of the content start, with the same
+            /// hysteresis contract as `on_reach_end` (fires once per
+            /// approach; re-arms past one and a half viewports, which
+            /// prepending a batch causes on its own because the offset
+            /// grows by the prepended extent to keep the viewport
+            /// anchored). Builder-only for now, like the windowed
+            /// virtual list itself.
+            on_reach_start: ?Msg = null,
             /// Press-and-hold Msg: a pointer held down on this element
             /// for ~350 ms dispatches it (the release then presses
             /// nothing), while a quick click dispatches `on_press` as
@@ -552,6 +606,7 @@ pub fn Ui(comptime Msg: type) type {
             on_dismiss: ?Msg = null,
             on_hold: ?Msg = null,
             on_reach_end: ?Msg = null,
+            on_reach_start: ?Msg = null,
             on_input: ?InputMsgFn = null,
             on_value: ?ValueMsgFn = null,
             on_resize: ?ValueMsgFn = null,
@@ -703,6 +758,13 @@ pub fn Ui(comptime Msg: type) type {
                 return self.msgFor(id, .reach_end);
             }
 
+            /// Typed dispatch for an approach-START signal (load older
+            /// history): the widget's `on_reach_start` message, with the
+            /// same dispatcher-owned hysteresis as reach-end.
+            pub fn msgForReachStart(self: Tree, id: ObjectId) ?Msg {
+                return self.msgFor(id, .reach_start);
+            }
+
             /// Whether the widget binds an `on_hold` handler (the UiApp
             /// hold-timer arms only for these).
             pub fn hasHoldHandler(self: Tree, id: ObjectId) bool {
@@ -798,6 +860,7 @@ pub fn Ui(comptime Msg: type) type {
                 .on_dismiss = options.on_dismiss,
                 .on_hold = options.on_hold,
                 .on_reach_end = options.on_reach_end,
+                .on_reach_start = options.on_reach_start,
                 .on_input = options.on_input,
                 .on_value = options.on_value,
                 .on_resize = options.on_resize,
@@ -891,7 +954,46 @@ pub fn Ui(comptime Msg: type) type {
             /// The infinite-scroll fetch signal (see
             /// `ElementOptions.on_reach_end`).
             on_reach_end: ?Msg = null,
+            /// The load-older-history signal (see
+            /// `ElementOptions.on_reach_start`) — the tail-anchored
+            /// transcript's counterpart to `on_reach_end`.
+            on_reach_start: ?Msg = null,
+            /// VARIABLE-extent rows: a cheap per-item extent ESTIMATE
+            /// (called with `extent_context` and the item's LOGICAL
+            /// index, `index_base + physical`). Setting it selects the
+            /// variable contract: the window derives from an offset
+            /// table of estimate prefix sums that the engine patches
+            /// with measured actuals for mounted rows, rows lay out at
+            /// their intrinsic heights, and `item_extent` becomes the
+            /// fallback estimate only (it may be 0). Estimates should
+            /// come from model facts (line counts, attachment
+            /// presence) — never from layout; rough is fine, the
+            /// measured corrections converge the geometry and the
+            /// engine anchors the viewport so corrections never move
+            /// visible content.
+            extent_estimate: ?canvas.VirtualExtentEstimateFn = null,
+            extent_context: ?*const anyopaque = null,
+            /// Logical index of physical item 0. DECREASE it by the
+            /// prepended count when loading older history (chat
+            /// transcripts keyed by sequence number): logical item
+            /// identity — row keys, measured extents, the viewport
+            /// anchor — survives the prepend, and the engine grows the
+            /// scroll offset by the prepended extent so the user keeps
+            /// looking at the same rows. Increase it when the head is
+            /// truncated (bounded transcripts compacting old rows).
+            index_base: u64 = 0,
+            /// Which end the list anchors to. `.trailing` is the chat
+            /// contract: the first build opens at the bottom, and while
+            /// the user sits at the bottom an appended batch keeps the
+            /// list pinned there (scrolled away, appends never yank the
+            /// viewport). Uniform lists may use it too — `item_extent`
+            /// doubles as the estimate.
+            anchor: VirtualListAnchor = .leading,
         };
+
+        /// Anchoring contract of a windowed virtual list (see
+        /// `VirtualListOptions.anchor`).
+        pub const VirtualListAnchor = enum { leading, trailing };
 
         /// The DATA-WINDOW seam of the windowed virtual list: resolve
         /// which item range this build should materialize. The runtime
@@ -906,12 +1008,14 @@ pub fn Ui(comptime Msg: type) type {
         /// direction of flow as the chrome and appearance channels.
         pub fn virtualWindow(self: *Self, options: VirtualListOptions) canvas.VirtualListRange {
             const id = globalWidgetId(.scroll_view, .{ .str = options.id });
-            const state: VirtualWindowState = blk: {
+            const resolved: ?VirtualWindowState = blk: {
                 if (self.virtual_window_source) |source| {
                     if (source(self.virtual_window_context, id)) |value| break :blk value;
                 }
-                break :blk .{ .offset = 0, .viewport_extent = options.viewport_fallback };
+                break :blk null;
             };
+            if (virtualOptionsVariable(options)) return self.virtualWindowVariable(options, id, resolved);
+            const state: VirtualWindowState = resolved orelse .{ .offset = 0, .viewport_extent = options.viewport_fallback };
             return canvas.virtualListRange(.{
                 .item_count = options.item_count,
                 .item_extent = options.item_extent,
@@ -920,6 +1024,102 @@ pub fn Ui(comptime Msg: type) type {
                 .scroll_offset = state.offset,
                 .overscan = options.overscan,
             });
+        }
+
+        /// Whether the options select the VARIABLE-extent contract: an
+        /// estimate fn does, and so does tail anchoring alone (uniform
+        /// trailing lists ride the same offset table with `item_extent`
+        /// as a constant estimate — the was-at-bottom check needs the
+        /// retained previous total).
+        fn virtualOptionsVariable(options: VirtualListOptions) bool {
+            return options.extent_estimate != null or options.anchor == .trailing;
+        }
+
+        /// A user sitting within this many points of the bottom counts
+        /// as "at the bottom" for the trailing anchor's stick-on-append
+        /// rule (sub-point drift from measured corrections must not
+        /// unstick a pinned transcript).
+        const trailing_stick_slop: f32 = 1.0;
+
+        /// The variable-extent window computation: resolve the retained
+        /// offset table (app loop) or fall back to stateless estimates
+        /// (bare builds), consume the table's anchor-preserving offset
+        /// delta so corrections and geometry land atomically, apply the
+        /// trailing anchor, and derive the window from per-item offsets.
+        fn virtualWindowVariable(self: *Self, options: VirtualListOptions, id: ObjectId, resolved: ?VirtualWindowState) canvas.VirtualListRange {
+            const state: VirtualWindowState = resolved orelse .{ .offset = 0, .viewport_extent = options.viewport_fallback, .mounted = false };
+            const viewport = state.viewport_extent;
+            var offset: f32 = state.offset;
+            const table: ?*canvas.VirtualExtentTable = blk: {
+                if (self.virtual_extent_source) |source| break :blk source(self.virtual_extent_context, id);
+                break :blk null;
+            };
+            var range_options = canvas.VirtualVariableRangeOptions{
+                .item_count = options.item_count,
+                .gap = options.gap,
+                .viewport_extent = viewport,
+                .scroll_offset = 0,
+                .overscan = options.overscan,
+                .index_base = options.index_base,
+                .estimate_context = options.extent_context,
+                .estimate_fn = options.extent_estimate,
+                .uniform_estimate = options.item_extent,
+            };
+            if (table) |retained| {
+                _ = retained.sync(.{
+                    .id = id,
+                    .item_count = options.item_count,
+                    .index_base = options.index_base,
+                    .gap = options.gap,
+                    .estimate_context = options.extent_context,
+                    .estimate_fn = options.extent_estimate,
+                    .uniform_estimate = options.item_extent,
+                });
+                // Corrections and prepends land here, together with the
+                // patched offsets below — the anchoring invariant.
+                offset += retained.takePendingOffsetDelta();
+                const total = retained.totalExtent();
+                if (options.anchor == .trailing) {
+                    if (!state.mounted) {
+                        offset = @max(0, total - viewport);
+                    } else if (retained.last_build_total >= 0) {
+                        // Was-at-the-bottom re-pin: the RETAINED offset
+                        // is compared against the geometry it was
+                        // scrolled under (last build's total), so both
+                        // appends and measured corrections keep a
+                        // pinned transcript pinned — while a viewport
+                        // scrolled away is never yanked.
+                        const old_max = @max(0, retained.last_build_total - retained.last_build_viewport);
+                        if (state.offset >= old_max - trailing_stick_slop) offset = @max(0, total - viewport);
+                    }
+                }
+                retained.last_build_total = total;
+                retained.last_build_viewport = viewport;
+            } else if (options.anchor == .trailing and !state.mounted) {
+                // Stateless first build of a trailing list: open at the
+                // estimated bottom (one extra estimate pass — bare-build
+                // pricing only; app loops always install a table).
+                const probe = canvas.virtualVariableListRange(range_options, null);
+                offset = @max(0, probe.content_extent - viewport);
+            }
+            range_options.scroll_offset = offset;
+            const variable = canvas.virtualVariableListRange(range_options, table);
+            return .{
+                .start_index = variable.start_index,
+                .end_index = variable.end_index,
+                .first_visible_index = variable.first_visible_index,
+                .last_visible_index = variable.last_visible_index,
+                // 0 marks the variable contract for `virtualList` (rows
+                // stack at intrinsic heights; the table prices the rest).
+                .item_extent = 0,
+                .item_gap = @max(0, options.gap),
+                .scroll_offset = variable.scroll_offset,
+                .layout_offset = variable.layout_offset,
+                .content_extent = variable.content_extent,
+                .before_extent = variable.before_extent,
+                .after_extent = variable.after_extent,
+                .anchor_extent = variable.anchor_extent,
+            };
         }
 
         /// A WINDOWED virtual list: a runtime-scrolled scroll region
@@ -936,12 +1136,17 @@ pub fn Ui(comptime Msg: type) type {
         pub fn virtualList(self: *Self, options: VirtualListOptions, window: canvas.VirtualListRange, children: anytype) Node {
             var semantics = options.semantics;
             if (semantics.role == .none) semantics.role = .list;
+            const variable = virtualOptionsVariable(options);
             const node = self.el(.scroll_view, .{
                 .global_key = .{ .str = options.id },
                 // Mirror the runtime offset into the source so the flex
                 // pass lays the window out at the offset the window was
                 // computed for — the same value the scroll reconcile
-                // keeps, so source and runtime never fight.
+                // keeps, so source and runtime never fight. (For a
+                // variable list this is also the CORRECTION channel: an
+                // anchor-preserving offset shift stamps a changed
+                // source value, which the reconcile treats as the
+                // programmatic scroll it is.)
                 .value = window.layout_offset,
                 .width = options.width,
                 .height = options.height,
@@ -950,15 +1155,19 @@ pub fn Ui(comptime Msg: type) type {
                 .padding = options.padding,
                 .gap = options.gap,
                 .virtualized = true,
-                .virtual_item_extent = options.item_extent,
+                .virtual_item_extent = if (variable) 0 else options.item_extent,
                 .virtual_overscan = options.overscan,
                 .virtual_item_count = options.item_count,
                 .virtual_first_index = window.start_index,
+                .virtual_anchor_index = if (variable) window.first_visible_index else 0,
+                .virtual_anchor_extent = if (variable) window.anchor_extent else 0,
+                .virtual_total_extent = if (variable) window.content_extent else 0,
                 .style = options.style,
                 .style_tokens = options.style_tokens,
                 .semantics = semantics,
                 .on_scroll = options.on_scroll,
                 .on_reach_end = options.on_reach_end,
+                .on_reach_start = options.on_reach_start,
             }, children);
             self.recordVirtualWindow(.{
                 .id = globalWidgetId(.scroll_view, .{ .str = options.id }),
@@ -968,6 +1177,8 @@ pub fn Ui(comptime Msg: type) type {
                 .overscan = options.overscan,
                 .start_index = window.start_index,
                 .end_index = window.start_index + node.nodes.len,
+                .variable = variable,
+                .index_base = options.index_base,
             });
             return node;
         }
@@ -1715,6 +1926,7 @@ pub fn Ui(comptime Msg: type) type {
             appendHandler(handlers, handler_len, widget.id, .dismiss, node.on_dismiss);
             appendHandler(handlers, handler_len, widget.id, .hold, node.on_hold);
             appendHandler(handlers, handler_len, widget.id, .reach_end, node.on_reach_end);
+            appendHandler(handlers, handler_len, widget.id, .reach_start, node.on_reach_start);
             if (node.on_input) |make| {
                 handlers[handler_len.*] = .{ .id = widget.id, .event = .input, .action = .{ .input = make } };
                 handler_len.* += 1;
@@ -1767,6 +1979,7 @@ pub fn Ui(comptime Msg: type) type {
             if (node.on_dismiss != null) total += 1;
             if (node.on_hold != null) total += 1;
             if (node.on_reach_end != null) total += 1;
+            if (node.on_reach_start != null) total += 1;
             if (node.on_input != null) total += 1;
             if (node.on_value != null) total += 1;
             if (node.on_resize != null) total += 1;
@@ -1885,6 +2098,9 @@ pub fn Ui(comptime Msg: type) type {
                     .virtual_overscan = options.virtual_overscan,
                     .virtual_item_count = options.virtual_item_count,
                     .virtual_first_index = options.virtual_first_index,
+                    .virtual_anchor_index = options.virtual_anchor_index,
+                    .virtual_anchor_extent = options.virtual_anchor_extent,
+                    .virtual_total_extent = options.virtual_total_extent,
                     .min_size = .{ .width = @max(options.width, options.min_width), .height = options.height },
                     // Explicit sizes are definite (min AND max). Resizable
                     // is the exception: width documents the initial width

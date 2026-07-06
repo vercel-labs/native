@@ -7,6 +7,7 @@ test {
     _ = @import("runtime_event_tests.zig");
     _ = @import("canvas_widget_event_tests.zig");
     _ = @import("ui_app_tests.zig");
+    _ = @import("ui_app_virtual_variable_tests.zig");
     _ = @import("ui_app_provenance.zig");
     _ = @import("canvas_budget_edge_tests.zig");
     _ = @import("ui_app_huge_model_tests.zig");

@@ -3,7 +3,7 @@ import { AttrTable } from "@/components/attr-table";
 
 # Virtual List
 
-The windowed virtual list: a scroll region that represents the model's whole dataset while the view only ever builds the rows on screen. The runtime owns the viewport math — retained scroll offset + viewport height → visible index range, from a fixed per-item extent — and the model owns the data: the view asks `ui.virtualWindow` for the range, builds one keyed node per item in it, and hands both to `ui.virtualList`. Widget-node cost is the window plus overscan, never the dataset, so a 100,000-row timeline stays deep under the per-view node budget while the scrollbar (engine-drawn, or the native scroll driver's OS overlay on macOS) spans the full virtual extent.
+The windowed virtual list: a scroll region that represents the model's whole dataset while the view only ever builds the rows on screen. The runtime owns the viewport math — retained scroll offset + viewport height → visible index range, from a fixed per-item extent (uniform rows) or an app-provided extent estimate corrected by measurement (variable rows) — and the model owns the data: the view asks `ui.virtualWindow` for the range, builds one keyed node per item in it, and hands both to `ui.virtualList`. Widget-node cost is the window plus overscan, never the dataset, so a 100,000-row timeline stays deep under the per-view node budget while the scrollbar (engine-drawn, or the native scroll driver's OS overlay on macOS) spans the full virtual extent.
 
 <ComponentPreview name="virtual-list" alt="A windowed virtual list rendered by the engine" caption="2,500 rows exist as arithmetic; the tree holds only the visible window" />
 
@@ -15,7 +15,7 @@ Declare the list options once and use them twice — `virtualWindow` resolves wh
 const options = Ui.VirtualListOptions{
     .id = "timeline",              // stable identity (global key + scroll-state lookup)
     .item_count = model.loaded,    // the MODEL owns the data; this is all the runtime sees
-    .item_extent = 84,             // fixed row height: the v1 uniform-extent contract
+    .item_extent = 84,             // fixed row height: the uniform fast path
     .overscan = 4,                 // rows built beyond the visible range on each side
     .grow = 1,
     .on_reach_end = .load_more,    // the infinite-scroll fetch signal
@@ -65,7 +65,7 @@ No `on_scroll` binding is required: the runtime owns the offset (wheel, kinetic,
     </tr>
     <tr>
       <td><code>item_extent</code></td>
-      <td>Fixed per-item extent in points. The v1 contract is uniform rows — the visible range and the 100k-row extent are pure arithmetic, no measurement pass.</td>
+      <td>Fixed per-item extent in points — the uniform fast path: the visible range and the 100k-row extent are pure arithmetic, no measurement pass. With <code>extent_estimate</code> set it becomes the fallback estimate only (may be 0).</td>
     </tr>
     <tr>
       <td><code>gap</code></td>
@@ -95,9 +95,34 @@ No `on_scroll` binding is required: the runtime owns the offset (wheel, kinetic,
       <td><code>on_reach_end</code></td>
       <td>The approach-end Msg (see above).</td>
     </tr>
+    <tr>
+      <td><code>extent_estimate</code> / <code>extent_context</code></td>
+      <td>Variable-extent mode: a cheap pure estimate fn (<code>fn (context, logical_index) f32</code>) from model facts — line counts, byte counts — never from layout. Rows lay out at their intrinsic heights; the engine measures mounted rows and converges the scroll geometry, anchored so corrections never move visible content.</td>
+    </tr>
+    <tr>
+      <td><code>index_base</code></td>
+      <td>Logical index of item 0 (prepend-stable identity). Decrease it by the prepended count to load older history: row identity, measured extents, and the viewport anchor all survive.</td>
+    </tr>
+    <tr>
+      <td><code>anchor</code></td>
+      <td><code>.leading</code> (default) or <code>.trailing</code> — the chat contract: open at the bottom, stay pinned through appends while the user sits at the bottom, never yank a scrolled-away viewport.</td>
+    </tr>
+    <tr>
+      <td><code>on_reach_start</code></td>
+      <td>The approach-START Msg (load older history), with the same hysteresis as reach-end; a prepend re-arms it by growing the offset.</td>
+    </tr>
   </tbody>
 </table>
 
+## Variable-extent rows
+
+Chat transcripts, mixed-height feeds, and markdown-bearing lists set `extent_estimate` instead of a fixed `item_extent`. The estimate prices unmounted rows (rough is fine); mounted rows lay out at their real wrapped heights and the engine records those measurements into a budgeted per-list offset table, so the total extent — the scrollbar, the scroll semantics, the native driver's content size — converges to truth as the user visits the list. Two honest behaviors to know:
+
+- **The scrollbar may drift as estimates correct.** That is the industry-honest contract of every estimated virtual list; the correction store is budgeted, and rows evicted from it drift back to their estimates until revisited.
+- **Visible content never jumps.** The built window is anchored on the first visible row: it lands exactly at the offset table's edge for it, freshly mounted rows stack above/below at their real heights, and every correction shifts the scroll offset and the geometry together. Estimate error surfaces off screen, not under the pointer.
+
+`anchor = .trailing`, `on_reach_start`, and `index_base` complete the transcript shape — see `examples/feed` for the mixed-height showcase and the options table above for each field.
+
 ## Markup
 
-The windowed virtual list is **builder-only**: the closed markup grammar has no channel for the view to receive the runtime's range request inside a `for` binding, so markup cannot build "only the visible rows" honestly. Markup lists keep the bounded form — [`<list virtualized>`](/components/list) lays out only the visible window of the rows the `for` produced, which is the right shape when the row set already fits the model (hundreds, not hundreds of thousands). `on-reach-end` IS markup-expressible on `scroll`, so markup apps get honest infinite fetch with bounded windows.
+The windowed virtual list is **builder-only**: the closed markup grammar has no channel for the view to receive the runtime's range request inside a `for` binding, so markup cannot build "only the visible rows" honestly — and the variable-extent mode additionally needs an estimate **function**, which the closed grammar has no binding form for. Markup lists keep the bounded form — [`<list virtualized>`](/components/list) lays out only the visible window of the rows the `for` produced, which is the right shape when the row set already fits the model (hundreds, not hundreds of thousands). `on-reach-end` IS markup-expressible on `scroll`, so markup apps get honest infinite fetch with bounded windows.
