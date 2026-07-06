@@ -1081,26 +1081,11 @@ test "import path escapes, absolute paths, and bad extensions are teaching error
     try testing.expectEqualStrings(markup.import_src_escape_message, escaped.message);
 }
 
-test "the former .zml extension is retired: not a markup extension, imports reject it" {
-    // The rename window is closed. `.zml` gets the same treatment as any
-    // other non-markup extension; the teaching error names the required
-    // extension so the fix is evident.
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
+test ".native is the one markup extension" {
     try testing.expect(markup.hasMarkupExtension("view.native"));
-    try testing.expect(!markup.hasMarkupExtension("view.zml"));
     try testing.expect(!markup.hasMarkupExtension("view.html"));
     try testing.expect(!markup.hasMarkupExtension("view.xml"));
-
-    const root_set = [_]markup.SourceFile{
-        .{ .path = "view.native", .source = "<import src=\"parts.zml\"/>\n<row><use template=\"pill\" /></row>" },
-        .{ .path = "parts.zml", .source = "<template name=\"pill\"><badge>x</badge></template>" },
-    };
-    var diagnostic: markup.MarkupErrorInfo = .{};
-    try testing.expectError(error.MarkupImport, resolveSet(arena, &root_set, "view.native", &diagnostic));
-    try testing.expectEqualStrings(markup.import_src_extension_message, diagnostic.message);
+    try testing.expect(!markup.hasMarkupExtension("view.native.txt"));
 }
 
 test "an imported file with a view root is rejected with the teaching error" {

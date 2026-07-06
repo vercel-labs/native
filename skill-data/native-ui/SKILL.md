@@ -12,7 +12,7 @@ A native-rendered Native SDK app is a markup view plus Zig logic:
 
 The markup compiles to the same widget tree a hand-written `canvas.Ui(Msg)` builder view would produce: identical structural widget ids, identical typed handler table. Markup can never mutate state — it binds values and dispatches messages; all logic lives in Zig.
 
-Editors highlight `.native` markup well in HTML mode — the default scaffold writes no editor config, so add `.vscode/settings.json` with `"files.associations": {"*.native": "html"}` yourself, or scaffold with `native init --full`, which writes it. Files with the format's former `.zml` extension still load and check everywhere `.native` does; rename them when convenient.
+Editors highlight `.native` markup well in HTML mode — the default scaffold writes no editor config, so add `.vscode/settings.json` with `"files.associations": {"*.native": "html"}` yourself, or scaffold with `native init --full`, which writes it.
 
 Start a new app with `native init` (zero-config: app.zon + src + assets, the CLI generates the build graph), or copy `examples/habits/` (smallest): change the name/id in app.zon and `assets/` copies verbatim — there are no build files to edit. The `native dev|test|build` verbs drive any app directory shaped this way.
 

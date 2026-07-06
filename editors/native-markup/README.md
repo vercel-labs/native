@@ -1,6 +1,6 @@
 # Native markup editor support
 
-Editor tooling for `.native` markup views (see `skill-data/native-ui/SKILL.md` for the language itself). Files with the format's former `.zml` extension are matched too while the rename window lasts.
+Editor tooling for `.native` markup views (see `skill-data/native-ui/SKILL.md` for the language itself).
 
 - **TextMate grammar** (`syntaxes/native-markup.tmLanguage.json`) — tags, attribute
   names, strings, comments, and `{...}` binding expressions get their own
@@ -49,8 +49,8 @@ PATH, set the server path in settings:
 }
 ```
 
-Remove any old `"files.associations"` entry mapping `*.native` (or `*.zml`)
-to `html` so the file picks up the `native-markup` language id.
+Remove any old `"files.associations"` entry mapping `*.native` to `html`
+so the file picks up the `native-markup` language id.
 
 (`code --install-extension` expects a packaged `.vsix`; the symlink route
 avoids needing `vsce`/npm entirely.)
@@ -67,7 +67,7 @@ args = ["markup", "lsp"]
 [[language]]
 name = "native-markup"
 scope = "source.native-markup"
-file-types = ["native", "zml"]
+file-types = ["native"]
 comment-tokens = []
 block-comment-tokens = { start = "<!--", end = "-->" }
 language-servers = ["native-markup-lsp"]
@@ -82,7 +82,7 @@ either way.
 ## Neovim (0.10+)
 
 ```lua
-vim.filetype.add({ extension = { native = "native-markup", zml = "native-markup" } })
+vim.filetype.add({ extension = { native = "native-markup" } })
 
 vim.api.nvim_create_autocmd("FileType", {
   pattern = "native-markup",

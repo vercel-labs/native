@@ -100,14 +100,6 @@ pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []con
     // for the scan).
     var embedded_basenames: ?[]const []const u8 = null;
     for (files) |file_path| {
-        // The format's former extension no longer loads anywhere, so
-        // checking such a file would validate something the engines will
-        // never see; the honest result is an error that names the one fix.
-        if (std.mem.endsWith(u8, file_path, ".zml")) {
-            outcome.failures += 1;
-            printRenameError(file_path);
-            continue;
-        }
         const checked = checkFile(allocator, io, file_path, .{
             .contract = if (contract_value) |*parsed| parsed else null,
             .usage = if (usage_state) |*live_usage| live_usage else null,
@@ -135,11 +127,6 @@ pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []con
         }
     }
     return outcome;
-}
-
-/// The teaching error for files still on the format's former extension.
-fn printRenameError(file_path: []const u8) void {
-    std.debug.print("{s}: error: .zml (the format's former extension) no longer loads — rename the file to .native and update the @embedFile path\n", .{file_path});
 }
 
 /// After a markup file fails inside an app directory, say out loud when
@@ -621,9 +608,6 @@ fn usage() void {
         \\lsp: speaks the Language Server Protocol over stdio (diagnostics,
         \\completion, hover) for .native files; wire it into your editor's LSP
         \\client (see editors/native-markup/README.md).
-        \\
-        \\Files with the format's former .zml extension keep working for all
-        \\three verbs for now; check notes the rename.
         \\
     , .{});
 }

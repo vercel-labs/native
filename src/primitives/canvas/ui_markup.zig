@@ -1738,9 +1738,7 @@ pub fn importSrcShapeError(src: []const u8) ?[]const u8 {
 /// The Native markup file extension.
 pub const markup_extension = ".native";
 
-/// True for the one markup extension. The format's former extension
-/// (`.zml`) is retired: the tools name the rename in their teaching
-/// errors, but nothing loads it.
+/// True for the one markup extension.
 pub fn hasMarkupExtension(path: []const u8) bool {
     return std.mem.endsWith(u8, path, markup_extension);
 }
