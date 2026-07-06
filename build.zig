@@ -139,6 +139,7 @@ pub fn build(b: *std.Build) void {
     desktop_mod.addImport("json", json_mod);
     desktop_mod.addImport("canvas", canvas_mod);
     const desktop_tests = testArtifact(b, desktop_mod);
+    const desktop_test_shards = desktopTestShardArtifacts(b, desktop_mod);
 
     // The embeddable static library's root module carries only the C ABI
     // exports (fixed WebView shell host); user-app canvas libraries are
@@ -358,7 +359,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(platform_info_tests).step);
     test_step.dependOn(&b.addRunArtifact(json_tests).step);
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
-    test_step.dependOn(&b.addRunArtifact(desktop_tests).step);
+    for (desktop_test_shards) |shard_tests| {
+        test_step.dependOn(&b.addRunArtifact(shard_tests).step);
+    }
     test_step.dependOn(&b.addRunArtifact(automation_protocol_tests).step);
     test_step.dependOn(&b.addRunArtifact(tooling_tests).step);
     test_step.dependOn(&b.addRunArtifact(markup_lsp_tests).step);
@@ -605,6 +608,9 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-json", "Run JSON primitive tests", json_tests);
     addTestStep(b, "test-canvas", "Run canvas display list tests", canvas_tests);
     addTestStep(b, "test-desktop", "Run Native SDK framework tests", desktop_tests);
+    for (desktop_test_shard_specs, desktop_test_shards) |spec, shard_tests| {
+        addTestStep(b, b.fmt("test-desktop-{s}", .{spec.name}), spec.description, shard_tests);
+    }
     addTestStep(b, "test-automation-protocol", "Run automation protocol tests", automation_protocol_tests);
     addTestStep(b, "test-automation-cli", "Run native automate CLI tests", automation_cli_tests);
     addTestStep(b, "test-tooling", "Run Native SDK tooling tests", tooling_tests);
@@ -2026,11 +2032,194 @@ fn cliBuildCommit(b: *std.Build) []const u8 {
 }
 
 fn testArtifact(b: *std.Build, mod: *std.Build.Module) *std.Build.Step.Compile {
+    return filteredTestArtifact(b, mod, "test", &.{});
+}
+
+fn filteredTestArtifact(b: *std.Build, mod: *std.Build.Module, name: []const u8, filters: []const []const u8) *std.Build.Step.Compile {
     // use_llvm: Zig 0.16.0's self-hosted x86_64 backend miscompiles the
     // SysV C ABI for f32-heavy signatures (native_sdk_app_viewport); see
     // useLlvmWorkaround in build/app.zig for the full story and repro.
     const use_llvm = if (mod.resolved_target) |target| @import("build/app.zig").useLlvmWorkaround(target) else null;
-    return b.addTest(.{ .root_module = mod, .use_llvm = use_llvm });
+    return b.addTest(.{ .name = name, .root_module = mod, .filters = filters, .use_llvm = use_llvm });
+}
+
+/// One slice of the framework test suite, selected by test-name filters.
+/// The framework module compiles into a single test binary whose ~580
+/// tests run serially in one process, which made that binary the longest
+/// step in `zig build test` by a wide margin — the rest of the suite is
+/// dozens of binaries that each finish in well under a second. The
+/// aggregate `test` step therefore runs the framework module as one
+/// filtered binary per family below, so the build runner executes the
+/// families concurrently and the suite finishes with the slowest family
+/// instead of the sum of all of them. `zig build test-desktop` still runs
+/// the unfiltered binary when a single process is easier to debug, and
+/// each family has its own `test-desktop-<name>` step.
+const DesktopTestShard = struct {
+    /// Suffix for the artifact name and the `test-desktop-<name>` step.
+    name: []const u8,
+    description: []const u8,
+    /// A test file's namespace is routed to the first shard in
+    /// `desktop_test_shard_specs` with a matching prefix, so earlier
+    /// entries carve their family out of the later, broader ones and
+    /// the final empty prefix collects every namespace left over.
+    prefixes: []const []const u8,
+};
+
+const desktop_test_shard_specs = [_]DesktopTestShard{
+    .{
+        .name = "canvas-widget",
+        .description = "Run framework canvas widget tests",
+        .prefixes = &.{"runtime.canvas_widget"},
+    },
+    .{
+        .name = "canvas-frame",
+        .description = "Run framework canvas frame, budget, image, and font tests",
+        .prefixes = &.{"runtime.canvas"},
+    },
+    .{
+        .name = "ui-shell",
+        .description = "Run framework UI app and shell layout tests",
+        .prefixes = &.{ "runtime.ui_app", "runtime.shell" },
+    },
+    .{
+        .name = "runtime-core",
+        .description = "Run framework runtime core, effects, session, and bridge tests",
+        .prefixes = &.{"runtime."},
+    },
+    .{
+        .name = "platform",
+        .description = "Run framework platform, automation, embed, and remaining tests",
+        .prefixes = &.{""},
+    },
+};
+
+/// A framework source file that declares top-level tests, described by
+/// the dotted namespace the test runner uses in fully-qualified test
+/// names: tests in src/runtime/effects_tests.zig are named
+/// "runtime.effects_tests.test.<name>".
+const DesktopTestFile = struct {
+    namespace: []const u8,
+    /// Names of the file's `test "<name>"` declarations, in source order.
+    /// Unnamed `test { ... }` blocks are not listed: the test runner
+    /// exempts them from filtering, so they run in every shard. That is
+    /// deliberate — those blocks are the aggregators whose references
+    /// make the compiler discover the named tests in the first place,
+    /// and their bodies are empty at run time.
+    named_tests: []const []const u8,
+};
+
+/// Test binaries for the framework module, one per shard spec. Filters
+/// are derived from the source tree at configure time: every framework
+/// file with a top-level `test` declaration contributes its namespace as
+/// a filter ("runtime.effects_tests.test") to exactly one shard, so a
+/// new test file is picked up — and routed to a shard by prefix — the
+/// moment it exists, and a file can never silently fall out of
+/// `zig build test` because a hand-kept list went stale.
+fn desktopTestShardArtifacts(b: *std.Build, mod: *std.Build.Module) [desktop_test_shard_specs.len]*std.Build.Step.Compile {
+    const files = desktopTestFiles(b);
+    var filters: [desktop_test_shard_specs.len]std.ArrayList([]const u8) = @splat(.empty);
+    for (files) |file| {
+        const shard = desktopTestShardIndex(file.namespace);
+        if (std.mem.eql(u8, file.namespace, "root")) {
+            // Filters match anywhere in a fully-qualified name, and the
+            // module root's namespace ("root") is a dotted suffix of
+            // every other root.zig namespace ("runtime.root",
+            // "platform.root", ...), so a bare "root.test" filter would
+            // pull those files' tests into this shard as well. Filter
+            // the module root by exact test name instead.
+            for (file.named_tests) |test_name| {
+                filters[shard].append(b.allocator, b.fmt("root.test.{s}", .{test_name})) catch @panic("OOM");
+            }
+            continue;
+        }
+        filters[shard].append(b.allocator, b.fmt("{s}.test", .{file.namespace})) catch @panic("OOM");
+        // The same suffix hazard across two shards would run the longer
+        // file's tests twice per `zig build test`. Refuse the layout up
+        // front so the collision is resolved when the file is added, not
+        // when a duplicated test starts flaking.
+        for (files) |other| {
+            if (desktopTestShardIndex(other.namespace) == shard) continue;
+            if (std.mem.endsWith(u8, other.namespace, b.fmt(".{s}", .{file.namespace}))) {
+                std.debug.panic(
+                    "framework test shards: namespace {s} is a dotted suffix of {s} in another shard; their name filters would overlap. Adjust desktop_test_shard_specs so both land in one shard.",
+                    .{ file.namespace, other.namespace },
+                );
+            }
+        }
+    }
+    var artifacts: [desktop_test_shard_specs.len]*std.Build.Step.Compile = undefined;
+    for (&artifacts, desktop_test_shard_specs, filters) |*artifact, spec, shard_filters| {
+        artifact.* = filteredTestArtifact(b, mod, b.fmt("desktop-{s}-tests", .{spec.name}), shard_filters.items);
+    }
+    return artifacts;
+}
+
+fn desktopTestShardIndex(namespace: []const u8) usize {
+    for (desktop_test_shard_specs, 0..) |spec, index| {
+        for (spec.prefixes) |prefix| {
+            if (std.mem.startsWith(u8, namespace, prefix)) return index;
+        }
+    }
+    unreachable; // the final shard's empty prefix matches every namespace
+}
+
+/// Scans the framework source tree for files declaring top-level tests,
+/// sorted by namespace so the generated filters — and therefore the
+/// shard binaries' cache manifests — do not churn with directory
+/// iteration order. src/primitives and src/tooling are separate modules
+/// with their own test binaries; everything else under src/ belongs to
+/// the framework module rooted at src/root.zig.
+fn desktopTestFiles(b: *std.Build) []const DesktopTestFile {
+    const gpa = b.allocator;
+    const io = b.graph.io;
+    var files: std.ArrayList(DesktopTestFile) = .empty;
+    var src_dir = b.build_root.handle.openDir(io, "src", .{ .iterate = true }) catch |err|
+        std.debug.panic("framework test shards: unable to open src/: {s}", .{@errorName(err)});
+    defer src_dir.close(io);
+    var walker = src_dir.walk(gpa) catch @panic("OOM");
+    defer walker.deinit();
+    while (walker.next(io) catch |err|
+        std.debug.panic("framework test shards: unable to walk src/: {s}", .{@errorName(err)})) |entry|
+    {
+        if (entry.kind == .directory) {
+            if (entry.depth() == 1 and
+                (std.mem.eql(u8, entry.basename, "primitives") or std.mem.eql(u8, entry.basename, "tooling")))
+            {
+                walker.leave(io);
+            }
+            continue;
+        }
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        const source = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(16 * 1024 * 1024)) catch |err|
+            std.debug.panic("framework test shards: unable to read src/{s}: {s}", .{ entry.path, @errorName(err) });
+        var named_tests: std.ArrayList([]const u8) = .empty;
+        var has_tests = false;
+        var lines = std.mem.splitScalar(u8, source, '\n');
+        while (lines.next()) |line| {
+            // Only column-zero declarations: a test nested inside a
+            // container would carry that container's namespace, which
+            // these filters would not match.
+            if (!std.mem.startsWith(u8, line, "test ")) continue;
+            has_tests = true;
+            const rest = line["test ".len..];
+            if (rest.len > 0 and rest[0] == '"') {
+                if (std.mem.indexOfScalar(u8, rest[1..], '"')) |end| {
+                    named_tests.append(gpa, rest[1 .. 1 + end]) catch @panic("OOM");
+                }
+            }
+        }
+        if (!has_tests) continue;
+        const namespace = gpa.dupe(u8, entry.path[0 .. entry.path.len - ".zig".len]) catch @panic("OOM");
+        std.mem.replaceScalar(u8, namespace, std.fs.path.sep, '.');
+        files.append(gpa, .{ .namespace = namespace, .named_tests = named_tests.items }) catch @panic("OOM");
+    }
+    const sorted = files.items;
+    std.mem.sort(DesktopTestFile, sorted, {}, struct {
+        fn lessThan(_: void, lhs: DesktopTestFile, rhs: DesktopTestFile) bool {
+            return std.mem.lessThan(u8, lhs.namespace, rhs.namespace);
+        }
+    }.lessThan);
+    return sorted;
 }
 
 fn addTestStep(b: *std.Build, name: []const u8, description: []const u8, artifact: *std.Build.Step.Compile) void {
