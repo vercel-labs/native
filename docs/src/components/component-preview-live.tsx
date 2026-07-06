@@ -423,7 +423,6 @@ export function ComponentPreviewLive({
             live ? "opacity-100" : "opacity-0 group-hover/live:opacity-70"
           }`}
         >
-          <span className={`h-1.5 w-1.5 rounded-full ${live ? "bg-green-700" : "bg-gray-600"}`} />
           {live ? "WASM Preview" : "Hover to interact"}
         </span>
       ) : null}
