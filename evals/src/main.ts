@@ -282,6 +282,7 @@ async function runCaseLocal(
     log,
     skipLive: options.skipLive,
     dryRun: options.dryRun,
+    agentErrored: agent.status === "error",
     lane: options.lane,
     artifactsDir: context.caseResultsDir,
     taskPrompt: evalCase.prompt,

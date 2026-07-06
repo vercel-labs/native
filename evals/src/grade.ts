@@ -15,6 +15,8 @@ export interface GradeContext {
   skipLive: boolean;
   /** Dry runs make no model calls; llm_judge checks report "skipped". */
   dryRun: boolean;
+  /** The agent step errored before producing work: llm_judge skips instead of spending judge tokens grading the untouched scaffold. */
+  agentErrored?: boolean | undefined;
   /** Grading lane: decides live-check build flags and lane-scoped skips. */
   lane: Lane;
   /**
@@ -96,6 +98,9 @@ async function llmJudge(check: LlmJudgeCheck, context: GradeContext): Promise<Pe
   const description = `judge${advisory ? " (advisory)" : ""}: ${check.description}`;
   if (context.dryRun) {
     return { type: "llm_judge", description, status: "skipped", advisory, detail: "--dry-run (no model calls)" };
+  }
+  if (context.agentErrored) {
+    return { type: "llm_judge", description, status: "skipped", advisory, detail: "agent step errored - nothing to judge" };
   }
   if (!context.gatewayKey) {
     return { type: "llm_judge", description, status: "skipped", advisory, detail: "no gateway key" };

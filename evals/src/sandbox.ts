@@ -10,6 +10,8 @@ import type { CaseResult, EvalCase } from "./types.ts";
 const SANDBOX_TIMEOUT_MS = 45 * 60 * 1000;
 /** Where evals/sandbox/Dockerfile bakes the repo (pinned ref, warm caches). */
 const REPO_DIR = "/opt/native-sdk/repo";
+/** The claude CLI refuses --dangerously-skip-permissions as root; the inner harness runs as this user. */
+const EVAL_USER = "evalagent";
 /** Headless X display for live checks; started per sandbox, so no collisions. */
 const DISPLAY = ":77";
 
@@ -177,7 +179,18 @@ export async function runCaseInSandbox(options: {
     // The inner harness does the rest, exactly like a local run but on the
     // linux-sandbox lane: repo-root zig build, scaffold + skill, pre-warm,
     // agent, graders (live checks drive the app on the Xvfb display), judge.
-    // --skip-permissions is safe here: the whole VM is the throwaway.
+    // --skip-permissions is safe here: the whole VM is the throwaway — but
+    // the claude CLI refuses it under root, so the inner harness runs as a
+    // dedicated non-root user (the image's shared zig caches are already
+    // world-writable for exactly this). setpriv (not runuser/su) so the
+    // command env — gateway key, DISPLAY — passes through unmodified.
+    await run(
+      sandbox,
+      "provision non-root eval user",
+      `id -u ${EVAL_USER} >/dev/null 2>&1 || useradd -m ${EVAL_USER}; chown -R ${EVAL_USER} /opt/native-sdk`,
+      log,
+      false,
+    );
     const inner = [
       `cd ${REPO_DIR}/evals &&`,
       "pnpm eval --skip-permissions --keep-workspaces --lane linux-sandbox",
@@ -185,6 +198,7 @@ export async function runCaseInSandbox(options: {
       `--model ${options.model} --judge-model ${options.judgeModel}`,
       evalCase.name,
     ].join(" ");
+    const innerAsUser = `setpriv --reuid=${EVAL_USER} --regid=${EVAL_USER} --init-groups env HOME=/home/${EVAL_USER} bash -c ${JSON.stringify(inner)}`;
     // The inner harness prefixes its own lines with the case name; strip it
     // since our `log` adds the same prefix.
     const innerPrefix = `[${evalCase.name}] `;
@@ -195,7 +209,7 @@ export async function runCaseInSandbox(options: {
     const innerExit = await run(
       sandbox,
       `inner eval: ${evalCase.name}`,
-      inner,
+      innerAsUser,
       innerLog,
       true,
       innerEnv,
