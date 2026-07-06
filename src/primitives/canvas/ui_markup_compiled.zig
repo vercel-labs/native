@@ -236,6 +236,21 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
                         }
                     }
                 }
+                // Interpreter parity: the size register's closed literal
+                // vocabulary — the control scale everywhere, the
+                // typography rungs (heading/display) on text only. A
+                // compile error here; bindings resolve at runtime like
+                // any enum option.
+                for (node.attrs) |attribute| {
+                    if (!std.mem.eql(u8, attribute.name, "size")) continue;
+                    const expression = markup.parseAttrExpression(attribute.value) orelse continue;
+                    if (expression != .literal) continue;
+                    if (markup.nameInList(expression.literal, &markup.known_text_size_value_names)) {
+                        if (kind != .text) fail(node, markup.text_size_element_message);
+                    } else if (!markup.nameInList(expression.literal, &markup.known_control_size_value_names)) {
+                        fail(node, markup.size_value_message);
+                    }
+                }
                 // Interpreter parity: splits take exactly two static
                 // pane children (the divider sits between fixed panes).
                 if (kind == .split) {

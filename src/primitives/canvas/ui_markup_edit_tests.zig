@@ -120,8 +120,8 @@ test "set-attr appends inside a self-closing tag keeping the tail spacing" {
     try h.expectEdit(
         "<column><icon name=\"search\" /></column>",
         "icon",
-        .{ .set_attr = .{ .name = "size", .value = "20" } },
-        "<column><icon name=\"search\" size=\"20\" /></column>",
+        .{ .set_attr = .{ .name = "width", .value = "20" } },
+        "<column><icon name=\"search\" width=\"20\" /></column>",
     );
 }
 

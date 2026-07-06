@@ -278,6 +278,22 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     }
                 }
             }
+            // The size register's closed literal vocabulary: the control
+            // scale everywhere, the typography rungs (heading/display) on
+            // text only. Mirrors the validator and the compiled engine's
+            // compile error; bindings resolve below like any enum option.
+            for (node.attrs) |attribute| {
+                if (!std.mem.eql(u8, attribute.name, "size")) continue;
+                const expression = markup.parseAttrExpression(attribute.value) orelse continue;
+                if (expression != .literal) continue;
+                if (markup.nameInList(expression.literal, &markup.known_text_size_value_names)) {
+                    if (kind != .text) {
+                        return self.failNode(node, markup.text_size_element_message);
+                    }
+                } else if (!markup.nameInList(expression.literal, &markup.known_control_size_value_names)) {
+                    return self.failNode(node, markup.size_value_message);
+                }
+            }
             // Splits take exactly two static pane children (the divider
             // sits between fixed panes). Mirrors the validator and the
             // compiled engine's compile error.
@@ -1982,4 +1998,3 @@ pub fn elementTakesChildren(kind: canvas.WidgetKind) bool {
     }
     return false;
 }
-

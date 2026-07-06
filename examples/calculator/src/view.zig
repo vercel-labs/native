@@ -2,9 +2,10 @@
 //! `.native` view; this file holds the sections the closed markup grammar
 //! cannot express — the drag band (the hidden-inset titlebar's
 //! `window_drag` region: empty by design, the window has no chrome) and
-//! the display block, which needs a scaled, right-aligned monospace
-//! result paragraph (markup text tops out at the `lg` body size) — plus
-//! the root view composing all three.
+//! the display block, whose result paragraph needs monospace and weight
+//! spans the closed markup grammar does not carry (its SIZE is the
+//! display typography rung, shared with markup) — plus the root view
+//! composing all three.
 //!
 //! The display's expression line is a real `text_field` and it is the
 //! app's keyboard seam: focusing it (click, or Tab) routes every typed
@@ -39,9 +40,8 @@ pub const window_padding: f32 = 16;
 /// the window controls in the leading corner.
 pub const band_height: f32 = 24;
 
-/// The big result line: body size x scale = 36px digits; the mono pitch
-/// (0.6 em) fits the 12-digit entry window inside the 288pt column.
-pub const result_scale: f32 = 2.6;
+// The big result line renders at the display typography rung; the theme
+// tunes the rung to the keypad geometry (`theme.display_size`).
 
 // ----------------------------------------------------------------- root
 
@@ -117,18 +117,19 @@ fn expressionField(ui: *Ui, model: *const Model) Ui.Node {
     }, .{});
 }
 
-/// The result: one scaled mono span, right-aligned. The explicit width
-/// spans the whole content column — it is the alignment box that keeps
-/// the right-aligned result flush with the keypad edge. Its semantic
-/// label IS the value, so assistive tech (and the automation snapshot)
-/// reads the result directly.
+/// The result: one mono span at the display rung, right-aligned. The
+/// explicit width spans the whole content column — it is the alignment
+/// box that keeps the right-aligned result flush with the keypad edge.
+/// Its semantic label IS the value, so assistive tech (and the
+/// automation snapshot) reads the result directly.
 fn resultLine(ui: *Ui, model: *const Model) Ui.Node {
     const value = model.displayText(ui.arena);
     var node = ui.paragraph(.{
         .width = content_width,
+        .size = .display,
         .semantics = .{ .label = value },
     }, &.{
-        .{ .text = value, .weight = .medium, .monospace = true, .scale = result_scale },
+        .{ .text = value, .weight = .medium, .monospace = true },
     });
     node.widget.text_alignment = .end;
     return node;

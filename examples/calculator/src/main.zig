@@ -6,9 +6,9 @@
 //! Authoring split (markup-first): the entire keypad is a `.native` view
 //! compiled at comptime; the Zig views are the drag band (the
 //! hidden-inset titlebar's drag region, deliberately empty) and the
-//! display block, which needs a scaled right-aligned mono result
-//! paragraph (markup text tops out at the `lg` body size). See
-//! `src/view.zig`.
+//! display block, whose right-aligned mono result paragraph needs
+//! monospace and weight spans markup does not carry (its size is the
+//! display typography rung markup shares). See `src/view.zig`.
 //!
 //! Keyboard: the expression line is a real `text_field` — click it (or
 //! Tab to it) and digits, operators, backspace, and enter flow through

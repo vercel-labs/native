@@ -571,7 +571,11 @@ test "the keypad grid lays out to exact frames inside the fixed window" {
     var model = Model{};
     const tree = try buildTree(arena_state.allocator(), &model);
     var nodes: [512]canvas.WidgetLayoutNode = undefined;
-    const layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, main.window_width, main.window_height), &nodes);
+    // Lay out with the THEME tokens, exactly like the running app: the
+    // result line sits on the display typography rung the theme tunes
+    // to the keypad column (36px), so the display block's height — and
+    // therefore every key row's y — depends on them.
+    const layout = try canvas.layoutWidgetTreeWithTokens(tree.root, geometry.RectF.init(0, 0, main.window_width, main.window_height), main.tokensFromModel(&model), &nodes);
     try testing.expect(layout.nodes.len > 0);
     try testing.expect(layout.nodes.len < 128); // tiny app, tiny tree
 

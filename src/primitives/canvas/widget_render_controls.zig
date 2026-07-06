@@ -1092,7 +1092,9 @@ fn iconGlyphSize(widget: Widget, tokens: DesignTokens) f32 {
 fn widgetIconGlyphScale(widget: Widget) f32 {
     return switch (widget.size) {
         .sm => 0.44,
-        .default, .icon => 0.48,
+        // heading/display are text-leaf typography rungs; icon glyphs
+        // keep the default control proportion.
+        .default, .icon, .heading, .display => 0.48,
         .lg => 0.52,
     };
 }

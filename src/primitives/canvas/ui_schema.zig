@@ -392,6 +392,19 @@ pub const color_token_names = [_][]const u8{
 
 pub const radius_token_names = [_][]const u8{ "sm", "md", "lg", "xl" };
 
+/// The `size` attribute's CONTROL-scale values, accepted on every sized
+/// element: the control register of `canvas.WidgetSize`, mirrored as data
+/// here (this module stays std-only) with a lockstep test in
+/// ui_markup_view_tests.zig holding the mirror equal to the live enum.
+pub const control_size_value_names = [_][]const u8{ "default", "sm", "lg", "icon" };
+
+/// The `size` attribute's TYPOGRAPHY rungs, accepted on TEXT elements
+/// only: named typography-token steps (heading_size, display_size) above
+/// the title rung. A different axis from the control scale — the
+/// validator and both engines reject them on controls with a teaching
+/// error. Same lockstep test as `control_size_value_names`.
+pub const text_size_value_names = [_][]const u8{ "heading", "display" };
+
 pub const icon_names = [_][]const u8{
     "alert",       "archive",       "arrow-down",   "arrow-right",      "arrow-up",
     "check",       "check-circle",  "chevron-down", "chevron-left",     "chevron-right",
@@ -409,11 +422,11 @@ pub const icon_names = [_][]const u8{
 /// std-only) with a lockstep test in ui_markup_view_tests.zig holding the
 /// mirror equal to the live enum.
 pub const role_names = [_][]const u8{
-    "none",     "group",    "text",     "link",           "image",
-    "button",   "textbox",  "tooltip",  "dialog",         "menu",
-    "menuitem", "list",     "listitem", "row",            "grid",
-    "gridcell", "tab",      "checkbox", "radio",          "switch_control",
-    "slider",   "progressbar", "chart", "tree",           "treeitem",
+    "none",      "group",       "text",     "link",   "image",
+    "button",    "textbox",     "tooltip",  "dialog", "menu",
+    "menuitem",  "list",        "listitem", "row",    "grid",
+    "gridcell",  "tab",         "checkbox", "radio",  "switch_control",
+    "slider",    "progressbar", "chart",    "tree",   "treeitem",
     "separator",
 };
 

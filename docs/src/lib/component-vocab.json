@@ -42,7 +42,7 @@
     },
     {
       "name": "text",
-      "doc": "Text leaf; content supports {} interpolation. Line policy via wrap: wrap=\"true\" word-wraps, wrap=\"false\" clips to one honest line."
+      "doc": "Text leaf; content supports {} interpolation. Line policy via wrap: wrap=\"true\" word-wraps, wrap=\"false\" clips to one honest line. size takes the typography rungs heading|display for section headings and hero stats."
     },
     {
       "name": "badge",
@@ -302,7 +302,7 @@
     },
     {
       "name": "size",
-      "doc": "Control size: default|sm|lg|icon."
+      "doc": "Control size: default|sm|lg|icon. On text, also the typography rungs heading|display (themable token steps above title - a section heading, a hero stat); numeric sizes are not accepted - retheme the typography tokens instead."
     },
     {
       "name": "width",
@@ -953,7 +953,9 @@
     "default",
     "sm",
     "lg",
-    "icon"
+    "icon",
+    "heading",
+    "display"
   ],
   "colorTokens": [
     "background",

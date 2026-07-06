@@ -677,6 +677,75 @@ test "gap on stacking containers fails the build with the teaching message" {
     _ = try view.build(&ui, &model);
 }
 
+test "text size rungs build text widgets on the typography ladder" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, "<column gap=\"4\">\n  <text size=\"heading\">Inbox</text>\n  <text size=\"display\">42</text>\n  <text size=\"sm\">detail</text>\n</column>");
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    try testing.expectEqual(canvas.WidgetSize.heading, tree.root.children[0].size);
+    try testing.expectEqual(canvas.WidgetSize.display, tree.root.children[1].size);
+    try testing.expectEqual(canvas.WidgetSize.sm, tree.root.children[2].size);
+}
+
+test "size teaching errors: typography rungs off text, unknown values, numbers" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        // heading/display are typography rungs only text resolves; a
+        // control's size register is the control scale.
+        .{
+            .source = "<column>\n  <button size=\"display\" on-press=\"add\">Go</button>\n</column>",
+            .message = canvas.ui_markup.text_size_element_message,
+        },
+        .{
+            .source = "<column>\n  <badge size=\"heading\">3</badge>\n</column>",
+            .message = canvas.ui_markup.text_size_element_message,
+        },
+        // Unknown values and numeric literals teach the vocabulary and
+        // the deliberate no-numbers line.
+        .{
+            .source = "<column>\n  <text size=\"title\">Inbox</text>\n</column>",
+            .message = canvas.ui_markup.size_value_message,
+        },
+        .{
+            .source = "<column>\n  <text size=\"48\">42</text>\n</column>",
+            .message = canvas.ui_markup.size_value_message,
+        },
+    };
+    for (cases) |case| {
+        var view = try InboxMarkup.init(arena, case.source);
+        var ui = InboxUi.init(arena);
+        try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
+        try testing.expectEqualStrings(case.message, view.diagnostic.message);
+        try testing.expectEqual(@as(usize, 2), view.diagnostic.line);
+    }
+}
+
+test "the registry's size vocabulary matches the live WidgetSize enum" {
+    // size="..." values resolve through std.meta.stringToEnum on
+    // canvas.WidgetSize; the registry's std-only mirrors (control scale +
+    // text-only typography rungs) must list exactly the same names so the
+    // validator and the engines accept identically.
+    const fields = std.meta.fields(canvas.WidgetSize);
+    try testing.expectEqual(
+        fields.len,
+        canvas.ui_markup.schema.control_size_value_names.len + canvas.ui_markup.schema.text_size_value_names.len,
+    );
+    inline for (fields) |field| {
+        const in_control = nameListed(field.name, &canvas.ui_markup.schema.control_size_value_names);
+        const in_text = nameListed(field.name, &canvas.ui_markup.schema.text_size_value_names);
+        // Every enum member sits on exactly one axis.
+        try testing.expect(in_control != in_text);
+    }
+}
+
 test "markup icons build icon widgets with validated names" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1922,6 +1991,35 @@ pub fn handWrapView(ui: *WrapUi, model: *const WrapModel) WrapUi.Node {
     });
 }
 
+// ------------------------------------------------------ text size rungs
+
+pub const TypeScaleMsg = union(enum) { refresh };
+
+pub const TypeScaleModel = struct {
+    stat: []const u8 = "42.7%",
+    caption: []const u8 = "of quota used this month across every region",
+};
+
+pub const type_scale_markup_source =
+    \\<column gap="8" width="360">
+    \\  <text size="heading">Usage</text>
+    \\  <text size="display">{stat}</text>
+    \\  <text size="display" wrap="true">{caption}</text>
+    \\  <text size="sm">{caption}</text>
+    \\</column>
+;
+
+pub const TypeScaleUi = canvas.Ui(TypeScaleMsg);
+
+pub fn handTypeScaleView(ui: *TypeScaleUi, model: *const TypeScaleModel) TypeScaleUi.Node {
+    return ui.column(.{ .gap = 8, .width = 360 }, .{
+        ui.text(.{ .size = .heading }, "Usage"),
+        ui.text(.{ .size = .display }, model.stat),
+        ui.text(.{ .size = .display, .wrap = true }, model.caption),
+        ui.text(.{ .size = .sm }, model.caption),
+    });
+}
+
 test "the wrap attribute builds the hand-written wrapped text leaf" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -2344,7 +2442,7 @@ test "split and tree misuse is validated with teaching messages" {
 /// variable at the use site) — including a nested `<use>` with the
 /// defaulted arg omitted, and a second use with no children (empty slot).
 pub const import_view_sources = [_]canvas.ui_markup.SourceFile{
-    .{ .path = "view.native", .source = 
+    .{ .path = "view.native", .source =
     \\<import src="components/pills.native"/>
     \\<row gap="8">
     \\  <use template="pill-stack" title="Top">
@@ -2356,7 +2454,7 @@ pub const import_view_sources = [_]canvas.ui_markup.SourceFile{
     \\  <use template="pill-stack" title="Bottom" />
     \\</row>
     },
-    .{ .path = "components/pills.native", .source = 
+    .{ .path = "components/pills.native", .source =
     \\<import src="base.native"/>
     \\<template name="pill-stack" args="title">
     \\  <column gap="4">
@@ -2365,7 +2463,7 @@ pub const import_view_sources = [_]canvas.ui_markup.SourceFile{
     \\  </column>
     \\</template>
     },
-    .{ .path = "components/base.native", .source = 
+    .{ .path = "components/base.native", .source =
     \\<template name="pill" args="label tone=muted">
     \\  <badge radius="md">{label} {tone}</badge>
     \\</template>

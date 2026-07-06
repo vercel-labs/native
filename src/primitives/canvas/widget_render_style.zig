@@ -102,7 +102,9 @@ pub fn controlRadius(widget: Widget, visual: ControlVisualTokens, fallback: f32)
 pub fn widgetSizedRadiusValue(widget: Widget, fallback: f32) f32 {
     return switch (widget.size) {
         .sm => @max(0, fallback - 2),
-        .default, .icon => fallback,
+        // heading/display are text-leaf typography rungs; radii are
+        // control chrome, so they sit at the default step.
+        .default, .icon, .heading, .display => fallback,
         .lg => fallback + 2,
     };
 }

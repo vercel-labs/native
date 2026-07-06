@@ -111,6 +111,39 @@ test "a span paragraph squeezed below its wrapped height is a finding" {
     try std.testing.expect(issues.findings[0].overrun_y > 0);
 }
 
+test "wrapped display-size text reserves its rung height: clean in a column" {
+    var nodes: [16]canvas.WidgetLayoutNode = undefined;
+    var storage: [8]canvas.LayoutAuditFinding = undefined;
+    // A display-rung paragraph (48pt by default) wraps like any span
+    // paragraph; layout must reserve the rung-sized wrapped height so
+    // the sibling below never collides with the painted lines.
+    const spans = [_]canvas.TextSpan{.{ .text = "48 hours 12 minutes" }};
+    const root = Widget{ .kind = .column, .children = &.{
+        .{ .kind = .text, .id = 5, .text = spans[0].text, .spans = &spans, .size = .display },
+        .{ .kind = .text, .id = 6, .text = "Below" },
+    } };
+    const issues = try auditTree(root, geometry.RectF.init(0, 0, 260, 400), .{}, &nodes, &storage);
+    try std.testing.expectEqual(@as(usize, 0), issues.total);
+    // Sanity: the reserved frame really is display-rung sized (several
+    // wrapped 60px line boxes), not body-sized lines.
+    const layout = try canvas.layoutWidgetTreeWithTokens(root, geometry.RectF.init(0, 0, 260, 400), .{}, &nodes);
+    const tokens = DesignTokens{};
+    try std.testing.expect(layout.findById(5).?.frame.height >= tokens.typography.display_size * 1.25 * 2);
+}
+
+test "display-size text squeezed below its wrapped height is a finding" {
+    var nodes: [16]canvas.WidgetLayoutNode = undefined;
+    var storage: [8]canvas.LayoutAuditFinding = undefined;
+    const spans = [_]canvas.TextSpan{.{ .text = "48 hours 12 minutes" }};
+    const root = Widget{ .kind = .column, .children = &.{
+        .{ .kind = .text, .id = 5, .text = spans[0].text, .spans = &spans, .size = .display, .frame = geometry.RectF.init(0, 0, 0, 24) },
+    } };
+    const issues = try auditTree(root, geometry.RectF.init(0, 0, 260, 400), .{}, &nodes, &storage);
+    try std.testing.expect(issues.total >= 1);
+    try std.testing.expectEqual(canvas.LayoutAuditRuleKind.text_overflow, issues.findings[0].rule);
+    try std.testing.expect(issues.findings[0].overrun_y > 0);
+}
+
 test "grid children wider than their cells are a sibling-overlap finding" {
     var nodes: [16]canvas.WidgetLayoutNode = undefined;
     var storage: [8]canvas.LayoutAuditFinding = undefined;
@@ -230,16 +263,19 @@ test "house control registers pass the pointer floor at every density" {
 test "hidden subtrees and anchored floating surfaces stay out of the audit" {
     var nodes: [16]canvas.WidgetLayoutNode = undefined;
     var storage: [8]canvas.LayoutAuditFinding = undefined;
-    const root = Widget{ .kind = .column, .children = &.{
-        // Hidden: would otherwise re-wrap into the sibling below.
-        .{ .kind = .text, .id = 7, .text = "A deliberately long heading that cannot fit on one line", .semantics = .{ .hidden = true } },
-        // Anchored: floats out of flow, window-clamped by the layout pass.
-        .{ .kind = .stack, .id = 8, .children = &.{
-            .{ .kind = .menu_surface, .id = 9, .layout = .{ .anchor = .{} }, .children = &.{
-                .{ .kind = .menu_item, .id = 10, .text = "Open" },
+    const root = Widget{
+        .kind = .column,
+        .children = &.{
+            // Hidden: would otherwise re-wrap into the sibling below.
+            .{ .kind = .text, .id = 7, .text = "A deliberately long heading that cannot fit on one line", .semantics = .{ .hidden = true } },
+            // Anchored: floats out of flow, window-clamped by the layout pass.
+            .{ .kind = .stack, .id = 8, .children = &.{
+                .{ .kind = .menu_surface, .id = 9, .layout = .{ .anchor = .{} }, .children = &.{
+                    .{ .kind = .menu_item, .id = 10, .text = "Open" },
+                } },
             } },
-        } },
-    } };
+        },
+    };
     const issues = try auditTree(root, geometry.RectF.init(0, 0, 120, 200), .{}, &nodes, &storage);
     try std.testing.expectEqual(@as(usize, 0), issues.total);
 }
@@ -309,6 +345,27 @@ test "the sweep harness passes a clean tree across the whole matrix" {
     });
 }
 
+test "the sweep harness passes the typography rungs across the whole matrix" {
+    // A hero-stat shape at every rung: sweep geometry, density variants,
+    // and the pseudo-locale expansion must all stay clean — display text
+    // reserves real wrapped height, it never earns a slack pass.
+    const wrapped = [_]canvas.TextSpan{.{ .text = "of quota used this month across every region" }};
+    const root = Widget{ .kind = .column, .layout = .{ .gap = 8, .cross_alignment = .start }, .children = &.{
+        .{ .kind = .text, .id = 1, .text = "Usage", .size = .heading },
+        .{ .kind = .text, .id = 2, .text = "42.7%", .size = .display },
+        .{ .kind = .text, .id = 3, .text = wrapped[0].text, .spans = &wrapped, .size = .display },
+        .{ .kind = .text, .id = 4, .text = "Short status" },
+    } };
+    // The window floor budgets the tallest sweep point: the wrapped
+    // display paragraph at min width under the pseudo-locale expansion
+    // runs several 60px line boxes, and the sweep demands the whole
+    // stack fit honestly (no scroll, no clip).
+    try canvas.expectLayoutAuditSweepClean(std.testing.allocator, root, .{
+        .min_size = geometry.SizeF.init(320, 640),
+        .default_size = geometry.SizeF.init(640, 720),
+    });
+}
+
 test "finding storage caps loudly with the true total" {
     var findings = layout_audit.LayoutAuditIssues{ .findings = &.{}, .total = 0 };
     _ = &findings;
@@ -323,4 +380,3 @@ test "finding storage caps loudly with the true total" {
     try std.testing.expectEqual(@as(usize, 2), issues.findings.len);
     try std.testing.expect(issues.total > issues.findings.len);
 }
-

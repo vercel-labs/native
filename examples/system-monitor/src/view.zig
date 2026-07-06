@@ -3,7 +3,8 @@
 //! `<chart>` per tile: token-tinted bar/area series binding the model's
 //! NaN-padded sample windows) are compiled `.native` views. Everything
 //! else is Zig because it needs what the closed markup grammar excludes —
-//! vector icons paired with press handlers, the scaled tile paragraphs,
+//! vector icons paired with press handlers, the tiles' bold-span stat
+//! paragraphs (sized by the heading typography rung),
 //! per-row native context menus, and the modal SIGTERM confirmation
 //! overlaid through a z-stack root.
 
@@ -44,7 +45,11 @@ pub const spark_width: f32 = spark_samples * 4 - 1; // 239
 
 pub const tile_padding: f32 = 14;
 pub const tile_width: f32 = spark_width + tile_padding * 2; // 267
-pub const tile_height: f32 = 132;
+// Budgeted from the tile column at rest: sm label line (16.25) + the
+// heading-rung stat line (28 x 1.25 = 35) + sm detail line (16.25) +
+// spark (32) + three 4px gaps + 14px padding twice = 139.5, kept on
+// the even-number rhythm.
+pub const tile_height: f32 = 140;
 pub const tile_gap: f32 = 12;
 pub const window_padding: f32 = 20;
 pub const content_width: f32 = tile_width * 4 + tile_gap * 3; // 1104
@@ -124,8 +129,8 @@ fn statTile(ui: *Ui, spec: TileSpec) Ui.Node {
         .semantics = .{ .label = ui.fmt("{s} tile", .{spec.label}) },
     }, ui.column(.{ .gap = 4 }, .{
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, spec.label),
-        ui.paragraph(.{ .width = spark_width, .semantics = .{ .label = spec.value } }, &.{
-            .{ .text = spec.value, .weight = .bold, .scale = 1.55 },
+        ui.paragraph(.{ .width = spark_width, .size = .heading, .semantics = .{ .label = spec.value } }, &.{
+            .{ .text = spec.value, .weight = .bold },
         }),
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, spec.detail),
         spec.spark,
@@ -141,8 +146,8 @@ fn uptimeTile(ui: *Ui, model: *const Model) Ui.Node {
         .semantics = .{ .label = "Uptime tile" },
     }, ui.column(.{ .gap = 4 }, .{
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Uptime"),
-        ui.paragraph(.{ .width = spark_width, .semantics = .{ .label = model.uptimeValue(ui.arena) } }, &.{
-            .{ .text = model.uptimeValue(ui.arena), .weight = .bold, .scale = 1.55 },
+        ui.paragraph(.{ .width = spark_width, .size = .heading, .semantics = .{ .label = model.uptimeValue(ui.arena) } }, &.{
+            .{ .text = model.uptimeValue(ui.arena), .weight = .bold },
         }),
         // One-line tile caption: clip at the tile width, never wrap
         // over the caption line below.

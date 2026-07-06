@@ -987,6 +987,43 @@ test "compiled wrap attribute matches the interpreter and the hand-written view"
     try testing.expectEqual(@as(f32, 360), compiled.root.layout.max_size.width);
 }
 
+// ------------------------------------------------ text size rung parity
+
+const TypeScaleUi = fixture.TypeScaleUi;
+const TypeScaleInterpreter = markup_view.MarkupView(fixture.TypeScaleModel, fixture.TypeScaleMsg);
+const TypeScaleCompiled = canvas.CompiledMarkupView(fixture.TypeScaleModel, fixture.TypeScaleMsg, fixture.type_scale_markup_source);
+
+test "compiled text size rungs match the interpreter and the hand-written view" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = fixture.TypeScaleModel{};
+
+    var view = try TypeScaleInterpreter.init(arena, fixture.type_scale_markup_source);
+    var interpreted_ui = TypeScaleUi.init(arena);
+    const interpreted = try interpreted_ui.finalize(try view.build(&interpreted_ui, &model));
+
+    var compiled_ui = TypeScaleUi.init(arena);
+    const compiled = try compiled_ui.finalize(TypeScaleCompiled.build(&compiled_ui, &model));
+
+    var hand_ui = TypeScaleUi.init(arena);
+    const hand = try hand_ui.finalize(fixture.handTypeScaleView(&hand_ui, &model));
+
+    try expectSameTree(fixture.TypeScaleMsg, hand, interpreted);
+    try expectSameTree(fixture.TypeScaleMsg, hand, compiled);
+    try expectSameTexts(interpreted.root, compiled.root);
+
+    // Both engines stamp the typography rungs onto the text widgets, and
+    // the wrapped display line keeps the single-span paragraph conversion.
+    try testing.expectEqual(canvas.WidgetSize.heading, compiled.root.children[0].size);
+    try testing.expectEqual(canvas.WidgetSize.display, compiled.root.children[1].size);
+    try testing.expectEqual(canvas.WidgetSize.display, interpreted.root.children[1].size);
+    const compiled_wrapped = compiled.root.children[2];
+    try testing.expectEqual(canvas.WidgetSize.display, compiled_wrapped.size);
+    try testing.expectEqual(@as(usize, 1), compiled_wrapped.spans.len);
+}
+
 // -------------------------------- text alignment and grid columns parity
 
 const AlignUi = fixture.AlignUi;

@@ -13,6 +13,21 @@ pub fn widgetButtonTextSize(widget: Widget, tokens: DesignTokens) f32 {
 }
 
 pub fn widgetBodyTextSize(widget: Widget, tokens: DesignTokens) f32 {
+    // heading/display are typography-token rungs, honored on text leaves
+    // only: they REPLACE the body base with the named token instead of
+    // stepping it, so the whole type scale stays themable through
+    // `TypographyTokenOverrides`. Like the other typography sizes they do
+    // not density-scale (density scales chrome — insets, heights — never
+    // glyph sizes). On any other widget kind they fall through to the
+    // default control step (the markup layer rejects them there; Zig
+    // views get a Debug warning from `Ui.el`).
+    if (widget.kind == .text) {
+        switch (widget.size) {
+            .heading => return tokens.typography.heading_size,
+            .display => return tokens.typography.display_size,
+            else => {},
+        }
+    }
     return widgetTypographySize(widget, tokens.typography.body_size);
 }
 
@@ -23,7 +38,10 @@ pub fn widgetLabelTextSize(widget: Widget, tokens: DesignTokens) f32 {
 pub fn widgetTypographySize(widget: Widget, base: f32) f32 {
     return switch (widget.size) {
         .sm => @max(8, base - 1),
-        .default, .icon => base,
+        // heading/display are text-leaf typography rungs (resolved in
+        // `widgetBodyTextSize`); on the control scale they sit at the
+        // default step.
+        .default, .icon, .heading, .display => base,
         .lg => base + 1,
     };
 }
@@ -115,7 +133,9 @@ pub fn widgetSizedDensityValue(widget: Widget, tokens: DesignTokens, value: f32)
 pub fn widgetSizedTokenValue(widget: Widget, value: f32) f32 {
     return switch (widget.size) {
         .sm => @max(0, value - 2),
-        .default, .icon => value,
+        // heading/display step type, not chrome: control metrics stay at
+        // the default step.
+        .default, .icon, .heading, .display => value,
         .lg => value + 2,
     };
 }
@@ -123,7 +143,7 @@ pub fn widgetSizedTokenValue(widget: Widget, value: f32) f32 {
 pub fn widgetSizeScale(widget: Widget) f32 {
     return switch (widget.size) {
         .sm => 0.875,
-        .default, .icon => 1,
+        .default, .icon, .heading, .display => 1,
         .lg => 1.125,
     };
 }

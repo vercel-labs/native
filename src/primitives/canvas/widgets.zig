@@ -352,11 +352,23 @@ pub const WidgetVariant = enum {
     destructive,
 };
 
+/// The `size` register. Two axes share it deliberately: the CONTROL
+/// scale (`default`/`sm`/`lg`/`icon` — inset, height, and radius steps on
+/// buttons, inputs, and the other chrome-bearing controls) and the
+/// TYPOGRAPHY rungs (`heading`/`display` — named typography-token steps
+/// honored on `.text` widgets only). The markup validator and both
+/// engines keep the axes apart with teaching errors (heading/display on
+/// a control is rejected); a Zig view that slips one onto a control gets
+/// a Debug warning and the default step.
 pub const WidgetSize = enum {
     default,
     sm,
     lg,
     icon,
+    /// Text leaves only: `TypographyTokens.heading_size` (28 by default).
+    heading,
+    /// Text leaves only: `TypographyTokens.display_size` (48 by default).
+    display,
 };
 
 pub const WidgetRole = enum {

@@ -268,6 +268,18 @@ pub const TypographyTokens = struct {
     label_size: f32 = 13,
     title_size: f32 = 20,
     button_size: f32 = 14,
+    /// Section-heading rung above `title_size`: 28 continues the house
+    /// step ratio (body 14 → title 20 ≈ x1.4; title 20 → heading 28 =
+    /// x1.4) and doubles `body_size`, so a heading's 1.25 line height
+    /// (35) still composes with body lines on the same 4pt-friendly
+    /// rhythm.
+    heading_size: f32 = 28,
+    /// Display rung: hero stats, timer numerals, pricing figures. The
+    /// jump from heading widens deliberately (28 → 48 ≈ x1.7) — display
+    /// text is a focal numeral, not a bigger heading — and 48 keeps the
+    /// even-number rhythm with a 1.25 line height of exactly 60, a
+    /// whole-pixel line box at 1x and 2x scale factors.
+    display_size: f32 = 48,
 
     pub fn bodyFamilyName(self: TypographyTokens) []const u8 {
         return self.font_family.cssName();
@@ -692,6 +704,8 @@ pub const TypographyTokenOverrides = struct {
     label_size: ?f32 = null,
     title_size: ?f32 = null,
     button_size: ?f32 = null,
+    heading_size: ?f32 = null,
+    display_size: ?f32 = null,
 
     pub fn apply(self: TypographyTokenOverrides, base: TypographyTokens) TypographyTokens {
         return applyFlatTokenOverrides(TypographyTokens, base, self);

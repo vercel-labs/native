@@ -3,7 +3,10 @@
      losing streak state. -->
 <column gap="12" padding="16">
   <row gap="8" cross="center">
-    <text grow="1">Habits</text>
+    <!-- The app title on the heading typography rung: the one line of
+         display-scale type in the window, so the header reads as a
+         title without any chrome. -->
+    <text size="heading" grow="1">Habits</text>
     <button variant="primary" on-press="add">New habit</button>
   </row>
   <!-- Single selection is radio semantics: the group renders selection

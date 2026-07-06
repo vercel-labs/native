@@ -72,6 +72,23 @@ fn warnInertWrap(kind: WidgetKind, wrap: ?bool) void {
     );
 }
 
+/// Debug-build diagnostic for the typography rungs of the size register
+/// (`heading`/`display`) on a widget kind that never reads them: only
+/// `.text` leaves resolve those steps to the heading/display typography
+/// tokens, so anywhere else the option is dead data rendered at the
+/// default control step. Zig views warn instead of failing (the option
+/// is inert, not harmful); markup views get the same lesson as a
+/// validation/compile error (`ui_markup.text_size_element_message`).
+fn warnTextSizeKind(kind: WidgetKind, size: canvas.WidgetSize) void {
+    if (builtin.mode != .Debug) return;
+    if (kind == .text) return;
+    if (size != .heading and size != .display) return;
+    ui_log.warn(
+        "size .{s} does nothing on {s}: heading and display are typography rungs only text leaves resolve - put the size on the text leaf itself, or use the control scale (sm, lg, icon)",
+        .{ @tagName(size), @tagName(kind) },
+    );
+}
+
 /// Debug-build diagnostic for text the bundled face cannot fully
 /// render: the codepoint draws as a tofu box wherever the bundled
 /// outlines are the only glyph source — reference screenshots
@@ -1843,6 +1860,7 @@ pub fn Ui(comptime Msg: type) type {
             warnUncoveredText(widget.kind, widget.text);
             warnUncoveredText(widget.kind, widget.placeholder);
             warnInertWrap(widget.kind, node.wrap);
+            warnTextSizeKind(widget.kind, widget.size);
             applyStyleTokens(&widget.style, node.style_tokens, tokens);
             // Opt-in text wrapping reuses the span paragraph machinery: a
             // wrapped text leaf becomes a single-span paragraph over its

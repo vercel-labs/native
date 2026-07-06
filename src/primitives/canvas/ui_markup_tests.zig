@@ -358,7 +358,6 @@ test "structural validation reports positions for grammar misuse" {
     }
 }
 
-
 test "the tofu guard flags markup literals outside the bundled font's coverage" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -736,6 +735,59 @@ test "wrap and issue-link-base validate as vocabulary with teaching errors" {
         const info = markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
         try testing.expectEqualStrings(case.message, info.message);
         try testing.expect(info.line > 0);
+    }
+}
+
+test "size validates as the two-axis closed vocabulary with teaching errors" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Valid: the control scale on controls, the typography rungs on
+    // text, and bindings (resolved by the engines at build).
+    const valid_sources = [_][]const u8{
+        "<column>\n  <button size=\"sm\" on-press=\"go\">Go</button>\n</column>",
+        "<column>\n  <text size=\"heading\">Section</text>\n</column>",
+        "<column>\n  <text size=\"display\">42.7</text>\n</column>",
+        "<column>\n  <text size=\"display\" wrap=\"true\">A hero line that may wrap</text>\n</column>",
+        "<column>\n  <text size=\"{stat_size}\">42</text>\n</column>",
+    };
+    for (valid_sources) |source| {
+        var parser = markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        // The typography rungs are text-only: on a control the size
+        // register is the control scale, a different axis.
+        .{
+            .source = "<column>\n  <button size=\"display\" on-press=\"go\">Go</button>\n</column>",
+            .message = markup.text_size_element_message,
+        },
+        .{
+            .source = "<column>\n  <badge size=\"heading\">3</badge>\n</column>",
+            .message = markup.text_size_element_message,
+        },
+        // Unknown values teach the whole vocabulary; numeric sizes are
+        // refused by design (type sizes are themable token steps).
+        .{
+            .source = "<column>\n  <text size=\"title\">Section</text>\n</column>",
+            .message = markup.size_value_message,
+        },
+        .{
+            .source = "<column>\n  <text size=\"48\">42.7</text>\n</column>",
+            .message = markup.size_value_message,
+        },
+        .{
+            .source = "<column>\n  <button size=\"tiny\" on-press=\"go\">Go</button>\n</column>",
+            .message = markup.size_value_message,
+        },
+    };
+    for (cases) |case| {
+        var parser = markup.Parser.init(arena, case.source);
+        const info = markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+        try testing.expectEqual(@as(usize, 2), info.line);
     }
 }
 

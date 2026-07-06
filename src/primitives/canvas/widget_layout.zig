@@ -1438,7 +1438,9 @@ fn intrinsicSquareControlSize(widget: Widget, tokens: DesignTokens) geometry.Siz
 fn intrinsicSpinnerWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
     const base: f32 = switch (widget.size) {
         .sm => 16,
-        .default, .icon => 20,
+        // heading/display are text-leaf typography rungs; the spinner
+        // glyph sits at the default register.
+        .default, .icon, .heading, .display => 20,
         .lg => 24,
     };
     const extent = densityValue(tokens, base);

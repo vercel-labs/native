@@ -484,6 +484,29 @@ test "widget layout collects accessibility semantics" {
     try expectRect(geometry.RectF.init(10, 52, 160, 8), semantics[2].bounds);
 }
 
+test "widget text size rungs do not change semantics" {
+    // heading/display are VISUAL typography rungs, not document
+    // structure: a display-size stat announces exactly like a body-size
+    // one (same role, same label, no heading level), so assistive tech
+    // output never shifts when a surface adopts the ladder.
+    const sizes = [_]canvas.WidgetSize{ .default, .heading, .display };
+    inline for (sizes) |size| {
+        const children = [_]Widget{
+            .{ .id = 2, .kind = .text, .frame = geometry.RectF.init(10, 10, 200, 60), .text = "42.7%", .size = size },
+        };
+        const root = Widget{ .id = 1, .kind = .column, .children = &children };
+        var nodes: [4]WidgetLayoutNode = undefined;
+        const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 240, 120), &nodes);
+        var semantics_buffer: [4]WidgetSemanticsNode = undefined;
+        const semantics = try layout.collectSemantics(&semantics_buffer);
+        try std.testing.expectEqual(@as(usize, 2), semantics.len);
+        try std.testing.expectEqual(WidgetRole.text, semantics[1].role);
+        try std.testing.expectEqualStrings("42.7%", semantics[1].label);
+        try std.testing.expect(!semantics[1].focusable);
+        try std.testing.expect(semantics[1].actions.isEmpty());
+    }
+}
+
 test "widget disabled semantics suppresses focusability and actions" {
     const children = [_]Widget{
         .{

@@ -2187,6 +2187,38 @@ test "intrinsic text sizing defaults to the estimator and honors an injected pro
     try std.testing.expectEqual(default_size.height, measured_size.height);
 }
 
+test "text size rungs resolve the typography tokens and retheme with overrides" {
+    const tokens = DesignTokens{};
+    const heading = Widget{ .id = 1, .kind = .text, .text = "Usage" };
+    const heading_sized = Widget{ .id = 1, .kind = .text, .text = "Usage", .size = .heading };
+    const display_sized = Widget{ .id = 2, .kind = .text, .text = "42.7%", .size = .display };
+
+    // The rungs REPLACE the body base with the named token: intrinsic
+    // height is the rung's 1.25 line height, width the rung-sized
+    // measurement.
+    const heading_size = intrinsicWidgetSize(heading_sized, tokens);
+    const display_size = intrinsicWidgetSize(display_sized, tokens);
+    try std.testing.expectEqual(tokens.typography.heading_size * 1.25, heading_size.height);
+    try std.testing.expectEqual(tokens.typography.display_size * 1.25, display_size.height);
+    try std.testing.expect(heading_size.width > intrinsicWidgetSize(heading, tokens).width);
+
+    // Themable like every typography token: an override moves the rung.
+    const themed = DesignTokens{ .typography = (TypographyTokenOverrides{ .display_size = 36 }).apply(.{}) };
+    try std.testing.expectEqual(@as(f32, 36 * 1.25), intrinsicWidgetSize(display_sized, themed).height);
+
+    // Like body/title, the rungs do not density-scale (density scales
+    // chrome, never glyph sizes).
+    const compact = DesignTokens{ .density = .compact };
+    try std.testing.expectEqual(display_size.height, intrinsicWidgetSize(display_sized, compact).height);
+
+    // On a control the rungs are inert: the button stays at its default
+    // control step (markup rejects this shape; Zig views get a Debug
+    // warning).
+    const button = Widget{ .id = 3, .kind = .button, .text = "Run" };
+    const button_display = Widget{ .id = 3, .kind = .button, .text = "Run", .size = .display };
+    try std.testing.expectEqualDeep(intrinsicWidgetSize(button, tokens), intrinsicWidgetSize(button_display, tokens));
+}
+
 test "widget tree layout widths follow the injected text measure provider" {
     const button = Widget{ .id = 2, .kind = .button, .text = "Run" };
     const row_children = [_]Widget{button};

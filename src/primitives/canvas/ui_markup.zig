@@ -1134,6 +1134,16 @@ pub const stack_container_gap_message = "gap does nothing here: this container l
 
 pub const wrap_element_message = "wrap is only supported on text - only plain text leaves take a line policy (wrap=\"true\" word-wraps, wrap=\"false\" clips to one honest line); put wrap on the text leaf itself, or size the container so content fits (rows and columns never flow-wrap their children)";
 
+/// The `size` attribute's control-scale values (every sized element) and
+/// its typography rungs (text only). Registry-derived; lockstep tests in
+/// ui_markup_view_tests.zig hold the mirrors equal to `canvas.WidgetSize`.
+pub const known_control_size_value_names = schema.control_size_value_names;
+pub const known_text_size_value_names = schema.text_size_value_names;
+
+pub const size_value_message = "unknown size value - controls take default, sm, lg, or icon, and text also takes heading or display (the typography rungs above title); numeric sizes are not accepted by design - retheme the typography tokens (TypographyTokenOverrides) to move the whole scale";
+
+pub const text_size_element_message = "heading and display are typography rungs only text takes - they name themable typography token steps (heading_size, display_size), a different axis from the control scale; put the size on the text element itself, or use the control scale here (default, sm, lg, icon)";
+
 pub const grid_columns_element_message = "columns is only supported on grid - it fixes the grid's column count (omit it for the derived near-square grid)";
 
 pub const avatar_image_message = "image takes one {binding} to a u64 ImageId the app registered at runtime (fx.registerImageBytes) - runtime image ids are model data, not markup literals; 0 renders the initials fallback";
@@ -2400,6 +2410,27 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     // (same policy as gap on stacking containers).
                     return attrError(node, attribute, wrap_element_message);
                 }
+                if (std.mem.eql(u8, attribute.name, "size")) {
+                    // The size register's closed literal vocabulary
+                    // (bindings resolve at build): the control scale
+                    // everywhere, plus the typography rungs on text only
+                    // - two axes one attribute names, kept apart with a
+                    // teaching error instead of a silently inert option.
+                    // Numeric literals are refused on purpose: type
+                    // sizes are themable token steps, never per-element
+                    // numbers.
+                    if (parseAttrExpression(attribute.value)) |expression| {
+                        if (expression == .literal) {
+                            if (nameInList(expression.literal, &known_text_size_value_names)) {
+                                if (!std.mem.eql(u8, node.name, "text")) {
+                                    return attrError(node, attribute, text_size_element_message);
+                                }
+                            } else if (!nameInList(expression.literal, &known_control_size_value_names)) {
+                                return attrError(node, attribute, size_value_message);
+                            }
+                        }
+                    }
+                }
                 if (!nameInList(attribute.name, &known_option_attrs)) {
                     return attrError(node, attribute, "unknown attribute");
                 }
@@ -2481,7 +2512,9 @@ fn textLeadingTrim(text: []const u8) usize {
     return lead;
 }
 
-fn nameInList(name: []const u8, list: []const []const u8) bool {
+/// Membership in a name-list vocabulary (comptime-callable; both engines
+/// reuse it for the shared closed vocabularies).
+pub fn nameInList(name: []const u8, list: []const []const u8) bool {
     for (list) |candidate| {
         if (std.mem.eql(u8, name, candidate)) return true;
     }
