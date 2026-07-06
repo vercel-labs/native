@@ -65,7 +65,7 @@ fn counterOptions() CounterApp.Options {
     };
 }
 
-fn findWidgetIdByText(tree: CounterApp.Ui.Tree, kind: canvas.WidgetKind, text: []const u8) ?canvas.ObjectId {
+fn findWidgetIdByText(tree: anytype, kind: canvas.WidgetKind, text: []const u8) ?canvas.ObjectId {
     return findIn(tree.root, kind, text);
 }
 
@@ -130,6 +130,135 @@ test "ui app owns install, dispatch, and rebuild end to end" {
     try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "counter.reset", .window_id = 1 } });
     try std.testing.expectEqual(@as(u32, 0), app_state.model.count);
     try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 0"));
+}
+
+// -------------------------------------- context-menu fallback fixture
+
+const TaskRowModel = struct {
+    completed: u32 = 0,
+    deleted: u32 = 0,
+};
+
+const TaskRowMsg = union(enum) {
+    complete,
+    delete,
+};
+
+const TaskRowApp = ui_app_model.UiApp(TaskRowModel, TaskRowMsg);
+
+fn taskRowUpdate(model: *TaskRowModel, msg: TaskRowMsg) void {
+    switch (msg) {
+        .complete => model.completed += 1,
+        .delete => model.deleted += 1,
+    }
+}
+
+fn taskRowView(ui: *TaskRowApp.Ui, model: *const TaskRowModel) TaskRowApp.Ui.Node {
+    _ = model;
+    var row = ui.el(.list_item, .{
+        .padding = 8,
+        .context_menu = &.{
+            .{ .label = "Complete", .msg = .complete },
+            .{ .separator = true },
+            .{ .label = "Delete", .msg = .delete },
+        },
+    }, .{
+        ui.text(.{ .grow = 1 }, "Task"),
+    });
+    row.widget.text = "Task";
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{row});
+}
+
+fn taskRowOptions() TaskRowApp.Options {
+    return .{
+        .name = "ui-app-task-rows",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = taskRowUpdate,
+        .view = taskRowView,
+    };
+}
+
+fn retainedWidgetKindExists(runtime: *core.Runtime, kind: canvas.WidgetKind) !bool {
+    const layout = try runtime.canvasWidgetLayout(1, canvas_label);
+    for (layout.nodes) |node| {
+        if (node.widget.kind == kind) return true;
+    }
+    return false;
+}
+
+test "a declared context menu presents as the anchored fallback surface on presenter-less hosts, end to end" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    // A host without a native menu presenter (Linux GTK, Windows Win32
+    // today). Service pointers are captured at init, so re-capture.
+    harness.null_platform.context_menus = false;
+    harness.runtime.options.platform = harness.null_platform.platform();
+
+    const app_state = try std.testing.allocator.create(TaskRowApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = TaskRowApp.init(std.heap.page_allocator, .{}, taskRowOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // At rest: no surface mounted, no fallback state.
+    try std.testing.expect(!try retainedWidgetKindExists(&harness.runtime, .dropdown_menu));
+    try std.testing.expect(app_state.tree.?.context_menu_fallback == null);
+
+    // Right-click the row: the SAME declared menu mounts as an anchored
+    // canvas surface (no native presenter to hand it to).
+    const row_id = findWidgetIdByText(app_state.tree.?, .list_item, "Task").?;
+    var command_buffer: [96]u8 = undefined;
+    const context_press = try std.fmt.bufPrint(&command_buffer, "widget-context-press {s} {d}", .{ canvas_label, row_id });
+    try harness.runtime.dispatchAutomationCommand(app, context_press);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.context_menu_request_count);
+    const fallback = app_state.tree.?.context_menu_fallback orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(row_id, fallback.target_id);
+    try std.testing.expectEqual(@as(usize, 3), fallback.item_ids.len);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), fallback.item_ids[1]);
+    try std.testing.expect(try retainedWidgetKindExists(&harness.runtime, .dropdown_menu));
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .menu_item, "Delete") != null);
+
+    // Clicking "Delete" routes through the target's .context_menu
+    // handler — the same entry a native selection resolves — and closes
+    // the surface.
+    var click_buffer: [96]u8 = undefined;
+    const click_delete = try std.fmt.bufPrint(&click_buffer, "widget-click {s} {d}", .{ canvas_label, fallback.item_ids[2] });
+    try harness.runtime.dispatchAutomationCommand(app, click_delete);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.deleted);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.completed);
+    try std.testing.expect(app_state.tree.?.context_menu_fallback == null);
+    try std.testing.expect(!try retainedWidgetKindExists(&harness.runtime, .dropdown_menu));
+
+    // Reopen and dismiss (Escape/outside-click/automation all land on
+    // the same dismissal machinery): the surface closes, no Msg fires.
+    try harness.runtime.dispatchAutomationCommand(app, context_press);
+    const reopened = app_state.tree.?.context_menu_fallback orelse return error.TestUnexpectedResult;
+    var dismiss_buffer: [96]u8 = undefined;
+    const dismiss = try std.fmt.bufPrint(&dismiss_buffer, "widget-action {s} {d} dismiss", .{ canvas_label, reopened.surface_id });
+    try harness.runtime.dispatchAutomationCommand(app, dismiss);
+    try std.testing.expect(app_state.tree.?.context_menu_fallback == null);
+    try std.testing.expect(!try retainedWidgetKindExists(&harness.runtime, .dropdown_menu));
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.deleted);
+
+    // The widget-context-menu verb converges on the same dispatch with
+    // no surface involved at all.
+    var verb_buffer: [96]u8 = undefined;
+    const invoke_complete = try std.fmt.bufPrint(&verb_buffer, "widget-context-menu {s} {d} 0", .{ canvas_label, row_id });
+    try harness.runtime.dispatchAutomationCommand(app, invoke_complete);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.completed);
+    try std.testing.expect(app_state.tree.?.context_menu_fallback == null);
 }
 
 // ------------------------------------------------- scroll event fixture

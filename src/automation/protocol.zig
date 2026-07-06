@@ -20,8 +20,12 @@ pub const max_command_bytes: usize = 16 * 1024 + 64;
 /// per-stage timing line.
 /// 4 = the `provenance` verb (widget id or point -> authored markup) and
 /// its `provenance.txt` response artifact, the write-back read half.
+/// 5 = the `widget-context-menu` verb (invoke a declared context-menu
+/// item by target widget + item index, through the same
+/// `context_menu_action` dispatch a native selection takes) and the
+/// snapshot's per-widget `context_menu=[...]` item listing.
 /// Snapshots without a `protocol=` field predate the handshake entirely.
-pub const version: u32 = 4;
+pub const version: u32 = 5;
 
 pub const Error = error{
     InvalidCommand,
@@ -39,6 +43,12 @@ pub const Action = enum {
     widget_click,
     widget_hold,
     widget_context_press,
+    /// `widget-context-menu <view-label> <id> <item-index>`: invoke one
+    /// of the widget's DECLARED context-menu items without running the
+    /// OS menu's tracking loop (which cannot be driven programmatically)
+    /// — the selection dispatches as the same `context_menu_action`
+    /// platform event a real pick produces, so it journals and replays.
+    widget_context_menu,
     widget_drag,
     widget_wheel,
     widget_key,
@@ -78,6 +88,7 @@ pub const Command = struct {
         if (std.mem.eql(u8, action_text, "widget-click") and value.len > 0) return .{ .action = .widget_click, .value = value };
         if (std.mem.eql(u8, action_text, "widget-hold") and value.len > 0) return .{ .action = .widget_hold, .value = value };
         if (std.mem.eql(u8, action_text, "widget-context-press") and value.len > 0) return .{ .action = .widget_context_press, .value = value };
+        if (std.mem.eql(u8, action_text, "widget-context-menu") and value.len > 0) return .{ .action = .widget_context_menu, .value = value };
         if (std.mem.eql(u8, action_text, "widget-drag") and value.len > 0) return .{ .action = .widget_drag, .value = value };
         if (std.mem.eql(u8, action_text, "widget-wheel") and value.len > 0) return .{ .action = .widget_wheel, .value = value };
         if (std.mem.eql(u8, action_text, "widget-key") and value.len > 0) return .{ .action = .widget_key, .value = value };
@@ -161,6 +172,10 @@ test "commands parse reload and wait" {
     try std.testing.expectEqual(Action.widget_context_press, widget_context_press.action);
     try std.testing.expectEqualStrings("canvas 2", widget_context_press.value);
     try std.testing.expectError(error.InvalidCommand, Command.parse("widget-context-press"));
+    const widget_context_menu = try Command.parse("widget-context-menu canvas 2 1");
+    try std.testing.expectEqual(Action.widget_context_menu, widget_context_menu.action);
+    try std.testing.expectEqualStrings("canvas 2 1", widget_context_menu.value);
+    try std.testing.expectError(error.InvalidCommand, Command.parse("widget-context-menu"));
     const widget_drag = try Command.parse("widget-drag canvas 2 0.2 0.8");
     try std.testing.expectEqual(Action.widget_drag, widget_drag.action);
     try std.testing.expectEqualStrings("canvas 2 0.2 0.8", widget_drag.value);

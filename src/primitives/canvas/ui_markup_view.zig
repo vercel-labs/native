@@ -233,9 +233,41 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 // Series inside a chart are consumed by buildChart.
                 return self.failNode(node, markup.series_parent_message);
             }
+            if (std.mem.eql(u8, node.name, "context-menu")) {
+                // Direct context-menu children are consumed by their host
+                // element below; one reaching here is misplaced.
+                return self.failNode(node, markup.context_menu_parent_message);
+            }
             const kind = elementKind(node.name) orelse {
                 return self.failNode(node, "unknown element");
             };
+            // Extract a direct context-menu child: it is metadata on this
+            // element (lowered to the declared platform-menu items), not
+            // content, so every content rule below sees the remaining
+            // children only. Mirrors the validator and the compiled
+            // engine.
+            var inner = node;
+            var context_menu_child: ?markup.MarkupNode = null;
+            for (node.children) |child| {
+                if (!markup.nodeIsContextMenu(child)) continue;
+                if (context_menu_child != null) return self.failNode(child, markup.context_menu_single_message);
+                if (!markup.contextMenuHostEligible(node)) return self.failNode(child, markup.context_menu_host_message);
+                if (markup.contextMenuShapeError(child)) |info| {
+                    self.diagnostic = .{ .line = info.line, .column = info.column, .message = info.message, .path = info.path };
+                    return error.MarkupBuild;
+                }
+                context_menu_child = child;
+            }
+            if (context_menu_child != null) {
+                const filtered = try ui.arena.alloc(markup.MarkupNode, node.children.len - 1);
+                var filtered_len: usize = 0;
+                for (node.children) |child| {
+                    if (markup.nodeIsContextMenu(child)) continue;
+                    filtered[filtered_len] = child;
+                    filtered_len += 1;
+                }
+                inner.children = filtered[0..filtered_len];
+            }
             // Value/text handlers on non-hit-target kinds can never fire
             // (the element has no control or text behavior); reject
             // instead of silently accepting a dead handler. on-press and
@@ -299,7 +331,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             // compiled engine's compile error.
             if (kind == .split) {
                 var pane_count: usize = 0;
-                for (node.children) |child| {
+                for (inner.children) |child| {
                     switch (child.kind) {
                         .element, .use_block => pane_count += 1,
                         else => return self.failNode(child, markup.split_children_message),
@@ -320,6 +352,17 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             }
             var options: Ui.ElementOptions = .{};
             try self.applyAttrs(scope, node, &options);
+            // The extracted context-menu lowers through the ordinary
+            // element path — its menu-items build like any element
+            // (structure tags, interpolation, and message typing all
+            // apply) — and the built nodes become the host's declared
+            // items. An empty runtime result (every if false, an empty
+            // for) simply declares no menu.
+            if (context_menu_child) |menu_node| {
+                var menu_children: std.ArrayListUnmanaged(Ui.Node) = .empty;
+                try self.buildChildList(ui, scope, menu_node.children, &menu_children);
+                options.context_menu = ui.contextMenuItemsFromNodes(menu_children.items);
+            }
 
             if (kind == .icon) {
                 // Closed vocabulary: a literal built-in icon name, no
@@ -329,7 +372,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 const typed = markup.attrTyped(name_attr);
                 if (typed != .literal) return self.failNode(node, markup.icon_name_message);
                 if (canvas.icons.find(typed.literal) == null) return self.failNode(node, markup.icon_name_message);
-                if (node.children.len > 0) return self.failNode(node, markup.icon_children_message);
+                if (inner.children.len > 0) return self.failNode(node, markup.icon_children_message);
                 var built = ui.el(kind, options, .{});
                 built.widget.text = typed.literal;
                 return built;
@@ -341,14 +384,14 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             // a teaching error; the text path below would silently drop
             // the elements). Mirrors the validator and the compiled
             // engine.
-            const composite_children = elementTakesChildren(kind) and markup.nodeHasElementContent(node);
+            const composite_children = elementTakesChildren(kind) and markup.nodeHasElementContent(inner);
             if (composite_children) {
-                for (node.children) |child| {
+                for (inner.children) |child| {
                     if (child.kind == .text) return self.failNode(child, markup.text_or_children_content_message);
                 }
             }
             if (elementTakesText(kind) and !composite_children) {
-                const text = try self.interpolatedText(ui, scope, node);
+                const text = try self.interpolatedText(ui, scope, inner);
                 var built = ui.el(kind, options, .{});
                 built.widget.text = text;
                 // Avatars clip their runtime image to the avatar circle,
@@ -359,7 +402,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             }
 
             var children: std.ArrayListUnmanaged(Ui.Node) = .empty;
-            try self.buildChildren(ui, scope, node, &children);
+            try self.buildChildren(ui, scope, inner, &children);
             // Tab triggers ARE segmented controls: markup composes the
             // strip from `<button>` children (segmented-control is a
             // documented markup exclusion), and the engine lowers them to

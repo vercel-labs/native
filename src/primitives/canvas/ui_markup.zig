@@ -1270,11 +1270,31 @@ pub fn a11yRoleError(node: MarkupNode) ?[]const u8 {
 /// Whether the node carries element content (elements or structure tags,
 /// as opposed to text runs) — the list-row composite discriminator.
 /// Shared by the validator and both engines; comptime-callable.
+/// A `context-menu` child is metadata, not content — it lowers onto the
+/// PARENT's declared menu items and never renders in the parent's flow —
+/// so it does not make an element "have children" here.
 pub fn nodeHasElementContent(node: MarkupNode) bool {
     for (node.children) |child| {
-        if (child.kind != .text) return true;
+        if (child.kind != .text and !nodeIsContextMenu(child)) return true;
     }
     return false;
+}
+
+/// A `<context-menu>` element child: consumed by its parent (lowered to
+/// the parent's declared context-menu items), skipped by every content
+/// rule and child build. Shared by the validator and both engines;
+/// comptime-callable.
+pub fn nodeIsContextMenu(node: MarkupNode) bool {
+    return node.kind == .element and std.mem.eql(u8, node.name, "context-menu");
+}
+
+/// Whether an element can HOST a context-menu: right-click resolution
+/// walks the hit route, so the host must be a hit target — or carry a
+/// bound on-press/on-hold, which makes any element pressable. Shared by
+/// the validator and both engines; comptime-callable.
+pub fn contextMenuHostEligible(node: MarkupNode) bool {
+    if (!nameInList(node.name, &known_non_hit_target_element_names)) return true;
+    return node.attr("on-press") != null or node.attr("on-hold") != null;
 }
 
 fn a11yNodeHasName(node: MarkupNode) bool {
@@ -1589,6 +1609,16 @@ pub const series_values_message = "series requires a values attribute with one {
 pub const series_color_message = "series color takes a literal color token name (a canvas ColorTokens field, e.g. accent, info, success, text_muted)";
 pub const series_label_message = "series label expects text (a literal or one {binding}) - it names the series in the chart's semantics summary";
 pub const series_children_message = "series is a leaf - it takes no children; the values binding carries its data";
+pub const context_menu_parent_message = "context-menu must be a DIRECT child of the element whose right-click it answers - a conditional menu goes inside: wrap the menu-items in if/else, not the context-menu itself";
+pub const context_menu_host_message = "context-menu attaches to the element that takes the right-click, and this element is never a hit target - put the menu on the pressable element (list-item, button, panel, ...) or bind on-press on this one";
+pub const context_menu_single_message = "an element takes at most one context-menu - one right-click, one menu; swap its items with if/else INSIDE the menu";
+pub const context_menu_attrs_message = "context-menu takes no attributes - presentation belongs to the platform (the OS menu where the host has one, the anchored fallback surface elsewhere)";
+pub const context_menu_children_message = "context-menu takes menu-item and separator children (if/else/for around them are fine) - the items present through the platform's menu, so other elements cannot render there";
+pub const context_menu_empty_message = "context-menu requires at least one menu-item child";
+pub const context_menu_item_press_message = "every menu-item in a context-menu needs on-press - selecting the item dispatches that Msg, and an item without one is dead";
+pub const context_menu_item_attr_message = "unknown attribute for a context-menu menu-item - it takes on-press and disabled; the platform menu renders labels, separators, and enabled state only";
+pub const context_menu_item_label_message = "a context-menu menu-item's content is its label - give it one run of text";
+pub const context_menu_separator_message = "separator inside a context-menu is a bare divider - it takes no attributes or children";
 pub const text_leaf_children_message = "this element takes text content only - wrap element children in a container (row, column, stack)";
 pub const text_leaf_single_run_message = "text elements take a single run of text";
 pub const text_or_children_content_message = "this element takes either one run of text or element children - not both; move the text into a <text> child (and keep label= for the accessible name)";
@@ -2019,6 +2049,107 @@ pub const chart_series_kind_names = [_][]const u8{ "line", "area", "bar" };
 /// bind model iterables of f32. The series SET is static — data varies
 /// through bindings — so structure tags inside a chart are a teaching
 /// error naming the Zig builder as the home for dynamic composition.
+/// One `<context-menu>` on its host element: attribute-less, holding
+/// menu-item and separator children (structure tags around them are
+/// transparent, so a menu can swap or repeat items). The host's
+/// eligibility (hit target or bound press) is checked at the host, where
+/// the parent node is in hand. Pub and comptime-callable: the validator
+/// and BOTH engines run this one shape check, so the closed item
+/// vocabulary is stated once.
+pub fn contextMenuShapeError(node: MarkupNode) ?MarkupErrorInfo {
+    for (node.attrs) |attribute| {
+        return attrError(node, attribute, context_menu_attrs_message);
+    }
+    var item_count: usize = 0;
+    if (validateContextMenuChildren(node, &item_count)) |info| return info;
+    if (item_count == 0) return errorAt(node, context_menu_empty_message);
+    return null;
+}
+
+/// The context-menu content walk, transparent through structure tags:
+/// `for`/`if`/`else` keep their generic shape rules, and every element
+/// they can ever produce is a menu-item or separator.
+fn validateContextMenuChildren(node: MarkupNode, item_count: *usize) ?MarkupErrorInfo {
+    var previous_kind: ?MarkupNodeKind = null;
+    for (node.children) |child| {
+        switch (child.kind) {
+            .element => {
+                if (std.mem.eql(u8, child.name, "menu-item")) {
+                    item_count.* += 1;
+                    if (validateContextMenuItem(child)) |info| return info;
+                } else if (std.mem.eql(u8, child.name, "separator")) {
+                    if (child.attrs.len > 0 or child.children.len > 0) {
+                        return errorAt(child, context_menu_separator_message);
+                    }
+                    item_count.* += 1;
+                } else {
+                    return errorAt(child, context_menu_children_message);
+                }
+            },
+            .for_block => {
+                if (child.attr("each") == null) return errorAt(child, "for requires an each attribute");
+                if (child.attr("as") == null) return errorAt(child, "for requires an as attribute");
+                if (child.children.len == 0) return errorAt(child, for_children_message);
+                // Repeated items count as content even though the model
+                // may produce none at runtime (same optimism as the
+                // engines' empty-menu handling).
+                var repeated: usize = 0;
+                if (validateContextMenuChildren(child, &repeated)) |info| return info;
+                if (repeated == 0) return errorAt(child, context_menu_children_message);
+                item_count.* += repeated;
+            },
+            .if_block => {
+                const test_value = child.attr("test") orelse return errorAt(child, "if requires a test attribute");
+                if (attrExpressionError(test_value, if_test_expression_message)) |message| {
+                    return errorAt(child, message);
+                }
+                if (validateContextMenuChildren(child, item_count)) |info| return info;
+            },
+            .else_block => {
+                if (previous_kind != .if_block and previous_kind != .for_block) {
+                    return errorAt(child, else_placement_message);
+                }
+                if (validateContextMenuChildren(child, item_count)) |info| return info;
+            },
+            else => return errorAt(child, context_menu_children_message),
+        }
+        previous_kind = child.kind;
+    }
+    return null;
+}
+
+/// One `<menu-item>` inside a context-menu: a closed attribute set
+/// (on-press and disabled — the platform item carries label, enabled
+/// state, and separators only) around one run of label text.
+fn validateContextMenuItem(node: MarkupNode) ?MarkupErrorInfo {
+    var has_press = false;
+    for (node.attrs) |attribute| {
+        if (std.mem.eql(u8, attribute.name, "on-press")) {
+            has_press = true;
+            if (parseMessageExpression(attribute.value) == null) {
+                return attrError(node, attribute, "invalid message expression: on-* takes a Msg tag (\"add\") or tag with one binding payload (\"toggle:{item.id}\")");
+            }
+        } else if (std.mem.eql(u8, attribute.name, "disabled")) {
+            if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+                return attrError(node, attribute, message);
+            }
+        } else {
+            return attrError(node, attribute, context_menu_item_attr_message);
+        }
+    }
+    if (!has_press) return errorAt(node, context_menu_item_press_message);
+    var text_runs: usize = 0;
+    for (node.children) |child| {
+        if (child.kind != .text) return errorAt(child, context_menu_item_label_message);
+        text_runs += 1;
+        if (text_runs > 1) return errorAt(child, text_leaf_single_run_message);
+        if (textInterpolationError(child)) |info| return info;
+        if (textNodeCoverageError(child)) |info| return info;
+    }
+    if (text_runs == 0) return errorAt(node, context_menu_item_label_message);
+    return null;
+}
+
 fn validateChart(node: MarkupNode) ?MarkupErrorInfo {
     for (node.attrs) |attribute| {
         if (std.mem.startsWith(u8, attribute.name, "on-")) {
@@ -2110,7 +2241,7 @@ fn validateSeries(node: MarkupNode) ?MarkupErrorInfo {
 /// The rule hooks the composite registry entries name. A registry entry
 /// whose hook this table does not implement is a compile error (below),
 /// so attachment and implementation can never drift.
-const rule_hook_names = [_][]const u8{ "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series" };
+const rule_hook_names = [_][]const u8{ "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu" };
 
 comptime {
     for (schema.elements) |entry| {
@@ -2150,6 +2281,12 @@ fn validateRuleHook(hook: []const u8, document: MarkupDocument, node: MarkupNode
         // Series inside a chart are consumed by validateChart; one
         // reaching the generic pass sits outside a chart.
         return errorAt(node, series_parent_message);
+    }
+    if (std.mem.eql(u8, hook, "context-menu")) {
+        // Direct context-menu element children are consumed by their
+        // host element's validation; one reaching the generic pass sits
+        // at the root or behind a structure tag.
+        return errorAt(node, context_menu_parent_message);
     }
     // The comptime check above proves every registry hook lands in one of
     // the branches; a name reaching here is not a registry hook at all.
@@ -2196,6 +2333,18 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
             if (!nameInList(node.name, &known_element_names)) {
                 return errorAt(node, "unknown element");
             }
+            // Direct context-menu children attach to THIS element (the
+            // rule hook rejects any other placement), so the host's
+            // eligibility — right-click resolution walks the hit route —
+            // is checked here, where the host node is in hand.
+            var context_menu_count: usize = 0;
+            for (node.children) |child| {
+                if (!nodeIsContextMenu(child)) continue;
+                context_menu_count += 1;
+                if (context_menu_count > 1) return errorAt(child, context_menu_single_message);
+                if (!contextMenuHostEligible(node)) return errorAt(child, context_menu_host_message);
+                if (contextMenuShapeError(child)) |info| return info;
+            }
             if (std.mem.eql(u8, node.name, "table-row")) {
                 if (parent_element) |parent_name| {
                     if (!std.mem.eql(u8, parent_name, "table")) return errorAt(node, table_row_parent_message);
@@ -2216,6 +2365,10 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                 var text_runs: usize = 0;
                 for (node.children) |child| {
                     if (child.kind != .text) {
+                        // A context-menu child is metadata on the host,
+                        // not content: it never renders in the flow, so
+                        // the content-model rules look through it.
+                        if (nodeIsContextMenu(child)) continue;
                         if (!takes_children) return errorAt(child, text_leaf_children_message);
                         continue;
                     }
@@ -2234,6 +2387,7 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                 // belongs inside a pane container.
                 var pane_count: usize = 0;
                 for (node.children) |child| {
+                    if (nodeIsContextMenu(child)) continue;
                     switch (child.kind) {
                         .element, .use_block => pane_count += 1,
                         else => return errorAt(child, split_children_message),
@@ -2499,6 +2653,12 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
     for (node.children) |child| {
         if (child.kind == .else_block and previous_kind != .if_block and previous_kind != .for_block) {
             return errorAt(child, else_placement_message);
+        }
+        // A direct context-menu child was already validated by its host
+        // element above; recursing would fire the placement hook.
+        if (node.kind == .element and nodeIsContextMenu(child)) {
+            previous_kind = child.kind;
+            continue;
         }
         if (validateNode(document, child, child_parent, template_limit, slot_rule)) |info| {
             return info;

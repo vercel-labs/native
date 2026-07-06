@@ -197,7 +197,18 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
                 // Series inside a chart are consumed by buildChart.
                 comptime fail(node, markup.series_parent_message);
             }
+            if (comptime std.mem.eql(u8, node.name, "context-menu")) {
+                // Direct context-menu children are consumed by their host
+                // element below; one reaching here is misplaced.
+                comptime fail(node, markup.context_menu_parent_message);
+            }
             const kind = comptime (interpreter.elementKind(node.name) orelse fail(node, "unknown element"));
+            // Interpreter parity: extract a direct context-menu child —
+            // metadata on this element (lowered to the declared
+            // platform-menu items), not content — so every content rule
+            // below sees the remaining children only.
+            const context_menu_split = comptime splitContextMenuChild(node);
+            const inner = comptime context_menu_split.inner;
             comptime {
                 // Interpreter parity: value/text handlers on
                 // non-hit-target kinds can never fire, so a dead handler
@@ -255,7 +266,7 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
                 // pane children (the divider sits between fixed panes).
                 if (kind == .split) {
                     var pane_count: usize = 0;
-                    for (node.children) |child| {
+                    for (inner.children) |child| {
                         switch (child.kind) {
                             .element, .use_block => pane_count += 1,
                             else => fail(child, markup.split_children_message),
@@ -276,6 +287,15 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
             }
             var options: Ui.ElementOptions = .{};
             applyAttrs(node, entries, ui, model, scope, &options);
+            // Interpreter parity: the extracted context-menu lowers
+            // through the ordinary element path — its menu-items build
+            // like any element — and the built nodes become the host's
+            // declared items. An empty runtime result declares no menu.
+            if (comptime (context_menu_split.menu != null)) {
+                var menu_children: std.ArrayListUnmanaged(Ui.Node) = .empty;
+                buildChildList(comptime context_menu_split.menu.?.children, entries, ui, model, scope, &menu_children);
+                options.context_menu = ui.contextMenuItemsFromNodes(menu_children.items);
+            }
 
             if (comptime (kind == .icon)) {
                 // Closed vocabulary, resolved at comptime: a typo in an
@@ -286,7 +306,7 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
                     const expression = markup.parseAttrExpression(raw) orelse fail(node, markup.icon_name_message);
                     if (expression != .literal) fail(node, markup.icon_name_message);
                     if (canvas.icons.find(expression.literal) == null) fail(node, markup.icon_name_message);
-                    if (node.children.len > 0) fail(node, markup.icon_children_message);
+                    if (inner.children.len > 0) fail(node, markup.icon_children_message);
                     break :blk expression.literal;
                 };
                 var built = ui.el(kind, options, .{});
@@ -298,17 +318,17 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
             // element whose content is element children instead of the
             // text run flows those children inside its own chrome, and
             // mixing text and elements is a compile error here.
-            const composite_children = comptime (interpreter.elementTakesChildren(kind) and markup.nodeHasElementContent(node));
+            const composite_children = comptime (interpreter.elementTakesChildren(kind) and markup.nodeHasElementContent(inner));
             comptime {
                 if (composite_children) {
-                    for (node.children) |child| {
+                    for (inner.children) |child| {
                         if (child.kind == .text) fail(child, markup.text_or_children_content_message);
                     }
                 }
             }
             if (comptime (interpreter.elementTakesText(kind) and !composite_children)) {
                 var built = ui.el(kind, options, .{});
-                built.widget.text = interpolatedText(node, entries, ui, model, scope);
+                built.widget.text = interpolatedText(inner, entries, ui, model, scope);
                 // Avatars clip their runtime image to the avatar circle,
                 // exactly like `Ui.avatar` and the interpreter (a no-op
                 // while the id is 0 and the initials fallback renders).
@@ -317,7 +337,7 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
             }
 
             var children: std.ArrayListUnmanaged(Ui.Node) = .empty;
-            buildChildren(node, entries, ui, model, scope, &children);
+            buildChildren(inner, entries, ui, model, scope, &children);
             // Interpreter parity: tab triggers ARE segmented controls -
             // `<button>` children of a `<tabs>` strip lower to the
             // widget kind tab strips are built on (see
@@ -2017,6 +2037,55 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
         }
 
         // -------------------------------------------------- diagnostics
+
+        /// Comptime mirror of the interpreter's context-menu extraction:
+        /// splits one direct `<context-menu>` child off the element (the
+        /// menu is metadata, not content) after running the SAME shared
+        /// checks — single menu, eligible host, and the closed item
+        /// shape (`markup.contextMenuShapeError`).
+        const ContextMenuSplit = struct {
+            inner: markup.MarkupNode,
+            menu: ?markup.MarkupNode,
+        };
+
+        fn splitContextMenuChild(comptime node: markup.MarkupNode) ContextMenuSplit {
+            comptime {
+                var menu: ?markup.MarkupNode = null;
+                for (node.children) |child| {
+                    if (!markup.nodeIsContextMenu(child)) continue;
+                    if (menu != null) fail(child, markup.context_menu_single_message);
+                    if (!markup.contextMenuHostEligible(node)) fail(child, markup.context_menu_host_message);
+                    if (markup.contextMenuShapeError(child)) |info| failInfo(info);
+                    menu = child;
+                }
+                if (menu == null) return .{ .inner = node, .menu = null };
+                var filtered: []const markup.MarkupNode = &.{};
+                for (node.children) |child| {
+                    if (markup.nodeIsContextMenu(child)) continue;
+                    filtered = filtered ++ &[_]markup.MarkupNode{child};
+                }
+                var inner = node;
+                inner.children = filtered;
+                return .{ .inner = inner, .menu = menu };
+            }
+        }
+
+        /// `fail` from a shared shape check's positioned error info.
+        fn failInfo(comptime info: markup.MarkupErrorInfo) noreturn {
+            if (info.path.len > 0) {
+                @compileError(std.fmt.comptimePrint("markup error in {s} at line {d}, column {d}: {s}", .{
+                    info.path,
+                    info.line,
+                    info.column,
+                    info.message,
+                }));
+            }
+            @compileError(std.fmt.comptimePrint("markup error at line {d}, column {d}: {s}", .{
+                info.line,
+                info.column,
+                info.message,
+            }));
+        }
 
         fn fail(comptime node: markup.MarkupNode, comptime message: []const u8) noreturn {
             if (node.src_path.len > 0) {

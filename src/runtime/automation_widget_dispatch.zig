@@ -222,6 +222,41 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             } });
         }
 
+        /// Invoke one of the target widget's DECLARED context-menu items
+        /// (`widget-context-menu <view> <id> <item-index>`). The OS
+        /// menu's tracking loop cannot be driven programmatically, so
+        /// the verb skips presentation and dispatches the SELECTION on
+        /// the same path a real pick takes: it arms the pending request
+        /// exactly as presenting would, then delivers a
+        /// `context_menu_action` platform event — which journals,
+        /// replays, and resolves through `dispatchContextMenuAction`
+        /// into the widget's `.context_menu` handler. Named errors say
+        /// why an invocation cannot happen: no declared menu, an index
+        /// past the declared items, a separator slot, or a disabled
+        /// item — the same items the snapshot lists per widget.
+        pub fn dispatchAutomationWidgetContextMenuItem(self: *Runtime, app: runtime_api.App(Runtime), item: automation_commands.AutomationWidgetContextMenuItem) anyerror!void {
+            const view_index = try automationWidgetTargetViewIndex(self, item.target);
+            const node_index = self.views[view_index].canvasWidgetNodeIndexById(item.target.id) orelse return error.InvalidCommand;
+            const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+            if (widget.context_menu.len == 0) return error.ContextMenuUndeclared;
+            if (item.item_index >= widget.context_menu.len) return error.ContextMenuItemOutOfRange;
+            const declared = widget.context_menu[item.item_index];
+            if (declared.separator) return error.ContextMenuItemSeparator;
+            if (!declared.enabled) return error.ContextMenuItemDisabled;
+
+            self.canvas_widget_context_menu_pending = .{
+                .window_id = self.views[view_index].window_id,
+                .token = widget.id,
+                .kind = .app,
+            };
+            try self.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+                .window_id = self.views[view_index].window_id,
+                .view_label = self.views[view_index].label,
+                .token = widget.id,
+                .item_id = @intCast(item.item_index + 1),
+            } });
+        }
+
         /// Where a pointer verb lands on a widget: the control's aim
         /// point, not the geometric center — a stretched selection
         /// control (switch as a bare column child) draws its glyph at

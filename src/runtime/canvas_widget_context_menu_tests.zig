@@ -23,6 +23,8 @@ const MenuTestApp = struct {
     menu_count: u32 = 0,
     last_menu_target: canvas.ObjectId = 0,
     last_menu_item_index: usize = 0,
+    request_count: u32 = 0,
+    last_request_target: canvas.ObjectId = 0,
 
     fn app(self: *@This()) App {
         return .{ .context = self, .name = "context-menus", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
@@ -38,6 +40,10 @@ const MenuTestApp = struct {
                 self.menu_count += 1;
                 self.last_menu_target = menu_event.target_id;
                 self.last_menu_item_index = menu_event.item_index;
+            },
+            .canvas_widget_context_menu_request => |request_event| {
+                self.request_count += 1;
+                self.last_request_target = request_event.target_id;
             },
             else => {},
         }
@@ -258,6 +264,136 @@ test "right click with no menu target presents nothing" {
     // A stray action event with no pending request is a no-op.
     try harness.runtime.dispatchPlatformEvent(app, menuAction(2, 1));
     try std.testing.expectEqual(@as(u32, 0), app_state.menu_count);
+}
+
+test "a declared menu on a presenter-less host becomes a fallback request, not a lost click" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    harness.null_platform.gpu_surfaces = true;
+    // Model a host without a native menu presenter (Linux GTK, Windows
+    // Win32 today): the service is null and the feature reports false.
+    // Service POINTERS are captured at init, so re-capture after the
+    // flip (feature FLAGS like gpu_surfaces read live through context).
+    harness.null_platform.context_menus = false;
+    harness.runtime.options.platform = harness.null_platform.platform();
+    try harness.start(app);
+    defer harness.destroy(std.testing.allocator);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 200),
+    });
+
+    const items = [_]canvas.WidgetContextMenuItem{
+        .{ .label = "Complete" },
+        .{ .label = "Delete" },
+    };
+    const row = canvas.Widget{
+        .id = 2,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(10, 10, 200, 40),
+        .text = "Task",
+        .context_menu = &items,
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{row} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // Right-click: nothing to present natively, so the app loop is asked
+    // to mount the anchored fallback surface for the declared target.
+    try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 20));
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.context_menu_request_count);
+    try std.testing.expectEqual(@as(u32, 1), app_state.request_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_request_target);
+    // Never the hold alternative: a declared menu consumed the press.
+    try std.testing.expectEqual(@as(u32, 0), app_state.pointer_count);
+
+    // The automation verb still drives the SAME selection dispatch — no
+    // presenter required (the OS tracking loop is skipped on macOS too).
+    try harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 1");
+    try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_menu_target);
+    try std.testing.expectEqual(@as(usize, 1), app_state.last_menu_item_index);
+}
+
+test "the widget-context-menu verb dispatches selections through context_menu_action and refuses dead items by name" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    const items = [_]canvas.WidgetContextMenuItem{
+        .{ .label = "Complete" },
+        .{ .separator = true },
+        .{ .label = "Delete" },
+        .{ .label = "Archive", .enabled = false },
+    };
+    const row = canvas.Widget{
+        .id = 2,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(10, 10, 200, 40),
+        .text = "Task",
+        .context_menu = &items,
+    };
+    const plain = canvas.Widget{
+        .id = 3,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(10, 60, 200, 40),
+        .text = "Bare",
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{ row, plain } }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // Invoking "Delete" (index 2) takes the same dispatch a real pick
+    // does: a context_menu_action platform event resolved against the
+    // pending request the verb armed.
+    try harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 2");
+    try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_menu_target);
+    try std.testing.expectEqual(@as(usize, 2), app_state.last_menu_item_index);
+    // The verb never asked the platform to present: the OS menu's
+    // tracking loop cannot be driven programmatically.
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.context_menu_request_count);
+
+    // Dead invocations fail by name instead of silently doing nothing.
+    try std.testing.expectError(error.ContextMenuUndeclared, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 3 0"));
+    try std.testing.expectError(error.ContextMenuItemOutOfRange, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 4"));
+    try std.testing.expectError(error.ContextMenuItemSeparator, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 1"));
+    try std.testing.expectError(error.ContextMenuItemDisabled, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 3"));
+    try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+}
+
+test "automation snapshots list each widget's declared context-menu items in invocable order" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    const items = [_]canvas.WidgetContextMenuItem{
+        .{ .label = "Complete" },
+        .{ .separator = true },
+        .{ .label = "Archive", .enabled = false },
+    };
+    const row = canvas.Widget{
+        .id = 2,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(10, 10, 200, 40),
+        .text = "Task",
+        .context_menu = &items,
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{row} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    var buffer: [16384]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try automation.snapshot.writeText(harness.runtime.automationSnapshot("Menus"), &writer);
+    // List position = the widget-context-menu item index; separators
+    // keep their slots and disabled items say so.
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "context_menu=[\"Complete\",separator,\"Archive\"(disabled)]") != null);
 }
 
 test "automation snapshots report per-view context-menu item headroom" {

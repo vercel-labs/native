@@ -122,6 +122,10 @@ The runtime polls `command.txt` and processes these actions:
       <td>Secondary click (right/ctrl-click): presents the widget's context menu, or dispatches <code>on_hold</code> immediately when the route has none</td>
     </tr>
     <tr>
+      <td><code>widget-context-menu &lt;view-label&gt; &lt;widget-id&gt; &lt;item-index&gt;</code></td>
+      <td>Invoke a declared context-menu item by 0-based index (as the snapshot's <code>context_menu=[...]</code> lists them) — the selection dispatches as the same <code>context_menu_action</code> platform event a real pick produces; presentation is skipped because the OS menu's tracking loop cannot be driven. Refuses undeclared menus, out-of-range indices, separators, and disabled items by name</td>
+    </tr>
+    <tr>
       <td><code>widget-drag &lt;view-label&gt; &lt;widget-id&gt; &lt;start-x-ratio&gt; &lt;end-x-ratio&gt; [&lt;start-y-ratio&gt; &lt;end-y-ratio&gt;]</code></td>
       <td>Dispatch pointer down/drag/up across a retained canvas widget</td>
     </tr>
@@ -197,7 +201,8 @@ native automate shortcut app.refresh
 native automate widget-action canvas 2 press
 native automate widget-click canvas 3
 native automate widget-hold canvas 3            # press-and-hold (on_hold)
-native automate widget-context-press canvas 3   # right-click
+native automate widget-context-press canvas 3   # right-click (presents the menu)
+native automate widget-context-menu canvas 3 1  # pick declared menu item 1
 
 # Drive focus between native controls and WebViews
 native automate focus refresh-button

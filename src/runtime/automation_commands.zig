@@ -42,6 +42,15 @@ pub const AutomationWidgetWheel = struct {
     delta_y: f32,
 };
 
+/// `widget-context-menu <view-label> <id> <item-index>`: invoke one of
+/// the target widget's declared context-menu items. `item_index` is the
+/// 0-based index into the widget's declared items, exactly as the
+/// snapshot lists them (separators count).
+pub const AutomationWidgetContextMenuItem = struct {
+    target: AutomationWidgetTarget,
+    item_index: usize,
+};
+
 pub const AutomationWidgetKey = struct {
     view_label: []const u8,
     key: []const u8,
@@ -226,6 +235,20 @@ pub fn parseAutomationWidgetWheel(value: []const u8) !AutomationWidgetWheel {
     return .{
         .target = .{ .view_label = view.token, .id = id },
         .delta_y = delta_y,
+    };
+}
+
+pub fn parseAutomationWidgetContextMenuItem(value: []const u8) !AutomationWidgetContextMenuItem {
+    const view = takeAutomationToken(value) orelse return error.InvalidCommand;
+    const id_part = takeAutomationToken(view.rest) orelse return error.InvalidCommand;
+    const item_part = takeAutomationToken(id_part.rest) orelse return error.InvalidCommand;
+    if (takeAutomationToken(item_part.rest) != null) return error.InvalidCommand;
+    const id = std.fmt.parseInt(canvas.ObjectId, id_part.token, 10) catch return error.InvalidCommand;
+    if (id == 0) return error.InvalidCommand;
+    const item_index = std.fmt.parseInt(usize, item_part.token, 10) catch return error.InvalidCommand;
+    return .{
+        .target = .{ .view_label = view.token, .id = id },
+        .item_index = item_index,
     };
 }
 
@@ -579,6 +602,21 @@ test "runtime parses automation widget wheel targets" {
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetWheel("canvas 42 nope"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetWheel("canvas 42 nan"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetWheel("canvas 42 18 extra"));
+}
+
+test "runtime parses automation widget context-menu items" {
+    const item = try parseAutomationWidgetContextMenuItem("canvas 42 1");
+    try std.testing.expectEqualStrings("canvas", item.target.view_label);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 42), item.target.id);
+    try std.testing.expectEqual(@as(usize, 1), item.item_index);
+
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetContextMenuItem(""));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetContextMenuItem("canvas"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetContextMenuItem("canvas 42"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetContextMenuItem("canvas 0 1"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetContextMenuItem("canvas nope 1"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetContextMenuItem("canvas 42 nope"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetContextMenuItem("canvas 42 1 extra"));
 }
 
 test "runtime parses automation widget key inputs" {

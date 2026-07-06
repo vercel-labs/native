@@ -215,7 +215,7 @@ pub fn draft(model: *const Model) []const u8 {
 
 `on-resize` (on the `split` element; `Ui.valueMsg(.tag)` on `on_resize` in Zig views) names a variant whose payload is the new first-pane fraction (`f32`): after every divider drag, keyboard adjustment, or assistive increment/decrement the runtime delivers the fraction it already applied and clamped — store it in the model and echo it back through the split's `value`, and rebuilds never fight live resizing.
 
-`on-dismiss` (on the dismissible surfaces: `dialog`, `drawer`, `sheet`, `dropdown-menu`; `ElementOptions.on_dismiss` in Zig views) dispatches when Escape or a click outside dismisses the surface, so the model owns the close — clear the open flag in `update`. The engine hides the surface immediately as an optimistic echo; the next rebuild's source tree is truth. Escape works regardless of focus: it dismisses the nearest surface up the focused widget's chain, and when nothing relevant is focused — a menu opened from a plain-text trigger takes no focus — it falls back to the topmost mounted anchored surface. `on-hold` (any element; `ElementOptions.on_hold`) is press-and-hold: a pointer held ~350 ms dispatches the hold Msg and the release presses nothing, a quick click dispatches `on-press` as usual, and a right/ctrl-click with no context menu on its route dispatches the hold Msg immediately — the crumb-switcher shape (`on-press` selects, `on-hold` opens an anchored menu). Both legs are live-drivable through automation: `native automate widget-hold <view> <id>` runs the pointer+timer gesture, `widget-context-press <view> <id>` the secondary click.
+`on-dismiss` (on the dismissible surfaces: `dialog`, `drawer`, `sheet`, `dropdown-menu`; `ElementOptions.on_dismiss` in Zig views) dispatches when Escape or a click outside dismisses the surface, so the model owns the close — clear the open flag in `update`. The engine hides the surface immediately as an optimistic echo; the next rebuild's source tree is truth. Escape works regardless of focus: it dismisses the nearest surface up the focused widget's chain, and when nothing relevant is focused — a menu opened from a plain-text trigger takes no focus — it falls back to the topmost mounted anchored surface. `on-hold` (any element; `ElementOptions.on_hold`) is press-and-hold: a pointer held ~350 ms dispatches the hold Msg and the release presses nothing, a quick click dispatches `on-press` as usual, and a right/ctrl-click with no context menu on its route dispatches the hold Msg immediately (a declared `<context-menu>` always wins the right-click) — the crumb-switcher shape (`on-press` selects, `on-hold` opens an anchored menu). Both legs are live-drivable through automation: `native automate widget-hold <view> <id>` runs the pointer+timer gesture, `widget-context-press <view> <id>` the secondary click.
 
 Presses follow one rule: a click lands on the nearest pressable widget under the pointer — plain text, icons, images, badges, and layout containers let it fall through to their closest pressable ancestor, and dragging still selects text. Any element with a bound `on-press`/`on-toggle` is pressable (the handler makes it a hit target), so a pressable row is just `<panel on-press="open:{id}">` — or `<row on-press=...>` — with plain text children: no overlays, no duplicated handlers. Nested pressables resolve to the deepest one (a button inside a pressable row wins); editable text fields, scroll containers, and modal surfaces always claim their own presses. Value/text handlers (`on-change`, `on-submit`, `on-input`) still belong on controls only — the validator, both engines, and the LSP reject them on layout/decoration elements with a teaching error.
 
@@ -225,7 +225,20 @@ On macOS, every non-virtualized `scroll` region is driven by an invisible `NSScr
 
 Scroll regions pin at their content edges by default on every path — no rubber-band bounce; kinetic motion stops cleanly at the boundary. Bouncing is a per-region opt-in: `overscroll="rubber_band"` in markup or `ElementOptions.overscroll = .rubber_band` in Zig views (the native macOS scroller gets elastic edges, the engine physics overscroll under resistance and spring back). The `ScrollPhysics.overscroll` design token flips the app-wide default; per-region values override it, and `overscroll="none"` pins a region regardless of the token.
 
-Right/ctrl-click presents a real OS context menu (`NSMenu` on macOS). Declare per-widget items with typed messages from a Zig view function (`canvas.Ui` builder — the closed markup grammar has no list-valued attributes):
+Right/ctrl-click presents a real OS context menu (`NSMenu` on macOS). Authors declare ONE menu and the platform decides presentation: hosts without a native menu presenter (Linux and Windows today) mount the same declared items as an anchored canvas surface on the widget automatically — never two authored menus, never a canvas imitation where the OS menu exists. In markup, the menu is a `<context-menu>` child of the pressable element it answers, holding `menu-item`s (`on-press` required, `disabled` optional) and `separator`s, with `if`/`else`/`for` to swap or repeat items:
+
+```html
+<list-item on-press="open:{entry.id}" label="{entry.title}">
+  <text grow="1">{entry.title}</text>
+  <context-menu>
+    <menu-item on-press="open:{entry.id}">Open</menu-item>
+    <separator />
+    <menu-item on-press="delete:{entry.id}">Delete</menu-item>
+  </context-menu>
+</list-item>
+```
+
+The Zig builder's mirror is `ElementOptions.context_menu`:
 
 ```zig
 ui.listItem(.{
@@ -238,7 +251,7 @@ ui.listItem(.{
 }, entry.title)
 ```
 
-Editable text fields present the standard Cut / Copy / Paste / Select All menu with no declaration, wired to the same clipboard actions as the keyboard shortcuts; a selected static text presents Copy.
+Editable text fields present the standard Cut / Copy / Paste / Select All menu with no declaration, wired to the same clipboard actions as the keyboard shortcuts; a selected static text presents Copy. Tests drive the native path without pixels: snapshots list each widget's declared items (`context_menu=["Open","Delete"]`), and `native automate widget-context-menu <view> <id> <item-index>` invokes an item through the same dispatch a real pick takes.
 
 ## Effects
 

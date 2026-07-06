@@ -277,6 +277,10 @@ pub const elements = [_]ElementInfo{
     .{ .code = 58, .name = "timeline-item", .rule_hook = "timeline-item" },
     .{ .code = 59, .name = "chart", .rule_hook = "chart" },
     .{ .code = 60, .name = "series", .rule_hook = "series" },
+    // Consumed by its parent element: lowers to the parent's declared
+    // context-menu items (the platform-menu channel), never to a widget
+    // of its own.
+    .{ .code = 61, .name = "context-menu", .rule_hook = "context-menu" },
 };
 
 // ------------------------------------------------------------- attributes

@@ -144,6 +144,7 @@ pub const CanvasWidgetAccessibilityAction = runtime_api.CanvasWidgetAccessibilit
 pub const CanvasWidgetFileDropEvent = runtime_api.CanvasWidgetFileDropEvent;
 pub const CanvasWidgetDragEvent = runtime_api.CanvasWidgetDragEvent;
 pub const CanvasWidgetContextMenuEvent = runtime_api.CanvasWidgetContextMenuEvent;
+pub const CanvasWidgetContextMenuRequestEvent = runtime_api.CanvasWidgetContextMenuRequestEvent;
 pub const CanvasWidgetDismissEvent = runtime_api.CanvasWidgetDismissEvent;
 pub const CanvasWidgetContextPressEvent = runtime_api.CanvasWidgetContextPressEvent;
 pub const CanvasWidgetResizeEvent = runtime_api.CanvasWidgetResizeEvent;
@@ -231,6 +232,12 @@ pub const Runtime = struct {
     automation_frame_profile_stages: [runtime_frame_profile.frame_profile_stage_count]automation.snapshot.FrameProfileStage = undefined,
     automation_views: [automation.snapshot.max_views]platform.ViewInfo = undefined,
     automation_widgets: [automation.snapshot.max_widgets]automation.snapshot.Widget = undefined,
+    /// Snapshot-side storage for per-widget declared context-menu items
+    /// (the snapshot Input only references runtime-owned memory; labels
+    /// alias the views' bounded menu storage). Sized so every view can
+    /// list its full per-view item budget — the snapshot never truncates
+    /// menus the runtime accepted.
+    automation_widget_menu_items: [canvas_limits.max_canvas_widget_context_menu_items_per_view * platform.max_views]automation.snapshot.WidgetContextMenuItem = undefined,
     automation_tray_items: [platform.max_tray_items]automation.snapshot.TrayItem = undefined,
     /// Handshake for the `provenance` verb: cleared before the query is
     /// evented to the app, set by the app's response publish — so the

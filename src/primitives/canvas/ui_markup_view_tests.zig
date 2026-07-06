@@ -949,6 +949,98 @@ test "markup anchors dropdown-menus and binds dismiss and hold handlers" {
     try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(good_document));
 }
 
+pub const context_menu_markup_source =
+    \\<column gap="4">
+    \\  <for each="visible" key="id" as="t">
+    \\    <list-item on-press="toggle:{t.id}" padding="6" label="{t.title}">
+    \\      <text grow="1">{t.title}</text>
+    \\      <context-menu>
+    \\        <if test="{t.done}">
+    \\          <menu-item on-press="toggle:{t.id}">Reopen</menu-item>
+    \\        </if>
+    \\        <else>
+    \\          <menu-item on-press="toggle:{t.id}">Complete</menu-item>
+    \\        </else>
+    \\        <separator />
+    \\        <menu-item on-press="add" disabled="{t.done}">Add Another</menu-item>
+    \\      </context-menu>
+    \\    </list-item>
+    \\  </for>
+    \\</column>
+;
+
+test "markup context-menus lower to declared platform-menu items on their host" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = testModel();
+
+    var view = try InboxMarkup.init(arena, context_menu_markup_source);
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+
+    // Three tasks, three rows; the menu is metadata, never a flow
+    // child — each row renders exactly its one text child.
+    const list = tree.root;
+    try testing.expectEqual(@as(usize, 3), list.children.len);
+    for (list.children) |row| {
+        try testing.expectEqual(canvas.WidgetKind.list_item, row.kind);
+        try testing.expectEqual(@as(usize, 1), row.children.len);
+        try testing.expectEqual(canvas.WidgetKind.text, row.children[0].kind);
+        try testing.expectEqual(@as(usize, 3), row.context_menu.len);
+        try testing.expect(row.context_menu[1].separator);
+        try testing.expectEqualStrings("Add Another", row.context_menu[2].label);
+    }
+    // Row 1 ("Ship IR", open): Complete leads and every item is live.
+    const open_row = list.children[0];
+    try testing.expectEqualStrings("Complete", open_row.context_menu[0].label);
+    try testing.expect(open_row.context_menu[0].enabled);
+    try testing.expect(open_row.context_menu[2].enabled);
+    // Row 2 ("Write decisions", done): the if swapped the first item and
+    // the binding disabled the last.
+    const done_row = list.children[1];
+    try testing.expectEqualStrings("Reopen", done_row.context_menu[0].label);
+    try testing.expect(!done_row.context_menu[2].enabled);
+
+    // Selections resolve through the handler table with typed payloads —
+    // the SAME entry native picks and the anchored fallback both use.
+    const toggle_msg = tree.msgForContextMenu(done_row.id, 0) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(Msg{ .toggle = 2 }, toggle_msg);
+    const add_msg = tree.msgForContextMenu(open_row.id, 2) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(Msg.add, add_msg);
+    // The separator slot is inert.
+    try testing.expectEqual(@as(?Msg, null), tree.msgForContextMenu(open_row.id, 1));
+
+    // Teaching errors, engine and validator agreeing on the message.
+    const failing = [_]struct { source: []const u8, message: []const u8 }{
+        .{ .source = "<row>\n  <context-menu><menu-item on-press=\"add\">A</menu-item></context-menu>\n</row>", .message = canvas.ui_markup.context_menu_host_message },
+        .{ .source = "<column>\n  <if test=\"{open_count}\">\n    <context-menu><menu-item on-press=\"add\">A</menu-item></context-menu>\n  </if>\n</column>", .message = canvas.ui_markup.context_menu_parent_message },
+        .{ .source = "<column>\n  <button>Save<context-menu><menu-item on-press=\"add\">A</menu-item></context-menu><context-menu><menu-item on-press=\"add\">B</menu-item></context-menu></button>\n</column>", .message = canvas.ui_markup.context_menu_single_message },
+        .{ .source = "<column>\n  <button>Save<context-menu anchor=\"below\"><menu-item on-press=\"add\">A</menu-item></context-menu></button>\n</column>", .message = canvas.ui_markup.context_menu_attrs_message },
+        .{ .source = "<column>\n  <button>Save<context-menu><button on-press=\"add\">A</button></context-menu></button>\n</column>", .message = canvas.ui_markup.context_menu_children_message },
+        .{ .source = "<column>\n  <button>Save<context-menu></context-menu></button>\n</column>", .message = canvas.ui_markup.context_menu_empty_message },
+        .{ .source = "<column>\n  <button>Save<context-menu><menu-item>A</menu-item></context-menu></button>\n</column>", .message = canvas.ui_markup.context_menu_item_press_message },
+        .{ .source = "<column>\n  <button>Save<context-menu><menu-item on-press=\"add\" icon=\"copy\">A</menu-item></context-menu></button>\n</column>", .message = canvas.ui_markup.context_menu_item_attr_message },
+        .{ .source = "<column>\n  <button>Save<context-menu><menu-item on-press=\"add\" /></context-menu></button>\n</column>", .message = canvas.ui_markup.context_menu_item_label_message },
+        .{ .source = "<column>\n  <button>Save<context-menu><menu-item on-press=\"add\">A</menu-item><separator gap=\"2\" /></context-menu></button>\n</column>", .message = canvas.ui_markup.context_menu_separator_message },
+    };
+    for (failing) |case| {
+        var failing_view = try InboxMarkup.init(arena, case.source);
+        var failing_ui = InboxUi.init(arena);
+        try testing.expectError(error.MarkupBuild, failing_view.build(&failing_ui, &model));
+        try testing.expectEqualStrings(case.message, failing_view.diagnostic.message);
+    }
+    for (failing) |case| {
+        var parser = canvas.ui_markup.Parser.init(arena, case.source);
+        const document = try parser.parse();
+        const diagnostic = canvas.ui_markup.validate(document) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, diagnostic.message);
+    }
+    var good_parser = canvas.ui_markup.Parser.init(arena, context_menu_markup_source);
+    const good_document = try good_parser.parse();
+    try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(good_document));
+}
+
 test "the schema registry's icon section matches the comptime icon registry" {
     // ui_schema.zig is std-only (ui_markup.zig doubles as the LSP's module
     // root), so its icon section is a data mirror of the comptime-parsed

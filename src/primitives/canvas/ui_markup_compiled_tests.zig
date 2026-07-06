@@ -42,8 +42,9 @@ fn expectSameTree(comptime MsgT: type, expected: canvas.Ui(MsgT).Tree, actual: c
             .input => |make| try testing.expectEqual(make, actual_handler.action.input),
             .value => |make| try testing.expectEqual(make, actual_handler.action.value),
             .scroll => |make| try testing.expectEqual(make, actual_handler.action.scroll),
-            // Context menus are builder-only (the closed markup grammar has
-            // no list-valued attributes), so parity trees never carry them.
+            // Context-menu handler entries carry one ?Msg per declared
+            // item (separators are null slots); markup `<context-menu>`
+            // and the Zig builder both produce them.
             .context_menu => |msgs| {
                 const actual_msgs = actual_handler.action.context_menu;
                 try testing.expectEqual(msgs.len, actual_msgs.len);
@@ -98,6 +99,42 @@ fn interpretInbox(arena: std.mem.Allocator, model: *const fixture.Model) !InboxU
 fn compileInbox(arena: std.mem.Allocator, model: *const fixture.Model) !InboxUi.Tree {
     var ui = InboxUi.init(arena);
     return ui.finalize(InboxCompiled.build(&ui, model));
+}
+
+const ContextMenuCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, fixture.context_menu_markup_source);
+
+test "compiled context-menus build the interpreter's declared items and handler entries exactly" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = fixture.testModel();
+
+    var interpreter_view = try InboxInterpreter.init(arena, fixture.context_menu_markup_source);
+    var interpreter_ui = InboxUi.init(arena);
+    const interpreted = try interpreter_ui.finalize(try interpreter_view.build(&interpreter_ui, &model));
+    var compiled_ui = InboxUi.init(arena);
+    const compiled = try compiled_ui.finalize(ContextMenuCompiled.build(&compiled_ui, &model));
+
+    // Same ids, same handler table (context_menu entries msg for msg),
+    // same texts — and the declared items agree slot for slot.
+    try expectSameTree(fixture.Msg, interpreted, compiled);
+    try expectSameTexts(interpreted.root, compiled.root);
+    try testing.expectEqual(@as(usize, 3), interpreted.root.children.len);
+    for (interpreted.root.children, compiled.root.children) |expected_row, actual_row| {
+        try testing.expectEqual(expected_row.context_menu.len, actual_row.context_menu.len);
+        for (expected_row.context_menu, actual_row.context_menu) |expected_item, actual_item| {
+            try testing.expectEqualStrings(expected_item.label, actual_item.label);
+            try testing.expectEqual(expected_item.enabled, actual_item.enabled);
+            try testing.expectEqual(expected_item.separator, actual_item.separator);
+        }
+    }
+    // Selection dispatch parity through the shared handler entry.
+    const row = compiled.root.children[1];
+    try testing.expectEqual(fixture.Msg{ .toggle = 2 }, compiled.msgForContextMenu(row.id, 0).?);
+    try testing.expectEqual(
+        interpreted.msgForContextMenu(interpreted.root.children[1].id, 0).?,
+        compiled.msgForContextMenu(row.id, 0).?,
+    );
 }
 
 test "compiled inbox view builds the interpreter's and the hand-written tree exactly" {

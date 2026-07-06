@@ -343,6 +343,19 @@ pub fn Ui(comptime Msg: type) type {
         /// branch per node and captures nothing — builder-only apps and
         /// non-automation runs never pay for it.
         provenance_sink: ?ui_provenance.Sink = null,
+        /// Context-menu presentation fallback: when the platform has no
+        /// native menu presenter (or presenting failed), the app loop sets
+        /// this to the widget whose declared menu should present as an
+        /// anchored canvas surface instead. `finalize` synthesizes that
+        /// surface — a `dropdown_menu` with `menu_item`/`separator`
+        /// children built from the SAME declared items — as an anchored
+        /// child of the target, and reports the synthesized ids through
+        /// `Tree.context_menu_fallback`. 0 (the default) synthesizes
+        /// nothing.
+        context_menu_fallback_target: ObjectId = 0,
+        /// Set by `finalizeNode` when the fallback target was found and a
+        /// surface was synthesized; copied onto the returned `Tree`.
+        context_menu_fallback_result: ?Tree.ContextMenuFallback = null,
 
         pub const ElementOptions = struct {
             /// Sibling-scoped identity: the widget id hashes the parent
@@ -591,12 +604,14 @@ pub fn Ui(comptime Msg: type) type {
             /// so echoing it back into `value` on the next rebuild never
             /// fights the scroll reconcile rule.
             on_scroll: ?ScrollMsgFn = null,
-            /// Native context menu for this widget: right/ctrl-click (or a
-            /// touch long-press) presents these items through the OS menu
-            /// (macOS `NSMenu`); selecting one dispatches its `msg`.
-            /// Deepest declaring widget on the hit route wins. Builder-only
-            /// (the closed markup grammar has no list-valued attributes) —
-            /// markup apps attach menus from a wrapping Zig view.
+            /// Context menu for this widget: right/ctrl-click (or a touch
+            /// long-press) presents these items through the platform's
+            /// native menu (macOS `NSMenu`); selecting one dispatches its
+            /// `msg`. Deepest declaring widget on the hit route wins. On
+            /// hosts without a native presenter the SAME items present as
+            /// an anchored canvas surface (the app loop's fallback) — one
+            /// authored menu, platform-appropriate presentation. Markup
+            /// authors declare this with a `<context-menu>` child element.
             context_menu: []const ContextMenuItem = &.{},
         };
 
@@ -710,6 +725,34 @@ pub fn Ui(comptime Msg: type) type {
         pub const Tree = struct {
             root: Widget,
             handlers: []const Handler,
+            /// Non-null when this build synthesized the anchored
+            /// context-menu fallback surface (see
+            /// `Ui.context_menu_fallback_target`): the app loop uses the
+            /// ids to route item presses through `msgForContextMenu` —
+            /// the SAME handler entry native selections resolve — and to
+            /// close its open state on dismissal.
+            context_menu_fallback: ?ContextMenuFallback = null,
+
+            /// The synthesized context-menu fallback surface's identity.
+            pub const ContextMenuFallback = struct {
+                /// The widget whose declared `context_menu` presents.
+                target_id: ObjectId,
+                /// The synthesized anchored `dropdown_menu` surface.
+                surface_id: ObjectId,
+                /// Synthesized `menu_item` ids, index-aligned with the
+                /// target's `context_menu` items; separators hold 0.
+                item_ids: []const ObjectId,
+
+                /// The declared-item index a synthesized menu item
+                /// dispatches, or null for ids outside this surface.
+                pub fn itemIndex(self: ContextMenuFallback, id: ObjectId) ?usize {
+                    if (id == 0) return null;
+                    for (self.item_ids, 0..) |item_id, index| {
+                        if (item_id == id) return index;
+                    }
+                    return null;
+                }
+            };
 
             pub fn msgFor(self: Tree, id: ObjectId, event: UiHandlerEvent) ?Msg {
                 for (self.handlers) |handler| {
@@ -899,6 +942,33 @@ pub fn Ui(comptime Msg: type) type {
                 .context_menu = self.dupeContextMenuItems(options.context_menu),
                 .nodes = self.childNodes(children),
             };
+        }
+
+        /// Lower built `<context-menu>` child nodes into declared items:
+        /// a `menu_item` node becomes one item (its text run is the
+        /// label, its `on_press` the selection Msg, `disabled` flips
+        /// enabled) and a `separator` node keeps its slot as a divider.
+        /// Both markup engines build the menu's children through the
+        /// ordinary element path — structure tags, interpolation, and
+        /// message typing all apply — and lower the result here, so the
+        /// item shape is stated once.
+        pub fn contextMenuItemsFromNodes(self: *Self, nodes: []const Node) []const ContextMenuItem {
+            if (nodes.len == 0) return &.{};
+            const items = self.arena.alloc(ContextMenuItem, nodes.len) catch {
+                self.failed = true;
+                return &.{};
+            };
+            for (nodes, 0..) |node, index| {
+                items[index] = if (node.widget.kind == .separator)
+                    .{ .separator = true }
+                else
+                    .{
+                        .label = node.widget.text,
+                        .msg = node.on_press,
+                        .enabled = !node.widget.state.disabled,
+                    };
+            }
+            return items;
         }
 
         /// Copy rather than alias: callers pass slices of literals that do
@@ -1864,7 +1934,11 @@ pub fn Ui(comptime Msg: type) type {
             const root_key = node.key orelse UiKey{ .index = 0 };
             var key_trail = ui_provenance.KeyTrail{};
             const root = try self.finalizeNode(node, root_id_seed, root_key, handlers, &handler_len, &tokens, &key_trail);
-            return .{ .root = root, .handlers = handlers[0..handler_len] };
+            return .{
+                .root = root,
+                .handlers = handlers[0..handler_len],
+                .context_menu_fallback = self.context_menu_fallback_result,
+            };
         }
 
         fn finalizeNode(
@@ -1999,8 +2073,66 @@ pub fn Ui(comptime Msg: type) type {
                 widget.context_menu = items;
                 handlers[handler_len.*] = .{ .id = widget.id, .event = .context_menu, .action = .{ .context_menu = msgs } };
                 handler_len.* += 1;
+                // The presentation fallback: on a host without a native
+                // menu presenter the app loop names the widget whose
+                // declared menu is open, and finalize mounts that menu as
+                // an anchored canvas surface — the same items, presented
+                // with the anchored-surface machinery (Escape/outside
+                // dismissal, late z-pass) instead of the OS menu.
+                if (widget.id == self.context_menu_fallback_target) {
+                    try self.appendContextMenuFallbackSurface(&widget, node.context_menu);
+                }
             }
             return widget;
+        }
+
+        /// Synthesize the anchored context-menu fallback surface as a
+        /// child of `widget`: a `dropdown_menu` floating below the target
+        /// with one `menu_item` per declared item (`separator`s keep
+        /// their slots). Items carry press semantics but no handler
+        /// entries — the app loop maps their presses through the
+        /// target's existing `.context_menu` handler, the same entry a
+        /// native selection resolves.
+        fn appendContextMenuFallbackSurface(self: *Self, widget: *Widget, declared: []const ContextMenuItem) error{OutOfMemory}!void {
+            if (declared.len == 0) return;
+            const surface_id = structuralId(widget.id, .dropdown_menu, UiKey{ .str = "context-menu" });
+            const item_widgets = try self.arena.alloc(Widget, declared.len);
+            const item_ids = try self.arena.alloc(ObjectId, declared.len);
+            for (declared, 0..) |item, index| {
+                if (item.separator) {
+                    item_widgets[index] = .{
+                        .kind = .separator,
+                        .id = structuralId(surface_id, .separator, UiKey{ .int = @intCast(index) }),
+                    };
+                    item_ids[index] = 0;
+                    continue;
+                }
+                var item_widget = Widget{
+                    .kind = .menu_item,
+                    .id = structuralId(surface_id, .menu_item, UiKey{ .int = @intCast(index) }),
+                    .text = item.label,
+                    .state = .{ .disabled = !item.enabled },
+                };
+                item_widget.semantics.actions.press = item.enabled;
+                item_widgets[index] = item_widget;
+                item_ids[index] = item_widget.id;
+            }
+            var surface = Widget{
+                .kind = .dropdown_menu,
+                .id = surface_id,
+                .semantics = .{ .label = "Context menu" },
+                .children = item_widgets,
+            };
+            surface.layout.anchor = .{ .placement = .below, .alignment = .start };
+            const children = try self.arena.alloc(Widget, widget.children.len + 1);
+            @memcpy(children[0..widget.children.len], widget.children);
+            children[widget.children.len] = surface;
+            widget.children = children;
+            self.context_menu_fallback_result = .{
+                .target_id = widget.id,
+                .surface_id = surface_id,
+                .item_ids = item_ids,
+            };
         }
 
         fn appendHandler(handlers: []Handler, handler_len: *usize, id: ObjectId, event: UiHandlerEvent, msg: ?Msg) void {

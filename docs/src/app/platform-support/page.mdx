@@ -57,6 +57,14 @@ The Native SDK exposes one runtime model across desktop hosts, but native afford
       <td>Supported</td>
     </tr>
     <tr>
+      <td>Native context menus</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Anchored fallback</td>
+      <td>Anchored fallback</td>
+      <td>Anchored fallback</td>
+    </tr>
+    <tr>
       <td>System tray</td>
       <td>Supported</td>
       <td>Supported</td>
@@ -146,6 +154,8 @@ The Native SDK exposes one runtime model across desktop hosts, but native afford
     </tr>
   </tbody>
 </table>
+
+"Anchored fallback" for native context menus means the declared menu still presents — as an anchored canvas surface on the widget — because those hosts have no native menu presenter yet (GTK popover menus and the Win32 popup-menu API are the documented future seams). Authors declare one menu either way; the platform decides presentation.
 
 ## Runtime Queries
 

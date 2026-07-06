@@ -44,6 +44,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
             }
             var view_count: usize = 0;
             var widget_count: usize = 0;
+            var menu_item_count: usize = 0;
             for (self.windows[0..count], 0..) |window, index| {
                 self.automation_windows[index] = .{
                     .id = window.info.id,
@@ -55,7 +56,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                     const views = self.listViews(window.info.id, self.automation_views[view_count..]);
                     view_count += views.len;
                 }
-                appendAutomationWidgets(self, window.info.id, &widget_count);
+                appendAutomationWidgets(self, window.info.id, &widget_count, &menu_item_count);
             }
             return .{
                 .windows = self.automation_windows[0..count],
@@ -141,7 +142,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
             };
         }
 
-        fn appendAutomationWidgets(self: *Runtime, window_id: platform.WindowId, widget_count: *usize) void {
+        fn appendAutomationWidgets(self: *Runtime, window_id: platform.WindowId, widget_count: *usize, menu_item_count: *usize) void {
             for (self.views[0..self.view_count]) |*view| {
                 if (!view.open or view.window_id != window_id or view.kind != .gpu_surface) continue;
                 const layout = view.widgetLayoutTree();
@@ -187,10 +188,34 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                         .actions = canvasWidgetActions(node.actions),
                         .text_selection = canvasTextRange(node.text_selection),
                         .text_composition = canvasTextRange(node.text_composition),
+                        .context_menu = automationWidgetContextMenu(self, layout, node.id, menu_item_count),
                     };
                     widget_count.* += 1;
                 }
             }
+        }
+
+        /// Copy a widget's declared context-menu items into the
+        /// snapshot's runtime-owned item storage (labels alias the
+        /// view's bounded menu storage). The storage is sized for every
+        /// view's full budget, so `count < declared.len` can only mean
+        /// a budget invariant broke elsewhere — the copy stays bounded
+        /// regardless.
+        fn automationWidgetContextMenu(self: *Runtime, layout: canvas.WidgetLayoutTree, id: canvas.ObjectId, menu_item_count: *usize) []const automation.snapshot.WidgetContextMenuItem {
+            const node = layout.findById(id) orelse return &.{};
+            const declared = node.widget.context_menu;
+            if (declared.len == 0) return &.{};
+            const start = menu_item_count.*;
+            const count = @min(declared.len, self.automation_widget_menu_items.len - start);
+            for (declared[0..count], self.automation_widget_menu_items[start .. start + count]) |item, *slot| {
+                slot.* = .{
+                    .label = item.label,
+                    .enabled = item.enabled,
+                    .separator = item.separator,
+                };
+            }
+            menu_item_count.* = start + count;
+            return self.automation_widget_menu_items[start .. start + count];
         }
 
         pub fn frameDiagnostics(self: *Runtime) FrameDiagnostics {

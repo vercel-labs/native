@@ -40,3 +40,7 @@ try runner.runWithOptions(app.app(), .{
 When a user selects a command-backed menu item, the runtime emits `Event.command` with `source = .menu`, the active native `window_id`, and the item command name.
 
 The macOS, Linux, and Windows system-WebView backends apply configured menus as native app/window menus. Backends that do not implement native menus return `UnsupportedService` for non-empty menu lists.
+
+## Context menus
+
+Per-widget right-click menus are declared once and presented by the platform: on macOS the real OS menu (`NSMenu`) opens at the pointer; hosts without a native menu presenter (Linux and Windows today) mount the same declared items as an anchored canvas surface automatically. Markup declares them as a `<context-menu>` child of the pressable element; Zig views use `ElementOptions.context_menu`. Selections dispatch typed Msgs — see [Native UI](/native-ui#native-scrolling-and-context-menus) for the authoring shapes and [Automation](/automation) for driving them in tests (`widget-context-menu`).

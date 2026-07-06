@@ -187,6 +187,17 @@ pub const CanvasWidgetContextMenuEvent = struct {
     item_index: usize,
 };
 
+/// A right/ctrl-click landed on a widget with a declared context menu,
+/// but the platform could not present it natively (this host has no
+/// native menu presenter, or presenting failed). The app loop answers by
+/// presenting the SAME declared items as an anchored canvas surface —
+/// one authored menu, platform-appropriate presentation.
+pub const CanvasWidgetContextMenuRequestEvent = struct {
+    window_id: platform.WindowId = 1,
+    view_label: []const u8,
+    target_id: canvas.ObjectId,
+};
+
 /// A window the RUNTIME knew as open was closed by the platform — the
 /// user clicked its close button (or the host tore it down). Never
 /// emitted for `runtime.closeWindow` calls the app itself made through
@@ -247,6 +258,7 @@ pub const Event = union(enum) {
     canvas_widget_file_drop: CanvasWidgetFileDropEvent,
     canvas_widget_drag: CanvasWidgetDragEvent,
     canvas_widget_context_menu: CanvasWidgetContextMenuEvent,
+    canvas_widget_context_menu_request: CanvasWidgetContextMenuRequestEvent,
     canvas_widget_dismiss: CanvasWidgetDismissEvent,
     canvas_widget_context_press: CanvasWidgetContextPressEvent,
     canvas_widget_resize: CanvasWidgetResizeEvent,
@@ -271,6 +283,7 @@ pub const Event = union(enum) {
             .canvas_widget_file_drop => "canvas_widget_file_drop",
             .canvas_widget_drag => "canvas_widget_drag",
             .canvas_widget_context_menu => "canvas_widget_context_menu",
+            .canvas_widget_context_menu_request => "canvas_widget_context_menu_request",
             .canvas_widget_dismiss => "canvas_widget_dismiss",
             .canvas_widget_context_press => "canvas_widget_context_press",
             .canvas_widget_resize => "canvas_widget_resize",

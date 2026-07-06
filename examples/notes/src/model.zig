@@ -151,12 +151,10 @@ pub const Msg = union(enum) {
     /// there — the same double meaning the row context menu spells out.
     delete_note,
     copy_note,
-    // Row context menus (right-click or press-and-hold on a row): the
-    // model owns which row's menu is open; items dispatch with the row's
-    // id, so acting never requires selecting first.
-    note_menu: u32,
-    folder_menu: u32,
-    close_menu,
+    // Row context-menu items (each row declares its menu in markup; the
+    // platform presents it on right/ctrl-click): items dispatch with the
+    // row's id, so acting never requires selecting first, and the model
+    // holds no open-menu state — presentation belongs to the platform.
     /// Move a note to Recently Deleted (the note row's Delete item).
     trash_note: u32,
     /// Bring a note back from Recently Deleted into its folder.
@@ -173,7 +171,9 @@ pub const Msg = union(enum) {
     delete_folder: u32,
     confirm_dialog,
     close_dialog,
-    /// Escape: close an open row menu, then the dialog, then the search.
+    /// Escape: close the dialog, then clear the search. (An open context
+    /// menu consumes Escape before the app sees it — the OS menu closes
+    /// itself, and the anchored fallback surface is runtime-dismissed.)
     dismiss,
     /// Splitter drags/keyboard: the runtime already applied the fraction;
     /// storing it and echoing it back through the split's `value` is the
@@ -219,10 +219,6 @@ pub const Model = struct {
     selected_folder: u32 = all_folder_id,
     /// The note in the editor; 0 = none.
     active_note: u32 = 0,
-    /// Which row's context menu is open (0 = none); at most one of the
-    /// two is nonzero — opening one closes the other.
-    menu_note: u32 = 0,
-    menu_folder: u32 = 0,
     search_buffer: canvas.TextBuffer(max_search_bytes) = .{},
     /// The folder dialog (create/rename) and its name field (elm mirror).
     dialog: DialogMode = .closed,
@@ -277,8 +273,8 @@ pub const Model = struct {
     /// for real drift.
     pub const view_unbound = .{
         "folders",        "folder_count",  "notes",           "note_count",
-        "next_folder_id", "next_note_id",  "selected_folder", "menu_note",
-        "menu_folder",    "search_buffer", "dialog",          "folder_field",
+        "next_folder_id", "next_note_id",  "selected_folder",
+        "search_buffer",  "dialog",        "folder_field",
         "dialog_folder",  "store_path_storage", "store_path_len",
         "store_write_inflight", "save_pending", "system_scheme",
         "clock",          "now_ms",        "status_storage",  "status_len",
@@ -421,9 +417,10 @@ pub const Model = struct {
             .label = "All Notes folder",
             .count = std.fmt.allocPrint(arena, "{d}", .{model.liveNoteCount()}) catch "",
             .selected = model.selected_folder == all_folder_id,
-            // The synthetic row has no menu: it cannot be renamed or
-            // deleted, and `folder_menu` refuses its id.
-            .menu_open = false,
+            // The synthetic row cannot be renamed or deleted: its
+            // declared context-menu item set is empty, so no menu
+            // presents (and the rename/delete handlers refuse its id).
+            .mutable = false,
         };
         for (model.folders[0..model.folder_count], out[1..]) |*folder, *row| {
             row.* = .{
@@ -432,7 +429,7 @@ pub const Model = struct {
                 .label = std.fmt.allocPrint(arena, "{s} folder", .{folder.name()}) catch folder.name(),
                 .count = std.fmt.allocPrint(arena, "{d}", .{model.notesInFolder(folder.id)}) catch "",
                 .selected = model.selected_folder == folder.id,
-                .menu_open = folder.id == model.menu_folder,
+                .mutable = true,
             };
         }
         return out;
@@ -463,7 +460,6 @@ pub const Model = struct {
                 .time = relativeTimeLabel(arena, now, note.updated_ms),
                 .active = note.id == model.active_note,
                 .deleted = note.isDeleted(),
-                .menu_open = note.id == model.menu_note,
             };
         }
         return out;
@@ -619,11 +615,6 @@ pub const Model = struct {
         model.note_count -= 1;
     }
 
-    fn closeMenus(model: *Model) void {
-        model.menu_note = 0;
-        model.menu_folder = 0;
-    }
-
     /// When Recently Deleted empties, the row it was selected through is
     /// gone — the selection falls back to All Notes.
     fn leaveEmptyTrash(model: *Model) void {
@@ -757,8 +748,10 @@ pub const FolderRow = struct {
     label: []const u8,
     count: []const u8,
     selected: bool,
-    /// Whether this row's context menu (Rename / Delete) is mounted.
-    menu_open: bool,
+    /// Whether the row's context menu offers Rename/Delete: false only
+    /// for the synthetic All Notes row, whose item set is empty — an
+    /// empty declared menu presents nothing.
+    mutable: bool,
 };
 
 pub const NoteRow = struct {
@@ -767,11 +760,9 @@ pub const NoteRow = struct {
     snippet: []const u8,
     time: []const u8,
     active: bool,
-    /// Recently Deleted rows carry the Restore / Delete Permanently
-    /// menu instead of Copy / Delete.
+    /// Recently Deleted rows' context menu offers Restore / Delete
+    /// Permanently instead of Copy / Delete.
     deleted: bool,
-    /// Whether this row's context menu is mounted.
-    menu_open: bool,
 };
 
 // ------------------------------------------------------------ derivations
@@ -933,19 +924,16 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (position <= model.folder_count) selectFolder(model, model.folders[position - 1].id);
         },
         .select_trash => {
-            model.closeMenus();
             model.selected_folder = deleted_scope_id;
             model.note_list_scroll = 0;
             model.selectTopNote();
         },
         .open_note => |id| {
-            model.closeMenus();
             if (model.noteById(id) != null) model.active_note = id;
         },
         .next_note => moveSelection(model, 1),
         .prev_note => moveSelection(model, -1),
         .new_note => {
-            model.closeMenus();
             // From All Notes or Recently Deleted the note files under the
             // first folder; from Recently Deleted the selection moves
             // there too, so the new note appears where the cursor lands.
@@ -981,25 +969,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             copyNoteBody(model, fx, note);
         },
         .copy_note_id => |id| {
-            model.closeMenus();
             const note = model.noteById(id) orelse return;
             copyNoteBody(model, fx, note);
         },
-        .note_menu => |id| {
-            if (model.noteById(id) == null) return;
-            model.closeMenus();
-            model.menu_note = id;
-        },
-        .folder_menu => |id| {
-            // Only real folders have a menu: All Notes and Recently
-            // Deleted cannot be renamed or deleted.
-            if (id == all_folder_id or model.folderById(id) == null) return;
-            model.closeMenus();
-            model.menu_folder = id;
-        },
-        .close_menu => model.closeMenus(),
         .open_create_folder => {
-            model.closeMenus();
             if (model.foldersFull()) {
                 model.setStatus("Folder limit reached ({d})", .{max_folders});
                 return;
@@ -1014,9 +987,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .confirm_dialog => confirmDialog(model, fx),
         .close_dialog => model.dialog = .closed,
         .dismiss => {
-            if (model.menu_note != 0 or model.menu_folder != 0) {
-                model.closeMenus();
-            } else if (model.dialog != .closed) {
+            if (model.dialog != .closed) {
                 model.dialog = .closed;
             } else if (model.searching()) {
                 model.search_buffer.apply(.clear);
@@ -1069,7 +1040,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
 
 fn selectFolder(model: *Model, id: u32) void {
     if (id != all_folder_id and model.folderById(id) == null) return;
-    model.closeMenus();
     model.selected_folder = id;
     // Jumping to a folder shows its top — the controlled scroll would
     // otherwise echo the previous folder's offset into the new list.
@@ -1081,7 +1051,6 @@ fn selectFolder(model: *Model, id: u32) void {
 /// keeps its folder id for restore, and the trash row appears in the
 /// sidebar the moment the first note lands there.
 fn trashNote(model: *Model, fx: *Effects, id: u32) void {
-    model.closeMenus();
     const note = model.noteByIdMut(id) orelse return;
     if (note.isDeleted()) return;
     model.now_ms = fx.wallMs();
@@ -1097,7 +1066,6 @@ fn trashNote(model: *Model, fx: *Effects, id: u32) void {
 /// deleted since; then it files under the first folder, like the store
 /// restore's orphan rule.
 fn restoreNote(model: *Model, fx: *Effects, id: u32) void {
-    model.closeMenus();
     const note = model.noteByIdMut(id) orelse return;
     if (!note.isDeleted()) return;
     note.deleted_ms = 0;
@@ -1119,7 +1087,6 @@ fn restoreNote(model: *Model, fx: *Effects, id: u32) void {
 /// Delete a Recently Deleted note permanently — the only path that
 /// actually removes a note record.
 fn purgeNote(model: *Model, fx: *Effects, id: u32) void {
-    model.closeMenus();
     const index = model.noteIndexById(id) orelse return;
     if (!model.notes[index].isDeleted()) return;
     var title_buffer: [max_title_bytes + 8]u8 = undefined;
@@ -1143,7 +1110,6 @@ fn copyNoteBody(model: *Model, fx: *Effects, note: *const Note) void {
 /// Open the rename dialog for a folder (the keyboard path targets the
 /// selection, the row menu targets its own folder).
 fn openRenameDialog(model: *Model, id: u32, missing_status: []const u8) void {
-    model.closeMenus();
     const folder = model.folderById(id) orelse {
         model.setStatus("{s}", .{missing_status});
         return;
@@ -1158,7 +1124,6 @@ fn openRenameDialog(model: *Model, id: u32, missing_status: []const u8) void {
 /// is lost silently) and the folder record goes. The last folder stays —
 /// a new note always needs a home.
 fn deleteFolder(model: *Model, fx: *Effects, id: u32) void {
-    model.closeMenus();
     const folder = model.folderById(id) orelse return;
     if (model.folder_count <= 1) {
         model.setStatus("Keep at least one folder", .{});

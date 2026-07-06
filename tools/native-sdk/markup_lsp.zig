@@ -325,6 +325,9 @@ pub const Server = struct {
                     for (chart_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "chart attribute", doc.doc);
                 } else if (std.mem.eql(u8, element_name, "series")) {
                     for (series_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "series attribute", doc.doc);
+                } else if (std.mem.eql(u8, element_name, "context-menu")) {
+                    // context-menu takes no attributes; its menu-item
+                    // children carry on-press and disabled.
                 } else if (std.mem.eql(u8, element_name, "avatar")) {
                     for (avatar_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "avatar attribute", doc.doc);
                     for (attribute_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "markup attribute", doc.doc);
@@ -844,7 +847,7 @@ test "doc tables cover every known element, attribute, and event" {
     for (ui_markup.known_element_names) |name| {
         try testing.expect(elementDoc(name) != null);
     }
-    for ([_][]const u8{ "for", "if", "else", "template", "use", "import", "slot", "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series" }) |name| {
+    for ([_][]const u8{ "for", "if", "else", "template", "use", "import", "slot", "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu" }) |name| {
         try testing.expect(elementDoc(name) != null);
     }
     for (ui_markup.known_option_attrs) |name| {

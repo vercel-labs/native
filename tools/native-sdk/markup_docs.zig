@@ -78,6 +78,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "timeline-item", .doc = "One timeline/ledger item: title (required), description, meta, indicator + variant color the leading badge, connector=\"false\" ends the rail; on-press makes the whole item pressable with a trailing chevron." },
     .{ .name = "chart", .doc = "Data chart: series children bind model f32 iterables and draw as token-colored line/area/bar plots (lowered through Ui.chart — same downsampling, theming, and semantics summary). Takes y-min, y-max, grid-lines, baseline, stroke-width, width, height, grow, padding, key, global-key, label. Display-only; the series set is static." },
     .{ .name = "series", .doc = "One chart series (chart children only): values is one {binding} naming a []const f32 iterable (the same sources for each accepts; NaN samples draw nothing), kind is line, area, or bar, color a token name, label the semantics name." },
+    .{ .name = "context-menu", .doc = "Right-click menu on its DIRECT parent (a pressable element): menu-item children (on-press required, disabled optional) and bare separators, with if/else/for around them. Presents through the platform's native menu; hosts without one mount the same items as an anchored surface automatically. Attribute-less; drive in tests with widget-context-menu." },
 };
 
 pub const structure_docs = [_]Doc{

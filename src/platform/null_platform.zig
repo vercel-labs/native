@@ -392,6 +392,12 @@ pub const NullPlatform = struct {
     /// Lifetime count of driver entries pushed with `set_offset = true`
     /// (the runtime forcing its offset into the native scroller).
     scroll_driver_set_offset_count: usize = 0,
+    /// Whether this modeled host presents native context menus. On by
+    /// default (the recorder below stands in for the OS menu); tests
+    /// modelling a presenter-less host (the anchored-surface fallback
+    /// path) set it false, which nulls the service AND the feature
+    /// report — the same shape as a real host without a presenter.
+    context_menus: bool = true,
     /// Native context-menu recorder: presentations record the request and
     /// return; tests then feed the selection back as a
     /// `.context_menu_action` platform event.
@@ -484,7 +490,7 @@ pub const NullPlatform = struct {
                 .remove_gpu_surface_image_fn = removeGpuSurfaceImage,
                 .decode_image_fn = decodeImage,
                 .set_gpu_surface_scroll_drivers_fn = setGpuSurfaceScrollDrivers,
-                .show_context_menu_fn = showContextMenu,
+                .show_context_menu_fn = if (self.context_menus) showContextMenu else null,
             },
             .app_info = self.app_info,
         };
@@ -512,7 +518,7 @@ pub const NullPlatform = struct {
             => true,
             .gpu_surfaces => self.gpu_surfaces,
             .gpu_surface_scroll_drivers => self.gpu_surface_scroll_drivers,
-            .context_menus => true,
+            .context_menus => self.context_menus,
             .tray => self.web_engine == .system,
             // The null platform has no real view hierarchy to adopt an
             // app-owned platform view into — reporting support would be a

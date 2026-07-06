@@ -115,9 +115,29 @@ Zero app code: on macOS every non-virtualized `scroll` region — and every wind
 
 **Overscroll is off by default, per region, on both paths.** Scroll regions pin at their content edges — the native scroller gets non-elastic edges, the engine's wheel/kinetic physics clamp, and kinetic motion stops cleanly at the boundary. Bouncing is a per-region opt-in: `overscroll="rubber_band"` in markup (the `scroll` element only — the validator rejects it elsewhere with a teaching error) or `ElementOptions.overscroll = .rubber_band` in Zig views. The `ScrollPhysics.overscroll` design token (`ScrollPhysicsOverrides` in a theme) flips the app-wide default; per-region values override it, and `.none` pins a region regardless of the token. The rubber-band shape — excursion bound, resistance, spring-back rate — stays themable through the `rubberband_*` physics tokens.
 
-### Native context menus
+### Context menus: one declared menu, platform-decided presentation
 
-`ElementOptions.context_menu` declares per-widget items in the chrome-menu shape with typed messages; right/ctrl-click presents the real OS menu (macOS `NSMenu`) at the pointer and dispatches the selected item's `Msg`:
+Authors write ONE menu; the platform decides how it presents. The default is the real OS context menu — on macOS a right/ctrl-click presents an `NSMenu` at the pointer and the selection dispatches the item's typed `Msg`. On hosts without a native menu presenter (Linux GTK and Windows Win32 today — their popover/`TrackPopupMenu` seams are documented future work), the SAME declared items present automatically as an anchored canvas surface floated against the declaring widget, with the standard anchored-surface behavior (Escape and outside-click dismiss, late z-pass, window clipping). Never two authored menus, never a canvas imitation where the OS menu exists.
+
+Markup declares the menu as a `<context-menu>` element — a DIRECT child of the pressable element whose right-click it answers (a hit target, or an element with a bound `on-press`/`on-hold`). It is metadata, not content: it renders nothing in the row's flow. Children are `menu-item`s (`on-press` required, `disabled` optional, the text content is the label) and bare `<separator/>`s, with `if`/`else`/`for` around them to swap or repeat items — a menu whose items all evaporate at runtime simply declares no menu (the All Notes row pattern). Conditional MENUS are spelled as conditional ITEMS: the `<context-menu>` itself takes no attributes and cannot sit behind a structure tag. No submenus: the platform channel carries flat items (label, enabled, separator) only.
+
+```html
+<list-item on-press="open_note:{n.id}" label="{n.title}">
+  <text grow="1">{n.title}</text>
+  <context-menu>
+    <if test="{n.deleted}">
+      <menu-item on-press="restore_note:{n.id}">Restore</menu-item>
+      <menu-item on-press="purge_note:{n.id}">Delete Permanently</menu-item>
+    </if>
+    <else>
+      <menu-item on-press="copy_note_id:{n.id}">Copy</menu-item>
+      <menu-item on-press="trash_note:{n.id}">Delete</menu-item>
+    </else>
+  </context-menu>
+</list-item>
+```
+
+The Zig builder's mirror is `ElementOptions.context_menu` — per-widget items in the chrome-menu shape with typed messages:
 
 ```zig
 ui.listItem(.{
@@ -130,7 +150,9 @@ ui.listItem(.{
 }, entry.title)
 ```
 
-The deepest declaring widget on the hit route wins; disabled items and separators are fine (`enabled = false`, `.separator = true`). Zero-code defaults need no declaration: editable text fields present the standard Cut / Copy / Paste / Select All menu wired to the existing clipboard actions, and a selected static text presents Copy. Builder-only by design — the closed markup grammar has no list-valued attributes, so markup apps attach menus from a wrapping Zig view function. macOS-only today (GTK popover menus and Win32 `TrackPopupMenu` are the documented future seams; unsupported platforms silently skip presentation). Touch long-press is design-noted for the mobile embeds: the iOS host's under-slop `Pending` touch state is the timer seam, pending a secondary-button leg in the embed ABI and `UIEditMenuInteraction` presentation. `examples/gpu-dashboard` nav rows carry a live menu; `zig build test-example-gpu-dashboard` and the runtime context-menu suite verify dispatch.
+The deepest declaring widget on the hit route wins; disabled items and separators are fine (`enabled = false`, `.separator = true`). Zero-code defaults need no declaration: editable text fields present the standard Cut / Copy / Paste / Select All menu wired to the existing clipboard actions, and a selected static text presents Copy (these defaults are presenter-only — without an OS menu they degrade to the keyboard clipboard paths). Touch long-press is design-noted for the mobile embeds: the iOS host's under-slop `Pending` touch state is the timer seam, pending a secondary-button leg in the embed ABI and `UIEditMenuInteraction` presentation.
+
+Automation drives the native path honestly: snapshots list every widget's declared items in invocation order (`context_menu=["Rename","Delete"]`, separators keep their slots, disabled items say so), `widget-context-press <view> <id>` performs the real secondary click (presenting the menu), and `widget-context-menu <view> <id> <item-index>` invokes an item — the selection dispatches as the same `context_menu_action` platform event a real pick produces (so it journals and replays), because the OS menu's tracking loop cannot be driven programmatically. Dead invocations fail by name (undeclared menu, index out of range, separator slot, disabled item). `examples/notes` row menus and `examples/gpu-dashboard` nav rows carry live menus; `zig build test-example-notes`, `test-example-gpu-dashboard`, and the runtime context-menu suite verify dispatch, the fallback surface, and the verb.
 
 ## Elements
 
@@ -161,6 +183,7 @@ The deepest declaring widget on the hit route wins; disabled items and separator
 | `stepper` > `step` | composite stage track | `active="{index}"` (required) derives each step's completed/active/pending state; steps are text leaves (no attributes) joined by connectors; stepper also takes `key`, `global-key`, `label` |
 | `timeline` > `timeline-item` | composite ledger list | items only inside a timeline (for/if fine); items are leaves — `title` (required), `description`, `meta`, `indicator`, `variant`, `connector="false"` on the last item, `selected`; `on-press` makes the whole item pressable with a trailing chevron |
 | `chart` > `series` | composite data chart | series only inside a chart, and only series (the set is static — data varies through bindings); each series is a leaf — `values="{binding}"` (required) names a model `[]const f32` iterable, `kind` is `line`/`area`/`bar` (literal), `color` a token name, `label` the semantics name; chart takes `y-min`, `y-max`, `grid-lines`, `baseline`, `stroke-width`, box options, `label` — see "Charts" |
+| `context-menu` | consumed by its parent | right-click menu on its DIRECT parent (a hit target or an element with `on-press`/`on-hold`); metadata, never a flow child. Children: `menu-item`s (`on-press` required, `disabled` optional, no `icon`) and bare `separator`s, with `if`/`else`/`for` around them. Attribute-less; presents natively where the host has a menu presenter, as an anchored surface elsewhere — see "Context menus" |
 
 Not markup-expressible (deliberately — write these as Zig view functions with `canvas.Ui`): `image` (needs `ImageId` pixel references, runtime-registered — see the Images section), `icon_button` (`<button icon="...">` with empty content is the declarative icon button), `data_grid` (per-column cell templates), `popover`/`menu_surface` (anchored to runtime geometry), `segmented_control` (use `tabs`/`toggle-group`: `<button>` children of `<tabs>` lower to segmented triggers automatically, so the active tab lifts per the house treatment). Charts ARE expressible: `<chart>` with `<series values="{binding}">` children binding model f32 iterables — see the Charts section (`.band` series and dynamic series composition stay with `ui.chart`). Built-in vector icons ARE expressible: `<icon name="search"/>` (closed, compile-checked name set; `Ui.icon` is the Zig-view equivalent). App-authored icons: `canvas.svg_icon.parseComptime(@embedFile("icons/logo.svg"))` parses any SVG in the common 24x24 stroke-icon dialect at comptime; register the parsed table once at boot with `canvas.icons.registerAppIcons(&table)` and draw by name via `ui.appIcon(.{...}, "logo")` or `ElementOptions.icon` — registered names render exactly like built-ins on every draw path. Markup `<icon>`/`<button icon>` stay built-in-only (the compiled engine validates names at comptime, where runtime registrations cannot exist — engine parity). The one image binding markup DOES carry is the avatar's: `<avatar image="{user_image}">CT</avatar>` binds a `u64` ImageId model field/fn (the id is just model data; 0 keeps the initials fallback) — the embedded-asset exclusion stays.
 
@@ -194,7 +217,7 @@ A `toggle-button` whose source asserts `selected` (this rebuild or the previous 
 
 ### Pickers: select is the trigger — compose the options as an ANCHORED dropdown
 
-`select` and `combobox` are trigger controls, not complete pickers: `select` renders the closed dropdown shape (current value as content, `placeholder` while empty, `on-press` to open) and `combobox` is a text entry with a menu chevron — neither owns an options list. There is no `options=` attribute (the closed grammar has no list-valued attributes, same as `context_menu`); the options ARE the composition — a `dropdown-menu` of `menu-item`s under an `if`, beside the trigger inside a `stack`, floated with `anchor`:
+`select` and `combobox` are trigger controls, not complete pickers: `select` renders the closed dropdown shape (current value as content, `placeholder` while empty, `on-press` to open) and `combobox` is a text entry with a menu chevron — neither owns an options list. There is no `options=` attribute (the closed grammar has no list-valued attributes — list-shaped vocabulary is element children, the way `<context-menu>` declares its items); the options ARE the composition — a `dropdown-menu` of `menu-item`s under an `if`, beside the trigger inside a `stack`, floated with `anchor`:
 
 ```html
 <stack>
@@ -262,7 +285,7 @@ How the pieces fit, all model-owned (TEA):
 
 ### Press-and-hold: on-hold
 
-`on-hold` is the click-acts, hold-reveals menu-button shape — a control that acts on click and offers more on hold: a pointer held ~350 ms dispatches the hold Msg (the release then presses nothing), a quick click dispatches `on-press` as usual, and a right/ctrl-click whose route offers no context menu dispatches the hold Msg immediately (declared `context_menu`s always win). Like `on-press`, binding it makes any element pressable. The breadcrumb-switcher pattern: `on-press` selects the crumb, `on-hold` opens an anchored `dropdown-menu` of its siblings. Both legs are live-drivable: `native automate widget-hold <view> <id>` runs the pointer+timer gesture, `widget-context-press <view> <id>` the secondary click.
+`on-hold` is the click-acts, hold-reveals menu-button shape — a control that acts on click and offers more on hold: a pointer held ~350 ms dispatches the hold Msg (the release then presses nothing), a quick click dispatches `on-press` as usual, and a right/ctrl-click whose route offers no context menu dispatches the hold Msg immediately (a declared `<context-menu>` always wins the right-click — hold is the primary-button gesture, not the context-menu channel). Like `on-press`, binding it makes any element pressable. The breadcrumb-switcher pattern: `on-press` selects the crumb, `on-hold` opens an anchored `dropdown-menu` of its siblings — an app-designed hold-reveal surface, distinct from the row's right-click menu. Both legs are live-drivable: `native automate widget-hold <view> <id>` runs the pointer+timer gesture, `widget-context-press <view> <id>` the secondary click.
 
 ```html
 <button on-press="select_crumb:{c.id}" on-hold="open_crumb_menu:{c.id}">{c.name}</button>

@@ -206,6 +206,8 @@ Interact with the automation server of a running automation-enabled app. See [Au
   <dd>Press-and-hold a retained canvas widget (drives <code>on_hold</code>).</dd>
   <dt><code>automate widget-context-press &lt;view-label&gt; &lt;widget-id&gt;</code></dt>
   <dd>Secondary-click a retained canvas widget (context menu, or <code>on_hold</code> when none).</dd>
+  <dt><code>automate widget-context-menu &lt;view-label&gt; &lt;widget-id&gt; &lt;item-index&gt;</code></dt>
+  <dd>Invoke a widget's declared context-menu item by index — the snapshot lists each widget's items in order.</dd>
   <dt><code>automate widget-drag &lt;view-label&gt; &lt;widget-id&gt; &lt;start-x-ratio&gt; &lt;end-x-ratio&gt; [&lt;start-y-ratio&gt; &lt;end-y-ratio&gt;]</code></dt>
   <dd>Dispatch pointer down/drag/up across a retained canvas widget.</dd>
   <dt><code>automate widget-wheel &lt;view-label&gt; &lt;widget-id&gt; &lt;delta-y&gt;</code></dt>

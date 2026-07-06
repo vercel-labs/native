@@ -630,6 +630,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         hold_view_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined,
         hold_view_label_len: usize = 0,
         hold_window_id: platform.WindowId = 1,
+        /// Context-menu presentation fallback state: the widget whose
+        /// declared menu is mounted as an anchored canvas surface because
+        /// the platform could not present it natively. Set by
+        /// `canvas_widget_context_menu_request`, cleared by selection,
+        /// dismissal, or the target vanishing from a rebuild. 0 = no
+        /// fallback menu open. The synthesized surface itself comes from
+        /// `Ui.finalize` (see `Ui.context_menu_fallback_target`).
+        context_menu_fallback_target: canvas.ObjectId = 0,
+        context_menu_fallback_window_id: platform.WindowId = 1,
+        context_menu_fallback_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined,
+        context_menu_fallback_label_len: usize = 0,
         /// The windowed virtual lists the LAST build declared
         /// (`Ui.virtualList` records): scroll events on these regions
         /// re-derive the view even without an app `on_scroll` binding,
@@ -968,6 +979,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 ui.virtual_window_source = VirtualWindowResolver.resolve;
                 ui.virtual_extent_context = @ptrCast(self);
                 ui.virtual_extent_source = virtualExtentResolve;
+                ui.context_menu_fallback_target = self.contextMenuFallbackTargetForLabel(self.options.canvas_label);
                 if (comptime features.runtime_markup) {
                     if (self.markup_view != null and runtime.options.automation != null) {
                         self.provenance.resetRecords();
@@ -1024,6 +1036,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
             self.tree = tree;
             self.arena_index = next_index;
+            // The fallback menu's target vanished from this build (the
+            // model dropped the row, or its menu emptied): the open state
+            // has nothing to present, so it closes.
+            if (self.contextMenuFallbackTargetForLabel(self.options.canvas_label) != 0 and tree.context_menu_fallback == null) {
+                self.clearContextMenuFallback();
+            }
             try self.scheduleAnimations(runtime, window_id);
             self.applyWebPanes(runtime, window_id, layout);
             self.applyStatusItem(runtime);
@@ -1489,6 +1507,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const next_index = slot.arena_index ^ 1;
             _ = slot.arenas[next_index].reset(.retain_capacity);
             var ui = Ui.init(slot.arenas[next_index].allocator());
+            ui.context_menu_fallback_target = self.contextMenuFallbackTargetForLabel(slot.canvasLabel());
             const node = window_view(&ui, &self.model, slot.label());
             const tree = try ui.finalizeWithTokens(node, tokens);
             const bounds = geometry.RectF.fromSize(slot.canvas_size).deflate(runtime.viewportInsetsForWindow(slot.window_id));
@@ -1507,6 +1526,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             slot.tree = tree;
             slot.arena_index = next_index;
+            // Same close-on-vanish rule as the main canvas rebuild.
+            if (self.contextMenuFallbackTargetForLabel(slot.canvasLabel()) != 0 and tree.context_menu_fallback == null) {
+                self.clearContextMenuFallback();
+            }
         }
 
         /// Re-apply the model-derived webview panes against the freshly
@@ -2086,6 +2109,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .canvas_widget_keyboard => |keyboard_event| try self.handleKeyboard(runtime, keyboard_event),
                 .canvas_widget_scroll => |scroll_event| try self.handleScroll(runtime, scroll_event),
                 .canvas_widget_context_menu => |menu_event| try self.handleContextMenu(runtime, menu_event),
+                .canvas_widget_context_menu_request => |request_event| try self.handleContextMenuRequest(runtime, request_event),
                 .canvas_widget_dismiss => |dismiss_event| try self.handleDismiss(runtime, dismiss_event),
                 .canvas_widget_context_press => |press_event| try self.handleContextPress(runtime, press_event),
                 .canvas_widget_resize => |resize_event| try self.handleWidgetResize(runtime, resize_event),
@@ -2467,6 +2491,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 }
             }
             const target = pointer_event.press_target orelse return;
+            // A released press on a synthesized fallback menu item is a
+            // context-menu selection, not an ordinary press: it resolves
+            // through the target's `.context_menu` handler entry and
+            // closes the surface.
+            if (pointer_event.pointer.phase == .up) {
+                if (try self.dispatchContextMenuFallbackItem(runtime, tree, pointer_event.window_id, target.id)) return;
+            }
             if (tree.msgForPointer(target.id, pointer_event.pointer.phase)) |msg| {
                 try self.dispatch(runtime, pointer_event.window_id, msg);
             }
@@ -2501,6 +2532,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// source wins).
         fn handleDismiss(self: *Self, runtime: *Runtime, dismiss_event: core.CanvasWidgetDismissEvent) anyerror!void {
             const tree = self.treeForViewLabel(dismiss_event.view_label) orelse return;
+            // The synthesized fallback menu surface has no app-declared
+            // on_dismiss (its open state lives here, not in the model):
+            // close the state and rebuild, agreeing with the engine's
+            // optimistic hide.
+            if (self.context_menu_fallback_target != 0) {
+                if (tree.context_menu_fallback) |fallback| {
+                    if (fallback.surface_id == dismiss_event.id) {
+                        self.clearContextMenuFallback();
+                        try self.rebuildAllViews(runtime);
+                        return;
+                    }
+                }
+            }
             if (tree.msgForDismiss(dismiss_event.id)) |msg| {
                 try self.dispatch(runtime, dismiss_event.window_id, msg);
             }
@@ -2520,6 +2564,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn handleKeyboard(self: *Self, runtime: *Runtime, keyboard_event: core.CanvasWidgetKeyboardEvent) anyerror!void {
             const tree = self.treeForViewLabel(keyboard_event.view_label) orelse return;
             const target = keyboard_event.target orelse return;
+            // Keyboard activation (Enter/Space) of a synthesized fallback
+            // menu item is a context-menu selection, same as the pointer
+            // path.
+            if (self.context_menu_fallback_target != 0) {
+                if (tree.findWidget(target.id)) |widget| {
+                    if (canvas.widgetKeyboardControlIntent(widget, keyboard_event.keyboard)) |intent| {
+                        if (intent.kind == .press or intent.kind == .select) {
+                            if (try self.dispatchContextMenuFallbackItem(runtime, tree, keyboard_event.window_id, target.id)) return;
+                        }
+                    }
+                }
+            }
             if (tree.msgForKeyboard(target.id, keyboard_event.keyboard)) |msg| {
                 try self.dispatch(runtime, keyboard_event.window_id, msg);
             }
@@ -2579,9 +2635,74 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// item's declared `Msg` through the tree's handler table.
         fn handleContextMenu(self: *Self, runtime: *Runtime, menu_event: core.CanvasWidgetContextMenuEvent) anyerror!void {
             const tree = self.treeForViewLabel(menu_event.view_label) orelse return;
+            // A selection on this menu closes it whatever the source: an
+            // automation-invoked selection while the fallback surface is
+            // open must not leave the surface mounted.
+            if (self.context_menu_fallback_target == menu_event.target_id) {
+                self.clearContextMenuFallback();
+            }
             if (tree.msgForContextMenu(menu_event.target_id, menu_event.item_index)) |msg| {
                 try self.dispatch(runtime, menu_event.window_id, msg);
             }
+        }
+
+        /// The platform could not present a declared context menu
+        /// natively: open the anchored-surface fallback — record which
+        /// widget's menu is open and rebuild, so `Ui.finalize` mounts the
+        /// same declared items as an anchored canvas surface on the
+        /// target.
+        fn handleContextMenuRequest(self: *Self, runtime: *Runtime, request_event: core.CanvasWidgetContextMenuRequestEvent) anyerror!void {
+            const label_len = @min(request_event.view_label.len, self.context_menu_fallback_label_storage.len);
+            @memcpy(self.context_menu_fallback_label_storage[0..label_len], request_event.view_label[0..label_len]);
+            self.context_menu_fallback_label_len = label_len;
+            self.context_menu_fallback_window_id = request_event.window_id;
+            self.context_menu_fallback_target = request_event.target_id;
+            try self.rebuildAllViews(runtime);
+        }
+
+        fn contextMenuFallbackLabel(self: *const Self) []const u8 {
+            return self.context_menu_fallback_label_storage[0..self.context_menu_fallback_label_len];
+        }
+
+        /// The fallback target `Ui.finalize` should mount for a view
+        /// being rebuilt, or 0 when the open fallback (if any) belongs to
+        /// a different view.
+        fn contextMenuFallbackTargetForLabel(self: *const Self, view_label: []const u8) canvas.ObjectId {
+            if (self.context_menu_fallback_target == 0) return 0;
+            if (!std.mem.eql(u8, view_label, self.contextMenuFallbackLabel())) return 0;
+            return self.context_menu_fallback_target;
+        }
+
+        fn clearContextMenuFallback(self: *Self) void {
+            self.context_menu_fallback_target = 0;
+            self.context_menu_fallback_label_len = 0;
+        }
+
+        /// Rebuild every open view without a Msg dispatch — the fallback
+        /// menu's open state lives here, not in the model, so opening and
+        /// closing it re-derives the views directly.
+        fn rebuildAllViews(self: *Self, runtime: *Runtime) anyerror!void {
+            if (!self.installed) return;
+            try self.rebuild(runtime, self.canvas_window_id);
+            try self.rebuildWindowSlots(runtime);
+        }
+
+        /// A pointer press or keyboard activation resolved to one of the
+        /// fallback surface's synthesized items: close the surface and
+        /// dispatch through `msgForContextMenu` — the SAME handler entry
+        /// a native selection resolves. Returns true when the id was a
+        /// fallback item (consumed either way).
+        fn dispatchContextMenuFallbackItem(self: *Self, runtime: *Runtime, tree: *const Ui.Tree, window_id: platform.WindowId, id: canvas.ObjectId) anyerror!bool {
+            if (self.context_menu_fallback_target == 0) return false;
+            const fallback = tree.context_menu_fallback orelse return false;
+            const item_index = fallback.itemIndex(id) orelse return false;
+            self.clearContextMenuFallback();
+            if (tree.msgForContextMenu(fallback.target_id, item_index)) |msg| {
+                try self.dispatch(runtime, window_id, msg);
+            } else {
+                try self.rebuildAllViews(runtime);
+            }
+            return true;
         }
     };
 }

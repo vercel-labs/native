@@ -61,7 +61,7 @@ ui.el(.menu_surface, .{ .min_width = 220 }, .{
 })
 ```
 
-Native right-click context menus (macOS `NSMenu`) are a separate, builder-only channel: the `context_menu` option on any element presents OS menu items whose selection dispatches a Msg — see [Menus](/menus).
+Right-click context menus are a separate channel with its own element: a `<context-menu>` child on a pressable element (or `ElementOptions.context_menu` in Zig views) presents the platform's native menu — macOS `NSMenu` — and falls back to an anchored surface on hosts without one; selections dispatch typed Msgs. The anchored `dropdown-menu` here is for app-designed surfaces you open yourself (pickers, button dropdowns, hold-reveal menus) — see [Menus](/menus).
 
 ## Attributes
 

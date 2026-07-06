@@ -76,6 +76,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.E
         const value = try std.fmt.allocPrint(allocator, "{s} {s}", .{ args[1], args[2] });
         defer allocator.free(value);
         try sendCommand(allocator, io, "widget-context-press", value);
+    } else if (std.mem.eql(u8, command, "widget-context-menu")) {
+        if (args.len != 4) return usage();
+        const value = try std.fmt.allocPrint(allocator, "{s} {s} {s}", .{ args[1], args[2], args[3] });
+        defer allocator.free(value);
+        try sendCommand(allocator, io, "widget-context-menu", value);
     } else if (std.mem.eql(u8, command, "widget-drag")) {
         if (args.len != 5 and args.len != 7) return usage();
         const value = if (args.len == 7)
@@ -438,6 +443,7 @@ fn printUsage() void {
         \\  widget-click <view-label> <widget-id>   (ids are the bare number; snapshots print #id)
         \\  widget-hold <view-label> <widget-id>   (press-and-hold: arms and fires the on_hold timer, release suppressed)
         \\  widget-context-press <view-label> <widget-id>   (right-click: context menu, or on_hold when the route has none)
+        \\  widget-context-menu <view-label> <widget-id> <item-index>   (invoke a declared context-menu item; snapshots list them as context_menu=[...])
         \\  widget-drag <view-label> <widget-id> <start-x-ratio> <end-x-ratio> [start-y-ratio end-y-ratio]
         \\  widget-wheel <view-label> <widget-id> <delta-y>
         \\  widget-key <view-label> <key> [text]

@@ -35,25 +35,26 @@
              own wash chrome (hover/selected are full-width washes, no
              per-row border or fill at rest), and the rows sit flush —
              the washes are the only separation. -->
-        <!-- Row actions live in a context menu, not buttons: on-hold
-             fires on right/ctrl-click (and press-and-hold), the model
-             owns which row's menu is open, and the anchored menu floats
-             against the row. At most one menu mounts at a time (the
-             per-row if), so the anchored-surface budget never binds. -->
+        <!-- Row actions live in a context menu, not buttons: each row
+             declares its items once and right/ctrl-click presents them
+             through the platform — the OS menu where the host has one,
+             the anchored fallback surface elsewhere. The model holds no
+             open-menu state at all. All Notes cannot be renamed or
+             deleted, so its item set is empty and no menu presents. -->
         <tree label="Folders">
           <for each="folderRows" key="id" as="f">
-            <list-item on-press="select_folder:{f.id}" on-hold="folder_menu:{f.id}" selected="{f.selected}" padding="8" gap="8" cross="center" role="treeitem" label="{f.label}">
+            <list-item on-press="select_folder:{f.id}" selected="{f.selected}" padding="8" gap="8" cross="center" role="treeitem" label="{f.label}">
               <icon name="folder" width="14" height="14" foreground="text_muted" />
               <!-- One-line folder row: clip a long name at the rail's
                    width, never wrap onto the row below. -->
               <text grow="1" wrap="false">{f.name}</text>
               <badge variant="secondary">{f.count}</badge>
-              <if test="{f.menu_open}">
-                <dropdown-menu anchor="below" on-dismiss="close_menu" label="Folder actions">
+              <context-menu>
+                <if test="{f.mutable}">
                   <menu-item on-press="rename_folder:{f.id}">Rename</menu-item>
                   <menu-item on-press="delete_folder:{f.id}">Delete</menu-item>
-                </dropdown-menu>
-              </if>
+                </if>
+              </context-menu>
             </list-item>
           </for>
           <!-- Recently Deleted exists only while deleted notes do —
@@ -84,7 +85,7 @@
                  pane width. -->
             <column>
               <for each="noteRows" key="id" as="n">
-                <list-item on-press="open_note:{n.id}" on-hold="note_menu:{n.id}" selected="{n.active}" padding="10" label="{n.title}">
+                <list-item on-press="open_note:{n.id}" selected="{n.active}" padding="10" label="{n.title}">
                   <column gap="4" grow="1">
                     <!-- Title leads, the age trails the same line; the
                          snippet gets the full second line. Titles clip
@@ -97,18 +98,19 @@
                          into the row below. -->
                     <text size="sm" foreground="text_muted" wrap="false">{n.snippet}</text>
                   </column>
-                  <if test="{n.menu_open}">
-                    <dropdown-menu anchor="below" on-dismiss="close_menu" label="Note actions">
-                      <if test="{n.deleted}">
-                        <menu-item on-press="restore_note:{n.id}">Restore</menu-item>
-                        <menu-item on-press="purge_note:{n.id}">Delete Permanently</menu-item>
-                      </if>
-                      <else>
-                        <menu-item on-press="copy_note_id:{n.id}">Copy</menu-item>
-                        <menu-item on-press="trash_note:{n.id}">Delete</menu-item>
-                      </else>
-                    </dropdown-menu>
-                  </if>
+                  <!-- One declared menu; the scope swaps its items — a
+                       Recently Deleted row offers Restore instead of
+                       Copy, and permanent delete instead of trash. -->
+                  <context-menu>
+                    <if test="{n.deleted}">
+                      <menu-item on-press="restore_note:{n.id}">Restore</menu-item>
+                      <menu-item on-press="purge_note:{n.id}">Delete Permanently</menu-item>
+                    </if>
+                    <else>
+                      <menu-item on-press="copy_note_id:{n.id}">Copy</menu-item>
+                      <menu-item on-press="trash_note:{n.id}">Delete</menu-item>
+                    </else>
+                  </context-menu>
                 </list-item>
               </for>
               <else>

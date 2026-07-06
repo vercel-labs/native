@@ -1,7 +1,12 @@
-//! Native context menus: right/ctrl-click (and a touch long-press,
-//! which hosts report the same way) on a canvas widget asks the platform
-//! to present the OS context menu at the pointer — never a canvas-drawn
-//! imitation — and dispatches the selection back through typed messages.
+//! Context menus: right/ctrl-click (and a touch long-press, which hosts
+//! report the same way) on a canvas widget asks the platform to present
+//! the OS context menu at the pointer, and dispatches the selection back
+//! through typed messages. The OS menu is the DEFAULT presentation; when
+//! this host has no native presenter (or presenting failed), an
+//! app-declared menu presents as an anchored canvas surface instead —
+//! the app loop answers `canvas_widget_context_menu_request` by mounting
+//! the SAME declared items, so authors write one menu and the platform
+//! decides presentation.
 //!
 //! Resolution order for a secondary-button press:
 //! 1. the deepest widget on the hit route declaring
@@ -9,6 +14,9 @@
 //! 2. an editable text target: the standard Cut / Copy / Paste /
 //!    Select All menu wired to the existing clipboard actions,
 //! 3. the view's live static-text selection: a Copy-only menu.
+//! The zero-code defaults (2 and 3) are presenter-only: without a native
+//! menu they degrade to the keyboard clipboard paths, never a synthesized
+//! surface (there are no app-declared items to mount).
 //!
 //! Presentation is asynchronous (macOS `popUpMenuPositioningItem` runs a
 //! nested tracking loop): the platform emits a `context_menu_action`
@@ -58,12 +66,15 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
 
         /// Present the context menu for a secondary-button press: hit-test
         /// the point, pick the menu (app-declared, editable-text default,
-        /// or static-selection copy), and hand it to the platform. When
-        /// NOTHING under the pointer offers a menu — or the platform has
-        /// no presenter — the press is delivered to the app instead as a
-        /// `canvas_widget_context_press` with the resolved press target:
-        /// the desktop alternative for press-and-hold (`on_hold`).
-        /// Declared context menus always win over hold handlers.
+        /// or static-selection copy), and hand it to the platform. An
+        /// app-declared menu the platform cannot present natively becomes
+        /// a `canvas_widget_context_menu_request` — the app loop mounts
+        /// the same items as an anchored canvas surface. When NOTHING
+        /// under the pointer offers a menu, the press is delivered to the
+        /// app instead as a `canvas_widget_context_press` with the
+        /// resolved press target: the desktop alternative for
+        /// press-and-hold (`on_hold`). Declared context menus always win
+        /// over hold handlers.
         pub fn presentCanvasWidgetContextMenuFromPointer(self: *Runtime, app: runtime_api.App(Runtime), input_event: platform.GpuSurfaceInputEvent) anyerror!void {
             const routed = CanvasWidgetEventMethods().routeCanvasWidgetPointerInput(self, input_event, &self.widget_event_route_entries) catch |err| switch (err) {
                 error.WindowNotFound, error.ViewNotFound, error.InvalidViewOptions => return,
@@ -76,24 +87,36 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             var items: [platform.max_context_menu_items]platform.ContextMenuItem = undefined;
             const has_presenter = self.options.platform.services.show_context_menu_fn != null;
 
-            // 1. Deepest app-declared menu on the route wins.
+            // 1. Deepest app-declared menu on the route wins. When the
+            // platform cannot present it (no native presenter on this
+            // host, or the presenter call failed), the SAME declared menu
+            // presents as an anchored canvas surface instead: the app
+            // loop answers the request event by mounting it — one
+            // authored menu, platform-appropriate presentation.
             if (deepestContextMenuRouteNode(self, index, pointer_event.route)) |node_index| {
                 const widget = self.views[index].widget_layout_nodes[node_index].widget;
                 const count = @min(widget.context_menu.len, items.len);
-                if (count == 0 or !has_presenter) return;
-                for (widget.context_menu[0..count], 0..) |item, item_index| {
-                    items[item_index] = .{
-                        .id = @intCast(item_index + 1),
-                        .label = item.label,
-                        .enabled = item.enabled,
-                        .separator = item.separator,
-                    };
+                if (count == 0) return;
+                if (has_presenter) {
+                    for (widget.context_menu[0..count], 0..) |item, item_index| {
+                        items[item_index] = .{
+                            .id = @intCast(item_index + 1),
+                            .label = item.label,
+                            .enabled = item.enabled,
+                            .separator = item.separator,
+                        };
+                    }
+                    if (try showMenu(self, index, .{
+                        .window_id = input_event.window_id,
+                        .token = widget.id,
+                        .kind = .app,
+                    }, point, items[0..count])) return;
                 }
-                try showMenu(self, index, .{
+                try self.dispatchEvent(app, .{ .canvas_widget_context_menu_request = .{
                     .window_id = input_event.window_id,
-                    .token = widget.id,
-                    .kind = .app,
-                }, point, items[0..count]);
+                    .view_label = self.views[index].label,
+                    .target_id = widget.id,
+                } });
                 return;
             }
 
@@ -112,7 +135,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                     items[2] = .{ .id = default_item_paste, .label = "Paste" };
                     items[3] = .{ .separator = true };
                     items[4] = .{ .id = default_item_select_all, .label = "Select All", .enabled = widget.text.len > 0 };
-                    try showMenu(self, index, .{
+                    _ = try showMenu(self, index, .{
                         .window_id = input_event.window_id,
                         .token = target.id,
                         .kind = .edit_text,
@@ -125,7 +148,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 if (selected_id != 0 and selected_id == target.id) {
                     if (!has_presenter) return;
                     items[0] = .{ .id = default_item_copy, .label = "Copy" };
-                    try showMenu(self, index, .{
+                    _ = try showMenu(self, index, .{
                         .window_id = input_event.window_id,
                         .token = target.id,
                         .kind = .static_copy,
@@ -144,7 +167,11 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             } });
         }
 
-        fn showMenu(self: *Runtime, view_index: usize, pending: PendingCanvasWidgetContextMenu, point: geometry.PointF, items: []const platform.ContextMenuItem) anyerror!void {
+        /// Returns whether the platform accepted the presentation; a
+        /// refusal is not fatal (app-declared menus fall back to the
+        /// anchored canvas surface, the zero-code defaults degrade to
+        /// their keyboard paths).
+        fn showMenu(self: *Runtime, view_index: usize, pending: PendingCanvasWidgetContextMenu, point: geometry.PointF, items: []const platform.ContextMenuItem) anyerror!bool {
             self.options.platform.services.showContextMenu(.{
                 .window_id = pending.window_id,
                 .view_label = self.views[view_index].label,
@@ -155,9 +182,10 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 if (err != error.UnsupportedService) {
                     context_menu_log.warn("context menu presentation failed: {s}", .{@errorName(err)});
                 }
-                return;
+                return false;
             };
             self.canvas_widget_context_menu_pending = pending;
+            return true;
         }
 
         /// The platform reported the menu outcome: resolve the pending

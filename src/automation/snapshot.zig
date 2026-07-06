@@ -148,6 +148,15 @@ pub const WidgetList = struct {
     item_count: u32 = 0,
 };
 
+/// One declared context-menu item on a widget, as the snapshot lists it.
+/// The list position IS the index `widget-context-menu` invokes
+/// (separators keep their slots).
+pub const WidgetContextMenuItem = struct {
+    label: []const u8 = "",
+    enabled: bool = true,
+    separator: bool = false,
+};
+
 pub const Widget = struct {
     window_id: platform.WindowId = 1,
     view_label: []const u8 = "",
@@ -178,6 +187,11 @@ pub const Widget = struct {
     actions: WidgetActions = .{},
     text_selection: ?TextRange = null,
     text_composition: ?TextRange = null,
+    /// The widget's declared context-menu items in declared order —
+    /// what a right-click presents (natively, or through the anchored
+    /// fallback surface) and what `widget-context-menu` invokes by
+    /// index.
+    context_menu: []const WidgetContextMenuItem = &.{},
 };
 
 /// One status-item dropdown row as the runtime last applied it. Slices
@@ -499,6 +513,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
         try writeWidgetState(widget, writer);
         try writeWidgetActions(widget.actions, writer);
         try writeWidgetTextRanges(widget, writer);
+        try writeWidgetContextMenu(widget, writer);
         try writer.writeByte('\n');
     }
     if (input.tray) |tray| {
@@ -585,6 +600,7 @@ pub fn writeA11yText(input: Input, writer: anytype) !void {
         try writeWidgetState(widget, writer);
         try writeWidgetActions(widget.actions, writer);
         try writeWidgetTextRanges(widget, writer);
+        try writeWidgetContextMenu(widget, writer);
         try writer.writeByte('\n');
     }
 }
@@ -711,6 +727,25 @@ fn writeWidgetAction(enabled: bool, name: []const u8, wrote: *bool, writer: anyt
 fn writeWidgetTextRanges(widget: Widget, writer: anytype) !void {
     if (widget.text_selection) |selection| try writer.print(" selection={d}..{d}", .{ selection.start, selection.end });
     if (widget.text_composition) |composition| try writer.print(" composition={d}..{d}", .{ composition.start, composition.end });
+}
+
+/// The widget's declared context-menu items: quoted labels in declared
+/// order (list position = the `widget-context-menu` item index), bare
+/// `separator` for divider slots, `(disabled)` marking items a real
+/// menu would grey out.
+fn writeWidgetContextMenu(widget: Widget, writer: anytype) !void {
+    if (widget.context_menu.len == 0) return;
+    try writer.writeAll(" context_menu=[");
+    for (widget.context_menu, 0..) |item, index| {
+        if (index > 0) try writer.writeByte(',');
+        if (item.separator) {
+            try writer.writeAll("separator");
+            continue;
+        }
+        try writer.print("\"{s}\"", .{item.label});
+        if (!item.enabled) try writer.writeAll("(disabled)");
+    }
+    try writer.writeByte(']');
 }
 
 test "snapshot emits window and source" {

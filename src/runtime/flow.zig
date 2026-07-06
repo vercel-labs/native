@@ -36,6 +36,7 @@ const parseAutomationWidgetAction = automation_commands.parseAutomationWidgetAct
 const parseAutomationWidgetTarget = automation_commands.parseAutomationWidgetTarget;
 const parseAutomationProvenanceTarget = automation_commands.parseAutomationProvenanceTarget;
 const parseAutomationWidgetWheel = automation_commands.parseAutomationWidgetWheel;
+const parseAutomationWidgetContextMenuItem = automation_commands.parseAutomationWidgetContextMenuItem;
 const parseAutomationWidgetKey = automation_commands.parseAutomationWidgetKey;
 const parseAutomationWidgetPointerDrag = automation_commands.parseAutomationWidgetPointerDrag;
 const parseAutomationResizeCommand = automation_commands.parseAutomationResizeCommand;
@@ -411,6 +412,11 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .canvas_widget_context_menu => {
                     self.invalidateFor(.command, null);
                 },
+                .canvas_widget_context_menu_request => {
+                    // The app loop answers by mounting the anchored
+                    // fallback surface: a visual change.
+                    self.invalidateFor(.command, null);
+                },
                 .canvas_widget_dismiss => {},
                 .canvas_widget_context_press => {},
                 .canvas_widget_resize => {},
@@ -709,6 +715,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .widget_click => "automation.widget_click",
                 .widget_hold => "automation.widget_hold",
                 .widget_context_press => "automation.widget_context_press",
+                .widget_context_menu => "automation.widget_context_menu",
                 .widget_action => "automation.widget_action",
                 .widget_drag => "automation.widget_drag",
                 .widget_wheel => "automation.widget_wheel",
@@ -761,6 +768,9 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 },
                 .widget_context_press => {
                     try AutomationWidgetMethods().dispatchAutomationWidgetContextPress(self, app, try parseAutomationWidgetTarget(command.value));
+                },
+                .widget_context_menu => {
+                    try AutomationWidgetMethods().dispatchAutomationWidgetContextMenuItem(self, app, try parseAutomationWidgetContextMenuItem(command.value));
                 },
                 .widget_drag => {
                     try AutomationWidgetMethods().dispatchAutomationWidgetPointerDrag(self, app, try parseAutomationWidgetPointerDrag(command.value));
