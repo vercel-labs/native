@@ -8,7 +8,9 @@ const previews = vocab.previews as Record<string, { width: number; height: numbe
 /**
  * The Components index: a component-docs-style grid of engine-rendered
  * preview tiles, one per component page, driven by the shared
- * components-pages inventory.
+ * components-pages inventory. Each tile is a 16:9 hero — ONE
+ * representative variation, sized to read at a glance; the full
+ * variation sets live on the component pages.
  */
 export function ComponentIndexGrid() {
   return (
@@ -26,9 +28,9 @@ export function ComponentIndexGrid() {
             href={`/components/${page.slug}`}
             className="group block rounded-md border border-gray-alpha-400 bg-background-100 transition-colors hover:border-gray-alpha-500"
           >
-            {/* Letterbox bands match the engine's background tokens
-                (#fff light, #0a0a0a dark) so contained tiles read as one
-                seamless surface. */}
+            {/* Hero tiles render at exactly 16:9, so the image fills the
+                box edge to edge; the background tokens (#fff light,
+                #0a0a0a dark) keep any rounding slivers seamless. */}
             <div className="flex aspect-[16/9] items-center justify-center overflow-hidden rounded-t-md border-b border-gray-alpha-400 bg-white dark:bg-[#0a0a0a]">
               {(["light", "dark"] as const).map((scheme) => (
                 <Image

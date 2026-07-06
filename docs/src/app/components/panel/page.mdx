@@ -1,0 +1,40 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Panel
+
+`panel` is the plain surface container: background, border, radius — the workhorse surface for sidebars, wells, and status areas. Like [card](/components/card) it is a stacking container — children layer on top of each other and `gap` is rejected — so put a single `column` (or `row`) inside for flow. Binding `on-press` makes the whole surface pressable. See [Native UI](/native-ui) for how surfaces pick up color tokens.
+
+<ComponentPreview name="panel" alt="A panel rendered by the engine" />
+
+## Markup
+
+```html
+<panel width="340" padding="16">
+  <column gap="6">
+    <text>Build output</text>
+    <text wrap="true" foreground="text_muted">Warm cache, 214 modules, 1.8s.</text>
+  </column>
+</panel>
+```
+
+## Zig builder
+
+```zig
+ui.panel(.{ .width = 340, .padding = 16 }, .{
+    ui.column(.{ .gap = 6 }, .{
+        ui.text(.{}, "Build output"),
+        ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Warm cache, 214 modules, 1.8s."),
+    }),
+})
+```
+
+## Attributes
+
+<AttrTable
+  attrs={[
+    "padding",
+    "width",
+    "on-press",
+  ]}
+/>

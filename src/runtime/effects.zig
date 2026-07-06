@@ -531,6 +531,15 @@ fn fallbackEnviron() std.process.Environ {
     }
 }
 
+/// `std.Io.Threaded` (the real executor's io) does not exist on
+/// freestanding targets — the docs' live-preview wasm host compiles
+/// this runtime to wasm32-freestanding. There the executor io compiles
+/// away: `ensureIo` reports unsupported, which surfaces through the
+/// standard `.rejected` outcome. Effects never actually run in that
+/// host, so nothing is lost.
+const io_threaded_supported = builtin.target.os.tag != .freestanding;
+const IoThreaded = if (io_threaded_supported) std.Io.Threaded else void;
+
 /// Map a fetch-side error onto the delivered failure taxonomy. The
 /// worker refines `.cancelled` into `.timed_out` when the deadline (not
 /// the app) interrupted the exchange.
@@ -1104,7 +1113,7 @@ pub fn Effects(comptime Msg: type) type {
         /// spawn/fetch; `null` means "resolve a fallback at first use"
         /// (see `fallbackEnviron`).
         environ: ?std.process.Environ = null,
-        io_threaded: ?*std.Io.Threaded = null,
+        io_threaded: ?*IoThreaded = null,
         shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
         next_generation: u32 = 1,
         slots: [max_effects]Slot = [_]Slot{.{}} ** max_effects,
@@ -1168,24 +1177,26 @@ pub fn Effects(comptime Msg: type) type {
                     if (slot.kind == .spawn) self.killPublishedChild(slot);
                 }
             }
-            if (self.io_threaded) |threaded| {
-                const io = threaded.io();
-                var waited_ms: usize = 0;
-                while (waited_ms < 5000) : (waited_ms += 1) {
-                    var running = false;
-                    for (&self.slots) |*slot| {
-                        if (slot.state.load(.acquire) == .running and !slot.fake) running = true;
+            if (io_threaded_supported) {
+                if (self.io_threaded) |threaded| {
+                    const io = threaded.io();
+                    var waited_ms: usize = 0;
+                    while (waited_ms < 5000) : (waited_ms += 1) {
+                        var running = false;
+                        for (&self.slots) |*slot| {
+                            if (slot.state.load(.acquire) == .running and !slot.fake) running = true;
+                        }
+                        if (!running) break;
+                        // Keep the queue drained so exit-post retries finish.
+                        self.clearQueue();
+                        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch break;
                     }
-                    if (!running) break;
-                    // Keep the queue drained so exit-post retries finish.
-                    self.clearQueue();
-                    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch break;
                 }
-            }
-            if (self.io_threaded) |threaded| {
-                threaded.deinit();
-                self.allocator.destroy(threaded);
-                self.io_threaded = null;
+                if (self.io_threaded) |threaded| {
+                    threaded.deinit();
+                    self.allocator.destroy(threaded);
+                    self.io_threaded = null;
+                }
             }
             self.clearQueue();
             for (&self.slots) |*slot| {
@@ -2624,17 +2635,21 @@ pub fn Effects(comptime Msg: type) type {
         // ---------------------------------------------------------- internals
 
         fn ensureIo(self: *Self) !std.Io {
-            if (self.io_threaded == null) {
-                const threaded = try self.allocator.create(std.Io.Threaded);
-                // `environ` defaults to `.empty` in `InitOptions`, which
-                // would hand every spawned child a blank environment (no
-                // HOME, no PATH) — always pass the host environment.
-                threaded.* = std.Io.Threaded.init(self.allocator, .{
-                    .environ = self.environ orelse fallbackEnviron(),
-                });
-                self.io_threaded = threaded;
+            if (io_threaded_supported) {
+                if (self.io_threaded == null) {
+                    const threaded = try self.allocator.create(IoThreaded);
+                    // `environ` defaults to `.empty` in `InitOptions`, which
+                    // would hand every spawned child a blank environment (no
+                    // HOME, no PATH) — always pass the host environment.
+                    threaded.* = IoThreaded.init(self.allocator, .{
+                        .environ = self.environ orelse fallbackEnviron(),
+                    });
+                    self.io_threaded = threaded;
+                }
+                return self.io_threaded.?.io();
+            } else {
+                return error.IoUnsupported;
             }
-            return self.io_threaded.?.io();
         }
 
         fn wakeHost(self: *Self) void {

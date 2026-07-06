@@ -864,6 +864,14 @@
       "width": 1120,
       "height": 400
     },
+    "spacer": {
+      "width": 1120,
+      "height": 320
+    },
+    "resizable": {
+      "width": 1120,
+      "height": 480
+    },
     "skeleton": {
       "width": 1120,
       "height": 400
@@ -895,6 +903,178 @@
     "timeline": {
       "width": 1120,
       "height": 640
+    },
+    "accordion-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "alert-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "avatar-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "badge-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "breadcrumb-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "bubble-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "button-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "card-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "chart-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "checkbox-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "combobox-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "dialog-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "drawer-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "dropdown-menu-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "icon-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "input-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "list-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "markdown-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "pagination-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "panel-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "progress-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "radio-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "resizable-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "scroll-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "select-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "separator-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "sheet-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "skeleton-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "slider-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "spacer-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "spinner-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "split-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "status-bar-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "stepper-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "switch-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "table-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "tabs-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "textarea-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "timeline-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "toggle-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "tooltip-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "tree-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "virtual-list-hero": {
+      "width": 704,
+      "height": 396
     }
   },
   "iconTileSize": 112,

@@ -1,0 +1,49 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Sheet
+
+A bottom-anchored surface with the same contract as [dialog](/components/dialog) and [drawer](/components/drawer): rendered in place, title via the `text` attribute, visibility model-owned behind an `if`, and `on-dismiss` dispatched on Escape or click-outside so `update` clears the open flag. The sheet rises from the bottom edge; size it with `height`. The title chrome is engine-drawn and children stack over the full content box, so lead the body column with a fixed-height spacer.
+
+<ComponentPreview name="sheet" alt="A sheet surface rendered by the engine" caption="a bottom sheet with a title, body text, and an action row" />
+
+## Markup
+
+```html
+<column padding="24">
+  <button variant="outline" icon="external-link" on-press="open_share">Share</button>
+  <if test="{share_open}">
+    <sheet text="Share" height="190" padding="24" on-dismiss="close_share">
+      <column gap="12">
+        <spacer height="34"></spacer>
+        <text wrap="true" foreground="text_muted">Anyone with the link can view this board.</text>
+        <row gap="8">
+          <input text="{share_url}" grow="1"></input>
+          <button variant="secondary" icon="copy" on-press="copy_link">Copy</button>
+        </row>
+      </column>
+    </sheet>
+  </if>
+</column>
+```
+
+## Zig builder
+
+```zig
+ui.el(.sheet, .{ .text = "Share", .height = 190, .padding = 24, .on_dismiss = .close_share }, .{
+    ui.column(.{ .gap = 12 }, .{
+        ui.column(.{ .height = 34 }, .{}), // clears the engine-drawn title line
+        ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Anyone with the link can view this board."),
+        ui.row(.{ .gap = 8 }, .{
+            ui.el(.input, .{ .text = model.share_url, .grow = 1 }, .{}),
+            ui.button(.{ .variant = .secondary, .icon = "copy", .on_press = .copy_link }, "Copy"),
+        }),
+    }),
+})
+```
+
+## Attributes
+
+The sheet rejects `gap` — it layers children like the other stacking surfaces; put a column (or row) inside for flow.
+
+<AttrTable attrs={["text", "width", "height", "padding", "on-dismiss"]} />

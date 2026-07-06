@@ -1,9 +1,9 @@
 import { ComponentPreview } from "@/components/component-preview";
 import { AttrTable } from "@/components/attr-table";
 
-# Card & Panel
+# Card
 
-Surface containers: `card` is the bordered, elevated surface and `panel` is the plain one (background, border, radius). Both are stacking containers — children layer on top of each other and `gap` is rejected — so put a single `column` (or `row`) inside for flow. Cards carry 24px of content padding by default (the house inset; 16 at `size="sm"`) — set `padding` explicitly to override it. Binding `on-press` makes the whole surface pressable, the list-of-cards pattern.
+`card` is the bordered, elevated surface container. It is a stacking container — children layer on top of each other and `gap` is rejected — so put a single `column` (or `row`) inside for flow. Cards carry 24px of content padding by default (the house inset; 16 at `size="sm"`) — set `padding` explicitly to override it. Binding `on-press` makes the whole surface pressable, the list-of-cards pattern. For the plain surface with the same stacking contract, see [panel](/components/panel).
 
 <ComponentPreview name="card" alt="A card rendered by the engine" />
 
@@ -33,30 +33,6 @@ ui.el(.card, .{ .width = 340 }, .{
             ui.button(.{ .variant = .primary, .on_press = .deploy }, "Deploy"),
             ui.button(.{ .variant = .ghost, .on_press = .cancel }, "Cancel"),
         }),
-    }),
-})
-```
-
-## Panel
-
-Same stacking contract, plainer chrome — the workhorse surface for sidebars, wells, and status areas. See [/native-ui](/native-ui) for how surfaces pick up color tokens.
-
-<ComponentPreview name="panel" alt="A panel rendered by the engine" />
-
-```html
-<panel width="340" padding="16">
-  <column gap="6">
-    <text>Build output</text>
-    <text wrap="true" foreground="text_muted">Warm cache, 214 modules, 1.8s.</text>
-  </column>
-</panel>
-```
-
-```zig
-ui.panel(.{ .width = 340, .padding = 16 }, .{
-    ui.column(.{ .gap = 6 }, .{
-        ui.text(.{}, "Build output"),
-        ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Warm cache, 214 modules, 1.8s."),
     }),
 })
 ```

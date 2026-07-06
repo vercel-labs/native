@@ -195,7 +195,11 @@ pub const SessionRecorder = struct {
     fn fail(self: *SessionRecorder, reason: []const u8) void {
         if (self.failed) return;
         self.failed = true;
-        std.debug.print("session recording failed and stopped: {s} (the partial journal has no end record; replay will refuse it)\n", .{reason});
+        // No stderr on freestanding targets (the docs' wasm preview
+        // host): analyzing the print would drag `std.Io.Threaded` in.
+        if (comptime @import("builtin").os.tag != .freestanding) {
+            std.debug.print("session recording failed and stopped: {s} (the partial journal has no end record; replay will refuse it)\n", .{reason});
+        }
     }
 };
 

@@ -3,7 +3,7 @@ import { AttrTable } from "@/components/attr-table";
 
 # Dialog
 
-A modal dialog surface rendered in place: the title comes from the `text` attribute, and visibility is model-owned — wrap the dialog in an `if` on an open flag. `on-dismiss` dispatches when Escape or a click outside dismisses the surface, so `update` clears the flag; the engine hides the surface immediately as an optimistic echo, and the source tree wins on the next rebuild. The title is drawn by the surface chrome and children stack over the full content box, so lead the body column with a fixed-height spacer that clears the title line. For edge-anchored surfaces with the same contract, see [Drawer & Sheet](/components/drawer).
+A modal dialog surface rendered in place: the title comes from the `text` attribute, and visibility is model-owned — wrap the dialog in an `if` on an open flag. `on-dismiss` dispatches when Escape or a click outside dismisses the surface, so `update` clears the flag; the engine hides the surface immediately as an optimistic echo, and the source tree wins on the next rebuild. The title is drawn by the surface chrome and children stack over the full content box, so lead the body column with a fixed-height spacer that clears the title line. For edge-anchored surfaces with the same contract, see [drawer](/components/drawer) and [sheet](/components/sheet).
 
 <ComponentPreview name="dialog" alt="A modal dialog rendered by the engine" caption="title chrome, body content, and a trailing action row" />
 

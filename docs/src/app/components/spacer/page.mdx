@@ -1,0 +1,40 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Spacer
+
+A layout leaf of flexible empty space between siblings — give it a `grow` and it soaks up the leftover main-axis room, which is how toolbars push actions to the far edge. A fixed `width` or `height` makes it a rigid gap instead (the fixed-height form is how modal bodies clear the engine-drawn title line). For a visible dividing line, see [separator](/components/separator).
+
+<ComponentPreview name="spacer" alt="A spacer pushing a toolbar action to the far edge, rendered by the engine" caption="a grow spacer pushing the action button to the trailing edge" />
+
+## Markup
+
+```html
+<panel width="340" padding="12">
+  <row gap="12" cross="center">
+    <text>Docs</text>
+    <text foreground="text_muted">Source</text>
+    <spacer grow="1"></spacer>
+    <button size="sm" variant="secondary" on-press="open_changelog">Changelog</button>
+  </row>
+</panel>
+```
+
+## Zig builder
+
+`ui.spacer(1)` is the builder shorthand for a grow-1 spacer.
+
+```zig
+ui.panel(.{ .width = 340, .padding = 12 }, .{
+    ui.row(.{ .gap = 12, .cross = .center }, .{
+        ui.text(.{}, "Docs"),
+        ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Source"),
+        ui.spacer(1),
+        ui.button(.{ .size = .sm, .variant = .secondary, .on_press = .open_changelog }, "Changelog"),
+    }),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["width", "height", "grow"]} />

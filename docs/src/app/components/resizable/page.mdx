@@ -1,0 +1,42 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Resizable
+
+A single panel with an engine-managed drag handle: `width` sets the initial width and the engine owns the drag from there — no fraction bookkeeping in the model. It is a stacking surface — no `gap`; put a row or column inside for flow. When the model should own the pane fraction (or you need two coordinated panes), use [split](/components/split) instead.
+
+<ComponentPreview name="resizable" alt="A resizable sidebar panel rendered by the engine" caption="a resizable sidebar with its drag handle beside the content pane" />
+
+## Markup
+
+```html
+<row grow="1">
+  <resizable width="260">
+    <column padding="12">
+      <text foreground="text_muted">Sidebar</text>
+    </column>
+  </resizable>
+  <panel grow="1" padding="12">
+    <text>Content</text>
+  </panel>
+</row>
+```
+
+## Zig builder
+
+```zig
+ui.row(.{ .grow = 1 }, .{
+    ui.el(.resizable, .{ .width = 260 }, .{
+        ui.column(.{ .padding = 12 }, .{
+            ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Sidebar"),
+        }),
+    }),
+    ui.panel(.{ .grow = 1, .padding = 12 }, .{
+        ui.text(.{}, "Content"),
+    }),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["width", "min-width"]} />

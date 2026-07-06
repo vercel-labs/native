@@ -1,0 +1,39 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Radio
+
+The single-choice value control, grouped by a `radio-group` row container. Like [checkbox](/components/checkbox), the label rides the `text` attribute — radio is not a text-bearing element, so text content between the tags is rejected with a teaching error. One model field holds the group's selection: render it with `{a == b}` equalities on each radio's `checked`, and let each radio's `on-toggle` dispatch the Msg that sets the field — the engine never flips state on its own.
+
+<ComponentPreview name="radio-group" alt="A radio group rendered by the engine" caption="a radio group with one selected and one disabled option" />
+
+## Markup
+
+```html
+<radio-group gap="12">
+  <radio checked="{density == default}" on-toggle="set_default" text="Default" />
+  <radio checked="{density == comfortable}" on-toggle="set_comfortable" text="Comfortable" />
+  <radio checked="{density == compact}" disabled="true" text="Compact" />
+</radio-group>
+```
+
+## Zig builder
+
+```zig
+ui.el(.radio_group, .{ .gap = 12 }, .{
+    ui.el(.radio, .{ .text = "Default", .checked = model.density == .default, .on_toggle = .set_default }, .{}),
+    ui.el(.radio, .{ .text = "Comfortable", .checked = model.density == .comfortable, .on_toggle = .set_comfortable }, .{}),
+    ui.el(.radio, .{ .text = "Compact", .checked = model.density == .compact, .disabled = true }, .{}),
+})
+```
+
+## Attributes
+
+<AttrTable
+  attrs={[
+    "text",
+    "checked",
+    "disabled",
+    "on-toggle",
+  ]}
+/>

@@ -16,12 +16,17 @@ const runtime_clock = @import("clock.zig");
 const GateState = enum { unknown, off, on };
 var gate: GateState = .unknown;
 
+/// Whether the gate can ever turn on for this target: only OS targets
+/// with libc and an environment qualify. Comptime-known so wasm and
+/// freestanding builds never analyze the stderr print path (which would
+/// drag `std.Io.Threaded` into targets that cannot compile it).
+const gate_possible = builtin.link_libc and (builtin.os.tag == .macos or builtin.os.tag == .linux);
+
 /// True when `NATIVE_SDK_WINDOW_TIMING` is set. Cached after the first
 /// read; only meaningful on OS targets with an environment (returns
 /// false elsewhere, keeping wasm/freestanding builds inert).
 pub fn enabled() bool {
-    if (comptime !builtin.link_libc) return false;
-    if (comptime builtin.os.tag != .macos and builtin.os.tag != .linux) return false;
+    if (comptime !gate_possible) return false;
     if (gate == .unknown) {
         gate = if (std.c.getenv("NATIVE_SDK_WINDOW_TIMING") != null) .on else .off;
     }
@@ -30,8 +35,10 @@ pub fn enabled() bool {
 
 /// Print one launch lap: `native-sdk: launch <name> wall_ns=<ns>`.
 pub fn lap(comptime name: []const u8) void {
-    if (!enabled()) return;
-    std.debug.print("native-sdk: launch " ++ name ++ " wall_ns={d}\n", .{runtime_clock.nowNanoseconds()});
+    if (comptime gate_possible) {
+        if (!enabled()) return;
+        std.debug.print("native-sdk: launch " ++ name ++ " wall_ns={d}\n", .{runtime_clock.nowNanoseconds()});
+    }
 }
 
 /// Like `lap`, but fires at most once per process per name — for sites

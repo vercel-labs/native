@@ -1,0 +1,32 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Spinner
+
+An indeterminate progress leaf for work with no measurable fraction; when there is one, use [progress](/components/progress) instead. For a placeholder that sketches the shape of the loading content, use [skeleton](/components/skeleton).
+
+<ComponentPreview name="spinner" alt="An indeterminate spinner rendered by the engine" />
+
+## Markup
+
+```html
+<row gap="12" cross="center">
+  <spinner></spinner>
+  <text foreground="text_muted">Loading notes…</text>
+</row>
+```
+
+## Zig builder
+
+Spinner has no sugar method; use `ui.el` with the element kind.
+
+```zig
+ui.row(.{ .gap = 12, .cross = .center }, .{
+    ui.el(.spinner, .{}, .{}),
+    ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Loading notes…"),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["width", "height"]} />

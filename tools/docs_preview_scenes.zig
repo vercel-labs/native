@@ -134,7 +134,7 @@ pub const scenes = [_]Scene{
     .{ .name = "accordion", .height = 240, .build = buildAccordion, .model = .{ .flags = .{ true, false, false, false } } },
     .{ .name = "tabs", .height = 230, .build = buildTabs },
     .{ .name = "menu", .height = 280, .build = stateless(buildMenu) },
-    .{ .name = "tooltip", .height = 160, .build = stateless(buildTooltip) },
+    .{ .name = "tooltip", .height = 160, .build = stateless(buildTooltip), .hover = .{ .kind = .button } },
     .{ .name = "bubble", .height = 200, .build = stateless(buildBubble) },
     .{ .name = "breadcrumb", .height = 140, .build = stateless(buildBreadcrumb) },
     .{ .name = "pagination", .height = 150, .build = stateless(buildPagination) },
@@ -148,6 +148,8 @@ pub const scenes = [_]Scene{
     .{ .name = "drawer", .height = 300, .build = stateless(buildDrawer) },
     .{ .name = "sheet", .height = 300, .build = stateless(buildSheet) },
     .{ .name = "separator", .height = 200, .build = stateless(buildSeparator) },
+    .{ .name = "spacer", .height = 160, .build = stateless(buildSpacer) },
+    .{ .name = "resizable", .height = 240, .build = stateless(buildResizable) },
     .{ .name = "skeleton", .height = 200, .build = stateless(buildSkeleton) },
     .{ .name = "spinner", .height = 140, .build = stateless(buildSpinner) },
     .{ .name = "markdown", .height = 440, .build = stateless(buildMarkdown) },
@@ -156,7 +158,64 @@ pub const scenes = [_]Scene{
     .{ .name = "status-bar", .height = 170, .build = stateless(buildStatusBar) },
     .{ .name = "stepper", .height = 160, .build = stateless(buildStepper) },
     .{ .name = "timeline", .height = 320, .build = stateless(buildTimeline) },
+
+    // Catalog hero tiles: ONE representative variation per component,
+    // framed 16:9 so the Components index card fills edge to edge and
+    // the component reads at a glance. The full variation sets stay on
+    // the component pages (the scenes above).
+    .{ .name = "accordion-hero", .width = hero_tile_width, .height = hero_tile_height, .build = buildAccordionHero, .model = .{ .flags = .{ true, false, false, false } } },
+    heroScene("alert-hero", buildAlertHero),
+    heroScene("avatar-hero", buildAvatarHero),
+    heroScene("badge-hero", buildBadgeHero),
+    heroScene("breadcrumb-hero", buildBreadcrumb),
+    heroScene("bubble-hero", buildBubbleHero),
+    heroScene("button-hero", buildButtonHero),
+    heroScene("card-hero", buildCardHero),
+    heroScene("chart-hero", buildChartHero),
+    heroScene("checkbox-hero", buildCheckboxHero),
+    heroScene("combobox-hero", buildComboboxHero),
+    heroScene("dialog-hero", buildDialogHero),
+    heroScene("drawer-hero", buildDrawerHero),
+    heroScene("dropdown-menu-hero", buildDropdownMenuHero),
+    heroScene("icon-hero", buildIconHeroTile),
+    heroScene("input-hero", buildInputHero),
+    heroScene("list-hero", buildListHero),
+    heroScene("markdown-hero", buildMarkdownHero),
+    heroScene("pagination-hero", buildPaginationHero),
+    heroScene("panel-hero", buildPanelHero),
+    heroScene("progress-hero", buildProgressHero),
+    heroScene("radio-hero", buildRadioHero),
+    heroScene("resizable-hero", buildResizableHero),
+    heroScene("scroll-hero", buildScrollHero),
+    .{ .name = "select-hero", .width = hero_tile_width, .height = hero_tile_height, .build = buildSelectHero, .model = .{ .open = true } },
+    heroScene("separator-hero", buildSeparatorHero),
+    heroScene("sheet-hero", buildSheetHero),
+    heroScene("skeleton-hero", buildSkeletonHero),
+    heroScene("slider-hero", buildSliderHero),
+    heroScene("spacer-hero", buildSpacerHero),
+    heroScene("spinner-hero", buildSpinner),
+    heroScene("split-hero", buildSplitHero),
+    heroScene("status-bar-hero", buildStatusBarHero),
+    heroScene("stepper-hero", buildStepperHero),
+    heroScene("switch-hero", buildSwitchHero),
+    heroScene("table-hero", buildTableHero),
+    heroScene("tabs-hero", buildTabsHero),
+    heroScene("textarea-hero", buildTextareaHero),
+    heroScene("timeline-hero", buildTimelineHero),
+    heroScene("toggle-hero", buildToggleHero),
+    .{ .name = "tooltip-hero", .width = hero_tile_width, .height = hero_tile_height, .build = stateless(buildTooltipHero), .hover = .{ .kind = .button } },
+    heroScene("tree-hero", buildTreeHero),
+    heroScene("virtual-list-hero", buildVirtualListHero),
 };
+
+/// The catalog hero frame: exactly 16:9, so the index-grid card shows
+/// the tile edge to edge with no letterboxing.
+pub const hero_tile_width: f32 = 352;
+pub const hero_tile_height: f32 = 198;
+
+fn heroScene(comptime name: []const u8, comptime build_fn: fn (ui: *Ui) Node) Scene {
+    return .{ .name = name, .width = hero_tile_width, .height = hero_tile_height, .build = stateless(build_fn) };
+}
 
 pub fn sceneByName(name: []const u8) ?*const Scene {
     for (&scenes) |*scene| {
@@ -856,5 +915,526 @@ fn buildTimeline(ui: *Ui) Node {
             ui.timelineItem(.{ .indicator = "2", .variant = .default, .title = "Test", .description = "Canvas and runtime suites passing.", .meta = "zig build test · 42s" }),
             ui.timelineItem(.{ .indicator = "3", .title = "Package", .connector = false }),
         }),
+    });
+}
+
+fn buildSpacer(ui: *Ui) Node {
+    return tile(ui, .{
+        ui.panel(.{ .width = 340, .padding = 12 }, .{
+            ui.row(.{ .gap = 12, .cross = .center }, .{
+                ui.text(.{}, "Docs"),
+                ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Source"),
+                ui.spacer(1),
+                ui.button(.{ .variant = .secondary, .size = .sm }, "Changelog"),
+            }),
+        }),
+    });
+}
+
+fn buildResizable(ui: *Ui) Node {
+    return tileStart(ui, .{
+        ui.row(.{ .height = 150 }, .{
+            ui.el(.resizable, .{ .width = 180 }, .{
+                ui.column(.{ .padding = 12 }, .{
+                    ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Sidebar"),
+                }),
+            }),
+            ui.panel(.{ .grow = 1, .padding = 12 }, .{
+                ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Content"),
+            }),
+        }),
+    });
+}
+
+// ------------------------------------------------- catalog hero scenes
+//
+// One representative variation per component for the Components index
+// grid, composed inside the 16:9 hero frame. Padded like the page tiles
+// but slightly tighter so the single variation renders large.
+
+fn heroTile(ui: *Ui, children: anytype) Node {
+    return ui.column(.{ .padding = 20, .main = .center, .cross = .center, .grow = 1 }, children);
+}
+
+fn heroTileStart(ui: *Ui, children: anytype) Node {
+    return ui.column(.{ .padding = 20, .main = .center, .cross = .stretch, .grow = 1 }, children);
+}
+
+fn buildAccordionHero(ui: *Ui, model: *const SceneModel) Node {
+    return heroTile(ui, .{
+        ui.column(.{ .width = 300 }, .{
+            accordionItem(ui, model, 0, "Is it accessible?", "Yes. Widgets carry semantic roles and one roving focus set."),
+        }),
+    });
+}
+
+fn buildAlertHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.column(.{ .width = 310 }, .{
+            ui.el(.alert, .{ .text = "A new version of the shell is available." }, .{
+                ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Restart the app to finish updating."),
+            }),
+        }),
+    });
+}
+
+fn buildAvatarHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.avatar(.{}, "CT"),
+    });
+}
+
+fn buildBadgeHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.el(.badge, .{ .text = "Badge" }, .{}),
+    });
+}
+
+fn buildBubbleHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.row(.{ .width = 300 }, .{
+            ui.spacer(1),
+            ui.el(.bubble, .{ .padding = 10, .variant = .primary }, .{
+                ui.text(.{ .wrap = true }, "Previews are rendering now."),
+            }),
+        }),
+    });
+}
+
+fn buildButtonHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.button(.{ .variant = .primary }, "Button"),
+    });
+}
+
+fn buildCardHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.el(.card, .{ .width = 300 }, .{
+            ui.column(.{ .gap = 10 }, .{
+                ui.text(.{}, "Deploy your app"),
+                ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Views, commands, and assets in one native binary."),
+                ui.row(.{ .gap = 8 }, .{
+                    ui.button(.{ .variant = .primary }, "Deploy"),
+                    ui.button(.{ .variant = .ghost }, "Cancel"),
+                }),
+            }),
+        }),
+    });
+}
+
+fn buildChartHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.chart(.{ .width = 300, .height = 140, .grid_lines = 3, .baseline = true }, &.{
+            .{ .kind = .line, .fill = true, .label = "cpu", .values = &.{ 0.18, 0.24, 0.21, 0.32, 0.45, 0.38, 0.52, 0.61, 0.55, 0.68, 0.62, 0.74 } },
+        }),
+    });
+}
+
+fn buildCheckboxHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.checkbox(.{ .text = "Accept terms and conditions", .checked = true }),
+    });
+}
+
+fn buildComboboxHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.el(.combobox, .{ .width = 260, .placeholder = "Search frameworks…" }, .{}),
+    });
+}
+
+fn buildDialogHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.el(.dialog, .{ .text = "Rename note", .width = 300, .height = 150, .padding = 20 }, .{
+            ui.column(.{ .gap = 10 }, .{
+                surfaceTitleSpacer(ui),
+                ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "The new name shows up everywhere."),
+                ui.row(.{ .gap = 8, .main = .end }, .{
+                    ui.button(.{ .variant = .ghost }, "Cancel"),
+                    ui.button(.{ .variant = .primary }, "Rename"),
+                }),
+            }),
+        }),
+    });
+}
+
+fn buildDrawerHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.el(.drawer, .{ .text = "Filters", .width = 220, .height = 155, .padding = 18 }, .{
+            ui.column(.{ .gap = 10 }, .{
+                surfaceTitleSpacer(ui),
+                ui.checkbox(.{ .text = "Only unread", .checked = true }),
+                ui.checkbox(.{ .text = "Has attachments" }),
+            }),
+        }),
+    });
+}
+
+fn buildDropdownMenuHero(ui: *Ui) Node {
+    return ui.column(.{ .padding = 16, .cross = .center, .grow = 1 }, .{
+        ui.stack(.{}, .{
+            ui.button(.{ .variant = .outline, .icon = "chevron-down" }, "Actions"),
+            ui.el(.dropdown_menu, .{ .anchor = .below, .min_width = 180 }, .{
+                ui.el(.menu_item, .{ .text = "Duplicate", .icon = "copy" }, .{}),
+                ui.el(.menu_item, .{ .text = "Rename", .icon = "edit" }, .{}),
+                ui.el(.menu_item, .{ .text = "Delete", .icon = "trash" }, .{}),
+            }),
+        }),
+    });
+}
+
+fn buildIconHeroTile(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.row(.{ .gap = 24, .cross = .center }, .{
+            ui.icon(.{}, "play"),
+            ui.icon(.{}, "search"),
+            ui.icon(.{}, "settings"),
+            ui.icon(.{}, "git-branch"),
+            ui.icon(.{}, "download"),
+        }),
+    });
+}
+
+fn buildInputHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.el(.input, .{ .width = 260, .placeholder = "Email address" }, .{}),
+    });
+}
+
+fn buildListHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.list(.{ .width = 280 }, .{
+            ui.listItem(.{ .icon = "file-text" }, "Quarterly report.md"),
+            ui.listItem(.{ .icon = "file-text", .selected = true }, "Launch checklist.md"),
+            ui.listItem(.{ .icon = "folder" }, "Archive"),
+        }),
+    });
+}
+
+const markdown_hero_sample =
+    \\## Release notes
+    \\
+    \\The **markdown** widget renders rich text — *emphasis*,
+    \\`inline code`, and [links](https://zero-native.dev) — through
+    \\native widgets.
+;
+
+fn buildMarkdownHero(ui: *Ui) Node {
+    return heroTileStart(ui, .{
+        Md.view(ui, markdown_hero_sample, .{}),
+    });
+}
+
+fn buildPaginationHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.el(.pagination, .{}, .{
+            ui.button(.{ .variant = .ghost, .size = .icon, .icon = "chevron-left" }, ""),
+            ui.button(.{ .variant = .outline, .selected = true }, "1"),
+            ui.button(.{ .variant = .ghost }, "2"),
+            ui.button(.{ .variant = .ghost }, "3"),
+            ui.button(.{ .variant = .ghost, .size = .icon, .icon = "chevron-right" }, ""),
+        }),
+    });
+}
+
+fn buildPanelHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.panel(.{ .width = 280, .padding = 16 }, .{
+            ui.column(.{ .gap = 6 }, .{
+                ui.text(.{}, "Panel"),
+                ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "A plain surface container: background, border, radius."),
+            }),
+        }),
+    });
+}
+
+fn buildProgressHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.el(.progress, .{ .value = 0.62, .width = 260 }, .{}),
+    });
+}
+
+fn buildRadioHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.el(.radio_group, .{ .gap = 10 }, .{
+            ui.el(.radio, .{ .text = "Default", .checked = true }, .{}),
+            ui.el(.radio, .{ .text = "Comfortable" }, .{}),
+            ui.el(.radio, .{ .text = "Compact" }, .{}),
+        }),
+    });
+}
+
+fn buildResizableHero(ui: *Ui) Node {
+    return heroTileStart(ui, .{
+        ui.row(.{ .height = 130 }, .{
+            ui.el(.resizable, .{ .width = 120 }, .{
+                ui.column(.{ .padding = 12 }, .{
+                    ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Sidebar"),
+                }),
+            }),
+            ui.panel(.{ .grow = 1, .padding = 12 }, .{
+                ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Content"),
+            }),
+        }),
+    });
+}
+
+fn buildScrollHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.panel(.{ .width = 280, .height = 140 }, .{
+            ui.scroll(.{}, .{
+                ui.column(.{ .gap = 2, .padding = 8, .height = 220 }, .{
+                    ui.listItem(.{}, "Changelog entry 14"),
+                    ui.listItem(.{}, "Changelog entry 13"),
+                    ui.listItem(.{}, "Changelog entry 12"),
+                    ui.listItem(.{}, "Changelog entry 11"),
+                    ui.listItem(.{}, "Changelog entry 10"),
+                    ui.listItem(.{}, "Changelog entry 9"),
+                }),
+            }),
+        }),
+    });
+}
+
+/// The open select: the catalog card shows the anchored options menu,
+/// the component's signature rendering.
+fn buildSelectHero(ui: *Ui, model: *const SceneModel) Node {
+    const active: usize = @min(model.index, select_options.len - 1);
+    const trigger = ui.el(.select, .{
+        .text = select_options[active],
+        .selected = model.open,
+        .on_press = .toggle_open,
+    }, .{});
+    const picker = if (model.open)
+        ui.stack(.{}, .{
+            trigger,
+            ui.el(.dropdown_menu, .{
+                .anchor = .below,
+                .anchor_alignment = .stretch,
+                .on_dismiss = .{ .set_open = false },
+            }, .{
+                ui.el(.menu_item, .{ .text = select_options[0], .selected = active == 0, .on_press = .{ .choose = 0 } }, .{}),
+                ui.el(.menu_item, .{ .text = select_options[1], .selected = active == 1, .on_press = .{ .choose = 1 } }, .{}),
+                ui.el(.menu_item, .{ .text = select_options[2], .selected = active == 2, .on_press = .{ .choose = 2 } }, .{}),
+            }),
+        })
+    else
+        ui.stack(.{}, .{trigger});
+    return ui.column(.{ .padding = 16, .cross = .center, .grow = 1 }, .{
+        ui.column(.{ .width = 240 }, .{picker}),
+    });
+}
+
+fn buildSeparatorHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.column(.{ .gap = 12, .width = 280 }, .{
+            ui.text(.{}, "Native SDK"),
+            ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "A component catalog rendered by the engine."),
+            ui.separator(.{}),
+            ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Docs · Source · Changelog"),
+        }),
+    });
+}
+
+fn buildSheetHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.el(.sheet, .{ .text = "Share", .width = 300, .height = 158, .padding = 14 }, .{
+            ui.column(.{ .gap = 10 }, .{
+                surfaceTitleSpacer(ui),
+                ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Anyone with the link can view this board."),
+                ui.row(.{ .gap = 8 }, .{
+                    ui.el(.input, .{ .text = "https://zero-native.dev/b/9f2", .grow = 1 }, .{}),
+                    ui.button(.{ .variant = .secondary, .icon = "copy" }, "Copy"),
+                }),
+            }),
+        }),
+    });
+}
+
+fn buildSkeletonHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.row(.{ .gap = 12, .width = 280 }, .{
+            ui.el(.skeleton, .{ .width = 44, .height = 44 }, .{}),
+            ui.column(.{ .gap = 8, .grow = 1, .main = .center }, .{
+                ui.el(.skeleton, .{ .height = 14 }, .{}),
+                ui.el(.skeleton, .{ .height = 14, .width = 160 }, .{}),
+            }),
+        }),
+    });
+}
+
+fn buildSliderHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.el(.slider, .{ .value = 0.4, .width = 260 }, .{}),
+    });
+}
+
+fn buildSpacerHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.panel(.{ .width = 300, .padding = 12 }, .{
+            ui.row(.{ .gap = 12, .cross = .center }, .{
+                ui.text(.{}, "Docs"),
+                ui.spacer(1),
+                ui.button(.{ .variant = .secondary, .size = .sm }, "Changelog"),
+            }),
+        }),
+    });
+}
+
+fn buildSplitHero(ui: *Ui) Node {
+    return heroTileStart(ui, .{
+        ui.split(.{ .height = 130, .value = 0.35, .gap = 8 }, .{
+            ui.panel(.{ .padding = 12, .min_width = 70 }, .{
+                ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Sidebar"),
+            }),
+            ui.panel(.{ .padding = 12, .min_width = 100 }, .{
+                ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Content"),
+            }),
+        }),
+    });
+}
+
+fn buildStatusBarHero(ui: *Ui) Node {
+    return ui.column(.{ .grow = 1 }, .{
+        ui.column(.{ .grow = 1, .padding = 20, .main = .center, .cross = .center }, .{
+            ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Window content"),
+        }),
+        ui.statusBar(.{}, "Ready — 3 notes synced"),
+    });
+}
+
+fn buildStepperHero(ui: *Ui) Node {
+    return heroTileStart(ui, .{
+        ui.stepper(.{ .active = 1 }, &.{
+            .{ .label = "Draft" },
+            .{ .label = "Review" },
+            .{ .label = "Publish" },
+        }),
+    });
+}
+
+fn buildSwitchHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.el(.switch_control, .{ .text = "Airplane mode", .checked = true }, .{}),
+    });
+}
+
+fn buildTableHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.el(.table, .{ .width = 300 }, .{
+            ui.el(.data_row, .{}, .{
+                ui.el(.data_cell, .{ .text = "Invoice", .grow = 1 }, .{}),
+                ui.el(.data_cell, .{ .text = "Status", .grow = 1 }, .{}),
+                ui.el(.data_cell, .{ .text = "Amount", .grow = 1 }, .{}),
+            }),
+            ui.el(.data_row, .{}, .{
+                ui.el(.data_cell, .{ .text = "INV-001", .grow = 1 }, .{}),
+                ui.el(.data_cell, .{ .text = "Paid", .grow = 1 }, .{}),
+                ui.el(.data_cell, .{ .text = "$250.00", .grow = 1 }, .{}),
+            }),
+            ui.el(.data_row, .{ .selected = true }, .{
+                ui.el(.data_cell, .{ .text = "INV-002", .grow = 1 }, .{}),
+                ui.el(.data_cell, .{ .text = "Pending", .grow = 1 }, .{}),
+                ui.el(.data_cell, .{ .text = "$150.00", .grow = 1 }, .{}),
+            }),
+        }),
+    });
+}
+
+fn buildTabsHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.column(.{ .gap = 10, .width = 290 }, .{
+            ui.row(.{}, .{
+                ui.el(.tabs, .{}, .{
+                    ui.el(.segmented_control, .{ .text = "Account", .selected = true }, .{}),
+                    ui.el(.segmented_control, .{ .text = "Password" }, .{}),
+                    ui.el(.segmented_control, .{ .text = "Team" }, .{}),
+                }),
+                ui.spacer(1),
+            }),
+            ui.panel(.{ .padding = 14 }, .{
+                ui.column(.{ .gap = 4 }, .{
+                    ui.text(.{}, "Account"),
+                    ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Make changes to your account here."),
+                }),
+            }),
+        }),
+    });
+}
+
+fn buildTextareaHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.el(.textarea, .{ .width = 280, .height = 90, .placeholder = "Write a release note…" }, .{}),
+    });
+}
+
+fn buildTimelineHero(ui: *Ui) Node {
+    return heroTileStart(ui, .{
+        ui.timeline(.{ .gap = 0 }, .{
+            ui.timelineItem(.{ .icon = "check", .variant = .primary, .title = "Build", .description = "Compiled 214 files in 1.8s." }),
+            ui.timelineItem(.{ .indicator = "2", .title = "Test", .description = "Canvas and runtime suites passing.", .connector = false }),
+        }),
+    });
+}
+
+fn buildToggleHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.el(.toggle_group, .{}, .{
+            ui.el(.toggle_button, .{ .text = "Left", .selected = true }, .{}),
+            ui.el(.toggle_button, .{ .text = "Center" }, .{}),
+            ui.el(.toggle_button, .{ .text = "Right" }, .{}),
+        }),
+    });
+}
+
+/// The tooltip in its natural pose: visible, anchored just above the
+/// hovered control it annotates (the static capture forces the hover).
+fn buildTooltipHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.column(.{ .gap = 8, .cross = .center }, .{
+            ui.el(.tooltip, .{ .text = "Add to library" }, .{}),
+            ui.button(.{ .variant = .outline }, "Hover"),
+        }),
+    });
+}
+
+fn buildTreeHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.tree(.{ .width = 260, .gap = 2 }, .{
+            ui.listItem(.{ .icon = "folder-open", .expanded = true, .semantics = .{ .role = .treeitem } }, "src"),
+            ui.column(.{ .padding = 0, .gap = 2 }, .{
+                ui.row(.{}, .{
+                    ui.spacer(0),
+                    ui.column(.{ .width = 20 }, .{}),
+                    ui.column(.{ .gap = 2, .grow = 1 }, .{
+                        ui.listItem(.{ .icon = "file-text", .selected = true, .semantics = .{ .role = .treeitem } }, "main.zig"),
+                        ui.listItem(.{ .icon = "file-text", .semantics = .{ .role = .treeitem } }, "view.zig"),
+                    }),
+                }),
+            }),
+            ui.listItem(.{ .icon = "folder", .expanded = false, .semantics = .{ .role = .treeitem } }, "assets"),
+        }),
+    });
+}
+
+fn buildVirtualListHero(ui: *Ui) Node {
+    const options = Ui.VirtualListOptions{
+        .id = "docs-virtual-list-hero",
+        .item_count = 2500,
+        .item_extent = 28,
+        .overscan = 6,
+        .width = 280,
+        .height = 112,
+        .viewport_fallback = 112,
+    };
+    const window = ui.virtualWindow(options);
+    const rows = ui.arena.alloc(Node, window.itemCount()) catch return heroTile(ui, .{ui.column(.{}, .{})});
+    for (rows, 0..) |*row, offset| {
+        const index = window.start_index + offset;
+        var node = ui.listItem(.{ .icon = "file-text" }, ui.fmt("Row {d} of 2500", .{index}));
+        node.key = .{ .int = @intCast(index) };
+        row.* = node;
+    }
+    return heroTile(ui, .{
+        ui.panel(.{}, .{ui.virtualList(options, window, .{rows})}),
     });
 }

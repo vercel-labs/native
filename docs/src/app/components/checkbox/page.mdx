@@ -1,9 +1,9 @@
 import { ComponentPreview } from "@/components/component-preview";
 import { AttrTable } from "@/components/attr-table";
 
-# Checkbox & Radio
+# Checkbox
 
-Value controls: the label rides the `text` attribute — checkbox and radio are not text-bearing elements, so text content between the tags is rejected with a teaching error (`label="..."` alone names one for accessibility without a visible label). The model binds `checked`, and `on-toggle` dispatches its Msg — the engine never flips state on its own. `radio` is the single-selection variant, grouped by a `radio-group` row container; render the group's selection with `{a == b}` equalities and let each radio's `on-toggle` set the model field.
+A binary value control: the label rides the `text` attribute — checkbox is not a text-bearing element, so text content between the tags is rejected with a teaching error (`label="..."` alone names one for accessibility without a visible label). The model binds `checked`, and `on-toggle` dispatches its Msg — the engine never flips state on its own. For a single choice among options, use [radio](/components/radio); for an on/off setting rendered as a sliding thumb, use [switch](/components/switch).
 
 <ComponentPreview name="checkbox" alt="Checkboxes rendered by the engine" caption="checked, unchecked, and disabled checkboxes" />
 
@@ -24,28 +24,6 @@ ui.column(.{ .gap = 12 }, .{
     ui.checkbox(.{ .text = "Accept terms and conditions", .checked = model.accepted, .on_toggle = .toggle_terms }),
     ui.checkbox(.{ .text = "Send usage reports", .checked = model.reports, .on_toggle = .toggle_reports }),
     ui.checkbox(.{ .text = "Managed by your organization", .checked = true, .disabled = true }),
-})
-```
-
-## Radio group
-
-One model field holds the selection; each radio compares against it and dispatches its own Msg.
-
-<ComponentPreview name="radio-group" alt="A radio group rendered by the engine" />
-
-```html
-<radio-group gap="12">
-  <radio checked="{density == default}" on-toggle="set_default" text="Default" />
-  <radio checked="{density == comfortable}" on-toggle="set_comfortable" text="Comfortable" />
-  <radio checked="{density == compact}" disabled="true" text="Compact" />
-</radio-group>
-```
-
-```zig
-ui.el(.radio_group, .{ .gap = 12 }, .{
-    ui.el(.radio, .{ .text = "Default", .checked = model.density == .default, .on_toggle = .set_default }, .{}),
-    ui.el(.radio, .{ .text = "Comfortable", .checked = model.density == .comfortable, .on_toggle = .set_comfortable }, .{}),
-    ui.el(.radio, .{ .text = "Compact", .checked = model.density == .compact, .disabled = true }, .{}),
 })
 ```
 

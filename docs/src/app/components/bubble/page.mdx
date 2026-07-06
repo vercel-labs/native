@@ -1,0 +1,50 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Bubble
+
+`bubble` is the chat-message surface: children stack inside, `variant` colors it (`primary` for the sent side), and like every stacking surface it rejects `gap` — put the content inside and size with `padding`. Alternate sides with a [spacer](/components/spacer) in a row: spacer-last pushes the bubble left (received), spacer-first pushes it right (sent).
+
+<ComponentPreview name="bubble" alt="Received and sent chat bubbles rendered by the engine" caption="a received bubble and a primary sent bubble" />
+
+## Markup
+
+```html
+<column gap="10" width="340">
+  <row>
+    <bubble padding="10">
+      <text wrap="true">Ready to ship the components page?</text>
+    </bubble>
+    <spacer grow="1" />
+  </row>
+  <row>
+    <spacer grow="1" />
+    <bubble padding="10" variant="primary">
+      <text wrap="true">Previews are rendering now.</text>
+    </bubble>
+  </row>
+</column>
+```
+
+## Zig builder
+
+```zig
+ui.column(.{ .gap = 10, .width = 340 }, .{
+    ui.row(.{}, .{
+        ui.el(.bubble, .{ .padding = 10 }, .{
+            ui.text(.{ .wrap = true }, "Ready to ship the components page?"),
+        }),
+        ui.spacer(1),
+    }),
+    ui.row(.{}, .{
+        ui.spacer(1),
+        ui.el(.bubble, .{ .padding = 10, .variant = .primary }, .{
+            ui.text(.{ .wrap = true }, "Previews are rendering now."),
+        }),
+    }),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["padding", "variant"]} />

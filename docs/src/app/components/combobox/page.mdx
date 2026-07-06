@@ -1,0 +1,61 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Combobox
+
+`combobox` is a trigger-only primitive like [select](/components/select), but the trigger is a text entry with a menu affordance: `on-input` names a Msg variant that receives every edit as a `canvas.TextInputEvent`, and the model filters the options as the user types. The options themselves are composed the same way as the select's — an anchored [dropdown-menu](/components/dropdown-menu) of menu-items beside the trigger in a `stack`, rendered under an `if`, with `on-dismiss` clearing the model's open flag when Escape or a click outside closes the surface.
+
+<ComponentPreview name="combobox" alt="A combobox rendered by the engine" caption="a combobox trigger with its search placeholder" />
+
+## Markup
+
+The model owns the query and the open flag; the `for` source is the model-filtered match list, so the menu narrows as the user types.
+
+```html
+<stack width="240">
+  <combobox placeholder="Search frameworks" text="{framework_query}" on-input="framework_edited" on-press="open_framework_menu" />
+  <if test="{framework_menu_open}">
+    <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="close_framework_menu">
+      <for each="matchingFrameworks" key="id" as="f">
+        <menu-item on-press="pick_framework:{f.id}">{f.name}</menu-item>
+      </for>
+    </dropdown-menu>
+  </if>
+</stack>
+```
+
+## Zig builder
+
+`on_input` takes a comptime message constructor: `Ui.inputMsg(.tag)` builds `Msg{ .tag = edit }` for each `canvas.TextInputEvent`.
+
+```zig
+ui.stack(.{ .width = 240 }, .{
+    ui.el(.combobox, .{
+        .placeholder = "Search frameworks",
+        .text = model.framework_query,
+        .on_input = Ui.inputMsg(.framework_edited),
+        .on_press = .open_framework_menu,
+    }, .{}),
+    if (model.framework_menu_open) ui.el(.dropdown_menu, .{
+        .anchor = .below,
+        .anchor_alignment = .stretch,
+        .on_dismiss = .close_framework_menu,
+    }, .{
+        ui.el(.menu_item, .{ .text = "Native SDK", .on_press = .{ .pick_framework = 0 } }, .{}),
+        ui.el(.menu_item, .{ .text = "Canvas", .on_press = .{ .pick_framework = 1 } }, .{}),
+    }) else ui.spacer(0),
+})
+```
+
+## Attributes
+
+<AttrTable
+  attrs={[
+    "text",
+    "placeholder",
+    "disabled",
+    "on-press",
+    "on-input",
+    "on-dismiss",
+  ]}
+/>

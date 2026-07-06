@@ -36,7 +36,7 @@ ui.column(.{ .gap = 12, .width = 280 }, .{
 
 ## Search field
 
-`search-field` renders the search affordance but binds exactly like an input; pair it with a model-filtered list. Whenever the field holds text it also shows a built-in clear affordance — a small x inside its trailing edge — and pressing it (or pressing Escape while focused) clears through the standard text-edit path, so the `on-input` handler receives the clear like any other edit and a model-owned buffer empties with it. No attribute enables or disables this; searchable fields simply carry it. For text entry that opens a menu of suggestions, see [combobox](/components/select).
+`search-field` renders the search affordance but binds exactly like an input; pair it with a model-filtered list. Whenever the field holds text it also shows a built-in clear affordance — a small x inside its trailing edge — and pressing it (or pressing Escape while focused) clears through the standard text-edit path, so the `on-input` handler receives the clear like any other edit and a model-owned buffer empties with it. No attribute enables or disables this; searchable fields simply carry it. For text entry that opens a menu of suggestions, see [combobox](/components/combobox).
 
 <ComponentPreview name="search-field" alt="A search field rendered by the engine" />
 

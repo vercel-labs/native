@@ -1,11 +1,11 @@
 import { ComponentPreview } from "@/components/component-preview";
 import { AttrTable } from "@/components/attr-table";
 
-# Select & Combobox
+# Select
 
-`select` and `combobox` are trigger-only primitives — neither takes an options attribute. The select's content is the current value (`placeholder` shows while empty) and `on-press` opens; the combobox is a text entry with a menu affordance, editing via `on-input`. The options are composed as an anchored [dropdown-menu](/components/dropdown-menu) of menu-items beside the trigger in a `stack`, rendered under an `if` — the model owns the open flag, and `on-dismiss` clears it when Escape or a click outside closes the surface.
+`select` is a trigger-only primitive — it takes no options attribute. Its content is the current value (`placeholder` shows while empty) and `on-press` opens. The options are composed as an anchored [dropdown-menu](/components/dropdown-menu) of menu-items beside the trigger in a `stack`, rendered under an `if` — the model owns the open flag, and `on-dismiss` clears it when Escape or a click outside closes the surface. For a trigger the user types into, see [combobox](/components/combobox).
 
-<ComponentPreview name="select" alt="Select triggers rendered by the engine" caption="a select trigger with a value, and a disabled trigger" />
+<ComponentPreview name="select" alt="Select triggers rendered by the engine" caption="a select trigger with a value, and a disabled trigger — press to open the anchored menu" />
 
 ## Markup
 
@@ -45,25 +45,6 @@ ui.stack(.{ .width = 240 }, .{
 })
 ```
 
-## Combobox
-
-Same anchored-menu composition, but the trigger is a text entry: `on-input` edits the query and the model filters the `for` source as the user types.
-
-<ComponentPreview name="combobox" alt="A combobox rendered by the engine" />
-
-```html
-<stack width="240">
-  <combobox placeholder="Search frameworks" text="{framework_query}" on-input="framework_edited" on-press="open_framework_menu" />
-  <if test="{framework_menu_open}">
-    <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="close_framework_menu">
-      <for each="matchingFrameworks" key="id" as="f">
-        <menu-item on-press="pick_framework:{f.id}">{f.name}</menu-item>
-      </for>
-    </dropdown-menu>
-  </if>
-</stack>
-```
-
 ## Attributes
 
 <AttrTable
@@ -72,7 +53,6 @@ Same anchored-menu composition, but the trigger is a text entry: `on-input` edit
     "placeholder",
     "disabled",
     "on-press",
-    "on-input",
     "on-dismiss",
   ]}
 />
