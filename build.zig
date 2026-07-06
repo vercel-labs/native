@@ -2052,6 +2052,25 @@ fn addExampleTestStep(b: *std.Build, cli_exe: *std.Build.Step.Compile, group: *s
         .managed => managedExampleRun(b, cli_exe, &.{ "test", "-Dplatform=null" }),
     };
     run.setCwd(b.path(example_path));
+    // Every example suite must actually run every time: the child build owns
+    // its own caching, and this outer step's argv never changes when example
+    // or framework sources do, so letting the step cache would skip real
+    // tests. But a side-effect run that also inherits stdio holds the build
+    // runner's global stderr lock for the child's entire lifetime, which
+    // executes the example suites strictly one at a time. Capturing both
+    // streams keeps the always-run semantics while releasing that lock, so
+    // independent examples run concurrently (bounded by the runner's job
+    // pool, one worker per CPU — cold child builds peak well under 1 GB
+    // each, so a machine-wide pool of them fits in memory). On failure the
+    // captured stderr is reported under this step's name, so a failing
+    // example still names itself.
+    run.has_side_effects = true;
+    _ = run.captureStdOut(.{});
+    _ = run.captureStdErr(.{});
+    // Concurrent children all spawn the same binary, so carry the step name
+    // into the run: a failure line then reads "test-example-<name> failure"
+    // instead of nineteen indistinguishable "run exe native" entries.
+    run.setName(name);
     const step = b.step(name, description);
     step.dependOn(&run.step);
     group.dependOn(&run.step);
