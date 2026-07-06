@@ -62,6 +62,8 @@ const info = builtin("info");
 const menu = builtin("menu");
 const moon = builtin("moon");
 const music = builtin("music");
+const panel_left = builtin("panel-left");
+const panel_right = builtin("panel-right");
 const pause = builtin("pause");
 const play = builtin("play");
 const plus = builtin("plus");
@@ -75,8 +77,10 @@ const shuffle = builtin("shuffle");
 const skip_back = builtin("skip-back");
 const skip_forward = builtin("skip-forward");
 const sun = builtin("sun");
+const terminal = builtin("terminal");
 const trash = builtin("trash");
 const volume = builtin("volume");
+const wrench = builtin("wrench");
 const x = builtin("x");
 const x_circle = builtin("x-circle");
 
@@ -112,6 +116,8 @@ pub const entries = [_]Entry{
     .{ .name = "menu", .icon = &menu },
     .{ .name = "moon", .icon = &moon },
     .{ .name = "music", .icon = &music },
+    .{ .name = "panel-left", .icon = &panel_left },
+    .{ .name = "panel-right", .icon = &panel_right },
     .{ .name = "pause", .icon = &pause },
     .{ .name = "play", .icon = &play },
     .{ .name = "plus", .icon = &plus },
@@ -125,8 +131,10 @@ pub const entries = [_]Entry{
     .{ .name = "skip-back", .icon = &skip_back },
     .{ .name = "skip-forward", .icon = &skip_forward },
     .{ .name = "sun", .icon = &sun },
+    .{ .name = "terminal", .icon = &terminal },
     .{ .name = "trash", .icon = &trash },
     .{ .name = "volume", .icon = &volume },
+    .{ .name = "wrench", .icon = &wrench },
     .{ .name = "x", .icon = &x },
     .{ .name = "x-circle", .icon = &x_circle },
 };

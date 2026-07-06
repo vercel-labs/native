@@ -79,6 +79,8 @@ pub const element_docs = [_]Doc{
     .{ .name = "chart", .doc = "Data chart: series children bind model f32 iterables and draw as token-colored line/area/bar plots (lowered through Ui.chart — same downsampling, theming, and semantics summary). Takes y-min, y-max, grid-lines, baseline, stroke-width, width, height, grow, padding, key, global-key, label. Display-only; the series set is static." },
     .{ .name = "series", .doc = "One chart series (chart children only): values is one {binding} naming a []const f32 iterable (the same sources for each accepts; NaN samples draw nothing), kind is line, area, or bar, color a token name, label the semantics name." },
     .{ .name = "context-menu", .doc = "Right-click menu on its DIRECT parent (a pressable element): menu-item children (on-press required, disabled optional) and bare separators, with if/else/for around them. Presents through the platform's native menu; hosts without one mount the same items as an anchored surface automatically. Attribute-less; drive in tests with widget-context-menu." },
+    .{ .name = "input-group", .doc = "Composer-grade grouped input: ONE bordered field wrapping exactly one textarea (first) plus an optional input-group-actions row inside the same border. The group wears the focus ring for its focused descendant and the textarea's own chrome dissolves, so the whole group reads as one field. Takes label, width, height, min-width, grow, key, global-key." },
+    .{ .name = "input-group-actions", .doc = "The input-group's accessory row (only inside input-group, after its textarea): leading/trailing controls on one bottom row inside the group's border — put a <spacer grow=\"1\"/> between the leading controls and the trailing send. Children are ordinary elements (if/else/for work). Takes gap, key, global-key." },
 };
 
 pub const structure_docs = [_]Doc{
@@ -213,6 +215,22 @@ pub const series_attr_docs = [_]Doc{
     .{ .name = "label", .doc = "series: name for the chart's semantics summary (\"cpu\", \"stars\"); the kind tag stands in when empty." },
 };
 
+pub const input_group_attr_docs = [_]Doc{
+    .{ .name = "label", .doc = "Accessible name; the group announces as ONE named field (role group) while the entry and accessory controls stay individually reachable." },
+    .{ .name = "width", .doc = "Definite group width (plain number); 0/omitted sizes from the entry plus the actions row." },
+    .{ .name = "height", .doc = "Definite group height (plain number); the entry grow-stretches to absorb it." },
+    .{ .name = "min-width", .doc = "Width floor (plain number) without width's definite max." },
+    .{ .name = "grow", .doc = "Flex grow factor." },
+    .{ .name = "key", .doc = "Sibling-scoped identity key." },
+    .{ .name = "global-key", .doc = "Parent-independent identity: ids survive reparenting between containers." },
+};
+
+pub const input_group_actions_attr_docs = [_]Doc{
+    .{ .name = "gap", .doc = "input-group-actions: spacing between the accessory controls (plain number; default 6)." },
+    .{ .name = "key", .doc = "Sibling-scoped identity key." },
+    .{ .name = "global-key", .doc = "Parent-independent identity: ids survive reparenting between containers." },
+};
+
 pub const anchor_attr_docs = [_]Doc{
     .{ .name = "anchor", .doc = "dropdown-menu: floats the surface against its PARENT's frame instead of the flow (literal below or above; either side auto-flips at the window edges). Late z-pass above the whole tree, window-clipped — never cropped by a scroll pane, never reflows siblings. Put the dropdown beside its trigger inside a stack." },
     .{ .name = "anchor-alignment", .doc = "dropdown-menu (with anchor): horizontal alignment against the anchor - start, end, or stretch (stretch also widens the surface to at least the anchor's width, the select-menu look)." },
@@ -250,6 +268,8 @@ pub fn attributeDoc(name: []const u8) ?[]const u8 {
     if (findDoc(&anchor_attr_docs, name)) |doc| return doc;
     if (findDoc(&chart_attr_docs, name)) |doc| return doc;
     if (findDoc(&series_attr_docs, name)) |doc| return doc;
+    if (findDoc(&input_group_attr_docs, name)) |doc| return doc;
+    if (findDoc(&input_group_actions_attr_docs, name)) |doc| return doc;
     return findDoc(&if_attr_docs, name);
 }
 

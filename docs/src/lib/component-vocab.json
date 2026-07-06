@@ -243,6 +243,14 @@
     {
       "name": "context-menu",
       "doc": "Right-click menu on its DIRECT parent (a pressable element): menu-item children (on-press required, disabled optional) and bare separators, with if/else/for around them. Presents through the platform's native menu; hosts without one mount the same items as an anchored surface automatically. Attribute-less; drive in tests with widget-context-menu."
+    },
+    {
+      "name": "input-group",
+      "doc": "Composer-grade grouped input: ONE bordered field wrapping exactly one textarea (first) plus an optional input-group-actions row inside the same border. The group wears the focus ring for its focused descendant and the textarea's own chrome dissolves, so the whole group reads as one field. Takes label, width, height, min-width, grow, key, global-key."
+    },
+    {
+      "name": "input-group-actions",
+      "doc": "The input-group's accessory row (only inside input-group, after its textarea): leading/trailing controls on one bottom row inside the group's border — put a <spacer grow=\"1\"/> between the leading controls and the trailing send. Children are ordinary elements (if/else/for work). Takes gap, key, global-key."
     }
   ],
   "structure": [
@@ -658,6 +666,50 @@
         "doc": "series: name for the chart's semantics summary (\"cpu\", \"stars\"); the kind tag stands in when empty."
       }
     ],
+    "input-group": [
+      {
+        "name": "label",
+        "doc": "Accessible name; the group announces as ONE named field (role group) while the entry and accessory controls stay individually reachable."
+      },
+      {
+        "name": "width",
+        "doc": "Definite group width (plain number); 0/omitted sizes from the entry plus the actions row."
+      },
+      {
+        "name": "height",
+        "doc": "Definite group height (plain number); the entry grow-stretches to absorb it."
+      },
+      {
+        "name": "min-width",
+        "doc": "Width floor (plain number) without width's definite max."
+      },
+      {
+        "name": "grow",
+        "doc": "Flex grow factor."
+      },
+      {
+        "name": "key",
+        "doc": "Sibling-scoped identity key."
+      },
+      {
+        "name": "global-key",
+        "doc": "Parent-independent identity: ids survive reparenting between containers."
+      }
+    ],
+    "input-group-actions": [
+      {
+        "name": "gap",
+        "doc": "input-group-actions: spacing between the accessory controls (plain number; default 6)."
+      },
+      {
+        "name": "key",
+        "doc": "Sibling-scoped identity key."
+      },
+      {
+        "name": "global-key",
+        "doc": "Parent-independent identity: ids survive reparenting between containers."
+      }
+    ],
     "dropdown-menu": [
       {
         "name": "anchor",
@@ -751,6 +803,10 @@
     "textarea": {
       "width": 1120,
       "height": 440
+    },
+    "input-group": {
+      "width": 1120,
+      "height": 680
     },
     "select": {
       "width": 1120,
@@ -976,6 +1032,10 @@
       "width": 704,
       "height": 396
     },
+    "input-group-hero": {
+      "width": 704,
+      "height": 396
+    },
     "list-hero": {
       "width": 704,
       "height": 396
@@ -1116,6 +1176,8 @@
     "menu",
     "moon",
     "music",
+    "panel-left",
+    "panel-right",
     "pause",
     "play",
     "plus",
@@ -1129,8 +1191,10 @@
     "skip-back",
     "skip-forward",
     "sun",
+    "terminal",
     "trash",
     "volume",
+    "wrench",
     "x",
     "x-circle"
   ],

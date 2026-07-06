@@ -202,6 +202,14 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
                 // element below; one reaching here is misplaced.
                 comptime fail(node, markup.context_menu_parent_message);
             }
+            if (comptime std.mem.eql(u8, node.name, "input-group")) {
+                return buildInputGroup(node, entries, ui, model, scope);
+            }
+            if (comptime std.mem.eql(u8, node.name, "input-group-actions")) {
+                // Actions rows inside an input-group are consumed by
+                // buildInputGroup.
+                comptime fail(node, markup.input_group_actions_parent_message);
+            }
             const kind = comptime (interpreter.elementKind(node.name) orelse fail(node, "unknown element"));
             // Interpreter parity: extract a direct context-menu child —
             // metadata on this element (lowered to the declared
@@ -691,6 +699,103 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
                 steps[index] = .{ .label = interpolatedText(comptime node.children[index], entries, ui, model, scope) };
             }
             return ui.stepper(options, steps);
+        }
+
+        /// Comptime mirror of the interpreter's `buildInputGroup`: the
+        /// closed attribute set and the static child shape (one textarea
+        /// first, then at most one actions row) check at comptime with
+        /// the interpreter's messages; the textarea builds through the
+        /// ordinary element path and the group lowers through
+        /// `Ui.inputGroup`.
+        fn buildInputGroup(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype) Ui.Node {
+            comptime {
+                for (node.attrs) |attribute| {
+                    if (std.mem.eql(u8, attribute.name, "kind")) continue;
+                    if (std.mem.eql(u8, attribute.name, "label")) continue;
+                    if (std.mem.eql(u8, attribute.name, "width")) continue;
+                    if (std.mem.eql(u8, attribute.name, "height")) continue;
+                    if (std.mem.eql(u8, attribute.name, "min-width")) continue;
+                    if (std.mem.eql(u8, attribute.name, "grow")) continue;
+                    if (std.mem.eql(u8, attribute.name, "key")) continue;
+                    if (std.mem.eql(u8, attribute.name, "global-key")) continue;
+                    fail(node, markup.input_group_attr_message);
+                }
+                var textarea_count: usize = 0;
+                var actions_count: usize = 0;
+                for (node.children) |child| {
+                    if (child.kind != .element) fail(child, markup.input_group_children_message);
+                    if (std.mem.eql(u8, child.name, "textarea")) {
+                        if (textarea_count > 0 or actions_count > 0) fail(child, markup.input_group_children_message);
+                        textarea_count += 1;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, child.name, "input-group-actions")) {
+                        if (textarea_count == 0) fail(child, markup.input_group_textarea_message);
+                        if (actions_count > 0) fail(child, markup.input_group_children_message);
+                        actions_count += 1;
+                        continue;
+                    }
+                    fail(child, markup.input_group_children_message);
+                }
+                if (textarea_count == 0) fail(node, markup.input_group_textarea_message);
+            }
+            var options: Ui.InputGroupOptions = .{};
+            if (comptime (node.attr("label") != null)) {
+                options.semantics.label = stringAttr(node, entries, comptime node.attr("label").?, ui, model, scope, "label expects text");
+            }
+            if (comptime (node.attr("width") != null)) {
+                options.width = floatAttr(node, entries, comptime node.attr("width").?, ui, model, scope);
+            }
+            if (comptime (node.attr("height") != null)) {
+                options.height = floatAttr(node, entries, comptime node.attr("height").?, ui, model, scope);
+            }
+            if (comptime (node.attr("min-width") != null)) {
+                options.min_width = floatAttr(node, entries, comptime node.attr("min-width").?, ui, model, scope);
+            }
+            if (comptime (node.attr("grow") != null)) {
+                options.grow = floatAttr(node, entries, comptime node.attr("grow").?, ui, model, scope);
+            }
+            if (comptime (node.attr("key") != null)) {
+                options.key = attrKey(node, entries, comptime node.attr("key").?, ui, model, scope, "keys must be integers or strings");
+            }
+            if (comptime (node.attr("global-key") != null)) {
+                options.global_key = attrKey(node, entries, comptime node.attr("global-key").?, ui, model, scope, "keys must be integers or strings");
+            }
+            const entry = buildElement(comptime node.children[0], entries, ui, model, scope);
+            var actions: ?Ui.Node = null;
+            if (comptime (node.children.len > 1)) {
+                actions = buildInputGroupActions(comptime node.children[1], entries, ui, model, scope);
+            }
+            return ui.inputGroup(options, entry, actions);
+        }
+
+        /// Comptime mirror of the interpreter's `buildInputGroupActions`.
+        fn buildInputGroupActions(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype) Ui.Node {
+            comptime {
+                for (node.attrs) |attribute| {
+                    if (std.mem.eql(u8, attribute.name, "kind")) continue;
+                    if (std.mem.eql(u8, attribute.name, "gap")) continue;
+                    if (std.mem.eql(u8, attribute.name, "key")) continue;
+                    if (std.mem.eql(u8, attribute.name, "global-key")) continue;
+                    fail(node, markup.input_group_actions_attr_message);
+                }
+                for (node.children) |child| {
+                    if (child.kind == .text) fail(child, markup.input_group_actions_children_message);
+                }
+            }
+            var options: Ui.InputGroupActionsOptions = .{};
+            if (comptime (node.attr("gap") != null)) {
+                options.gap = floatAttr(node, entries, comptime node.attr("gap").?, ui, model, scope);
+            }
+            if (comptime (node.attr("key") != null)) {
+                options.key = attrKey(node, entries, comptime node.attr("key").?, ui, model, scope, "keys must be integers or strings");
+            }
+            if (comptime (node.attr("global-key") != null)) {
+                options.global_key = attrKey(node, entries, comptime node.attr("global-key").?, ui, model, scope, "keys must be integers or strings");
+            }
+            var children: std.ArrayListUnmanaged(Ui.Node) = .empty;
+            buildChildren(node, entries, ui, model, scope, &children);
+            return ui.inputGroupActions(options, @as([]const Ui.Node, children.items));
         }
 
         /// Comptime mirror of the interpreter's `buildTimeline`.

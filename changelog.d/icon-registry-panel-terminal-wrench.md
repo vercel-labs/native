@@ -1,0 +1,1 @@
+feature: **Four new built-in icons**: `panel-left`/`panel-right` (pane collapse toggles), `terminal`, and `wrench` (tool identity in agent transcripts) join the closed stroke-icon registry — additive vocabulary, validated everywhere icon names are.

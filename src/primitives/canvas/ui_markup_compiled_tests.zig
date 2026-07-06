@@ -1416,6 +1416,49 @@ test "compiled charts match the interpreter and the hand-written Ui.chart tree" 
     try testing.expectEqual(canvas.WidgetKind.chart, compiled_chart.kind);
 }
 
+// ---------------------------------------------- input-group fixture parity
+
+const ComposerUi = fixture.ComposerUi;
+const ComposerInterpreter = markup_view.MarkupView(fixture.ComposerModel, fixture.ComposerMsg);
+const ComposerCompiled = canvas.CompiledMarkupView(fixture.ComposerModel, fixture.ComposerMsg, fixture.composer_markup_source);
+
+test "compiled input-groups match the interpreter and the hand-written Ui.inputGroup tree" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = fixture.ComposerModel{};
+    model.draft_buffer.set("hello");
+
+    var view = try ComposerInterpreter.init(arena, fixture.composer_markup_source);
+    var interpreted_ui = ComposerUi.init(arena);
+    const interpreted = try interpreted_ui.finalize(try view.build(&interpreted_ui, &model));
+
+    var compiled_ui = ComposerUi.init(arena);
+    const compiled = try compiled_ui.finalize(ComposerCompiled.build(&compiled_ui, &model));
+
+    var hand_ui = ComposerUi.init(arena);
+    const hand = try hand_ui.finalize(fixture.handComposerView(&hand_ui, &model));
+
+    try expectSameTree(fixture.ComposerMsg, hand, interpreted);
+    try expectSameTree(fixture.ComposerMsg, hand, compiled);
+
+    // Group payload parity: the field chrome treatment (dissolved entry
+    // chrome, grow-stretched entry, group semantics) agrees across all
+    // three engines.
+    const compiled_group = fixture.findByKind(compiled.root, .input_group).?;
+    const hand_group = fixture.findByKind(hand.root, .input_group).?;
+    try testing.expectEqual(canvas.WidgetKind.input_group, compiled_group.kind);
+    try testing.expectEqualStrings(hand_group.semantics.label, compiled_group.semantics.label);
+    try testing.expectEqual(hand_group.semantics.role, compiled_group.semantics.role);
+    try testing.expectEqual(@as(usize, 2), compiled_group.children.len);
+    try testing.expectEqual(@as(f32, 1), compiled_group.children[0].layout.grow);
+    try testing.expectEqual(@as(u8, 0), compiled_group.children[0].style.background.?.a);
+    try testing.expectEqual(@as(u8, 0), compiled_group.children[0].style.border.?.a);
+    try testing.expectEqual(@as(u8, 0), compiled_group.children[0].style.focus_ring.?.a);
+    try testing.expectEqualStrings("hello", compiled_group.children[0].text);
+}
+
 const chart_template_markup =
     \\<template name="spark" args="data"><chart height="32"><series kind="area" values="{data}" /></chart></template>
     \\<column>

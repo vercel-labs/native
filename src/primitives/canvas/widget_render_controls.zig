@@ -451,6 +451,33 @@ pub fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignToke
     if (clips_text) try builder.popClip();
 }
 
+/// The grouped input's field chrome: text-input fill and border on the
+/// GROUP's own frame, plus the focus ring while `state.focused` — for
+/// this kind that flag is FOCUS-WITHIN, derived by the render walk from
+/// the focused descendant, so keyboard focus anywhere inside the group
+/// rings the whole field. Children (the chrome-dissolved entry and the
+/// accessory row) flow on top through the ordinary child pass.
+pub fn emitInputGroupWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = textInputControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 1),
+        .rect = widget.frame,
+        .radius = radius,
+        .fill = textInputFill(widget, tokens, visual),
+    });
+    try builder.strokeRect(.{
+        .id = widgetPartId(widget.id, 2),
+        .rect = widget.frame,
+        .radius = radius,
+        .stroke = .{
+            .fill = textInputBorderFill(widget, visual, tokens.colors.border),
+            .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
+        },
+    });
+    if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 3, widget.frame, radius);
+}
+
 pub fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const visual = textInputControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.md);

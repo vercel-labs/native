@@ -329,6 +329,34 @@ pub fn widgetRenderStateDirtyBounds(layout: anytype, previous: WidgetRenderState
         if (widgetStatesEqual(previous_widget.state, next_widget.state)) continue;
         bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetRenderStatePaintChangeBounds(previous_widget, next_widget, tokens)));
     }
+    // Focus-within chrome: an `.input_group` ancestor wears the focus
+    // ring FOR its focused descendant, so a focus-visible change dirties
+    // the group's ring region too — the group's own id never appears in
+    // the render state, only the descendant's does.
+    if (previous.focus_visible_id != next.focus_visible_id) {
+        bounds = unionOptionalBounds(bounds, inputGroupFocusWithinBounds(layout, previous.focus_visible_id, tokens));
+        bounds = unionOptionalBounds(bounds, inputGroupFocusWithinBounds(layout, next.focus_visible_id, tokens));
+    }
+    return bounds;
+}
+
+/// The paint bounds of every `.input_group` ancestor's focus ring for a
+/// focus-visible widget id (null when the id resolves outside any group).
+fn inputGroupFocusWithinBounds(layout: anytype, maybe_id: ?ObjectId, tokens: DesignTokens) ?geometry.RectF {
+    const id = maybe_id orelse return null;
+    if (id == 0) return null;
+    const index = widgetIndexById(layout, id) orelse return null;
+    var bounds: ?geometry.RectF = null;
+    var current = layout.nodes[index].parent_index;
+    while (current) |parent_index| {
+        const parent = layout.nodes[parent_index];
+        if (parent.widget.kind == .input_group) {
+            var focused = widgetWithFrame(parent.widget, parent.frame);
+            focused.state.focused = true;
+            bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, parent_index, widgetFocusPaintBounds(focused, tokens)));
+        }
+        current = parent.parent_index;
+    }
     return bounds;
 }
 
@@ -530,7 +558,7 @@ fn widgetFrameStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
         .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface, .dropdown_menu => controlStrokeWidth(widget, surfaceControlVisualTokens(widget, tokens), tokens.stroke.hairline),
         .button, .toggle_button, .toggle, .icon_button => if (widget.state.focused) tokens.stroke.focus else buttonStrokeWidth(widget, tokens),
         .select => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectControlVisualTokens(tokens), tokens.stroke.regular),
-        .input, .text_field, .search_field, .combobox, .textarea => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, textInputControlVisualTokens(widget, tokens), tokens.stroke.regular),
+        .input, .text_field, .search_field, .combobox, .textarea, .input_group => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, textInputControlVisualTokens(widget, tokens), tokens.stroke.regular),
         .segmented_control => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectionControlVisualTokens(widget, tokens), tokens.stroke.regular),
         .data_cell => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, listItemControlVisualTokens(widget, tokens), tokens.stroke.hairline),
         .checkbox, .radio, .switch_control, .slider => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectionControlVisualTokens(widget, tokens), tokens.stroke.regular),
@@ -551,6 +579,7 @@ fn widgetFocusStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
         .search_field,
         .combobox,
         .textarea,
+        .input_group,
         .menu_item,
         .list_item,
         .data_cell,

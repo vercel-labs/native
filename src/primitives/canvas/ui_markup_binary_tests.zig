@@ -91,6 +91,37 @@ test "NSUI round-trips a document byte-for-byte and node-for-node" {
     try testing.expectEqualSlices(u8, stripped, re_stripped);
 }
 
+test "NSUI round-trips the input-group vocabulary under its fresh codes" {
+    // The grouped-input composite serializes like any element — fresh
+    // registry codes ride the wire automatically, no schema bump — so a
+    // full composer document survives encode/decode node-for-node.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source =
+        \\<column gap="8">
+        \\  <input-group label="Composer" height="120">
+        \\    <textarea text="{draft}" placeholder="Type a message" on-input="edit" label="Message" />
+        \\    <input-group-actions>
+        \\      <button icon="plus" variant="ghost" size="icon" on-press="attach" label="Attach"></button>
+        \\      <spacer grow="1" />
+        \\      <button icon="send" size="icon" on-press="send" label="Send"></button>
+        \\    </input-group-actions>
+        \\  </input-group>
+        \\</column>
+    ;
+    const document = try parseSource(arena, source);
+
+    var diagnostic = nsui.CodecDiagnostic{};
+    const bytes = try nsui.encode(arena, document, .{}, &diagnostic);
+    const decoded = try nsui.decode(arena, bytes, &diagnostic);
+    try expectNodesEqual(document.root.?, decoded.root.?);
+
+    // The wire carries the registry codes, never the names.
+    try testing.expectEqual(@as(u16, 62), schema.elementByName("input-group").?.code);
+    try testing.expectEqual(@as(u16, 63), schema.elementByName("input-group-actions").?.code);
+}
+
 test "NSUI golden bytes for a minimal document" {
     // Hand-checkable pin of the exact layout. If this changed, the WIRE
     // changed: bump the schema version and write the migration — never

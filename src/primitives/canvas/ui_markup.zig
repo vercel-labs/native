@@ -1619,6 +1619,12 @@ pub const context_menu_item_press_message = "every menu-item in a context-menu n
 pub const context_menu_item_attr_message = "unknown attribute for a context-menu menu-item - it takes on-press and disabled; the platform menu renders labels, separators, and enabled state only";
 pub const context_menu_item_label_message = "a context-menu menu-item's content is its label - give it one run of text";
 pub const context_menu_separator_message = "separator inside a context-menu is a bare divider - it takes no attributes or children";
+pub const input_group_attr_message = "unknown attribute for input-group - it takes label, width, height, min-width, grow, key, and global-key";
+pub const input_group_children_message = "input-group wraps exactly one textarea, then an optional input-group-actions row - other content lives outside the group";
+pub const input_group_textarea_message = "input-group requires a textarea child (the text entry the group wraps) before any input-group-actions";
+pub const input_group_actions_parent_message = "input-group-actions is only allowed inside an input-group, after its textarea";
+pub const input_group_actions_attr_message = "unknown attribute for input-group-actions - it takes gap, key, and global-key";
+pub const input_group_actions_children_message = "input-group-actions takes element children (buttons, spacers - if/else/for around them are fine) - text content is only allowed inside text-bearing elements";
 pub const text_leaf_children_message = "this element takes text content only - wrap element children in a container (row, column, stack)";
 pub const text_leaf_single_run_message = "text elements take a single run of text";
 pub const text_or_children_content_message = "this element takes either one run of text or element children - not both; move the text into a <text> child (and keep label= for the accessible name)";
@@ -2238,10 +2244,87 @@ fn validateSeries(node: MarkupNode) ?MarkupErrorInfo {
     return null;
 }
 
+/// `<input-group>` — the composer-grade grouped input: ONE bordered
+/// field wrapping exactly one `<textarea>` (first, so document order is
+/// focus order) plus an optional `<input-group-actions>` accessory row.
+/// The group's own attribute set is closed and small — the text entry's
+/// behavior (text, placeholder, on-input, autofocus, ...) belongs to the
+/// textarea child, which validates through the ordinary pass.
+fn validateInputGroup(document: MarkupDocument, node: MarkupNode, template_limit: usize, slot_rule: SlotRule) ?MarkupErrorInfo {
+    for (node.attrs) |attribute| {
+        const known = std.mem.eql(u8, attribute.name, "label") or
+            std.mem.eql(u8, attribute.name, "width") or
+            std.mem.eql(u8, attribute.name, "height") or
+            std.mem.eql(u8, attribute.name, "min-width") or
+            std.mem.eql(u8, attribute.name, "grow") or
+            std.mem.eql(u8, attribute.name, "key") or
+            std.mem.eql(u8, attribute.name, "global-key");
+        if (!known) {
+            return attrError(node, attribute, input_group_attr_message);
+        }
+        if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+            return attrError(node, attribute, message);
+        }
+        if (attrCoverageError(node, attribute)) |info| return info;
+    }
+    // The child shape is static: the textarea first, then at most one
+    // actions row. Conditional/repeated content belongs INSIDE the
+    // actions row (structure tags work there), never at the group level.
+    var textarea_count: usize = 0;
+    var actions_count: usize = 0;
+    for (node.children) |child| {
+        if (child.kind != .element) return errorAt(child, input_group_children_message);
+        if (std.mem.eql(u8, child.name, "textarea")) {
+            if (textarea_count > 0 or actions_count > 0) return errorAt(child, input_group_children_message);
+            textarea_count += 1;
+            if (validateNode(document, child, "input-group", template_limit, slot_rule)) |info| return info;
+            continue;
+        }
+        if (std.mem.eql(u8, child.name, "input-group-actions")) {
+            if (textarea_count == 0) return errorAt(child, input_group_textarea_message);
+            if (actions_count > 0) return errorAt(child, input_group_children_message);
+            actions_count += 1;
+            if (validateInputGroupActions(document, child, template_limit, slot_rule)) |info| return info;
+            continue;
+        }
+        return errorAt(child, input_group_children_message);
+    }
+    if (textarea_count == 0) return errorAt(node, input_group_textarea_message);
+    return null;
+}
+
+/// `<input-group-actions>` — the accessory row pinned inside the group's
+/// border, under the textarea: a closed attribute set around ordinary
+/// row content (buttons, spacers; `for`/`if` work), validated through
+/// the generic pass.
+fn validateInputGroupActions(document: MarkupDocument, node: MarkupNode, template_limit: usize, slot_rule: SlotRule) ?MarkupErrorInfo {
+    for (node.attrs) |attribute| {
+        const known = std.mem.eql(u8, attribute.name, "gap") or
+            std.mem.eql(u8, attribute.name, "key") or
+            std.mem.eql(u8, attribute.name, "global-key");
+        if (!known) {
+            return attrError(node, attribute, input_group_actions_attr_message);
+        }
+        if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+            return attrError(node, attribute, message);
+        }
+    }
+    var previous_kind: ?MarkupNodeKind = null;
+    for (node.children) |child| {
+        if (child.kind == .text) return errorAt(child, input_group_actions_children_message);
+        if (child.kind == .else_block and previous_kind != .if_block and previous_kind != .for_block) {
+            return errorAt(child, else_placement_message);
+        }
+        if (validateNode(document, child, "input-group-actions", template_limit, slot_rule)) |info| return info;
+        previous_kind = child.kind;
+    }
+    return null;
+}
+
 /// The rule hooks the composite registry entries name. A registry entry
 /// whose hook this table does not implement is a compile error (below),
 /// so attachment and implementation can never drift.
-const rule_hook_names = [_][]const u8{ "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu" };
+const rule_hook_names = [_][]const u8{ "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions" };
 
 comptime {
     for (schema.elements) |entry| {
@@ -2287,6 +2370,13 @@ fn validateRuleHook(hook: []const u8, document: MarkupDocument, node: MarkupNode
         // host element's validation; one reaching the generic pass sits
         // at the root or behind a structure tag.
         return errorAt(node, context_menu_parent_message);
+    }
+    if (std.mem.eql(u8, hook, "input-group")) return validateInputGroup(document, node, template_limit, slot_rule);
+    if (std.mem.eql(u8, hook, "input-group-actions")) {
+        // Actions rows inside an input-group are consumed by
+        // validateInputGroup; one reaching the generic pass sits outside
+        // an input-group.
+        return errorAt(node, input_group_actions_parent_message);
     }
     // The comptime check above proves every registry hook lands in one of
     // the branches; a name reaching here is not a registry hook at all.

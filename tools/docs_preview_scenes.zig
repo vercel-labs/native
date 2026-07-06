@@ -118,6 +118,7 @@ pub const scenes = [_]Scene{
     .{ .name = "input", .height = 260, .build = stateless(buildInput) },
     .{ .name = "search-field", .height = 160, .build = stateless(buildSearchField) },
     .{ .name = "textarea", .height = 220, .build = stateless(buildTextarea) },
+    .{ .name = "input-group", .height = 340, .build = stateless(buildInputGroup) },
     .{ .name = "select", .height = 280, .build = buildSelect },
     .{ .name = "combobox", .height = 160, .build = stateless(buildCombobox) },
     .{ .name = "dropdown-menu", .height = 300, .build = stateless(buildDropdownMenu) },
@@ -179,6 +180,7 @@ pub const scenes = [_]Scene{
     heroScene("dropdown-menu-hero", buildDropdownMenuHero),
     heroScene("icon-hero", buildIconHeroTile),
     heroScene("input-hero", buildInputHero),
+    heroScene("input-group-hero", buildInputGroupHero),
     heroScene("list-hero", buildListHero),
     heroScene("markdown-hero", buildMarkdownHero),
     heroScene("pagination-hero", buildPaginationHero),
@@ -332,6 +334,37 @@ fn buildSearchField(ui: *Ui) Node {
 fn buildTextarea(ui: *Ui) Node {
     return tile(ui, .{
         ui.el(.textarea, .{ .width = 320, .height = 96, .placeholder = "Write a release note…" }, .{}),
+    });
+}
+
+/// The composer shape: one bordered field wrapping the textarea plus the
+/// accessory actions row (attach bottom-left, send bottom-right). The
+/// entry carries focus, so the GROUP wears the ring — the focus-within
+/// treatment the component exists for.
+fn inputGroupComposer(ui: *Ui, width: f32, height: f32, focused: bool) Node {
+    var entry = ui.el(.textarea, .{
+        .text = "Ship the composer today.",
+        .placeholder = "Type a message…",
+        .semantics = .{ .label = "Message" },
+    }, .{});
+    entry.widget.state.focused = focused;
+    return ui.inputGroup(.{
+        .width = width,
+        .height = height,
+        .semantics = .{ .label = "Message composer" },
+    }, entry, ui.inputGroupActions(.{}, .{
+        ui.el(.button, .{ .icon = "plus", .variant = .ghost, .size = .icon, .semantics = .{ .label = "Attach" } }, .{}),
+        ui.spacer(1),
+        ui.el(.button, .{ .icon = "send", .size = .icon, .variant = .primary, .semantics = .{ .label = "Send" } }, .{}),
+    }));
+}
+
+fn buildInputGroup(ui: *Ui) Node {
+    return tile(ui, .{
+        ui.column(.{ .gap = 20 }, .{
+            inputGroupComposer(ui, 340, 128, true),
+            inputGroupComposer(ui, 340, 128, false),
+        }),
     });
 }
 
@@ -1369,6 +1402,12 @@ fn buildTabsHero(ui: *Ui) Node {
 fn buildTextareaHero(ui: *Ui) Node {
     return heroTile(ui, .{
         ui.el(.textarea, .{ .width = 280, .height = 90, .placeholder = "Write a release note…" }, .{}),
+    });
+}
+
+fn buildInputGroupHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        inputGroupComposer(ui, 280, 118, true),
     });
 }
 

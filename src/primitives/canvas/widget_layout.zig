@@ -74,6 +74,10 @@ pub fn layoutWidgetDepth(
     switch (widget.kind) {
         .row, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
         .column => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
+        // The grouped input flows vertically inside its own field chrome:
+        // the text entry (grow-stretched by `Ui.inputGroup`) above the
+        // accessory actions row.
+        .input_group => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
         .grid => if (widget.layout.virtualized)
             try layoutVirtualGridChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens)
         else
@@ -1160,7 +1164,7 @@ fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) 
         // viewports and virtualized containers stay zero: their content is
         // allowed to overflow the space they're given.
         .row, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group => intrinsicAxisChildrenSize(widget, tokens, .horizontal, depth),
-        .column, .menu_surface, .dropdown_menu => intrinsicAxisChildrenSize(widget, tokens, .vertical, depth),
+        .column, .menu_surface, .dropdown_menu, .input_group => intrinsicAxisChildrenSize(widget, tokens, .vertical, depth),
         .list, .data_grid, .table => if (widget.layout.virtualized)
             geometry.SizeF.zero()
         else

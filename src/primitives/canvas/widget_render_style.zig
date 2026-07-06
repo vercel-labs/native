@@ -239,7 +239,10 @@ pub fn textInputControlVisualTokens(widget: Widget, tokens: DesignTokens) Contro
         .input => controlVisualTokensWithFallback(tokens.controls.input, tokens.controls.text_field),
         .search_field => tokens.controls.search_field,
         .combobox => controlVisualTokensWithFallback(tokens.controls.combobox, tokens.controls.search_field),
-        .textarea => tokens.controls.textarea,
+        // The grouped input wears the textarea's visual class: the group
+        // IS the field (its entry's own chrome dissolves), so both draw
+        // from one control register.
+        .textarea, .input_group => tokens.controls.textarea,
         else => tokens.controls.text_field,
     };
 }

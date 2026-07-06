@@ -127,6 +127,9 @@ pub fn semanticRole(widget: Widget) WidgetRole {
         .split => .group,
         .split_divider => .separator,
         .tree => .tree,
+        // The grouped input announces as ONE named group; the entry and
+        // the accessory controls inside stay individually reachable.
+        .input_group => .group,
     };
 }
 

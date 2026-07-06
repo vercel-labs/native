@@ -2383,6 +2383,92 @@ test "widget layout emission can render runtime focus state" {
     try std.testing.expect(!saw_stale_focus);
 }
 
+test "input-group wears the focus ring for its focused descendant" {
+    const tokens = DesignTokens{};
+    const group_children = [_]Widget{
+        .{
+            .id = 3,
+            .kind = .textarea,
+            .layout = .{ .grow = 1 },
+            // The dissolved entry chrome `Ui.inputGroup` stamps.
+            .style = .{
+                .background = Color.rgba8(0, 0, 0, 0),
+                .border = Color.rgba8(0, 0, 0, 0),
+                .focus_ring = Color.rgba8(0, 0, 0, 0),
+            },
+        },
+        .{ .id = 4, .kind = .row, .frame = geometry.RectF.init(0, 0, 0, 32) },
+    };
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .input_group,
+        .frame = geometry.RectF.init(0, 0, 200, 112),
+        .children = &group_children,
+    }};
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 240, 140), &nodes);
+
+    // Focus on the inner textarea: the GROUP's ring (part slot 3 on id 2)
+    // is emitted — focus-within, not the group's own focus.
+    var focused_commands: [24]CanvasCommand = undefined;
+    var focused_builder = Builder.init(&focused_commands);
+    try layout.emitDisplayListWithState(&focused_builder, tokens, .{ .focused_id = 3, .focus_visible_id = 3 });
+    var saw_group_ring = false;
+    for (focused_builder.displayList().commands) |command| {
+        if (command.objectId()) |id| {
+            if (id == widgetPartId(2, 3)) saw_group_ring = true;
+        }
+    }
+    try std.testing.expect(saw_group_ring);
+
+    // No focus anywhere: no ring.
+    var idle_commands: [24]CanvasCommand = undefined;
+    var idle_builder = Builder.init(&idle_commands);
+    try layout.emitDisplayListWithState(&idle_builder, tokens, .{});
+    for (idle_builder.displayList().commands) |command| {
+        if (command.objectId()) |id| {
+            try std.testing.expect(id != widgetPartId(2, 3));
+        }
+    }
+
+    // Focus somewhere OUTSIDE the group's subtree: still no ring.
+    var outside_commands: [24]CanvasCommand = undefined;
+    var outside_builder = Builder.init(&outside_commands);
+    try layout.emitDisplayListWithState(&outside_builder, tokens, .{ .focused_id = 99, .focus_visible_id = 99 });
+    for (outside_builder.displayList().commands) |command| {
+        if (command.objectId()) |id| {
+            try std.testing.expect(id != widgetPartId(2, 3));
+        }
+    }
+}
+
+test "input-group focus change dirties the group's ring region" {
+    const tokens = DesignTokens{};
+    const group_children = [_]Widget{
+        .{ .id = 3, .kind = .textarea, .layout = .{ .grow = 1 } },
+    };
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .input_group,
+        .frame = geometry.RectF.init(20, 20, 200, 112),
+        .children = &group_children,
+    }};
+
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 260, 160), &nodes);
+
+    // Focus arriving on the inner textarea must dirty the GROUP's
+    // focus-ring region (frame + ring offset + stroke), not just the
+    // textarea's own bounds — the group wears the ring on its behalf.
+    const dirty = layout.renderStateDirtyBoundsWithTokens(.{}, .{ .focused_id = 3, .focus_visible_id = 3 }, tokens).?;
+    const ring = drawing_model.strokeBounds(widget_render_style.focusRingRect(geometry.RectF.init(20, 20, 200, 112)), tokens.stroke.focus);
+    try std.testing.expect(dirty.x <= ring.x);
+    try std.testing.expect(dirty.y <= ring.y);
+    try std.testing.expect(dirty.maxX() >= ring.maxX());
+    try std.testing.expect(dirty.maxY() >= ring.maxY());
+}
+
 test "widget layer tokens order display emission and hit testing" {
     const children = [_]Widget{
         .{

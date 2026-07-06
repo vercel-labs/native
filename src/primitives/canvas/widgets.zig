@@ -121,6 +121,16 @@ pub const WidgetKind = enum {
     /// Expansion and selection stay model-owned: rows dispatch their
     /// `on_toggle`/`on_press` Msgs and the view re-renders.
     tree,
+    /// Composer-grade grouped input: ONE bordered field (text-input
+    /// chrome — fill, border, md radius) whose children flow vertically,
+    /// wrapping a multi-line text entry plus an accessory row of controls
+    /// inside the same border. The GROUP wears the focus ring when
+    /// keyboard focus is on any descendant (focus-within), so the whole
+    /// group reads as one field; `Ui.inputGroup` dissolves the inner
+    /// textarea's own chrome (the notes editor-pane treatment) so the two
+    /// never double-draw. Not a hit target itself: the textarea fills the
+    /// group's body, so a click "in the field" IS a click in the textarea.
+    input_group,
 };
 
 /// STABLE code for a widget kind: assigned at birth, never reused or
@@ -197,6 +207,7 @@ pub fn widgetKindCode(kind: WidgetKind) u16 {
         .split => 57,
         .split_divider => 58,
         .tree => 59,
+        .input_group => 60,
     };
 }
 

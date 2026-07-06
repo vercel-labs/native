@@ -155,15 +155,15 @@ test "registry entries and known names stay in lockstep" {
         try std.testing.expectEqual(entry.icon, icons.find(name).?);
     }
     try std.testing.expectEqual(@as(?*const icons.Icon, null), icons.find("not-an-icon"));
-    // Deliberate size bound: the curated set is 45 after the anchored-
-    // floating-surface round completed the GitHub vocabulary (git-branch,
-    // git-merge, check-circle, x-circle — the names GitHub-shaped apps
-    // kept demanding for PR/issue state). Growing it is fine — raise the
-    // bound consciously and update the docs/skill name lists (the
-    // mirror-list lockstep test catches the validator; prose lists are
-    // on you).
-    try std.testing.expect(icons.entries.len >= 41);
-    try std.testing.expect(icons.entries.len <= 48);
+    // Deliberate size bound: the curated set is 49 after the pane and
+    // tool-identity round (panel-left/panel-right for sidebar toggles,
+    // terminal/wrench for agent-transcript tool calls; before that, 45
+    // when the anchored-floating-surface round completed the GitHub
+    // vocabulary). Growing it is fine — raise the bound consciously and
+    // update the docs/skill name lists (the mirror-list lockstep test
+    // catches the validator; prose lists are on you).
+    try std.testing.expect(icons.entries.len >= 45);
+    try std.testing.expect(icons.entries.len <= 52);
 }
 
 test "app icon registration resolves for drawing but never widens the closed vocabulary" {

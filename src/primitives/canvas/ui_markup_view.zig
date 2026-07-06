@@ -238,6 +238,14 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 // element below; one reaching here is misplaced.
                 return self.failNode(node, markup.context_menu_parent_message);
             }
+            if (std.mem.eql(u8, node.name, "input-group")) {
+                return self.buildInputGroup(ui, scope, node);
+            }
+            if (std.mem.eql(u8, node.name, "input-group-actions")) {
+                // Actions rows inside an input-group are consumed by
+                // buildInputGroup.
+                return self.failNode(node, markup.input_group_actions_parent_message);
+            }
             const kind = elementKind(node.name) orelse {
                 return self.failNode(node, "unknown element");
             };
@@ -723,6 +731,99 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 steps[index] = .{ .label = try self.interpolatedText(ui, scope, child) };
             }
             return ui.stepper(options, steps);
+        }
+
+        /// `<input-group>` — the composer-grade grouped input: exactly
+        /// one textarea child (built through the ordinary element path,
+        /// so its text/placeholder/on-input/autofocus behave like any
+        /// textarea) plus an optional input-group-actions row, lowered
+        /// through `Ui.inputGroup` so the chrome-dissolve and
+        /// focus-within treatment match Zig-built groups.
+        fn buildInputGroup(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!Ui.Node {
+            var options: Ui.InputGroupOptions = .{};
+            for (node.attrs) |attribute| {
+                if (std.mem.eql(u8, attribute.name, "kind")) continue;
+                if (std.mem.eql(u8, attribute.name, "label")) {
+                    options.semantics.label = try self.stringAttr(scope, node, attribute, "label expects text");
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "width")) {
+                    options.width = try self.floatAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "height")) {
+                    options.height = try self.floatAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "min-width")) {
+                    options.min_width = try self.floatAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "grow")) {
+                    options.grow = try self.floatAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "key")) {
+                    options.key = try self.attrKey(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "global-key")) {
+                    options.global_key = try self.attrKey(scope, node, attribute);
+                    continue;
+                }
+                return self.failNode(node, markup.input_group_attr_message);
+            }
+            // The child shape is static (mirrors the validator): the
+            // textarea first, then at most one actions row. Conditional
+            // content belongs INSIDE the actions row.
+            var entry: ?Ui.Node = null;
+            var actions: ?Ui.Node = null;
+            for (node.children) |child| {
+                if (child.kind != .element) return self.failNode(child, markup.input_group_children_message);
+                if (std.mem.eql(u8, child.name, "textarea")) {
+                    if (entry != null or actions != null) return self.failNode(child, markup.input_group_children_message);
+                    entry = try self.buildElement(ui, scope, child);
+                    continue;
+                }
+                if (std.mem.eql(u8, child.name, "input-group-actions")) {
+                    if (entry == null) return self.failNode(child, markup.input_group_textarea_message);
+                    if (actions != null) return self.failNode(child, markup.input_group_children_message);
+                    actions = try self.buildInputGroupActions(ui, scope, child);
+                    continue;
+                }
+                return self.failNode(child, markup.input_group_children_message);
+            }
+            const entry_node = entry orelse return self.failNode(node, markup.input_group_textarea_message);
+            return ui.inputGroup(options, entry_node, actions);
+        }
+
+        /// `<input-group-actions>` — the group's accessory row; children
+        /// build through the ordinary pass (structure tags work) and
+        /// lower through `Ui.inputGroupActions`.
+        fn buildInputGroupActions(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!Ui.Node {
+            var options: Ui.InputGroupActionsOptions = .{};
+            for (node.attrs) |attribute| {
+                if (std.mem.eql(u8, attribute.name, "kind")) continue;
+                if (std.mem.eql(u8, attribute.name, "gap")) {
+                    options.gap = try self.floatAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "key")) {
+                    options.key = try self.attrKey(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "global-key")) {
+                    options.global_key = try self.attrKey(scope, node, attribute);
+                    continue;
+                }
+                return self.failNode(node, markup.input_group_actions_attr_message);
+            }
+            for (node.children) |child| {
+                if (child.kind == .text) return self.failNode(child, markup.input_group_actions_children_message);
+            }
+            var children: std.ArrayListUnmanaged(Ui.Node) = .empty;
+            try self.buildChildren(ui, scope, node, &children);
+            return ui.inputGroupActions(options, @as([]const Ui.Node, children.items));
         }
 
         /// `<timeline gap="4">` — a list container whose children are

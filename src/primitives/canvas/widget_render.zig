@@ -254,7 +254,60 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         .skeleton => try emitSkeletonWidget(builder, paint_widget, tokens),
         .spinner => try emitSpinnerWidget(builder, paint_widget, tokens),
         .chart => try emitChartWidget(builder, paint_widget, tokens),
+        .input_group => {
+            // Focus-within: the GROUP wears the focus ring for its
+            // focused descendant (the entry's own ring is dissolved), so
+            // the whole group reads as one field.
+            var group = paint_widget;
+            if (!group.state.focused) group.state.focused = widgetSubtreeHasFocusedState(paint_widget);
+            try widget_render_controls.emitInputGroupWidget(builder, group, tokens);
+            try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
+        },
     }
+}
+
+/// Whether any descendant carries the focused state (the tree path's
+/// focus-within source: state is baked into the widgets themselves).
+fn widgetSubtreeHasFocusedState(widget: Widget) bool {
+    for (widget.children) |child| {
+        if (child.state.focused) return true;
+        if (widgetSubtreeHasFocusedState(child)) return true;
+    }
+    return false;
+}
+
+/// Whether any descendant NODE carries baked focused state (the layout
+/// path's focus-within source for static trees — docs scenes, tests —
+/// resolved through the layout's parent links, which survive layout
+/// retention where `widget.children` slices may not).
+fn layoutSubtreeHasBakedFocus(layout: anytype, node_index: usize) bool {
+    for (layout.nodes, 0..) |node, index| {
+        if (index == node_index or !node.widget.state.focused) continue;
+        var current = node.parent_index;
+        while (current) |current_index| {
+            if (current_index == node_index) return true;
+            current = layout.nodes[current_index].parent_index;
+        }
+    }
+    return false;
+}
+
+/// Whether the focus-visible widget sits inside `node_index`'s subtree
+/// (the layout path's focus-within source: runtime focus is an id in
+/// `WidgetRenderState`, resolved against the layout's parent links).
+fn layoutSubtreeHasFocusVisible(layout: anytype, node_index: usize, state: WidgetRenderState) bool {
+    const focus_id = state.focus_visible_id orelse return false;
+    if (focus_id == 0) return false;
+    for (layout.nodes, 0..) |node, index| {
+        if (node.widget.id != focus_id) continue;
+        var current: ?usize = index;
+        while (current) |current_index| {
+            if (current_index == node_index) return true;
+            current = layout.nodes[current_index].parent_index;
+        }
+        return false;
+    }
+    return false;
 }
 
 /// A table cell draws its chrome (fill, border, focus ring) and then its
@@ -405,6 +458,22 @@ fn emitWidgetLayoutNodeContent(
         .skeleton => try emitSkeletonWidget(builder, paint_widget, tokens),
         .spinner => try emitSpinnerWidget(builder, paint_widget, tokens),
         .chart => try emitChartWidget(builder, paint_widget, tokens),
+        .input_group => {
+            // Focus-within: the GROUP wears the focus ring for its
+            // focused descendant (the entry's own ring is dissolved), so
+            // the whole group reads as one field. With runtime render
+            // state the focused descendant is an id; without it (static
+            // trees, docs scenes) the baked child state is truth — the
+            // same override-vs-baked split `widgetWithRenderState` makes.
+            var group = paint_widget;
+            if (!group.state.focused) {
+                group.state.focused = if (state.focused_id != null or state.focus_visible_id != null)
+                    layoutSubtreeHasFocusVisible(layout, node_index, state)
+                else
+                    layoutSubtreeHasBakedFocus(layout, node_index);
+            }
+            try widget_render_controls.emitInputGroupWidget(builder, group, tokens);
+        },
     }
 
     try emitWidgetLayoutClippedChildren(builder, layout, node_index, tokens, state, paint_widget);

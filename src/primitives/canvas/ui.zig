@@ -1592,6 +1592,99 @@ pub fn Ui(comptime Msg: type) type {
             return summary;
         }
 
+        pub const InputGroupOptions = struct {
+            key: ?UiKey = null,
+            global_key: ?UiKey = null,
+            /// Definite group width/height (same contract as
+            /// `ElementOptions.width`/`height`); 0 sizes from the entry's
+            /// intrinsic height plus the actions row, and `grow` flexes.
+            width: f32 = 0,
+            height: f32 = 0,
+            min_width: f32 = 0,
+            grow: f32 = 0,
+            /// Group semantics; role defaults to `group` so the whole
+            /// field announces as one named unit while the entry and the
+            /// accessory controls stay individually reachable.
+            semantics: canvas.WidgetSemantics = .{},
+        };
+
+        pub const InputGroupActionsOptions = struct {
+            key: ?UiKey = null,
+            global_key: ?UiKey = null,
+            gap: f32 = 6,
+        };
+
+        /// Composer-grade grouped input (the house input-group): ONE
+        /// bordered field wrapping a multi-line text entry plus an
+        /// optional accessory row of controls inside the same border —
+        /// the reference composer shape (attach bottom-left, send
+        /// bottom-right). The group wears text-input chrome and the
+        /// focus ring whenever focus is on any descendant; the entry's
+        /// own chrome (fill, border, focus ring) dissolves (the notes
+        /// editor-pane treatment) unless the author styled it
+        /// explicitly, so the group reads as one field. The entry comes
+        /// FIRST (document order is focus order); build the accessory
+        /// row with `inputGroupActions`.
+        pub fn inputGroup(self: *Self, options: InputGroupOptions, entry: Node, actions: ?Node) Node {
+            var semantics = options.semantics;
+            if (semantics.role == .none) semantics.role = .group;
+            var entry_node = entry;
+            dissolveInputGroupEntryChrome(&entry_node);
+            // The entry absorbs the group's height: an explicitly sized
+            // group grows its text entry, never a gap under the actions.
+            if (entry_node.widget.layout.grow == 0) entry_node.widget.layout.grow = 1;
+            const child_count: usize = if (actions == null) 1 else 2;
+            const nodes = self.arena.alloc(Node, child_count) catch {
+                self.failed = true;
+                return self.el(.input_group, .{ .semantics = semantics }, .{});
+            };
+            nodes[0] = entry_node;
+            if (actions) |actions_node| nodes[1] = actions_node;
+            return self.el(.input_group, .{
+                .key = options.key,
+                .global_key = options.global_key,
+                .width = options.width,
+                .height = options.height,
+                .min_width = options.min_width,
+                .grow = options.grow,
+                .semantics = semantics,
+            }, .{nodes[0..child_count]});
+        }
+
+        /// The input-group's accessory row: leading/trailing controls on
+        /// one bottom row INSIDE the group's border (put a
+        /// `spacer(1)` between the leading and trailing controls). Insets
+        /// keep ghost/icon buttons optically inside the field's own text
+        /// inset without double-padding the seam.
+        pub fn inputGroupActions(self: *Self, options: InputGroupActionsOptions, children: anytype) Node {
+            var node = self.el(.row, .{
+                .key = options.key,
+                .global_key = options.global_key,
+                .gap = options.gap,
+                .cross = .center,
+            }, children);
+            node.widget.layout.padding = .{ .top = 4, .left = 8, .right = 8, .bottom = 8 };
+            return node;
+        }
+
+        /// Dissolve the entry's control chrome into the group (the notes
+        /// editor-pane treatment, structural here): transparent fill,
+        /// border, and focus ring — the GROUP draws that chrome — unless
+        /// the author styled the field explicitly (style tokens included),
+        /// in which case the explicit choice wins.
+        fn dissolveInputGroupEntryChrome(node: *Node) void {
+            const transparent = canvas.Color.rgba8(0, 0, 0, 0);
+            if (node.widget.style.background == null and node.style_tokens.background == null) {
+                node.widget.style.background = transparent;
+            }
+            if (node.widget.style.border == null and node.style_tokens.border_color == null) {
+                node.widget.style.border = transparent;
+            }
+            if (node.widget.style.focus_ring == null and node.style_tokens.focus_ring == null) {
+                node.widget.style.focus_ring = transparent;
+            }
+        }
+
         /// Visual state of a stepper step, derived from its index against
         /// `StepperOptions.active`.
         pub const StepState = enum { completed, active, pending };

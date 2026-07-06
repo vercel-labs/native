@@ -202,7 +202,7 @@ pub const ElementInfo = struct {
 // --------------------------------------------------------------- elements
 //
 // Codes 1..53 are the plain elements (assigned at birth in the vocabulary's
-// documented grouping); 54..60 are the composites. The grouping comments
+// documented grouping); 54 onward are the composites. The grouping comments
 // mirror the authoring docs; they carry no meaning — codes do.
 
 pub const elements = [_]ElementInfo{
@@ -281,6 +281,14 @@ pub const elements = [_]ElementInfo{
     // context-menu items (the platform-menu channel), never to a widget
     // of its own.
     .{ .code = 61, .name = "context-menu", .rule_hook = "context-menu" },
+    // The composer-grade grouped input: one bordered field wrapping a
+    // textarea plus an optional accessory row (input-group-actions) —
+    // the group wears the focus ring, the inner textarea's chrome
+    // dissolves. Lowers through `Ui.inputGroup` to the `input_group`
+    // widget kind; the actions row is consumed by its parent and lowers
+    // to a plain row inside the group's border.
+    .{ .code = 62, .name = "input-group", .rule_hook = "input-group" },
+    .{ .code = 63, .name = "input-group-actions", .rule_hook = "input-group-actions" },
 };
 
 // ------------------------------------------------------------- attributes
@@ -421,12 +429,12 @@ pub const icon_names = [_][]const u8{
     "check",       "check-circle",  "chevron-down", "chevron-left",     "chevron-right",
     "chevron-up",  "circle-dot",    "clock",        "copy",             "download",
     "edit",        "ellipsis",      "external-link", "eye",             "file-text",
-    "folder",      "folder-open",   "git-branch",   "git-merge",        "git-pull-request",
-    "info",        "menu",          "moon",         "music",            "pause",
-    "play",        "plus",          "refresh-cw",   "repeat",           "save",
-    "search",      "send",          "settings",     "shuffle",          "skip-back",
-    "skip-forward", "sun",          "trash",        "volume",           "x",
-    "x-circle",
+    "folder",      "folder-open",   "git-branch",    "git-merge",       "git-pull-request",
+    "info",        "menu",          "moon",          "music",           "panel-left",
+    "panel-right", "pause",         "play",          "plus",            "refresh-cw",
+    "repeat",      "save",          "search",        "send",            "settings",
+    "shuffle",     "skip-back",     "skip-forward",  "sun",             "terminal",
+    "trash",       "volume",        "wrench",        "x",               "x-circle",
 };
 
 /// The semantic role vocabulary the `role` attribute accepts: the field

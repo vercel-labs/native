@@ -1248,8 +1248,12 @@ test "the registry's takes-children predicate matches the interpreter's takes-ch
 /// - split_divider: never authored — the builder synthesizes the drag
 ///   handle between a split's two panes, so both markup engines get it
 ///   through the same finalize that Zig views do.
+/// - input_group: expressible as the `<input-group>` COMPOSITE (one
+///   textarea child plus an optional `<input-group-actions>` row,
+///   lowered through `Ui.inputGroup`), so no plain element maps to the
+///   kind here — like chart, the bespoke builder is the channel.
 const markup_excluded_widget_kinds = [_]canvas.WidgetKind{
-    .image, .icon_button, .data_grid, .popover, .menu_surface, .segmented_control, .chart, .split_divider,
+    .image, .icon_button, .data_grid, .popover, .menu_surface, .segmented_control, .chart, .split_divider, .input_group,
 };
 
 fn kindExpressible(kind: canvas.WidgetKind) bool {
@@ -3007,6 +3011,192 @@ test "chart misuse fails the build with teaching messages" {
         try testing.expectEqualStrings(case.message, view.diagnostic.message);
         try testing.expect(view.diagnostic.line > 0);
     }
+}
+
+// ------------------------------------------------------ input-group fixture
+
+pub const ComposerMsg = union(enum) {
+    edit: canvas.TextInputEvent,
+    send,
+    attach,
+};
+
+pub const ComposerModel = struct {
+    draft_buffer: canvas.TextBuffer(64) = .{},
+    streaming: bool = false,
+
+    pub fn draft(model: *const ComposerModel) []const u8 {
+        return model.draft_buffer.text();
+    }
+};
+
+pub const ComposerUi = canvas.Ui(ComposerMsg);
+
+pub const composer_markup_source =
+    \\<column gap="8">
+    \\  <input-group label="Message composer" height="120">
+    \\    <textarea text="{draft}" placeholder="Type a message" on-input="edit" label="Message" />
+    \\    <input-group-actions>
+    \\      <button icon="plus" variant="ghost" size="icon" on-press="attach" label="Attach"></button>
+    \\      <spacer grow="1" />
+    \\      <button icon="send" size="icon" on-press="send" label="Send"></button>
+    \\    </input-group-actions>
+    \\  </input-group>
+    \\</column>
+;
+
+/// The hand-written equivalent of the composer markup: both engines must
+/// build exactly what direct `Ui.inputGroup` calls produce (the entry
+/// first, then the accessory row — leading control, spacer, trailing
+/// send).
+pub fn handComposerView(ui: *ComposerUi, model: *const ComposerModel) ComposerUi.Node {
+    const entry = ui.el(.textarea, .{
+        .text = model.draft(),
+        .placeholder = "Type a message",
+        .on_input = ComposerUi.inputMsg(.edit),
+        .semantics = .{ .label = "Message" },
+    }, .{});
+    return ui.column(.{ .gap = 8 }, .{
+        ui.inputGroup(.{
+            .height = 120,
+            .semantics = .{ .label = "Message composer" },
+        }, entry, ui.inputGroupActions(.{}, .{
+            ui.el(.button, .{ .icon = "plus", .variant = .ghost, .size = .icon, .on_press = .attach, .semantics = .{ .label = "Attach" } }, .{}),
+            ui.spacer(1),
+            ui.el(.button, .{ .icon = "send", .size = .icon, .on_press = .send, .semantics = .{ .label = "Send" } }, .{}),
+        })),
+    });
+}
+
+test "the input-group element builds the hand-written Ui.inputGroup tree" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = ComposerModel{};
+    model.draft_buffer.set("hello");
+    const ComposerMarkup = markup_view.MarkupView(ComposerModel, ComposerMsg);
+
+    var view = try ComposerMarkup.init(arena, composer_markup_source);
+    var markup_ui = ComposerUi.init(arena);
+    const markup_tree = try markup_ui.finalize(try view.build(&markup_ui, &model));
+
+    var hand_ui = ComposerUi.init(arena);
+    const hand_tree = try hand_ui.finalize(handComposerView(&hand_ui, &model));
+
+    var markup_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer markup_ids.deinit(testing.allocator);
+    var hand_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer hand_ids.deinit(testing.allocator);
+    try collectIds(markup_tree.root, &markup_ids, testing.allocator);
+    try collectIds(hand_tree.root, &hand_ids, testing.allocator);
+    try testing.expectEqualSlices(canvas.ObjectId, hand_ids.items, markup_ids.items);
+    try testing.expectEqual(hand_tree.handlers.len, markup_tree.handlers.len);
+
+    // The group: one labeled field with group semantics and two children
+    // (the entry, then the actions row).
+    const group = findByKind(markup_tree.root, .input_group).?;
+    try testing.expectEqualStrings("Message composer", group.semantics.label);
+    try testing.expectEqual(canvas.WidgetRole.group, group.semantics.role);
+    try testing.expectEqual(@as(usize, 2), group.children.len);
+
+    // The entry: chrome dissolved (transparent fill/border/focus ring —
+    // the GROUP wears that chrome) and grow-stretched to absorb the
+    // group's height; its text behavior is untouched.
+    const entry = group.children[0];
+    try testing.expectEqual(canvas.WidgetKind.textarea, entry.kind);
+    try testing.expectEqualStrings("hello", entry.text);
+    try testing.expectEqualStrings("Type a message", entry.placeholder);
+    try testing.expectEqual(@as(f32, 1), entry.layout.grow);
+    try testing.expectEqual(@as(u8, 0), entry.style.background.?.a);
+    try testing.expectEqual(@as(u8, 0), entry.style.border.?.a);
+    try testing.expectEqual(@as(u8, 0), entry.style.focus_ring.?.a);
+
+    // The actions row: a plain row inside the group's border with the
+    // leading/spacer/trailing children.
+    const actions = group.children[1];
+    try testing.expectEqual(canvas.WidgetKind.row, actions.kind);
+    try testing.expectEqual(@as(usize, 3), actions.children.len);
+    try testing.expectEqualStrings("plus", actions.children[0].icon);
+    try testing.expectEqualStrings("send", actions.children[2].icon);
+}
+
+test "input-group misuse fails the build with teaching messages" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = ComposerModel{};
+    const ComposerMarkup = markup_view.MarkupView(ComposerModel, ComposerMsg);
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        .{
+            // The group requires its text entry.
+            .source = "<column>\n  <input-group label=\"Composer\">\n    <input-group-actions>\n      <button icon=\"send\" label=\"Send\" on-press=\"send\"></button>\n    </input-group-actions>\n  </input-group>\n</column>",
+            .message = canvas.ui_markup.input_group_textarea_message,
+        },
+        .{
+            // An empty group has nothing to wrap.
+            .source = "<column>\n  <input-group label=\"Composer\" />\n</column>",
+            .message = canvas.ui_markup.input_group_textarea_message,
+        },
+        .{
+            // One text entry per group.
+            .source = "<column>\n  <input-group>\n    <textarea label=\"A\" placeholder=\"a\" />\n    <textarea label=\"B\" placeholder=\"b\" />\n  </input-group>\n</column>",
+            .message = canvas.ui_markup.input_group_children_message,
+        },
+        .{
+            // Other content lives outside the group.
+            .source = "<column>\n  <input-group>\n    <textarea label=\"A\" placeholder=\"a\" />\n    <text>hint</text>\n  </input-group>\n</column>",
+            .message = canvas.ui_markup.input_group_children_message,
+        },
+        .{
+            // Closed group attribute set.
+            .source = "<column>\n  <input-group gap=\"8\">\n    <textarea label=\"A\" placeholder=\"a\" />\n  </input-group>\n</column>",
+            .message = canvas.ui_markup.input_group_attr_message,
+        },
+        .{
+            // Closed actions attribute set.
+            .source = "<column>\n  <input-group>\n    <textarea label=\"A\" placeholder=\"a\" />\n    <input-group-actions padding=\"4\">\n      <button icon=\"send\" label=\"Send\" on-press=\"send\"></button>\n    </input-group-actions>\n  </input-group>\n</column>",
+            .message = canvas.ui_markup.input_group_actions_attr_message,
+        },
+        .{
+            // Actions rows belong inside a group.
+            .source = "<column>\n  <input-group-actions>\n    <button icon=\"send\" label=\"Send\" on-press=\"send\"></button>\n  </input-group-actions>\n</column>",
+            .message = canvas.ui_markup.input_group_actions_parent_message,
+        },
+    };
+    for (cases) |case| {
+        var view = try ComposerMarkup.init(arena, case.source);
+        var ui = ComposerUi.init(arena);
+        try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
+        try testing.expectEqualStrings(case.message, view.diagnostic.message);
+        try testing.expect(view.diagnostic.line > 0);
+    }
+}
+
+test "input-group actions render conditional controls through structure tags" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const ComposerMarkup = markup_view.MarkupView(ComposerModel, ComposerMsg);
+
+    // Conditional content belongs INSIDE the actions row (the group's
+    // child shape stays static): a streaming composer swaps send for
+    // stop without changing the group's structure.
+    const source =
+        "<column>\n  <input-group label=\"Composer\">\n    <textarea label=\"Message\" placeholder=\"m\" />\n    <input-group-actions>\n      <if test=\"{streaming}\">\n        <button icon=\"x\" label=\"Stop\" on-press=\"send\"></button>\n      </if>\n      <else>\n        <button icon=\"send\" label=\"Send\" on-press=\"send\"></button>\n      </else>\n    </input-group-actions>\n  </input-group>\n</column>";
+
+    const idle = ComposerModel{};
+    var view = try ComposerMarkup.init(arena, source);
+    var idle_ui = ComposerUi.init(arena);
+    const idle_tree = try idle_ui.finalize(try view.build(&idle_ui, &idle));
+    try testing.expectEqualStrings("send", findByKind(idle_tree.root, .button).?.icon);
+
+    const streaming = ComposerModel{ .streaming = true };
+    var streaming_view = try ComposerMarkup.init(arena, source);
+    var streaming_ui = ComposerUi.init(arena);
+    const streaming_tree = try streaming_ui.finalize(try streaming_view.build(&streaming_ui, &streaming));
+    try testing.expectEqualStrings("x", findByKind(streaming_tree.root, .button).?.icon);
 }
 
 test "chart series values resolve through slice-valued template args" {

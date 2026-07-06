@@ -328,6 +328,10 @@ pub const Server = struct {
                 } else if (std.mem.eql(u8, element_name, "context-menu")) {
                     // context-menu takes no attributes; its menu-item
                     // children carry on-press and disabled.
+                } else if (std.mem.eql(u8, element_name, "input-group")) {
+                    for (input_group_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "input-group attribute", doc.doc);
+                } else if (std.mem.eql(u8, element_name, "input-group-actions")) {
+                    for (input_group_actions_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "input-group-actions attribute", doc.doc);
                 } else if (std.mem.eql(u8, element_name, "avatar")) {
                     for (avatar_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "avatar attribute", doc.doc);
                     for (attribute_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "markup attribute", doc.doc);
@@ -601,6 +605,8 @@ pub const avatar_attr_docs = markup_docs.avatar_attr_docs;
 pub const anchor_attr_docs = markup_docs.anchor_attr_docs;
 pub const chart_attr_docs = markup_docs.chart_attr_docs;
 pub const series_attr_docs = markup_docs.series_attr_docs;
+pub const input_group_attr_docs = markup_docs.input_group_attr_docs;
+pub const input_group_actions_attr_docs = markup_docs.input_group_actions_attr_docs;
 pub const event_docs = markup_docs.event_docs;
 pub const elementDoc = markup_docs.elementDoc;
 pub const attributeDoc = markup_docs.attributeDoc;
@@ -847,7 +853,7 @@ test "doc tables cover every known element, attribute, and event" {
     for (ui_markup.known_element_names) |name| {
         try testing.expect(elementDoc(name) != null);
     }
-    for ([_][]const u8{ "for", "if", "else", "template", "use", "import", "slot", "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu" }) |name| {
+    for ([_][]const u8{ "for", "if", "else", "template", "use", "import", "slot", "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions" }) |name| {
         try testing.expect(elementDoc(name) != null);
     }
     for (ui_markup.known_option_attrs) |name| {

@@ -32,6 +32,7 @@ export const componentPages: ComponentPage[] = [
   { slug: "dropdown-menu", name: "Dropdown Menu", preview: "dropdown-menu-hero", blurb: "Anchored floating menus and menu items." },
   { slug: "icon", name: "Icon", preview: "icon-hero", blurb: "The built-in vector icon registry." },
   { slug: "input", name: "Input", preview: "input-hero", blurb: "Single-line text entry: input, text field, search field." },
+  { slug: "input-group", name: "Input Group", preview: "input-group-hero", blurb: "One bordered field: textarea plus accessory actions." },
   { slug: "list", name: "List", preview: "list-hero", blurb: "Rows with icons, selection, and virtualization." },
   { slug: "markdown", name: "Markdown", preview: "markdown-hero", blurb: "GFM rendering through native widgets." },
   { slug: "pagination", name: "Pagination", preview: "pagination-hero", blurb: "Page navigation row." },
