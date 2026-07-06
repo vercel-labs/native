@@ -12,34 +12,40 @@ import { githubUrl, npmCli, siteName } from "@/lib/site";
 
 const installCommands = [`npm install -g ${npmCli}`];
 
-const markupSample = `<column gap="12" padding="16">
-  <row gap="8" cross="center">
-    <text grow="1">Inbox</text>
-    <button variant="ghost" disabled="{doneCount == 0}"
-            on-press="clear_done">Clear done</button>
+const markupSample = `<column background="background">
+  <row height="{header_height}" padding="12" gap="10" cross="center"
+       background="surface" window-drag="true" label="Inbox header">
+    <spacer width="{chrome_leading}" />
+    <spacer grow="1" />
+    <if test="{doneCount}">
+      <button variant="ghost" on-press="clear_done">Clear done</button>
+    </if>
   </row>
-  <row gap="8" cross="center">
-    <text-field text="{draft}" placeholder="New task…"
-                on-input="draft_edit" on-submit="add" grow="1" />
-    <button variant="primary" on-press="add">Add task</button>
-  </row>
-  <tabs gap="8">
-    <for each="filters" as="f">
-      <button size="sm" selected="{f == filter}"
-              on-press="set_filter:{f}">{f}</button>
-    </for>
-  </tabs>
-  <scroll grow="1">
-    <column gap="2">
-      <for each="visible" key="id" as="t">
-        <row gap="8" padding="6" cross="center">
-          <checkbox checked="{t.done}" on-toggle="toggle:{t.id}"
-                    label="Done" />
-          <text grow="1">{t.title}</text>
-        </row>
+  <separator />
+  <column grow="1" gap="12" padding="16">
+    <row gap="8" cross="center">
+      <text-field text="{draft}" placeholder="New task…"
+                  on-input="draft_edit" on-submit="add" grow="1" />
+      <button variant="primary" on-press="add">Add task</button>
+    </row>
+    <tabs gap="8">
+      <for each="filters" as="f">
+        <button size="sm" selected="{f == filter}"
+                on-press="set_filter:{f}">{f}</button>
       </for>
-    </column>
-  </scroll>
+    </tabs>
+    <scroll grow="1">
+      <column gap="2">
+        <for each="visible" key="id" as="t">
+          <row gap="8" padding="6" cross="center">
+            <checkbox checked="{t.done}" on-toggle="toggle:{t.id}"
+                      label="Done" />
+            <text grow="1">{t.title}</text>
+          </row>
+        </for>
+      </column>
+    </scroll>
+  </column>
   <status-bar>{openCount} open · {doneCount} done</status-bar>
 </column>`;
 
@@ -49,6 +55,7 @@ const zigSample = `pub const Msg = union(enum) {
     set_filter: Filter,
     clear_done,
     draft_edit: canvas.TextInputEvent,
+    chrome_changed: native_sdk.WindowChrome,
 };
 
 pub fn update(model: *Model, msg: Msg) void {
@@ -67,6 +74,11 @@ pub fn update(model: *Model, msg: Msg) void {
         .set_filter => |filter| model.filter = filter,
         .clear_done => model.clearDone(),
         .draft_edit => |edit| model.draft_buffer.apply(edit),
+        .chrome_changed => |chrome| {
+            model.chrome_leading = chrome.insets.left;
+            model.header_height =
+                @max(header_natural_height, chrome.insets.top);
+        },
     }
 }`;
 
@@ -102,30 +114,6 @@ function CodePane({ title, lang, code }: { title: string; lang: string; code: st
       <div className="[&>div]:my-0! [&>div]:rounded-none! [&>div]:border-none! [&>div]:bg-transparent!">
         <Code lang={lang}>{code}</Code>
       </div>
-    </div>
-  );
-}
-
-function AppWindow({
-  title,
-  className = "",
-  children,
-}: {
-  title: string;
-  className?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      className={`overflow-hidden rounded-md border border-gray-alpha-400 bg-background-200 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.18)] dark:bg-gray-alpha-100 dark:shadow-[0_24px_48px_-24px_rgba(0,0,0,0.7)] ${className}`}
-    >
-      <div className="flex items-center gap-1.5 border-b border-gray-alpha-400 px-4 py-2.5">
-        <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
-        <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
-        <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
-        <span className="ml-3 font-mono label-12 text-gray-900">{title}</span>
-      </div>
-      {children}
     </div>
   );
 }
@@ -348,16 +336,15 @@ export default function HomePage() {
           </SectionLede>
           {/* The proof: soundboard and deck are the same player — same
               library, transport, queue, and search — separated only by
-              design tokens and a chrome pass. Soundboard runs in a real
-              titled window, so the window frame is honest; deck is a
-              chromeless fixed 460x180 chassis, so it gets no invented
-              chrome — its own silhouette sits on the page background at
-              natural scale, and the size contrast is part of the point.
-              Soundboard follows the site theme; deck is dark by design,
-              so it never swaps. */}
+              design tokens and a chrome pass. Both windows own their own
+              chrome (soundboard's header IS its titlebar; deck is a fixed
+              460x180 chassis), so neither gets an invented window frame —
+              each capture sits on the page as its own silhouette, and the
+              size contrast is part of the point. Soundboard follows the
+              site theme; deck is dark by design, so it never swaps. */}
           <figure className="mt-12">
             <div className="grid gap-6 lg:grid-cols-2">
-              <AppWindow title="examples/soundboard">
+              <div className="overflow-hidden rounded-md border border-gray-alpha-400 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.18)] dark:shadow-[0_24px_48px_-24px_rgba(0,0,0,0.7)]">
                 {(["light", "dark"] as const).map((scheme) => (
                   <Image
                     key={scheme}
@@ -371,7 +358,7 @@ export default function HomePage() {
                     }`}
                   />
                 ))}
-              </AppWindow>
+              </div>
               <div className="flex items-center justify-center px-6 py-10 sm:px-10">
                 <Image
                   src="/home/deck-dark.webp"
@@ -428,9 +415,9 @@ export default function HomePage() {
               <div className="mx-auto max-w-2xl overflow-hidden rounded-md border border-gray-alpha-400 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.3)] dark:shadow-[0_24px_48px_-16px_rgba(0,0,0,0.9)]">
                 <Image
                   src="/home/ui-inbox-macos.png"
-                  alt="The ui-inbox example app running in a native macOS window: a task inbox with a text field, filter tabs, a checklist of tasks, and a status bar"
+                  alt="The ui-inbox example app running in a native macOS window: the window controls share the header band with a Clear done action, above a text field, filter tabs, a checklist of tasks, and a status bar"
                   width={720}
-                  height={548}
+                  height={520}
                   className="block h-auto w-full"
                 />
               </div>

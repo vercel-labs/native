@@ -502,3 +502,43 @@ test "chrome geometry pads the header and matches its height to the tall band" {
     // hides the OS bar this header replaces.
     try testing.expectEqual(.hidden_inset_tall, main.shell_scene.windows[0].titlebar);
 }
+
+// Env-gated homepage screenshot renderer (skipped by default, never in
+// CI): the docs-homepage showcase state — the timeline a few posts in,
+// so variable-height rows fill the fold and the header's load counter
+// shows — once per color scheme, same state in both. PNGs land in
+// /tmp/homepage-shots/feed-{light,dark}-artifacts/. To use:
+//
+//   HOMEPAGE_SHOTS=1 zig build test
+test "render homepage screenshots (env-gated)" {
+    if (!envGateSet("HOMEPAGE_SHOTS")) return error.SkipZigTest;
+    const io = testing.io;
+
+    var h = try Harness.create(.{});
+    defer h.destroy();
+
+    // A few posts in: wrapped multi-line bodies above and below the
+    // fold. The extra nudge past the post boundary lands the band edge
+    // inside a body, not across an author line (eyeballed).
+    try h.wheel(estimatedOffsetAt(5) + 100);
+
+    // The app follows the system appearance: drive the platform event
+    // once per scheme, the same channel the OS uses. The dispatch
+    // re-emits the display list with the re-derived tokens, so no
+    // present is needed in between.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .appearance_changed = .{ .color_scheme = .light } });
+    h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/feed-light-artifacts", "Feed");
+    try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot feed-canvas 2");
+
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .appearance_changed = .{ .color_scheme = .dark } });
+    h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/feed-dark-artifacts", "Feed");
+    try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot feed-canvas 2");
+}
+
+/// Env-gated dump switch. `std.c.getenv` needs libc, which this test
+/// build only links on targets whose platform layer pulls it in; when
+/// libc is absent the gate reads as unset and the gated test skips.
+fn envGateSet(name: [*:0]const u8) bool {
+    if (comptime !@import("builtin").link_libc) return false;
+    return std.c.getenv(name) != null;
+}

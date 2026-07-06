@@ -71,6 +71,11 @@ test "a full user session drives the model through typed dispatch" {
     main.update(&model, filtered.msgForPointer(clear_button.id, .up).?);
     try testing.expectEqual(@as(usize, 2), model.task_count);
     try testing.expectEqual(@as(usize, 2), model.openCount());
+
+    // With nothing left to clear the header shows no Clear done at all:
+    // availability is presence, not a permanently disabled button.
+    const cleared = try buildTree(arena, &model);
+    try testing.expect(findByText(cleared.root, .button, "Clear done") == null);
 }
 
 test "the inbox view lays out through the canvas engine" {

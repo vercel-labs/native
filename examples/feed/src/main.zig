@@ -360,10 +360,12 @@ pub fn view(ui: *FeedUi, model: *const Model) FeedUi.Node {
         // traffic lights via on_chrome, and matches its height to the
         // titlebar band so its controls and the lights share a
         // centerline.
+        // Band contents: one informative element — the load progress
+        // against the full corpus (the status bar reports the visible
+        // window, not the total) holds the trailing corner, and the rest
+        // of the band stays bare drag surface.
         ui.row(.{ .height = model.header_height, .padding = 12, .gap = 10, .cross = .center, .window_drag = true, .style_tokens = .{ .background = .surface }, .semantics = .{ .label = "Feed header" } }, .{
             ui.el(.stack, .{ .width = model.chrome_leading }, .{}),
-            ui.el(.badge, .{ .variant = .primary, .text = "Feed" }, .{}),
-            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Native SDK"),
             ui.spacer(1),
             ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, ui.fmt("{d} of {d} posts", .{ model.loaded, max_posts })),
         }),

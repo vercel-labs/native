@@ -5,7 +5,7 @@
 //! The app is one elm-style loop: `Model` -> `Msg` -> `update` -> `view`.
 //! Widget identity is structural (hashed ids), layout is flex, and events
 //! resolve to typed `Msg` values through the tree's handler table. The
-//! non-widget chrome (background, toolbar title, separators, hero gradient)
+//! non-widget chrome (background, toolbar wash, separators, hero gradient)
 //! is a display-list prefix built through the `UiApp` chrome hook, which the
 //! runtime preserves via `emitCanvasWidgetDisplayListWithChrome`. Design
 //! tokens derive from model-owned appearance state (`tokens_fn` +
@@ -39,7 +39,7 @@ const max_dashboard_pipelines: usize = 8;
 const max_dashboard_commands: usize = native_sdk.runtime.max_canvas_commands_per_view;
 const max_dashboard_glyphs: usize = native_sdk.runtime.max_canvas_glyphs_per_view;
 const max_dashboard_widgets: usize = 64;
-const dashboard_chrome_prefix_commands: usize = 6;
+const dashboard_chrome_prefix_commands: usize = 5;
 // 69 after the component control sweep: the switch track dropped its
 // default border stroke and the inactive tab segments dropped theirs
 // (selection reads by elevation now), while the search field's magnifier
@@ -49,8 +49,8 @@ const dashboard_chrome_prefix_commands: usize = 6;
 // UNSELECTED segmented control is transparent (its muted wash moved to
 // the tabs-list container), so the toolbar's mode trigger paints one
 // fewer fill.
-const expected_dashboard_command_count: usize = 72;
-const expected_dashboard_interaction_command_count: usize = 72;
+const expected_dashboard_command_count: usize = 71;
+const expected_dashboard_interaction_command_count: usize = 71;
 // Regenerated 2026-07-04: layout measures with the bundled face's real
 // advance table (estimator wave); spot-reviewed before/after — sub-pixel
 // text shifts only, no layout change.
@@ -72,7 +72,11 @@ const expected_dashboard_interaction_command_count: usize = 72;
 // rows paint one line and never elide, so the titles now budget for the
 // rail width with long-content headroom (enforced by the layout audit
 // sweep); reviewed via before/after reference captures.
-const expected_dashboard_reference_signature: u64 = 9741943004418608128;
+// Regenerated 2026-07-06 for the header register: the toolbar no longer
+// draws an app-name title in its chrome prefix (a window never labels
+// itself), so the prefix is one command shorter and the mode control
+// leads the band right after the window controls.
+const expected_dashboard_reference_signature: u64 = 14940616558550130966;
 const expected_dashboard_widget_node_count: usize = 48;
 const expected_dashboard_snapshot_widget_count: usize = 48;
 const refresh_command = "dashboard.refresh";
@@ -85,7 +89,6 @@ const dashboard_canvas_label = "dashboard-canvas";
 // (which are hashed widget ids multiplied into a distinct range).
 const dashboard_background_command_id: canvas.ObjectId = 1;
 const dashboard_toolbar_id: canvas.ObjectId = 80;
-const dashboard_toolbar_title_id: canvas.ObjectId = 81;
 const dashboard_toolbar_separator_id: canvas.ObjectId = 84;
 const dashboard_status_separator_id: canvas.ObjectId = 260;
 const dashboard_hero_command_id: canvas.ObjectId = 4;
@@ -123,9 +126,9 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .restore_state = false,
     // Tall hidden-inset titlebar (declared in app.zon too, which threads
     // it through the STARTUP window create): the toolbar IS the titlebar
-    // — the chrome title and the toolbar's leading reserve shift right by
-    // the live chrome inset, and the toolbar row is the window's drag
-    // surface.
+    // — its leading reserve shifts right by the live chrome inset so the
+    // mode control clears the traffic lights, and the toolbar row is the
+    // window's drag surface.
     .titlebar = .hidden_inset_tall,
     .views = &shell_views,
 }};
@@ -208,10 +211,9 @@ pub const Model = struct {
     confidence: f32 = 0.62,
     activity_scroll: f32 = 18,
     /// Chrome overlay geometry from `on_chrome` (tall hidden-inset
-    /// titlebar): the chrome title and the toolbar's leading reserve
-    /// shift right by this much so they clear the traffic lights. Zero
-    /// when no band overlays the content (fullscreen, standard chrome,
-    /// tests).
+    /// titlebar): the toolbar's leading reserve shifts right by this
+    /// much so its controls clear the traffic lights. Zero when no band
+    /// overlays the content (fullscreen, standard chrome, tests).
     chrome_leading: f32 = 0,
     color_scheme: native_sdk.ColorScheme = .light,
     reduce_motion: bool = false,
@@ -338,8 +340,10 @@ fn toolbarView(ui: *DashboardUi, model: *const Model) DashboardUi.Node {
     // window's drag surface, and its leading reserve grows by the live
     // chrome inset so the title and controls clear the traffic lights.
     return ui.row(.{ .height = toolbar_height, .padding = 10, .gap = 12, .cross = .center, .window_drag = true }, .{
-        // The chrome display list draws the "GPU Dashboard" title here.
-        ui.el(.stack, .{ .width = 228 + model.chrome_leading }, .{}),
+        // Band contents: only working controls — the leading reserve is
+        // exactly the live chrome inset, so the mode control sits right
+        // after the window controls.
+        ui.el(.stack, .{ .width = model.chrome_leading }, .{}),
         // A width FLOOR, not a fixed width: the control keeps its
         // designed 214pt at the shipped type scale and may only grow
         // when measured text runs longer (wider type, longer strings),
@@ -548,10 +552,11 @@ fn dashboardTokensFromModel(model: *const Model) canvas.DesignTokens {
     return dashboardWidgetTokensForSchemeScaleMotionAndContrast(model.color_scheme, 1, model.reduce_motion, model.high_contrast);
 }
 
-/// The non-widget chrome prefix (background, toolbar, title, separators,
+/// The non-widget chrome prefix (background, toolbar wash, separators,
 /// hero gradient) rebuilt with the widget display list on every rebuild.
 fn buildDashboardChrome(model: *const Model, builder: *canvas.Builder, size: geometry.SizeF, tokens: canvas.DesignTokens) anyerror!void {
-    try buildDashboardChromeForSizeWithInset(builder, tokens, size, model.chrome_leading);
+    _ = model;
+    try buildDashboardChromeForSize(builder, tokens, size);
 }
 
 /// CommandEvent is stringly by design; the shell command names map onto the
@@ -704,14 +709,10 @@ fn dashboardHeroRect(surface_size: geometry.SizeF) geometry.RectF {
 }
 
 /// The chrome display-list prefix: exactly
-/// `dashboard_chrome_prefix_commands` commands.
+/// `dashboard_chrome_prefix_commands` commands. No app-name title — a
+/// window never labels itself; the toolbar band carries only its
+/// working controls (widgets, not chrome).
 fn buildDashboardChromeForSize(builder: *canvas.Builder, tokens: canvas.DesignTokens, surface_size: geometry.SizeF) canvas.Error!void {
-    try buildDashboardChromeForSizeWithInset(builder, tokens, surface_size, 0);
-}
-
-/// `chrome_leading` shifts the toolbar title past the traffic lights on a
-/// hidden-inset titlebar; zero everywhere chrome does not overlay content.
-fn buildDashboardChromeForSizeWithInset(builder: *canvas.Builder, tokens: canvas.DesignTokens, surface_size: geometry.SizeF, chrome_leading: f32) canvas.Error!void {
     const size = dashboardSurfaceSize(surface_size);
     const backdrop_rect = dashboardBackdropRect(size);
     const hero_rect = dashboardHeroRect(size);
@@ -719,18 +720,6 @@ fn buildDashboardChromeForSizeWithInset(builder: *canvas.Builder, tokens: canvas
     const content_height = dashboardContentHeightForSize(size);
     try builder.fillRect(.{ .id = dashboard_background_command_id, .rect = backdrop_rect, .fill = .{ .color = tokens.colors.background } });
     try builder.fillRect(.{ .id = dashboard_toolbar_id, .rect = rect(0, 0, size.width, toolbar_height), .fill = .{ .color = tokens.colors.surface } });
-    try builder.drawText(.{
-        .id = dashboard_toolbar_title_id,
-        .font_id = tokens.typography.font_id,
-        .size = 16,
-        .origin = geometry.PointF.init(18 + chrome_leading, 33),
-        .color = tokens.colors.text,
-        .text = "GPU Dashboard",
-        .text_layout = .{
-            .max_width = 220,
-            .line_height = 20,
-        },
-    });
     try builder.fillRect(.{ .id = dashboard_toolbar_separator_id, .rect = rect(0, toolbar_height - 1, size.width, 1), .fill = .{ .color = tokens.colors.border } });
     try builder.fillRect(.{ .id = dashboard_status_separator_id, .rect = rect(0, content_y + content_height, size.width, 1), .fill = .{ .color = tokens.colors.border } });
     try builder.fillRoundedRect(.{ .id = dashboard_hero_command_id, .rect = hero_rect, .radius = canvas.Radius.all(16), .fill = .{ .linear_gradient = .{ .start = hero_rect.topLeft(), .end = hero_rect.bottomRight(), .stops = &hero_stops } } });
@@ -1076,9 +1065,10 @@ test "gpu dashboard flex layout keeps controls visually separated" {
     };
     for (ids) |id| try expectDashboardFrameVisible(layout, id, canvas_bounds);
 
-    // Toolbar controls clear the chrome title and each other.
+    // Toolbar controls sit inside the band (past its padding; the chrome
+    // reserve is zero without a live inset) and clear each other.
     const segmented_frame = try dashboardLayoutFrame(layout, segmented.id);
-    try std.testing.expect(segmented_frame.x >= 238);
+    try std.testing.expect(segmented_frame.x >= 10);
     try std.testing.expect(segmented_frame.maxY() <= toolbar_height + 0.001);
     try expectDashboardFramesDoNotOverlap(layout, segmented.id, refresh_button.id);
 
@@ -1849,13 +1839,13 @@ test "gpu dashboard app rebuilds retained scene for resized gpu surfaces" {
     try std.testing.expect(status_frame.y >= content_end);
 }
 
-test "chrome geometry shifts the toolbar title reserve past the traffic lights" {
+test "chrome geometry shifts the toolbar's leading reserve past the traffic lights" {
     var model = Model{};
     try std.testing.expectEqual(@as(f32, 0), model.chrome_leading);
 
-    // The tall hidden-inset band arrives through on_chrome: the chrome
-    // title and the toolbar's leading reserve shift right so they clear
-    // the traffic lights.
+    // The tall hidden-inset band arrives through on_chrome: the
+    // toolbar's leading reserve shifts right so its controls clear the
+    // traffic lights.
     const msg = dashboardChrome(.{
         .insets = .{ .top = 52, .left = 78 },
         .buttons = geometry.RectF.init(20, 19, 52, 14),

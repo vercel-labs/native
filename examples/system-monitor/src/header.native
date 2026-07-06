@@ -1,5 +1,6 @@
-<!-- The monitor header: brand and the live/paused status line, which
-     holds the trailing corner like an ops-room wall clock. Compiled at
+<!-- The monitor header: the live/paused sampling status line, which
+     holds the trailing corner like an ops-room wall clock — the band's
+     one informative element, the rest stays bare drag surface. Compiled at
      comptime (canvas.CompiledMarkupView) and composed under the Zig root
      view; the sampling toggle, search, and sort controls live in the Zig
      toolbar because they pair vector icons with press handlers. The app
@@ -12,7 +13,6 @@
        so its controls and the lights share a centerline. -->
   <row height="{header_height}" padding="12" gap="12" cross="center" background="surface" window-drag="true" label="Monitor header">
     <spacer width="{chrome_leading}" />
-    <badge variant="primary">System Monitor</badge>
     <spacer grow="1" />
     <text size="sm" foreground="text_muted" label="Sampling status">{headerStatus}</text>
   </row>

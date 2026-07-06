@@ -7,11 +7,16 @@
        window's drag surface, leads with a spacer sized to the traffic
        lights via on_chrome, and matches its height to the titlebar band
        so its controls and the lights share a centerline. -->
+  <!-- Band contents: Clear done holds the trailing corner only while
+       there is something to clear — availability is shown by presence,
+       not by a permanently dead button — and the rest of the band stays
+       bare drag surface. -->
   <row height="{header_height}" padding="12" gap="10" cross="center" background="surface" window-drag="true" label="Inbox header">
     <spacer width="{chrome_leading}" />
-    <badge variant="primary">Inbox</badge>
     <spacer grow="1" />
-    <button variant="ghost" disabled="{doneCount == 0}" on-press="clear_done">Clear done</button>
+    <if test="{doneCount}">
+      <button variant="ghost" on-press="clear_done">Clear done</button>
+    </if>
   </row>
   <separator />
   <column grow="1" gap="12" padding="16">

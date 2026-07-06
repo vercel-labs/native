@@ -8,17 +8,15 @@
          window's drag surface, leads with a spacer sized to the traffic
          lights via on_chrome, and matches its height to the titlebar
          band so its controls and the lights share a centerline. -->
+    <!-- Band contents: only working controls — search leads after the
+         window controls, the one primary action holds the trailing
+         corner, and the stretch between them stays bare drag surface. -->
     <row height="{header_height}" padding="12" gap="10" cross="center" background="surface" window-drag="true" label="Notes header">
       <spacer width="{chrome_leading}" />
-      <badge variant="primary">Notes</badge>
-      <!-- Width-constrained caption: one honest line, clipped if the
-           text ever outgrows the band, never a second line over the
-           header row. -->
-      <text size="sm" width="76" wrap="false" foreground="text_muted">Native SDK</text>
-      <spacer grow="1" />
       <!-- Clearing is the search field's own affordance: the built-in
            trailing x (and Escape) clear through the standard edit path. -->
       <search-field text="{search}" placeholder="Search all notes…" width="300" on-input="search_edit" label="Search notes" />
+      <spacer grow="1" />
       <button variant="primary" icon="plus" on-press="new_note">New note</button>
     </row>
     <separator />

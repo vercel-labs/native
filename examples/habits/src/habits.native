@@ -6,9 +6,10 @@
        window's drag surface, leads with a spacer sized to the traffic
        lights via on_chrome, and matches its height to the titlebar band
        so its controls and the lights share a centerline. -->
+  <!-- Band contents: the one primary action holds the trailing corner;
+       the rest of the band stays bare drag surface. -->
   <row height="{header_height}" padding="12" gap="10" cross="center" background="surface" window-drag="true" label="Habits header">
     <spacer width="{chrome_leading}" />
-    <badge variant="primary">Habits</badge>
     <spacer grow="1" />
     <button variant="primary" on-press="add">New habit</button>
   </row>

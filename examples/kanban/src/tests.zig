@@ -173,7 +173,6 @@ const legacy_board_markup =
     \\<column background="background">
     \\  <row height="{header_height}" padding="12" gap="10" cross="center" background="surface" window-drag="true" label="Kanban header">
     \\    <spacer width="{chrome_leading}" />
-    \\    <badge variant="primary">Kanban</badge>
     \\    <spacer grow="1" />
     \\    <button variant="primary" on-press="add">Add card</button>
     \\  </row>

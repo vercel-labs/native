@@ -16,12 +16,6 @@ interface ShowcaseApp {
   /** Dark-only apps ship one capture that shows in both site themes. */
   darkOnly?: boolean;
   /**
-   * Apps with no OS titlebar (hidden-inset windows) get no invented window
-   * frame: their capture sits on the page background as its own silhouette.
-   * Apps that run in real titled windows keep the frame device.
-   */
-  chromeless?: boolean;
-  /**
    * Multi-window apps (deck) present their fixed-size windows stacked at
    * natural scale instead of one edge-to-edge capture.
    */
@@ -40,7 +34,6 @@ const apps: ShowcaseApp[] = [
     facts: [{ label: "Binary", value: "3.5 MB" }],
     width: 2400,
     height: 1520,
-    chromeless: true,
   },
   {
     id: "soundboard",
@@ -62,7 +55,6 @@ const apps: ShowcaseApp[] = [
     width: 920,
     height: 360,
     darkOnly: true,
-    chromeless: true,
     stack: [
       {
         src: "/home/deck-dark.webp",
@@ -122,7 +114,6 @@ const apps: ShowcaseApp[] = [
     width: 640,
     height: 980,
     portrait: true,
-    chromeless: true,
   },
 ];
 
@@ -157,9 +148,10 @@ export function Showcase() {
       {/* Screenshot: the light and dark captures are the same app state
           rendered per scheme; the site theme picks which one shows.
           Dark-only apps (deck) ship a single capture for both themes.
-          The window frame device only wraps apps that run in real titled
-          windows; chromeless apps present their own silhouette on the
-          page background — no invented chrome. */}
+          Every showcase window owns its own chrome (hidden-inset header
+          bands or fixed chromeless chassis), so no capture gets an
+          invented window frame — each sits on the page background as its
+          own silhouette. */}
       {active.stack ? (
         // Chromeless fixed-size windows at natural scale on the page
         // background — never framed, never stretched to fill a tile.
@@ -177,10 +169,10 @@ export function Showcase() {
             />
           ))}
         </div>
-      ) : active.chromeless ? (
-        // Chromeless single window: the app's own silhouette — rounded
-        // corners and a shadow, like the real window on a desktop, but no
-        // invented titlebar.
+      ) : (
+        // Single window: the app's own silhouette — rounded corners and
+        // a shadow, like the real window on a desktop, no invented
+        // titlebar.
         <div className="mt-6 flex justify-center py-4">
           {(active.darkOnly ? (["dark"] as const) : (["light", "dark"] as const)).map((scheme) => (
             <Image
@@ -198,35 +190,6 @@ export function Showcase() {
               } ${active.darkOnly ? "" : scheme === "light" ? "dark:hidden" : "hidden dark:block"}`}
             />
           ))}
-        </div>
-      ) : (
-        <div className="mt-6 overflow-hidden rounded-md border border-gray-alpha-400 bg-background-200 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.18)] dark:bg-gray-alpha-100 dark:shadow-[0_24px_48px_-24px_rgba(0,0,0,0.7)]">
-          <div className="flex items-center gap-1.5 border-b border-gray-alpha-400 px-4 py-2.5">
-            <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
-            <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
-            <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
-            <span className="ml-3 font-mono label-12 text-gray-900">
-              examples/{active.id}
-            </span>
-          </div>
-          <div className={`relative ${active.portrait ? "flex justify-center bg-gray-100 py-8" : ""}`}>
-            {(active.darkOnly ? (["dark"] as const) : (["light", "dark"] as const)).map((scheme) => (
-              <Image
-                key={`${active.id}-${scheme}`}
-                src={`/home/${active.id}-${scheme}.webp`}
-                alt={`The ${active.name} example app rendered by the Native SDK engine ${
-                  active.darkOnly ? "(dark by design)" : `(${scheme} theme)`
-                }`}
-                width={active.width}
-                height={active.height}
-                quality={90}
-                loading="eager"
-                className={`h-auto ${active.portrait ? "w-full max-w-[440px] rounded-md border border-gray-alpha-400 shadow-modal" : "w-full"} ${
-                  active.darkOnly ? "" : scheme === "light" ? "dark:hidden" : "hidden dark:block"
-                }`}
-              />
-            ))}
-          </div>
         </div>
       )}
 
