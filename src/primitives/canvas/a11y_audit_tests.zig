@@ -164,6 +164,32 @@ test "content below a scroll viewport's fold is reachable by design: no finding"
     try std.testing.expectEqual(@as(usize, 0), issues.total);
 }
 
+test "below-the-fold scroll content stays reachable through OUTER clip scopes" {
+    var nodes: [32]canvas.WidgetLayoutNode = undefined;
+    var storage: [8]a11y_audit.A11yAuditFinding = undefined;
+
+    // The scroll region sits inside a clipping pane column. Rows below
+    // the fold live at layout-space content offsets past BOTH frames —
+    // scrolling carries them into the pane's band, so the outer clip
+    // must not re-flag what the scroll scope already forgave. A row
+    // past the pane's RIGHT edge stays a finding (scrolling is
+    // vertical; nothing ever brings it into view).
+    var pane_layout = canvas.WidgetLayoutStyle{};
+    pane_layout.clip_content = true;
+    const root = Widget{ .kind = .column, .id = 1, .layout = pane_layout, .frame = geometry.RectF.init(0, 0, 400, 100), .children = &.{
+        .{ .kind = .scroll_view, .id = 2, .frame = geometry.RectF.init(0, 0, 400, 80), .children = &.{
+            .{ .kind = .column, .children = &.{
+                .{ .kind = .button, .id = 3, .text = "Visible", .frame = geometry.RectF.init(0, 0, 380, 60) },
+                .{ .kind = .button, .id = 4, .text = "Past the pane's fold", .frame = geometry.RectF.init(0, 150, 380, 60) },
+                .{ .kind = .button, .id = 5, .text = "Past the pane's edge", .frame = geometry.RectF.init(500, 150, 80, 30) },
+            } },
+        } },
+    } };
+    const issues = try auditTree(root, window, &nodes, &storage);
+    try std.testing.expectEqual(@as(usize, 1), issues.total);
+    try std.testing.expectEqual(a11y_audit.A11yAuditRuleKind.focus_unreachable, issues.findings[0].rule);
+}
+
 test "the formatter names the path, the role, and the fix" {
     var nodes: [16]canvas.WidgetLayoutNode = undefined;
     var storage: [8]a11y_audit.A11yAuditFinding = undefined;

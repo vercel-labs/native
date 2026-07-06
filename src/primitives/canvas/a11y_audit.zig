@@ -221,6 +221,14 @@ fn auditFocusReachable(layout: WidgetLayoutTree, node_index: usize, sink: *Findi
 
     const frame = node.frame.normalized();
     var current = node_index;
+    // Once the walk crosses a vertically scrolling scope, the widget's
+    // layout-space y is scroll content, not screen geometry: scrolling
+    // carries it into every OUTER scope's band, so only horizontal
+    // full-clips count from there up (below-the-fold rows in a long
+    // scroll region — windowed virtual lists included — are reachable
+    // by design; a pane column clipping the scroll's frame must not
+    // re-flag them).
+    var scrolls_vertically = false;
     while (true) {
         // Anchored floating widgets escape every ancestor clip (the
         // routing layer keeps focus targets inside open overlays live).
@@ -231,12 +239,14 @@ fn auditFocusReachable(layout: WidgetLayoutTree, node_index: usize, sink: *Findi
             const scope = parent.frame.normalized();
             const outside_x = frame.maxX() <= scope.x or frame.x >= scope.maxX();
             const outside_y = frame.maxY() <= scope.y or frame.y >= scope.maxY();
-            const unreachable_here = if (scopeScrollsVertically(parent.widget)) outside_x else (outside_x or outside_y);
+            const vertical_scroll_scope = scrolls_vertically or scopeScrollsVertically(parent.widget);
+            const unreachable_here = if (vertical_scroll_scope) outside_x else (outside_x or outside_y);
             if (unreachable_here) {
                 sink.append(.{ .rule = .focus_unreachable, .node_index = node_index, .other_index = parent_index });
                 return;
             }
         }
+        if (scopeScrollsVertically(parent.widget)) scrolls_vertically = true;
         current = parent_index;
     }
 }
