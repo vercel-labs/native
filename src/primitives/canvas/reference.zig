@@ -50,6 +50,7 @@ const reference_glyph_path_capacity: usize = 256;
 const referenceBlurKernel = reference_blur.referenceBlurKernel;
 const referenceBlurSampleWithKernel = reference_blur.referenceBlurSampleWithKernel;
 const referenceBlurSample = reference_blur.referenceBlurSample;
+pub const ReferenceRenderMemo = @import("reference_memo.zig").ReferenceRenderMemo;
 const referenceDistanceToSegment = reference_paths.referenceDistanceToSegment;
 
 const max_reference_text_layout_lines: usize = 64;
@@ -78,6 +79,13 @@ pub const ReferenceRenderSurface = struct {
     scratch: ?[]u8 = null,
     images: []const ReferenceImage = &.{},
     fonts: []const ReferenceFont = &.{},
+    /// Optional memo for large per-pixel commands (see
+    /// `ReferenceRenderMemo`): when present, a heavyweight command
+    /// (backdrop blur, drop shadow, big fills) whose inputs are
+    /// byte-identical to a previous render replays its stored output
+    /// instead of re-running its pixel loop. Same bytes either way —
+    /// this only moves time.
+    render_memo: ?*ReferenceRenderMemo = null,
 
     pub fn init(width: usize, height: usize, pixels: []u8) Error!ReferenceRenderSurface {
         const len = std.math.mul(usize, std.math.mul(usize, width, height) catch return error.ReferenceRenderSurfaceTooSmall, 4) catch return error.ReferenceRenderSurfaceTooSmall;
@@ -108,6 +116,84 @@ pub const ReferenceRenderSurface = struct {
         var next = self;
         next.fonts = fonts;
         return next;
+    }
+
+    /// Attach a render memo that outlives this render pass (one per
+    /// live scene). Purely an optimization: output bytes are identical
+    /// with or without it.
+    pub fn withRenderMemo(self: ReferenceRenderSurface, memo: ?*ReferenceRenderMemo) ReferenceRenderSurface {
+        var next = self;
+        next.render_memo = memo;
+        return next;
+    }
+
+    /// A memo lookup in flight for one command: the memo to store into
+    /// and the fully built key. Null everywhere a memo doesn't apply
+    /// (no memo attached, or the rect is too small to be worth a hash).
+    const MemoProbe = struct {
+        memo: *ReferenceRenderMemo,
+        key: ReferenceRenderMemo.Key,
+    };
+
+    /// Build the memo key for a per-pixel command about to run.
+    /// `params_hash` must cover every command parameter the pixel loop
+    /// reads (see `referenceMemoParamsHash`); `apron_rows` is how far
+    /// beyond its rect the command reads destination pixels (the blur's
+    /// kernel radius; zero for single-pixel blends). Must be called
+    /// BEFORE the command writes any pixels — the key hashes the
+    /// destination bytes as the command will read them.
+    fn memoProbe(self: ReferenceRenderSurface, pixel_rect: ReferencePixelRect, apron_rows: usize, params_hash: u64) ?MemoProbe {
+        const memo = self.render_memo orelse return null;
+        if (pixel_rect.width * pixel_rect.height < memo.min_pixels) return null;
+        return .{
+            .memo = memo,
+            .key = ReferenceRenderMemo.keyFor(
+                self.pixels,
+                self.width,
+                self.height,
+                pixel_rect.x,
+                pixel_rect.y,
+                pixel_rect.width,
+                pixel_rect.height,
+                apron_rows,
+                params_hash,
+            ),
+        };
+    }
+
+    /// Replay a memoized command's output rows into the framebuffer.
+    /// True on a hit (the command is done); false means render normally
+    /// and offer the result to `memoStore`.
+    fn memoReplay(self: ReferenceRenderSurface, probe: ?MemoProbe, pixel_rect: ReferencePixelRect) bool {
+        const p = probe orelse return false;
+        const cached = p.memo.find(p.key) orelse return false;
+        var row: usize = 0;
+        while (row < pixel_rect.height) : (row += 1) {
+            const src_offset = row * pixel_rect.width * 4;
+            const dst_offset = ((pixel_rect.y + row) * self.width + pixel_rect.x) * 4;
+            @memcpy(
+                self.pixels[dst_offset .. dst_offset + pixel_rect.width * 4],
+                cached[src_offset .. src_offset + pixel_rect.width * 4],
+            );
+        }
+        return true;
+    }
+
+    /// Remember a freshly rendered command's output rows for the next
+    /// frame. Storage failure just means the next identical run
+    /// recomputes.
+    fn memoStore(self: ReferenceRenderSurface, probe: ?MemoProbe, pixel_rect: ReferencePixelRect) void {
+        const p = probe orelse return;
+        const buffer = p.memo.store(p.key) orelse return;
+        var row: usize = 0;
+        while (row < pixel_rect.height) : (row += 1) {
+            const dst_offset = row * pixel_rect.width * 4;
+            const src_offset = ((pixel_rect.y + row) * self.width + pixel_rect.x) * 4;
+            @memcpy(
+                buffer[dst_offset .. dst_offset + pixel_rect.width * 4],
+                self.pixels[src_offset .. src_offset + pixel_rect.width * 4],
+            );
+        }
     }
 
     pub fn clear(self: ReferenceRenderSurface, color: Color) void {
@@ -178,6 +264,11 @@ pub const ReferenceRenderSurface = struct {
 
     fn fillRect(self: ReferenceRenderSurface, command: RenderCommand, value: FillRect, draw_bounds: geometry.RectF) Error!void {
         const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return;
+        // Render memo: a large translucent fill (the modal scrim's wash
+        // covers the whole viewport) blends every pixel; it reads only
+        // the pixel it writes, so no apron rows join the key.
+        const probe = self.memoProbe(pixel_rect, 0, referenceMemoParamsHash(1, command, value));
+        if (self.memoReplay(probe, pixel_rect)) return;
         var y = pixel_rect.y;
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
@@ -186,12 +277,18 @@ pub const ReferenceRenderSurface = struct {
                 self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.fill, command.transform, point), command.opacity);
             }
         }
+        self.memoStore(probe, pixel_rect);
     }
 
     fn fillRoundedRect(self: ReferenceRenderSurface, command: RenderCommand, value: FillRoundedRect, draw_bounds: geometry.RectF) Error!void {
         const rect = command.transform.transformRect(value.rect).normalized();
         const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return;
         const radius = referenceScaleRadius(value.radius, command.transform);
+        // Render memo: a large rounded fill (a dialog surface) tests the
+        // corner mask per pixel; it reads only the pixel it blends into,
+        // so no apron rows join the key.
+        const probe = self.memoProbe(pixel_rect, 0, referenceMemoParamsHash(2, command, value));
+        if (self.memoReplay(probe, pixel_rect)) return;
         var y = pixel_rect.y;
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
@@ -200,6 +297,7 @@ pub const ReferenceRenderSurface = struct {
                 if (referencePointInRoundedRect(point, rect, radius)) self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.fill, command.transform, point), command.opacity);
             }
         }
+        self.memoStore(probe, pixel_rect);
     }
 
     fn strokeRect(self: ReferenceRenderSurface, command: RenderCommand, value: StrokeRect, draw_bounds: geometry.RectF) Error!void {
@@ -213,6 +311,12 @@ pub const ReferenceRenderSurface = struct {
         const outer_radius = referenceOutsetRadius(radius, half_width);
         const inner_radius = referenceInsetRadius(radius, half_width);
         const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return;
+        // Render memo: a rounded border's pixel rect spans the WHOLE
+        // stroked rect (a dialog outline covers the dialog), and every
+        // pixel tests two corner masks. It reads only the pixel it
+        // blends into, so no apron rows join the key.
+        const probe = self.memoProbe(pixel_rect, 0, referenceMemoParamsHash(5, command, value));
+        if (self.memoReplay(probe, pixel_rect)) return;
         var y = pixel_rect.y;
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
@@ -223,6 +327,7 @@ pub const ReferenceRenderSurface = struct {
                 }
             }
         }
+        self.memoStore(probe, pixel_rect);
     }
 
     fn drawLine(self: ReferenceRenderSurface, command: RenderCommand, value: Line, draw_bounds: geometry.RectF) Error!void {
@@ -347,6 +452,12 @@ pub const ReferenceRenderSurface = struct {
         const shadow_radius = referenceScaleRadius(referenceSpreadRadius(value.radius, value.spread), command.transform);
         const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return;
 
+        // Render memo: the shadow evaluates a rounded-rect distance
+        // field per pixel over its whole halo. It reads only the pixel
+        // it blends into, so no apron rows join the key.
+        const probe = self.memoProbe(pixel_rect, 0, referenceMemoParamsHash(3, command, value));
+        if (self.memoReplay(probe, pixel_rect)) return;
+
         var y = pixel_rect.y;
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
@@ -357,6 +468,8 @@ pub const ReferenceRenderSurface = struct {
                 if (alpha > 0) self.blendPixel(@intCast(x), @intCast(y), referenceScaleColorAlpha(value.color, alpha), command.opacity);
             }
         }
+
+        self.memoStore(probe, pixel_rect);
     }
 
     fn drawBlur(self: ReferenceRenderSurface, command: RenderCommand, value: Blur, draw_bounds: geometry.RectF) Error!void {
@@ -364,9 +477,19 @@ pub const ReferenceRenderSurface = struct {
         const radius = nonNegative(value.radius) * referenceTransformScale(command.transform);
         if (radius <= 0) return;
 
-        @memcpy(scratch[0..self.pixels.len], self.pixels);
         const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return;
         const kernel_radius: i64 = @intCast(@max(1, referenceCeil(radius)));
+
+        // Render memo: the blur is the renderer's most expensive command
+        // — an O(kernel²) Gaussian gather per output pixel over what is
+        // usually the whole viewport (the modal scrim). Its inputs are
+        // the source rows within a kernel-radius apron of the rect (the
+        // mix's destination pixels lie inside that region too), so the
+        // apron rows join the key.
+        const probe = self.memoProbe(pixel_rect, @intCast(kernel_radius), referenceMemoParamsHash(4, command, value));
+        if (self.memoReplay(probe, pixel_rect)) return;
+
+        @memcpy(scratch[0..self.pixels.len], self.pixels);
         const kernel_width: usize = @intCast(kernel_radius * 2 + 1);
         const kernel_sample_count = kernel_width * kernel_width;
         var kernel_storage: [max_reference_blur_kernel_samples]f32 = undefined;
@@ -398,6 +521,8 @@ pub const ReferenceRenderSurface = struct {
                 self.pixels[index + 3] = out[3];
             }
         }
+
+        self.memoStore(probe, pixel_rect);
     }
 
     fn drawText(self: ReferenceRenderSurface, command: RenderCommand, value: DrawText, draw_bounds: geometry.RectF) Error!void {
@@ -647,6 +772,70 @@ const ReferencePixelRect = struct {
     width: usize = 0,
     height: usize = 0,
 };
+
+/// Hash a command's parameters for the render memo key: the kind tag
+/// keeps different command types with coincidentally equal fields apart,
+/// and `command.opacity` + `command.transform` join the value struct
+/// because the pixel loops read all three. Clip needs no hashing — the
+/// planner folds it into `command.bounds`, which reaches the key through
+/// the pixel rect.
+fn referenceMemoParamsHash(kind: u8, command: RenderCommand, value: anytype) u64 {
+    var hasher = std.hash.Wyhash.init(0x9e37_79b9);
+    referenceMemoHashValue(&hasher, kind);
+    referenceMemoHashValue(&hasher, command.opacity);
+    referenceMemoHashValue(&hasher, command.transform);
+    referenceMemoHashValue(&hasher, value);
+    return hasher.final();
+}
+
+/// Recursively hash a plain value BIT-EXACTLY: floats hash their bit
+/// patterns (so -0.0 and 0.0, or two NaNs, are distinct keys — stricter
+/// than `==`, which can only cause a spurious miss, never a wrong hit).
+/// Supports exactly the shapes command values are built from; anything
+/// else is a compile error so a new field can't silently escape the key.
+fn referenceMemoHashValue(hasher: *std.hash.Wyhash, value: anytype) void {
+    const T = @TypeOf(value);
+    switch (@typeInfo(T)) {
+        .float => {
+            const Bits = std.meta.Int(.unsigned, @bitSizeOf(T));
+            const bits: Bits = @bitCast(value);
+            hasher.update(std.mem.asBytes(&bits));
+        },
+        .int => hasher.update(std.mem.asBytes(&value)),
+        .bool => hasher.update(&[1]u8{@intFromBool(value)}),
+        .@"enum" => referenceMemoHashValue(hasher, @intFromEnum(value)),
+        .optional => {
+            if (value) |inner| {
+                hasher.update(&[1]u8{1});
+                referenceMemoHashValue(hasher, inner);
+            } else {
+                hasher.update(&[1]u8{0});
+            }
+        },
+        .@"struct" => |info| {
+            inline for (info.fields) |field| referenceMemoHashValue(hasher, @field(value, field.name));
+        },
+        .@"union" => {
+            switch (value) {
+                inline else => |inner, tag| {
+                    referenceMemoHashValue(hasher, @intFromEnum(tag));
+                    referenceMemoHashValue(hasher, inner);
+                },
+            }
+        },
+        .pointer => |info| {
+            // Slices of plain items (a gradient's stops). Length first so
+            // concatenations can't collide.
+            comptime std.debug.assert(info.size == .slice);
+            referenceMemoHashValue(hasher, value.len);
+            for (value) |item| referenceMemoHashValue(hasher, item);
+        },
+        .array => {
+            for (value) |item| referenceMemoHashValue(hasher, item);
+        },
+        else => @compileError("unsupported memo param type " ++ @typeName(T)),
+    }
+}
 
 fn referenceCommandBounds(command: RenderCommand, scissor: ?geometry.RectF) ?geometry.RectF {
     var bounds = command.bounds.normalized();

@@ -270,6 +270,7 @@ pub const renderCommandIntersectsDirtyBounds = gpu_model.renderCommandIntersects
 pub const ReferenceImage = reference_model.ReferenceImage;
 pub const ReferenceFont = reference_model.ReferenceFont;
 pub const ReferenceRenderSurface = reference_model.ReferenceRenderSurface;
+pub const ReferenceRenderMemo = reference_model.ReferenceRenderMemo;
 
 // Deterministic CPU path rasterizer (bezier flattening, scanline AA fill,
 // stroke-to-outline) lives in `vector.zig`; it serves the reference

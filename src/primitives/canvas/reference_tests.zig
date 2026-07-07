@@ -936,6 +936,112 @@ test "reference renderer blurs with caller scratch storage" {
     try expectPixelRgba8(.{ 0, 0, 159, 255 }, surface, 2, 0);
 }
 
+test "reference renderer render memo replays byte-identical pixels" {
+    // The render memo is pure memoization: a render with a cold memo, a
+    // render that HITS the memo, and a render with no memo at all must
+    // produce the same bytes — determinism is the law, the memo only
+    // moves time. A content change under the memoized layers must miss
+    // and land on the unmemoized bytes for the NEW content. The scene
+    // carries every memoized command kind: a base fill, a backdrop blur,
+    // a translucent wash fill, a drop shadow, and a rounded surface fill
+    // (the modal-dialog stack in miniature).
+    const Frame = struct {
+        commands: [5]CanvasCommand,
+        render_commands: [5]RenderCommand,
+        render_batches: [5]RenderBatch,
+        resources: [8]RenderResource,
+        resource_cache_entries: [8]RenderResourceCacheEntry,
+        resource_cache_actions: [8]RenderResourceCacheAction,
+        glyphs: [0]GlyphAtlasEntry,
+        changes: [0]DiffChange,
+
+        fn render(self: *@This(), base: Color, pixels: []u8, scratch: []u8, memo: ?*canvas.ReferenceRenderMemo) !void {
+            self.commands = .{
+                .{ .fill_rect = .{
+                    .id = 1,
+                    .rect = geometry.RectF.init(0, 0, 8, 8),
+                    .fill = .{ .color = base },
+                } },
+                .{ .blur = .{
+                    .id = 2,
+                    .rect = geometry.RectF.init(0, 0, 8, 8),
+                    .radius = 1,
+                } },
+                .{ .fill_rect = .{
+                    .id = 3,
+                    .rect = geometry.RectF.init(0, 0, 8, 8),
+                    .fill = .{ .color = Color.rgba8(0, 0, 0, 26) },
+                } },
+                .{ .shadow = .{
+                    .id = 4,
+                    .rect = geometry.RectF.init(2, 2, 4, 4),
+                    .blur = 2,
+                    .color = Color.rgba8(0, 0, 0, 128),
+                } },
+                .{ .fill_rounded_rect = .{
+                    .id = 5,
+                    .rect = geometry.RectF.init(2, 2, 4, 4),
+                    .radius = Radius.all(1),
+                    .fill = .{ .color = Color.rgb8(240, 240, 240) },
+                } },
+            };
+            const frame = try (DisplayList{ .commands = &self.commands }).framePlan(null, .{
+                .surface_size = geometry.SizeF.init(8, 8),
+            }, .{
+                .render_commands = &self.render_commands,
+                .render_batches = &self.render_batches,
+                .resources = &self.resources,
+                .resource_cache_entries = &self.resource_cache_entries,
+                .resource_cache_actions = &self.resource_cache_actions,
+                .glyph_atlas_entries = &self.glyphs,
+                .changes = &self.changes,
+            });
+            const surface = (try ReferenceRenderSurface.initWithScratch(8, 8, pixels, scratch)).withRenderMemo(memo);
+            try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
+        }
+    };
+    var frame: Frame = undefined;
+
+    var memo = canvas.ReferenceRenderMemo.init(std.testing.allocator);
+    defer memo.deinit();
+    // The production threshold skips small rects; the test surface is
+    // tiny, so memoize everything to exercise all four command kinds.
+    memo.min_pixels = 0;
+
+    var baseline: [8 * 8 * 4]u8 = undefined;
+    var pixels: [8 * 8 * 4]u8 = undefined;
+    var scratch: [8 * 8 * 4]u8 = undefined;
+
+    const red = Color.rgb8(255, 0, 0);
+    try frame.render(red, &baseline, &scratch, null);
+
+    // Cold memo: all five commands miss and compute — same bytes as
+    // unmemoized.
+    try frame.render(red, &pixels, &scratch, &memo);
+    try std.testing.expectEqual(@as(u64, 0), memo.hits);
+    try std.testing.expectEqual(@as(u64, 5), memo.misses);
+    try std.testing.expectEqualSlices(u8, &baseline, &pixels);
+
+    // Warm memo: every command hits — replayed bytes must be identical
+    // too.
+    try frame.render(red, &pixels, &scratch, &memo);
+    try std.testing.expectEqual(@as(u64, 5), memo.hits);
+    try std.testing.expectEqual(@as(u64, 5), memo.misses);
+    try std.testing.expectEqualSlices(u8, &baseline, &pixels);
+
+    // Changed content at the bottom of the stack: every layer above it
+    // reads different source bytes, so all five must MISS (stale pixels
+    // would be wrong) and match the unmemoized render of the new
+    // content.
+    const green = Color.rgb8(0, 255, 0);
+    var changed_baseline: [8 * 8 * 4]u8 = undefined;
+    try frame.render(green, &changed_baseline, &scratch, null);
+    try frame.render(green, &pixels, &scratch, &memo);
+    try std.testing.expectEqual(@as(u64, 5), memo.hits);
+    try std.testing.expectEqual(@as(u64, 10), memo.misses);
+    try std.testing.expectEqualSlices(u8, &changed_baseline, &pixels);
+}
+
 test "reference renderer blurs transparent colors without dark fringes" {
     const commands = [_]CanvasCommand{
         .{ .fill_rect = .{

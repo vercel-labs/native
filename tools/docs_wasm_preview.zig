@@ -82,6 +82,16 @@ const Preview = struct {
     /// delta consumers (the resizable's edge drag) read
     /// `input_event.delta_x`, never re-deriving it from positions.
     last_pointer: ?geometry.PointF = null,
+    /// Memoized heavyweight render commands across frames: the modal
+    /// scrim's full-viewport Gaussian blur alone dominated whole frames
+    /// in the CPU reference renderer (hundreds of milliseconds at 2x
+    /// DPR), with the surface drop shadow and the scrim wash close
+    /// behind — yet the content UNDER those layers rarely changes
+    /// between repaints (typing in a dialog, hover, and the caret blink
+    /// all repaint content ABOVE the scrim). The memo keys on the exact
+    /// source bytes each command reads, so a hit replays byte-identical
+    /// pixels: determinism holds, only the time moves.
+    render_memo: canvas.ReferenceRenderMemo,
     /// Revision of the view's retained display list at the last render,
     /// so `preview_render` can report "clean" without touching pixels.
     rendered_revision: u64 = std.math.maxInt(u64),
@@ -229,12 +239,14 @@ export fn preview_create(name_ptr: ?[*]const u8, name_len: usize, dark: u32) ?*P
     self.pack = .house;
     self.frame_index = 0;
     self.last_pointer = null;
+    self.render_memo = canvas.ReferenceRenderMemo.init(allocator);
     self.rendered_revision = std.math.maxInt(u64);
     self.rendered_scale_bits = 0;
     self.rendered_animating = false;
     native_sdk.Runtime.initAt(&self.runtime, .{ .platform = self.null_platform.platform() });
 
     installScene(self) catch {
+        self.render_memo.deinit();
         self.arenas[0].deinit();
         self.arenas[1].deinit();
         allocator.destroy(self);
@@ -283,6 +295,7 @@ fn rebuildScene(self: *Preview) !void {
 
 export fn preview_destroy(self: ?*Preview) void {
     const p = self orelse return;
+    p.render_memo.deinit();
     p.arenas[0].deinit();
     p.arenas[1].deinit();
     allocator.destroy(p);
@@ -549,12 +562,13 @@ export fn preview_render(
     const settling = !animating and p.rendered_animating;
     if (!animating and !settling and revision == p.rendered_revision and scale_bits == p.rendered_scale_bits) return 0;
 
-    _ = p.runtime.renderCanvasScreenshot(
+    _ = p.runtime.renderCanvasScreenshotWithMemo(
         1,
         view_label,
         renderScale(scale),
         pixels[0..pixels_len],
         scratch[0..scratch_len],
+        &p.render_memo,
     ) catch return -2;
     p.rendered_revision = revision;
     p.rendered_scale_bits = scale_bits;

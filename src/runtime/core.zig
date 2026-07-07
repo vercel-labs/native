@@ -609,6 +609,7 @@ pub const Runtime = struct {
     pub const presentCanvasFramePixels = CanvasFrameMethods.presentCanvasFramePixels;
     pub const presentNextCanvasFramePixels = CanvasFrameMethods.presentNextCanvasFramePixels;
     pub const renderCanvasScreenshot = CanvasFrameMethods.renderCanvasScreenshot;
+    pub const renderCanvasScreenshotWithMemo = CanvasFrameMethods.renderCanvasScreenshotWithMemo;
     pub const canvasScreenshotPixelSize = CanvasFrameMethods.canvasScreenshotPixelSize;
     const planCanvasFrameForView = CanvasFrameMethods.planCanvasFrameForView;
     pub const canvasFrameScratchStorage = CanvasFrameMethods.canvasFrameScratchStorage;

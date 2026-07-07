@@ -727,6 +727,25 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             pixels: []u8,
             scratch: []u8,
         ) anyerror!CanvasScreenshot {
+            return renderCanvasScreenshotWithMemo(self, window_id, label, scale, pixels, scratch, null);
+        }
+
+        /// `renderCanvasScreenshot` with a caller-owned render memo for
+        /// hosts that re-render the same retained scene every frame (the
+        /// docs live previews): heavyweight per-pixel commands (backdrop
+        /// blur, drop shadow, big fills) whose inputs are byte-identical
+        /// to the previous render replay their stored pixels instead of
+        /// re-running their loops. Output bytes are identical with or
+        /// without the memo — it only moves time, never pixels.
+        pub fn renderCanvasScreenshotWithMemo(
+            self: *Runtime,
+            window_id: platform.WindowId,
+            label: []const u8,
+            scale: ?f32,
+            pixels: []u8,
+            scratch: []u8,
+            render_memo: ?*canvas.ReferenceRenderMemo,
+        ) anyerror!CanvasScreenshot {
             try validateRuntimeViewParent(self, window_id);
             try validateViewLabel(label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
@@ -744,7 +763,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 try canvas.ReferenceRenderSurface.initWithScratch(pixel_size.width, pixel_size.height, pixels, scratch)
             else
                 try canvas.ReferenceRenderSurface.init(pixel_size.width, pixel_size.height, pixels);
-            surface = surface.withImages(canvas_frame.image_resources).withFonts(canvas_frame.font_resources);
+            surface = surface.withImages(canvas_frame.image_resources).withFonts(canvas_frame.font_resources).withRenderMemo(render_memo);
             try surface.renderPass(canvas_frame.renderPass(), self.views[index].canvas_clear_color);
             return .{
                 .width = pixel_size.width,
