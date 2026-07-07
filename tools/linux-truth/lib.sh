@@ -4,16 +4,17 @@
 # INSIDE the container (see Dockerfile), never on the host.
 #
 # Transport: the app (built with -Dautomation=true) publishes
-# .zig-cache/native-sdk-automation/snapshot.txt and consumes a
-# single-slot command.txt (rewritten to "done" once consumed). Commands
-# must therefore be paced: send one, wait for "done", then send the next.
+# .zig-cache/native-sdk-automation/snapshot.txt and consumes a bounded
+# queue of command-<n>.txt entries, oldest first, DELETING each entry as
+# its consumption ack. The CLI already waits for its own entry's
+# deletion before exiting; wait_done below is the belt-and-braces check
+# that the whole queue drained.
 
 CLI=/work/zig-out/bin/native
 # :77 avoids colliding with any xvfb-run-owned :99 from ad-hoc runs.
 DISPLAY_NUM=:77
 AUTOMATION_DIR=.zig-cache/native-sdk-automation
 SNAP="$AUTOMATION_DIR/snapshot.txt"
-CMD="$AUTOMATION_DIR/command.txt"
 
 # One shared Xvfb with access control off so xwd can capture the root
 # window without the per-run cookie dance xvfb-run would require.
@@ -58,13 +59,15 @@ stop_app() {
   APP_PID=""
 }
 
-# Pacing: block until the app has consumed the last queued command.
+# Pacing: block until the app has consumed every queued command (the
+# app deletes each command-<n>.txt entry as it consumes it, so an empty
+# queue means everything dispatched).
 wait_done() {
   for _ in $(seq 1 200); do
-    [ "$(cat "$CMD" 2>/dev/null)" = "done" ] && return 0
+    if ! ls "$AUTOMATION_DIR"/command-*.txt >/dev/null 2>&1; then return 0; fi
     sleep 0.05
   done
-  echo "WARN: command not consumed within 10s"
+  echo "WARN: command queue not drained within 10s"
   return 1
 }
 

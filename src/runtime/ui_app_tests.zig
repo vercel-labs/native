@@ -2044,7 +2044,7 @@ test "a stale automation widget click degrades instead of killing the frame call
     defer cwd.deleteTree(io, directory) catch {};
     harness.runtime.options.automation = automation.Server.init(io, directory, "Degrade");
     var command_path_buffer: [128]u8 = undefined;
-    const command_path = try std.fmt.bufPrint(&command_path_buffer, "{s}/command.txt", .{directory});
+    const command_path = try std.fmt.bufPrint(&command_path_buffer, "{s}/command-1.txt", .{directory});
     try cwd.writeFile(io, .{ .sub_path = command_path, .data = "widget-click counter-canvas 999999\n" });
 
     // The frame pump consumes the command without propagating.
@@ -2060,6 +2060,67 @@ test "a stale automation widget click degrades instead of killing the frame call
     const click = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ canvas_label, increment_id });
     try harness.runtime.dispatchAutomationCommand(app, click);
     try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+}
+
+test "rapid-fire automation commands all dispatch, one per frame turn" {
+    // The field reproduction for the queued dropbox: three commands land
+    // back-to-back BEFORE the app drains any of them (the old
+    // single-entry slot lost one of these to an overwrite). Zero may be
+    // lost, and the drain must stay one-command-per-`frame_requested`
+    // turn — the recorded event boundary replay determinism hangs on.
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, counterOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    const io = std.testing.io;
+    const directory = ".zig-cache/test-ui-app-automation-rapid-fire";
+    var cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(io, directory) catch {};
+    try cwd.createDirPath(io, directory);
+    defer cwd.deleteTree(io, directory) catch {};
+    harness.runtime.options.automation = automation.Server.init(io, directory, "RapidFire");
+
+    // Three increments queued before a single frame runs.
+    const increment_id = findWidgetIdByText(app_state.tree.?, .button, "Increment").?;
+    var sequence: u64 = 1;
+    while (sequence <= 3) : (sequence += 1) {
+        var command_path_buffer: [128]u8 = undefined;
+        var command_buffer: [128]u8 = undefined;
+        try cwd.writeFile(io, .{
+            .sub_path = try std.fmt.bufPrint(&command_path_buffer, "{s}/command-{d}.txt", .{ directory, sequence }),
+            .data = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}\n", .{ canvas_label, increment_id }),
+        });
+    }
+
+    // Each frame turn consumes exactly one queued command — never two,
+    // never zero — until the queue is drained.
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.count);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try std.testing.expectEqual(@as(u32, 3), app_state.model.count);
+    // Drained: further frames dispatch nothing and no errors were
+    // recorded along the way.
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try std.testing.expectEqual(@as(u32, 3), app_state.model.count);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
 }
 
 // ---------------------------------------------------------- webview panes

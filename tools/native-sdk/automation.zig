@@ -479,72 +479,135 @@ fn sendCommand(allocator: std.mem.Allocator, io: std.Io, action: []const u8, val
     // A live publisher already on another protocol makes the queue write
     // provably useless (or worse, misread) — refuse before writing.
     try requireCompatibleSnapshotIfPresent(allocator, io);
-    // The command slot is single-entry: overwriting a line the app has
-    // not consumed yet silently drops that command. The app drains one
-    // command per presented frame and acks by rewriting the slot to
-    // `done`, so wait for a pending predecessor to drain first...
-    try awaitCommandSlot(allocator, io, action, .free);
-    var command_path: [256]u8 = undefined;
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path(&command_path, "command.txt"), .data = line });
-    // ...and only report success once OUR line was consumed, so
-    // back-to-back `native automate` invocations can never race each
-    // other out of the slot and a dead/frozen app fails loudly here
-    // instead of a "queued" line that went nowhere.
-    try awaitCommandSlot(allocator, io, action, .{ .consumed = line });
+    // Claim a slot in the dropbox command queue: an exclusive create of
+    // `command-<n>.txt`, so back-to-back (or fully concurrent) `native
+    // automate` invocations can NEVER overwrite each other — the old
+    // single-entry slot lost exactly that race...
+    var name_buffer: [64]u8 = undefined;
     var dir_buffer: [1024]u8 = undefined;
+    const name = enqueueCommand(io, automation_dir, line, &name_buffer, queue_attempt_budget) catch |err| {
+        switch (err) {
+            error.QueueStayedFull => std.debug.print(
+                "error: refusing to send {s} - the command queue in {s} stayed full ({d} pending) for 10s\n" ++
+                    "       (the app drains one command per presented frame; a queue that never drains\n" ++
+                    "        means the app exited, froze, or stopped presenting - check `native automate\n" ++
+                    "        wait` and that the snapshot's publisher_pid is your app)\n",
+                .{ action, automationDirDescription(io, &dir_buffer), protocol.max_queued_commands },
+            ),
+            error.QueueUnwritable => std.debug.print(
+                "error: could not write a command entry into {s}\n",
+                .{automationDirDescription(io, &dir_buffer)},
+            ),
+        }
+        return error.AutomationCommandFailed;
+    };
+    // ...and only report success once OUR entry was consumed (the app
+    // deletes it after reading), so a dead/frozen app fails loudly here
+    // instead of a "queued" line that went nowhere.
+    awaitCommandConsumed(io, automation_dir, name, queue_attempt_budget) catch {
+        std.debug.print(
+            "error: the app never consumed {s} (still queued as {s}/{s} after 10s)\n" ++
+                "       (the app drains one command per presented frame and deletes the entry as its\n" ++
+                "        ack; a silent timeout here means the app exited, froze, or stopped presenting -\n" ++
+                "        check `native automate wait` and the snapshot's publisher_pid)\n",
+            .{ action, automationDirDescription(io, &dir_buffer), name },
+        );
+        return error.AutomationCommandFailed;
+    };
     std.debug.print("delivered {s} -> {s}\n", .{ action, automationDirDescription(io, &dir_buffer) });
 }
 
-const CommandSlotCondition = union(enum) {
-    /// The slot holds no pending command (missing, empty, or `done`).
-    free,
-    /// The slot no longer holds this exact line (the app consumed it and
-    /// wrote `done`).
-    consumed: []const u8,
+/// The shared patience of both queue waits: ~10s at 25ms per attempt.
+/// Consumption normally takes one presented frame, so exhausting this
+/// budget means the app is gone, frozen, or not presenting. Tests pass a
+/// budget of 1 to pin the loud refusals without real waiting.
+const queue_attempt_budget: usize = 400;
+
+/// One pass over the dropbox queue from a writer's seat: how many
+/// entries are pending, and which claim sequence a new command should
+/// take (max present + 1). Sequences only order entries that COEXIST —
+/// the app always consumes the lowest number present and deletes it —
+/// so numbering restarting at 1 after the queue drains is fine.
+const QueueState = struct {
+    pending: usize = 0,
+    next_sequence: u64 = 1,
 };
 
-/// Poll the single-entry command slot until `condition` holds. ~10s
-/// budget at 25ms: consumption normally takes one presented frame, so
-/// hitting the timeout means the app is gone, frozen, or not presenting.
-fn awaitCommandSlot(allocator: std.mem.Allocator, io: std.Io, action: []const u8, condition: CommandSlotCondition) error{AutomationCommandFailed}!void {
-    var attempts: usize = 0;
-    while (attempts < 400) : (attempts += 1) {
-        if (commandSlotSatisfies(allocator, io, condition)) return;
-        std.Io.sleep(io, std.Io.Duration.fromNanoseconds(25 * std.time.ns_per_ms), .awake) catch {};
+fn scanQueue(io: std.Io, directory: []const u8) QueueState {
+    var state: QueueState = .{};
+    var dir = std.Io.Dir.cwd().openDir(io, directory, .{ .iterate = true }) catch return state;
+    defer dir.close(io);
+    var iterator = dir.iterate();
+    while (iterator.next(io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        const sequence = protocol.queueFileSequence(entry.name) orelse continue;
+        state.pending += 1;
+        if (sequence >= state.next_sequence) state.next_sequence = sequence + 1;
     }
-    var dir_buffer: [1024]u8 = undefined;
-    switch (condition) {
-        .free => std.debug.print(
-            "error: refusing to send {s} - an earlier command is still unconsumed in {s}/command.txt\n" ++
-                "       (the app drains one command per presented frame; it appears to have stopped\n" ++
-                "        consuming - check the app is still running and presenting frames, e.g.\n" ++
-                "        `native automate wait`, and that the snapshot's publisher_pid is your app)\n",
-            .{ action, automationDirDescription(io, &dir_buffer) },
-        ),
-        .consumed => std.debug.print(
-            "error: the app never consumed {s} (still in {s}/command.txt after 10s)\n" ++
-                "       (the app drains one command per presented frame and acks it with `done`;\n" ++
-                "        a silent timeout here means the app exited, froze, or stopped presenting -\n" ++
-                "        check `native automate wait` and the snapshot's publisher_pid)\n",
-            .{ action, automationDirDescription(io, &dir_buffer) },
-        ),
-    }
-    return error.AutomationCommandFailed;
+    return state;
 }
 
-fn commandSlotSatisfies(allocator: std.mem.Allocator, io: std.Io, condition: CommandSlotCondition) bool {
-    var command_path: [256]u8 = undefined;
-    const bytes = readFile(allocator, io, path(&command_path, "command.txt")) catch {
-        // No slot file yet: free for a new command; and a consumed check
-        // treats a vanished slot as consumed (the dir owner removed it).
-        return true;
-    };
-    defer allocator.free(bytes);
-    const trimmed = std.mem.trim(u8, bytes, " \r\n\t");
-    return switch (condition) {
-        .free => trimmed.len == 0 or std.mem.eql(u8, trimmed, "done"),
-        .consumed => |line| !std.mem.eql(u8, trimmed, std.mem.trim(u8, line, " \r\n\t")),
-    };
+/// Land `line` in the dropbox command queue and return its entry name.
+/// Diagnostics stay with the caller (sendCommand), which owns the
+/// teaching messages for both errors.
+///
+/// Two honesty rules shape this writer:
+/// - The claim is an EXCLUSIVE create: losing a name race to another
+///   writer is a rescan-and-retry, never an overwrite, so no command can
+///   be silently replaced before the app drains it.
+/// - A FULL queue (`max_queued_commands` entries pending) is retried at
+///   the consumption cadence up to the same ~10s budget as the
+///   consumption wait, then refused loudly naming the depth. Retrying in
+///   the writer keeps the protocol one-writer-one-file simple (no
+///   overflow side-channel for the app to publish and both sides to
+///   version), and the outcome stays deterministic: a live app drains
+///   one command per presented frame, so a burst clears in milliseconds,
+///   while a queue still full after 10s means the app stopped consuming
+///   — which must be a loud error, never a dropped command.
+fn enqueueCommand(io: std.Io, directory: []const u8, line: []const u8, name_buffer: []u8, attempt_budget: usize) error{ QueueStayedFull, QueueUnwritable }![]const u8 {
+    var attempts: usize = 0;
+    while (attempts < attempt_budget) : (attempts += 1) {
+        const state = scanQueue(io, directory);
+        if (state.pending >= protocol.max_queued_commands) {
+            std.Io.sleep(io, std.Io.Duration.fromNanoseconds(25 * std.time.ns_per_ms), .awake) catch {};
+            continue;
+        }
+        // The buffer always fits `command-<u64>.txt`; only a caller bug
+        // could trip this.
+        const name = protocol.queueFileName(state.next_sequence, name_buffer) catch unreachable;
+        var entry_path: [256]u8 = undefined;
+        std.Io.Dir.cwd().writeFile(io, .{
+            .sub_path = std.fmt.bufPrint(&entry_path, "{s}/{s}", .{ directory, name }) catch unreachable,
+            .data = line,
+            .flags = .{ .exclusive = true },
+        }) catch |err| switch (err) {
+            // Another writer claimed this sequence between our scan and
+            // our create; rescan and take the next number.
+            error.PathAlreadyExists => continue,
+            else => return error.QueueUnwritable,
+        };
+        return name;
+    }
+    return error.QueueStayedFull;
+}
+
+/// Poll until the app deletes our queue entry — deletion IS the
+/// consumption ack, so "the file is gone" means the runtime took the
+/// line into its frame-boundary dispatch. ~10s budget at 25ms:
+/// consumption normally takes one presented frame, so hitting the
+/// timeout means the app is gone, frozen, or not presenting. A vanished
+/// DIRECTORY counts as consumed for the same reason the old protocol
+/// accepted a vanished slot: the dropbox owner swept it.
+fn awaitCommandConsumed(io: std.Io, directory: []const u8, name: []const u8, attempt_budget: usize) error{NeverConsumed}!void {
+    var attempts: usize = 0;
+    while (attempts < attempt_budget) : (attempts += 1) {
+        var entry_path: [256]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&entry_path, "{s}/{s}", .{ directory, name }) catch unreachable;
+        var file = std.Io.Dir.cwd().openFile(io, full_path, .{}) catch return;
+        file.close(io);
+        std.Io.sleep(io, std.Io.Duration.fromNanoseconds(25 * std.time.ns_per_ms), .awake) catch {};
+    }
+    return error.NeverConsumed;
 }
 
 /// Error out (loudly, with the absolute path) when the automation dir
@@ -1386,4 +1449,114 @@ test "textTail keeps the last lines only" {
     try testing.expectEqualStrings("a\nb\n", textTail("a\nb\n", 3));
     try testing.expectEqualStrings("c\nd\ne\n", textTail("a\nb\nc\nd\ne\n", 3));
     try testing.expectEqualStrings("d\ne", textTail("c\nd\ne", 2));
+}
+
+/// Pid-suffixed scratch dropbox: these tests are compiled into more than
+/// one test binary and the aggregate build step runs those binaries in
+/// parallel, so a fixed path would let two copies race each other.
+fn queueTestDirectory(buffer: []u8, comptime prefix: []const u8) ![]const u8 {
+    const pid: u32 = switch (builtin.os.tag) {
+        .windows => std.os.windows.GetCurrentProcessId(),
+        .wasi, .freestanding, .emscripten => 0,
+        else => @intCast(@max(0, std.posix.system.getpid())),
+    };
+    return std.fmt.bufPrint(buffer, prefix ++ "-{d}", .{pid});
+}
+
+test "scanQueue counts only queue entries and picks max-present + 1" {
+    var dir_buffer: [64]u8 = undefined;
+    const directory = try queueTestDirectory(&dir_buffer, ".zig-cache/test-native-cli-queue-scan");
+    var cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(testing.io, directory) catch {};
+    try cwd.createDirPath(testing.io, directory);
+    defer cwd.deleteTree(testing.io, directory) catch {};
+
+    // Empty queue: nothing pending, sequences start at 1.
+    try testing.expectEqual(@as(usize, 0), scanQueue(testing.io, directory).pending);
+    try testing.expectEqual(@as(u64, 1), scanQueue(testing.io, directory).next_sequence);
+
+    // Gapped entries count; snapshots, response artifacts, and a
+    // retired-v5 writer's `command.txt` slot are invisible to the queue.
+    var path_buffer: [128]u8 = undefined;
+    for ([_][]const u8{ "command-2.txt", "command-5.txt", "command.txt", "snapshot.txt" }) |name| {
+        try cwd.writeFile(testing.io, .{
+            .sub_path = try std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ directory, name }),
+            .data = "menu-command app.probe\n",
+        });
+    }
+    const state = scanQueue(testing.io, directory);
+    try testing.expectEqual(@as(usize, 2), state.pending);
+    try testing.expectEqual(@as(u64, 6), state.next_sequence);
+}
+
+test "enqueueCommand claims the next sequence exclusively and refuses a full queue loudly" {
+    var dir_buffer: [64]u8 = undefined;
+    const directory = try queueTestDirectory(&dir_buffer, ".zig-cache/test-native-cli-queue-claim");
+    var cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(testing.io, directory) catch {};
+    try cwd.createDirPath(testing.io, directory);
+    defer cwd.deleteTree(testing.io, directory) catch {};
+
+    // Claim into a queue that already holds an entry: the new command
+    // lands BEHIND it (higher sequence), preserving arrival order.
+    var path_buffer: [128]u8 = undefined;
+    try cwd.writeFile(testing.io, .{
+        .sub_path = try std.fmt.bufPrint(&path_buffer, "{s}/command-3.txt", .{directory}),
+        .data = "menu-command app.earlier\n",
+    });
+    var name_buffer: [64]u8 = undefined;
+    const name = try enqueueCommand(testing.io, directory, "menu-command app.later\n", &name_buffer, queue_attempt_budget);
+    try testing.expectEqualStrings("command-4.txt", name);
+    var content_buffer: [64]u8 = undefined;
+    var file = try cwd.openFile(testing.io, try std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ directory, name }), .{});
+    const content_len = try file.readPositionalAll(testing.io, &content_buffer, 0);
+    file.close(testing.io);
+    try testing.expectEqualStrings("menu-command app.later\n", content_buffer[0..content_len]);
+
+    // The overflow pin: fill the queue to its bound and the writer
+    // refuses (after its retry budget — 1 here so the test never really
+    // waits) instead of overwriting or silently dropping anything.
+    var sequence: u64 = 5;
+    while (scanQueue(testing.io, directory).pending < protocol.max_queued_commands) : (sequence += 1) {
+        try cwd.writeFile(testing.io, .{
+            .sub_path = try std.fmt.bufPrint(&path_buffer, "{s}/command-{d}.txt", .{ directory, sequence }),
+            .data = "menu-command app.filler\n",
+        });
+    }
+    try testing.expectError(
+        error.QueueStayedFull,
+        enqueueCommand(testing.io, directory, "menu-command app.overflow\n", &name_buffer, 1),
+    );
+    // Nothing pending was disturbed by the refusal.
+    try testing.expectEqual(protocol.max_queued_commands, scanQueue(testing.io, directory).pending);
+
+    // Draining one entry frees a slot and the very next claim succeeds.
+    try cwd.deleteFile(testing.io, try std.fmt.bufPrint(&path_buffer, "{s}/command-3.txt", .{directory}));
+    const freed = try enqueueCommand(testing.io, directory, "menu-command app.freed\n", &name_buffer, queue_attempt_budget);
+    try testing.expect(protocol.queueFileSequence(freed) != null);
+}
+
+test "awaitCommandConsumed returns on deletion and fails loudly on a stuck entry" {
+    var dir_buffer: [64]u8 = undefined;
+    const directory = try queueTestDirectory(&dir_buffer, ".zig-cache/test-native-cli-queue-consume");
+    var cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(testing.io, directory) catch {};
+    try cwd.createDirPath(testing.io, directory);
+    defer cwd.deleteTree(testing.io, directory) catch {};
+
+    // An entry the app already deleted (or that never existed — the
+    // dropbox owner swept it) reads as consumed.
+    try awaitCommandConsumed(testing.io, directory, "command-1.txt", 1);
+
+    // An entry the app never touches fails once the budget is spent —
+    // the CLI's honest signal that the command did NOT dispatch.
+    var path_buffer: [128]u8 = undefined;
+    try cwd.writeFile(testing.io, .{
+        .sub_path = try std.fmt.bufPrint(&path_buffer, "{s}/command-2.txt", .{directory}),
+        .data = "menu-command app.stuck\n",
+    });
+    try testing.expectError(
+        error.NeverConsumed,
+        awaitCommandConsumed(testing.io, directory, "command-2.txt", 1),
+    );
 }

@@ -24,8 +24,49 @@ pub const max_command_bytes: usize = 16 * 1024 + 64;
 /// item by target widget + item index, through the same
 /// `context_menu_action` dispatch a native selection takes) and the
 /// snapshot's per-widget `context_menu=[...]` item listing.
+/// 6 = the queued command dropbox: numbered `command-<n>.txt` entries
+/// (claimed exclusively by writers, consumed lowest-number-first by the
+/// app, DELETED as the consumption ack) replace the single-entry
+/// `command.txt` slot that rapid back-to-back writers could overwrite
+/// before the app drained it. A v5 CLI against a v6 app writes a
+/// `command.txt` the app never touches (and times out loudly on its own
+/// consumption wait); a v6 CLI against a v5 app queues files the app
+/// never touches (same loud timeout) — and both directions are refused
+/// up front by this handshake whenever a live snapshot exists.
 /// Snapshots without a `protocol=` field predate the handshake entirely.
-pub const version: u32 = 5;
+pub const version: u32 = 6;
+
+/// How many commands may sit in the dropbox queue at once. Automation
+/// drivers are scripts, not firehoses: the app drains one command per
+/// presented frame (milliseconds apart once the arrival watcher wakes
+/// it), so a handful of entries absorbs any realistic burst. The bound is
+/// enforced by WRITERS — the CLI retries a full queue at its consumption
+/// cadence up to its existing timeout, then refuses loudly naming this
+/// depth — because the consumer can only ever shrink the queue.
+pub const max_queued_commands: usize = 8;
+
+pub const queue_file_prefix = "command-";
+pub const queue_file_suffix = ".txt";
+
+/// Queue entry file name for a claim sequence: `command-<n>.txt`. Both
+/// sides build names through here so the on-disk shape lives in exactly
+/// one place.
+pub fn queueFileName(sequence: u64, output: []u8) Error![]const u8 {
+    return std.fmt.bufPrint(output, "{s}{d}{s}", .{ queue_file_prefix, sequence, queue_file_suffix }) catch error.CommandTooLarge;
+}
+
+/// The claim sequence of a queue entry name, or null for every other
+/// dropbox file — snapshots, response artifacts, and notably the retired
+/// v5 single-slot `command.txt`, whose bare name has no `-<n>` and so
+/// never parses as queue traffic (a stale v5 writer's slot sits inert
+/// until that writer's own consumption wait fails loudly).
+pub fn queueFileSequence(name: []const u8) ?u64 {
+    if (!std.mem.startsWith(u8, name, queue_file_prefix)) return null;
+    if (!std.mem.endsWith(u8, name, queue_file_suffix)) return null;
+    if (name.len <= queue_file_prefix.len + queue_file_suffix.len) return null;
+    const digits = name[queue_file_prefix.len .. name.len - queue_file_suffix.len];
+    return std.fmt.parseUnsigned(u64, digits, 10) catch null;
+}
 
 pub const Error = error{
     InvalidCommand,
@@ -215,6 +256,23 @@ test "commands parse reload and wait" {
     try std.testing.expectEqual(Action.provenance, provenance_at.action);
     try std.testing.expectEqualStrings("kanban-canvas at 120 64", provenance_at.value);
     try std.testing.expectError(error.InvalidCommand, Command.parse("provenance"));
+}
+
+test "queue entry names round-trip and reject non-queue files" {
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("command-1.txt", try queueFileName(1, &buffer));
+    try std.testing.expectEqualStrings("command-42.txt", try queueFileName(42, &buffer));
+    try std.testing.expectEqual(@as(?u64, 1), queueFileSequence("command-1.txt"));
+    try std.testing.expectEqual(@as(?u64, 42), queueFileSequence("command-42.txt"));
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), queueFileSequence(try queueFileName(std.math.maxInt(u64), &buffer)));
+    // The retired v5 single-slot name, response artifacts, and malformed
+    // sequences are all non-queue files.
+    try std.testing.expectEqual(@as(?u64, null), queueFileSequence("command.txt"));
+    try std.testing.expectEqual(@as(?u64, null), queueFileSequence("command-.txt"));
+    try std.testing.expectEqual(@as(?u64, null), queueFileSequence("command-x.txt"));
+    try std.testing.expectEqual(@as(?u64, null), queueFileSequence("command-1.png"));
+    try std.testing.expectEqual(@as(?u64, null), queueFileSequence("snapshot.txt"));
+    try std.testing.expectEqual(@as(?u64, null), queueFileSequence("bridge-response.txt"));
 }
 
 test "screenshot file names stay inside the automation directory" {

@@ -413,9 +413,9 @@ pub fn recordError(self: anytype, err: anyerror) void {
 /// Point the embedded runtime's automation server at `dir` (the desktop
 /// equivalent is `-Dautomation=true` + `.zig-cache/native-sdk-automation`;
 /// mobile shims pass an absolute path inside the app's data container).
-/// The host-pumped frame loop then consumes `command.txt` and publishes
-/// `snapshot.txt` / `accessibility.txt` / `windows.txt` exactly like the
-/// desktop runners.
+/// The host-pumped frame loop then consumes the `command-<n>.txt` queue
+/// and publishes `snapshot.txt` / `accessibility.txt` / `windows.txt`
+/// exactly like the desktop runners.
 pub fn enableAutomation(self: anytype, dir: []const u8) anyerror!void {
     if (dir.len == 0) return error.InvalidCommand;
     if (dir.len > self.automation_dir.len) return error.WindowSourceTooLarge;

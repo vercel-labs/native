@@ -801,8 +801,8 @@ pub fn build(b: *std.Build) void {
         \\request='{"id":"smoke","command":"native.ping","payload":{"source":"smoke"}}'
         \\response_file=".zig-cache/native-sdk-automation/bridge-response.txt"
         \\mkdir -p .zig-cache/native-sdk-automation
-        \\rm -f .zig-cache/native-sdk-automation/snapshot.txt .zig-cache/native-sdk-automation/windows.txt .zig-cache/native-sdk-automation/command.txt "$response_file"
-        \\printf 'bridge %s\n' "$request" > .zig-cache/native-sdk-automation/command.txt
+        \\rm -f .zig-cache/native-sdk-automation/snapshot.txt .zig-cache/native-sdk-automation/windows.txt .zig-cache/native-sdk-automation/command*.txt "$response_file"
+        \\printf 'bridge %s\n' "$request" > .zig-cache/native-sdk-automation/command-1.txt
         \\"$app" > .zig-cache/native-sdk-webview-smoke.log 2>&1 &
         \\pid=$!
         \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-webview-smoke.log) ----" >&2; cat .zig-cache/native-sdk-webview-smoke.log >&2 2>/dev/null || true; fi' EXIT
@@ -818,25 +818,25 @@ pub fn build(b: *std.Build) void {
         \\case "$response" in *'"ok":true'*) ;; *) echo "native.ping did not succeed: $response" >&2; exit 1 ;; esac
         \\case "$response" in *'pong from Zig'*) ;; *) echo "native.ping response was unexpected: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"webview-create","command":"native-sdk.webview.create","payload":{"label":"smoke","url":"https://example.com","frame":{"x":24,"y":24,"width":320,"height":220}}}' > .zig-cache/native-sdk-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-create","command":"native-sdk.webview.create","payload":{"label":"smoke","url":"https://example.com","frame":{"x":24,"y":24,"width":320,"height":220}}}' > .zig-cache/native-sdk-automation/command-1.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"
         \\case "$response" in *'"ok":true'*) ;; *) echo "webview create did not succeed: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"webview-resize","command":"native-sdk.webview.setFrame","payload":{"label":"smoke","frame":{"x":36,"y":36,"width":420,"height":260}}}' > .zig-cache/native-sdk-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-resize","command":"native-sdk.webview.setFrame","payload":{"label":"smoke","frame":{"x":36,"y":36,"width":420,"height":260}}}' > .zig-cache/native-sdk-automation/command-1.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"
         \\case "$response" in *'"ok":true'*) ;; *) echo "webview resize did not succeed: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"webview-navigate","command":"native-sdk.webview.navigate","payload":{"label":"smoke","url":"https://example.com/?smoke=1"}}' > .zig-cache/native-sdk-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-navigate","command":"native-sdk.webview.navigate","payload":{"label":"smoke","url":"https://example.com/?smoke=1"}}' > .zig-cache/native-sdk-automation/command-1.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"
         \\case "$response" in *'"ok":true'*) ;; *) echo "webview navigate did not succeed: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"webview-close","command":"native-sdk.webview.close","payload":{"label":"smoke"}}' > .zig-cache/native-sdk-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-close","command":"native-sdk.webview.close","payload":{"label":"smoke"}}' > .zig-cache/native-sdk-automation/command-1.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"
@@ -863,7 +863,7 @@ pub fn build(b: *std.Build) void {
         \\automation_dir=".zig-cache/native-sdk-automation"
         \\response_file="$automation_dir/bridge-response.txt"
         \\mkdir -p "$automation_dir"
-        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir/command.txt" "$response_file"
+        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir"/command*.txt "$response_file"
         \\"$app" > .zig-cache/native-sdk-native-shell-smoke.log 2>&1 &
         \\pid=$!
         \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-native-shell-smoke.log) ----" >&2; cat .zig-cache/native-sdk-native-shell-smoke.log >&2 2>/dev/null || true; fi' EXIT
@@ -919,7 +919,7 @@ pub fn build(b: *std.Build) void {
         \\case "$snapshot" in *'view @w1/main kind=webview'*'bounds=(240,52 660x548)'*) ;; *) echo "native-shell main WebView did not relayout after resize" >&2; exit 1 ;; esac
         \\case "$snapshot" in *'view @w1/statusbar kind=statusbar'*'bounds=(240,600 660x40)'*) ;; *) echo "native-shell statusbar did not relayout after resize" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"native-shell-refresh","command":"native-sdk.command.invoke","payload":{"name":"app.refresh"}}' > "$automation_dir/command.txt"
+        \\printf 'bridge %s\n' '{"id":"native-shell-refresh","command":"native-sdk.command.invoke","payload":{"name":"app.refresh"}}' > "$automation_dir/command-1.txt"
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"
@@ -1014,7 +1014,7 @@ pub fn build(b: *std.Build) void {
         \\ready_budget_ms="$smoke_budget_ms"
         \\if [ "$ready_budget_ms" -lt 500 ]; then ready_budget_ms=500; fi
         \\ready_budget_ns=$((ready_budget_ms * 1000000))
-        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir/command.txt"
+        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir"/command*.txt
         \\"$app" > .zig-cache/native-sdk-gpu-surface-smoke.log 2>&1 &
         \\pid=$!
         \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-gpu-surface-smoke.log) ----" >&2; cat .zig-cache/native-sdk-gpu-surface-smoke.log >&2 2>/dev/null || true; fi' EXIT
@@ -1093,7 +1093,7 @@ pub fn build(b: *std.Build) void {
         \\case "$cli" in /*) ;; *) cli="../../$cli" ;; esac
         \\automation_dir=".zig-cache/native-sdk-automation"
         \\mkdir -p "$automation_dir"
-        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/command.txt" "$automation_dir/provenance.txt"
+        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir"/command*.txt "$automation_dir/provenance.txt"
         \\# The smoke edits src/board.native through the write-back verb and restores
         \\# it through the same verb; the trap restores from the backup on ANY
         \\# failure so an aborted run never leaves the example dirty.
@@ -1180,7 +1180,7 @@ pub fn build(b: *std.Build) void {
         \\  pid=""
         \\}
         \\launch_and_measure_first_frame() {
-        \\  rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir/command.txt"
+        \\  rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir"/command*.txt
         \\  "$app" > .zig-cache/native-sdk-gpu-dashboard-smoke.log 2>&1 &
         \\  pid=$!
         \\  ready="$("$cli" automate wait 2>&1)"
@@ -1311,7 +1311,7 @@ pub fn build(b: *std.Build) void {
         \\# live-pulse animation, and a mid-animation resize drive scissored
         \\# patches; the verify counters must show checks with zero mismatches.
         \\stop_app
-        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/command.txt"
+        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir"/command*.txt
         \\verify_log=".zig-cache/native-sdk-gpu-dashboard-verify.log"
         \\NATIVE_SDK_GPU_VERIFY_INCREMENTAL=1 "$app" > "$verify_log" 2>&1 &
         \\pid=$!
@@ -1375,7 +1375,7 @@ pub fn build(b: *std.Build) void {
         \\case "$cli" in /*) ;; *) cli="../../$cli" ;; esac
         \\automation_dir=".zig-cache/native-sdk-automation"
         \\mkdir -p "$automation_dir"
-        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir/command.txt" "$automation_dir/screenshot-preview-canvas.png"
+        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir"/command*.txt "$automation_dir/screenshot-preview-canvas.png"
         \\"$app" > .zig-cache/native-sdk-canvas-preview-smoke.log 2>&1 &
         \\pid=$!
         \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-canvas-preview-smoke.log) ----" >&2; cat .zig-cache/native-sdk-canvas-preview-smoke.log >&2 2>/dev/null || true; fi' EXIT
@@ -1435,7 +1435,7 @@ pub fn build(b: *std.Build) void {
         \\ready_budget_ms="$smoke_budget_ms"
         \\if [ "$ready_budget_ms" -lt 500 ]; then ready_budget_ms=500; fi
         \\ready_budget_ns=$((ready_budget_ms * 1000000))
-        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir/command.txt"
+        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir"/command*.txt
         \\"$app" > .zig-cache/native-sdk-gpu-components-smoke.log 2>&1 &
         \\pid=$!
         \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-gpu-components-smoke.log) ----" >&2; cat .zig-cache/native-sdk-gpu-components-smoke.log >&2 2>/dev/null || true; fi' EXIT
@@ -1800,8 +1800,8 @@ pub fn build(b: *std.Build) void {
         \\request='{"id":"ping","command":"native.ping","payload":{"source":"cef-smoke"}}'
         \\response_file=".zig-cache/native-sdk-automation/bridge-response.txt"
         \\mkdir -p .zig-cache/native-sdk-automation
-        \\rm -f .zig-cache/native-sdk-automation/snapshot.txt .zig-cache/native-sdk-automation/windows.txt .zig-cache/native-sdk-automation/command.txt "$response_file"
-        \\printf 'bridge %s\n' "$request" > .zig-cache/native-sdk-automation/command.txt
+        \\rm -f .zig-cache/native-sdk-automation/snapshot.txt .zig-cache/native-sdk-automation/windows.txt .zig-cache/native-sdk-automation/command*.txt "$response_file"
+        \\printf 'bridge %s\n' "$request" > .zig-cache/native-sdk-automation/command-1.txt
         \\"$app" > .zig-cache/native-sdk-webview-cef-smoke.log 2>&1 &
         \\pid=$!
         \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-webview-cef-smoke.log) ----" >&2; cat .zig-cache/native-sdk-webview-cef-smoke.log >&2 2>/dev/null || true; fi' EXIT
@@ -1816,25 +1816,25 @@ pub fn build(b: *std.Build) void {
         \\response="$(cat "$response_file" 2>/dev/null || true)"
         \\case "$response" in *'"ok":true'*'pong from Zig'*) ;; *) echo "native.ping response was unexpected: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"webview-create","command":"native-sdk.webview.create","payload":{"label":"smoke","url":"https://example.com","frame":{"x":24,"y":24,"width":320,"height":220}}}' > .zig-cache/native-sdk-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-create","command":"native-sdk.webview.create","payload":{"label":"smoke","url":"https://example.com","frame":{"x":24,"y":24,"width":320,"height":220}}}' > .zig-cache/native-sdk-automation/command-1.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"
         \\case "$response" in *'"ok":true'*) ;; *) echo "cef webview create did not succeed: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"webview-resize","command":"native-sdk.webview.setFrame","payload":{"label":"smoke","frame":{"x":36,"y":36,"width":420,"height":260}}}' > .zig-cache/native-sdk-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-resize","command":"native-sdk.webview.setFrame","payload":{"label":"smoke","frame":{"x":36,"y":36,"width":420,"height":260}}}' > .zig-cache/native-sdk-automation/command-1.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"
         \\case "$response" in *'"ok":true'*) ;; *) echo "cef webview resize did not succeed: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"webview-navigate","command":"native-sdk.webview.navigate","payload":{"label":"smoke","url":"https://example.com/?smoke=1"}}' > .zig-cache/native-sdk-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-navigate","command":"native-sdk.webview.navigate","payload":{"label":"smoke","url":"https://example.com/?smoke=1"}}' > .zig-cache/native-sdk-automation/command-1.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"
         \\case "$response" in *'"ok":true'*) ;; *) echo "cef webview navigate did not succeed: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"webview-close","command":"native-sdk.webview.close","payload":{"label":"smoke"}}' > .zig-cache/native-sdk-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-close","command":"native-sdk.webview.close","payload":{"label":"smoke"}}' > .zig-cache/native-sdk-automation/command-1.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"

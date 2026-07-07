@@ -2,11 +2,11 @@
 //! protocol. The runtime drains at most one command per `frame_requested`
 //! turn, but an idle app has no reason to run a frame — no animation, no
 //! input, nothing invalidated — so a queued `widget-click` used to sit in
-//! the slot until some unrelated timer happened to produce a frame (or,
+//! the queue until some unrelated timer happened to produce a frame (or,
 //! on hosts without such a timer, forever). This watcher makes a command
 //! LANDING wake the loop the same way user input does: a dedicated
-//! thread polls the command slot off the loop thread and, while a line
-//! is pending, asks the platform for one coalesced `frame_requested`
+//! thread polls the command queue off the loop thread and, while an
+//! entry is pending, asks the platform for one coalesced `frame_requested`
 //! tick through the platform's thread-safe frame-request entry. The
 //! drain on the loop thread stays the ONLY consumer, so command order,
 //! the one-command-per-frame cadence, and session-replay determinism
@@ -24,7 +24,7 @@
 const std = @import("std");
 const server_module = @import("server.zig");
 
-/// How often the watcher thread probes the command slot. Small enough
+/// How often the watcher thread probes the command queue. Small enough
 /// that a driver's command starts dispatching within a frame or two of
 /// landing (the CLI itself only polls the ack at 25ms), large enough
 /// that the probe — one open/read/close of a tiny file — is noise even
@@ -73,11 +73,11 @@ pub const Watcher = struct {
 
     fn main(self: *Watcher) void {
         while (!self.stop_requested.load(.acquire)) {
-            // Request a tick on EVERY probe while a line is pending, not
-            // just the first: the request is coalesced platform-side,
-            // and re-requesting covers the race where a tick fired
-            // between the drain's ack and a driver's immediate next
-            // command. Request failures are swallowed — the watcher is
+            // Request a tick on EVERY probe while an entry is pending,
+            // not just the first: the request is coalesced platform-side,
+            // and one wake per probe also keeps a MULTI-entry queue
+            // draining frame after frame until it is empty. Request
+            // failures are swallowed — the watcher is
             // best-effort liveness, and the drain still runs on any
             // frame that arrives for another reason.
             if (self.server.hasPendingCommand()) {
@@ -131,14 +131,21 @@ test "watcher requests frames while a command is pending" {
     }));
     defer watcher.stop();
 
-    // Idle slot: give the watcher a few polls; no frame requests.
-    try std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(4 * poll_interval_ns), .awake);
-    try std.testing.expectEqual(@as(usize, 0), counter.count.load(.acquire));
-
-    // A landed command turns into frame requests promptly.
+    // Idle queue: give the watcher a few polls; no frame requests. A
+    // leftover non-queue file (a retired-v5 writer's `command.txt`)
+    // stays invisible — the watcher must not wake the loop for traffic
+    // this protocol version never consumes.
     var path_buffer: [96]u8 = undefined;
     try cwd.writeFile(std.testing.io, .{
         .sub_path = try std.fmt.bufPrint(&path_buffer, "{s}/command.txt", .{directory}),
+        .data = "widget-click canvas 7\n",
+    });
+    try std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(4 * poll_interval_ns), .awake);
+    try std.testing.expectEqual(@as(usize, 0), counter.count.load(.acquire));
+
+    // A landed queue entry turns into frame requests promptly.
+    try cwd.writeFile(std.testing.io, .{
+        .sub_path = try std.fmt.bufPrint(&path_buffer, "{s}/command-1.txt", .{directory}),
         .data = "widget-click canvas 7\n",
     });
     var waited_ns: u64 = 0;

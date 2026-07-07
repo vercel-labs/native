@@ -51,8 +51,8 @@ When the runtime publishes a snapshot, it writes these files to the automation d
       <td>Deterministic PNG of a <code>gpu_surface</code> view, rendered through the CPU reference renderer on <code>screenshot &lt;view-label&gt; [scale]</code></td>
     </tr>
     <tr>
-      <td><code>command.txt</code></td>
-      <td>Command input: written by the CLI, consumed by the runtime</td>
+      <td><code>command-&lt;n&gt;.txt</code></td>
+      <td>Command queue: one entry per command, written by the CLI, consumed oldest-first by the runtime (which deletes the entry as its consumption ack)</td>
     </tr>
     <tr>
       <td><code>bridge-response.txt</code></td>
@@ -67,7 +67,7 @@ When the runtime publishes a snapshot, it writes these files to the automation d
 
 ## Commands
 
-The runtime polls `command.txt` and processes these actions:
+The runtime watches the command queue and processes these actions:
 
 <table>
   <thead>
@@ -160,7 +160,7 @@ The runtime polls `command.txt` and processes these actions:
   </tbody>
 </table>
 
-After processing a command, the runtime writes `done` to `command.txt`. The command slot is single-entry and the app consumes one command per presented frame: `native automate <command>` waits for the running app to consume it and prints `delivered <action> -> <dir>` on success — it fails loudly instead of silently overwriting an unconsumed command, and exits non-zero if the app never consumes it.
+Commands queue as `command-<n>.txt` entries: each `native automate <command>` claims the next sequence number exclusively (rapid back-to-back invocations can never overwrite each other), the app consumes one entry per presented frame in strict arrival order, and deleting the entry is the consumption ack. The queue is bounded to a handful of entries — a writer finding it full retries until the app drains a slot and fails loudly (non-zero exit) if it never does. `native automate <command>` prints `delivered <action> -> <dir>` only after the app consumed its entry, so a dead or frozen app is always a loud failure, never a silently dropped command.
 
 Widget verbs and `screenshot` address a `gpu_surface` view by its label across ALL open windows — snapshots enumerate every window's views and widgets, so a model-declared secondary window's canvas (a settings window) is drivable and capturable exactly like the main one, with no window argument.
 

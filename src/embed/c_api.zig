@@ -165,7 +165,7 @@ pub fn MobileCApi(comptime Host: type) type {
         }
 
         /// Enable the automation harness inside the embedded runtime,
-        /// writing `snapshot.txt` (and consuming `command.txt`) under
+        /// writing `snapshot.txt` (and consuming the `command-<n>.txt` queue) under
         /// `path` — an absolute directory inside the app's data container
         /// on device. The mobile counterpart of the desktop runners'
         /// `-Dautomation=true`.

@@ -52,7 +52,7 @@ const IdleLoop = struct {
 
         var path_buffer: [128]u8 = undefined;
         try std.Io.Dir.cwd().writeFile(std.testing.io, .{
-            .sub_path = try std.fmt.bufPrint(&path_buffer, "{s}/command.txt", .{self.automation_dir}),
+            .sub_path = try std.fmt.bufPrint(&path_buffer, "{s}/command-1.txt", .{self.automation_dir}),
             .data = "menu-command app.probe\n",
         });
 
@@ -129,12 +129,12 @@ test "idle app consumes an automation command promptly via the arrival watcher" 
     try std.testing.expect(app_state.probed);
     try std.testing.expect(idle_loop.woke_after_ns < wake_asserted_budget_ns);
 
-    // The drain acked the slot, so the driver's await-consumption poll
-    // (the CLI's `delivered` report) completes too.
+    // The drain deleted the queue entry — that deletion IS the ack the
+    // driver's await-consumption poll (the CLI's `delivered` report)
+    // watches for.
     var path_buffer: [128]u8 = undefined;
-    var done_buffer: [16]u8 = undefined;
-    var file = try cwd.openFile(std.testing.io, try std.fmt.bufPrint(&path_buffer, "{s}/command.txt", .{automation_dir}), .{});
-    defer file.close(std.testing.io);
-    const done_len = try file.readPositionalAll(std.testing.io, &done_buffer, 0);
-    try std.testing.expectEqualStrings("done\n", done_buffer[0..done_len]);
+    try std.testing.expectError(
+        error.FileNotFound,
+        cwd.openFile(std.testing.io, try std.fmt.bufPrint(&path_buffer, "{s}/command-1.txt", .{automation_dir}), .{}),
+    );
 }

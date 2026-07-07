@@ -9,9 +9,11 @@
 # from the ssh session while the app renders on the real desktop.
 #
 # Transport: the app (built with -Dautomation=true) publishes
-# .zig-cache/native-sdk-automation/snapshot.txt and consumes a single-slot
-# command.txt (rewritten to "done" once consumed). Commands must be paced:
-# send one, wait for "done", then send the next.
+# .zig-cache/native-sdk-automation/snapshot.txt and consumes a bounded
+# queue of command-<n>.txt entries, oldest first, DELETING each entry as
+# its consumption ack. The CLI already waits for its own entry's deletion
+# before exiting; Wait-Done below is the belt-and-braces check that the
+# whole queue drained.
 
 $script:RepoRoot = "$env:USERPROFILE\repo"
 $script:CLI = "$RepoRoot\zig-out\bin\native.exe"
@@ -55,14 +57,16 @@ function Stop-App([string]$app) {
     taskkill /IM "$app.exe" /F 2>$null | Out-Null
 }
 
-# Pacing: block until the app has consumed the last queued command.
+# Pacing: block until the app has consumed every queued command (the
+# app deletes each command-<n>.txt entry as it consumes it, so an empty
+# queue means everything dispatched).
 function Wait-Done {
-    $cmd = Join-Path (DropboxDir) "command.txt"
+    $pattern = Join-Path (DropboxDir) "command-*.txt"
     for ($i = 0; $i -lt 200; $i++) {
-        if ((Get-Content $cmd -Raw -ErrorAction SilentlyContinue) -eq "done") { return $true }
+        if (-not (Test-Path $pattern)) { return $true }
         Start-Sleep -Milliseconds 50
     }
-    Write-Output "WARN: command not consumed within 10s"
+    Write-Output "WARN: command queue not drained within 10s"
     return $false
 }
 
