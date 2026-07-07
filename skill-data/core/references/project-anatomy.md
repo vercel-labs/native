@@ -24,7 +24,7 @@ Keep product-level metadata and policies in `app.zon`:
     .name = "my-app",
     .display_name = "My App",
     .version = "0.1.0",
-    .icons = .{ "assets/icon.icns" },
+    .icons = .{"assets/icon.png"},
     .platforms = .{ "macos", "linux" },
     .permissions = .{ "window" },
     .capabilities = .{ "webview", "js_bridge" },

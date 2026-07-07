@@ -108,7 +108,7 @@ Keep `app.zon` as the source of truth for app-level behavior:
     .display_name = "My App",
     .description = "One line about the app, shown in the About panel.",
     .version = "0.1.0",
-    .icons = .{ "assets/icon.icns" },
+    .icons = .{"assets/icon.png"},
     .platforms = .{ "macos", "linux" },
     .permissions = .{},
     .capabilities = .{ "webview" },

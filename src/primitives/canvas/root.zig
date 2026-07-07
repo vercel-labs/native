@@ -286,6 +286,10 @@ pub const icons = @import("icons.zig");
 // Deterministic PNG writer (stored-deflate zlib stream) lives in `png.zig`.
 pub const png = @import("png.zig");
 
+// One-image app-icon pipeline: PNG/SVG source in, per-platform icon
+// artifacts (.icns/.ico/size sets) out, all through the vector core.
+pub const app_icon = @import("app_icon.zig");
+
 pub const Density = token_model.Density;
 pub const Easing = token_model.Easing;
 pub const ColorScheme = token_model.ColorScheme;

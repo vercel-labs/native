@@ -38,7 +38,9 @@ pub const RunOptions = struct {
     app_name: []const u8,
     window_title: []const u8 = "",
     bundle_id: []const u8,
-    icon_path: []const u8 = "assets/icon.icns",
+    // Dev-run Dock icon file. The scaffold's one-image contract puts a
+    // square PNG here; a prebuilt .icns path works too.
+    icon_path: []const u8 = "assets/icon.png",
     default_frame: native_sdk.geometry.RectF = native_sdk.geometry.RectF.init(0, 0, 1100, 760),
     restore_state: bool = true,
     bridge: ?native_sdk.BridgeDispatcher = null,

@@ -91,7 +91,7 @@ For frontend apps, package the built frontend assets. The build step usually wir
 `zig build package` creates a `.app` bundle with:
 
 - `Contents/MacOS/<binary>`
-- `Contents/Resources/icon.icns`
+- `Contents/Resources/AppIcon.icns` (generated from the square `assets/icon.png`/`.svg` source in `.icons`; a prebuilt `.icns` ships untouched under its own name)
 - `Contents/Info.plist`
 - `Contents/Resources/dist/` when frontend assets are configured
 - `Contents/Frameworks/Chromium Embedded Framework.framework` for Chromium apps

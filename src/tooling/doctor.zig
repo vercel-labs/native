@@ -104,7 +104,7 @@ pub fn reportForCurrentHost() platform_info.DoctorReport {
             platform_info.DoctorCheck.ok("codesign", "codesign is available for macOS signing (ad-hoc or identity)"),
             platform_info.DoctorCheck.ok("notarytool", "xcrun notarytool is available for macOS notarization"),
             platform_info.DoctorCheck.ok("hdiutil", "hdiutil is available for macOS .dmg creation"),
-            platform_info.DoctorCheck.ok("iconutil", "iconutil is available for .icns generation from .iconset"),
+            platform_info.DoctorCheck.ok("app-icon", "app icon generation (.icns, .ico, PNG size sets) is built into `native package` - one square assets/icon.png or .svg source, no external tools"),
             platform_info.DoctorCheck.ok("ios-static-lib", "Use `zig build lib -Dtarget=aarch64-ios` to build the iOS static library"),
             platform_info.DoctorCheck.ok("android-static-lib", "Use `zig build lib -Dtarget=aarch64-linux-android` to build the Android static library"),
         };
@@ -147,7 +147,6 @@ pub fn reportForCurrentHostWithProbe(
         try addPathCheck(buffers, io, probe, "codesign", "/usr/bin/codesign", "codesign is available for macOS signing", "codesign was not found");
         try addCommandCheck(buffers, allocator, io, probe, "notarytool", &.{ "xcrun", "notarytool", "--help" }, "xcrun notarytool is available for notarization", "xcrun notarytool was not found");
         try addPathCheck(buffers, io, probe, "hdiutil", "/usr/bin/hdiutil", "hdiutil is available for macOS .dmg creation", "hdiutil was not found");
-        try addPathCheck(buffers, io, probe, "iconutil", "/usr/bin/iconutil", "iconutil is available for .icns generation", "iconutil was not found");
     } else {
         try buffers.add("codesign", .unsupported, "macOS signing checks only run on macOS hosts", .{});
     }
@@ -191,6 +190,9 @@ pub fn reportForCurrentHostWithProbe(
     } else {
         try buffers.add("webview-chromium", .available, "Chromium backend is available; configure app.zon or pass --web-engine chromium to check CEF", .{});
     }
+    // Icon generation needs no host tool anywhere: the pipeline (PNG/SVG
+    // source -> .icns/.ico/PNG size sets) is built into the CLI itself.
+    try buffers.add("app-icon", .available, "app icon generation (.icns, .ico, PNG size sets) is built into `native package` - one square assets/icon.png or .svg source, no external tools", .{});
     try buffers.add("ios-static-lib", .available, "Use `zig build lib -Dtarget=aarch64-ios` to build the iOS static library", .{});
     try buffers.add("android-static-lib", .available, "Use `zig build lib -Dtarget=aarch64-linux-android` to build the Android static library", .{});
 

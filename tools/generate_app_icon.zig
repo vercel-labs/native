@@ -1,25 +1,29 @@
 //! Default app-icon generator: renders the SDK's default macOS app icon
 //! from vector geometry through the same path rasterizer the reference
 //! renderer uses, so the icon regenerates from source — no opaque
-//! binary-only asset checked in anywhere.
+//! binary-only asset checked in anywhere, and no external tools: the
+//! `.icns` and `.ico` containers are assembled by the built-in app-icon
+//! pipeline (`canvas.app_icon`) and round-trip-validated with its own
+//! parsers.
 //!
-//! The design follows Apple's macOS icon grid: a 1024x1024 canvas with a
-//! centered 824x824 rounded-rect "squircle" plate (corner radius 185.4),
-//! a subtle baked drop shadow, a vertical blue-violet gradient adjacent
-//! to the design-token accent (#1447e6 light / #193cb8 dark), and a
-//! neutral layered-surface mark: two offset rounded sheets, the back one
+//! The design follows the macOS icon grid: a 1024x1024 canvas with a
+//! centered 824x824 rounded-rect plate (corner radius 185.4), a subtle
+//! baked drop shadow, a vertical blue-violet gradient adjacent to the
+//! design-token accent (#1447e6 light / #193cb8 dark), and a neutral
+//! layered-surface mark: two offset rounded sheets, the back one
 //! translucent. No letterforms, no wordmark.
 //!
 //! Regenerate everything with ONE command from the repo root:
 //!
 //!   zig build generate-icon
 //!
-//! which runs this tool (iconset PNGs + assets/icon.png + assets/icon.ico
-//! + assets/icon.svg), assembles assets/icon.icns via `iconutil`, syncs
-//! the CLI's embedded copy (src/tooling/default_icon.icns), and
-//! round-trips the .icns for validation.
+//! which writes assets/icon.{icns,png,ico,svg}, syncs the CLI's embedded
+//! scaffold copies (src/tooling/default_icon.icns and default_icon.png),
+//! and emits a full-bleed variant (the same design without plate or
+//! margins) used by examples that demonstrate the packaging pipeline's
+//! automatic mask + inset.
 //!
-//! Usage: generate-app-icon <iconset-dir> <png-path> <ico-path> <svg-path>
+//! Usage: generate-app-icon <icns> <png> <ico> <svg> <default-icns> <default-png> <full-bleed-png>
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
@@ -27,6 +31,7 @@ const native_sdk = @import("native_sdk");
 const canvas = native_sdk.canvas;
 const geometry = native_sdk.geometry;
 const vector = canvas.vector;
+const app_icon = canvas.app_icon;
 const PointF = geometry.PointF;
 const Affine = canvas.Affine;
 
@@ -34,15 +39,15 @@ const Affine = canvas.Affine;
 // Design constants (1024 design grid)
 // ---------------------------------------------------------------------------
 
-/// Design canvas — Apple's macOS icon grid is specified at 1024x1024.
+/// Design canvas — the macOS icon grid is specified at 1024x1024.
 const design_size: f32 = 1024;
 /// Master raster size; every shipped size is an area-average downsample
 /// of this, so edges get supersampled antialiasing on top of the
 /// rasterizer's own coverage AA.
 const master_size: usize = 2048;
 
-/// The icon plate: Apple's grid centers an 824x824 rounded rect on the
-/// 1024 canvas (100px margins) with a 185.4px corner radius.
+/// The icon plate: the grid centers an 824x824 rounded rect on the 1024
+/// canvas (100px margins) with a 185.4px corner radius.
 const plate = RoundedRect{ .x = 100, .y = 100, .w = 824, .h = 824, .r = 185.4 };
 
 /// Baked drop shadow (macOS icons carry their own shadow; the system
@@ -64,24 +69,9 @@ const back_sheet = RoundedRect{ .x = 372, .y = 272, .w = 380, .h = 380, .r = 84 
 const front_sheet = RoundedRect{ .x = 272, .y = 372, .w = 380, .h = 380, .r = 84 };
 const back_sheet_alpha: f32 = 0.52;
 
-/// Shipped raster sizes. The .iconset slots and the .ico directory both
-/// draw from this set.
-const output_sizes = [_]usize{ 16, 32, 48, 64, 128, 256, 512, 1024 };
-
-const iconset_slots = [_]struct { name: []const u8, size: usize }{
-    .{ .name = "icon_16x16.png", .size = 16 },
-    .{ .name = "icon_16x16@2x.png", .size = 32 },
-    .{ .name = "icon_32x32.png", .size = 32 },
-    .{ .name = "icon_32x32@2x.png", .size = 64 },
-    .{ .name = "icon_128x128.png", .size = 128 },
-    .{ .name = "icon_128x128@2x.png", .size = 256 },
-    .{ .name = "icon_256x256.png", .size = 256 },
-    .{ .name = "icon_256x256@2x.png", .size = 512 },
-    .{ .name = "icon_512x512.png", .size = 512 },
-    .{ .name = "icon_512x512@2x.png", .size = 1024 },
-};
-
-const ico_sizes = [_]usize{ 16, 32, 48, 64, 128, 256 };
+/// Shipped raster sizes: the union of the .icns family and the .ico
+/// directory sizes.
+const output_sizes = [_]usize{ 16, 24, 32, 48, 64, 128, 256, 512, 1024 };
 
 const RoundedRect = struct {
     x: f32,
@@ -90,6 +80,23 @@ const RoundedRect = struct {
     h: f32,
     r: f32,
 };
+
+/// Map a design-grid rounded rect through the full-bleed transform: the
+/// plate square (824 wide, 100 margins) expands to cover the whole
+/// canvas, so the full-bleed variant is the identical composition with
+/// the plate itself removed — exactly what the packaging pipeline's
+/// mask + inset reconstructs.
+fn fullBleed(rect: RoundedRect) RoundedRect {
+    const scale = design_size / plate.w;
+    const center = design_size * 0.5;
+    return .{
+        .x = (rect.x - center) * scale + center,
+        .y = (rect.y - center) * scale + center,
+        .w = rect.w * scale,
+        .h = rect.h * scale,
+        .r = rect.r * scale,
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Rasterization helpers
@@ -149,6 +156,11 @@ fn rasterizeRoundedRect(mask: []f32, rect: RoundedRect, offset_y: f32) !void {
     );
 }
 
+/// Fill `mask` with full coverage (the full-bleed background).
+fn fillMask(mask: []f32) void {
+    @memset(mask, 1);
+}
+
 /// Composite `mask` over the premultiplied RGBA f32 canvas with a solid
 /// color. `alpha` scales the mask.
 fn compositeSolid(pixels: []f32, mask: []const f32, r: f32, g: f32, b: f32, alpha: f32) void {
@@ -164,11 +176,12 @@ fn compositeSolid(pixels: []f32, mask: []const f32, r: f32, g: f32, b: f32, alph
     }
 }
 
-/// Composite `mask` with a vertical linear gradient spanning the plate.
-fn compositeVerticalGradient(pixels: []f32, mask: []const f32) void {
+/// Composite `mask` with a vertical linear gradient spanning `top_y` to
+/// `top_y + span` in design coordinates.
+fn compositeVerticalGradient(pixels: []f32, mask: []const f32, top_y_design: f32, span_design: f32) void {
     const scale = @as(f32, @floatFromInt(master_size)) / design_size;
-    const top_y = plate.y * scale;
-    const span = plate.h * scale;
+    const top_y = top_y_design * scale;
+    const span = span_design * scale;
     var y: usize = 0;
     while (y < master_size) : (y += 1) {
         const t = std.math.clamp((@as(f32, @floatFromInt(y)) + 0.5 - top_y) / span, 0, 1);
@@ -290,112 +303,50 @@ fn quantize(value: f64) u8 {
 }
 
 // ---------------------------------------------------------------------------
-// Encoders
+// Composition
 // ---------------------------------------------------------------------------
 
-/// PNG encoder with real deflate compression (Up row filter + zlib via
-/// std.compress.flate) — the canvas PNG writer deliberately emits stored
-/// blocks for determinism, which is wrong for checked-in assets.
-fn encodePng(allocator: std.mem.Allocator, rgba: []const u8, size: usize) ![]u8 {
-    const flate = std.compress.flate;
-    const row_len = 1 + size * 4;
-    const raw = try allocator.alloc(u8, row_len * size);
-    defer allocator.free(raw);
-    var y: usize = 0;
-    while (y < size) : (y += 1) {
-        const row = raw[y * row_len ..][0..row_len];
-        row[0] = 2; // Up filter
-        const src = rgba[y * size * 4 ..][0 .. size * 4];
-        if (y == 0) {
-            @memcpy(row[1..], src);
-        } else {
-            const prev = rgba[(y - 1) * size * 4 ..][0 .. size * 4];
-            for (src, prev, row[1..]) |current, above, *out| out.* = current -% above;
-        }
+const Variant = enum {
+    /// The shipped icon: plate + margins + shadow on a transparent canvas.
+    plate,
+    /// The same composition covering the full square, no plate or shadow —
+    /// input for pipelines that apply the platform mask themselves.
+    full_bleed,
+};
+
+fn renderMaster(gpa: std.mem.Allocator, master: []f32, mask: []f32, scratch: []f32, variant: Variant) !void {
+    @memset(master, 0);
+    switch (variant) {
+        .plate => {
+            // 1. Baked drop shadow under the plate.
+            try rasterizeRoundedRect(mask, plate, shadow_offset_y);
+            gaussianBlur(mask, scratch, shadow_sigma * (@as(f32, @floatFromInt(master_size)) / design_size));
+            compositeSolid(master, mask, 0, 0, 0, shadow_alpha);
+            // 2. The plate with its vertical gradient.
+            try rasterizeRoundedRect(mask, plate, 0);
+            compositeVerticalGradient(master, mask, plate.y, plate.h);
+            // 3 + 4. Surface sheets.
+            try rasterizeRoundedRect(mask, back_sheet, 0);
+            compositeSolid(master, mask, 1, 1, 1, back_sheet_alpha);
+            try rasterizeRoundedRect(mask, front_sheet, 0);
+            compositeSolid(master, mask, 1, 1, 1, 1);
+        },
+        .full_bleed => {
+            fillMask(mask);
+            compositeVerticalGradient(master, mask, 0, design_size);
+            try rasterizeRoundedRect(mask, fullBleed(back_sheet), 0);
+            compositeSolid(master, mask, 1, 1, 1, back_sheet_alpha);
+            try rasterizeRoundedRect(mask, fullBleed(front_sheet), 0);
+            compositeSolid(master, mask, 1, 1, 1, 1);
+        },
     }
-
-    const zlib_capacity = raw.len + raw.len / 8 + 1024;
-    const zlib_buffer = try allocator.alloc(u8, zlib_capacity);
-    defer allocator.free(zlib_buffer);
-    var zlib_writer = std.Io.Writer.fixed(zlib_buffer);
-    const window = try allocator.alloc(u8, flate.max_window_len * 2);
-    defer allocator.free(window);
-    var compress = try flate.Compress.init(&zlib_writer, window, .zlib, .default);
-    try compress.writer.writeAll(raw);
-    try compress.finish();
-    const idat = zlib_writer.buffered();
-
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    try out.appendSlice(allocator, &canvas.png.signature);
-    var ihdr: [13]u8 = undefined;
-    std.mem.writeInt(u32, ihdr[0..4], @intCast(size), .big);
-    std.mem.writeInt(u32, ihdr[4..8], @intCast(size), .big);
-    ihdr[8] = 8; // bit depth
-    ihdr[9] = 6; // truecolor with alpha
-    ihdr[10] = 0;
-    ihdr[11] = 0;
-    ihdr[12] = 0;
-    try appendChunk(&out, allocator, "IHDR", &ihdr);
-    try appendChunk(&out, allocator, "IDAT", idat);
-    try appendChunk(&out, allocator, "IEND", &.{});
-    return out.toOwnedSlice(allocator);
+    _ = gpa;
 }
 
-fn appendChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, kind: *const [4]u8, data: []const u8) !void {
-    try appendU32Big(list, allocator, @intCast(data.len));
-    try list.appendSlice(allocator, kind);
-    try list.appendSlice(allocator, data);
-    var crc = std.hash.Crc32.init();
-    crc.update(kind);
-    crc.update(data);
-    try appendU32Big(list, allocator, crc.final());
-}
+// ---------------------------------------------------------------------------
+// SVG mirror of the same geometry, for design handoff and preview.
+// ---------------------------------------------------------------------------
 
-fn appendU32Big(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u32) !void {
-    var bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &bytes, value, .big);
-    try list.appendSlice(allocator, &bytes);
-}
-
-/// ICO container with PNG-compressed entries (supported since Vista).
-fn writeIco(allocator: std.mem.Allocator, io: std.Io, path: []const u8, pngs: []const []const u8, sizes: []const usize) !void {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    const count: u16 = @intCast(pngs.len);
-    try appendU16(&out, allocator, 0); // reserved
-    try appendU16(&out, allocator, 1); // type: icon
-    try appendU16(&out, allocator, count);
-    var offset: u32 = 6 + 16 * @as(u32, count);
-    for (pngs, sizes) |png_bytes, size| {
-        const dim: u8 = if (size >= 256) 0 else @intCast(size);
-        try out.append(allocator, dim); // width
-        try out.append(allocator, dim); // height
-        try out.append(allocator, 0); // palette
-        try out.append(allocator, 0); // reserved
-        try appendU16(&out, allocator, 1); // planes
-        try appendU16(&out, allocator, 32); // bpp
-        try appendU32(&out, allocator, @intCast(png_bytes.len));
-        try appendU32(&out, allocator, offset);
-        offset += @intCast(png_bytes.len);
-    }
-    for (pngs) |png_bytes| try out.appendSlice(allocator, png_bytes);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = out.items });
-}
-
-fn appendU16(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u16) !void {
-    var bytes: [2]u8 = undefined;
-    std.mem.writeInt(u16, &bytes, value, .little);
-    try list.appendSlice(allocator, &bytes);
-}
-
-fn appendU32(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u32) !void {
-    var bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &bytes, value, .little);
-    try list.appendSlice(allocator, &bytes);
-}
-
-/// SVG mirror of the same geometry, for design handoff and preview.
 fn writeSvg(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     const svg = try std.fmt.allocPrint(allocator,
         \\<!-- Generated by `zig build generate-icon` (tools/generate_app_icon.zig). Edit the tool, not this file. -->
@@ -465,68 +416,103 @@ pub fn main(init: std.process.Init) !void {
     const arena = arena_state.allocator();
 
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len < 5) usage();
-    const iconset_dir = args[1];
+    if (args.len < 8) usage();
+    const icns_path = args[1];
     const png_path = args[2];
     const ico_path = args[3];
     const svg_path = args[4];
+    const default_icns_path = args[5];
+    const default_png_path = args[6];
+    const full_bleed_png_path = args[7];
 
     const pixel_count = master_size * master_size;
     const master = try gpa.alloc(f32, pixel_count * 4);
     defer gpa.free(master);
-    @memset(master, 0);
     const mask = try gpa.alloc(f32, pixel_count);
     defer gpa.free(mask);
     const scratch = try gpa.alloc(f32, pixel_count);
     defer gpa.free(scratch);
 
-    const master_scale = @as(f32, @floatFromInt(master_size)) / design_size;
-
-    // 1. Baked drop shadow under the plate.
-    try rasterizeRoundedRect(mask, plate, shadow_offset_y);
-    gaussianBlur(mask, scratch, shadow_sigma * master_scale);
-    compositeSolid(master, mask, 0, 0, 0, shadow_alpha);
-
-    // 2. The plate with its vertical gradient.
-    try rasterizeRoundedRect(mask, plate, 0);
-    compositeVerticalGradient(master, mask);
-
-    // 3. Back surface sheet (translucent white).
-    try rasterizeRoundedRect(mask, back_sheet, 0);
-    compositeSolid(master, mask, 1, 1, 1, back_sheet_alpha);
-
-    // 4. Front surface sheet (opaque white).
-    try rasterizeRoundedRect(mask, front_sheet, 0);
-    compositeSolid(master, mask, 1, 1, 1, 1);
-
-    // Encode every shipped size once, keyed by size.
+    // The shipped (plate) variant at every output size.
+    try renderMaster(gpa, master, mask, scratch, .plate);
+    var renders: [output_sizes.len][]u8 = undefined;
     var pngs: [output_sizes.len][]u8 = undefined;
     var encoded_count: usize = 0;
-    defer for (pngs[0..encoded_count]) |bytes| gpa.free(bytes);
+    defer for (renders[0..encoded_count], pngs[0..encoded_count]) |rgba, bytes| {
+        gpa.free(rgba);
+        gpa.free(bytes);
+    };
     for (output_sizes, 0..) |size, i| {
-        const rgba = try downsample(gpa, master, size);
-        defer gpa.free(rgba);
-        pngs[i] = try encodePng(gpa, rgba, size);
+        renders[i] = try downsample(gpa, master, size);
+        pngs[i] = try app_icon.encodePng(gpa, renders[i], size, size);
         encoded_count += 1;
     }
 
-    var cwd = std.Io.Dir.cwd();
-    try cwd.createDirPath(io, iconset_dir);
-    for (iconset_slots) |slot| {
-        const slot_path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ iconset_dir, slot.name });
-        defer gpa.free(slot_path);
-        try cwd.writeFile(io, .{ .sub_path = slot_path, .data = pngs[sizeIndex(slot.size)] });
+    // .icns straight from the built-in writer (each slot in the payload
+    // form it expects), then round-trip-check it with the built-in
+    // parsers.
+    var payloads: [app_icon.icns_slots.len][]u8 = undefined;
+    var payload_count: usize = 0;
+    defer for (payloads[0..payload_count]) |bytes| gpa.free(bytes);
+    var members: [app_icon.icns_slots.len]app_icon.IcnsMember = undefined;
+    for (app_icon.icns_slots, 0..) |slot, i| {
+        payloads[i] = try app_icon.encodeIcnsPayload(gpa, slot, renders[sizeIndex(slot.size)]);
+        payload_count += 1;
+        members[i] = .{ .kind = slot.kind, .data = payloads[i] };
     }
+    const icns = try app_icon.writeIcns(gpa, &members);
+    defer gpa.free(icns);
+    var icns_iterator = app_icon.IcnsIterator.init(icns) orelse return error.InvalidGeneratedIcns;
+    var member_count: usize = 0;
+    while (icns_iterator.next()) |member| {
+        const slot = app_icon.icns_slots[member_count];
+        switch (slot.payload) {
+            .png => {
+                const header = app_icon.pngHeader(member.data) orelse return error.InvalidGeneratedIcns;
+                if (header.width != slot.size) return error.InvalidGeneratedIcns;
+            },
+            .argb => {
+                const rgba = try app_icon.decodeArgb(gpa, member.data, slot.size, slot.size);
+                gpa.free(rgba);
+            },
+        }
+        member_count += 1;
+    }
+    if (member_count != app_icon.icns_slots.len) return error.InvalidGeneratedIcns;
 
+    var cwd = std.Io.Dir.cwd();
+    try cwd.writeFile(io, .{ .sub_path = icns_path, .data = icns });
+    try cwd.writeFile(io, .{ .sub_path = default_icns_path, .data = icns });
     try cwd.writeFile(io, .{ .sub_path = png_path, .data = pngs[sizeIndex(1024)] });
+    try cwd.writeFile(io, .{ .sub_path = default_png_path, .data = pngs[sizeIndex(1024)] });
 
-    var ico_pngs: [ico_sizes.len][]const u8 = undefined;
-    for (ico_sizes, 0..) |size, i| ico_pngs[i] = pngs[sizeIndex(size)];
-    try writeIco(gpa, io, ico_path, &ico_pngs, &ico_sizes);
+    var ico_entries: [app_icon.ico_sizes.len]app_icon.IcoEntry = undefined;
+    for (app_icon.ico_sizes, 0..) |size, i| ico_entries[i] = .{ .size = size, .data = pngs[sizeIndex(size)] };
+    const ico = try app_icon.writeIco(gpa, &ico_entries);
+    defer gpa.free(ico);
+    try cwd.writeFile(io, .{ .sub_path = ico_path, .data = ico });
 
     try writeSvg(gpa, io, svg_path);
 
-    std.debug.print("generated {s} ({d} slots), {s}, {s}, {s}\n", .{ iconset_dir, iconset_slots.len, png_path, ico_path, svg_path });
+    // The full-bleed variant (1024 only): the pipeline-demo source.
+    try renderMaster(gpa, master, mask, scratch, .full_bleed);
+    const full_bleed_rgba = try downsample(gpa, master, 1024);
+    defer gpa.free(full_bleed_rgba);
+    const full_bleed_png = try app_icon.encodePng(gpa, full_bleed_rgba, 1024, 1024);
+    defer gpa.free(full_bleed_png);
+    if (std.fs.path.dirname(full_bleed_png_path)) |parent| try cwd.createDirPath(io, parent);
+    try cwd.writeFile(io, .{ .sub_path = full_bleed_png_path, .data = full_bleed_png });
+
+    std.debug.print("generated {s} ({d} members), {s}, {s}, {s}, {s}, {s}, {s}\n", .{
+        icns_path,
+        app_icon.icns_slots.len,
+        png_path,
+        ico_path,
+        svg_path,
+        default_icns_path,
+        default_png_path,
+        full_bleed_png_path,
+    });
 }
 
 fn sizeIndex(size: usize) usize {
@@ -537,6 +523,6 @@ fn sizeIndex(size: usize) usize {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: generate-app-icon <iconset-dir> <png-path> <ico-path> <svg-path>\n", .{});
+    std.debug.print("usage: generate-app-icon <icns> <png> <ico> <svg> <default-icns> <default-png> <full-bleed-png>\n", .{});
     std.process.exit(2);
 }

@@ -2,9 +2,12 @@ const std = @import("std");
 
 /// The SDK's default app icon, rendered from vector source by
 /// `zig build generate-icon` (tools/generate_app_icon.zig). Embedded so
-/// `native init` always scaffolds a real macOS .icns regardless of the
-/// directory the CLI runs from.
-const default_icon_icns = @embedFile("default_icon.icns");
+/// `native init` always scaffolds a real icon regardless of the
+/// directory the CLI runs from. The scaffold ships the one-image PNG
+/// contract (`assets/icon.png` in app.zon `.icons`; packaging generates
+/// every platform's artifacts from it); the `.icns` twin stays embedded
+/// for packaging's no-icon fallback (src/tooling/package.zig).
+const default_icon_png = @embedFile("default_icon.png");
 
 pub const Frontend = enum {
     next,
@@ -110,7 +113,7 @@ pub fn writeDefaultApp(allocator: std.mem.Allocator, io: std.Io, destination: []
     try writeFile(app_dir, io, "src/main.zig", main_zig);
     try writeFile(app_dir, io, "src/runner.zig", runnerZig());
     try writeFile(app_dir, io, "app.zon", app_zon);
-    try writeFile(app_dir, io, "assets/icon.icns", default_icon_icns);
+    try writeFile(app_dir, io, "assets/icon.png", default_icon_png);
     try writeFile(app_dir, io, ".github/workflows/ci.yml", ci_yaml);
     try writeFile(app_dir, io, "README.md", readme_md);
 
@@ -133,7 +136,7 @@ fn writeNativeAppSlim(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.
     try writeFile(app_dir, io, "src/app.native", nativeAppMarkup());
     try writeFile(app_dir, io, "src/tests.zig", tests_zig);
     try writeFile(app_dir, io, "app.zon", app_zon);
-    try writeFile(app_dir, io, "assets/icon.icns", default_icon_icns);
+    try writeFile(app_dir, io, "assets/icon.png", default_icon_png);
     try writeFile(app_dir, io, ".gitignore", slimGitignore());
     try writeFile(app_dir, io, "README.md", readme_md);
 }
@@ -210,7 +213,7 @@ fn writeNativeApp(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir,
     try writeFile(app_dir, io, "src/app.native", nativeAppMarkup());
     try writeFile(app_dir, io, "src/tests.zig", tests_zig);
     try writeFile(app_dir, io, "app.zon", app_zon);
-    try writeFile(app_dir, io, "assets/icon.icns", default_icon_icns);
+    try writeFile(app_dir, io, "assets/icon.png", default_icon_png);
     try writeFile(app_dir, io, ".vscode/settings.json", nativeVscodeSettings());
     try writeFile(app_dir, io, ".github/workflows/ci.yml", ci_yaml);
     try writeFile(app_dir, io, ".gitignore", nativeGitignore());
@@ -381,7 +384,7 @@ fn nativeMainZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8
     try appendZigString(&out, allocator, names.app_id);
     try out.appendSlice(allocator,
         \\,
-        \\        .icon_path = "assets/icon.icns",
+        \\        .icon_path = "assets/icon.png",
         \\        .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
         \\        .restore_state = false,
         \\        .js_window_api = false,
@@ -558,7 +561,7 @@ fn nativeAppZon(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 
         \\,
         \\    .description = "A counter that lives in one native window.",
         \\    .version = "0.1.0",
-        \\    .icons = .{"assets/icon.icns"},
+        \\    .icons = .{"assets/icon.png"},
         \\    .platforms = .{"macos"},
         \\    .permissions = .{ "view", "command" },
         \\    .capabilities = .{ "native_views", "gpu_surfaces" },
@@ -1400,7 +1403,7 @@ fn mainZig(allocator: std.mem.Allocator, names: TemplateNames, frontend: Fronten
     try appendZigString(&out, allocator, names.app_id);
     try out.appendSlice(allocator,
         \\,
-        \\        .icon_path = "assets/icon.icns",
+        \\        .icon_path = "assets/icon.png",
         \\        .security = .{
         \\            .navigation = .{ .allowed_origins = &dev_origins },
         \\        },
@@ -1453,7 +1456,7 @@ fn runnerZig() []const u8 {
     \\    app_name: []const u8,
     \\    window_title: []const u8 = "",
     \\    bundle_id: []const u8,
-    \\    icon_path: []const u8 = "assets/icon.icns",
+    \\    icon_path: []const u8 = "assets/icon.png",
     \\    bridge: ?native_sdk.BridgeDispatcher = null,
     \\    builtin_bridge: native_sdk.BridgePolicy = .{},
     \\    security: native_sdk.SecurityPolicy = .{},
@@ -1936,7 +1939,7 @@ fn appZon(allocator: std.mem.Allocator, names: TemplateNames, frontend: Frontend
     try out.appendSlice(allocator,
         \\,
         \\    .version = "0.1.0",
-        \\    .icons = .{ "assets/icon.icns" },
+        \\    .icons = .{ "assets/icon.png" },
         \\    .platforms = .{ "macos", "linux" },
         \\    .permissions = .{},
         \\    .capabilities = .{ "webview" },
@@ -2895,7 +2898,7 @@ test "writeDefaultApp emits a slim native scaffold by default" {
     defer std.testing.allocator.free(gitignore_text);
     const readme_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "README.md");
     defer std.testing.allocator.free(readme_text);
-    const icon = try readTestFile(std.testing.allocator, std.testing.io, destination, "assets/icon.icns");
+    const icon = try readTestFile(std.testing.allocator, std.testing.io, destination, "assets/icon.png");
     defer std.testing.allocator.free(icon);
 
     // Zero-config: no build files, no editor config, no CI workflow.

@@ -1,10 +1,16 @@
 const std = @import("std");
+const app_icon_tool = @import("app_icon");
 const assets_tool = @import("assets.zig");
 const cef = @import("cef.zig");
 const codesign = @import("codesign.zig");
 const diagnostics = @import("diagnostics");
 const manifest_tool = @import("manifest.zig");
 const web_engine_tool = @import("web_engine.zig");
+
+/// The SDK's default app icon (kept in sync by `zig build generate-icon`):
+/// what a bundle ships when app.zon configures no usable icon at all, so
+/// a fresh package is never a text placeholder pretending to be an icon.
+const default_icon_icns = @embedFile("default_icon.icns");
 
 pub const PackageTarget = enum {
     macos,
@@ -254,14 +260,15 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
             defer allocator.free(mime_path);
             try writeFile(dir, io, mime_path, mime_info);
         }
-        if (options.metadata.icons.len > 0) {
-            copyFileToDir(allocator, io, dir, options.metadata.icons[0], "share/icons/app-icon.png") catch {};
+        try writeLinuxIcons(allocator, io, dir, options.metadata);
+    } else if (options.target == .windows) {
+        try writeWindowsIcon(allocator, io, dir, options.metadata);
+        if (hasRegistrationMetadata(options.metadata)) {
+            try dir.createDirPath(io, "install");
+            const registry_script = try windowsRegistrationScript(allocator, options.metadata, executable_name);
+            defer allocator.free(registry_script);
+            try writeFile(dir, io, "install/register-file-types.ps1", registry_script);
         }
-    } else if (options.target == .windows and hasRegistrationMetadata(options.metadata)) {
-        try dir.createDirPath(io, "install");
-        const registry_script = try windowsRegistrationScript(allocator, options.metadata, executable_name);
-        defer allocator.free(registry_script);
-        try writeFile(dir, io, "install/register-file-types.ps1", registry_script);
     }
     if (options.web_engine == .chromium) {
         const cef_platform = cefPlatformForTarget(options.target) orelse return error.UnsupportedWebEngine;
@@ -284,6 +291,7 @@ fn createIosArtifact(allocator: std.mem.Allocator, io: std.Io, options: PackageO
     const shell_config = try iosShellConfigAlloc(allocator, shell_model);
     defer allocator.free(shell_config);
     try writeFile(dir, io, "native-sdkHost/NativeSdkShellConfig.swift", shell_config);
+    try writeIosIcon(allocator, io, dir, options.metadata);
     const assets_output = try assetOutputPath(allocator, options.output_path, "Resources", options);
     defer allocator.free(assets_output);
     const bundle_stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);
@@ -300,7 +308,8 @@ fn createAndroidArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
     const build_gradle = try androidBuildGradleForMetadata(allocator, options.metadata);
     defer allocator.free(build_gradle);
     try writeFile(dir, io, "app/build.gradle", build_gradle);
-    const manifest = try androidManifestForMetadata(allocator, options.metadata);
+    const has_launcher_icons = try writeAndroidIcons(allocator, io, dir, options.metadata);
+    const manifest = try androidManifestForMetadata(allocator, options.metadata, has_launcher_icons);
     defer allocator.free(manifest);
     try writeFile(dir, io, "app/src/main/AndroidManifest.xml", manifest);
     const shell_model = mobileShellModel(options.metadata);
@@ -1373,12 +1382,16 @@ fn androidManifest() []const u8 {
     return "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"><application android:theme=\"@style/AppTheme\"><activity android:name=\"dev.native_sdk.MainActivity\" android:configChanges=\"keyboard|keyboardHidden|orientation|screenSize\" android:exported=\"true\" android:windowSoftInputMode=\"adjustResize\"><intent-filter><action android:name=\"android.intent.action.MAIN\"/><category android:name=\"android.intent.category.LAUNCHER\"/></intent-filter></activity></application></manifest>\n";
 }
 
-fn androidManifestForMetadata(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata) ![]const u8 {
+fn androidManifestForMetadata(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata, has_launcher_icons: bool) ![]const u8 {
     const label = try xmlEscapeAlloc(allocator, metadata.displayName());
     defer allocator.free(label);
+    // Only reference @mipmap/ic_launcher when the packager actually
+    // generated the mipmap set — a dangling resource reference would
+    // break the host project's build.
+    const icon_attribute: []const u8 = if (has_launcher_icons) " android:icon=\"@mipmap/ic_launcher\"" else "";
     return std.fmt.allocPrint(allocator,
         \\<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-        \\  <application android:label="{s}" android:theme="@style/AppTheme">
+        \\  <application android:label="{s}"{s} android:theme="@style/AppTheme">
         \\    <activity android:name="dev.native_sdk.MainActivity" android:configChanges="keyboard|keyboardHidden|orientation|screenSize" android:exported="true" android:windowSoftInputMode="adjustResize">
         \\      <intent-filter>
         \\        <action android:name="android.intent.action.MAIN" />
@@ -1388,7 +1401,7 @@ fn androidManifestForMetadata(allocator: std.mem.Allocator, metadata: manifest_t
         \\  </application>
         \\</manifest>
         \\
-    , .{label});
+    , .{ label, icon_attribute });
 }
 
 fn androidStyles() []const u8 {
@@ -2276,17 +2289,213 @@ fn artifactReadme(target: PackageTarget) []const u8 {
     };
 }
 
+// ---------------------------------------------------------------------------
+// App icons: one square source image (assets/icon.png or assets/icon.svg
+// in app.zon `.icons`) generates every platform's artifacts through the
+// built-in pipeline (`app_icon`). A prebuilt container in `.icons` always
+// wins untouched for its platform: `.icns` on macOS, `.ico` on Windows.
+// Precedence on macOS: explicit .icns > generated-from-image > the SDK
+// default icon.
+// ---------------------------------------------------------------------------
+
+/// How `.icons` resolves for packaging: at most one prebuilt container
+/// per platform plus at most one generatable source (first of each wins).
+const IconPlan = struct {
+    prebuilt_icns: ?[]const u8 = null,
+    prebuilt_ico: ?[]const u8 = null,
+    source_path: ?[]const u8 = null,
+    source_kind: app_icon_tool.SourceKind = .png,
+};
+
+fn resolveIconPlan(metadata: manifest_tool.Metadata) IconPlan {
+    var plan: IconPlan = .{};
+    for (metadata.icons) |path| {
+        if (app_icon_tool.pathHasExtension(path, ".icns")) {
+            if (plan.prebuilt_icns == null) plan.prebuilt_icns = path;
+        } else if (app_icon_tool.pathHasExtension(path, ".ico")) {
+            if (plan.prebuilt_ico == null) plan.prebuilt_ico = path;
+        } else if (app_icon_tool.sourceKindForPath(path)) |kind| {
+            if (plan.source_path == null) {
+                plan.source_path = path;
+                plan.source_kind = kind;
+            }
+        }
+    }
+    return plan;
+}
+
+/// Read and validate the icon source, printing the same teaching
+/// diagnostics `native validate` produces. A missing file warns and
+/// returns null (packaging falls back per platform); a file that exists
+/// but is not a square PNG/supported SVG is an error.
+fn loadIconSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8, kind: app_icon_tool.SourceKind) !?app_icon_tool.Source {
+    const bytes = readPath(allocator, io, path) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.debug.print("warning: app icon source {s} was not found; the artifact falls back to the default icon where one exists\n", .{path});
+            return null;
+        },
+        else => return err,
+    };
+    defer allocator.free(bytes);
+    switch (try app_icon_tool.loadSource(allocator, bytes, kind)) {
+        .ok => |loaded| {
+            if (kind == .png and loaded.width < app_icon_tool.min_recommended_source_size) {
+                var buffer: [512]u8 = undefined;
+                std.debug.print("{s}\n", .{app_icon_tool.formatSmallSourceMessage(&buffer, path, loaded.width, loaded.height)});
+            }
+            return loaded;
+        },
+        .issue => |issue| {
+            var buffer: [512]u8 = undefined;
+            const message = switch (issue) {
+                .not_square => |dims| app_icon_tool.formatNotSquareMessage(&buffer, path, dims.width, dims.height),
+                .unsupported => app_icon_tool.formatUnsupportedMessage(&buffer, path),
+            };
+            std.debug.print("error: {s}\n", .{message});
+            return error.InvalidIconSource;
+        },
+    }
+}
+
 fn macosIconFile(metadata: manifest_tool.Metadata) []const u8 {
-    if (metadata.icons.len == 0) return "AppIcon.icns";
-    return std.fs.path.basename(metadata.icons[0]);
+    // Only a prebuilt .icns keeps its own name; generated and default
+    // icons always ship as AppIcon.icns.
+    const plan = resolveIconPlan(metadata);
+    if (plan.prebuilt_icns) |path| return std.fs.path.basename(path);
+    return "AppIcon.icns";
 }
 
 fn copyMacosIcon(allocator: std.mem.Allocator, io: std.Io, package_dir: std.Io.Dir, options: PackageOptions) !void {
-    if (options.metadata.icons.len == 0) {
-        try writeFile(package_dir, io, "Contents/Resources/AppIcon.icns", "placeholder: replace with a real macOS .icns before distributing\n");
+    const plan = resolveIconPlan(options.metadata);
+    if (plan.prebuilt_icns) |path| {
+        // Art-directed prebuilt .icns wins untouched.
+        try copyMacosResourceIcon(allocator, io, package_dir, path, "configured app icon");
         return;
     }
-    try copyMacosResourceIcon(allocator, io, package_dir, options.metadata.icons[0], "configured app icon");
+    if (plan.source_path) |path| {
+        if (try loadIconSource(allocator, io, path, plan.source_kind)) |loaded| {
+            var source = loaded;
+            defer source.deinit(allocator);
+            const icns = app_icon_tool.buildIcns(allocator, &source) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    var buffer: [512]u8 = undefined;
+                    std.debug.print("error: {s}\n", .{app_icon_tool.formatUnsupportedMessage(&buffer, path)});
+                    return error.InvalidIconSource;
+                },
+            };
+            defer allocator.free(icns);
+            try writeFile(package_dir, io, "Contents/Resources/AppIcon.icns", icns);
+            return;
+        }
+    }
+    try writeFile(package_dir, io, "Contents/Resources/AppIcon.icns", default_icon_icns);
+}
+
+/// Linux: the hicolor-theme size set the desktop entry's `Icon=app-icon`
+/// name resolves against, generated from the one source image.
+fn writeLinuxIcons(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, metadata: manifest_tool.Metadata) !void {
+    const plan = resolveIconPlan(metadata);
+    const path = plan.source_path orelse {
+        if (metadata.icons.len > 0) {
+            std.debug.print("note: Linux icons generate from a square .png or .svg in app.zon .icons; a prebuilt .icns/.ico only serves macOS/Windows, so this artifact ships without one\n", .{});
+        }
+        return;
+    };
+    var source = (try loadIconSource(allocator, io, path, plan.source_kind)) orelse return;
+    defer source.deinit(allocator);
+    for (app_icon_tool.linux_sizes) |size| {
+        const encoded = app_icon_tool.buildSquarePng(allocator, &source, size) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidIconSource,
+        };
+        defer allocator.free(encoded);
+        const icon_dir = try std.fmt.allocPrint(allocator, "share/icons/hicolor/{d}x{d}/apps", .{ size, size });
+        defer allocator.free(icon_dir);
+        try dir.createDirPath(io, icon_dir);
+        const icon_path = try std.fmt.allocPrint(allocator, "{s}/app-icon.png", .{icon_dir});
+        defer allocator.free(icon_path);
+        try writeFile(dir, io, icon_path, encoded);
+    }
+}
+
+/// Windows: a multi-size `.ico` at the artifact root (square, unmasked).
+/// A prebuilt `.ico` in `.icons` ships untouched.
+fn writeWindowsIcon(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, metadata: manifest_tool.Metadata) !void {
+    const plan = resolveIconPlan(metadata);
+    if (plan.prebuilt_ico) |path| {
+        copyFileToDir(allocator, io, dir, path, "app-icon.ico") catch {
+            std.debug.print("warning: configured .ico {s} was not found; the Windows artifact ships without an icon\n", .{path});
+        };
+        return;
+    }
+    const path = plan.source_path orelse return;
+    var source = (try loadIconSource(allocator, io, path, plan.source_kind)) orelse return;
+    defer source.deinit(allocator);
+    const ico = app_icon_tool.buildIco(allocator, &source) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidIconSource,
+    };
+    defer allocator.free(ico);
+    try writeFile(dir, io, "app-icon.ico", ico);
+}
+
+/// iOS: an asset-catalog icon set with the single 1024 universal image
+/// modern toolchains take, dropped next to the host skeleton sources.
+fn writeIosIcon(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, metadata: manifest_tool.Metadata) !void {
+    const plan = resolveIconPlan(metadata);
+    const path = plan.source_path orelse return;
+    var source = (try loadIconSource(allocator, io, path, plan.source_kind)) orelse return;
+    defer source.deinit(allocator);
+    const encoded = app_icon_tool.buildSquarePng(allocator, &source, app_icon_tool.ios_icon_size) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidIconSource,
+    };
+    defer allocator.free(encoded);
+    try dir.createDirPath(io, "Assets.xcassets/AppIcon.appiconset");
+    try writeFile(dir, io, "Assets.xcassets/AppIcon.appiconset/AppIcon.png", encoded);
+    try writeFile(dir, io, "Assets.xcassets/AppIcon.appiconset/Contents.json",
+        \\{
+        \\  "images" : [
+        \\    {
+        \\      "filename" : "AppIcon.png",
+        \\      "idiom" : "universal",
+        \\      "platform" : "ios",
+        \\      "size" : "1024x1024"
+        \\    }
+        \\  ],
+        \\  "info" : {
+        \\    "author" : "native",
+        \\    "version" : 1
+        \\  }
+        \\}
+        \\
+    );
+}
+
+/// Android: launcher mipmaps at the standard densities. Returns whether
+/// icons were generated so the manifest can reference them. (Adaptive
+/// icons need two art-directed layers a single flat source cannot
+/// honestly provide, so only the legacy launcher set is generated.)
+fn writeAndroidIcons(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, metadata: manifest_tool.Metadata) !bool {
+    const plan = resolveIconPlan(metadata);
+    const path = plan.source_path orelse return false;
+    var source = (try loadIconSource(allocator, io, path, plan.source_kind)) orelse return false;
+    defer source.deinit(allocator);
+    for (app_icon_tool.android_densities) |density| {
+        const encoded = app_icon_tool.buildSquarePng(allocator, &source, density.size) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidIconSource,
+        };
+        defer allocator.free(encoded);
+        const mipmap_dir = try std.fmt.allocPrint(allocator, "app/src/main/res/mipmap-{s}", .{density.name});
+        defer allocator.free(mipmap_dir);
+        try dir.createDirPath(io, mipmap_dir);
+        const icon_path = try std.fmt.allocPrint(allocator, "{s}/ic_launcher.png", .{mipmap_dir});
+        defer allocator.free(icon_path);
+        try writeFile(dir, io, icon_path, encoded);
+    }
+    return true;
 }
 
 fn copyMacosDocumentIcons(allocator: std.mem.Allocator, io: std.Io, package_dir: std.Io.Dir, metadata: manifest_tool.Metadata) !void {
@@ -3633,4 +3842,290 @@ test "package report records target signing and assets" {
     const len = try file.readPositionalAll(std.testing.io, &buffer, 0);
     try std.testing.expect(std.mem.indexOf(u8, buffer[0..len], ".target = \"linux\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer[0..len], ".asset_count = 2") != null);
+}
+
+// ---------------------------------------------------------------------------
+// App icon pipeline tests
+// ---------------------------------------------------------------------------
+
+/// Write a solid full-bleed square PNG source for icon tests.
+fn writeTestIconSource(gpa: std.mem.Allocator, io: std.Io, path: []const u8, extent: usize) !void {
+    const pixels = try gpa.alloc(u8, extent * extent * 4);
+    defer gpa.free(pixels);
+    var index: usize = 0;
+    while (index < extent * extent) : (index += 1) {
+        pixels[index * 4 + 0] = 40;
+        pixels[index * 4 + 1] = 90;
+        pixels[index * 4 + 2] = 220;
+        pixels[index * 4 + 3] = 255;
+    }
+    const encoded = try app_icon_tool.encodePng(gpa, pixels, extent, extent);
+    defer gpa.free(encoded);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = encoded });
+}
+
+test "macos package generates a full icns family from a png source" {
+    const gpa = std.testing.allocator;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-icon-gen";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    try writeTestIconSource(gpa, std.testing.io, root ++ "/assets/icon.png", 128);
+
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.app",
+        .name = "demo",
+        .version = "1.0.0",
+        .icons = &.{root ++ "/assets/icon.png"},
+    };
+    _ = try createMacosApp(gpa, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/Demo.app",
+        .assets_dir = root ++ "/assets",
+    });
+
+    const icns = try readPath(gpa, std.testing.io, root ++ "/Demo.app/Contents/Resources/AppIcon.icns");
+    defer gpa.free(icns);
+    var iterator = app_icon_tool.IcnsIterator.init(icns) orelse return error.TestUnexpectedResult;
+    var seen: usize = 0;
+    while (iterator.next()) |member| {
+        const slot = app_icon_tool.icns_slots[seen];
+        try std.testing.expectEqualSlices(u8, &slot.kind, &member.kind);
+        switch (slot.payload) {
+            .png => {
+                const header = app_icon_tool.pngHeader(member.data) orelse return error.TestUnexpectedResult;
+                try std.testing.expectEqual(slot.size, header.width);
+                try std.testing.expectEqual(slot.size, header.height);
+            },
+            .argb => {
+                const rgba = try app_icon_tool.decodeArgb(gpa, member.data, slot.size, slot.size);
+                defer gpa.free(rgba);
+                try std.testing.expectEqual(slot.size * slot.size * 4, rgba.len);
+            },
+        }
+        seen += 1;
+    }
+    try std.testing.expectEqual(app_icon_tool.icns_slots.len, seen);
+
+    // The Info.plist references the generated name, not the source name.
+    const plist = try readPath(gpa, std.testing.io, root ++ "/Demo.app/Contents/Info.plist");
+    defer gpa.free(plist);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "AppIcon.icns") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "icon.png") == null);
+}
+
+test "a prebuilt icns wins untouched over a png source" {
+    const gpa = std.testing.allocator;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-icon-precedence";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    try writeTestIconSource(gpa, std.testing.io, root ++ "/assets/icon.png", 64);
+    const prebuilt = "icns\x00\x00\x00\x0cJUNK";
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/assets/icon.icns", .data = prebuilt });
+
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.app",
+        .name = "demo",
+        .version = "1.0.0",
+        // Source listed FIRST: the prebuilt .icns must still win.
+        .icons = &.{ root ++ "/assets/icon.png", root ++ "/assets/icon.icns" },
+    };
+    _ = try createMacosApp(gpa, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/Demo.app",
+        .assets_dir = root ++ "/assets",
+    });
+
+    const copied = try readPath(gpa, std.testing.io, root ++ "/Demo.app/Contents/Resources/icon.icns");
+    defer gpa.free(copied);
+    try std.testing.expectEqualStrings(prebuilt, copied);
+}
+
+test "macos package without icons ships the default icon" {
+    const gpa = std.testing.allocator;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-icon-default";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.app", .name = "demo", .version = "1.0.0" };
+    _ = try createMacosApp(gpa, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/Demo.app",
+        .assets_dir = root ++ "/assets",
+    });
+    const icns = try readPath(gpa, std.testing.io, root ++ "/Demo.app/Contents/Resources/AppIcon.icns");
+    defer gpa.free(icns);
+    try std.testing.expect(app_icon_tool.IcnsIterator.init(icns) != null);
+}
+
+test "a non-square icon source fails packaging with the teaching error" {
+    const gpa = std.testing.allocator;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-icon-nonsquare";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    const pixels = try gpa.alloc(u8, 6 * 4 * 4);
+    defer gpa.free(pixels);
+    @memset(pixels, 255);
+    const encoded = try app_icon_tool.encodePng(gpa, pixels, 6, 4);
+    defer gpa.free(encoded);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/assets/icon.png", .data = encoded });
+
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.app",
+        .name = "demo",
+        .version = "1.0.0",
+        .icons = &.{root ++ "/assets/icon.png"},
+    };
+    try std.testing.expectError(error.InvalidIconSource, createMacosApp(gpa, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/Demo.app",
+        .assets_dir = root ++ "/assets",
+    }));
+}
+
+test "linux artifact installs the hicolor icon size set" {
+    const gpa = std.testing.allocator;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-icon-linux";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    try writeTestIconSource(gpa, std.testing.io, root ++ "/assets/icon.png", 64);
+
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.app",
+        .name = "demo",
+        .version = "1.0.0",
+        .icons = &.{root ++ "/assets/icon.png"},
+    };
+    _ = try createPackage(gpa, std.testing.io, .{
+        .metadata = metadata,
+        .target = .linux,
+        .output_path = root ++ "/demo-linux",
+        .assets_dir = root ++ "/assets",
+    });
+
+    inline for (app_icon_tool.linux_sizes) |size| {
+        const icon_path = try std.fmt.allocPrint(gpa, "{s}/demo-linux/share/icons/hicolor/{d}x{d}/apps/app-icon.png", .{ root, size, size });
+        defer gpa.free(icon_path);
+        const encoded = try readPath(gpa, std.testing.io, icon_path);
+        defer gpa.free(encoded);
+        const header = app_icon_tool.pngHeader(encoded) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(usize, size), header.width);
+        try std.testing.expectEqual(@as(usize, size), header.height);
+    }
+}
+
+test "windows artifact gets a generated multi-size ico" {
+    const gpa = std.testing.allocator;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-icon-windows";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    try writeTestIconSource(gpa, std.testing.io, root ++ "/assets/icon.png", 64);
+
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.app",
+        .name = "demo",
+        .version = "1.0.0",
+        .icons = &.{root ++ "/assets/icon.png"},
+    };
+    _ = try createPackage(gpa, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/demo-windows",
+        .assets_dir = root ++ "/assets",
+    });
+
+    const ico = try readPath(gpa, std.testing.io, root ++ "/demo-windows/app-icon.ico");
+    defer gpa.free(ico);
+    var iterator = app_icon_tool.IcoIterator.init(ico) orelse return error.TestUnexpectedResult;
+    var seen: usize = 0;
+    while (iterator.next()) |entry| {
+        try std.testing.expectEqual(app_icon_tool.ico_sizes[seen], entry.size);
+        const header = app_icon_tool.pngHeader(entry.data) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(app_icon_tool.ico_sizes[seen], header.width);
+        seen += 1;
+    }
+    try std.testing.expectEqual(app_icon_tool.ico_sizes.len, seen);
+}
+
+test "ios artifact carries the asset-catalog icon set" {
+    const gpa = std.testing.allocator;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-icon-ios";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    try writeTestIconSource(gpa, std.testing.io, root ++ "/assets/icon.png", 64);
+
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.app",
+        .name = "demo",
+        .version = "1.0.0",
+        .icons = &.{root ++ "/assets/icon.png"},
+    };
+    _ = try createPackage(gpa, std.testing.io, .{
+        .metadata = metadata,
+        .target = .ios,
+        .output_path = root ++ "/demo-ios",
+        .assets_dir = root ++ "/assets",
+    });
+
+    const contents = try readPath(gpa, std.testing.io, root ++ "/demo-ios/Assets.xcassets/AppIcon.appiconset/Contents.json");
+    defer gpa.free(contents);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "1024x1024") != null);
+    const icon = try readPath(gpa, std.testing.io, root ++ "/demo-ios/Assets.xcassets/AppIcon.appiconset/AppIcon.png");
+    defer gpa.free(icon);
+    const header = app_icon_tool.pngHeader(icon) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(app_icon_tool.ios_icon_size, header.width);
+}
+
+test "android artifact carries launcher mipmaps and references them" {
+    const gpa = std.testing.allocator;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-icon-android";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    try writeTestIconSource(gpa, std.testing.io, root ++ "/assets/icon.png", 64);
+
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.app",
+        .name = "demo",
+        .version = "1.0.0",
+        .icons = &.{root ++ "/assets/icon.png"},
+    };
+    _ = try createPackage(gpa, std.testing.io, .{
+        .metadata = metadata,
+        .target = .android,
+        .output_path = root ++ "/demo-android",
+        .assets_dir = root ++ "/assets",
+    });
+
+    inline for (app_icon_tool.android_densities) |density| {
+        const icon_path = try std.fmt.allocPrint(gpa, "{s}/demo-android/app/src/main/res/mipmap-{s}/ic_launcher.png", .{ root, density.name });
+        defer gpa.free(icon_path);
+        const encoded = try readPath(gpa, std.testing.io, icon_path);
+        defer gpa.free(encoded);
+        const header = app_icon_tool.pngHeader(encoded) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(usize, density.size), header.width);
+    }
+    const manifest = try readPath(gpa, std.testing.io, root ++ "/demo-android/app/src/main/AndroidManifest.xml");
+    defer gpa.free(manifest);
+    try std.testing.expect(std.mem.indexOf(u8, manifest, "android:icon=\"@mipmap/ic_launcher\"") != null);
+
+    // Without a generatable source the manifest must not dangle a
+    // resource reference.
+    const bare = try androidManifestForMetadata(gpa, .{ .id = "dev.example.app", .name = "demo", .version = "1.0.0" }, false);
+    defer gpa.free(bare);
+    try std.testing.expect(std.mem.indexOf(u8, bare, "@mipmap") == null);
 }

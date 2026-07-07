@@ -1,4 +1,5 @@
 const std = @import("std");
+const app_icon_tool = @import("app_icon");
 const app_manifest = @import("app_manifest");
 const diagnostics = @import("diagnostics");
 const raw_manifest = @import("raw_manifest.zig");
@@ -328,6 +329,9 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
         };
     }
     validateIconPaths(metadata.icons) catch return .{ .ok = false, .message = "app.zon icons are invalid" };
+    if (try checkIconSources(allocator, io, std.fs.path.dirname(path) orelse ".", metadata.icons)) |icon_message| {
+        return .{ .ok = false, .message = icon_message };
+    }
     const permissions = parsePermissions(allocator, metadata.permissions) catch return .{ .ok = false, .message = "app.zon permissions are invalid" };
     defer allocator.free(permissions);
     const capabilities = parseCapabilities(allocator, metadata.capabilities) catch return .{ .ok = false, .message = "app.zon capabilities are invalid" };
@@ -846,6 +850,51 @@ fn validateIconPaths(icons: []const []const u8) !void {
             if (std.mem.eql(u8, previous, icon)) return error.DuplicateIcon;
         }
     }
+}
+
+/// The app-icon teaching checks `native validate` and `native check`
+/// share with packaging (same messages, no packaging): every `.icons`
+/// entry must be a generatable source (.png/.svg) or a prebuilt
+/// container (.icns/.ico), and a source file that exists must decode to
+/// a square image. A missing file is packaging's problem (it warns and
+/// falls back); an undersized source prints the upscaling warning
+/// without failing validation. Returns the error message or null when
+/// the icons pass. The returned message is allocated and intentionally
+/// lives until process exit (same policy as `zonParseFailureMessage`).
+fn checkIconSources(allocator: std.mem.Allocator, io: std.Io, manifest_dir: []const u8, icons: []const []const u8) !?[]const u8 {
+    for (icons) |icon_path| {
+        const is_prebuilt = app_icon_tool.pathHasExtension(icon_path, ".icns") or
+            app_icon_tool.pathHasExtension(icon_path, ".ico");
+        const kind = app_icon_tool.sourceKindForPath(icon_path) orelse {
+            if (is_prebuilt) continue;
+            var buffer: [512]u8 = undefined;
+            return try allocator.dupe(u8, app_icon_tool.formatBadExtensionMessage(&buffer, icon_path));
+        };
+
+        const resolved = try std.fs.path.join(allocator, &.{ manifest_dir, icon_path });
+        defer allocator.free(resolved);
+        const bytes = readFile(allocator, io, resolved) catch continue;
+        defer allocator.free(bytes);
+        switch (try app_icon_tool.loadSource(allocator, bytes, kind)) {
+            .ok => |loaded| {
+                var source = loaded;
+                defer source.deinit(allocator);
+                if (kind == .png and source.width < app_icon_tool.min_recommended_source_size) {
+                    var buffer: [512]u8 = undefined;
+                    std.debug.print("{s}\n", .{app_icon_tool.formatSmallSourceMessage(&buffer, icon_path, source.width, source.height)});
+                }
+            },
+            .issue => |issue| {
+                var buffer: [512]u8 = undefined;
+                const message = switch (issue) {
+                    .not_square => |dims| app_icon_tool.formatNotSquareMessage(&buffer, icon_path, dims.width, dims.height),
+                    .unsupported => app_icon_tool.formatUnsupportedMessage(&buffer, icon_path),
+                };
+                return try allocator.dupe(u8, message);
+            },
+        }
+    }
+    return null;
 }
 
 fn parseCapabilities(allocator: std.mem.Allocator, values: []const []const u8) ![]const app_manifest.Capability {
@@ -1612,4 +1661,111 @@ test "manifest metadata parser reads frontend config" {
     try std.testing.expectEqualStrings("http://127.0.0.1:5173/", metadata.frontend.?.dev.?.url);
     try std.testing.expectEqualStrings("npm", metadata.frontend.?.dev.?.command[0]);
     try std.testing.expectEqual(@as(u32, 12000), metadata.frontend.?.dev.?.timeout_ms);
+}
+
+test "validate surfaces the non-square icon teaching error with dimensions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-validate-icon-nonsquare";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    // A 6x4 white PNG source.
+    const pixels = try gpa.alloc(u8, 6 * 4 * 4);
+    @memset(pixels, 255);
+    const encoded = try app_icon_tool.encodePng(gpa, pixels, 6, 4);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/assets/icon.png", .data = encoded });
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.app",
+        \\  .name = "demo",
+        \\  .version = "1.0.0",
+        \\  .icons = .{"assets/icon.png"},
+        \\}
+    });
+
+    const result = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!result.ok);
+    try std.testing.expect(std.mem.indexOf(u8, result.message, "6x4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.message, "square") != null);
+}
+
+test "validate rejects unsupported icon extensions naming the accepted forms" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-validate-icon-ext";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.app",
+        \\  .name = "demo",
+        \\  .version = "1.0.0",
+        \\  .icons = .{"assets/icon.jpg"},
+        \\}
+    });
+
+    const result = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!result.ok);
+    try std.testing.expect(std.mem.indexOf(u8, result.message, ".png") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.message, ".svg") != null);
+}
+
+test "validate reports an unreadable icon source naming the accepted forms" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-validate-icon-bad";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/assets/icon.png", .data = "this is not a png" });
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.app",
+        \\  .name = "demo",
+        \\  .version = "1.0.0",
+        \\  .icons = .{"assets/icon.png"},
+        \\}
+    });
+
+    const result = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!result.ok);
+    try std.testing.expect(std.mem.indexOf(u8, result.message, "could not be read") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.message, ".png") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.message, ".svg") != null);
+}
+
+test "validate accepts a square icon source and prebuilt containers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-validate-icon-ok";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    const pixels = try gpa.alloc(u8, 600 * 600 * 4);
+    @memset(pixels, 128);
+    const encoded = try app_icon_tool.encodePng(gpa, pixels, 600, 600);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/assets/icon.png", .data = encoded });
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.app",
+        \\  .name = "demo",
+        \\  .version = "1.0.0",
+        \\  .icons = .{ "assets/icon.png", "assets/prebuilt.icns", "assets/prebuilt.ico" },
+        \\}
+    });
+
+    const result = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(result.ok);
 }

@@ -163,6 +163,12 @@ pub fn build(b: *std.Build) void {
 
     const automation_protocol_mod = module(b, target, optimize, "src/automation/protocol.zig");
     const automation_protocol_tests = testArtifact(b, automation_protocol_mod);
+    // The app-icon pipeline as a standalone module: tooling needs only
+    // the vector core + PNG codec slice of canvas, not the full canvas
+    // module (which links platform frameworks on macOS and would weigh
+    // down the cross-compiled CLI).
+    const app_icon_mod = module(b, target, optimize, "src/primitives/canvas/app_icon.zig");
+    app_icon_mod.addImport("geometry", geometry_mod);
     const tooling_mod = module(b, target, optimize, "src/tooling/root.zig");
     tooling_mod.addImport("assets", assets_mod);
     tooling_mod.addImport("app_dirs", app_dirs_mod);
@@ -171,6 +177,7 @@ pub fn build(b: *std.Build) void {
     tooling_mod.addImport("debug", debug_mod);
     tooling_mod.addImport("platform_info", platform_info_mod);
     tooling_mod.addImport("trace", trace_mod);
+    tooling_mod.addImport("app_icon", app_icon_mod);
     const tooling_tests = testArtifact(b, tooling_mod);
 
     const ui_markup_mod = module(b, target, optimize, "src/primitives/canvas/ui_markup.zig");
@@ -219,6 +226,9 @@ pub fn build(b: *std.Build) void {
     host_debug_mod.addImport("app_dirs", host_app_dirs_mod);
     host_debug_mod.addImport("trace", host_trace_mod);
     const host_automation_protocol_mod = module(b, host_target, optimize, "src/automation/protocol.zig");
+    const host_geometry_mod = module(b, host_target, optimize, "src/primitives/geometry/root.zig");
+    const host_app_icon_mod = module(b, host_target, optimize, "src/primitives/canvas/app_icon.zig");
+    host_app_icon_mod.addImport("geometry", host_geometry_mod);
     const host_tooling_mod = module(b, host_target, optimize, "src/tooling/root.zig");
     host_tooling_mod.addImport("assets", host_assets_mod);
     host_tooling_mod.addImport("app_dirs", host_app_dirs_mod);
@@ -227,6 +237,7 @@ pub fn build(b: *std.Build) void {
     host_tooling_mod.addImport("debug", host_debug_mod);
     host_tooling_mod.addImport("platform_info", host_platform_info_mod);
     host_tooling_mod.addImport("trace", host_trace_mod);
+    host_tooling_mod.addImport("app_icon", host_app_icon_mod);
     const host_ui_markup_mod = module(b, host_target, optimize, "src/primitives/canvas/ui_markup.zig");
     const host_markup_lsp_mod = module(b, host_target, optimize, "tools/native-sdk/markup_lsp.zig");
     host_markup_lsp_mod.addImport("ui_markup", host_ui_markup_mod);
@@ -1930,8 +1941,9 @@ pub fn build(b: *std.Build) void {
     // Default app icon: rendered from vector geometry (tools/
     // generate_app_icon.zig) through the SDK's own path rasterizer, so
     // the checked-in .icns/.ico/.png/.svg all regenerate from source.
-    // `iconutil` assembles and round-trip-validates the .icns (macOS
-    // only), and the CLI's embedded scaffold copy is kept in sync.
+    // The built-in app-icon pipeline assembles and round-trip-validates
+    // the containers itself (no external tools, any host OS), and the
+    // CLI's embedded scaffold copies are kept in sync.
     const generate_icon_step = b.step("generate-icon", "Regenerate the default app icon (.icns/.ico/.png/.svg) from vector source");
     const generate_icon_mod = module(b, target, optimize, "tools/generate_app_icon.zig");
     generate_icon_mod.addImport("native_sdk", desktop_mod);
@@ -1940,21 +1952,17 @@ pub fn build(b: *std.Build) void {
         .root_module = generate_icon_mod,
     });
     const generate_icon_run = b.addRunArtifact(generate_icon_exe);
-    generate_icon_run.addArgs(&.{ "zig-out/icon.iconset", "assets/icon.png", "assets/icon.ico", "assets/icon.svg" });
-    generate_icon_run.has_side_effects = true;
-    const iconset_script = b.addSystemCommand(&.{
-        "sh", "-c",
-        \\set -e
-        \\command -v iconutil >/dev/null || { echo "iconutil required (macOS) to assemble .icns" >&2; exit 1; }
-        \\iconutil -c icns zig-out/icon.iconset -o assets/icon.icns
-        \\cp assets/icon.icns src/tooling/default_icon.icns
-        \\rm -rf zig-out/icon-roundtrip.iconset
-        \\iconutil -c iconset assets/icon.icns -o zig-out/icon-roundtrip.iconset
-        \\test -f zig-out/icon-roundtrip.iconset/icon_512x512@2x.png
-        \\echo "generated assets/icon.{icns,ico,png,svg} and src/tooling/default_icon.icns"
+    generate_icon_run.addArgs(&.{
+        "assets/icon.icns",
+        "assets/icon.png",
+        "assets/icon.ico",
+        "assets/icon.svg",
+        "src/tooling/default_icon.icns",
+        "src/tooling/default_icon.png",
+        "zig-out/icon-full-bleed.png",
     });
-    iconset_script.step.dependOn(&generate_icon_run.step);
-    generate_icon_step.dependOn(&iconset_script.step);
+    generate_icon_run.has_side_effects = true;
+    generate_icon_step.dependOn(&generate_icon_run.step);
 
     const notarize_run = b.addRunArtifact(host_cli_exe);
     notarize_run.addArgs(&.{

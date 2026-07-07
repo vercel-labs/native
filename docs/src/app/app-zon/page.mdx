@@ -13,7 +13,7 @@ The manifest `native init` generates — identity, one shell window with a GPU s
     .display_name = "My App",
     .description = "A counter that lives in one native window.",
     .version = "0.1.0",
-    .icons = .{"assets/icon.icns"},
+    .icons = .{"assets/icon.png"},
     .platforms = .{"macos"},
     .permissions = .{ "view", "command" },
     .capabilities = .{ "native_views", "gpu_surfaces" },
@@ -53,7 +53,7 @@ A fuller manifest for an app that also [embeds web content](/frontend) and decla
     .name = "native-sdk",
     .display_name = "native-sdk",
     .version = "0.1.0",
-    .icons = .{ "assets/icon.icns", "assets/icon.ico" },
+    .icons = .{"assets/icon.png"},
     .platforms = .{ "macos" },
     .permissions = .{ "command", "view", "dialog", "window", "clipboard", "credentials" },
     .capabilities = .{ "webview", "js_bridge", "native_views", "gpu_surfaces", "menus", "shortcuts", "dialog", "clipboard", "credentials" },
@@ -142,7 +142,7 @@ A fuller manifest for an app that also [embeds web content](/frontend) and decla
     </tr>
     <tr>
       <td><code>icons</code></td>
-      <td>Paths to icon files for packaging</td>
+      <td>The app icon: one square <code>.png</code> (1:1, ideally 1024x1024) or <code>.svg</code> source that packaging turns into every platform's icon artifacts &mdash; the macOS <code>.icns</code> gets the platform's rounded-rect icon shape applied automatically. A prebuilt <code>.icns</code>/<code>.ico</code> entry ships untouched for its platform instead</td>
     </tr>
     <tr>
       <td><code>platforms</code></td>
