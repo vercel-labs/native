@@ -1,6 +1,111 @@
+import { Tier, TierLegend } from "@/components/support-tier";
+
 # Platform Support
 
-The Native SDK exposes one runtime model across desktop hosts, but native affordances land per platform and per web engine. Unsupported operations return explicit runtime errors instead of pretending that every host can do the same thing.
+Native SDK is the complete toolkit for building native desktop and mobile applications — one runtime model, with native affordances landing per platform. This page states exactly what each platform gets today, at what tier, with the caveats attached. Unsupported operations return explicit runtime errors instead of pretending every host can do the same thing.
+
+## Support Matrix
+
+macOS, Linux, and Windows run full desktop apps through their own platform hosts. iOS and Android are embed-level: you own the host app project, and Native SDK renders and runs inside a view or surface that project provides — see [Mobile](#mobile) below.
+
+<TierLegend />
+
+<table>
+  <thead>
+    <tr>
+      <th>What you get</th>
+      <th>macOS</th>
+      <th>Windows</th>
+      <th>Linux</th>
+      <th>iOS</th>
+      <th>Android</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Real OS windows</td>
+      <td><Tier tier="full" /></td>
+      <td><Tier tier="full" /></td>
+      <td><Tier tier="full" /></td>
+      <td><Tier tier="embed" note="renders into a view your UIKit host provides" fn={1} /></td>
+      <td><Tier tier="embed" note="renders into a surface your Android host provides" fn={1} /></td>
+    </tr>
+    <tr>
+      <td>Native rendering</td>
+      <td><Tier tier="full" note="Metal presentation with OS scroll physics" fn={2} /></td>
+      <td><Tier tier="caveats" note="deterministic software renderer, GDI blit" fn={2} /></td>
+      <td><Tier tier="caveats" note="deterministic software renderer, cairo blit" fn={2} /></td>
+      <td><Tier tier="embed" note="CPU reference renderer, pixels presented by the host shim" fn={2} /></td>
+      <td><Tier tier="embed" note="CPU reference renderer, pixels presented by the host shim" fn={2} /></td>
+    </tr>
+    <tr>
+      <td>Pointer, keyboard &amp; IME input</td>
+      <td><Tier tier="full" /></td>
+      <td><Tier tier="caveats" note="IME composition is mapped; real-hardware IME verification is pending" fn={3} /></td>
+      <td><Tier tier="full" note="pointer, keyboard, scroll, IME composition, HiDPI" /></td>
+      <td><Tier tier="embed" note="touch, system keyboard, and IME forwarded by the canvas host shim" fn={3} /></td>
+      <td><Tier tier="embed" note="touch forwarded; soft keyboard and IME are not wired yet" fn={3} /></td>
+    </tr>
+    <tr>
+      <td>Menus</td>
+      <td><Tier tier="full" note="native app menus and native context menus" /></td>
+      <td><Tier tier="caveats" note="native app menus; context menus present as an anchored canvas surface" fn={4} /></td>
+      <td><Tier tier="caveats" note="native app menus; context menus present as an anchored canvas surface" fn={4} /></td>
+      <td><Tier tier="none" /></td>
+      <td><Tier tier="none" /></td>
+    </tr>
+    <tr>
+      <td>System tray</td>
+      <td><Tier tier="full" /></td>
+      <td><Tier tier="full" /></td>
+      <td><Tier tier="none" note="returns UnsupportedService until a portable status-notifier implementation is selected" fn={5} /></td>
+      <td><Tier tier="none" /></td>
+      <td><Tier tier="none" /></td>
+    </tr>
+    <tr>
+      <td>Web content (WebViews)</td>
+      <td><Tier tier="full" note="system WebView by default; optional bundled Chromium via CEF" fn={6} /></td>
+      <td><Tier tier="caveats" note="system WebView host still maturing; native-rendered apps carry no web engine" fn={6} /></td>
+      <td><Tier tier="full" note="system WebView" fn={6} /></td>
+      <td><Tier tier="embed" note="system WebView workspace inside your host app" fn={6} /></td>
+      <td><Tier tier="embed" note="system WebView workspace inside your host app" fn={6} /></td>
+    </tr>
+    <tr>
+      <td>Packaging</td>
+      <td><Tier tier="full" note=".app bundle, DMG, generated icons" fn={7} /></td>
+      <td><Tier tier="caveats" note="directory artifact with icons and file-type registration; installer is future work" fn={7} /></td>
+      <td><Tier tier="caveats" note="install tree with desktop entry, icons, MIME metadata; AppImage and packages are future work" fn={7} /></td>
+      <td><Tier tier="embed" note="Xcode host skeleton plus static library; no .ipa" fn={7} /></td>
+      <td><Tier tier="embed" note="Gradle host skeleton plus static library; no .apk" fn={7} /></td>
+    </tr>
+    <tr>
+      <td>Code signing</td>
+      <td><Tier tier="full" note="ad-hoc and identity signing with entitlements; notarization is a documented manual step" fn={8} /></td>
+      <td><Tier tier="none" /></td>
+      <td><Tier tier="none" /></td>
+      <td><Tier tier="none" /></td>
+      <td><Tier tier="none" /></td>
+    </tr>
+    <tr>
+      <td>Automation</td>
+      <td><Tier tier="full" /></td>
+      <td><Tier tier="full" note="driven live on a real Windows desktop and in CI under emulation" fn={9} /></td>
+      <td><Tier tier="full" note="driven live under Xvfb: waits, assertions, input, screenshots" fn={9} /></td>
+      <td><Tier tier="embed" note="accessibility snapshots and actions over the embed ABI, exercised on the simulator" fn={9} /></td>
+      <td><Tier tier="embed" note="accessibility snapshot and actions over the embed ABI; no on-device verification loop yet" fn={9} /></td>
+    </tr>
+  </tbody>
+</table>
+
+1. iOS and Android have no windowing host in the SDK: the runtime renders into a view or surface owned by an app project you control, driven over the [embed C ABI](/embed).
+2. macOS presents through Metal and hands scrolling to OS scroll drivers. Linux and Windows present the deterministic software renderer through the platform blit path and report `backend=software`; a manifest that requests another backend falls back to software there instead of erroring. Mobile hosts read rendered pixels over the ABI and present them in their own surface.
+3. Windows maps native IME composition onto the shared IME events, with real-hardware IME verification still pending. The iOS canvas shim forwards touch, the system keyboard, and IME composition; the Android shim forwards touch, but soft-keyboard and IME wiring is future work.
+4. App menus are native on all three desktops. Hosts without a native context-menu presenter — Linux and Windows today — present the same declared context menu as an anchored canvas surface; authors declare one menu either way.
+5. Tray support is implemented on macOS (`NSStatusItem`) and Windows; Linux tray calls return `UnsupportedService` until a portable status-notifier implementation is selected.
+6. Web engines only apply to apps that embed web content; native-rendered apps carry none. The system WebView is the default engine on every desktop platform; bundled Chromium through CEF is available on macOS only, and Linux/Windows Chromium builds fail early instead of silently substituting an engine. See [Web Engines](/web-engines). The mobile shell examples embed the platform WebView as the content workspace.
+7. `native package` targets all five platforms: macOS gets a `.app` bundle (plus `zig build dmg`), Linux an install tree, Windows a distributable directory with a per-user file-type registration script, and iOS/Android host project skeletons with the embed static library. Every platform's icons generate from one square source image. See [Packaging](/packaging).
+8. macOS signing supports `adhoc` and `identity` modes with entitlements; notarization is submitted manually with the platform tools after packaging. No signing tooling exists yet for the other platforms. See [Code Signing](/packaging/signing).
+9. The automation server is a file-based protocol the runtime serves on every desktop platform: snapshots, assertions, synthetic input, screenshots, record/replay. Engine screenshots render through the deterministic CPU reference renderer on every platform, so they are byte-comparable across hosts. Mobile exposes accessibility snapshots and actions through the embed ABI.
 
 ## Desktop Hosts
 
@@ -132,7 +237,7 @@ The Native SDK exposes one runtime model across desktop hosts, but native afford
       <td>Credentials</td>
       <td>Supported</td>
       <td>Supported</td>
-      <td>Supported</td>
+      <td>Supported when a secret service is present</td>
       <td>Unsupported</td>
       <td>Supported</td>
     </tr>
@@ -156,6 +261,10 @@ The Native SDK exposes one runtime model across desktop hosts, but native afford
 </table>
 
 "Anchored fallback" for native context menus means the declared menu still presents — as an anchored canvas surface on the widget — because those hosts have no native menu presenter yet (GTK popover menus and the Win32 popup-menu API are the documented future seams). Authors declare one menu either way; the platform decides presentation.
+
+## How Support Is Verified
+
+macOS is the primary development platform and carries the deepest support. The Linux and Windows columns are not aspirational: the repository carries reproducible live-verification loops that build every showcase app and drive it for real. `tools/linux-truth` runs the apps in real windows against the platform toolkit under Xvfb — clicks, keys, wheel input, multi-window flows, resize clamps, window-close paths, and both engine and X-server screenshots. `tools/windows-truth` drives the same scenarios on a real Windows desktop, plus clipboard round-trips, effect-stream cancellation, record/replay, and launching the packaged artifact. CI additionally runs headless Linux and Windows canvas smokes on every change. iOS is exercised on the simulator through the embed library, including input and layout verification scripts; Android cross-compiles the full embed ABI for both architectures.
 
 ## Runtime Queries
 
@@ -188,7 +297,7 @@ Window chrome control is macOS-first, like `resizable = false` before it: `title
 
 Chromium builds are currently enabled on macOS only. Linux and Windows Chromium host files are placeholders and build/package tooling rejects those targets until the native hosts are implemented.
 
-## Mobile And GPU
+## Mobile
 
 iOS and Android are supported today through embedded host examples rather than the desktop platform host matrix. The mobile examples own native header/navigation layout in UIKit or Android views, embed a `WKWebView` or Android `WebView` as the workspace, and drive the Native SDK through the C/JNI lifecycle, activation, resize, and command calls documented in [Embedded App](/embed).
 
@@ -248,7 +357,7 @@ Mobile hosts own safe areas, orientation, keyboard avoidance, back gestures, and
 
 Canvas-scene apps also run on mobile through the embed path: `addMobileLib` compiles a `Model`/`Msg`/`update`/`view` app into the embed static library with a single `gpu_surface` scene, frames render through the deterministic CPU reference renderer, and the host shim blits the presented pixels (`native_sdk_app_render_pixels`) into its own surface. The `examples/mobile-canvas` iOS shim is exercised on the simulator — rendering, safe-area layout, real touch/keyboard/IME input, and accessibility snapshots — and the Android `NativeActivity` shim cross-compiles for both Android arches from the same library build.
 
-`gpu_surface` is implemented for the macOS system-WebView host as a Metal-backed child surface and for the Linux and Windows system-WebView hosts as a software-rendered (CPU reference renderer + GTK pixel blit on Linux, GDI DIB blit on Windows) child surface; Linux and Windows frame events report `backend=software`, and a manifest that declares another backend (for example `gpu_backend = "metal"`) falls back to software on those hosts instead of erroring. Windows IME composition preview (`ime_set_composition`) is not wired yet — committed text still arrives through `WM_CHAR` text input. Other current hosts report unsupported operations for that view kind and `runtime.supports(.gpu_surfaces)` / `window.zero.platform.supports("gpuSurfaces")` return `false`.
+`gpu_surface` is implemented for the macOS system-WebView host as a Metal-backed child surface and for the Linux and Windows system-WebView hosts as a software-rendered (CPU reference renderer + GTK pixel blit on Linux, GDI DIB blit on Windows) child surface; Linux and Windows frame events report `backend=software`, and a manifest that declares another backend (for example `gpu_backend = "metal"`) falls back to software on those hosts instead of erroring. Windows maps native IME composition (`WM_IME_COMPOSITION`) onto the same shared IME events the macOS and Linux hosts emit — inline preedit, cursor position, and the commit contract — with real-hardware IME verification still pending. Other current hosts report unsupported operations for that view kind and `runtime.supports(.gpu_surfaces)` / `window.zero.platform.supports("gpuSurfaces")` return `false`.
 
 ## Related Docs
 
