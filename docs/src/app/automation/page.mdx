@@ -36,7 +36,7 @@ When the runtime publishes a snapshot, it writes these files to the automation d
   <tbody>
     <tr>
       <td><code>snapshot.txt</code></td>
-      <td>Runtime state: source kind, window metadata, native/WebView metadata including role, accessibility label, text, and focus state, <code>ready=true/false</code>, and <code>markup_watch=armed|off</code> in the header — whether the markup hot-reload watch is armed (only in builds where the app wired <code>.markup</code> with a <code>watch_path</code> and <code>io</code>, i.e. Debug dev builds)</td>
+      <td>Runtime state: source kind, window metadata, native/WebView metadata including role, accessibility label, text, and focus state, <code>ready=true/false</code>, and <code>markup_watch=armed|off</code> in the header — whether the markup hot-reload watch is armed (only in builds where the app wired <code>.markup</code> with a <code>watch_path</code> and <code>io</code>, or registered compiled fragments through <code>fragment_watch</code> — i.e. Debug dev builds)</td>
     </tr>
     <tr>
       <td><code>accessibility.txt</code></td>

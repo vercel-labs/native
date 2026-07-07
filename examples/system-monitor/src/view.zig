@@ -26,7 +26,14 @@ pub const Msg = model_mod.Msg;
 pub const Ui = canvas.Ui(Msg);
 
 pub const header_markup = @embedFile("header.native");
-pub const CompiledHeaderView = canvas.CompiledMarkupView(Model, Msg, header_markup);
+/// The header's import closure: the embedded source set feeds the
+/// compiled engine, the interpreter parity test, and the hot-reload
+/// baseline, so all three see the same document.
+pub const header_markup_files = [_]canvas.ui_markup.SourceFile{
+    .{ .path = "header.native", .source = header_markup },
+    .{ .path = "header_status.native", .source = @embedFile("header_status.native") },
+};
+pub const CompiledHeaderView = canvas.CompiledMarkupImports(Model, Msg, "header.native", &header_markup_files);
 
 // The sparkline charts, one compiled markup fragment per stat tile:
 // each is a single `<chart>` whose series binds the model's NaN-padded

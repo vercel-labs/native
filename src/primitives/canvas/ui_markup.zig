@@ -12,6 +12,7 @@
 //! the feedback loop markup authors (human or agent) rely on.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const font_coverage = @import("font_coverage.zig");
 
 /// The vocabulary registry: elements, attributes, and events with stable
@@ -3088,6 +3089,36 @@ pub const SourceFile = struct {
     path: []const u8,
     source: []const u8,
 };
+
+/// Registration handle for the runtime's fragment hot-reload watch: a
+/// hybrid app (Zig builder root embedding compiled markup fragments)
+/// hands the runtime one of these per fragment — obtained from the
+/// compiled type's `fragment(path)` — so editing that fragment's
+/// `.native` source in a dev run reloads it in place. Debug-shaped on
+/// purpose: outside Debug the struct is empty and `fragment(path)`
+/// returns nothing, so release binaries carry no source paths, no
+/// embedded-baseline references, and no watch plumbing.
+pub const MarkupFragment = if (builtin.mode == .Debug) struct {
+    /// Identity of the compiled fragment type (the address of its
+    /// comptime document), matched by the engine's build-time override
+    /// lookup — registration and lookup derive it from the same type,
+    /// so they cannot disagree. A pointer, not an integer, so a
+    /// registration list can live in a file-scope const (global
+    /// addresses are comptime-representable; their integer values are
+    /// not).
+    key: ?*const anyopaque = null,
+    /// On-disk source file to watch, relative to the process cwd (the
+    /// dev flow runs apps from the app root). Imports resolve against
+    /// this file's directory, exactly like the single-root watch.
+    path: []const u8 = "",
+    /// The embedded root source the fragment was compiled from — the
+    /// baseline the watched file is compared against, so an unchanged
+    /// disk file never triggers a phantom reload.
+    source: []const u8 = "",
+    /// The embedded import closure (`CompiledMarkupImports` source set);
+    /// empty for single-file fragments.
+    sources: []const SourceFile = &.{},
+} else struct {};
 
 /// Runtime source access for `resolveImports`: returns the source for a
 /// root-relative path, or null when it cannot be read (the resolver turns

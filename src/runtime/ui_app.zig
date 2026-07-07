@@ -28,6 +28,7 @@
 //! the compiled view until the watched file first changes on disk.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const app_manifest = @import("app_manifest");
@@ -95,6 +96,53 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         pub const Ui = canvas.Ui(MsgT);
 
         pub const MarkupView = canvas.MarkupView(ModelT, MsgT);
+
+        /// The fragment watch exists only where BOTH the runtime markup
+        /// engine (the interpreter that builds reloaded fragments) and a
+        /// Debug build (the dev loop) are present; everywhere else its
+        /// state, polling, and registration collapse to nothing.
+        const fragment_watch_enabled = features.runtime_markup and builtin.mode == .Debug;
+
+        /// Fixed budget of watched fragments per app. Registrations past
+        /// it are not watched (a teaching warning names the budget when
+        /// the watch arms) — a view embedding more compiled fragments
+        /// than this wants consolidation more than it wants polling.
+        pub const max_watched_fragments: usize = 16;
+
+        /// One registered fragment's hot-reload state.
+        const MarkupFragmentSlot = struct {
+            /// Two-arena swap, the `markup_arenas` discipline: a reload
+            /// resolves into the inactive arena and adopts on success, so
+            /// the live document — still referenced by the retained tree
+            /// — survives failed parses and failed rebuilds; the inactive
+            /// arena is reset only when the next reload attempt begins.
+            arenas: [2]std.heap.ArenaAllocator,
+            arena_index: usize = 0,
+            /// The adopted override document the compiled fragment's
+            /// build swaps in through the Ui seam; null while the disk
+            /// closure matches the embedded baseline, which keeps the
+            /// comptime-compiled path (and drops back to it when an edit
+            /// is reverted byte for byte).
+            document: ?canvas.ui_markup.MarkupDocument = null,
+            /// Hash of the embedded source closure the fragment was
+            /// compiled from, computed when the watch arms.
+            baseline_hash: u64 = 0,
+            /// Hash of the last disk closure seen — the change detector,
+            /// updated on every divergence (including failed parses, so
+            /// one bad save teaches once, not once per poll).
+            hash: u64 = 0,
+        };
+
+        fn markupFragmentSlotsInit(backing: std.mem.Allocator) [max_watched_fragments]MarkupFragmentSlot {
+            var slots: [max_watched_fragments]MarkupFragmentSlot = undefined;
+            for (&slots) |*slot| {
+                slot.* = .{ .arenas = .{
+                    std.heap.ArenaAllocator.init(backing),
+                    std.heap.ArenaAllocator.init(backing),
+                } };
+            }
+            return slots;
+        }
 
         /// The app's effect system (TEA's Cmd half): `fx.spawn` /
         /// `fx.fetch` / `fx.writeFile` / `fx.readFile` / `fx.cancel`
@@ -297,6 +345,25 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             io: ?std.Io = null,
         };
 
+        /// Dev-mode hot reload for HYBRID roots: a Zig builder view that
+        /// embeds compiled markup fragments registers each fragment's
+        /// on-disk source here (`CompiledHeaderView.fragment("src/header.native")`),
+        /// and in Debug runs the markup watch polls every registered file
+        /// — plus every file each fragment's imports reach — reloading
+        /// exactly the fragments a changed file serves. The same degrade
+        /// family as the single-root watch: a bad save keeps the last
+        /// good view and records the file:line teaching diagnostic, the
+        /// next good save recovers. Outside Debug the registration
+        /// handles are empty by construction (see `canvas.MarkupFragment`)
+        /// and the watch compiles to nothing, so release binaries carry
+        /// no source paths and no polling.
+        pub const MarkupFragmentWatch = struct {
+            /// One handle per compiled fragment, from the fragment
+            /// type's `fragment(path)`.
+            fragments: []const canvas.MarkupFragment,
+            io: std.Io,
+        };
+
         pub const Options = struct {
             name: []const u8,
             scene: app_manifest.ShellConfig,
@@ -367,6 +434,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// Runtime-parsed markup view. Requires
             /// `UiAppFeatures.runtime_markup` (the default).
             markup: ?MarkupOptions = null,
+            /// Debug-only hot reload for compiled markup fragments a Zig
+            /// `view` embeds (see `MarkupFragmentWatch`). Safe to set
+            /// unconditionally: outside Debug it degrades to nothing.
+            fragment_watch: ?MarkupFragmentWatch = null,
             /// Optional mapping from shell command events (menus, shortcuts,
             /// native controls) into messages.
             on_command: ?*const fn (name: []const u8) ?MsgT = null,
@@ -564,6 +635,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         markup_diagnostic: ?canvas.ui_markup.MarkupErrorInfo = null,
         markup_diagnostic_message_storage: [512]u8 = undefined,
         markup_diagnostic_path_storage: [canvas.ui_markup.max_import_path_len]u8 = undefined,
+        /// Fragment hot-reload slots (Debug dev runs only), one per
+        /// registered fragment in `Options.fragment_watch` order. Exists
+        /// only where the fragment watch does, so release binaries carry
+        /// none of this state. No default on purpose: every constructor
+        /// must initialize the arenas against the backing allocator.
+        markup_fragment_slots: if (fragment_watch_enabled) [max_watched_fragments]MarkupFragmentSlot else void,
         /// Widget provenance (write-back's read half): the retained
         /// structural-id -> authored-markup table the `provenance`
         /// automation verb answers from. Exists only in markup-interpreter
@@ -691,6 +768,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     std.heap.ArenaAllocator.init(backing),
                 },
                 .window_slots = windowSlotsInit(backing),
+                .markup_fragment_slots = if (comptime fragment_watch_enabled) markupFragmentSlotsInit(backing) else {},
                 .effects = Effects.init(backing),
             };
         }
@@ -746,6 +824,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     std.heap.ArenaAllocator.init(backing),
                 },
                 .window_slots = windowSlotsInit(backing),
+                .markup_fragment_slots = if (comptime fragment_watch_enabled) markupFragmentSlotsInit(backing) else {},
                 .effects = Effects.init(backing),
             };
         }
@@ -764,6 +843,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.arenas[1].deinit();
             self.markup_arenas[0].deinit();
             self.markup_arenas[1].deinit();
+            if (comptime fragment_watch_enabled) {
+                for (&self.markup_fragment_slots) |*slot| {
+                    slot.arenas[0].deinit();
+                    slot.arenas[1].deinit();
+                }
+            }
             for (&self.window_slots) |*slot| {
                 slot.arenas[0].deinit();
                 slot.arenas[1].deinit();
@@ -980,6 +1065,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 ui.virtual_extent_context = @ptrCast(self);
                 ui.virtual_extent_source = virtualExtentResolve;
                 ui.context_menu_fallback_target = self.contextMenuFallbackTargetForLabel(self.options.canvas_label);
+                self.armUiFragmentHost(&ui);
                 if (comptime features.runtime_markup) {
                     if (self.markup_view != null and runtime.options.automation != null) {
                         self.provenance.resetRecords();
@@ -1508,6 +1594,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             _ = slot.arenas[next_index].reset(.retain_capacity);
             var ui = Ui.init(slot.arenas[next_index].allocator());
             ui.context_menu_fallback_target = self.contextMenuFallbackTargetForLabel(slot.canvasLabel());
+            self.armUiFragmentHost(&ui);
             const node = window_view(&ui, &self.model, slot.label());
             const tree = try ui.finalizeWithTokens(node, tokens);
             const bounds = geometry.RectF.fromSize(slot.canvas_size).deflate(runtime.viewportInsetsForWindow(slot.window_id));
@@ -1862,46 +1949,89 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         /// Dev-mode hot reload: start the repeating runtime timer that polls
-        /// the watched markup file. Runs once, on first install, and only
-        /// when a watch path and io are configured.
+        /// the watched markup file and every registered fragment. Runs
+        /// once, on first install, and only when something is watchable —
+        /// a root watch path with io, or (Debug only) registered fragments.
         fn startMarkupWatch(self: *Self, runtime: *Runtime) void {
             if (comptime !features.runtime_markup) return;
-            const markup_options = self.options.markup orelse return;
-            if (markup_options.watch_path == null or markup_options.io == null) return;
-            // With a compiled `view` also set, the embedded sources are
-            // the baseline: the interpreter only takes over once the
-            // watched closure diverges from them. The baseline hash must
-            // be computed the way the poll computes it — over the whole
-            // resolved import closure — or the first poll would flag a
-            // phantom change.
-            if (self.options.view != null and self.markup_source_hash == 0) {
-                self.markup_source_hash = self.embeddedMarkupClosureHash(markup_options);
+            const root_armed = if (self.options.markup) |markup_options|
+                markup_options.watch_path != null and markup_options.io != null
+            else
+                false;
+            if (root_armed) {
+                const markup_options = self.options.markup.?;
+                // With a compiled `view` also set, the embedded sources are
+                // the baseline: the interpreter only takes over once the
+                // watched closure diverges from them. The baseline hash must
+                // be computed the way the poll computes it — over the whole
+                // resolved import closure — or the first poll would flag a
+                // phantom change.
+                if (self.options.view != null and self.markup_source_hash == 0) {
+                    self.markup_source_hash = self.embeddedMarkupClosureHash(markup_options);
+                }
             }
+            const fragments_armed = self.armFragmentWatch();
+            if (!root_armed and !fragments_armed) return;
             runtime.startTimer(markup_watch_timer_id, markup_watch_interval_ns, true) catch {};
             // Make the armed watch observable: the automation snapshot
             // header reports `markup_watch=armed|off`, so a dev loop can
             // check the watch instead of bisecting an app that never
-            // reloads (release builds compile the watch out entirely).
+            // reloads. The bit stays honest for hybrid apps: registered
+            // fragments arm it in Debug, and in release — where the
+            // fragment watch compiles out — a compiled-only app reports
+            // off.
             if (comptime @hasDecl(Runtime, "setMarkupWatchArmed")) {
                 runtime.setMarkupWatchArmed(true);
             }
         }
 
-        fn embeddedMarkupClosureHash(self: *Self, markup_options: MarkupOptions) u64 {
-            if (markup_options.sources.len == 0) {
-                return std.hash.Wyhash.hash(0, markup_options.source);
+        /// Seed every registered fragment slot's baseline hash from its
+        /// embedded sources (computed the way the poll computes disk
+        /// hashes, so an untouched file never phantom-reloads). Returns
+        /// whether any fragment is actually watched.
+        fn armFragmentWatch(self: *Self) bool {
+            if (comptime !fragment_watch_enabled) return false;
+            const fragment_watch = self.options.fragment_watch orelse return false;
+            if (fragment_watch.fragments.len > max_watched_fragments) {
+                ui_app_log.warn(
+                    "fragment watch: {d} fragments registered but the watch budget is {d} (max_watched_fragments) - the rest stay compiled-only; consolidate fragments or raise the budget",
+                    .{ fragment_watch.fragments.len, max_watched_fragments },
+                );
             }
+            const count = @min(fragment_watch.fragments.len, max_watched_fragments);
+            for (fragment_watch.fragments[0..count], self.markup_fragment_slots[0..count]) |spec, *slot| {
+                // Baseline into the slot's inactive arena — reset on the
+                // next reload attempt, so this costs nothing durable.
+                const scratch_index = slot.arena_index ^ 1;
+                _ = slot.arenas[scratch_index].reset(.retain_capacity);
+                slot.baseline_hash = embeddedClosureHash(slot.arenas[scratch_index].allocator(), spec.source, spec.sources);
+                slot.hash = slot.baseline_hash;
+            }
+            return count > 0;
+        }
+
+        fn embeddedMarkupClosureHash(self: *Self, markup_options: MarkupOptions) u64 {
             // Resolve into the inactive scratch arena purely for the
             // hashing side effect; the arena resets on the next reload.
             const scratch_index = self.markup_arena_index ^ 1;
             _ = self.markup_arenas[scratch_index].reset(.retain_capacity);
-            var set_loader = canvas.ui_markup.SourceSetLoader{ .set = markup_options.sources };
-            var hashing = HashingLoader.init(set_loader.loader(), markup_options.source, "");
+            return embeddedClosureHash(self.markup_arenas[scratch_index].allocator(), markup_options.source, markup_options.sources);
+        }
+
+        /// Hash an embedded source closure exactly like the disk poll
+        /// hashes the on-disk one: root bytes plus every loaded file's
+        /// root-relative path and bytes, in resolution order.
+        fn embeddedClosureHash(arena: std.mem.Allocator, source: []const u8, sources: []const canvas.ui_markup.SourceFile) u64 {
+            if (sources.len == 0) {
+                return std.hash.Wyhash.hash(0, source);
+            }
+            var set_loader = canvas.ui_markup.SourceSetLoader{ .set = sources };
+            var hashing = HashingLoader.init(set_loader.loader(), source, "");
             var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
             _ = canvas.ui_markup.resolveImports(
-                self.markup_arenas[scratch_index].allocator(),
+                arena,
                 "",
-                markup_options.source,
+                source,
                 hashing.loader(),
                 &diagnostic,
             ) catch {};
@@ -1951,6 +2081,113 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // entries are already cwd-relative disk paths.
             self.commitProvenanceFiles(watch_path, source, true);
             if (self.installed) self.rebuild(runtime, window_id) catch {};
+        }
+
+        /// Timer-driven poll of every registered fragment (Debug dev runs
+        /// only), riding the same reserved timer as the root watch. Each
+        /// fragment's whole import closure is re-resolved and hashed per
+        /// poll, so a change to a SHARED imported file reloads every
+        /// fragment whose closure reaches it — one edit, one rebuild, all
+        /// dependents fresh. Same degrade family as the root watch: a
+        /// failed parse keeps that fragment's last good view and records
+        /// the file:line diagnostic; a save matching the embedded
+        /// baseline drops the fragment back to its compiled path.
+        fn pollFragmentWatch(self: *Self, runtime: *Runtime) void {
+            if (comptime !fragment_watch_enabled) return;
+            const fragment_watch = self.options.fragment_watch orelse return;
+            const count = @min(fragment_watch.fragments.len, max_watched_fragments);
+            var any_adopted = false;
+            for (fragment_watch.fragments[0..count], self.markup_fragment_slots[0..count]) |spec, *slot| {
+                const next_index = slot.arena_index ^ 1;
+                _ = slot.arenas[next_index].reset(.retain_capacity);
+                const arena = slot.arenas[next_index].allocator();
+                const source = readMarkupFile(fragment_watch.io, arena, spec.path) orelse continue;
+                var disk_loader = DiskImportLoader{ .io = fragment_watch.io };
+                const watch_dir = std.fs.path.dirname(spec.path) orelse "";
+                var hashing = HashingLoader.init(disk_loader.loader(), source, watch_dir);
+                var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
+                const document = canvas.ui_markup.resolveImports(arena, spec.path, source, hashing.loader(), &diagnostic) catch |err| {
+                    const hash = hashing.hasher.final();
+                    if (hash == slot.hash) continue;
+                    slot.hash = hash;
+                    if (err == error.MarkupSyntax or err == error.MarkupImport) {
+                        self.recordMarkupDiagnostic(diagnostic);
+                    }
+                    continue;
+                };
+                const hash = hashing.hasher.final();
+                if (hash == slot.hash) continue;
+                slot.hash = hash;
+                if (hash == slot.baseline_hash) {
+                    // The edit was reverted byte for byte: back to the
+                    // comptime-compiled path, the release-identical one.
+                    slot.document = null;
+                } else {
+                    // Canonicalize for per-frame cost only; on OOM the raw
+                    // document builds identically through attrTyped's
+                    // fallback.
+                    slot.document = canvas.ui_markup.canonicalize(arena, document) catch document;
+                }
+                slot.arena_index = next_index;
+                // One diagnostic channel, adopt clears it — the root
+                // watch's contract (`adoptMarkupDocument`): the dev loop
+                // edits one file at a time, and the recovering save is
+                // what should silence the teaching line.
+                self.markup_diagnostic = null;
+                any_adopted = true;
+            }
+            // Fragments build wherever the app's views embed them — the
+            // main canvas and declared windows — so a reload re-derives
+            // every open view.
+            if (any_adopted and self.installed) self.rebuildAllViews(runtime) catch {};
+        }
+
+        /// The `override` half of the fragment hot-reload seam (see
+        /// `canvas.MarkupFragmentHost`): a compiled fragment asks by
+        /// identity key whether the watch adopted a changed document for
+        /// it. Null keeps the comptime-compiled path.
+        fn markupFragmentOverride(context: *anyopaque, key: *const anyopaque) ?*const anyopaque {
+            if (comptime !fragment_watch_enabled) return null;
+            const self: *Self = @ptrCast(@alignCast(context));
+            const fragment_watch = self.options.fragment_watch orelse return null;
+            const count = @min(fragment_watch.fragments.len, max_watched_fragments);
+            for (fragment_watch.fragments[0..count], self.markup_fragment_slots[0..count]) |spec, *slot| {
+                const spec_key = spec.key orelse continue;
+                if (spec_key != key) continue;
+                if (slot.document) |*document| return @ptrCast(document);
+                return null;
+            }
+            return null;
+        }
+
+        /// The `report` half of the fragment hot-reload seam: a reloaded
+        /// fragment that parses but cannot build against this Model/Msg
+        /// surfaces the same file:line teaching diagnostic the root
+        /// watch's build failures do.
+        fn markupFragmentReport(context: *anyopaque, diagnostic: canvas.MarkupFragmentDiagnostic) void {
+            if (comptime !fragment_watch_enabled) return;
+            const self: *Self = @ptrCast(@alignCast(context));
+            self.recordMarkupDiagnostic(.{
+                .line = diagnostic.line,
+                .column = diagnostic.column,
+                .message = diagnostic.message,
+                .path = diagnostic.path,
+            });
+        }
+
+        /// Arm the fragment hot-reload seam on a freshly initialized Ui
+        /// (both the main canvas and declared-window builds), so compiled
+        /// fragments built anywhere in the app can pick up their reloaded
+        /// documents. No-op unless the fragment watch exists and the app
+        /// registered fragments.
+        fn armUiFragmentHost(self: *Self, ui: *Ui) void {
+            if (comptime !fragment_watch_enabled) return;
+            if (self.options.fragment_watch == null) return;
+            ui.markup_fragment_host = .{
+                .context = @ptrCast(self),
+                .override = markupFragmentOverride,
+                .report = markupFragmentReport,
+            };
         }
 
         /// Disk-backed import loader for the watch: paths come out of the
@@ -2148,6 +2385,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn handleTimer(self: *Self, runtime: *Runtime, timer_event: platform.TimerEvent) anyerror!void {
             if (timer_event.id == markup_watch_timer_id) {
                 self.pollMarkupWatch(runtime, self.canvas_window_id);
+                self.pollFragmentWatch(runtime);
                 return;
             }
             if (timer_event.id == press_hold_timer_id) {

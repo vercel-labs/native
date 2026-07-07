@@ -1,0 +1,7 @@
+<!-- The header's sampling status line, imported by header.native: the
+     band's one informative element, kept in its own component file so
+     the header stays bare drag surface and the status wording lives
+     where it reads. -->
+<template name="status-line">
+  <text size="sm" foreground="text_muted" label="Sampling status">{headerStatus}</text>
+</template>

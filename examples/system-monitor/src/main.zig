@@ -100,6 +100,21 @@ pub const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
 
 pub const MonitorApp = native_sdk.UiApp(Model, Msg);
 
+/// Fragment hot reload (Debug dev runs): the root view is Zig, but the
+/// header and the three sparklines are compiled markup fragments —
+/// registering them keeps the edit-see loop alive, so editing any of
+/// these `.native` sources (or a file they import, like the header's
+/// status-line component) while the app runs reloads that fragment in
+/// place. Outside Debug the handles are empty and the watch compiles
+/// to nothing.
+const monitor_fragments = [_]canvas.MarkupFragment{
+    view_mod.CompiledHeaderView.fragment("src/header.native"),
+    view_mod.CpuSparkView.fragment("src/spark_cpu.native"),
+    view_mod.MemSparkView.fragment("src/spark_mem.native"),
+    view_mod.ProcSparkView.fragment("src/spark_proc.native"),
+    view_mod.UptimeValueView.fragment("src/uptime_value.native"),
+};
+
 pub fn monitorOptions() MonitorApp.Options {
     return .{
         .name = "system-monitor",
@@ -172,7 +187,9 @@ pub fn onChrome(chrome: native_sdk.WindowChrome) ?Msg {
 pub fn main(init: std.process.Init) !void {
     const app_state = try std.heap.page_allocator.create(MonitorApp);
     defer std.heap.page_allocator.destroy(app_state);
-    app_state.* = MonitorApp.init(std.heap.page_allocator, .{}, monitorOptions());
+    var options = monitorOptions();
+    options.fragment_watch = .{ .fragments = &monitor_fragments, .io = init.io };
+    app_state.* = MonitorApp.init(std.heap.page_allocator, .{}, options);
     defer app_state.deinit();
     try runner.runWithOptions(app_state.app(), .{
         .app_name = "system-monitor",

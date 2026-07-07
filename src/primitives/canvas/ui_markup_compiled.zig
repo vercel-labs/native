@@ -27,6 +27,7 @@
 //! enum), which latch `ui.failed` exactly like the builder's own sugar.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const canvas = @import("root.zig");
 const markup = @import("ui_markup.zig");
 const interpreter = @import("ui_markup_view.zig");
@@ -44,7 +45,7 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
     if (parsed.imports.len > 0) {
         @compileError("this markup imports other files - compile it with canvas.CompiledMarkupImports(Model, Msg, \"root.native\", &sources), where sources is a markup.SourceFile set embedding the root and every imported file");
     }
-    return CompiledMarkupDocument(ModelT, MsgT, parsed);
+    return CompiledMarkupEngine(ModelT, MsgT, parsed, source, &.{});
 }
 
 /// The compiled engine's side of the import resolver seam (see the
@@ -54,19 +55,70 @@ pub fn CompiledMarkupView(comptime ModelT: type, comptime MsgT: type, comptime s
 /// comptime. The same set drives the runtime interpreter's embedded
 /// resolution (`MarkupOptions.sources`), so both engines see one document.
 pub fn CompiledMarkupImports(comptime ModelT: type, comptime MsgT: type, comptime root_name: []const u8, comptime sources: []const markup.SourceFile) type {
-    return CompiledMarkupDocument(ModelT, MsgT, markup.resolveImportsComptime(root_name, sources));
+    return CompiledMarkupEngine(ModelT, MsgT, markup.resolveImportsComptime(root_name, sources), rootSourceOf(root_name, sources), sources);
 }
 
-/// Shared engine over an already-resolved comptime document. The document
+/// The root file's embedded bytes out of a comptime source set — the
+/// hot-reload baseline `fragment()` carries. The resolver already
+/// requires the root to be present (with its own teaching error), so a
+/// miss here is unreachable in practice.
+fn rootSourceOf(comptime root_name: []const u8, comptime sources: []const markup.SourceFile) []const u8 {
+    for (sources) |file| {
+        if (std.mem.eql(u8, file.path, root_name)) return file.source;
+    }
+    return "";
+}
+
+/// Shared engine over an already-resolved comptime document, without a
+/// hot-reload baseline: a fragment compiled through this shape has no
+/// embedded source to compare a watched file against, so it cannot
+/// register with the fragment watch (`CompiledMarkupView` and
+/// `CompiledMarkupImports` are the registrable shapes).
+pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, comptime resolved_document: markup.MarkupDocument) type {
+    return CompiledMarkupEngine(ModelT, MsgT, resolved_document, "", &.{});
+}
+
+/// The engine over an already-resolved comptime document. The document
 /// is canonicalized first (the typed-document pass), so both engines
 /// consume the same typed form; this engine's binding/message resolution
 /// stays comptime-unrolled, so the pass changes nothing about the code it
-/// emits — the parity suite is the proof.
-pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, comptime resolved_document: markup.MarkupDocument) type {
+/// emits — the parity suite is the proof. `fragment_source` and
+/// `fragment_sources` are the embedded bytes the document was compiled
+/// from, referenced only by the Debug-only fragment watch registration.
+fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime resolved_document: markup.MarkupDocument, comptime fragment_source: []const u8, comptime fragment_sources: []const markup.SourceFile) type {
     return struct {
         pub const Ui = canvas.Ui(MsgT);
 
         pub const document = markup.canonicalizeComptime(resolved_document);
+
+        /// Debug-only registration handle for the runtime's fragment
+        /// hot-reload watch: `.fragment("src/header.native")` in
+        /// `UiApp.Options.fragment_watch` names the on-disk source this
+        /// fragment was compiled from, so a dev run reloads it in place
+        /// when the file (or any file its imports reach) changes.
+        /// Outside Debug this returns an empty handle — no path bytes,
+        /// no embedded-baseline references — so release binaries carry
+        /// no watch plumbing.
+        pub fn fragment(comptime path: []const u8) markup.MarkupFragment {
+            comptime {
+                if (fragment_source.len == 0) @compileError("this compiled markup view has no embedded source baseline - only CompiledMarkupView / CompiledMarkupImports fragments can register with the fragment watch");
+            }
+            if (comptime builtin.mode != .Debug) return .{};
+            return .{
+                .key = fragmentKey(),
+                .path = path,
+                .source = fragment_source,
+                .sources = fragment_sources,
+            };
+        }
+
+        /// This fragment's identity for the watch's override lookup: the
+        /// address of the comptime document, unique per compiled fragment
+        /// type and shared by registration (`fragment`) and the build-time
+        /// check, so the two cannot disagree.
+        fn fragmentKey() *const anyopaque {
+            return @ptrCast(&document);
+        }
 
         /// Loop variables, template args, and slot captures in scope at a
         /// point in the tree. Names, kinds, and item types are comptime;
@@ -117,6 +169,40 @@ pub fn CompiledMarkupDocument(comptime ModelT: type, comptime MsgT: type, compti
         /// failures latch `ui.failed` (surfaced by `finalize`) exactly like
         /// the builder's own sugar (`ui.fmt`, `ui.each`).
         pub fn build(ui: *Ui, model: *const ModelT) Ui.Node {
+            // Debug-only hot-reload seam: when the app registered this
+            // fragment with the runtime's fragment watch (`fragment(path)`
+            // in `UiApp.Options.fragment_watch`) and the watch adopted a
+            // changed on-disk source, the interpreter builds the reloaded
+            // document instead of the comptime tree. The engines are
+            // parity-proven, so pixels and structural ids match until the
+            // edit itself changes them; release builds compile this
+            // branch out entirely.
+            if (comptime builtin.mode == .Debug) {
+                if (ui.markup_fragment_host) |host| {
+                    if (host.override(host.context, fragmentKey())) |override_ptr| {
+                        const live_document: *const markup.MarkupDocument = @ptrCast(@alignCast(override_ptr));
+                        var live = interpreter.MarkupView(ModelT, MsgT).fromDocument(live_document.*);
+                        return live.build(ui, model) catch {
+                            // The reloaded source parses but cannot build
+                            // against this Model/Msg (a binding naming no
+                            // model field, an unknown message tag — what
+                            // the compiled engine catches at comptime).
+                            // Report the teaching diagnostic through the
+                            // host and latch `ui.failed` so the frame
+                            // aborts and the last good tree stays up; the
+                            // next good save reloads and recovers.
+                            host.report(host.context, .{
+                                .line = live.diagnostic.line,
+                                .column = live.diagnostic.column,
+                                .message = live.diagnostic.message,
+                                .path = live.diagnostic.path,
+                            });
+                            ui.failed = true;
+                            return ui.column(.{}, .{});
+                        };
+                    }
+                }
+            }
             const root = comptime (document.root orelse @compileError("markup error: " ++ markup.component_file_view_message));
             comptime {
                 checkTemplates();

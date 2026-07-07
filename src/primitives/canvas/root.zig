@@ -448,6 +448,10 @@ pub const MarkupView = @import("ui_markup_view.zig").MarkupView;
 pub const MarkupBuildDiagnostic = @import("ui_markup_view.zig").BuildDiagnostic;
 pub const CompiledMarkupView = @import("ui_markup_compiled.zig").CompiledMarkupView;
 pub const CompiledMarkupImports = @import("ui_markup_compiled.zig").CompiledMarkupImports;
+/// Fragment hot-reload registration handle (Debug-shaped; see
+/// `ui_markup.MarkupFragment`): obtained from a compiled fragment's
+/// `.fragment(path)` and handed to `UiApp.Options.fragment_watch`.
+pub const MarkupFragment = ui_markup.MarkupFragment;
 
 // The model–view contract (ui_markup_contract.zig): the payload types the
 // engines special-case are bound here so the contract module stays
@@ -489,6 +493,10 @@ pub const max_virtual_windows = ui_builder.max_virtual_windows;
 pub const ColorTokenName = ui_builder.ColorTokenName;
 pub const RadiusTokenName = ui_builder.RadiusTokenName;
 pub const StyleTokenRefs = ui_builder.StyleTokenRefs;
+/// The fragment hot-reload seam between the app loop and compiled
+/// markup fragments (Debug dev runs only; see `ui_builder`).
+pub const MarkupFragmentHost = ui_builder.MarkupFragmentHost;
+pub const MarkupFragmentDiagnostic = ui_builder.MarkupFragmentDiagnostic;
 
 // Canvas widget event and semantics data lives in `events.zig`; root keeps the public API stable.
 pub const WidgetLayoutNode = event_model.WidgetLayoutNode;

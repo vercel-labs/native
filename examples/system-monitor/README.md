@@ -25,7 +25,7 @@ Right/ctrl-click a table row for the native context menu. **Terminate (SIGTERM)�
 
 ## Authoring split (markup-first)
 
-- `src/header.native` — brand and the live/paused status line holding the trailing corner. The app follows the system appearance; there is no in-window theme control.
+- `src/header.native` — brand and the live/paused status line holding the trailing corner (the status line itself is an imported component, `src/header_status.native`). The app follows the system appearance; there is no in-window theme control. All four markup fragments — the header and the sparklines — are registered with the runtime's fragment watch in `main.zig`, so a Debug `native dev` run hot reloads any of them (or the imported status component) on save.
 - `src/spark_cpu.native`, `src/spark_mem.native`, `src/spark_proc.native` — the three sparkline charts, one `<chart>` fragment per stat tile, built into the Zig tile chrome as ordinary children.
 - `src/view.zig` — the Zig sections: stat tiles, the toolbar (every control on the `.sm` register so the row renders one height — pause/resume button with its inline play/pause icon, filter field with the search component's own built-in clear affordance, sort toggles), the process table as flat `list_item` rows under a hairline-separated heading (one surface, full-width hover washes, per-row context menus) with a controlled scroll (the model echoes the applied offset, so the 2 s sample rebuild never resets it mid-gesture), and the modal confirmation overlaid through a z-stack root.
 - `src/sampler.zig` — the pure parsers and per-OS command lines; no effects, no allocation.

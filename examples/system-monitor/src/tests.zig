@@ -664,7 +664,13 @@ test "markup engine parity: the header builds identical trees" {
     var model = Model{};
     apply(&model, .{ .set_appearance = .{ .color_scheme = .dark } });
 
-    var interpreter = try canvas.MarkupView(Model, Msg).init(arena, view_mod.header_markup);
+    // The header imports its status-line component, so the interpreter
+    // side resolves the same embedded source set the compiled engine
+    // merged at comptime — both engines see one document.
+    var set_loader = canvas.ui_markup.SourceSetLoader{ .set = &view_mod.header_markup_files };
+    var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
+    const header_document = try canvas.ui_markup.resolveImports(arena, "header.native", view_mod.header_markup, set_loader.loader(), &diagnostic);
+    var interpreter = canvas.MarkupView(Model, Msg).fromDocument(try canvas.ui_markup.canonicalize(arena, header_document));
     var compiled_ui = Ui.init(arena);
     const compiled = try compiled_ui.finalize(view_mod.CompiledHeaderView.build(&compiled_ui, &model));
     var interpreted_ui = Ui.init(arena);

@@ -199,6 +199,31 @@ pub const VirtualWindowSourceFn = *const fn (context: ?*anyopaque, id: ObjectId)
 /// correct within the window, just without cross-frame corrections.
 pub const VirtualExtentSourceFn = *const fn (context: ?*anyopaque, id: ObjectId) ?*canvas.VirtualExtentTable;
 
+/// A markup fragment build failure surfaced through the hot-reload seam:
+/// the same file:line teaching shape the single-root markup watch reports,
+/// so a fragment that reloads into a bad binding degrades identically.
+pub const MarkupFragmentDiagnostic = struct {
+    line: usize = 0,
+    column: usize = 0,
+    message: []const u8 = "",
+    /// Source file the position refers to; import resolution stamps it so
+    /// errors inside imported component files name the right file.
+    path: []const u8 = "",
+};
+
+/// The app loop's side of the fragment hot-reload seam (Debug dev runs
+/// only). `override` answers a compiled fragment's identity key with the
+/// watch's reloaded document (`*const ui_markup.MarkupDocument` as
+/// `anyopaque` — the engine casts it back; the builder core stays free of
+/// markup imports), or null while the fragment matches its compiled
+/// baseline. `report` carries a reloaded-but-unbuildable fragment's
+/// teaching diagnostic back to the app loop's markup diagnostic channel.
+pub const MarkupFragmentHost = struct {
+    context: *anyopaque,
+    override: *const fn (context: *anyopaque, key: *const anyopaque) ?*const anyopaque,
+    report: *const fn (context: *anyopaque, diagnostic: MarkupFragmentDiagnostic) void,
+};
+
 /// One windowed virtual list the current build declared: enough for the
 /// app loop to re-check the window against the freshly laid-out
 /// geometry (a resize or first build can widen the viewport after the
@@ -356,6 +381,15 @@ pub fn Ui(comptime Msg: type) type {
         /// Set by `finalizeNode` when the fallback target was found and a
         /// surface was synthesized; copied onto the returned `Tree`.
         context_menu_fallback_result: ?Tree.ContextMenuFallback = null,
+        /// Markup fragment hot-reload seam (Debug dev runs only): set by
+        /// the app loop when the runtime's fragment watch is armed, so a
+        /// compiled markup fragment built inline in a Zig view can ask
+        /// "did my source change on disk?" and build the reloaded
+        /// document through the interpreter instead of its comptime
+        /// tree. Null everywhere else — release builds never read it,
+        /// and the seam stays untyped (`anyopaque` document pointers)
+        /// so the builder core never imports the markup engine.
+        markup_fragment_host: ?MarkupFragmentHost = null,
 
         pub const ElementOptions = struct {
             /// Sibling-scoped identity: the widget id hashes the parent

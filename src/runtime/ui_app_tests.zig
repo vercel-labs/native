@@ -1270,6 +1270,301 @@ test "with view and markup both set the compiled view renders until the watched 
     try std.testing.expectEqual(increment_id, findWidgetIdByText(app_state.tree.?, .button, "Increment").?);
 }
 
+// ------------------------------------------------- fragment hot reload
+// A HYBRID root: a Zig builder view embedding compiled markup fragments.
+// The fragment watch (Options.fragment_watch) is what keeps the edit-see
+// loop alive for these apps — without it, editing a fragment's .native
+// source in dev does nothing because the fragment was compiled at
+// comptime.
+
+const fragment_actions_markup =
+    \\<column gap="4">
+    \\  <button variant="primary" on-press="increment">Increment</button>
+    \\  <button on-press="reset">Reset</button>
+    \\</column>
+;
+
+const fragment_actions_markup_v2 =
+    \\<column gap="4">
+    \\  <button variant="primary" on-press="increment">Increment</button>
+    \\  <button on-press="reset">Start over</button>
+    \\</column>
+;
+
+const fragment_actions_path = ".zig-cache/ui-app-fragment-actions.native";
+
+const FragmentActionsView = canvas.CompiledMarkupView(CounterModel, CounterMsg, fragment_actions_markup);
+
+fn hybridCounterView(ui: *CounterApp.Ui, model: *const CounterModel) CounterApp.Ui.Node {
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.text(.{}, ui.fmt("Count {d}", .{model.count})),
+        FragmentActionsView.build(ui, model),
+    });
+}
+
+const hybrid_counter_fragments = [_]canvas.MarkupFragment{
+    FragmentActionsView.fragment(fragment_actions_path),
+};
+
+fn hybridCounterOptions(io: std.Io) CounterApp.Options {
+    var options = counterOptions();
+    options.name = "ui-app-hybrid-counter";
+    options.view = hybridCounterView;
+    options.fragment_watch = .{ .fragments = &hybrid_counter_fragments, .io = io };
+    return options;
+}
+
+/// Install the app on the harness and drive the first gpu frame (the
+/// installing frame, which also arms the markup watch).
+fn installCounterApp(harness: anytype, app: core.App) !void {
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+}
+
+test "the fragment watch reloads a compiled fragment embedded in a Zig view" {
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    try cwd.writeFile(io, .{ .sub_path = fragment_actions_path, .data = fragment_actions_markup });
+    defer cwd.deleteFile(io, fragment_actions_path) catch {};
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, hybridCounterOptions(io));
+    defer app_state.deinit();
+    const app = app_state.app();
+    try installCounterApp(harness, app);
+    try std.testing.expect(app_state.installed);
+
+    // Registered fragments arm the watch — the same reserved repeating
+    // timer as the single-root watch — and the armed state is honest in
+    // the automation snapshot bit even though the app has no markup root.
+    try std.testing.expect(harness.null_platform.startedTimer(CounterApp.markup_watch_timer_id) != null);
+    try std.testing.expect(harness.runtime.markup_watch_armed);
+
+    // An idle poll (file matches the embedded baseline) keeps the
+    // comptime-compiled path: no override document is adopted.
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 1_500_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document == null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .button, "Reset") != null);
+
+    // Advance model state, then edit the fragment's file: the poll
+    // reloads THAT fragment through the interpreter and rebuilds while
+    // model state and structural ids hold.
+    const increment_id = findWidgetIdByText(app_state.tree.?, .button, "Increment").?;
+    var command_buffer: [96]u8 = undefined;
+    const click = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ canvas_label, increment_id });
+    try harness.runtime.dispatchAutomationCommand(app, click);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+
+    try cwd.writeFile(io, .{ .sub_path = fragment_actions_path, .data = fragment_actions_markup_v2 });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 2_000_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .button, "Start over") != null);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
+    try std.testing.expectEqual(increment_id, findWidgetIdByText(app_state.tree.?, .button, "Increment").?);
+
+    // Reverting the file byte for byte drops the override: back to the
+    // comptime-compiled path, the release-identical one.
+    try cwd.writeFile(io, .{ .sub_path = fragment_actions_path, .data = fragment_actions_markup });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 2_500_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document == null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .button, "Reset") != null);
+}
+
+test "a broken fragment save keeps the last good view and the next good save recovers" {
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    try cwd.writeFile(io, .{ .sub_path = fragment_actions_path, .data = fragment_actions_markup });
+    defer cwd.deleteFile(io, fragment_actions_path) catch {};
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, hybridCounterOptions(io));
+    defer app_state.deinit();
+    const app = app_state.app();
+    try installCounterApp(harness, app);
+    try std.testing.expect(app_state.installed);
+
+    // A save that does not parse: the fragment keeps its last good view,
+    // the app keeps running, and the teaching diagnostic names the file.
+    try cwd.writeFile(io, .{ .sub_path = fragment_actions_path, .data = "<column><oops</column>" });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 1_500_000).?);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .button, "Reset") != null);
+    try std.testing.expect(app_state.markup_diagnostic != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_state.markup_diagnostic.?.path, "ui-app-fragment-actions.native") != null);
+
+    // A save that parses but cannot build against the Model (a binding
+    // naming no model field — what the compiled engine rejects at
+    // comptime): the frame aborts, the last good tree stays up, and the
+    // diagnostic reports through the same channel.
+    try cwd.writeFile(io, .{ .sub_path = fragment_actions_path, .data = "<column><text>{missing_field}</text></column>" });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 2_000_000).?);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .button, "Reset") != null);
+    try std.testing.expect(app_state.markup_diagnostic != null);
+
+    // The next good save recovers in place.
+    try cwd.writeFile(io, .{ .sub_path = fragment_actions_path, .data = fragment_actions_markup_v2 });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 2_500_000).?);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .button, "Start over") != null);
+    try std.testing.expect(app_state.markup_diagnostic == null);
+}
+
+// Two fragments importing ONE shared component file: the import-closure
+// propagation rule is that editing the shared file reloads every fragment
+// whose closure reaches it, in the same poll.
+
+const fragment_badge_a_markup =
+    \\<import src="ui-app-fragment-parts.native"/>
+    \\<row gap="4">
+    \\  <text>Badge A</text>
+    \\  <use template="chip" />
+    \\</row>
+;
+
+const fragment_badge_b_markup =
+    \\<import src="ui-app-fragment-parts.native"/>
+    \\<row gap="4">
+    \\  <text>Badge B</text>
+    \\  <use template="chip" />
+    \\</row>
+;
+
+const fragment_parts_markup =
+    \\<template name="chip">
+    \\  <text>Alpha</text>
+    \\</template>
+;
+
+const fragment_parts_markup_v2 =
+    \\<template name="chip">
+    \\  <text>Beta</text>
+    \\</template>
+;
+
+const fragment_badge_a_path = ".zig-cache/ui-app-fragment-badge-a.native";
+const fragment_badge_b_path = ".zig-cache/ui-app-fragment-badge-b.native";
+const fragment_parts_path = ".zig-cache/ui-app-fragment-parts.native";
+
+const fragment_badge_a_sources = [_]canvas.ui_markup.SourceFile{
+    .{ .path = "ui-app-fragment-badge-a.native", .source = fragment_badge_a_markup },
+    .{ .path = "ui-app-fragment-parts.native", .source = fragment_parts_markup },
+};
+const fragment_badge_b_sources = [_]canvas.ui_markup.SourceFile{
+    .{ .path = "ui-app-fragment-badge-b.native", .source = fragment_badge_b_markup },
+    .{ .path = "ui-app-fragment-parts.native", .source = fragment_parts_markup },
+};
+
+const FragmentBadgeAView = canvas.CompiledMarkupImports(CounterModel, CounterMsg, "ui-app-fragment-badge-a.native", &fragment_badge_a_sources);
+const FragmentBadgeBView = canvas.CompiledMarkupImports(CounterModel, CounterMsg, "ui-app-fragment-badge-b.native", &fragment_badge_b_sources);
+
+fn badgesCounterView(ui: *CounterApp.Ui, model: *const CounterModel) CounterApp.Ui.Node {
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        FragmentBadgeAView.build(ui, model),
+        FragmentBadgeBView.build(ui, model),
+    });
+}
+
+const badges_counter_fragments = [_]canvas.MarkupFragment{
+    FragmentBadgeAView.fragment(fragment_badge_a_path),
+    FragmentBadgeBView.fragment(fragment_badge_b_path),
+};
+
+fn countTextIn(widget: canvas.Widget, text: []const u8) usize {
+    var count: usize = 0;
+    if (widget.kind == .text and std.mem.eql(u8, widget.text, text)) count += 1;
+    for (widget.children) |child| count += countTextIn(child, text);
+    return count;
+}
+
+test "editing a shared imported file reloads every fragment whose imports reach it" {
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    try cwd.writeFile(io, .{ .sub_path = fragment_badge_a_path, .data = fragment_badge_a_markup });
+    defer cwd.deleteFile(io, fragment_badge_a_path) catch {};
+    try cwd.writeFile(io, .{ .sub_path = fragment_badge_b_path, .data = fragment_badge_b_markup });
+    defer cwd.deleteFile(io, fragment_badge_b_path) catch {};
+    try cwd.writeFile(io, .{ .sub_path = fragment_parts_path, .data = fragment_parts_markup });
+    defer cwd.deleteFile(io, fragment_parts_path) catch {};
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    var options = counterOptions();
+    options.name = "ui-app-badges-counter";
+    options.view = badgesCounterView;
+    options.fragment_watch = .{ .fragments = &badges_counter_fragments, .io = io };
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, options);
+    defer app_state.deinit();
+    const app = app_state.app();
+    try installCounterApp(harness, app);
+    try std.testing.expect(app_state.installed);
+
+    // Both compiled fragments rendered the shared template.
+    try std.testing.expectEqual(@as(usize, 2), countTextIn(app_state.tree.?.root, "Alpha"));
+
+    // An idle poll leaves both fragments compiled: the embedded baseline
+    // hash covers the whole import closure, so nothing phantom-reloads.
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 1_500_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document == null);
+    try std.testing.expect(app_state.markup_fragment_slots[1].document == null);
+
+    // Editing only the SHARED imported file reloads BOTH fragments in
+    // one poll — a file may serve several fragments, and every one of
+    // its dependents rebuilds fresh.
+    try cwd.writeFile(io, .{ .sub_path = fragment_parts_path, .data = fragment_parts_markup_v2 });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 2_000_000).?);
+    try std.testing.expectEqual(@as(usize, 2), countTextIn(app_state.tree.?.root, "Beta"));
+    try std.testing.expectEqual(@as(usize, 0), countTextIn(app_state.tree.?.root, "Alpha"));
+
+    // Editing one fragment's ROOT file reloads only that fragment; the
+    // other keeps its current view.
+    const badge_a_v2 = try std.mem.concat(std.testing.allocator, u8, &.{ fragment_badge_a_markup, "\n" });
+    defer std.testing.allocator.free(badge_a_v2);
+    try cwd.writeFile(io, .{ .sub_path = fragment_badge_a_path, .data = badge_a_v2 });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 2_500_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Badge A") != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Badge B") != null);
+}
+
+test "a hybrid app with no registered fragments keeps the markup watch off" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, counterOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try installCounterApp(harness, app);
+    try std.testing.expect(app_state.installed);
+
+    // No markup root, no fragments: the watch never arms and the
+    // automation snapshot bit honestly reports off.
+    try std.testing.expect(harness.null_platform.startedTimer(CounterApp.markup_watch_timer_id) == null);
+    try std.testing.expect(!harness.runtime.markup_watch_armed);
+}
+
 const RosterModel = struct {
     row_count: usize = 70,
 

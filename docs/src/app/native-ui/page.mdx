@@ -9,7 +9,7 @@ An app is four things:
 - `Msg` — a tagged union of everything that can happen.
 - `update(model, msg)` — the only place state changes.
 
-The runtime owns the rest: install, presentation, resize, typed event dispatch, timers, and hot reload. In dev builds, edit the `.native` file while the app runs and the window updates in place — model state, selection, and widget identity all survive. In release builds the markup is compiled at comptime, so the binary carries no parser and a typo in a view is a compile error with a line and column.
+The runtime owns the rest: install, presentation, resize, typed event dispatch, timers, and hot reload. In dev builds, edit the `.native` file while the app runs and the window updates in place — model state, selection, and widget identity all survive. Compiled markup fragments embedded in a Zig view hot reload the same way — register each one with `View.fragment("src/header.native")` in `Options.fragment_watch`, and editing that file (or any file its imports reach) reloads it in place. In release builds the markup is compiled at comptime, so the binary carries no parser and a typo in a view is a compile error with a line and column.
 
 ## A complete view
 

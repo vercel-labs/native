@@ -6,6 +6,7 @@
      toolbar, composed with the Zig-authored table they act on. The app
      follows the system appearance (on_appearance); there is no
      in-window theme control. -->
+<import src="header_status.native"/>
 <column>
   <!-- The header IS the titlebar (tall hidden-inset chrome): it is the
        window's drag surface, leads with a spacer sized to the traffic
@@ -14,7 +15,7 @@
   <row height="{header_height}" padding="12" gap="12" cross="center" background="surface" window-drag="true" label="Monitor header">
     <spacer width="{chrome_leading}" />
     <spacer grow="1" />
-    <text size="sm" foreground="text_muted" label="Sampling status">{headerStatus}</text>
+    <use template="status-line" />
   </row>
   <separator />
 </column>
