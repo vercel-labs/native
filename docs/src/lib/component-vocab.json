@@ -1020,6 +1020,14 @@
       "width": 1120,
       "height": 520
     },
+    "chart-bar": {
+      "width": 1120,
+      "height": 520
+    },
+    "chart-area": {
+      "width": 1120,
+      "height": 480
+    },
     "status-bar": {
       "width": 1120,
       "height": 340

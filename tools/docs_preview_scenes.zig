@@ -174,6 +174,8 @@ pub const scenes = [_]Scene{
     .{ .name = "markdown", .height = 440, .build = stateless(buildMarkdown) },
     .{ .name = "icon", .height = 150, .build = stateless(buildIconHero) },
     .{ .name = "chart", .height = 260, .build = stateless(buildChart) },
+    .{ .name = "chart-bar", .height = 260, .build = stateless(buildChartBar) },
+    .{ .name = "chart-area", .height = 240, .build = stateless(buildChartArea) },
     .{ .name = "status-bar", .height = 170, .build = stateless(buildStatusBar) },
     .{ .name = "stepper", .height = 160, .build = stateless(buildStepper) },
     .{ .name = "timeline", .height = 320, .build = stateless(buildTimeline) },
@@ -1013,27 +1015,66 @@ fn buildIconHero(ui: *Ui) Node {
 }
 
 fn buildChart(ui: *Ui) Node {
-    // The labeled register: muted x/y ticks in reserved gutters. Hover
-    // details are on, but they render only under live pointer
-    // interaction — the static webp stays cold; the LIVE wasm tile
-    // shows the snap cursor and floating detail card.
+    // The line example, in the fully labeled register: two line series
+    // sharing muted x/y ticks in reserved gutters, gridlines riding the
+    // y-label lattice. Hover details are on, but they render only under
+    // live pointer interaction — the static webp stays cold; the LIVE
+    // wasm tile shows the snap cursor, per-point dots, and the floating
+    // detail card listing both series' values.
     return tile(ui, .{
         ui.chart(.{
             .width = 420,
             .height = 180,
             .grid_lines = 3,
-            .baseline = true,
             .x_labels = &chart_month_labels,
             .y_labels = true,
             .hover_details = true,
         }, &.{
-            .{ .kind = .line, .fill = true, .label = "cpu", .values = &.{ 0.18, 0.24, 0.21, 0.32, 0.45, 0.38, 0.52, 0.61, 0.55, 0.68, 0.62, 0.74 } },
-            .{ .kind = .bar, .color = .text_muted, .label = "jobs", .values = &.{ 0.08, 0.12, 0.1, 0.16, 0.2, 0.15, 0.22, 0.28, 0.24, 0.3, 0.26, 0.34 } },
+            .{ .kind = .line, .label = "p95", .values = &.{ 38, 44, 41, 52, 61, 48, 57, 72, 66, 78, 70, 85 } },
+            .{ .kind = .line, .color = .text_muted, .label = "p50", .values = &.{ 12, 14, 13, 16, 18, 15, 17, 21, 19, 22, 20, 24 } },
+        }),
+    });
+}
+
+fn buildChartBar(ui: *Ui) Node {
+    // The bar example: one bar series of small counts over weekday
+    // categories. Bars force zero into a derived domain, so the
+    // baseline hairline sits at an honest zero; hover details float the
+    // hovered day's count on the live tile.
+    return tile(ui, .{
+        ui.chart(.{
+            .width = 420,
+            .height = 180,
+            .baseline = true,
+            .x_labels = &chart_day_labels,
+            .hover_details = true,
+        }, &.{
+            .{ .kind = .bar, .label = "builds", .values = &.{ 12, 18, 9, 22, 17, 6, 4 } },
+        }),
+    });
+}
+
+fn buildChartArea(ui: *Ui) Node {
+    // The area example: one line filled to the baseline (markup's
+    // kind="area") on an explicit 0..1 domain — the fixed-window
+    // sparkline register, no category labels. With no x labels the
+    // hover card titles the hovered sample by index.
+    return tile(ui, .{
+        ui.chart(.{
+            .width = 420,
+            .height = 160,
+            .y_min = 0,
+            .y_max = 1,
+            .grid_lines = 3,
+            .hover_details = true,
+        }, &.{
+            .{ .kind = .line, .fill = true, .label = "memory", .values = &.{ 0.32, 0.34, 0.33, 0.38, 0.42, 0.4, 0.45, 0.51, 0.48, 0.55, 0.6, 0.57, 0.63, 0.68, 0.64, 0.7, 0.75, 0.72, 0.78, 0.82, 0.79, 0.84, 0.88, 0.86 } },
         }),
     });
 }
 
 const chart_month_labels = [_][]const u8{ "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec" };
+const chart_day_labels = [_][]const u8{ "mon", "tue", "wed", "thu", "fri", "sat", "sun" };
 
 fn buildStatusBar(ui: *Ui) Node {
     return ui.column(.{ .grow = 1 }, .{

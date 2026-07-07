@@ -5,16 +5,16 @@ import { AttrTable } from "@/components/attr-table";
 
 A data chart: line, area (a line filled to the baseline), and bar series over uniform x steps, drawn through the vector path pipeline with token-driven colors — charts retheme with the palette, repaint exactly when their data changes, and report a series summary to automation and assistive tech. Series are copied into the build arena and downsampled deterministically to the per-series point budget (index-bucket min/max, spikes preserved), so a 10k-point series renders instead of erroring. Axis tick labels are opt-in and draw in the muted text register inside reserved gutters; `hover-details` adds a pointer-hover detail card. Presses fall through like text — with hover details on, the chart is a hover target only.
 
-<ComponentPreview name="chart" alt="A chart rendered by the engine" caption="a filled line series and a bar series with gridlines, a baseline, and muted axis tick labels — hover the live preview for per-sample details" />
+<ComponentPreview name="chart" alt="A line chart rendered by the engine" caption="two line series over monthly categories with gridlines and muted axis tick labels — hover the live preview for per-sample details" />
 
 ## Markup
 
-A `<chart>` takes one or more `<series>` children. Each series binds its data with `values="{binding}"` naming a model iterable of `f32` — a field, a public declaration, or a function (arena functions work), the same sources `for each` accepts. Axis bounds are literals or scalar bindings.
+A `<chart>` takes one or more `<series>` children. Each series binds its data with `values="{binding}"` naming a model iterable of `f32` — a field, a public declaration, or a function (arena functions work), the same sources `for each` accepts. Axis bounds are literals or scalar bindings. The chart above is two `line` series sharing one labeled frame: category labels on x, nice-step ticks on y, and gridlines riding the same tick lattice.
 
 ```html
-<chart height="160" grid-lines="3" baseline="true" x-labels="{months}" y-labels="true" hover-details="true" label="Build load">
-  <series kind="area" values="{cpu_samples}" label="cpu" />
-  <series kind="bar" values="{job_counts}" color="text_muted" label="jobs" />
+<chart height="180" grid-lines="3" x-labels="{months}" y-labels="true" hover-details="true" label="Request latency">
+  <series kind="line" values="{p95_ms}" label="p95" />
+  <series kind="line" values="{p50_ms}" color="text_muted" label="p50" />
 </chart>
 ```
 
@@ -32,13 +32,37 @@ pub fn cpuSpark(model: *const Model, arena: std.mem.Allocator) []const f32 {
 
 Unlabeled charts get a generated series summary (`chart: line cpu 60 pts last 0.42`) as their accessible name, so automation can assert on the data without pixels; `label` replaces it.
 
+## Bar
+
+`kind="bar"` draws one column per sample. Bars always force 0 into a derived y domain — a bar's area IS its value, so the baseline is an honest zero, and `baseline="true"` marks it with a hairline. Category labels suit bars: one x label per column, thinned to every Nth when they would collide.
+
+<ComponentPreview name="chart-bar" alt="A bar chart rendered by the engine" caption="a bar series over weekday categories with a zero-baseline hairline — hover the live preview for the day's count" />
+
+```html
+<chart height="180" baseline="true" x-labels="{weekdays}" hover-details="true" label="Builds per day">
+  <series kind="bar" values="{daily_builds}" label="builds" />
+</chart>
+```
+
+## Area
+
+`kind="area"` is a line filled to the baseline — the register for a quantity where the mass under the curve reads, like a rolling resource window. Explicit `y-min`/`y-max` pin the domain (here the 0..1 fraction of a fixed budget) so the fill's height stays comparable as new samples arrive instead of rescaling to the data. A rolling window has no category labels, so this one carries none — the hover card titles the hovered sample by index.
+
+<ComponentPreview name="chart-area" alt="An area chart rendered by the engine" caption="a line series filled to the baseline on a pinned 0..1 domain — hover the live preview for the sample's value" />
+
+```html
+<chart height="160" y-min="0" y-max="1" grid-lines="3" hover-details="true" label="Memory">
+  <series kind="area" values="{memorySpark}" label="memory" />
+</chart>
+```
+
 ## Axis labels
 
 `x-labels="{binding}"` names a model iterable of strings — one category label per sample, oldest first (label i names sample i). Labels draw muted below the plot and thin deterministically to every Nth so they never collide; they are dropped when a series downsamples (the bucketed indices no longer name the labeled samples). `y-labels="true"` adds numeric ticks in a measured gutter left of the plot: values ride a nice-step lattice (1, 2, or 5 times a power of ten), so every label is exact at its precision, and with `grid-lines` set the gridlines share that lattice — the grid and its labels can never disagree.
 
 ## Hover details
 
-`hover-details="true"` makes the plot hoverable: the pointer snaps to the nearest sample, a hairline cursor marks it (line series get a dot on the hovered point), and a floating card shows the sample's category label with every series' name and value. The card prefers the right side of the cursor and flips left at the window edge. This is interaction-only chrome — static renders never show it — and presses still fall through to whatever is around the chart.
+`hover-details="true"` makes the plot hoverable: the pointer snaps to the nearest sample, a hairline cursor marks it (line series get a dot on the hovered point), and a floating card shows the sample's category label with every series' name and value. The card prefers the right side of the cursor and flips left at the window edge. This is interaction-only chrome — static renders never show it — and presses still fall through to whatever is around the chart. Every live preview on this page has it on: hover any of the three.
 
 ## Attributes
 
