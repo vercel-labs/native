@@ -183,6 +183,25 @@ test "app icon registration resolves for drawing but never widens the closed voc
     const shadowing = [_]icons.Entry{.{ .name = "check", .icon = &parsed }};
     icons.registerAppIcons(&shadowing);
     try std.testing.expectEqual(icons.find("check").?, icons.resolve("check").?);
+    // The app: namespace reaches ONLY the registered table: a shadowed
+    // name resolves to the app icon through it, and a built-in name is
+    // never an answer for an app: reference.
+    try std.testing.expectEqual(@as(?*const icons.Icon, &parsed), icons.resolve("app:check"));
+    try std.testing.expectEqual(@as(?*const icons.Icon, null), icons.resolve("app:search"));
+}
+
+test "the explicit icon channel resolves unknown names to the missing-icon fallback" {
+    // Empty means "no icon"; a name that resolves nowhere yields the
+    // fallback glyph so a broken reference draws its failure, never a
+    // silent gap (the paired Debug warning names the value).
+    try std.testing.expectEqual(@as(?*const icons.Icon, null), icons.resolveOrMissing(""));
+    try std.testing.expectEqual(@as(?*const icons.Icon, icons.missing_icon), icons.resolveOrMissing("sparkle-pony"));
+    try std.testing.expectEqual(@as(?*const icons.Icon, icons.missing_icon), icons.resolveOrMissing("app:sparkle-pony"));
+    try std.testing.expectEqual(@as(?*const icons.Icon, icons.find("search").?), icons.resolveOrMissing("search"));
+    // The fallback is deliberately NOT vocabulary: no name reaches it.
+    for (icons.known_icon_names) |name| {
+        try std.testing.expect(icons.find(name).? != icons.missing_icon);
+    }
 }
 
 test "every built-in icon is a 24x24 stroke-dialect icon" {

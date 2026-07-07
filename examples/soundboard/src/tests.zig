@@ -23,6 +23,9 @@ const App = main.SoundboardApp;
 // ------------------------------------------------------------- tree utils
 
 fn buildTree(arena: std.mem.Allocator, model: *const Model) !Ui.Tree {
+    // Tree tests build views like the live app: with the app icon table
+    // installed (registration is idempotent - one static table).
+    main.registerIcons();
     var ui = Ui.init(arena);
     return ui.finalizeWithTokens(view_mod.rootView(&ui, model), main.tokensFromModel(model));
 }
@@ -76,6 +79,10 @@ const LiveApp = struct {
     app_state: *App,
 
     fn start(image_decode: bool) !LiveApp {
+        // The same boot-time act main performs: install the app icon
+        // table before any view builds, so app: markup references
+        // resolve here exactly like in the shipped app.
+        main.registerIcons();
         const harness = try native_sdk.TestHarness().create(testing.allocator, .{ .size = surface_size });
         errdefer harness.destroy(testing.allocator);
         harness.null_platform.gpu_surfaces = true;
@@ -608,6 +615,53 @@ test "the album detail heading moved to markup unchanged" {
     try testing.expectEqualStrings(hand_node.widget.semantics.label, markup_node.widget.semantics.label);
     // One text run for assistive tech: spans stay visual, scaled or not.
     try testing.expectEqual(@as(usize, 0), markup_node.nodes.len);
+}
+
+test "app icons and bound icons flow from markup into the live layout and snapshot" {
+    const live = try LiveApp.start(true);
+    defer live.stop();
+
+    try live.dispatch(.{ .play_track = 7 });
+    try presentShotFrame(live, 2);
+
+    // The retained layout carries both open icon forms: the app:
+    // namespace reference verbatim on the waveform mark, and the bound
+    // play/pause icon as the value the model produced while playing.
+    const layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+    var saw_waveform = false;
+    var play_pause_icon: []const u8 = "";
+    for (layout.nodes) |node| {
+        if (node.widget.kind == .icon and std.mem.eql(u8, node.widget.icon, "app:waveform")) saw_waveform = true;
+        if (std.mem.eql(u8, node.widget.semantics.label, "Play or pause")) play_pause_icon = node.widget.icon;
+    }
+    try testing.expect(saw_waveform);
+    try testing.expectEqualStrings("pause", play_pause_icon);
+
+    // Both names resolve to REAL parsed icons at draw time - never the
+    // missing-icon fallback: the namespace reaches the registered table,
+    // and the bound value lands on a built-in.
+    try testing.expectEqual(@as(?*const canvas.icons.Icon, main.app_icons[0].icon), canvas.icons.resolve("app:waveform"));
+    try testing.expectEqual(canvas.icons.find("pause").?, canvas.icons.resolveOrMissing(play_pause_icon).?);
+
+    // The automation snapshot sees the transport button the bound icon
+    // rides on (the accessibility surface stays intact).
+    const snapshot = live.harness.runtime.automationSnapshot("Soundboard");
+    var saw_transport = false;
+    for (snapshot.widgets) |widget| {
+        if (std.mem.eql(u8, widget.name, "Play or pause")) saw_transport = true;
+    }
+    try testing.expect(saw_transport);
+
+    // Data-driven for real: pausing swaps the SAME button's glyph
+    // through the binding - no if/else arms, no key juggling.
+    try live.dispatch(.toggle_play);
+    try presentShotFrame(live, 3);
+    const paused_layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+    for (paused_layout.nodes) |node| {
+        if (std.mem.eql(u8, node.widget.semantics.label, "Play or pause")) {
+            try testing.expectEqualStrings("play", node.widget.icon);
+        }
+    }
 }
 
 test "every view lays out within the canvas and the widget budget" {

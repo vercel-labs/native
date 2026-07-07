@@ -1245,13 +1245,89 @@ pub const avatar_image_element_message = "image is only supported on avatar - th
 /// cannot ship without its markup name.
 pub const known_icon_names = schema.icon_names;
 
-pub const icon_name_message = "name takes a literal built-in icon name (see canvas.icons.known_icon_names, e.g. search, plus, x, check, chevron-down, settings, trash)";
+pub const icon_name_message = "name takes a built-in icon name (see canvas.icons.known_icon_names, e.g. search, plus, x, check, chevron-down, settings, trash), an app-registered app:<name> (canvas.icons.registerAppIcons), or one {binding} resolving to such a name";
 pub const icon_name_element_message = "name is only supported on icon - it selects a built-in vector icon";
 pub const icon_missing_name_message = "icon requires a name attribute selecting a built-in vector icon (e.g. <icon name=\"search\"/>)";
 pub const icon_children_message = "icon is a leaf - it takes no children";
 
-pub const button_icon_message = "icon takes a literal built-in icon name drawn inside the element (see canvas.icons.known_icon_names, e.g. save, plus, refresh-cw)";
+pub const button_icon_message = "icon takes a built-in icon name drawn inside the element (see canvas.icons.known_icon_names, e.g. save, plus, refresh-cw), an app-registered app:<name> (canvas.icons.registerAppIcons), or one {binding} resolving to such a name";
 pub const button_icon_element_message = "icon is only supported on button, toggle-button, list-item, menu-item, and badge - it draws a vector icon inside the element as one hit target; for a bare icon use <icon name=\"...\"/>";
+
+/// The `app:` icon namespace: the markup channel into the app's OWN
+/// registered vector icons (`canvas.icons.registerAppIcons`). Bare names
+/// stay the closed built-in vocabulary the engines prove at build time;
+/// `app:` names are structurally accepted here (registration is a
+/// boot-time act no static pass can see) and verified against the
+/// registered set by `native check` through the model contract's
+/// `app_icons` list.
+pub const app_icon_prefix = "app:";
+
+pub const app_icon_shape_message = "app: takes a registered icon name after the colon, spelled like a built-in (lowercase words joined by dashes, e.g. app:wave-pulse) - the name is the one the app passed to canvas.icons.registerAppIcons";
+pub const icon_namespace_message = "unknown icon namespace - app: is the only one (app:<name> draws an icon the app registered with canvas.icons.registerAppIcons); built-in names are bare (see canvas.icons.known_icon_names)";
+
+/// One icon-valued attribute, structurally classified. Shared by the
+/// validator and BOTH engines (comptime-callable) so the accepted forms
+/// can never drift: a bare literal must be a built-in, an `app:` literal
+/// must be well-shaped (its registration is checked later, by `native
+/// check` against the contract and by the draw path's missing-icon
+/// fallback), and one `{binding}` defers the whole choice to model data.
+pub const IconValue = union(enum) {
+    /// A validated built-in name (`canvas.icons.known_icon_names`).
+    builtin: []const u8,
+    /// The full `app:<name>` spelling, shape-checked; carried verbatim so
+    /// draw-time resolution and diagnostics name exactly what the markup
+    /// said.
+    app: []const u8,
+    /// The raw attribute value of a `{binding}` (or richer expression)
+    /// producing the icon name at view build time.
+    binding: []const u8,
+    /// The teaching message for a value in none of those forms.
+    invalid: []const u8,
+};
+
+/// Classify an icon attribute value; `base_message` is the caller's
+/// teaching message for its own attribute (name vs icon), used for the
+/// generic failures (not a name at all, an unknown bare literal).
+pub fn iconValueOf(raw: []const u8, base_message: []const u8) IconValue {
+    const expression = parseAttrExpression(raw) orelse return .{ .invalid = base_message };
+    switch (expression) {
+        .literal => |literal| {
+            if (std.mem.startsWith(u8, literal, app_icon_prefix)) {
+                const bare = literal[app_icon_prefix.len..];
+                if (!wellShapedIconName(bare)) return .{ .invalid = app_icon_shape_message };
+                return .{ .app = literal };
+            }
+            if (std.mem.indexOfScalar(u8, literal, ':') != null) {
+                return .{ .invalid = icon_namespace_message };
+            }
+            if (!nameInList(literal, &known_icon_names)) return .{ .invalid = base_message };
+            return .{ .builtin = literal };
+        },
+        .binding => return .{ .binding = raw },
+        // Icon choice is one name: a literal or one binding. Computed
+        // names (concatenation, conditionals) belong in the model, where
+        // the contract can type them.
+        .equals, .expression => return .{ .invalid = base_message },
+    }
+}
+
+/// The shape every icon name has (built-in and registered alike):
+/// lowercase words of letters and digits joined by single dashes.
+fn wellShapedIconName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (name[0] == '-' or name[name.len - 1] == '-') return false;
+    var previous_dash = false;
+    for (name) |char| {
+        const word_char = (char >= 'a' and char <= 'z') or (char >= '0' and char <= '9');
+        if (word_char) {
+            previous_dash = false;
+            continue;
+        }
+        if (char != '-' or previous_dash) return false;
+        previous_dash = true;
+    }
+    return true;
+}
 
 /// Elements whose `icon` attribute draws an inline vector icon as part
 /// of the element's OWN rendering (one hit target, one tint following
@@ -2155,16 +2231,12 @@ fn validateTimelineItem(node: MarkupNode) ?MarkupErrorInfo {
             return attrError(node, attribute, timeline_item_press_only_message);
         }
         if (std.mem.eql(u8, attribute.name, "icon")) {
-            // Vector icon indicator: the same closed literal vocabulary
-            // as <icon name> (#96/#98 — symbols belong on the icon
-            // channel, not in text glyphs).
-            const expression = parseAttrExpression(attribute.value);
-            const literal = if (expression) |value|
-                (if (value == .literal) value.literal else null)
-            else
-                null;
-            if (literal == null or !nameInList(literal.?, &known_icon_names)) {
-                return attrError(node, attribute, button_icon_message);
+            // Vector icon indicator: the shared icon value grammar
+            // (built-in literal, app:<name>, or one {binding}) — symbols
+            // belong on the icon channel, not in text glyphs.
+            switch (iconValueOf(attribute.value, button_icon_message)) {
+                .invalid => |message| return attrError(node, attribute, message),
+                else => {},
             }
             continue;
         }
@@ -2830,18 +2902,16 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "name")) {
-                    // Built-in vector icon selector, icon-scoped: a closed
-                    // literal vocabulary so icon references never rot.
+                    // Vector icon selector, icon-scoped: the shared icon
+                    // value grammar — built-in literals never rot (a
+                    // closed vocabulary), app:<name> and {binding} defer
+                    // to the registered set and the model.
                     if (!std.mem.eql(u8, node.name, "icon")) {
                         return attrError(node, attribute, icon_name_element_message);
                     }
-                    const expression = parseAttrExpression(attribute.value);
-                    const literal = if (expression) |value|
-                        (if (value == .literal) value.literal else null)
-                    else
-                        null;
-                    if (literal == null or !nameInList(literal.?, &known_icon_names)) {
-                        return attrError(node, attribute, icon_name_message);
+                    switch (iconValueOf(attribute.value, icon_name_message)) {
+                        .invalid => |message| return attrError(node, attribute, message),
+                        else => {},
                     }
                     continue;
                 }
@@ -2859,20 +2929,16 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                 if (std.mem.eql(u8, attribute.name, "icon")) {
                     // Inline vector icon, scoped to the labeled
                     // interactive elements that render it themselves
-                    // (`known_icon_attr_element_names`): the same closed
-                    // literal vocabulary as <icon name>, drawn inside the
+                    // (`known_icon_attr_element_names`): the same icon
+                    // value grammar as <icon name>, drawn inside the
                     // element so icon + label are one hit target with one
                     // tint.
                     if (!iconAttrElement(node.name)) {
                         return attrError(node, attribute, button_icon_element_message);
                     }
-                    const expression = parseAttrExpression(attribute.value);
-                    const literal = if (expression) |value|
-                        (if (value == .literal) value.literal else null)
-                    else
-                        null;
-                    if (literal == null or !nameInList(literal.?, &known_icon_names)) {
-                        return attrError(node, attribute, button_icon_message);
+                    switch (iconValueOf(attribute.value, button_icon_message)) {
+                        .invalid => |message| return attrError(node, attribute, message),
+                        else => {},
                     }
                     continue;
                 }

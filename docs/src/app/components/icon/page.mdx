@@ -4,7 +4,7 @@ import { IconGallery } from "@/components/icon-gallery";
 
 # Icon
 
-A built-in vector icon leaf: `name` selects one of the curated built-in stroke icons, tint comes from the `foreground` color token, and size from `width`/`height` (square by default). `name` is a literal, not a binding — the markup compiler and the Zig builder both validate it at comptime against the registry, so icon references never rot. The same names power the inline `icon` attribute on [button](/components/button), toggle-button, list-item, menu-item, and badge, where the icon draws as part of the control's single hit target. Apps can register their own icons at boot with `canvas.icons.registerAppIcons` (comptime-parse the SVG with `canvas.svg_icon.parseComptime`).
+A vector icon leaf: `name` selects the icon, tint comes from the `foreground` color token, and size from `width`/`height` (square by default). A bare literal name is one of the curated built-in stroke icons — the markup compiler and the Zig builder both validate it at comptime against the registry, so icon references never rot. The same grammar powers the inline `icon` attribute on [button](/components/button), toggle-button, list-item, menu-item, and badge, where the icon draws as part of the control's single hit target.
 
 <ComponentPreview name="icon" alt="Built-in vector icons rendered by the engine" caption="a row of registry icons at the default size and tint" />
 
@@ -17,6 +17,20 @@ A built-in vector icon leaf: `name` selects one of the curated built-in stroke i
   <icon name="git-branch" width="28" height="28"></icon>
   <icon name="check-circle" foreground="success"></icon>
 </row>
+```
+
+## App icons and bound names
+
+Two more value forms open the vocabulary without weakening it:
+
+- `app:<name>` draws an icon the app registered at boot with `canvas.icons.registerAppIcons` (comptime-parse the SVG with `canvas.svg_icon.parseComptime`). Declare the table as `pub const app_icons` on the app root and pass it to `registerAppIcons` in `main` — the model contract carries the same names, so `native check` verifies every `app:` reference against exactly what the app registers (with a did-you-mean). Without a fresh contract artifact the check degrades to structural checking and says so.
+- `icon="{binding}"` defers the choice to model data — a field or function producing a built-in name or an `app:` name per row (a status icon per item, a play/pause toggle). The contract checks the binding resolves to a string.
+
+Both forms resolve at draw time with an honest failure mode: a name that resolves nowhere renders the missing-icon fallback (a slashed circle) and logs a Debug warning naming the value — visible and loud, never a silent gap.
+
+```html
+<icon name="app:waveform" foreground="text_muted"></icon>
+<button icon="{playPauseIcon}" on-press="toggle_play" label="Play or pause"></button>
 ```
 
 ## Zig builder
@@ -40,6 +54,6 @@ The full built-in set (`canvas.icons.known_icon_names`), rendered by the engine.
 
 ## Attributes
 
-`name` is the icon element's own required attribute: a literal registry name, comptime-validated (not part of the shared attribute vocabulary). The rest are the shared sizing and tint attributes:
+`name` is the icon element's own required attribute: a comptime-validated built-in name, an `app:<name>` reference to a registered app icon, or one `{binding}` resolving to such a name (not part of the shared attribute vocabulary). The rest are the shared sizing and tint attributes:
 
 <AttrTable attrs={["width", "height", "foreground", "label"]} />

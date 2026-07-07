@@ -76,15 +76,15 @@ pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []con
     switch (discoverContract(arena, io)) {
         .no_app => {},
         .missing => std.debug.print(
-            "model contract: not yet built - bindings checked structurally only; {s} to enable typed checks\n",
+            "model contract: not yet built - bindings and app: icon names checked structurally only; {s} to enable typed checks\n",
             .{refresh_hint},
         ),
         .unreadable => std.debug.print(
-            "model contract: {s} could not be parsed (it may come from a different toolkit version) - bindings checked structurally only; {s} to rebuild it\n",
+            "model contract: {s} could not be parsed (it may come from a different toolkit version) - bindings and app: icon names checked structurally only; {s} to rebuild it\n",
             .{ ui_markup.contract.default_artifact_path, refresh_hint },
         ),
         .stale => std.debug.print(
-            "model contract: {s} is stale (the app's Zig sources changed since it was emitted) - bindings checked structurally only; {s} to refresh it\n",
+            "model contract: {s} is stale (the app's Zig sources changed since it was emitted) - bindings and app: icon names checked structurally only; {s} to refresh it\n",
             .{ ui_markup.contract.default_artifact_path, refresh_hint },
         ),
         .ok => |parsed| contract_value = parsed,
@@ -593,7 +593,9 @@ fn usage() void {
         \\Inside an app directory with a fresh zig-out/model-contract.zon
         \\(refresh it with `native test`), the check also verifies
         \\bindings, iterables, message tags, and expression types against
-        \\the app's actual Model/Msg, and reports model state and Msg tags
+        \\the app's actual Model/Msg, verifies app: icon references
+        \\against the registered icon table (pub const app_icons on the
+        \\app root), and reports model state and Msg tags
         \\no view uses as warnings (--strict promotes warnings to failures;
         \\opt update-only names out with pub const view_unbound on Model or
         \\Msg). A missing or stale artifact degrades to structural checking

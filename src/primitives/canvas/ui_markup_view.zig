@@ -393,17 +393,25 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             }
 
             if (kind == .icon) {
-                // Closed vocabulary: a literal built-in icon name, no
-                // children. Mirrors the validator and the compiled
-                // engine's comptime checks.
+                // The shared icon value grammar, no children. Mirrors the
+                // validator and the compiled engine: a built-in literal is
+                // proven here (a typo can never rot), while app: names and
+                // bound names ride the explicit icon channel and degrade
+                // at draw time to the missing-icon fallback plus a Debug
+                // warning naming the value.
                 const name_attr = node.attrEntry("name") orelse return self.failNode(node, markup.icon_missing_name_message);
-                const typed = markup.attrTyped(name_attr);
-                if (typed != .literal) return self.failNode(node, markup.icon_name_message);
-                if (canvas.icons.find(typed.literal) == null) return self.failNode(node, markup.icon_name_message);
                 if (inner.children.len > 0) return self.failNode(node, markup.icon_children_message);
-                var built = ui.el(kind, options, .{});
-                built.widget.text = typed.literal;
-                return built;
+                switch (markup.iconValueOf(name_attr.value, markup.icon_name_message)) {
+                    .builtin => |name| {
+                        var built = ui.el(kind, options, .{});
+                        built.widget.text = name;
+                        return built;
+                    },
+                    .app => |spelled| options.icon = spelled,
+                    .binding => options.icon = try self.stringAttr(scope, node, name_attr, markup.icon_name_message),
+                    .invalid => |message| return self.failNode(node, message),
+                }
+                return ui.el(kind, options, .{});
             }
 
             // The span paragraph: a text element with inline <span>
@@ -917,12 +925,13 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "icon")) {
-                    // Vector icon indicator: closed literal vocabulary,
+                    // Vector icon indicator: the shared icon value grammar,
                     // like every icon attribute.
-                    const typed = markup.attrTyped(attribute);
-                    if (typed != .literal) return self.failVoid(node, markup.button_icon_message);
-                    if (canvas.icons.find(typed.literal) == null) return self.failVoid(node, markup.button_icon_message);
-                    options.icon = typed.literal;
+                    switch (markup.iconValueOf(attribute.value, markup.button_icon_message)) {
+                        .builtin, .app => |name| options.icon = name,
+                        .binding => options.icon = try self.stringAttr(scope, node, attribute, markup.button_icon_message),
+                        .invalid => |message| return self.failVoid(node, message),
+                    }
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "variant")) {
@@ -1435,7 +1444,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "icon")) {
-                    try self.applyButtonIconAttr(node, options, attribute);
+                    try self.applyButtonIconAttr(scope, node, options, attribute);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "anchor")) {
@@ -1507,18 +1516,20 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         }
 
         /// `icon="save"` on button, toggle-button, list-item, or
-        /// menu-item: the same closed literal vocabulary as `<icon name>`
-        /// (a typo can never rot silently), drawn inside the element so
-        /// icon + label are one hit target with one tint. Mirrors the
-        /// validator and the compiled engine's compile error.
-        fn applyButtonIconAttr(self: *Self, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
+        /// menu-item: the same icon value grammar as `<icon name>` — a
+        /// built-in literal can never rot silently, app:<name> and one
+        /// {binding} defer to the registered set and the model — drawn
+        /// inside the element so icon + label are one hit target with one
+        /// tint. Mirrors the validator and the compiled engine.
+        fn applyButtonIconAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
             if (!markup.iconAttrElement(node.name)) {
                 return self.failVoid(node, markup.button_icon_element_message);
             }
-            const typed = markup.attrTyped(attribute);
-            if (typed != .literal) return self.failVoid(node, markup.button_icon_message);
-            if (canvas.icons.find(typed.literal) == null) return self.failVoid(node, markup.button_icon_message);
-            options.icon = typed.literal;
+            switch (markup.iconValueOf(attribute.value, markup.button_icon_message)) {
+                .builtin, .app => |name| options.icon = name,
+                .binding => options.icon = try self.stringAttr(scope, node, attribute, markup.button_icon_message),
+                .invalid => |message| return self.failVoid(node, message),
+            }
         }
 
         /// `anchor="below|above"` on dropdown-menu: anchored floating

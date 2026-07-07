@@ -70,7 +70,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "combobox", .doc = "Text entry with menu affordance (no options attribute); edits via on-input, open via on-press — compose the options like select's anchored dropdown-menu pattern (filter the for-each source from the model as the user types)." },
     .{ .name = "skeleton", .doc = "Loading placeholder block; size with width and height." },
     .{ .name = "spinner", .doc = "Indeterminate progress spinner leaf." },
-    .{ .name = "icon", .doc = "Built-in vector icon leaf: name selects one of the curated built-in stroke icons (comptime-validated), tint via foreground, size with width/height or size." },
+    .{ .name = "icon", .doc = "Vector icon leaf: name selects a curated built-in stroke icon (comptime-validated), an app-registered app:<name> (canvas.icons.registerAppIcons; native check verifies the name against the model contract), or one {binding} resolving to such a name. Tint via foreground, size with width/height or size." },
     .{ .name = "markdown", .doc = "Renders a markdown string (GFM subset, pipe tables included) as widgets; source is one {binding}, links dispatch on-link (bare URLs autolink), <details> blocks toggle via on-details + details-expanded, #123 refs linkify via issue-link-base." },
     .{ .name = "stepper", .doc = "Stage stepper: step children joined by connectors; active names the current step index (earlier steps render completed, later ones pending)." },
     .{ .name = "step", .doc = "One stepper stage; only allowed inside a stepper, the label is the text content (supports {} interpolation), state derives from the stepper's active index." },
@@ -123,7 +123,7 @@ pub const attribute_docs = [_]Doc{
     .{ .name = "expanded", .doc = "Tree rows (role=\"treeitem\"): disclosure state (true/false or a {binding}). Omit on leaves; expanded rows collapse on Left, collapsed ones expand on Right, both through on-toggle - the model owns the state." },
     .{ .name = "label", .doc = "Accessible name." },
     .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus). The TEA way to focus an editor on create." },
-    .{ .name = "icon", .doc = "button, toggle-button, list-item, menu-item: built-in vector icon drawn inline (buttons/toggle-buttons before the label, list/menu items as a leading slot; literal name, comptime-validated against canvas.icons.known_icon_names, e.g. save, plus, refresh-cw). Icon-only buttons when the content is empty — add a label. One hit target, one enabled/disabled tint." },
+    .{ .name = "icon", .doc = "button, toggle-button, list-item, menu-item: vector icon drawn inline (buttons/toggle-buttons before the label, list/menu items as a leading slot): a built-in name (comptime-validated against canvas.icons.known_icon_names, e.g. save, plus, refresh-cw), an app-registered app:<name>, or one {binding} resolving to such a name. Icon-only buttons when the content is empty — add a label. One hit target, one enabled/disabled tint." },
     .{ .name = "icon-placement", .doc = "Icon slot side on label-bearing buttons/toggle-buttons: leading (default) draws the icon before the label, trailing after it — the next-page chevron. Icon-only buttons center the glyph regardless." },
     .{ .name = "window-drag", .doc = "Marks the element as a window-drag surface (the hidden-titlebar pattern): pressing its background - or plain text/icons inside - moves the window; double-click zooms per the OS convention. Buttons and other press-claiming children inside stay clickable. macOS-only; elsewhere the press is dead space." },
     .{ .name = "overscroll", .doc = "scroll only: edge behavior of the region. none pins scrolling at the content edges (the shipped default via the ScrollPhysics.overscroll token), rubber_band lets this region bounce past them, default follows the token. Honored by the engine's scroll physics and the native OS scroller alike." },
@@ -139,7 +139,7 @@ pub const attribute_docs = [_]Doc{
 };
 
 pub const template_attr_docs = [_]Doc{
-    .{ .name = "name", .doc = "template: the definition's name, referenced by use. icon: the built-in vector icon to draw (literal, comptime-validated against canvas.icons.known_icon_names)." },
+    .{ .name = "name", .doc = "template: the definition's name, referenced by use. icon: the vector icon to draw (a comptime-validated built-in name, app:<name>, or one {binding})." },
     .{ .name = "args", .doc = "template: space-separated arg names use sites must pass (slice bindings iterate, scalars bind as values); name=default declares a literal default the use site may omit." },
     .{ .name = "template", .doc = "use: names an earlier top-level template to expand in place." },
     .{ .name = "src", .doc = "import: a .native component file (templates only), relative to the importing file, under the markup root." },

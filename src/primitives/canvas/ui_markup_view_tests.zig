@@ -844,12 +844,26 @@ test "markup icons build icon widgets with validated names" {
     try testing.expectEqual(canvas.WidgetKind.icon, icon.kind);
     try testing.expectEqualStrings("search", icon.text);
 
-    // Unknown names, bindings, misplaced name attrs, and children fail
-    // the build with the validator's messages.
+    // The other two grammar forms ride the EXPLICIT icon channel
+    // (`Widget.icon`), resolved at draw time: an app: reference carries
+    // its full spelling, and a bound name carries whatever the model
+    // produced (an unknown value draws the missing-icon fallback with a
+    // Debug warning - loud, never silent).
+    var open_view = try InboxMarkup.init(arena, "<row gap=\"8\">\n  <icon name=\"app:wave\" />\n  <icon name=\"{filter}\" />\n</row>");
+    var open_ui = InboxUi.init(arena);
+    const open_tree = try open_ui.finalize(try open_view.build(&open_ui, &model));
+    try testing.expectEqualStrings("app:wave", open_tree.root.children[0].icon);
+    try testing.expectEqualStrings("all", open_tree.root.children[1].icon);
+
+    // Unknown built-in names, unknown namespaces, malformed app: names,
+    // misplaced name attrs, and children fail the build with the
+    // validator's messages.
     const failing = [_][]const u8{
         "<row>\n  <icon />\n</row>",
         "<row>\n  <icon name=\"sparkle-pony\" />\n</row>",
-        "<row>\n  <icon name=\"{filter}\" />\n</row>",
+        "<row>\n  <icon name=\"lib:search\" />\n</row>",
+        "<row>\n  <icon name=\"app:\" />\n</row>",
+        "<row>\n  <icon name=\"app:Wave Pulse\" />\n</row>",
         "<row>\n  <badge name=\"search\">3</badge>\n</row>",
         "<row>\n  <icon name=\"search\"><text>x</text></icon>\n</row>",
     };
@@ -896,12 +910,22 @@ test "markup buttons take an inline icon with validated names" {
     try testing.expectEqual(canvas.WidgetKind.menu_item, menu_row.kind);
     try testing.expectEqualStrings("trash", menu_row.icon);
 
-    // Unknown names, bindings, and out-of-scope elements fail the build
-    // with the validator's messages.
+    // The open grammar forms on the inline attribute: app: references
+    // carry their full spelling, bound names carry the resolved value -
+    // both resolved at draw time through the missing-icon fallback.
+    var open_view = try InboxMarkup.init(arena, "<row gap=\"8\">\n  <button icon=\"app:wave\" on-press=\"add\">Wave</button>\n  <button icon=\"{filter}\" on-press=\"add\">Filter</button>\n</row>");
+    var open_ui = InboxUi.init(arena);
+    const open_tree = try open_ui.finalize(try open_view.build(&open_ui, &model));
+    try testing.expectEqualStrings("app:wave", open_tree.root.children[0].icon);
+    try testing.expectEqualStrings("all", open_tree.root.children[1].icon);
+
+    // Unknown built-in names, unknown namespaces, and out-of-scope
+    // elements fail the build with the validator's messages.
     const failing = [_]struct { source: []const u8, message: []const u8 }{
         .{ .source = "<row>\n  <button icon=\"sparkle-pony\">Save</button>\n</row>", .message = canvas.ui_markup.button_icon_message },
         .{ .source = "<row>\n  <toggle-button icon=\"sparkle-pony\">Bold</toggle-button>\n</row>", .message = canvas.ui_markup.button_icon_message },
-        .{ .source = "<row>\n  <button icon=\"{filter}\">Save</button>\n</row>", .message = canvas.ui_markup.button_icon_message },
+        .{ .source = "<row>\n  <button icon=\"lib:save\">Save</button>\n</row>", .message = canvas.ui_markup.icon_namespace_message },
+        .{ .source = "<row>\n  <button icon=\"app:Sparkle Pony\">Save</button>\n</row>", .message = canvas.ui_markup.app_icon_shape_message },
         .{ .source = "<row>\n  <badge icon=\"sparkle-pony\">3</badge>\n</row>", .message = canvas.ui_markup.button_icon_message },
         .{ .source = "<column>\n  <checkbox icon=\"check\">Done</checkbox>\n</column>", .message = canvas.ui_markup.button_icon_element_message },
     };

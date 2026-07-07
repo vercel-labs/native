@@ -636,6 +636,55 @@ test "expression type errors name the model field and its Zig type" {
     try testing.expect(std.mem.indexOf(u8, message, "name: []const u8") != null);
 }
 
+test "app: icon references check against the contract's registered icon list" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var with_icons = model_contract;
+    with_icons.app_icons = &.{ "wave", "wave-pulse" };
+
+    // Registered app: references and string-producing bindings pass, on
+    // both the icon leaf and the inline attribute.
+    const good = try parseFixture(arena,
+        \\<row>
+        \\  <icon name="app:wave" />
+        \\  <button icon="app:wave-pulse" on-press="add">Pulse</button>
+        \\  <button icon="{name}" on-press="add">Bound</button>
+        \\</row>
+    );
+    try testing.expectEqual(null, try contract.checkDocument(arena, good, &with_icons, null));
+
+    // An unknown app name fails with a did-you-mean over the REGISTERED
+    // list - the vocabulary only the contract can see.
+    const unknown = try parseFixture(arena,
+        \\<row>
+        \\  <icon name="app:wavee" />
+        \\</row>
+    );
+    const unknown_message = (try contract.checkDocument(arena, unknown, &with_icons, null)).?.message;
+    try testing.expect(std.mem.startsWith(u8, unknown_message, contract.unknown_app_icon_message));
+    try testing.expect(std.mem.indexOf(u8, unknown_message, "did you mean \"wave\"?") != null);
+
+    // An app that registers nothing gets the registration lesson, not a
+    // bare unknown-name miss.
+    const no_icons_message = (try contract.checkDocument(arena, unknown, &model_contract, null)).?.message;
+    try testing.expectEqualStrings(contract.no_app_icons_message, no_icons_message);
+
+    // Icon bindings are names: a non-string binding is a kind error.
+    const wrong_kind = try parseFixture(arena,
+        \\<row>
+        \\  <button icon="{count}" on-press="add">N</button>
+        \\</row>
+    );
+    const kind_message = (try contract.checkDocument(arena, wrong_kind, &with_icons, null)).?.message;
+    try testing.expectEqualStrings(contract.icon_binding_kind_message, kind_message);
+
+    // The markup-side prefix and the contract's std-only mirror cannot
+    // drift.
+    try testing.expectEqualStrings(markup.app_icon_prefix, contract.app_icon_prefix);
+}
+
 // ------------------------------------------------------------ dead state
 
 test "dead state warns on unbound model state and undispatched Msg tags" {
@@ -751,12 +800,20 @@ test "a contract round-trips through the ZON artifact" {
 
     var stamped = model_contract;
     stamped.source_hash = 0xdead_beef_dead_beef;
+    stamped.app_icons = &.{ "wave", "wave-pulse" };
     var out: std.Io.Writer.Allocating = .init(arena);
     try contract.writeArtifact(stamped, &out.writer);
 
     const parsed = try contract.parseArtifact(arena, out.written());
     try testing.expectEqual(contract.format_version, parsed.format);
     try testing.expectEqual(stamped.source_hash, parsed.source_hash);
+    try testing.expectEqual(@as(usize, 2), parsed.app_icons.len);
+    try testing.expectEqualStrings("wave", parsed.app_icons[0]);
+    try testing.expectEqualStrings("wave-pulse", parsed.app_icons[1]);
+    // Artifacts from before the app_icons field parse with the default
+    // (no registered icons) - the additive-with-default contract.
+    const legacy = try contract.parseArtifact(arena, ".{ .format = 1 }");
+    try testing.expectEqual(@as(usize, 0), legacy.app_icons.len);
     try testing.expectEqualStrings(model_contract.model_type, parsed.model_type);
     try testing.expectEqual(model_contract.model.scalars.len, parsed.model.scalars.len);
     try testing.expectEqual(model_contract.iterables.len, parsed.iterables.len);
@@ -768,6 +825,24 @@ test "a contract round-trips through the ZON artifact" {
     // The round-tripped contract checks documents identically.
     const document = try parseFixture(arena, fixtures[0].source);
     try testing.expectEqual(null, try contract.checkDocument(arena, document, &parsed, null));
+}
+
+test "appIconNames reflects the app root's icon table by name" {
+    // Duck-typed on `.name`: the emit step reads the same `pub const
+    // app_icons` table main hands to registerAppIcons, without this
+    // std-only module knowing the canvas Entry type.
+    const app = struct {
+        pub const app_icons = [_]struct { name: []const u8 }{
+            .{ .name = "wave" },
+            .{ .name = "wave-pulse" },
+        };
+    };
+    const names = comptime contract.appIconNames(app);
+    try testing.expectEqual(@as(usize, 2), names.len);
+    try testing.expectEqualStrings("wave", names[0]);
+    try testing.expectEqualStrings("wave-pulse", names[1]);
+    // No declaration means no registered icons.
+    try testing.expectEqual(@as(usize, 0), comptime contract.appIconNames(struct {}).len);
 }
 
 test "describe classifies the model surface the way the engines resolve it" {

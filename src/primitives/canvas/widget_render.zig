@@ -1044,11 +1044,12 @@ fn emitIconWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
     // (`icons.registerAppIcons`) — draws crisp parsed paths: `widget.icon`
     // first (the explicit channel), then an icon-name `text`; any other
     // text keeps the historical glyph rendering (apps that put literal
-    // glyph characters in `icon.text` are untouched).
-    if (widget.icon.len > 0) {
-        if (icon_model.resolve(widget.icon)) |icon| {
-            return emitVectorIconWidget(builder, widget, tokens, icon);
-        }
+    // glyph characters in `icon.text` are untouched). The explicit
+    // channel never falls through: a name that resolves nowhere draws the
+    // missing-icon fallback (the build-time Debug warning names the
+    // value), so a broken reference is visible, never silent.
+    if (icon_model.resolveOrMissing(widget.icon)) |icon| {
+        return emitVectorIconWidget(builder, widget, tokens, icon);
     }
     if (widget.text.len == 0) return;
     if (icon_model.resolve(widget.text)) |icon| {
@@ -1176,7 +1177,7 @@ fn emitBadgeWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Erro
     // completed check, status chips); icon + text draws it before the
     // label. One widget, one tint — and no text glyph outside the bundled
     // face's coverage (the stepper-checkmark tofu fix).
-    const icon = if (widget.icon.len > 0) icon_model.resolve(widget.icon) else null;
+    const icon = icon_model.resolveOrMissing(widget.icon);
     if (icon) |resolved| {
         const icon_extent = widget_metrics.widgetBadgeIconExtent(widget, tokens);
         const icon_y = widget.frame.y + (widget.frame.height - icon_extent) * 0.5;

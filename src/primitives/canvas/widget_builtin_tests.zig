@@ -476,6 +476,41 @@ test "app-registered icons draw through the widget paths like built-ins" {
     }
 }
 
+test "an unresolved explicit icon name draws the missing-icon fallback, never a silent gap" {
+    const tokens = DesignTokens{};
+    // The explicit channel (`Widget.icon`) is where bound markup names
+    // and app: references land; a name that resolves nowhere must stay
+    // VISIBLE - the slashed-circle fallback draws where the icon would.
+    const icon = Widget{
+        .id = 71,
+        .kind = WidgetKind.icon,
+        .frame = geometry.RectF.init(0, 0, 24, 24),
+        .icon = "sparkle-pony",
+    };
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, icon, tokens);
+    switch (builder.displayList().findCommandById(widgetPartId(71, 2)).?.command) {
+        .stroke_path => |stroke| try std.testing.expectEqual(canvas.icons.missing_icon.elements.ptr, stroke.elements.ptr),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // Same honesty inside a button's inline icon slot.
+    const button = Widget{
+        .id = 72,
+        .kind = WidgetKind.button,
+        .frame = geometry.RectF.init(0, 0, 44, 34),
+        .icon = "app:never-registered",
+    };
+    var button_commands: [8]CanvasCommand = undefined;
+    var button_builder = Builder.init(&button_commands);
+    try emitWidgetTree(&button_builder, button, tokens);
+    switch (button_builder.displayList().findCommandById(widgetPartId(72, 6)).?.command) {
+        .stroke_path => |stroke| try std.testing.expectEqual(canvas.icons.missing_icon.elements.ptr, stroke.elements.ptr),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "buttons draw an inline vector icon and label as one widget with one tint" {
     const tokens = DesignTokens{};
     const button = Widget{

@@ -15,10 +15,17 @@
 //! boot: the widget draw paths resolve names through `resolve` (built-ins
 //! first, then the app table), so a registered app icon renders exactly
 //! like a built-in — `Ui.icon` (comptime-checked) stays built-in-only;
-//! use `Ui.appIcon` for registered names. Markup `<icon name>` keeps the
-//! closed built-in vocabulary: the compiled engine validates names at
-//! comptime, where runtime registrations cannot exist, and the two
-//! engines stay in strict parity.
+//! use `Ui.appIcon` for registered names.
+//!
+//! Markup reaches registered icons through the `app:` NAMESPACE
+//! (`icon="app:wave"`, `<icon name="app:wave"/>`): bare names keep the
+//! closed built-in vocabulary (the compiled engine validates them at
+//! comptime, where runtime registrations cannot exist), while `app:`
+//! names are structurally accepted by both engines and verified against
+//! the app's registered set by `native check` through the model
+//! contract. A name that fails to resolve at draw time renders
+//! `missing_icon` (a slashed circle) with a Debug-build warning naming
+//! the value — visible and loud, never silent.
 
 const svg_icon = @import("svg_icon.zig");
 
@@ -157,6 +164,28 @@ pub fn find(name: []const u8) ?*const Icon {
     return null;
 }
 
+/// The one icon namespace: `app:<name>` in an icon-valued position names
+/// an icon from the app's registered table (never a built-in — the
+/// namespace is what makes the two vocabularies unambiguous, so a
+/// built-in can never shadow an `app:` reference).
+pub const app_prefix = "app:";
+
+/// The registered-table name inside an `app:` reference, or null when
+/// the value carries no namespace.
+pub fn appIconName(name: []const u8) ?[]const u8 {
+    if (name.len <= app_prefix.len) return null;
+    if (!stringsEqual(name[0..app_prefix.len], app_prefix)) return null;
+    return name[app_prefix.len..];
+}
+
+/// The honest failure glyph: what draws when a non-empty icon name fails
+/// to resolve at draw time (a bound name the model produced, an `app:`
+/// reference the app never registered). Deliberately NOT in `entries` —
+/// it is not vocabulary anyone can ask for, only the visible shape of a
+/// broken reference (paired with the Debug warning that names the value).
+const missing = builtin("missing");
+pub const missing_icon: *const Icon = &missing;
+
 // --------------------------------------------------------- app registry
 
 /// App-registered icons: process-global, installed once at boot. The
@@ -181,11 +210,30 @@ pub fn appIcons() []const Entry {
     return app_entries;
 }
 
-/// Resolve an icon name for DRAWING: built-ins first, then the
-/// app-registered table. Runtime-only (the app table cannot exist at
-/// comptime); validation paths keep using `find`.
+/// Resolve an icon name for DRAWING. An `app:`-namespaced name looks up
+/// the registered table ONLY (the namespace names the app's set — a
+/// built-in never answers for it); a bare name checks built-ins first,
+/// then the app table, so pre-namespace registrations keep working.
+/// Runtime-only (the app table cannot exist at comptime); validation
+/// paths keep using `find`.
 pub fn resolve(name: []const u8) ?*const Icon {
+    if (appIconName(name)) |bare| return findApp(bare);
     if (find(name)) |icon| return icon;
+    return findApp(name);
+}
+
+/// Resolve the EXPLICIT icon channel (`Widget.icon`) for drawing: empty
+/// means "no icon" (null), and a non-empty name that resolves nowhere
+/// yields `missing_icon` — a broken reference draws its failure glyph
+/// instead of silently vanishing. The draw paths route `Widget.icon`
+/// through this one seam so every icon-bearing widget degrades the same
+/// way.
+pub fn resolveOrMissing(name: []const u8) ?*const Icon {
+    if (name.len == 0) return null;
+    return resolve(name) orelse missing_icon;
+}
+
+fn findApp(name: []const u8) ?*const Icon {
     for (app_entries) |*entry| {
         if (stringsEqual(entry.name, name)) return entry.icon;
     }

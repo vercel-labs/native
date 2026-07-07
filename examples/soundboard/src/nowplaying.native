@@ -5,24 +5,27 @@
      The transport is icon-only buttons via the button icon attribute:
      the icon is part of the button's own rendering, so each control is
      ONE hit target whose icon follows the enabled/disabled tint (no
-     overlay stacking, no duplicated handlers). The play/pause arms share
-     a key so the button keeps its identity when the icon swaps. -->
+     overlay stacking, no duplicated handlers). The play/pause button
+     binds its icon to the model (icon="{playPauseIcon}"), so one button
+     swaps its glyph with playback state - no if/else arms, no shared
+     key. The waveform mark beside the title is the app's OWN registered
+     vector icon reached through the app: namespace (see app_icons in
+     main.zig); native check verifies the name against the model
+     contract. -->
 <column>
   <separator />
   <row height="76" padding="12" gap="14" cross="center" background="surface" label="Now playing bar">
     <avatar image="{nowPlayingCover}" width="52" height="52" label="Now playing cover">{nowPlayingInitials}</avatar>
     <column width="220" gap="2">
-      <text label="Now playing title">{nowPlayingTitle}</text>
+      <row gap="6" cross="center">
+        <icon name="app:waveform" width="14" height="14" foreground="text_muted" />
+        <text label="Now playing title">{nowPlayingTitle}</text>
+      </row>
       <text size="sm" foreground="text_muted">{nowPlayingArtist}</text>
     </column>
     <row gap="6" cross="center">
       <button size="sm" variant="ghost" icon="skip-back" disabled="{idle}" on-press="prev_track" label="Previous track"></button>
-      <if test="{playing}">
-        <button key="play-toggle" variant="primary" icon="pause" on-press="toggle_play" label="Play or pause"></button>
-      </if>
-      <else>
-        <button key="play-toggle" variant="primary" icon="play" on-press="toggle_play" label="Play or pause"></button>
-      </else>
+      <button variant="primary" icon="{playPauseIcon}" on-press="toggle_play" label="Play or pause"></button>
       <button size="sm" variant="ghost" icon="skip-forward" disabled="{idle}" on-press="next_track" label="Next track"></button>
     </row>
     <!-- Fixed time columns: a stamp like "1:22" must never ellipsize

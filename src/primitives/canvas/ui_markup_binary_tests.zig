@@ -91,6 +91,36 @@ test "NSUI round-trips a document byte-for-byte and node-for-node" {
     try testing.expectEqualSlices(u8, stripped, re_stripped);
 }
 
+test "NSUI round-trips app: and bound icon values as plain attribute strings" {
+    // Icon values are VALUES: NSUI writes every attribute value as an
+    // inline str16 under the attr's existing code (name=36, icon=37), so
+    // the app: namespace and {binding} forms ride the wire with no new
+    // codes and no schema bump - purely additive vocabulary.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source =
+        \\<row gap="8">
+        \\  <icon name="app:wave-pulse" />
+        \\  <icon name="{status_icon}" />
+        \\  <button icon="app:wave" on-press="play" label="Wave"></button>
+        \\  <button icon="{status_icon}" on-press="play" label="Status"></button>
+        \\</row>
+    ;
+    const document = try parseSource(arena, source);
+    try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(document));
+
+    var diagnostic = nsui.CodecDiagnostic{};
+    const bytes = try nsui.encode(arena, document, .{}, &diagnostic);
+    const decoded = try nsui.decode(arena, bytes, &diagnostic);
+    try expectNodesEqual(document.root.?, decoded.root.?);
+
+    // Decoded documents come back canonicalized with the same typed
+    // classification the engines consume.
+    try testing.expect(decoded.root.?.children[0].attrEntry("name").?.typed.?.* == .literal);
+    try testing.expect(decoded.root.?.children[1].attrEntry("name").?.typed.?.* == .binding);
+}
+
 test "NSUI round-trips the input-group vocabulary under its fresh codes" {
     // The grouped-input composite serializes like any element — fresh
     // registry codes ride the wire automatically, no schema bump — so a

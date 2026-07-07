@@ -6,7 +6,9 @@
 //!   `ui_markup.validate` (line/column + teaching messages), plus the
 //!   a11y lint's warnings (`ui_markup.collectA11yWarnings`) at warning
 //!   severity once the document validates clean.
-//! - completion: element names after `<`, attribute/event names inside a tag.
+//! - completion: element names after `<`, attribute/event names inside a
+//!   tag, and icon names inside an icon-valued attribute's quotes (the
+//!   built-in vocabulary plus the `app:` namespace prefix).
 //! - hover: one-line docs for element and attribute names.
 //!
 //! Binding paths and message tags are NOT validated here — that requires the
@@ -347,6 +349,12 @@ pub const Server = struct {
                     for (event_docs) |doc| try writeCompletionItem(&js, doc.name, .event, "markup event", doc.doc);
                 }
             },
+            .icon_values => {
+                for (ui_markup.known_icon_names) |name| {
+                    try writeCompletionItem(&js, name, .value, "built-in icon", "One of the built-in vector icons (canvas.icons.known_icon_names); validated at build time.");
+                }
+                try writeCompletionItem(&js, "app:", .value, "app icon namespace", "app:<name> draws an icon the app registered at boot with canvas.icons.registerAppIcons; `native check` verifies the name against the model contract's app_icons list.");
+            },
         }
         try js.endArray();
         try js.endObject();
@@ -403,6 +411,7 @@ const CompletionKind = enum(u8) {
     keyword = 14,
     class = 7,
     property = 10,
+    value = 12,
     event = 23,
 };
 
@@ -524,17 +533,52 @@ pub const CompletionContext = union(enum) {
     /// Inside a tag after the element name: offer attributes/events.
     /// Payload is the element name.
     attributes: []const u8,
+    /// Inside the quoted VALUE of an icon-valued attribute (`<icon
+    /// name="...">`, or `icon="..."` on the labeled interactive
+    /// elements): offer the built-in icon names plus the `app:`
+    /// namespace prefix for app-registered icons.
+    icon_values,
 };
 
 pub fn completionContext(text: []const u8, offset: usize) CompletionContext {
     const open = lastTagOpen(text, offset) orelse return .none;
-    if (insideQuotes(text, open, offset)) return .none;
+    if (insideQuotes(text, open, offset)) return attrValueContext(text, open, offset);
     var index = open + 1;
     if (index < offset and text[index] == '/') index += 1;
     const name_start = index;
     while (index < offset and isNameChar(text[index])) index += 1;
     if (index == offset) return .elements;
     return .{ .attributes = text[name_start..index] };
+}
+
+/// Classify a position INSIDE an attribute value's quotes: icon-valued
+/// attributes complete their closed vocabulary; every other value is the
+/// author's (bindings, text, numbers), so no items.
+fn attrValueContext(text: []const u8, open: usize, offset: usize) CompletionContext {
+    // The element name, right after `<`.
+    var index = open + 1;
+    if (index < offset and text[index] == '/') index += 1;
+    const element_start = index;
+    while (index < offset and isNameChar(text[index])) index += 1;
+    const element_name = text[element_start..index];
+    // The unmatched opening quote the offset sits behind.
+    var quote_open: ?usize = null;
+    var position = index;
+    while (position < @min(offset, text.len)) : (position += 1) {
+        if (text[position] != '"') continue;
+        quote_open = if (quote_open == null) position else null;
+    }
+    const value_open = quote_open orelse return .none;
+    // The attribute name, read back across its `="`.
+    if (value_open == 0 or text[value_open - 1] != '=') return .none;
+    const attr_end = value_open - 1;
+    var attr_start = attr_end;
+    while (attr_start > 0 and isNameChar(text[attr_start - 1])) attr_start -= 1;
+    const attr_name = text[attr_start..attr_end];
+    const icon_leaf = std.mem.eql(u8, element_name, "icon") and std.mem.eql(u8, attr_name, "name");
+    const inline_icon = std.mem.eql(u8, attr_name, "icon") and ui_markup.iconAttrElement(element_name);
+    if (icon_leaf or inline_icon) return .icon_values;
+    return .none;
 }
 
 /// Index of the `<` of the tag containing `offset`, or null when the
@@ -832,8 +876,21 @@ test "completionContext classifies positions" {
     const for_attrs = completionContext("<for ", 5);
     try testing.expectEqualStrings("for", for_attrs.attributes);
 
-    // Inside an attribute value string: no completions.
+    // Inside an attribute value string: no completions, EXCEPT the
+    // icon-valued attributes, whose closed vocabulary completes.
     try testing.expect(completionContext("<row gap=\"", 10) == .none);
+    try testing.expect(completionContext("<icon name=\"", 12) == .icon_values);
+    try testing.expect(completionContext("<icon name=\"se", 14) == .icon_values);
+    try testing.expect(completionContext("<button icon=\"", 14) == .icon_values);
+    try testing.expect(completionContext("<toggle-button icon=\"", 21) == .icon_values);
+    // Not icon-valued: a text attr on button, or icon-shaped attrs on
+    // elements outside the inline-icon set.
+    try testing.expect(completionContext("<button label=\"", 15) == .none);
+    try testing.expect(completionContext("<checkbox icon=\"", 16) == .none);
+    // A CLOSED earlier value does not leak: the cursor is back in
+    // name position, not inside quotes.
+    const after_value = completionContext("<icon name=\"search\" wi", 22);
+    try testing.expectEqualStrings("icon", after_value.attributes);
 }
 
 test "hoverAt resolves element and attribute docs" {

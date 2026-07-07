@@ -119,11 +119,19 @@ fn warnUncoveredText(kind: WidgetKind, text: []const u8) void {
     }
 }
 
+/// Debug-build diagnostic for an explicit icon name that resolves
+/// nowhere — a bound markup name the model produced, an `app:` reference
+/// the app never registered, a Zig `appIcon` typo. The draw path renders
+/// the missing-icon fallback (a slashed circle) in its place, so the
+/// break is VISIBLE; this warning is the other half of that honesty,
+/// naming the value so the fix is one glance. Warn and keep building
+/// (the shipped-app rule); literal markup names were already proven at
+/// build time and never reach here.
 fn warnUnknownIconName(name: []const u8) void {
     if (builtin.mode != .Debug) return;
     if (name.len == 0 or canvas.icons.resolve(name) != null) return;
     ui_log.warn(
-        "unknown icon \"{s}\": not a built-in (canvas.icons.known_icon_names) and not registered via canvas.icons.registerAppIcons - nothing will draw",
+        "unknown icon \"{s}\": not a built-in (canvas.icons.known_icon_names) and not registered via canvas.icons.registerAppIcons - the missing-icon fallback (a slashed circle) draws in its place",
         .{name},
     );
 }
@@ -1530,12 +1538,17 @@ pub fn Ui(comptime Msg: type) type {
         /// must be registered at boot via `canvas.icons.registerAppIcons`
         /// (comptime-parse your SVG with `canvas.svg_icon.parseComptime`).
         /// No compile-time check is possible for runtime registrations —
-        /// unknown names draw nothing, with a Debug-build warning. For
+        /// an unknown name draws the missing-icon fallback (a slashed
+        /// circle), with a Debug-build warning naming the value. For
         /// built-in names prefer `icon`, which compile-checks the name.
         pub fn appIcon(self: *Self, options: ElementOptions, name: []const u8) Node {
-            var node = self.el(.icon, options, .{});
-            node.widget.text = name;
-            return node;
+            // The EXPLICIT icon channel (`Widget.icon`), not `text`: the
+            // draw path then owns the honest failure mode above, instead
+            // of the historical glyph rendering spelling the raw name in
+            // text glyphs.
+            var with_icon = options;
+            with_icon.icon = name;
+            return self.el(.icon, with_icon, .{});
         }
 
         /// An icon leaf rendering a literal glyph (the pre-vector-icon

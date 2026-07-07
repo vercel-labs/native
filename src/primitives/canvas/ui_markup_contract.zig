@@ -17,7 +17,8 @@
 //!   sources, so a stale artifact is detectable instead of a false pass.
 //! - `checkDocument` walks a RESOLVED markup document (imports merged,
 //!   `validate` already green) against a contract: binding paths,
-//!   iterables and their key fields, message tags and payload classes, and
+//!   iterables and their key fields, message tags and payload classes,
+//!   `app:` icon references against the registered icon table, and
 //!   the typed expression layer with real binding kinds — the same
 //!   accept/reject set as the engines, one grammar earlier in the loop.
 //!   Template args are part of a template's interface: use-site argument
@@ -58,6 +59,32 @@ pub const default_source_root = "src";
 /// only Zig code dispatches). A tuple of string literals keeps it
 /// invisible to the binding engines.
 pub const opt_out_decl = "view_unbound";
+
+/// The app-icon table spelling: `pub const app_icons` on the app root —
+/// the same static table `main` hands to `canvas.icons.registerAppIcons`
+/// at boot, so the registered vocabulary and the contract's copy cannot
+/// drift (one declaration feeds both). Entries only need a `name` field
+/// here; this module never touches the parsed icon data.
+pub const app_icons_decl = "app_icons";
+
+/// The markup spelling of an app-icon reference (`app:<name>`); mirrors
+/// `ui_markup.app_icon_prefix` (this layer stays std-only, and the
+/// conformance suite holds the two equal).
+pub const app_icon_prefix = "app:";
+
+/// Reflect the app root's `pub const app_icons` table into the name list
+/// the contract carries. Duck-typed on `.name` so the Entry type stays
+/// the canvas layer's business; absent decl means "no registered icons".
+pub fn appIconNames(comptime app: type) []const []const u8 {
+    comptime {
+        if (!@hasDecl(app, app_icons_decl)) return &.{};
+        var names: []const []const u8 = &.{};
+        for (@field(app, app_icons_decl)) |entry| {
+            names = names ++ &[_][]const u8{entry.name};
+        }
+        return names;
+    }
+}
 
 /// One scalar binding leaf: a field, a public zero-arg method, or an
 /// arena-taking scalar method.
@@ -126,6 +153,14 @@ pub const Contract = struct {
     /// Names opted out of the dead-state lint via `pub const view_unbound`.
     model_unbound: []const []const u8 = &.{},
     msg_unbound: []const []const u8 = &.{},
+    /// The app's registered icon vocabulary (`pub const app_icons` on the
+    /// app root, the same table `canvas.icons.registerAppIcons` installs
+    /// at boot): what markup `app:<name>` references check against. The
+    /// engines cannot prove these at build time (registration is a
+    /// runtime act), so the contract is where `app:` names get their
+    /// typed check. Additive with a default: artifacts from before the
+    /// field parse as "no registered icons", never a false pass.
+    app_icons: []const []const u8 = &.{},
 };
 
 // ------------------------------------------------------------ reflection
@@ -329,6 +364,13 @@ pub const text_attr_message = "expected text";
 pub const option_attr_message = "expected an option name";
 pub const role_attr_message = "role expects a role name";
 pub const label_attr_message = "label expects text";
+
+// Contract-only findings (no engine counterpart, like the dead-state
+// lint): `app:` icon names are runtime registrations the engines cannot
+// prove, so this pass is where they get their typed check.
+pub const unknown_app_icon_message = "app: does not name a registered app icon (the contract's app_icons list)";
+pub const no_app_icons_message = "app: references a registered app icon, but this app registers none - declare pub const app_icons on the app root, pass it to canvas.icons.registerAppIcons at boot, and refresh the contract";
+pub const icon_binding_kind_message = "icon bindings must produce a string naming an icon (a built-in name or app:<name>)";
 
 // ------------------------------------------------- attribute kind classes
 
@@ -1108,8 +1150,14 @@ const Checker = struct {
                 try self.requireAttrKind(node, attribute, resolved.kind, &.{.integer}, markup.avatar_image_message);
                 continue;
             }
-            // Literal-vocabulary attributes (icon names, anchors, style
-            // tokens) are the structural validator's job; unknown
+            if (std.mem.eql(u8, attribute.name, "icon") or
+                (std.mem.eql(u8, attribute.name, "name") and std.mem.eql(u8, node.name, "icon")))
+            {
+                try self.checkIconAttr(node, attribute);
+                continue;
+            }
+            // Literal-vocabulary attributes (built-in icon names, anchors,
+            // style tokens) are the structural validator's job; unknown
             // attributes are too.
             if (attrClass(attribute.name)) |class| {
                 try self.checkClassAttr(node, attribute, class);
@@ -1121,6 +1169,31 @@ const Checker = struct {
     fn checkKeyAttr(self: *Checker, node: markup.MarkupNode, attribute: markup.MarkupAttr) CheckErr!void {
         const kind = try self.attrKind(node, attribute, attribute.value);
         try self.requireAttrKind(node, attribute, kind, &.{ .integer, .string }, attr_key_kind_message);
+    }
+
+    /// Icon-valued attributes (`<icon name>`, the inline icon attribute,
+    /// timeline-item's indicator icon): bare literals stay the structural
+    /// validator's closed built-in vocabulary; this pass adds the two
+    /// forms only the contract can see — `app:<name>` against the app's
+    /// registered `app_icons` list (with a did-you-mean over it), and
+    /// `{bindings}` against the model (an icon name is a string).
+    fn checkIconAttr(self: *Checker, node: markup.MarkupNode, attribute: markup.MarkupAttr) CheckErr!void {
+        switch (markup.attrTyped(attribute)) {
+            .literal => |text| {
+                if (!std.mem.startsWith(u8, text, app_icon_prefix)) return;
+                const bare = text[app_icon_prefix.len..];
+                if (nameListed(self.contract.app_icons, bare)) return;
+                if (self.contract.app_icons.len == 0) {
+                    return self.failAttr(node, attribute, no_app_icons_message);
+                }
+                return self.failNamed(node, unknown_app_icon_message, bare, .{ .names = self.contract.app_icons });
+            },
+            .binding => |path| {
+                const resolved = try self.resolveBinding(node, path, true);
+                try self.requireAttrKind(node, attribute, resolved.kind, &.{.string}, icon_binding_kind_message);
+            },
+            else => {},
+        }
     }
 
     fn checkMarkdown(self: *Checker, node: markup.MarkupNode) CheckErr!void {
@@ -1313,6 +1386,10 @@ const Checker = struct {
                 _ = try self.attrKind(node, attribute, attribute.value);
                 continue;
             }
+            if (std.mem.eql(u8, attribute.name, "icon")) {
+                try self.checkIconAttr(node, attribute);
+                continue;
+            }
             if (std.mem.eql(u8, attribute.name, "on-press")) {
                 try self.checkMessageAttr(node, attribute);
                 continue;
@@ -1382,6 +1459,8 @@ const NameSource = union(enum) {
     group: *const Group,
     iterables: *const Contract,
     msgs: *const Contract,
+    /// A plain name list (the contract's registered app icons).
+    names: []const []const u8,
 };
 
 fn nearestCandidate(token: []const u8, source: NameSource) ?[]const u8 {
@@ -1402,6 +1481,9 @@ fn nearestCandidate(token: []const u8, source: NameSource) ?[]const u8 {
         },
         .msgs => |contract| {
             for (contract.msgs) |tag| considerName(token, tag.name, &best, &best_distance);
+        },
+        .names => |names| {
+            for (names) |name| considerName(token, name, &best, &best_distance);
         },
     }
     return best;
@@ -1521,6 +1603,11 @@ pub fn emitMain(comptime app: type, comptime specials: Specials, init: std.proce
         }
     }
     var contract = comptime describe(app.Model, app.Msg, specials);
+    // The registered icon vocabulary rides the same artifact: one
+    // `pub const app_icons` declaration feeds boot-time registration and
+    // this reflection, so `native check` verifies `app:` markup
+    // references against exactly what the app registers.
+    contract.app_icons = comptime appIconNames(app);
     contract.source_root = src_root;
     contract.source_hash = try hashSourceDir(allocator, init.io, src_root);
     var out: std.Io.Writer.Allocating = .init(allocator);

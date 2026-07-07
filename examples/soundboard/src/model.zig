@@ -261,6 +261,14 @@ pub const Model = struct {
         return model.now == null;
     }
 
+    /// Data-driven icon choice for the transport's primary button: the
+    /// markup binds `icon="{playPauseIcon}"`, so ONE button swaps its
+    /// glyph with playback state - no if/else arms, no shared key to
+    /// keep its identity stable.
+    pub fn playPauseIcon(model: *const Model) []const u8 {
+        return if (model.playing) "pause" else "play";
+    }
+
     pub fn nowPlayingCover(model: *const Model) canvas.ImageId {
         const track = model.nowTrack() orelse return 0;
         return model.coverFor(track.album);

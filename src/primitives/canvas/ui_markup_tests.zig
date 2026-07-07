@@ -295,6 +295,13 @@ test "structural validation reports positions for grammar misuse" {
     var icon_parser = markup.Parser.init(arena_state.allocator(), icon_source);
     try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try icon_parser.parse()));
 
+    // The other two icon grammar forms are structurally valid: an
+    // app:<name> reference (its registration is `native check`'s job,
+    // through the model contract) and one {binding} producing the name.
+    const open_icon_source = "<row gap=\"8\">\n  <icon name=\"app:wave-pulse\" />\n  <icon name=\"{status_icon}\" />\n  <button icon=\"app:wave\" on-press=\"play\">Wave</button>\n  <button icon=\"{status_icon}\" on-press=\"play\">Status</button>\n</row>";
+    var open_icon_parser = markup.Parser.init(arena_state.allocator(), open_icon_source);
+    try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try open_icon_parser.parse()));
+
     // The labeled interactive elements take an inline icon (with or
     // without a label): one hit target, one tint. Toggle-buttons cover
     // chips and tab strips; list/menu items get a leading slot.
@@ -332,16 +339,22 @@ test "structural validation reports positions for grammar misuse" {
         .{ .source = "<column>\n  <text>x</text>\n  <else><text>y</text></else>\n</column>", .message = markup.else_placement_message },
         .{ .source = "<column>\n  <for each=\"items\" as=\"t\"></for>\n</column>", .message = markup.for_children_message },
         .{ .source = "<column>\n  <for each=\"items\" as=\"t\">stray text</for>\n</column>", .message = markup.for_children_message },
-        // Icon: closed literal name vocabulary, leaf, icon-scoped attr.
+        // Icon: bare names are the closed built-in vocabulary; app: is
+        // the one namespace (well-shaped names only); bindings pass
+        // structurally. Leaf, icon-scoped attr.
         .{ .source = "<row>\n  <icon />\n</row>", .message = markup.icon_missing_name_message },
         .{ .source = "<row>\n  <icon name=\"sparkle-pony\" />\n</row>", .message = markup.icon_name_message },
-        .{ .source = "<row>\n  <icon name=\"{binding}\" />\n</row>", .message = markup.icon_name_message },
+        .{ .source = "<row>\n  <icon name=\"lib:search\" />\n</row>", .message = markup.icon_namespace_message },
+        .{ .source = "<row>\n  <icon name=\"app:\" />\n</row>", .message = markup.app_icon_shape_message },
+        .{ .source = "<row>\n  <icon name=\"app:Wave Pulse\" />\n</row>", .message = markup.app_icon_shape_message },
+        .{ .source = "<row>\n  <icon name=\"app:wave--pulse\" />\n</row>", .message = markup.app_icon_shape_message },
         .{ .source = "<row>\n  <badge name=\"search\">3</badge>\n</row>", .message = markup.icon_name_element_message },
         .{ .source = "<row>\n  <icon name=\"search\"><text>x</text></icon>\n</row>", .message = markup.icon_children_message },
         .{ .source = "<row>\n  <icon name=\"search\" on-change=\"go\" />\n</row>", .message = markup.non_hit_target_handler_message },
-        // Button icon attr: closed literal vocabulary, button-scoped.
+        // Button icon attr: the same grammar, button-scoped.
         .{ .source = "<row>\n  <button icon=\"sparkle-pony\">Save</button>\n</row>", .message = markup.button_icon_message },
-        .{ .source = "<row>\n  <button icon=\"{binding}\">Save</button>\n</row>", .message = markup.button_icon_message },
+        .{ .source = "<row>\n  <button icon=\"lib:save\">Save</button>\n</row>", .message = markup.icon_namespace_message },
+        .{ .source = "<row>\n  <button icon=\"app:-wave\">Save</button>\n</row>", .message = markup.app_icon_shape_message },
         .{ .source = "<row>\n  <badge icon=\"sparkle-pony\">3</badge>\n</row>", .message = markup.button_icon_message },
         .{ .source = "<row>\n  <toggle-button icon=\"sparkle-pony\">Bold</toggle-button>\n</row>", .message = markup.button_icon_message },
         .{ .source = "<column>\n  <checkbox icon=\"check\">Done</checkbox>\n</column>", .message = markup.button_icon_element_message },

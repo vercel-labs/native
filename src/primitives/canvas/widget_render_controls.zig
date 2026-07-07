@@ -145,11 +145,12 @@ pub fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
     try emitButtonBorder(builder, widget, tokens, radius);
     if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 3, widget.frame, radius);
     const content_color = buttonTextColorForWidget(widget, tokens);
-    const icon = if (widget.icon.len > 0) icon_model.resolve(widget.icon) else null;
+    const icon = icon_model.resolveOrMissing(widget.icon);
     if (icon) |resolved| {
         // Icon-in-button: icon (and optional label) are the button's own
         // commands — one hit target, one tint that follows the button's
-        // enabled/disabled/variant state.
+        // enabled/disabled/variant state. A name that resolves nowhere
+        // draws the missing-icon fallback (never a silent gap).
         const icon_extent = widgetButtonIconExtent(widget, tokens);
         const icon_y = widget.frame.y + (widget.frame.height - icon_extent) * 0.5;
         if (widget.text.len == 0) {
@@ -227,11 +228,13 @@ pub fn emitIconButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTok
     });
     try emitButtonBorder(builder, widget, tokens, radius);
     if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 15, widget.frame, radius);
-    // Real vector icons: `widget.icon` first, then an icon-name `text`
-    // (so `el(.icon_button, .{ .text = "play" })` upgrades from glyph to
-    // vector); any other text keeps the historical glyph rendering.
+    // Real vector icons: `widget.icon` first (the explicit channel,
+    // falling back to the missing-icon glyph so a broken name shows),
+    // then an icon-name `text` (so `el(.icon_button, .{ .text = "play" })`
+    // upgrades from glyph to vector); any other text keeps the historical
+    // glyph rendering.
     const icon = if (widget.icon.len > 0)
-        icon_model.resolve(widget.icon)
+        icon_model.resolveOrMissing(widget.icon)
     else if (widget.text.len > 0)
         icon_model.resolve(widget.text)
     else
@@ -709,7 +712,7 @@ pub fn emitMenuItemWidget(builder: *Builder, widget: Widget, tokens: DesignToken
         @max(1, widget.frame.width - check_extent - check_gap),
         widget.frame.height,
     );
-    const icon = if (widget.icon.len > 0) icon_model.resolve(widget.icon) else null;
+    const icon = icon_model.resolveOrMissing(widget.icon);
     if (icon) |resolved| {
         // Leading icon slot: shared row metrics, one tint with the
         // label — the same contract list rows draw with.
@@ -786,7 +789,7 @@ pub fn emitListItemWidget(builder: *Builder, widget: Widget, tokens: DesignToken
     // button's inline icon. The label shifts right by the shared metric
     // the intrinsic size also accounts for.
     var text_frame = widget.frame;
-    const icon = if (widget.icon.len > 0) icon_model.resolve(widget.icon) else null;
+    const icon = icon_model.resolveOrMissing(widget.icon);
     if (icon) |resolved| {
         const icon_extent = widgetRowIconExtent(widget, tokens);
         const icon_frame = geometry.RectF.init(

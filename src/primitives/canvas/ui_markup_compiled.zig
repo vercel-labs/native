@@ -412,20 +412,28 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             }
 
             if (comptime (kind == .icon)) {
-                // Closed vocabulary, resolved at comptime: a typo in an
-                // icon name is a compile error, and icons take no
-                // children.
-                const icon_name = comptime blk: {
+                // The shared icon value grammar, resolved at comptime
+                // where it can be: a typo in a built-in name is a compile
+                // error, while app: names and bound names ride the
+                // explicit icon channel and degrade at draw time to the
+                // missing-icon fallback plus a Debug warning naming the
+                // value (interpreter parity).
+                const icon_value = comptime blk: {
                     const raw = node.attr("name") orelse fail(node, markup.icon_missing_name_message);
-                    const expression = markup.parseAttrExpression(raw) orelse fail(node, markup.icon_name_message);
-                    if (expression != .literal) fail(node, markup.icon_name_message);
-                    if (canvas.icons.find(expression.literal) == null) fail(node, markup.icon_name_message);
                     if (inner.children.len > 0) fail(node, markup.icon_children_message);
-                    break :blk expression.literal;
+                    break :blk iconValueChecked(node, raw, markup.icon_name_message);
                 };
-                var built = ui.el(kind, options, .{});
-                built.widget.text = icon_name;
-                return built;
+                switch (comptime icon_value) {
+                    .builtin => |name| {
+                        var built = ui.el(kind, options, .{});
+                        built.widget.text = name;
+                        return built;
+                    },
+                    .app => |spelled| options.icon = spelled,
+                    .binding => options.icon = stringAttr(node, entries, comptime node.attr("name").?, ui, model, scope, markup.icon_name_message),
+                    .invalid => unreachable,
+                }
+                return ui.el(kind, options, .{});
             }
 
             // Interpreter parity: the span paragraph — a text element
@@ -979,14 +987,13 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 options.indicator = stringAttr(node, entries, comptime node.attr("indicator").?, ui, model, scope, markup.timeline_item_text_attr_message);
             }
             if (comptime (node.attr("icon") != null)) {
-                // Vector icon indicator: closed literal vocabulary,
+                // Vector icon indicator: the shared icon value grammar,
                 // resolved at comptime like every icon attribute.
-                options.icon = comptime blk: {
-                    const expression = markup.parseAttrExpression(node.attr("icon").?) orelse fail(node, markup.button_icon_message);
-                    if (expression != .literal) fail(node, markup.button_icon_message);
-                    if (canvas.icons.find(expression.literal) == null) fail(node, markup.button_icon_message);
-                    break :blk expression.literal;
-                };
+                switch (comptime iconValueChecked(node, node.attr("icon").?, markup.button_icon_message)) {
+                    .builtin, .app => |name| options.icon = name,
+                    .binding => options.icon = stringAttr(node, entries, comptime node.attr("icon").?, ui, model, scope, markup.button_icon_message),
+                    .invalid => unreachable,
+                }
             }
             if (comptime (node.attr("variant") != null)) {
                 const raw = comptime node.attr("variant").?;
@@ -1228,6 +1235,18 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 if (info.Item != f32) fail(node, markup.series_values_message);
             }
             return eachItems(info, ui, model);
+        }
+
+        /// Comptime icon-value classification with the invalid arm turned
+        /// into a positioned compile error: the icon leaf, the inline
+        /// icon attribute, and the timeline-item indicator all funnel
+        /// through the one shared grammar (`markup.iconValueOf`).
+        fn iconValueChecked(comptime node: markup.MarkupNode, comptime raw: []const u8, comptime base_message: []const u8) markup.IconValue {
+            comptime {
+                const value = markup.iconValueOf(raw, base_message);
+                if (value == .invalid) fail(node, value.invalid);
+                return value;
+            }
         }
 
         fn stringAttr(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime raw: []const u8, ui: *Ui, model: *const ModelT, scope: anytype, comptime message: []const u8) []const u8 {
@@ -1527,16 +1546,17 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 } else if (comptime std.mem.eql(u8, attribute.name, "icon")) {
                     // Inline icon scoped to the labeled interactive
                     // elements (button, toggle-button, list-item,
-                    // menu-item): the same closed literal vocabulary as
-                    // <icon name>, resolved at comptime so a typo is a
-                    // compile error (interpreter and validator parity).
-                    options.icon = comptime blk: {
-                        if (!markup.iconAttrElement(node.name)) fail(node, markup.button_icon_element_message);
-                        const expression = markup.parseAttrExpression(attribute.value) orelse fail(node, markup.button_icon_message);
-                        if (expression != .literal) fail(node, markup.button_icon_message);
-                        if (canvas.icons.find(expression.literal) == null) fail(node, markup.button_icon_message);
-                        break :blk expression.literal;
-                    };
+                    // menu-item): the same icon value grammar as
+                    // <icon name>, checked at comptime so a built-in typo
+                    // is a compile error (interpreter and validator
+                    // parity); app: names and bound names resolve at draw
+                    // time.
+                    comptime if (!markup.iconAttrElement(node.name)) fail(node, markup.button_icon_element_message);
+                    switch (comptime iconValueChecked(node, attribute.value, markup.button_icon_message)) {
+                        .builtin, .app => |name| options.icon = name,
+                        .binding => options.icon = stringAttr(node, entries, attribute.value, ui, model, scope, markup.button_icon_message),
+                        .invalid => unreachable,
+                    }
                 } else if (comptime std.mem.eql(u8, attribute.name, "anchor")) {
                     // Anchored floating placement, dropdown-menu-scoped:
                     // a literal side resolved at comptime (interpreter
