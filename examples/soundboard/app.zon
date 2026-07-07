@@ -8,6 +8,11 @@
     .platforms = .{"macos"},
     .permissions = .{ "view", "command" },
     .capabilities = .{ "native_views", "gpu_surfaces" },
+    // The built-in pack the app's tokens resolve (theme.zig states the
+    // same choice through `ThemeOptions.pack` — the app owns its tokens
+    // via `tokens_fn`, so this channel is the manifest's statement of
+    // record, validated by `native check` against the known pack names).
+    .theme = "geist",
     .shell = .{
         .windows = .{
             .{

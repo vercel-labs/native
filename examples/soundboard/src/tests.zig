@@ -557,8 +557,24 @@ test "the system appearance drives the custom tokens live" {
     defer live.stop();
     const app_state = live.app_state;
 
-    // Default: light system appearance = custom light palette.
+    // Default: light system appearance = the pack's light register with
+    // the app's pink accent layered on (theme.zig exports the resolved
+    // palettes, so these assertions follow the one source of truth).
     try testing.expectEqualDeep(theme.light_colors, main.tokensFromModel(&app_state.model).colors);
+
+    // The accent override actually landed: the filled-primary pair, the
+    // focus ring, and the slider's filled range all carry the same pink
+    // step in BOTH schemes — the scrubber is the one slot the pack
+    // states its own hue for, so it is pinned separately from `accent`.
+    const pink = canvas.Color.rgb8(223, 38, 112);
+    for ([_]canvas.ColorTokens{ theme.light_colors, theme.dark_colors }) |colors| {
+        try testing.expectEqualDeep(pink, colors.accent);
+        try testing.expectEqualDeep(canvas.Color.rgb8(255, 255, 255), colors.accent_text);
+        try testing.expectEqualDeep(pink, colors.focus_ring);
+    }
+    for ([_]native_sdk.ColorScheme{ .light, .dark }) |scheme| {
+        try testing.expectEqualDeep(pink, theme.tokens(scheme, false, false).controls.slider.active_background.?);
+    }
 
     // The OS flips to dark; the app follows it - there is no in-window
     // theme control by design.
@@ -570,10 +586,14 @@ test "the system appearance drives the custom tokens live" {
     try live.harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .appearance_changed = .{ .color_scheme = .light } });
     try testing.expectEqualDeep(theme.light_colors, (try live.harness.runtime.canvasWidgetDesignTokens(1, main.canvas_label)).colors);
 
-    // High contrast falls back to the framework palette (accessibility
-    // beats brand).
+    // High contrast falls back to the pack's own loud register with no
+    // brand layer (accessibility beats brand): white on the pink fill
+    // sits near 4.5:1, under the loud-contrast bar, so the accent
+    // honestly bows out — pinned by resolving the same pack register
+    // the theme skips its overrides for.
     try live.harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .appearance_changed = .{ .color_scheme = .dark, .high_contrast = true } });
-    try testing.expectEqualDeep(canvas.ColorTokens.highContrastDark(), (try live.harness.runtime.canvasWidgetDesignTokens(1, main.canvas_label)).colors);
+    const pack_hc_dark = canvas.DesignTokens.theme(.{ .pack = .geist, .color_scheme = .dark, .contrast = .high }).colors;
+    try testing.expectEqualDeep(pack_hc_dark, (try live.harness.runtime.canvasWidgetDesignTokens(1, main.canvas_label)).colors);
 }
 
 test "the Albums/Songs tabs render as segmented triggers with one active" {

@@ -1,83 +1,73 @@
-//! soundboard theme: a custom "studio" token set layered over the built-in
-//! light/dark themes — the register's warm (stone) neutrals by day, its
-//! cool (zinc) neutrals after dark, an electric violet accent, and
-//! slightly softer radii. High-contrast requests fall back to the
-//! framework's high-contrast palettes (accessibility beats brand), and
-//! reduce-motion zeroes the motion tokens through the theme options.
+//! soundboard theme: the Geist pack with the accent moved to the pack's
+//! pink scale. The pack resolves the whole register (palette, control
+//! tables, type scale, metrics) per scheme and contrast; the app layers
+//! ONE brand decision on top through `DesignTokenOverrides` — it never
+//! forks the pack. High-contrast requests skip the override and take the
+//! pack's high-contrast register untouched (accessibility beats brand),
+//! and reduce-motion zeroes the motion tokens through the theme options.
 
 const native_sdk = @import("native_sdk");
 
 const canvas = native_sdk.canvas;
 const Color = canvas.Color;
 
+/// Pink 800, the pink scale's solid-fill step. The scale is stated per
+/// appearance, but the solid 700/800 steps cross at the same sRGB value
+/// in both — only the quiet low steps flip — so one constant serves
+/// light and dark alike: hsl(336, 74%, 51%) = #df2670.
+const pink_800 = Color.rgb8(223, 38, 112);
+
+/// The ink on the pink fill: the pack pairs every solid 700/800 fill
+/// with white knockout text, and white clears the 4.5:1 text bar on
+/// this pink (~4.5:1) — the honest readable ink in both schemes, since
+/// the fill itself is the same hex under both.
+const pink_ink = Color.rgb8(255, 255, 255);
+
+/// The app's one brand statement, layered over whichever scheme/contrast
+/// register the pack resolves. Three slots carry the accent identity:
+///
+/// - `colors.accent`/`accent_text`: the filled-primary pair — transport
+///   play button, "Playing" badges, selection washes, the now-playing
+///   row's title ink, and every control fill that derives from the
+///   accent channel (checkbox, switch, progress).
+/// - `colors.focus_ring`: the pack spends its identity hue on focus;
+///   with the identity moved to pink, the ring follows so focus and
+///   accent chrome read as one system (pink on the page clears the 3:1
+///   non-text bar in both schemes).
+/// - `controls.slider.active_background`: the pack's slider table states
+///   its own hue for the filled range rather than deriving from the
+///   accent channel, so the seek scrubber needs the same move stated
+///   once more or it would keep the pack's stock hue.
+const accent_overrides = canvas.DesignTokenOverrides{
+    .colors = .{
+        .accent = pink_800,
+        .accent_text = pink_ink,
+        .focus_ring = pink_800,
+    },
+    .controls = .{
+        .slider = .{ .active_background = pink_800 },
+    },
+};
+
 pub fn tokens(scheme: native_sdk.ColorScheme, high_contrast: bool, reduce_motion: bool) canvas.DesignTokens {
-    var out = canvas.DesignTokens.theme(.{
+    const options = canvas.ThemeOptions{
+        .pack = .geist,
         .color_scheme = switch (scheme) {
             .light => .light,
             .dark => .dark,
         },
         .contrast = if (high_contrast) .high else .standard,
         .reduce_motion = reduce_motion,
-    });
-    if (!high_contrast) {
-        out.colors = switch (scheme) {
-            .light => light_colors,
-            .dark => dark_colors,
-        };
-    }
-    out.radius = .{ .sm = 6, .md = 9, .lg = 12, .xl = 16 };
-    out.pixel_snap = .{ .geometry = true, .text = true, .scale = 1 };
-    return out;
+    };
+    // High contrast takes the pack's own loud register with no brand
+    // layer: white on the pink fill sits at ~4.5:1, well under the
+    // loud-contrast bar, so the accent honestly bows out.
+    if (high_contrast) return canvas.DesignTokens.theme(options);
+    return canvas.DesignTokens.themeWithOverrides(options, accent_overrides);
 }
 
-/// Warm paper on the register's stone (warm-neutral) scale — every
-/// neutral is a scale anchor converted from its published oklch value —
-/// with the electric violet identity carried by the accent alone
-/// (oklch(0.491 0.27 292.581) = #7008e7).
-pub const light_colors = canvas.ColorTokens{
-    .background = Color.rgb8(250, 250, 249),
-    .surface = Color.rgb8(255, 255, 255),
-    .surface_subtle = Color.rgb8(245, 245, 244),
-    .surface_pressed = Color.rgb8(231, 229, 228),
-    .text = Color.rgb8(12, 10, 9),
-    .text_muted = Color.rgb8(121, 113, 107),
-    .border = Color.rgb8(231, 229, 228),
-    .accent = Color.rgb8(112, 8, 231),
-    .accent_text = Color.rgb8(245, 243, 255),
-    .destructive = Color.rgb8(231, 0, 11),
-    .destructive_text = Color.rgb8(250, 250, 250),
-    .success = Color.rgb8(22, 163, 74),
-    .success_text = Color.rgb8(250, 250, 250),
-    .warning = Color.rgb8(217, 119, 6),
-    .warning_text = Color.rgb8(250, 250, 250),
-    .focus_ring = Color.rgb8(166, 160, 155),
-    .shadow = Color.rgba8(0, 0, 0, 26),
-    .disabled = Color.rgb8(245, 245, 244),
-};
-
-/// Club dark on the register's cool (zinc) scale: translucent-white
-/// hairlines and pressed washes, with the violet lifted to the scale's
-/// bright step (oklch(0.702 0.183 293.541) = #a684ff) and flipped to
-/// near-black accent text for contrast.
-pub const dark_colors = canvas.ColorTokens{
-    .background = Color.rgb8(9, 9, 11),
-    .surface = Color.rgb8(24, 24, 27),
-    .surface_subtle = Color.rgb8(39, 39, 42),
-    .surface_pressed = Color.rgba8(255, 255, 255, 38),
-    .text = Color.rgb8(250, 250, 250),
-    .text_muted = Color.rgb8(159, 159, 169),
-    .border = Color.rgba8(255, 255, 255, 26),
-    .accent = Color.rgb8(166, 132, 255),
-    .accent_text = Color.rgb8(9, 9, 11),
-    .destructive = Color.rgb8(255, 100, 103),
-    .destructive_text = Color.rgb8(250, 250, 250),
-    .success = Color.rgb8(34, 197, 94),
-    .success_text = Color.rgb8(9, 9, 11),
-    .warning = Color.rgb8(245, 158, 11),
-    .warning_text = Color.rgb8(9, 9, 11),
-    .info = Color.rgb8(167, 139, 250),
-    .info_text = Color.rgb8(9, 9, 11),
-    .focus_ring = Color.rgb8(113, 113, 123),
-    .shadow = Color.rgba8(0, 0, 0, 150),
-    .disabled = Color.rgb8(39, 39, 42),
-};
+/// The resolved standard-contrast palettes, exported for the suite's
+/// theme assertions: the pack's scheme register with the accent
+/// override already applied — exactly what `tokens` hands the runtime.
+pub const light_colors = tokens(.light, false, false).colors;
+pub const dark_colors = tokens(.dark, false, false).colors;
