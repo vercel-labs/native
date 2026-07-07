@@ -247,7 +247,6 @@ pub fn main(init: std.process.Init) !void {
         .app_name = "native-shell",
         .window_title = "Native SDK Native Shell",
         .bundle_id = "dev.native_sdk.native_shell",
-        .icon_path = "assets/icon.icns",
         .default_frame = native_sdk.geometry.RectF.init(0, 0, window_width, window_height),
         .builtin_bridge = .{ .enabled = true, .commands = &builtin_policies },
         .js_window_api = true,

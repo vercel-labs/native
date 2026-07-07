@@ -3,7 +3,6 @@
     .name = "native-shell",
     .display_name = "Native Shell",
     .version = "0.1.0",
-    .icons = .{ "assets/icon.icns" },
     .platforms = .{ "macos", "linux" },
     .permissions = .{ "command", "view" },
     .capabilities = .{ "webview", "js_bridge", "native_views", "menus", "shortcuts" },

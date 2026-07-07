@@ -39,7 +39,10 @@ pub const RunOptions = struct {
     window_title: []const u8 = "",
     bundle_id: []const u8,
     // Dev-run Dock icon file. The scaffold's one-image contract puts a
-    // square PNG here; a prebuilt .icns path works too.
+    // square PNG here; a prebuilt .icns path works too. When no file
+    // exists at this path, unbundled macOS runs render the toolkit's
+    // embedded default icon — the same fallback `native package` ships —
+    // so apps without a custom icon carry no committed copy to go stale.
     icon_path: []const u8 = "assets/icon.png",
     default_frame: native_sdk.geometry.RectF = native_sdk.geometry.RectF.init(0, 0, 1100, 760),
     restore_state: bool = true,

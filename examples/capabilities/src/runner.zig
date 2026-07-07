@@ -24,7 +24,7 @@ pub const RunOptions = struct {
     app_name: []const u8,
     window_title: []const u8 = "",
     bundle_id: []const u8,
-    icon_path: []const u8 = "assets/icon.icns",
+    icon_path: []const u8 = "assets/icon.png",
     default_frame: native_sdk.geometry.RectF = native_sdk.geometry.RectF.init(0, 0, 1100, 760),
     bridge: ?native_sdk.BridgeDispatcher = null,
     builtin_bridge: native_sdk.BridgePolicy = .{},

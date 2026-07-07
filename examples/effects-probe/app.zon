@@ -3,7 +3,6 @@
     .name = "effects-probe",
     .display_name = "Effects Probe",
     .version = "0.1.0",
-    .icons = .{"assets/icon.icns"},
     .platforms = .{"macos"},
     .capabilities = .{ "native_views", "gpu_surfaces" },
     .shell = .{

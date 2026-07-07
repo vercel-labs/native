@@ -3,7 +3,6 @@
     .name = "webview",
     .display_name = "WebView Example",
     .version = "0.1.0",
-    .icons = .{ "assets/icon.icns" },
     .platforms = .{ "macos", "linux" },
     .permissions = .{ "window" },
     .capabilities = .{ "webview", "js_bridge" },

@@ -39,7 +39,6 @@ pub fn main(init: std.process.Init) !void {
         .app_name = "Zero Browser",
         .window_title = "Zero Browser",
         .bundle_id = "dev.native_sdk.browser",
-        .icon_path = "assets/icon.icns",
         .builtin_bridge = .{ .enabled = true, .commands = &builtin_policies },
         .security = .{
             .permissions = &app_permissions,

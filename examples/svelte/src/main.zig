@@ -33,7 +33,6 @@ pub fn main(init: std.process.Init) !void {
         .app_name = "Svelte Example",
         .window_title = "Svelte Example",
         .bundle_id = "dev.native_sdk.svelte-example",
-        .icon_path = "assets/icon.icns",
         .security = .{
             .navigation = .{ .allowed_origins = &dev_origins },
         },

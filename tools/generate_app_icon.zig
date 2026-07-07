@@ -23,10 +23,12 @@
 //! which writes assets/icon.{icns,png,ico,svg}, syncs the CLI's embedded
 //! scaffold copies (src/tooling/default_icon.icns and default_icon.png),
 //! and emits a full-bleed variant (the same design without plate or
-//! margins) used by examples that demonstrate the packaging pipeline's
-//! automatic mask + inset.
+//! margins) to every listed path — a scratch preview plus the checked-in
+//! copy in the notes example, which demonstrates the packaging
+//! pipeline's automatic mask + inset from one raw source and therefore
+//! must regenerate in lockstep with the default.
 //!
-//! Usage: generate-app-icon <icns> <png> <ico> <svg> <default-icns> <default-png> <full-bleed-png>
+//! Usage: generate-app-icon <icns> <png> <ico> <svg> <default-icns> <default-png> <full-bleed-png>...
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
@@ -427,7 +429,11 @@ pub fn main(init: std.process.Init) !void {
     const svg_path = args[4];
     const default_icns_path = args[5];
     const default_png_path = args[6];
-    const full_bleed_png_path = args[7];
+    // One or more full-bleed outputs: the scratch preview plus every
+    // checked-in copy that must stay in lockstep with the default (the
+    // notes example's raw one-image source), so a default redesign can
+    // never leave a stale committed copy behind.
+    const full_bleed_png_paths = args[7..];
 
     const pixel_count = master_size * master_size;
     const master = try gpa.alloc(f32, pixel_count * 4);
@@ -504,10 +510,12 @@ pub fn main(init: std.process.Init) !void {
     defer gpa.free(full_bleed_rgba);
     const full_bleed_png = try app_icon.encodePng(gpa, full_bleed_rgba, 1024, 1024);
     defer gpa.free(full_bleed_png);
-    if (std.fs.path.dirname(full_bleed_png_path)) |parent| try cwd.createDirPath(io, parent);
-    try cwd.writeFile(io, .{ .sub_path = full_bleed_png_path, .data = full_bleed_png });
+    for (full_bleed_png_paths) |full_bleed_png_path| {
+        if (std.fs.path.dirname(full_bleed_png_path)) |parent| try cwd.createDirPath(io, parent);
+        try cwd.writeFile(io, .{ .sub_path = full_bleed_png_path, .data = full_bleed_png });
+    }
 
-    std.debug.print("generated {s} ({d} members), {s}, {s}, {s}, {s}, {s}, {s}\n", .{
+    std.debug.print("generated {s} ({d} members), {s}, {s}, {s}, {s}, {s}", .{
         icns_path,
         app_icon.icns_slots.len,
         png_path,
@@ -515,8 +523,9 @@ pub fn main(init: std.process.Init) !void {
         svg_path,
         default_icns_path,
         default_png_path,
-        full_bleed_png_path,
     });
+    for (full_bleed_png_paths) |full_bleed_png_path| std.debug.print(", {s}", .{full_bleed_png_path});
+    std.debug.print("\n", .{});
 }
 
 fn sizeIndex(size: usize) usize {
@@ -527,6 +536,6 @@ fn sizeIndex(size: usize) usize {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: generate-app-icon <icns> <png> <ico> <svg> <default-icns> <default-png> <full-bleed-png>\n", .{});
+    std.debug.print("usage: generate-app-icon <icns> <png> <ico> <svg> <default-icns> <default-png> <full-bleed-png>...\n", .{});
     std.process.exit(2);
 }

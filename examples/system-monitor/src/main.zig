@@ -195,7 +195,6 @@ pub fn main(init: std.process.Init) !void {
         .app_name = "system-monitor",
         .window_title = "System Monitor",
         .bundle_id = "dev.native_sdk.system_monitor",
-        .icon_path = "assets/icon.icns",
         .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
         .restore_state = false,
         .js_window_api = false,

@@ -4,7 +4,6 @@
     .display_name = "Markdown Viewer",
     .description = "A native markdown reader with GPU-rendered text.",
     .version = "0.1.0",
-    .icons = .{"assets/icon.icns"},
     .platforms = .{"macos"},
     .permissions = .{ "view", "command" },
     .capabilities = .{ "native_views", "gpu_surfaces" },

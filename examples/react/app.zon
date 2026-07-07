@@ -3,7 +3,6 @@
     .name = "react-example",
     .display_name = "React Example",
     .version = "0.1.0",
-    .icons = .{ "assets/icon.icns" },
     .platforms = .{ "macos", "linux" },
     .permissions = .{},
     .capabilities = .{ "webview" },

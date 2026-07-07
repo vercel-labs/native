@@ -156,7 +156,6 @@ pub fn main(init: std.process.Init) !void {
         .app_name = "webview",
         .window_title = "Native SDK WebView",
         .bundle_id = "dev.native_sdk.webview",
-        .icon_path = "assets/icon.icns",
         .bridge = app.bridge(),
         .builtin_bridge = .{ .enabled = true, .commands = &builtin_policies },
         .security = .{

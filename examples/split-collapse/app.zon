@@ -4,7 +4,6 @@
     .display_name = "Split Collapse",
     .description = "A two-pane split whose collapse animates over 180 ms; the frame-pacing measurement harness.",
     .version = "0.1.0",
-    .icons = .{"assets/icon.icns"},
     .platforms = .{"macos"},
     .permissions = .{ "view", "command" },
     .capabilities = .{ "native_views", "gpu_surfaces" },

@@ -4,7 +4,6 @@
     .display_name = "Deck",
     .description = "A compact deck controller driven by keyboard shortcuts.",
     .version = "0.2.0",
-    .icons = .{"assets/icon.icns"},
     .platforms = .{"macos"},
     .permissions = .{ "view", "command" },
     .capabilities = .{ "native_views", "gpu_surfaces", "shortcuts" },

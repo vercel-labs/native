@@ -33,7 +33,6 @@ pub fn main(init: std.process.Init) !void {
         .app_name = "Next Example",
         .window_title = "Next Example",
         .bundle_id = "dev.native_sdk.next-example",
-        .icon_path = "assets/icon.icns",
         .security = .{
             .navigation = .{ .allowed_origins = &dev_origins },
         },

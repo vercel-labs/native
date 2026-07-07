@@ -4,7 +4,6 @@
     .display_name = "Inbox",
     .description = "A task inbox with filters and a clear-done sweep.",
     .version = "0.1.0",
-    .icons = .{"assets/icon.icns"},
     .platforms = .{"macos"},
     .permissions = .{ "view", "command" },
     .capabilities = .{ "native_views", "gpu_surfaces" },

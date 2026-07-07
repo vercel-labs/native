@@ -1971,6 +1971,10 @@ pub fn build(b: *std.Build) void {
         "src/tooling/default_icon.icns",
         "src/tooling/default_icon.png",
         "zig-out/icon-full-bleed.png",
+        // The one committed full-bleed copy: the notes example's raw
+        // one-image icon source (it demos the packaging mask + inset),
+        // regenerated here so it can never drift from the default.
+        "examples/notes/assets/icon.png",
     });
     generate_icon_run.has_side_effects = true;
     generate_icon_step.dependOn(&generate_icon_run.step);

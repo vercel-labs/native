@@ -121,7 +121,6 @@ pub fn main(init: std.process.Init) !void {
         .app_name = "capabilities",
         .window_title = "Native SDK Capabilities",
         .bundle_id = "dev.native_sdk.capabilities",
-        .icon_path = "assets/icon.icns",
         .default_frame = native_sdk.geometry.RectF.init(0, 0, window_width, window_height),
         .builtin_bridge = .{ .enabled = true, .commands = &builtin_policies },
         .security = .{
@@ -219,7 +218,6 @@ test "capabilities manifest declares package integration metadata" {
     try std.testing.expectEqualStrings("viewer", manifest_file_associations[0].role);
     try std.testing.expectEqualStrings("zncap", manifest_file_associations[0].extensions[0]);
     try std.testing.expectEqualStrings("application/vnd.native-sdk.capability+json", manifest_file_associations[0].mime_types[0]);
-    try std.testing.expectEqualStrings("assets/icon.icns", manifest_file_associations[0].icon);
 
     try std.testing.expectEqual(@as(usize, 1), manifest_url_schemes.len);
     try std.testing.expectEqualStrings("native-sdk-capabilities", manifest_url_schemes[0].scheme);

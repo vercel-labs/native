@@ -285,7 +285,6 @@ pub fn main(init: std.process.Init) !void {
         .app_name = "deck",
         .window_title = "Native SDK Deck",
         .bundle_id = "dev.native_sdk.deck",
-        .icon_path = "assets/icon.icns",
         .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
         .restore_state = false,
         .js_window_api = false,

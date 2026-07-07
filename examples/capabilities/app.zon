@@ -3,7 +3,6 @@
     .name = "capabilities",
     .display_name = "Capabilities",
     .version = "0.1.0",
-    .icons = .{ "assets/icon.icns" },
     .platforms = .{ "macos", "linux" },
     .permissions = .{ "window", "network", "filesystem", "notifications", "dialog", "clipboard", "credentials" },
     .capabilities = .{
@@ -28,7 +27,6 @@
             .role = "viewer",
             .extensions = .{ "zncap" },
             .mime_types = .{ "application/vnd.native-sdk.capability+json" },
-            .icon = "assets/icon.icns",
         },
     },
     .url_schemes = .{

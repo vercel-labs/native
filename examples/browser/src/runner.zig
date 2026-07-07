@@ -9,7 +9,7 @@ pub const RunOptions = struct {
     app_name: []const u8,
     window_title: []const u8 = "",
     bundle_id: []const u8,
-    icon_path: []const u8 = "assets/icon.icns",
+    icon_path: []const u8 = "assets/icon.png",
     bridge: ?native_sdk.BridgeDispatcher = null,
     builtin_bridge: native_sdk.BridgePolicy = .{},
     security: native_sdk.SecurityPolicy = .{},

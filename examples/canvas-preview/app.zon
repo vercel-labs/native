@@ -3,7 +3,6 @@
     .name = "canvas-preview",
     .display_name = "Canvas Preview",
     .version = "0.1.0",
-    .icons = .{"assets/icon.icns"},
     .platforms = .{"macos"},
     .capabilities = .{ "native_views", "gpu_surfaces", "webview", "tray" },
     .shell = .{

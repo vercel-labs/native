@@ -28,7 +28,6 @@ pub fn main(init: std.process.Init) !void {
         .app_name = "hello",
         .window_title = "Hello",
         .bundle_id = "dev.native_sdk.hello",
-        .icon_path = "assets/icon.icns",
     }, init);
 }
 

@@ -16,7 +16,6 @@ pub fn main(init: std.process.Init) !void {
         .app_name = "gpu-components",
         .window_title = "Native SDK GPU Components",
         .bundle_id = "dev.native_sdk.gpu_components",
-        .icon_path = "assets/icon.icns",
         .default_frame = geometry.RectF.init(0, 0, model.window_width, model.window_height),
         .restore_state = false,
         .js_window_api = false,

@@ -33,7 +33,6 @@ pub fn main(init: std.process.Init) !void {
         .app_name = "React Example",
         .window_title = "React Example",
         .bundle_id = "dev.native_sdk.react-example",
-        .icon_path = "assets/icon.icns",
         .security = .{
             .navigation = .{ .allowed_origins = &dev_origins },
         },

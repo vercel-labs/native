@@ -343,6 +343,63 @@ fn devDockIconNeedsMask(path: []const u8) bool {
     return app_icon.sourceKindForPath(path) != null;
 }
 
+/// The toolkit's default app icon, the same bytes `native package`
+/// embeds as its fallback: unbundled runs whose configured icon file is
+/// absent render this instead of showing the generic executable tile,
+/// so a dev run and the packaged app fall back to the same picture from
+/// ONE committed source (src/tooling/default_icon.png) — apps that ship
+/// no icon of their own never carry a copy that can drift stale.
+const default_icon_png = @embedFile("../../tooling/default_icon.png");
+
+/// How the startup Dock icon resolves for this process.
+const DockIconPlan = enum {
+    /// The host loads the configured icon file itself (the classic
+    /// path; also every bundled run, where the .app's own icon must
+    /// never be overridden).
+    host_file,
+    /// Debug dev run with a raw square source: background-render the
+    /// packaging mask/inset and hand the host pixels.
+    masked_render,
+    /// Unbundled run with no icon file on disk: background-render the
+    /// embedded toolkit default.
+    embedded_default,
+};
+
+fn planDockIcon(path: []const u8) DockIconPlan {
+    if (iconFileExists(path)) {
+        return if (devDockIconNeedsMask(path)) .masked_render else .host_file;
+    }
+    // No icon file. Inside a packaged .app the bundle's .icns already
+    // owns the tile — hands off. Anywhere else (dev runs from the build
+    // cache, plain zig-out binaries) macOS would show the generic
+    // executable tile, so the embedded default steps in.
+    if (processIsBundled()) return .host_file;
+    return .embedded_default;
+}
+
+/// Existence probe for the configured Dock icon file. `access(2)`
+/// directly: this sits on the launch path, where a stat is noise but an
+/// event-loop `std.Io` instance is not; the host re-reads the file
+/// asynchronously anyway, so a race here only re-selects the fallback.
+fn iconFileExists(path: []const u8) bool {
+    var buffer: [1024:0]u8 = undefined;
+    if (path.len == 0 or path.len >= buffer.len) return false;
+    @memcpy(buffer[0..path.len], path);
+    buffer[path.len] = 0;
+    return std.c.access(buffer[0..path.len :0].ptr, std.c.F_OK) == 0;
+}
+
+/// Whether this process runs from inside a packaged .app bundle (the
+/// executable lives under Contents/MacOS). Unbundled processes get the
+/// dev-run icon fallbacks; bundled ones keep their Info.plist identity.
+fn processIsBundled() bool {
+    var buffer: [4096]u8 = undefined;
+    var size: u32 = buffer.len;
+    if (std.c._NSGetExecutablePath(&buffer, &size) != 0) return false;
+    const path = std.mem.sliceTo(buffer[0..], 0);
+    return std.mem.indexOf(u8, path, ".app/Contents/MacOS/") != null;
+}
+
 /// Ceiling for a dev Dock icon source read. The pipeline caps sources at
 /// 16384px on a side; any honest PNG/SVG source sits far below this.
 const max_dev_dock_icon_source_bytes: usize = 32 * 1024 * 1024;
@@ -375,6 +432,30 @@ fn devDockIconRenderMain(host: *AppKitHost, path: []u8) void {
     renderDevDockIcon(gpa, host, path) catch {
         native_sdk_appkit_set_dock_icon_file(host, path.ptr, path.len);
     };
+}
+
+/// Start the background render of the embedded default icon (see
+/// `default_icon_png`). Same off-the-launch-path policy as the masked
+/// dev render; failure means no Dock icon, exactly the pre-fallback
+/// behavior for a missing file.
+fn spawnDefaultDockIconRender(host: *AppKitHost) void {
+    const thread = std.Thread.spawn(.{}, defaultDockIconRenderMain, .{host}) catch return;
+    thread.detach();
+}
+
+fn defaultDockIconRenderMain(host: *AppKitHost) void {
+    const gpa = std.heap.c_allocator;
+    var source = switch (app_icon.loadSource(gpa, default_icon_png, .png) catch return) {
+        .ok => |value| value,
+        .issue => return,
+    };
+    defer source.deinit(gpa);
+    // The exact packaging render: the default is pre-shaped (transparent
+    // corners), so it ships through untouched at the master size and the
+    // dev tile equals the packaged fallback tile.
+    const rgba = app_icon.renderMacosCanvas(gpa, &source, app_icon.master_size) catch return;
+    defer gpa.free(rgba);
+    native_sdk_appkit_set_dock_icon_rgba(host, rgba.ptr, app_icon.master_size, app_icon.master_size);
 }
 
 /// Render the masked macOS canvas for a raw icon source and hand the
@@ -426,15 +507,22 @@ pub const MacPlatform = struct {
         const display_name = app_info.resolvedDisplayName();
         // Dev-run Dock icon parity: a raw square icon source (.png/.svg)
         // gets the packaging pipeline's macOS mask/inset before it
-        // reaches the Dock, so the dev tile matches the packaged one.
-        // The host's own file load is suppressed for those sources (an
-        // empty path at create) and a background render delivers the
-        // shaped pixels instead. Prebuilt .icns paths — and every
-        // release build, whose icon comes from the bundle — keep the
-        // classic load byte-for-byte.
-        const icon_path = if (devDockIconNeedsMask(app_info.icon_path)) "" else app_info.icon_path;
+        // reaches the Dock, so the dev tile matches the packaged one —
+        // and an unbundled run with NO icon file gets the embedded
+        // toolkit default, the same fallback `native package` ships.
+        // For both render plans the host's own file load is suppressed
+        // (an empty path at create) and a background render delivers
+        // the pixels instead. Prebuilt .icns paths that exist — and
+        // every bundled run, whose icon comes from the bundle — keep
+        // the classic load byte-for-byte.
+        const dock_icon = planDockIcon(app_info.icon_path);
+        const icon_path = if (dock_icon == .host_file) app_info.icon_path else "";
         const host = native_sdk_appkit_create(app_info.app_name.ptr, app_info.app_name.len, display_name.ptr, display_name.len, app_info.version.ptr, app_info.version.len, app_info.description.ptr, app_info.description.len, if (app_info.has_web_content) 1 else 0, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, icon_path.ptr, icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), showModeInt(window_options.show)) orelse return error.CreateFailed;
-        if (devDockIconNeedsMask(app_info.icon_path)) spawnDevDockIconRender(host, app_info.icon_path);
+        switch (dock_icon) {
+            .host_file => {},
+            .masked_render => spawnDevDockIconRender(host, app_info.icon_path),
+            .embedded_default => spawnDefaultDockIconRender(host),
+        }
         // The startup window's declared content min-size floor
         // (AppKit `contentMinSize`); the create call above registers
         // the window under its id, so the floor applies right after.
@@ -1934,6 +2022,49 @@ fn flattenFilters(filters: []const platform_mod.FileFilter, buffer: []u8) []cons
 
 test "mac platform module exports type" {
     _ = MacPlatform;
+}
+
+test "mac dock icon fallback renders the embedded toolkit default" {
+    // The exact pipeline `defaultDockIconRenderMain` hands the host:
+    // decode the embedded default and render the packaging canvas. This
+    // proves the runtime Dock path can consume the embedded bytes — no
+    // per-app icon file needed for the default tile.
+    const gpa = std.testing.allocator;
+    var source = switch (try app_icon.loadSource(gpa, default_icon_png, .png)) {
+        .ok => |value| value,
+        .issue => return error.TestUnexpectedResult,
+    };
+    defer source.deinit(gpa);
+    const rgba = try app_icon.renderMacosCanvas(gpa, &source, app_icon.master_size);
+    defer gpa.free(rgba);
+    const size = app_icon.master_size;
+    try std.testing.expectEqual(size * size * 4, rgba.len);
+    // Pre-shaped icon: the canvas corner stays transparent (the rounded
+    // plate never reaches it) …
+    try std.testing.expectEqual(@as(u8, 0), rgba[(2 * size + 2) * 4 + 3]);
+    // … and the plate is the dark-NEUTRAL gradient: an opaque gray
+    // (r == g == b, well below mid-tone) below the layered-sheet mark.
+    const plate_index = ((size * 850 / 1024) * size + size / 2) * 4;
+    const r = rgba[plate_index];
+    try std.testing.expectEqual(@as(u8, 255), rgba[plate_index + 3]);
+    try std.testing.expectEqual(r, rgba[plate_index + 1]);
+    try std.testing.expectEqual(r, rgba[plate_index + 2]);
+    try std.testing.expect(r >= 15 and r <= 60);
+}
+
+test "mac dock icon plan uses the embedded default only without a file" {
+    // Missing file, unbundled test binary: the embedded default.
+    try std.testing.expectEqual(DockIconPlan.embedded_default, planDockIcon("assets/does-not-exist.icns"));
+    try std.testing.expectEqual(DockIconPlan.embedded_default, planDockIcon(""));
+    // A real file keeps the classic host load (or the Debug masked
+    // render for raw sources) — an app's own icon always wins.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "icon.icns", .data = "stub" });
+    var path_buffer: [256]u8 = undefined;
+    // tmpDir lives under .zig-cache/tmp/ relative to the test cwd.
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/icon.icns", .{tmp.sub_path[0..]});
+    try std.testing.expectEqual(DockIconPlan.host_file, planDockIcon(path));
 }
 
 test "mac widget accessibility maps retained action flags" {

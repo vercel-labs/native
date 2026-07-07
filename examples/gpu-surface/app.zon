@@ -3,7 +3,6 @@
     .name = "gpu-surface",
     .display_name = "GPU Surface",
     .version = "0.1.0",
-    .icons = .{ "assets/icon.icns" },
     .platforms = .{ "macos" },
     .permissions = .{ "view", "command" },
     .capabilities = .{ "webview", "js_bridge", "native_views", "gpu_surfaces" },

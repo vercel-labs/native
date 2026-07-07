@@ -191,7 +191,6 @@ pub fn main(init: std.process.Init) !void {
         .app_name = "native-panels",
         .window_title = "Native SDK Native Panels",
         .bundle_id = "dev.native_sdk.native_panels",
-        .icon_path = "assets/icon.icns",
         .default_frame = native_sdk.geometry.RectF.init(0, 0, window_width, window_height),
         .builtin_bridge = .{ .enabled = true, .commands = &builtin_policies },
         .js_window_api = true,

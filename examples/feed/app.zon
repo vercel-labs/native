@@ -4,7 +4,6 @@
     .display_name = "Feed",
     .description = "A single-column feed of cards in a slim native window.",
     .version = "0.1.0",
-    .icons = .{"assets/icon.icns"},
     .platforms = .{"macos"},
     .capabilities = .{ "native_views", "gpu_surfaces" },
     .shell = .{

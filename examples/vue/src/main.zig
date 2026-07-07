@@ -33,7 +33,6 @@ pub fn main(init: std.process.Init) !void {
         .app_name = "Vue Example",
         .window_title = "Vue Example",
         .bundle_id = "dev.native_sdk.vue-example",
-        .icon_path = "assets/icon.icns",
         .security = .{
             .navigation = .{ .allowed_origins = &dev_origins },
         },

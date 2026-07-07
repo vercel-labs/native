@@ -7573,7 +7573,16 @@ static NSURL *NativeSdkAssetEntryURL(NSString *origin, NSString *entryPath) {
  * otherwise show their executable name there — packaged bundles get the
  * name from Info.plist instead, so this is dev-run-only polish. The
  * call is a private services entry resolved at runtime; when the
- * symbols are absent the name simply stays the executable's. */
+ * symbols are absent the name simply stays the executable's.
+ *
+ * Hard macOS limit, for the record: the Dock hover label and the app
+ * switcher read the LaunchServices registration, and a bundle-less
+ * process has NO public API to rename that registration — Info.plist
+ * is the only sanctioned channel, and it requires a bundle. What is
+ * honestly settable without one: the application menu (the host builds
+ * its own NSMenu titled with the display name, in buildMenuBar) and
+ * NSProcessInfo's processName. Everything beyond that either follows
+ * this best-effort services call or stays the executable name. */
 static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     if (displayName.length == 0) return;
     if ([NSBundle.mainBundle.bundlePath.pathExtension.lowercaseString isEqualToString:@"app"]) return;

@@ -180,7 +180,6 @@ pub fn main(init: std.process.Init) !void {
         .app_name = "gpu-surface",
         .window_title = "Native SDK GPU Surface",
         .bundle_id = "dev.native_sdk.gpu_surface",
-        .icon_path = "assets/icon.icns",
         .default_frame = native_sdk.geometry.RectF.init(0, 0, window_width, window_height),
         .js_window_api = false,
         .security = .{

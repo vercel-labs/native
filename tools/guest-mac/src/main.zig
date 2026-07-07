@@ -80,7 +80,6 @@ fn runApp(init: std.process.Init, command: cli.Command) !void {
         .app_name = "guest-mac",
         .window_title = "Guest macOS",
         .bundle_id = "dev.native_sdk.guest_mac",
-        .icon_path = "assets/icon.icns",
         .default_frame = native_sdk.geometry.RectF.init(0, 0, ui.window_width, ui.window_height),
         .js_window_api = false,
         .security = .{ .permissions = &ui.app_permissions },
