@@ -1149,9 +1149,17 @@ pub fn widgetKindDefaultLayout(kind: WidgetKind, size: WidgetSize) ?WidgetLayout
             .gap = 12,
             .clip_content = true,
         },
-        .alert, .bubble => .{
+        .alert => .{
             .padding = geometry.InsetsF.all(16),
             .gap = 12,
+            .clip_content = true,
+        },
+        // The chat bubble hugs its message: 10px vertical / 12px
+        // horizontal, so one 14px body line closes into a ~40px capsule
+        // (the chrome's `radius.lg + 12` arc reads as a full pill on a
+        // single line). Children stack inside — no gap axis to default.
+        .bubble => .{
+            .padding = geometry.InsetsF.init(10, 12, 10, 12),
             .clip_content = true,
         },
         // The house TabsList: one muted rounded container hugging its

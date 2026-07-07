@@ -638,17 +638,21 @@ fn buildTooltip(ui: *Ui) Node {
 }
 
 fn buildBubble(ui: *Ui) Node {
+    // The two sides of a thread: received keeps the default muted wash
+    // on the left, sent wears the primary fill (knockout ink cascades
+    // to the text automatically) on the right. The bubble's own chat
+    // hug (10/12) does the insetting — no padding passed here.
     return tile(ui, .{
-        ui.column(.{ .gap = 10, .width = 340 }, .{
+        ui.column(.{ .gap = 16, .width = 340 }, .{
             ui.row(.{}, .{
-                ui.el(.bubble, .{ .padding = 10 }, .{
+                ui.el(.bubble, .{}, .{
                     ui.text(.{ .wrap = true }, "Ready to ship the components page?"),
                 }),
                 ui.spacer(1),
             }),
             ui.row(.{}, .{
                 ui.spacer(1),
-                ui.el(.bubble, .{ .padding = 10, .variant = .primary }, .{
+                ui.el(.bubble, .{ .variant = .primary }, .{
                     ui.text(.{ .wrap = true }, "Previews are rendering now."),
                 }),
             }),
@@ -1045,7 +1049,7 @@ fn buildBubbleHero(ui: *Ui) Node {
     return heroTile(ui, .{
         ui.row(.{ .width = 300 }, .{
             ui.spacer(1),
-            ui.el(.bubble, .{ .padding = 10, .variant = .primary }, .{
+            ui.el(.bubble, .{ .variant = .primary }, .{
                 ui.text(.{ .wrap = true }, "Previews are rendering now."),
             }),
         }),

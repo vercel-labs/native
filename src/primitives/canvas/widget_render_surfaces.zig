@@ -273,6 +273,125 @@ pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
     if (widget.kind == .resizable) try emitResizableWidgetHandle(builder, widget, tokens, visual);
 }
 
+/// The chat bubble's corner arc: `radius.lg + 12` (22 at the default
+/// scale) on every corner. A one-line bubble — one 14px body line
+/// inside the 10px vertical hug — stands about 40px tall, so this arc
+/// closes it into a full capsule (the rasterizers clamp each corner to
+/// half the box), while a multi-line bubble keeps the same 22px arc
+/// instead of ballooning into a lozenge. Deriving from the lg token
+/// keeps themed radius scales in step. An author `radius` wins.
+pub fn bubbleWidgetRadius(widget: Widget, tokens: DesignTokens) Radius {
+    if (widget.style.radius) |radius| return Radius.all(@max(0, radius));
+    return Radius.all(@max(0, tokens.radius.lg) + 12);
+}
+
+/// The chat bubble chrome: a capsule-cornered message surface that sits
+/// IN the conversation plane — no drop shadow, and no border except on
+/// the outline variant — with `variant` picking the fill register:
+///
+/// - `default`/`secondary`: the muted surface wash (`surface_subtle`) —
+///   the received side of a thread. The neutral palette's secondary
+///   and muted surfaces resolve to the same wash step, so both
+///   variants share it rather than inventing a second gray.
+/// - `primary`: the accent fill with knockout ink — the sent side.
+///   The monochrome primary register applies: near-black in light,
+///   porcelain in dark, no hue unless the app themes one in.
+/// - `outline`: the page background with a hairline border — the
+///   framed bubble for content that must not read as either side.
+/// - `destructive`: the quiet red chip — the destructive wash under
+///   destructive-red ink, sharing the themed `button_destructive`
+///   table so the per-scheme wash strengths (10% light / 20% dark)
+///   live in ONE register instead of being re-derived here.
+/// - `ghost`: no chrome at all; the content carries the message.
+///
+/// Themed apps may still pin `controls.bubble` background/border; those
+/// land on the default variant, and author `style.*` always wins.
+pub fn emitBubbleWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const radius = bubbleWidgetRadius(widget, tokens);
+    if (bubbleFillColor(widget, tokens)) |background| {
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, 2),
+            .rect = widget.frame,
+            .radius = radius,
+            .fill = colorFill(background),
+        });
+    }
+    if (bubbleBorderColor(widget, tokens)) |border| {
+        try builder.strokeRect(.{
+            .id = widgetPartId(widget.id, 3),
+            .rect = widget.frame,
+            .radius = radius,
+            .stroke = .{
+                .fill = colorFill(border),
+                .width = controlStrokeWidth(widget, tokens.controls.bubble, tokens.stroke.hairline),
+            },
+        });
+    }
+}
+
+/// The bubble's body fill for its variant (see `emitBubbleWidgetChrome`
+/// for the register). Null means no fill at all (ghost), which also
+/// suppresses the border-only stroke pass ordering concern — a bubble
+/// paints at most one fill and one hairline.
+fn bubbleFillColor(widget: Widget, tokens: DesignTokens) ?Color {
+    if (widget.style.background) |explicit| return explicit;
+    return switch (widget.variant) {
+        .default, .secondary => tokens.controls.bubble.background orelse tokens.colors.surface_subtle,
+        .primary => widget.style.accent orelse tokens.colors.accent,
+        .outline => tokens.colors.background,
+        // The shared quiet-red-chip register: rest wash from the themed
+        // per-scheme table, light-recipe fallback (destructive at 10%)
+        // for a bare untheme'd `DesignTokens{}` whose palette defaults
+        // are the light values.
+        .destructive => tokens.controls.button_destructive.background orelse widget_render_style.colorWithAlpha(tokens.colors.destructive, 0.10),
+        .ghost => null,
+    };
+}
+
+/// The bubble's hairline, outline variant only — every other variant's
+/// edge is where its fill ends. An author `style.border` always paints.
+fn bubbleBorderColor(widget: Widget, tokens: DesignTokens) ?Color {
+    if (widget.style.border) |explicit| return explicit;
+    return switch (widget.variant) {
+        .outline => tokens.controls.bubble.border orelse tokens.colors.border,
+        else => null,
+    };
+}
+
+/// Descendant ink for bubble content: the bubble's fill decides the
+/// body ink of everything typeset inside it — the way a filled
+/// button's label follows its fill — so authors never hand-pick
+/// knockout ink per message. Only the token FALLBACKS move (`text`,
+/// and `text_muted` as the same ink at 70% for timestamps and
+/// captions); an explicit `style.foreground` on a child still wins,
+/// and the unfilled variants pass the palette through untouched.
+pub fn bubbleContentTokens(widget: Widget, tokens: DesignTokens) DesignTokens {
+    var content = tokens;
+    switch (widget.variant) {
+        .primary => {
+            const ink = widget.style.accent_foreground orelse tokens.controls.bubble.foreground orelse tokens.colors.accent_text;
+            content.colors.text = ink;
+            content.colors.text_muted = widget_render_style.colorWithAlpha(ink, 0.7);
+        },
+        // Destructive ink IN the destructive red on the quiet wash —
+        // the chip's identity — never knockout text (that pairing
+        // belongs to a filled alarm block, which the bubble is not).
+        .destructive => {
+            const ink = tokens.colors.destructive;
+            content.colors.text = ink;
+            content.colors.text_muted = widget_render_style.colorWithAlpha(ink, 0.7);
+        },
+        .default, .secondary => {
+            if (tokens.controls.bubble.foreground) |ink| {
+                content.colors.text = ink;
+                content.colors.text_muted = widget_render_style.colorWithAlpha(ink, 0.7);
+            }
+        },
+        .outline, .ghost => {},
+    }
+    return content;
+}
+
 /// The house style accordion item: a BORDERLESS row — no fill, no outline,
 /// no shadow — with a hairline separator under it, the trigger label on
 /// the leading edge of a py-4 header band, and the registry

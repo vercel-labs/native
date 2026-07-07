@@ -224,7 +224,8 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         .drawer => try emitDrawerSurfaceWidget(builder, paint_widget, tokens, depth),
         .sheet => try emitSheetSurfaceWidget(builder, paint_widget, tokens, depth),
         .accordion => try emitAccordionWidget(builder, paint_widget, tokens, depth),
-        .bubble, .resizable, .panel => try emitPanelWidget(builder, paint_widget, tokens, depth),
+        .bubble => try emitBubbleWidget(builder, paint_widget, tokens, depth),
+        .resizable, .panel => try emitPanelWidget(builder, paint_widget, tokens, depth),
         .popover => try emitPopoverWidget(builder, paint_widget, tokens, depth),
         .menu_surface, .dropdown_menu => try emitMenuSurfaceWidget(builder, paint_widget, tokens, depth),
         .text => try emitTextWidget(builder, paint_widget, tokens),
@@ -514,7 +515,17 @@ fn emitWidgetLayoutNodeContent(
             try widget_render_surfaces.emitSheetSurfaceWidgetChrome(builder, paint_widget, tokens);
         },
         .accordion => try widget_render_surfaces.emitAccordionWidgetChrome(builder, paint_widget, tokens),
-        .bubble, .resizable, .panel => try widget_render_surfaces.emitPanelWidgetChrome(builder, paint_widget, tokens),
+        .bubble => {
+            try widget_render_surfaces.emitBubbleWidgetChrome(builder, paint_widget, tokens);
+            // The bubble's variant re-inks its content: children render
+            // against the cascaded token palette (knockout body ink on a
+            // filled bubble) instead of the page's, so this subtree
+            // recurses with its own tokens and returns before the shared
+            // children pass below.
+            try emitWidgetLayoutClippedChildren(builder, layout, node_index, widget_render_surfaces.bubbleContentTokens(paint_widget, tokens), state, paint_widget);
+            return;
+        },
+        .resizable, .panel => try widget_render_surfaces.emitPanelWidgetChrome(builder, paint_widget, tokens),
         .popover => try widget_render_surfaces.emitPopoverWidgetChrome(builder, paint_widget, tokens),
         .menu_surface, .dropdown_menu => try widget_render_surfaces.emitMenuSurfaceWidgetChrome(builder, paint_widget, tokens),
         .text => try emitTextWidget(builder, paint_widget, tokens),
@@ -701,7 +712,11 @@ fn widgetContentClip(widget: Widget, tokens: DesignTokens) Clip {
 fn widgetContentClipRadius(widget: Widget, tokens: DesignTokens) Radius {
     if (!widget.layout.clip_content) return .{};
     return switch (widget.kind) {
-        .alert, .bubble, .card, .resizable, .panel, .menu_surface, .dropdown_menu => Radius.all(tokens.radius.lg),
+        // The bubble clips at its own capsule arc so wide content (an
+        // image child, a full-bleed row) shears along the chrome's
+        // corners instead of the generic surface radius.
+        .bubble => widget_render_surfaces.bubbleWidgetRadius(widget, tokens),
+        .alert, .card, .resizable, .panel, .menu_surface, .dropdown_menu => Radius.all(tokens.radius.lg),
         .accordion => .{},
         .dialog, .popover => Radius.all(tokens.radius.xl),
         .drawer, .sheet => Radius.all(tokens.radius.lg),
@@ -741,6 +756,15 @@ fn emitSheetSurfaceWidget(builder: *Builder, widget: Widget, tokens: DesignToken
 fn emitPanelWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
     try widget_render_surfaces.emitPanelWidgetChrome(builder, widget, tokens);
     try emitWidgetClippedChildren(builder, widget, tokens, depth);
+}
+
+fn emitBubbleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
+    try widget_render_surfaces.emitBubbleWidgetChrome(builder, widget, tokens);
+    // Children render against the bubble's cascaded token palette
+    // (knockout body ink on a filled bubble) — the whole subtree, not
+    // just direct children, because the recursion below threads these
+    // tokens all the way down.
+    try emitWidgetClippedChildren(builder, widget, widget_render_surfaces.bubbleContentTokens(widget, tokens), depth);
 }
 
 // Disclosure is DISCRETE by design, not animated: render animations are

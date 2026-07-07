@@ -1,0 +1,77 @@
+{
+  "name": "chat-composer",
+  "description": "Exercises the composer composites: input-group wrapping a textarea plus an in-border actions row, an attached button-group cluster, a model-derived disabled Send, and a data-driven message list.",
+  "prompt": "This workspace is a freshly scaffolded Native SDK native-frontend app (see README.md; the view is src/app.native, the logic src/main.zig). Replace the counter with a small team-chat pane.\n\nRequirements:\n- A message list rendered from model data, seeded with exactly two messages that display as exactly \"Alice: Shipped the build.\" and \"Bob: Testing now.\" — each message is ONE line of text.\n- Below the list, the composer: ONE bordered field that reads as a single control. It contains a multi-line draft area (Enter inserts a newline; the primary submit chord sends) with the placeholder exactly \"Message #general\", and, INSIDE the same border, an accessory row of controls: on the left an icon-only cluster of two related actions labeled exactly \"Attach\" and \"Snippet\" — attached into ONE segmented bar with shared seams, not two free-floating buttons — and on the right a button labeled exactly \"Send\". The whole group must wear the focus ring when any control inside it has focus (the composite provides this; don't rebuild it by hand).\n- Send is disabled exactly while the draft is empty, and enabled otherwise. Derive that; do not store it.\n- Sending (the Send button or the submit chord) appends the draft to the list displayed as exactly \"You: <draft>\", then clears the draft. Sending an empty draft does nothing. Attach and Snippet may be inert messages for now, but they must dispatch real Msgs.\n- A status bar reading exactly \"<n> messages\", updating live. Derive the count; do not store it.\n- Keep all logic in src/main.zig (Model, Msg, update); the markup only binds values and dispatches messages.\n- Validate the markup with `native markup check src/app.native`, and keep `zig build test` green — extend src/tests.zig so the tests type into the draft and send through the real dispatch path, asserting the appended message, the cleared draft, the empty-draft no-op, and the live count.\n\nWhen you are done, make sure `zig build test` passes and summarize what you built.",
+  "frontend": "native",
+  "timeoutMs": 1200000,
+  "maxTurns": 80,
+  "checks": [
+    {
+      "type": "build_test",
+      "args": ["-Dplatform=null"]
+    },
+    {
+      "type": "markup_check"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.native",
+      "pattern": "<input-group[\\s>]",
+      "expect": true,
+      "description": "the composer is an <input-group> composite"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.native",
+      "pattern": "<input-group-actions[\\s>]",
+      "expect": true,
+      "description": "the accessory controls ride an <input-group-actions> row inside the border"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.native",
+      "pattern": "<textarea[^>]*on-submit=",
+      "expect": true,
+      "description": "the draft is a real <textarea> with submit-chord sending"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.native",
+      "pattern": "<button-group[\\s>]",
+      "expect": true,
+      "description": "the Attach/Snippet cluster is an attached <button-group>"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.native",
+      "pattern": "<for\\s+[^>]*each=",
+      "expect": true,
+      "description": "the message list renders through a <for> loop"
+    },
+    {
+      "type": "snapshot_grep",
+      "patterns": [
+        "role=textbox .*placeholder=\"Message #general\"",
+        "role=button name=\"Attach\"",
+        "role=button name=\"Snippet\"",
+        "role=button name=\"Send\".*enabled=false",
+        "name=\"Alice: Shipped the build\\.\"",
+        "name=\"Bob: Testing now\\.\"",
+        "name=\"2 messages\""
+      ],
+      "description": "live snapshot shows the composer textbox, the attached cluster, Send disabled on the empty draft, the seeded messages, and the live count"
+    },
+    {
+      "type": "llm_judge",
+      "criteria": [
+        "Model/Msg/update follow The Elm Architecture idiomatically: the model owns the draft (mirrored through on-input) and the message list, send is one message that appends and clears with an empty-draft guard in update, and everything derivable (Send's disabled state, the message count) is computed rather than stored.",
+        "The composer uses the composite honestly: one <input-group> whose textarea comes first, the accessory controls live in <input-group-actions> inside the same border with a spacer separating leading and trailing controls, and the attached Attach/Snippet cluster is a <button-group> — no hand-built bordered box, no floating action row outside the field.",
+        "Tests are meaningful: they drive typing and sending through the real dispatch path, asserting the appended \"You: ...\" message, the cleared draft, the empty-draft no-op, and the derived count, not merely that the code compiles.",
+        "The markup stays declarative: the list renders via <for> with stable keys, labels and placeholders are bound or literal in markup, and no counting, guarding, or formatting is smuggled into the view."
+      ],
+      "minScore": 6,
+      "advisory": true,
+      "description": "quality of the chat composer beyond compliance"
+    }
+  ]
+}

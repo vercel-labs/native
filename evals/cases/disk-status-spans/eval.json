@@ -1,0 +1,66 @@
+{
+  "name": "disk-status-spans",
+  "description": "Exercises inline text spans: one wrapped paragraph mixing bold, muted, and monospace runs (announcing as a single text run), with bound values from the model and a derived summary.",
+  "prompt": "This workspace is a freshly scaffolded Native SDK native-frontend app (see README.md; the view is src/app.native, the logic src/main.zig). Replace the counter with a small disk status card.\n\nRequirements:\n- One status paragraph that reads exactly \"Disk <used> GB of 512 GB used — run native doctor if this looks wrong.\" (with that em dash), where <used> is the current used amount from the model. Inside that ONE sentence, the used amount (\"<used> GB\") renders bold, the total (\"512 GB\") renders in the muted text color, and the command name (\"native doctor\") renders in monospace. It must be a single paragraph — one sentence that word-wraps as a unit and announces to assistive tech as one text run — not separate text pieces laid out side by side.\n- The used amount starts at 128 and a button labeled exactly \"Rescan\" cycles it through the seeded readings 128 → 256 → 384 and back to 128, in that order.\n- A status bar reading exactly \"<percent>% of 512 GB used\" where <percent> is the whole-number percentage derived from the current used amount (128 → \"25% of 512 GB used\"), updating live. Derive it; do not store it.\n- Keep all logic in src/main.zig (Model, Msg, update); the markup only binds values and dispatches messages.\n- Validate the markup with `native markup check src/app.native`, and keep `zig build test` green — extend src/tests.zig so the tests drive Rescan through the real dispatch path across the full cycle (including the wrap-around) and assert the used amount and the derived percentage at each step.\n\nWhen you are done, make sure `zig build test` passes and summarize what you built.",
+  "frontend": "native",
+  "timeoutMs": 1200000,
+  "maxTurns": 80,
+  "checks": [
+    {
+      "type": "build_test",
+      "args": ["-Dplatform=null"]
+    },
+    {
+      "type": "markup_check"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.native",
+      "pattern": "<span[^>]*weight=\"bold\"",
+      "expect": true,
+      "description": "the used amount is a bold inline <span> run"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.native",
+      "pattern": "<span[^>]*mono=\"true\"",
+      "expect": true,
+      "description": "the command name is a monospace inline <span> run"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.native",
+      "pattern": "<span[^>]*foreground=\"text_muted\"",
+      "expect": true,
+      "description": "the total is a muted inline <span> run via the text_muted token"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.native",
+      "pattern": "<text[^>]*>[^<]*<span",
+      "expect": true,
+      "description": "the spans live inside one enclosing <text> paragraph"
+    },
+    {
+      "type": "snapshot_grep",
+      "patterns": [
+        "role=text name=\"Disk 128 GB of 512 GB used — run native doctor if this looks wrong\\.\"",
+        "role=button name=\"Rescan\"",
+        "name=\"25% of 512 GB used\""
+      ],
+      "description": "live snapshot shows the paragraph as ONE combined text run with resolved bindings, the Rescan button, and the derived summary"
+    },
+    {
+      "type": "llm_judge",
+      "criteria": [
+        "Model/Msg/update follow The Elm Architecture idiomatically: the model owns only the current reading (or its index into the seeded cycle), Rescan is one message, and everything derivable (the percentage, formatted strings) is computed in Zig model functions rather than stored.",
+        "The rich text is idiomatic: one <text> paragraph whose inline <span> runs carry the bold/muted/mono styling with bindings interpolated inside the spans — no paragraph split into sibling text widgets to fake mixed styling, and no wrap/overflow attributes fighting the span paragraph.",
+        "Tests are meaningful: they dispatch Rescan through the real update path across the whole cycle including the wrap-around, asserting the used amount and derived percentage at each step, not merely that the code compiles.",
+        "The markup stays declarative: the view only binds model values and dispatches messages, with the percentage math and number formatting living in Zig."
+      ],
+      "minScore": 6,
+      "advisory": true,
+      "description": "quality of the disk status card beyond compliance"
+    }
+  ]
+}

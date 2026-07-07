@@ -1,0 +1,64 @@
+{
+  "name": "brand-icon-package",
+  "description": "Exercises the one-image app-icon pipeline through native package: a single square PNG source wired in the manifest, a distributable macOS bundle whose icon artifacts are all generated from it, and no prebuilt icon containers anywhere.",
+  "prompt": "This workspace is a freshly scaffolded Native SDK native-frontend app (see README.md; the manifest is app.zon, the view src/app.native, the logic src/main.zig). The counter app itself is fine as it is — this task is about shipping it.\n\nRequirements:\n- The app must ship with a real app icon. Brand policy: icon sources live at exactly assets/brand-icon.png — a single square PNG — and every platform's icon artifacts are generated from that one image. The approved artwork is the square PNG the scaffold already ships; it just lives at the wrong path for brand policy.\n- No prebuilt icon containers (.icns, .ico) may appear anywhere in the project or be listed as icon sources; the single PNG is the only icon input.\n- Produce a distributable macOS app bundle inside the workspace. The bundle must carry a generated macOS icon wired into its metadata so the Dock and Finder show the brand mark.\n- Verify the icon source passes the SDK's own validation (`native validate`), and keep `zig build test` green.\n\nWhen you are done, make sure `zig build test` passes, state where the distributable bundle landed, and summarize how the icon is produced.",
+  "frontend": "native",
+  "timeoutMs": 1200000,
+  "maxTurns": 80,
+  "checks": [
+    {
+      "type": "build_test",
+      "args": ["-Dplatform=null"]
+    },
+    {
+      "type": "markup_check"
+    },
+    {
+      "type": "file_grep",
+      "files": "app.zon",
+      "pattern": "\\.icons\\s*=\\s*\\.\\{\\s*\"assets/brand-icon\\.png\"\\s*\\}",
+      "expect": true,
+      "description": "the manifest sources icons from the single brand PNG"
+    },
+    {
+      "type": "file_grep",
+      "files": "app.zon",
+      "pattern": "\\.(icns|ico)\"",
+      "expect": false,
+      "description": "no prebuilt icon container is listed as an icon source"
+    },
+    {
+      "type": "file_grep",
+      "files": "assets/*.icns",
+      "pattern": "icns",
+      "expect": false,
+      "description": "no hand-made .icns landed in assets/"
+    },
+    {
+      "type": "file_grep",
+      "files": "zig-out/package/brand-icon-package.app/Contents/Info.plist",
+      "pattern": "CFBundleIconFile",
+      "expect": true,
+      "description": "the packaged bundle's metadata wires an app icon"
+    },
+    {
+      "type": "file_grep",
+      "files": "zig-out/package/brand-icon-package.app/Contents/Resources/AppIcon.icns",
+      "pattern": "^icns",
+      "expect": true,
+      "description": "the bundle carries a generated AppIcon.icns (icns container magic present)"
+    },
+    {
+      "type": "llm_judge",
+      "files": ["app.zon", "src/main.zig", "src/tests.zig"],
+      "criteria": [
+        "The manifest is the single source of truth for the icon: .icons lists exactly the one square PNG at assets/brand-icon.png, and nothing else about the manifest was broken or gratuitously changed in the process.",
+        "The icon path is honest one-image pipeline usage: the PNG source drives the generated macOS artifacts through the SDK's packaging, with no hand-built .icns, no external icon tooling wired into the project, and no committed generated artifacts pretending to be sources.",
+        "The workspace stays healthy: the app still builds and its tests still pass, and the packaging work did not leak junk files or manifest hacks into the project."
+      ],
+      "minScore": 6,
+      "advisory": true,
+      "description": "quality of the icon-pipeline usage beyond compliance"
+    }
+  ]
+}

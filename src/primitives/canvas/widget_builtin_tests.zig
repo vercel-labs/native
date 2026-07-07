@@ -666,6 +666,102 @@ test "flush button groups collapse corners and interior seams in both render wal
     try std.testing.expect(spaced_list.findCommandById(widgetPartId(4, 0)) == null);
 }
 
+test "bubbles wear capsule chrome and re-ink their content by variant" {
+    const tokens = DesignTokens{};
+    const message = [_]Widget{.{
+        .id = 8,
+        .kind = .text,
+        .frame = geometry.RectF.init(12, 10, 176, 18),
+        .text = "On my way",
+    }};
+    const bubble = Widget{
+        .id = 7,
+        .kind = .bubble,
+        .frame = geometry.RectF.init(0, 0, 200, 38),
+        .children = &message,
+    };
+
+    // The received side (default variant): the muted wash in a capsule
+    // arc — `radius.lg + 12` = 22, which closes a one-line bubble into
+    // a full pill — with NO drop shadow (part 1) and NO hairline
+    // (part 3): a bubble sits in the conversation plane, not above it.
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, bubble, tokens);
+    const received_list = builder.displayList();
+    switch (received_list.findCommandById(widgetPartId(7, 2)).?.command) {
+        .fill_rounded_rect => |fill| {
+            try std.testing.expectEqualDeep(Radius.all(22), fill.radius);
+            try expectFillColor(tokens.colors.surface_subtle, fill.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(received_list.findCommandById(widgetPartId(7, 1)) == null);
+    try std.testing.expect(received_list.findCommandById(widgetPartId(7, 3)) == null);
+
+    // The sent side (primary): the monochrome accent fill, and the ink
+    // cascade re-inks the message to the knockout foreground without
+    // the author touching the child text.
+    var sent = bubble;
+    sent.variant = .primary;
+    var sent_commands: [8]CanvasCommand = undefined;
+    var sent_builder = Builder.init(&sent_commands);
+    try emitWidgetTree(&sent_builder, sent, tokens);
+    const sent_list = sent_builder.displayList();
+    switch (sent_list.findCommandById(widgetPartId(7, 2)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.accent, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (sent_list.findCommandById(widgetPartId(8, 1)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualDeep(tokens.colors.accent_text, text.color),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // Outline is the framed variant — the page fill plus the hairline —
+    // and ghost is chromeless: content only, no fill, no stroke.
+    var outline = bubble;
+    outline.variant = .outline;
+    var outline_commands: [8]CanvasCommand = undefined;
+    var outline_builder = Builder.init(&outline_commands);
+    try emitWidgetTree(&outline_builder, outline, tokens);
+    const outline_list = outline_builder.displayList();
+    switch (outline_list.findCommandById(widgetPartId(7, 2)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.background, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (outline_list.findCommandById(widgetPartId(7, 3)).?.command) {
+        .stroke_rect => |stroke| try expectFillColor(tokens.colors.border, stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    var ghost = bubble;
+    ghost.variant = .ghost;
+    var ghost_commands: [8]CanvasCommand = undefined;
+    var ghost_builder = Builder.init(&ghost_commands);
+    try emitWidgetTree(&ghost_builder, ghost, tokens);
+    try std.testing.expect(ghost_builder.displayList().findCommandById(widgetPartId(7, 2)) == null);
+    try std.testing.expect(ghost_builder.displayList().findCommandById(widgetPartId(7, 3)) == null);
+
+    // The layout walk stamps the same chrome AND the same ink cascade —
+    // a live app and a static docs scene must render the same thread.
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(sent, sent.frame, &nodes);
+    var layout_commands: [8]CanvasCommand = undefined;
+    var layout_builder = Builder.init(&layout_commands);
+    try layout.emitDisplayList(&layout_builder, tokens);
+    const layout_list = layout_builder.displayList();
+    switch (layout_list.findCommandById(widgetPartId(7, 2)).?.command) {
+        .fill_rounded_rect => |fill| {
+            try std.testing.expectEqualDeep(Radius.all(22), fill.radius);
+            try expectFillColor(tokens.colors.accent, fill.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (layout_list.findCommandById(widgetPartId(8, 1)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualDeep(tokens.colors.accent_text, text.color),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "list and menu items draw a leading vector icon with the label shifted right" {
     const tokens = DesignTokens{};
     const plain = Widget{
@@ -1070,7 +1166,10 @@ test "built-in component factory applies house composite defaults" {
     // house accordion items are borderless rows: no built-in inset —
     // the chrome draws the trigger band and hairline separator.
     try std.testing.expectEqual(@as(f32, 0), builtinComponentWidget(.accordion, .{}).layout.padding.top);
-    try std.testing.expectEqual(@as(f32, 16), builtinComponentWidget(.bubble, .{}).layout.padding.top);
+    // the chat bubble hugs its message: 10px vertical / 12px horizontal,
+    // so one body line closes into a capsule under the pill-arc chrome.
+    try std.testing.expectEqual(@as(f32, 10), builtinComponentWidget(.bubble, .{}).layout.padding.top);
+    try std.testing.expectEqual(@as(f32, 12), builtinComponentWidget(.bubble, .{}).layout.padding.left);
 
     // Defaults merge PER FIELD: an explicit gap wins for the gap alone
     // and the untouched padding keeps the house content inset — a custom
