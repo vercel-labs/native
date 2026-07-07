@@ -928,6 +928,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     .file => try self.effects.feedFileResult(record.key, record.file_outcome, record.payload),
                     .clipboard => try self.effects.feedClipboardResult(record.key, record.clipboard_outcome, record.payload),
                     .clock => try self.effects.pushReplayClock(record.clock_wall_ms),
+                    .audio => try self.effects.feedAudioEvent(record.audio_kind, record.audio_position_ms, record.audio_duration_ms, record.audio_playing),
                     .timer => {},
                 },
             }
@@ -940,6 +941,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.bindEffectsChannel(runtime);
             self.syncModel(runtime, self.canvas_window_id);
             self.applyMsg(msg);
+            self.publishAudioState(runtime);
             // Before the installing frame there is nothing to render
             // against: canvas size and scale arrive with the first frame
             // event, and the installing rebuild renders whatever model
@@ -983,10 +985,25 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 self.applyMsg(msg);
                 dispatched = true;
             }
+            self.publishAudioState(runtime);
             if (dispatched) {
                 try self.rebuild(runtime, self.canvas_window_id);
                 try self.rebuildWindowSlots(runtime);
             }
+        }
+
+        /// Mirror the effects channel's audio playback state into the
+        /// runtime so the automation snapshot reports it honestly (the
+        /// runtime is Msg-type-erased and cannot read the channel
+        /// itself). Called wherever a dispatch or drain may have moved
+        /// playback.
+        fn publishAudioState(self: *Self, runtime: *Runtime) void {
+            const audio = self.effects.audioSnapshot();
+            runtime.audio_active = audio.active;
+            runtime.audio_key = audio.key;
+            runtime.audio_playing = audio.playing;
+            runtime.audio_position_ms = audio.position_ms;
+            runtime.audio_duration_ms = audio.duration_ms;
         }
 
         /// The design tokens for the next rebuild: the model-derived
@@ -2386,6 +2403,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     }
                 },
                 .timer => |timer_event| try self.handleTimer(runtime, timer_event),
+                // Platform audio reports route back through the effects
+                // channel into the app's `on_event` Msg (and journal on
+                // the way — the recorded boundary).
+                .audio => |audio_event| if (self.effects.takeAudioMsg(audio_event)) |msg| {
+                    try self.dispatch(runtime, self.canvas_window_id, msg);
+                },
                 .effects_wake => try self.drainEffects(runtime),
                 .gpu_surface_frame => |frame_event| try self.handleFrame(runtime, frame_event),
                 .gpu_surface_resized => |resize_event| try self.handleResize(runtime, resize_event),
@@ -2527,6 +2550,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         self.init_fx_ran = true;
                         self.bindEffectsChannel(runtime);
                         init_fx(&self.model, &self.effects);
+                        self.publishAudioState(runtime);
                         // Launch lap (env-gated): boot-effect cost (asset
                         // decode/registration) splits out of the
                         // scene_loaded -> first_view_built window.

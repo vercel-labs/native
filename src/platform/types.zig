@@ -61,6 +61,10 @@ pub const Error = error{
     CredentialNotFound,
     InvalidTrayOptions,
     TrayFieldTooLarge,
+    InvalidAudioOptions,
+    AudioPathTooLarge,
+    AudioSourceNotFound,
+    AudioDecodeFailed,
     InvalidGpuSurfacePixels,
     InvalidGpuSurfacePacket,
     InvalidGpuSurfaceImage,
@@ -104,6 +108,12 @@ pub const PlatformFeature = enum {
     /// content of a declared native view container, via
     /// `PlatformServices.adoptViewSurface`. macOS system host only today.
     view_surface_adoption,
+    /// Single-player audio file playback (macOS: AVAudioPlayer in the
+    /// AppKit host; the null platform: a deterministic fake). Position
+    /// ticks and the completion arrive as `.audio` events. GTK/Win32
+    /// answer `error.UnsupportedService` today — named unsupported, not
+    /// half-implemented.
+    audio_playback,
 };
 
 pub const WebViewSourceKind = enum {
@@ -1139,6 +1149,32 @@ pub const TimerEvent = struct {
     timestamp_ns: u64 = 0,
 };
 
+/// Longest audio file path `audioLoad` accepts; longer paths are rejected
+/// with `error.AudioPathTooLarge` before the platform is asked.
+pub const max_audio_path_bytes: usize = 1024;
+
+/// How the platform's audio player reports back. `loaded` answers a
+/// successful `audioLoad` with the real decoded duration; `position` ticks
+/// at the host's honest coarse cadence (about every 500ms) only while
+/// playing; `completed` fires exactly once when a track reaches its natural
+/// end; `failed` reports an asynchronous decode/device failure. Pause,
+/// stop, seek, and volume never echo events — the caller already knows.
+pub const AudioEventKind = enum(u8) {
+    loaded,
+    position,
+    completed,
+    failed,
+};
+
+/// One report from the platform audio player. Positions and durations are
+/// in milliseconds; `playing` is the player's honest state at emit time.
+pub const AudioEvent = struct {
+    kind: AudioEventKind,
+    position_ms: u64 = 0,
+    duration_ms: u64 = 0,
+    playing: bool = false,
+};
+
 pub const FileDropEvent = struct {
     window_id: WindowId = 1,
     view_label: []const u8 = "",
@@ -1683,6 +1719,9 @@ pub const Event = union(enum) {
     gpu_surface_scroll_driver: GpuSurfaceScrollDriverEvent,
     context_menu_action: ContextMenuActionEvent,
     widget_accessibility_action: WidgetAccessibilityActionEvent,
+    /// Audio player reports: load acknowledgment, coarse position ticks
+    /// while playing, one completion at natural end, async failures.
+    audio: AudioEvent,
 
     pub fn name(self: Event) []const u8 {
         return switch (self) {
@@ -1709,6 +1748,7 @@ pub const Event = union(enum) {
             .gpu_surface_scroll_driver => "gpu_surface_scroll_driver",
             .context_menu_action => "context_menu_action",
             .widget_accessibility_action => "widget_accessibility_action",
+            .audio => "audio",
         };
     }
 };
@@ -1803,6 +1843,32 @@ pub const PlatformServices = struct {
     request_gpu_surface_frame_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8) anyerror!void = null,
     start_timer_fn: ?*const fn (context: ?*anyopaque, id: u64, interval_ns: u64, repeats: bool) anyerror!void = null,
     cancel_timer_fn: ?*const fn (context: ?*anyopaque, id: u64) anyerror!void = null,
+    /// Load a local audio file into THE app's single audio player,
+    /// replacing whatever was loaded before, paused at position zero. A
+    /// successful load is acknowledged asynchronously with one
+    /// `.audio`/`.loaded` event carrying the real decoded duration; an
+    /// unreadable path fails synchronously (`error.AudioSourceNotFound` /
+    /// `error.AudioDecodeFailed`). One player is the whole surface — a
+    /// music app plays one track at a time, and pretending otherwise
+    /// would be mixer design this layer has not earned. Loop-thread only,
+    /// like every audio entry below.
+    audio_load_fn: ?*const fn (context: ?*anyopaque, path: []const u8) anyerror!void = null,
+    /// Start or resume the loaded player. While playing the platform
+    /// emits `.audio`/`.position` events at a coarse honest cadence
+    /// (about every 500ms — position is a readout, not a frame clock)
+    /// and one `.audio`/`.completed` when the track ends naturally.
+    audio_play_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    /// Pause in place; position holds and ticks stop. No event echoes —
+    /// the caller commanded it, so the caller already knows.
+    audio_pause_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    /// Stop and unload the player entirely; a new `audio_load_fn` call is
+    /// required before anything can play again.
+    audio_stop_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    /// Jump the loaded player to `position_ms` (clamped to the duration).
+    /// Works while playing or paused.
+    audio_seek_fn: ?*const fn (context: ?*anyopaque, position_ms: u64) anyerror!void = null,
+    /// Set the player volume, `0.0` (silent) through `1.0` (full).
+    audio_set_volume_fn: ?*const fn (context: ?*anyopaque, volume: f32) anyerror!void = null,
     /// Nudge the platform event loop from ANY thread: the platform must
     /// deliver a `.wake` event on its loop thread as soon as possible.
     /// One of exactly two `PlatformServices` entries that may be called
@@ -2206,6 +2272,43 @@ pub const PlatformServices = struct {
         return cancel_fn(self.context, id);
     }
 
+    /// Load a local audio file into the app's single audio player (see
+    /// `audio_load_fn`). Platforms without audio playback answer
+    /// `error.UnsupportedService`; bad arguments are rejected here before
+    /// the platform is asked.
+    pub fn audioLoad(self: PlatformServices, path: []const u8) anyerror!void {
+        if (path.len == 0) return error.InvalidAudioOptions;
+        if (path.len > max_audio_path_bytes) return error.AudioPathTooLarge;
+        const load_fn = self.audio_load_fn orelse return error.UnsupportedService;
+        return load_fn(self.context, path);
+    }
+
+    pub fn audioPlay(self: PlatformServices) anyerror!void {
+        const play_fn = self.audio_play_fn orelse return error.UnsupportedService;
+        return play_fn(self.context);
+    }
+
+    pub fn audioPause(self: PlatformServices) anyerror!void {
+        const pause_fn = self.audio_pause_fn orelse return error.UnsupportedService;
+        return pause_fn(self.context);
+    }
+
+    pub fn audioStop(self: PlatformServices) anyerror!void {
+        const stop_fn = self.audio_stop_fn orelse return error.UnsupportedService;
+        return stop_fn(self.context);
+    }
+
+    pub fn audioSeek(self: PlatformServices, position_ms: u64) anyerror!void {
+        const seek_fn = self.audio_seek_fn orelse return error.UnsupportedService;
+        return seek_fn(self.context, position_ms);
+    }
+
+    pub fn audioSetVolume(self: PlatformServices, volume: f32) anyerror!void {
+        if (!(volume >= 0.0 and volume <= 1.0)) return error.InvalidAudioOptions;
+        const volume_fn = self.audio_set_volume_fn orelse return error.UnsupportedService;
+        return volume_fn(self.context, volume);
+    }
+
     /// Ask the platform loop to deliver a `.wake` event on its own thread.
     /// Safe to call from any thread; a missing implementation is an error
     /// so callers never assume a nudge happened when it did not.
@@ -2337,6 +2440,7 @@ fn defaultSupportsFeature(services: PlatformServices, feature: PlatformFeature) 
         .gpu_surface_scroll_drivers => services.set_gpu_surface_scroll_drivers_fn != null,
         .context_menus => services.show_context_menu_fn != null,
         .view_surface_adoption => services.adopt_view_surface_fn != null,
+        .audio_playback => services.audio_load_fn != null,
     };
 }
 

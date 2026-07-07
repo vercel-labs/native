@@ -221,6 +221,11 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         .response => record.fetch_outcome == .rejected,
         .file => record.file_outcome == .rejected,
         .clipboard => record.clipboard_outcome == .rejected,
+        // Audio rejections are loop-side validation (path bounds) that
+        // refuses again; everything else — loaded acknowledgments,
+        // position ticks, completions, platform failures — is an
+        // external input and must be fed.
+        .audio => record.audio_kind == .rejected,
         .line, .clock => false,
     };
 }

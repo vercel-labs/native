@@ -33,6 +33,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                     .diagnostics = automationDiagnostics(self),
                     .frame_profile = automationFrameProfile(self),
                     .tray = automationTray(self),
+                    .audio = automationAudio(self),
                     .errors = self.dispatchErrors(),
                     .source = self.loaded_source,
                     .widget_node_budget = canvas_limits.max_canvas_widget_nodes_per_view,
@@ -65,6 +66,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                 .diagnostics = automationDiagnostics(self),
                 .frame_profile = automationFrameProfile(self),
                 .tray = automationTray(self),
+                .audio = automationAudio(self),
                 .errors = self.dispatchErrors(),
                 .source = self.loaded_source,
                 .widget_node_budget = canvas_limits.max_canvas_widget_nodes_per_view,
@@ -94,6 +96,21 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
             return .{
                 .title = self.tray_title,
                 .items = self.automation_tray_items[0..count],
+            };
+        }
+
+        /// Live audio playback as the ui-app layer last mirrored it
+        /// (`Runtime.audio_*`), or null when nothing is loaded. The
+        /// player is outside every window capture, so the snapshot's
+        /// advancing `position_ms` is the automation-visible evidence
+        /// music is actually playing.
+        fn automationAudio(self: *Runtime) ?automation.snapshot.Audio {
+            if (!self.audio_active) return null;
+            return .{
+                .key = self.audio_key,
+                .playing = self.audio_playing,
+                .position_ms = self.audio_position_ms,
+                .duration_ms = self.audio_duration_ms,
             };
         }
 

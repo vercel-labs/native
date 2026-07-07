@@ -31,7 +31,21 @@ typedef enum {
     NATIVE_SDK_APPKIT_EVENT_WAKE = 17,
     NATIVE_SDK_APPKIT_EVENT_GPU_SURFACE_SCROLL_DRIVER = 18,
     NATIVE_SDK_APPKIT_EVENT_CONTEXT_MENU_ACTION = 19,
+    NATIVE_SDK_APPKIT_EVENT_AUDIO = 20,
 } native_sdk_appkit_event_kind_t;
+
+/* Audio player reports (EVENT_AUDIO payloads). LOADED acknowledges a
+ * successful native_sdk_appkit_audio_load with the decoded duration;
+ * POSITION ticks at a coarse honest cadence (~500ms) only while playing;
+ * COMPLETED fires exactly once at a track's natural end; FAILED reports
+ * an asynchronous decode/device failure. Ordinals are mirrored by the
+ * Zig side (audioEventKindFromInt). */
+typedef enum {
+    NATIVE_SDK_APPKIT_AUDIO_EVENT_LOADED = 0,
+    NATIVE_SDK_APPKIT_AUDIO_EVENT_POSITION = 1,
+    NATIVE_SDK_APPKIT_AUDIO_EVENT_COMPLETED = 2,
+    NATIVE_SDK_APPKIT_AUDIO_EVENT_FAILED = 3,
+} native_sdk_appkit_audio_event_kind_t;
 
 typedef enum {
     NATIVE_SDK_APPKIT_COLOR_SCHEME_LIGHT = 0,
@@ -250,6 +264,13 @@ typedef struct {
      * profile can attribute host time without a second channel. */
     uint64_t packet_decode_ns;
     uint64_t packet_draw_ns;
+    /* EVENT_AUDIO payloads: the report kind
+     * (native_sdk_appkit_audio_event_kind_t) plus the player's
+     * position/duration readout in milliseconds at emit time. */
+    int audio_kind;
+    uint64_t audio_position_ms;
+    uint64_t audio_duration_ms;
+    int audio_playing;
 } native_sdk_appkit_event_t;
 
 typedef void (*native_sdk_appkit_event_callback_t)(void *context, const native_sdk_appkit_event_t *event);
@@ -364,6 +385,21 @@ int native_sdk_appkit_upload_gpu_surface_image(native_sdk_appkit_host_t *host, u
 int native_sdk_appkit_remove_gpu_surface_image(native_sdk_appkit_host_t *host, uint64_t image_id);
 void native_sdk_appkit_start_timer(native_sdk_appkit_host_t *host, uint64_t timer_id, uint64_t interval_ns, int repeats);
 void native_sdk_appkit_cancel_timer(native_sdk_appkit_host_t *host, uint64_t timer_id);
+
+/* The app's single audio player (AVAudioPlayer). Load replaces whatever
+ * was loaded before, paused at position zero; returns 0 on success, 1
+ * when the file is missing/unreadable, 2 when it cannot be decoded. A
+ * successful load is followed by one EVENT_AUDIO/LOADED on the run loop
+ * carrying the decoded duration. Play/pause/stop/seek/set_volume return
+ * 1 when applied, 0 when there is no loaded player to apply to (stop,
+ * pause, and set_volume treat that as a harmless no-op on the Zig side).
+ * All entries are loop-thread only. */
+int native_sdk_appkit_audio_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len);
+int native_sdk_appkit_audio_play(native_sdk_appkit_host_t *host);
+int native_sdk_appkit_audio_pause(native_sdk_appkit_host_t *host);
+int native_sdk_appkit_audio_stop(native_sdk_appkit_host_t *host);
+int native_sdk_appkit_audio_seek(native_sdk_appkit_host_t *host, uint64_t position_ms);
+int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double volume);
 /* Thread-safe: nudges the main run loop to emit a WAKE event. May be
  * called from any thread (worker threads streaming effect results). */
 void native_sdk_appkit_wake(native_sdk_appkit_host_t *host);

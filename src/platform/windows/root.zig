@@ -311,11 +311,13 @@ pub const WindowsPlatform = struct {
             .app_activation_events,
             .gpu_surfaces,
             => self.web_engine == .system,
-            // Native scroll drivers, native context menus, and app-owned
-            // view-surface adoption are macOS-only today; Win32 keeps the
-            // engine's wheel physics (TrackPopupMenu is the natural future
-            // context-menu seam — the tray already uses it).
-            .gpu_surface_scroll_drivers, .context_menus, .view_surface_adoption => false,
+            // Native scroll drivers, native context menus, app-owned
+            // view-surface adoption, and audio playback are macOS-only
+            // today; Win32 keeps the engine's wheel physics
+            // (TrackPopupMenu is the natural future context-menu seam —
+            // the tray already uses it) and wires no audio services, so
+            // every audio call answers `error.UnsupportedService`.
+            .gpu_surface_scroll_drivers, .context_menus, .view_surface_adoption, .audio_playback => false,
         };
     }
 

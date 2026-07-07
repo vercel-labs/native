@@ -172,7 +172,7 @@ const NativePanelsApp = struct {
                     try self.apply(runtime, command);
                 }
             },
-            .appearance_changed, .shortcut, .timer, .effects_wake, .files_dropped, .gpu_surface_frame, .gpu_surface_resized, .gpu_surface_input, .canvas_widget_pointer, .canvas_widget_keyboard, .canvas_widget_scroll, .canvas_widget_file_drop, .canvas_widget_drag, .canvas_widget_context_menu, .canvas_widget_context_menu_request, .canvas_widget_dismiss, .canvas_widget_context_press, .canvas_widget_resize, .window_closed, .automation_provenance, .lifecycle => {},
+            .appearance_changed, .shortcut, .timer, .effects_wake, .audio, .files_dropped, .gpu_surface_frame, .gpu_surface_resized, .gpu_surface_input, .canvas_widget_pointer, .canvas_widget_keyboard, .canvas_widget_scroll, .canvas_widget_file_drop, .canvas_widget_drag, .canvas_widget_context_menu, .canvas_widget_context_menu_request, .canvas_widget_dismiss, .canvas_widget_context_press, .canvas_widget_resize, .window_closed, .automation_provenance, .lifecycle => {},
         }
     }
 

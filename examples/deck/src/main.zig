@@ -9,8 +9,10 @@
 //! (the `ui.chart` spectrum, mono paragraph readouts, the seven-segment
 //! elapsed readout) over two small AI-generated textures registered
 //! through the runtime image channel; nothing forks the engine. Playback
-//! is soundboard's honest simulation: a repeating timer effect advances
-//! the progress clock, no audio is decoded.
+//! is REAL: the audio effect channel drives the platform player over the
+//! shared committed catalog (the mp3s live once, in the soundboard's
+//! gitignored assets), and a failed load lands the honest NO MEDIA
+//! remedy on the VFD instead of a crash or silence.
 //!
 //! Authoring split (markup where it fits): the playlist's status strip is
 //! a `.native` view compiled at comptime; the faceplate and the playlist
@@ -74,11 +76,22 @@ pub const weave_texture_bytes = @embedFile("textures/weave.png");
 pub const plate_texture_id: canvas.ImageId = 1;
 pub const weave_texture_id: canvas.ImageId = 2;
 
-/// Boot effect: decode and register both textures. Registration is
+/// Album cover image ids derive from album ids, offset past the two
+/// texture ids so the registries never collide (2 textures + 8 covers =
+/// 10 of the runtime's 16 image slots).
+pub fn coverImageId(album_id: u8) canvas.ImageId {
+    return weave_texture_id + album_id;
+}
+
+/// Boot effect: decode and register the two textures plus every album's
+/// committed cover from the manifest's art slots. Registration is
 /// synchronous on the effects channel; ids reach the model only on
-/// success, so a failed decode leaves the chrome pure vector (the
-/// texture draw moves offscreen) — a bad asset can never break
-/// presentation.
+/// success, so a failed decode leaves that surface on its vector
+/// fallback (the chrome's texture draw moves offscreen, the sleeve pane
+/// stays an engraved plate) — a bad asset can never break presentation.
+/// The covers are JPEG: live macOS decodes them through the platform
+/// codec, while the null platform's strict test decoder refuses them and
+/// the suite pins the degrade instead.
 pub fn boot(model: *Model, fx: *model_mod.Effects) void {
     if (fx.registerImageBytes(plate_texture_id, plate_texture_bytes)) |_| {
         model.texture_plate = plate_texture_id;
@@ -86,6 +99,14 @@ pub fn boot(model: *Model, fx: *model_mod.Effects) void {
     if (fx.registerImageBytes(weave_texture_id, weave_texture_bytes)) |_| {
         model.texture_weave = weave_texture_id;
     } else |_| {}
+    inline for (model_mod.albums, 0..) |album, index| {
+        if (album.art) |art_path| {
+            const image_id = coverImageId(album.id);
+            if (fx.registerImageBytes(image_id, @embedFile(art_path))) |_| {
+                model.covers[index] = image_id;
+            } else |_| {}
+        }
+    }
 }
 
 // --------------------------------------------------------------- commands

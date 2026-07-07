@@ -38,6 +38,7 @@ const AppKitEventKind = enum(c_int) {
     wake = 17,
     gpu_surface_scroll_driver = 18,
     context_menu_action = 19,
+    audio = 20,
 };
 
 const AppKitEvent = extern struct {
@@ -95,6 +96,13 @@ const AppKitEvent = extern struct {
     /// event (0 when no packet present happened since the last one).
     packet_decode_ns: u64,
     packet_draw_ns: u64,
+    /// Audio player report payload (`kind == .audio`): the
+    /// `AudioEventKind` ordinal plus the player's position/duration
+    /// readout at emit time.
+    audio_kind: c_int,
+    audio_position_ms: u64,
+    audio_duration_ms: u64,
+    audio_playing: c_int,
 };
 
 const AppKitCallback = *const fn (context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) void;
@@ -143,6 +151,12 @@ extern fn native_sdk_appkit_set_gpu_surface_scroll_drivers(host: *AppKitHost, wi
 extern fn native_sdk_appkit_show_context_menu(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, token: u64, items: [*]const AppKitContextMenuItem, count: usize) c_int;
 extern fn native_sdk_appkit_start_timer(host: *AppKitHost, timer_id: u64, interval_ns: u64, repeats: c_int) void;
 extern fn native_sdk_appkit_cancel_timer(host: *AppKitHost, timer_id: u64) void;
+extern fn native_sdk_appkit_audio_load(host: *AppKitHost, path: [*]const u8, path_len: usize) c_int;
+extern fn native_sdk_appkit_audio_play(host: *AppKitHost) c_int;
+extern fn native_sdk_appkit_audio_pause(host: *AppKitHost) c_int;
+extern fn native_sdk_appkit_audio_stop(host: *AppKitHost) c_int;
+extern fn native_sdk_appkit_audio_seek(host: *AppKitHost, position_ms: u64) c_int;
+extern fn native_sdk_appkit_audio_set_volume(host: *AppKitHost, volume: f64) c_int;
 extern fn native_sdk_appkit_wake(host: *AppKitHost) void;
 extern fn native_sdk_appkit_present_gpu_surface_pixels(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, width: usize, height: usize, scale: f64, has_dirty_rect: c_int, dirty_x: f64, dirty_y: f64, dirty_width: f64, dirty_height: f64, rgba8: [*]const u8, rgba8_len: usize) c_int;
 extern fn native_sdk_appkit_present_gpu_surface_packet(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, surface_width: f64, surface_height: f64, scale: f64, clear_r: u8, clear_g: u8, clear_b: u8, clear_a: u8, requires_render: c_int, command_count: usize, unsupported_command_count: usize, representable: c_int, json: [*]const u8, json_len: usize) c_int;
@@ -496,6 +510,12 @@ pub const MacPlatform = struct {
                 .emit_window_event_fn = emitWindowEvent,
                 .start_timer_fn = startTimer,
                 .cancel_timer_fn = cancelTimer,
+                .audio_load_fn = audioLoad,
+                .audio_play_fn = audioPlay,
+                .audio_pause_fn = audioPause,
+                .audio_stop_fn = audioStop,
+                .audio_seek_fn = audioSeek,
+                .audio_set_volume_fn = audioSetVolume,
                 .wake_fn = wake,
                 .request_frame_fn = requestFrame,
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
@@ -541,6 +561,10 @@ pub const MacPlatform = struct {
             .gpu_surfaces,
             .gpu_surface_scroll_drivers,
             .view_surface_adoption,
+            // Audio lives in the AppKit host (AVAudioPlayer); the
+            // Chromium host stubs the C ABI and reports honestly
+            // unsupported rather than half-implementing a second player.
+            .audio_playback,
             => self.web_engine == .system,
         };
     }
@@ -696,6 +720,12 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             .token = event.widget_id,
             .item_id = event.menu_item_id,
         } }),
+        .audio => state.emit(.{ .audio = .{
+            .kind = audioEventKindFromInt(event.audio_kind),
+            .position_ms = event.audio_position_ms,
+            .duration_ms = event.audio_duration_ms,
+            .playing = event.audio_playing != 0,
+        } }),
         .widget_accessibility_action => if (widgetAccessibilityActionFromInt(event.widget_action)) |action| {
             state.emit(.{ .widget_accessibility_action = .{
                 .window_id = event.window_id,
@@ -724,6 +754,18 @@ fn appkitBridgeCallback(context: ?*anyopaque, window_id: u64, webview_label: [*]
         .window_id = window_id,
         .webview_label = webview_label[0..webview_label_len],
     } });
+}
+
+/// Ordinals match `native_sdk_appkit_audio_event_kind_t` in
+/// appkit_host.h; anything unknown degrades to `.failed` so a host/SDK
+/// skew is loud in the app instead of undefined behavior here.
+fn audioEventKindFromInt(value: c_int) platform_mod.AudioEventKind {
+    return switch (value) {
+        0 => .loaded,
+        1 => .position,
+        2 => .completed,
+        else => .failed,
+    };
 }
 
 fn gpuSurfaceInputEventFromAppKitEvent(event: *const AppKitEvent) platform_mod.GpuSurfaceInputEvent {
@@ -1067,6 +1109,45 @@ fn startTimer(context: ?*anyopaque, id: u64, interval_ns: u64, repeats: bool) an
 fn cancelTimer(context: ?*anyopaque, id: u64) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     native_sdk_appkit_cancel_timer(self.host, id);
+}
+
+/// Map the audio host's synchronous load result: 0 loaded, 1 the file is
+/// missing/unreadable, anything else a decode failure. The asynchronous
+/// `.loaded` acknowledgment (with the decoded duration) follows as an
+/// `.audio` event on the run loop.
+fn audioLoad(context: ?*anyopaque, path: []const u8) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    return switch (native_sdk_appkit_audio_load(self.host, path.ptr, path.len)) {
+        0 => {},
+        1 => error.AudioSourceNotFound,
+        else => error.AudioDecodeFailed,
+    };
+}
+
+fn audioPlay(context: ?*anyopaque) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_audio_play(self.host) == 0) return error.InvalidAudioOptions;
+}
+
+fn audioPause(context: ?*anyopaque) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    _ = native_sdk_appkit_audio_pause(self.host);
+}
+
+fn audioStop(context: ?*anyopaque) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    _ = native_sdk_appkit_audio_stop(self.host);
+}
+
+fn audioSeek(context: ?*anyopaque, position_ms: u64) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_audio_seek(self.host, position_ms) == 0) return error.InvalidAudioOptions;
+}
+
+fn audioSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    _ = native_sdk_appkit_audio_set_volume(self.host, volume);
 }
 
 /// Thread-safe: dispatches onto the main queue, which emits `.wake` on

@@ -462,6 +462,8 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
             app_mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
         }
         app_mod.linkFramework("AppKit", .{});
+        // The audio playback service (AVAudioPlayer in the AppKit host).
+        app_mod.linkFramework("AVFoundation", .{});
         app_mod.linkFramework("Foundation", .{});
         app_mod.linkFramework("CoreText", .{});
         app_mod.linkFramework("UniformTypeIdentifiers", .{});

@@ -686,6 +686,29 @@ fx.startTimer(.{
 
 Timer rules: starting a key that is already an active timer REPLACES it (interval/mode/`on_fire` update in place — the friendly behavior for an auto-refresh whose cadence changes); `fx.cancelTimer(key)` stops it, unknown keys are a no-op; rejection is never silent — a full timer table, a zero `interval_ms`, or a platform without a timer service delivers exactly one Msg with outcome `.rejected`. In the fake executor, `pendingTimerAt(0)` records `key`/`interval_ms`/`mode` and `fireTimer(key)` fires by hand (one-shot slots retire after the fire), draining through the same `.wake` path as `feedExit`. The mode enum is public as `native_sdk.TimerMode` (`.one_shot`/`.repeating`) — asserting a recorded request's mode must qualify it (`try testing.expectEqual(native_sdk.TimerMode.repeating, request.mode)`; a bare `.repeating` as `expectEqual`'s first argument does not infer).
 
+`fx.playAudio` plays a local audio file through the platform's single audio player (macOS: AVAudioPlayer in the AppKit host), and the transport rides the same channel: `fx.pauseAudio()` / `fx.resumeAudio()` / `fx.stopAudio()` / `fx.seekAudio(position_ms)` / `fx.setAudioVolume(0.0—1.0)`. One player is the whole surface — a new `playAudio` replaces whatever played before, exactly like a music app switching tracks. The audio key is its own namespace (like timer keys) and consumes none of the 16 effect slots; every report arrives as one `on_event` Msg:
+
+```zig
+pub const Msg = union(enum) {
+    audio_event: native_sdk.EffectAudio,   // the fixed payload type
+    ...
+};
+
+.play_track => |track| fx.playAudio(.{
+    .key = track.id,                        // echoed in every event
+    .path = track.path,                     // local file, copied at call time
+    .on_event = Effects.audioMsg(.audio_event),
+}),
+.audio_event => |event| switch (event.kind) {
+    .loaded => model.duration_ms = event.duration_ms,   // the real decoded duration
+    .position => model.elapsed_ms = event.position_ms,  // ~every 500ms while playing
+    .completed => model.playNext(fx),                   // exactly once, at natural end
+    .failed, .rejected => model.noteAudioUnavailable(), // never a crash, never silence
+},
+```
+
+Audio rules: `event.kind` is explicit — `.loaded` acknowledges a successful load (position ticks and `.completed` follow only after it), `.position` is a coarse honest readout (~500ms cadence — a readout, not a frame clock; drive animations from your model, not from tick density), `.completed` fires exactly once with position pinned to the duration, `.failed` reports an unreadable file, an async decode error, or a platform without audio playback (GTK/Win32 today — named unsupported, not half-implemented), `.rejected` reports loop-side validation (empty or over-long path, `max_effect_audio_path_bytes`). All payload fields are plain data — safe to store in the model, no drain-scratch copying. Pause/stop/seek/volume never echo events (the caller commanded them); volume is remembered across tracks. The automation snapshot reports playback honestly (`audio key=... state=playing|paused position_ms=... duration_ms=...`) — an advancing `position_ms` is the automation-visible evidence music is actually playing. In the fake executor, `pendingAudio()` records the single channel's `key`/`path`/`playing`/`volume`, `feedAudioEvent(.position, 1_500, 89_160, true)` feeds any event by hand (draining through the same `.wake` path), and `audioSnapshot()` exposes the mirrors; under the real executor the test harness's null platform is a deterministic fake player — `setAudioDuration(suffix, ms)` seeds durations, `takeAudioLoaded()` / `advanceAudio(delta_ms)` synthesize the platform events a live host would deliver, and position never advances on its own.
+
 Test effects with the fake executor — deterministic, no processes, no network:
 
 ```zig

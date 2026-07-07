@@ -14,3 +14,7 @@ package-lock.json
 
 # Local iOS build products.
 Libraries/
+
+# Prepared example music (tools/prepare-example-music.sh). The committed
+# music-manifest.zon describes the catalog; the audio itself stays local.
+soundboard/assets/music/

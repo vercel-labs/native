@@ -214,6 +214,17 @@ pub const Tray = struct {
     items: []const TrayItem = &.{},
 };
 
+/// Live audio playback state (the effects channel's single player), as
+/// the runtime last mirrored it. Speakers are outside every window
+/// capture, so `state=` and the advancing `position_ms` are the
+/// automation-visible evidence music is actually playing.
+pub const Audio = struct {
+    key: u64 = 0,
+    playing: bool = false,
+    position_ms: u64 = 0,
+    duration_ms: u64 = 0,
+};
+
 pub const Input = struct {
     windows: []const Window,
     views: []const platform.ViewInfo = &.{},
@@ -236,6 +247,9 @@ pub const Input = struct {
     text_layout_line_budget: usize = 0,
     /// The live status item, when the app created one.
     tray: ?Tray = null,
+    /// Live audio playback, when the app started any (null once stopped
+    /// or failed — an idle player is honest, not zeroed-out noise).
+    audio: ?Audio = null,
     /// The most recent degraded dispatch errors, oldest first (bounded
     /// ring; `diagnostics.dispatch_error_count` is the lifetime total).
     errors: []const DispatchError = &.{},
@@ -530,6 +544,14 @@ pub fn writeText(input: Input, writer: anytype) !void {
                 item.enabled,
             });
         }
+    }
+    if (input.audio) |audio| {
+        try writer.print("audio key={d} state={s} position_ms={d} duration_ms={d}\n", .{
+            audio.key,
+            if (audio.playing) "playing" else "paused",
+            audio.position_ms,
+            audio.duration_ms,
+        });
     }
     for (input.errors) |dispatch_error| {
         if (dispatch_error.detail_len > 0) {

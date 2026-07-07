@@ -109,7 +109,14 @@ pub const playlist_chrome_leading: f32 = 62;
 /// status strip all inset content by this much.
 pub const rack_pad: f32 = 8;
 pub const statusbar_height: f32 = 39; // 38 strip + 1 separator
-pub const cue_strip_height: f32 = 24;
+/// The bottom deck strip: the loaded record's sleeve window plus the
+/// up-next cues. Tall enough to case the sleeve with the strip's own
+/// padding as its lip.
+pub const cue_strip_height: f32 = 52;
+pub const cue_strip_pad: f32 = 4;
+/// The sleeve window: the current album's committed cover (or its
+/// engraved fallback plate) at the strip's left.
+pub const sleeve_size: f32 = cue_strip_height - cue_strip_pad * 2; // 44
 pub const ledger_caption_height: f32 = 16;
 pub const ledger_row_height: f32 = 27;
 pub const ledger_row_gap: f32 = 1;

@@ -321,6 +321,7 @@ const EventTag = enum(u8) {
     gpu_surface_scroll_driver = 21,
     context_menu_action = 22,
     widget_accessibility_action = 23,
+    audio = 24,
 };
 
 fn writeModifiers(cursor: *WriteCursor, modifiers: platform.ShortcutModifiers) JournalError!void {
@@ -456,6 +457,16 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeEnum(EventTag.timer);
             try cursor.writeInt(u64, timer.id);
             try cursor.writeInt(u64, timer.timestamp_ns);
+        },
+        // Recorded for stream fidelity; inert on replay (the journaled
+        // audio EFFECT records are the Msg source — `takeAudioMsg`
+        // ignores platform audio events under replay).
+        .audio => |audio| {
+            try cursor.writeEnum(EventTag.audio);
+            try cursor.writeEnum(audio.kind);
+            try cursor.writeInt(u64, audio.position_ms);
+            try cursor.writeInt(u64, audio.duration_ms);
+            try cursor.writeBool(audio.playing);
         },
         .files_dropped => |drop| {
             try cursor.writeEnum(EventTag.files_dropped);
@@ -641,6 +652,15 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
                 .timestamp_ns = try cursor.readInt(u64),
             } };
         },
+        .audio => blk: {
+            const kind = try cursor.readEnum(platform.AudioEventKind);
+            break :blk .{ .audio = .{
+                .kind = kind,
+                .position_ms = try cursor.readInt(u64),
+                .duration_ms = try cursor.readInt(u64),
+                .playing = try cursor.readBool(),
+            } };
+        },
         .files_dropped => blk: {
             const window_id = try cursor.readInt(u64);
             const view_label = try cursor.readStr();
@@ -799,6 +819,10 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeInt(u64, record.timer_timestamp_ns);
     try cursor.writeEnum(record.timer_outcome);
     try cursor.writeInt(i64, record.clock_wall_ms);
+    try cursor.writeEnum(record.audio_kind);
+    try cursor.writeInt(u64, record.audio_position_ms);
+    try cursor.writeInt(u64, record.audio_duration_ms);
+    try cursor.writeBool(record.audio_playing);
     return buffer[0..cursor.len];
 }
 
@@ -824,6 +848,10 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         .timer_timestamp_ns = try cursor.readInt(u64),
         .timer_outcome = try cursor.readEnum(runtime_effects.EffectTimerOutcome),
         .clock_wall_ms = try cursor.readInt(i64),
+        .audio_kind = try cursor.readEnum(runtime_effects.EffectAudioEventKind),
+        .audio_position_ms = try cursor.readInt(u64),
+        .audio_duration_ms = try cursor.readInt(u64),
+        .audio_playing = try cursor.readBool(),
     };
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
@@ -1115,6 +1143,18 @@ test "event codec round-trips every payload variant" {
         try testing.expectEqual(@as(u64, 123456), decoded.timer.timestamp_ns);
     }
     {
+        const decoded = try roundTripEvent(.{ .audio = .{
+            .kind = .completed,
+            .position_ms = 89_160,
+            .duration_ms = 89_160,
+            .playing = false,
+        } });
+        try testing.expectEqual(platform.AudioEventKind.completed, decoded.audio.kind);
+        try testing.expectEqual(@as(u64, 89_160), decoded.audio.position_ms);
+        try testing.expectEqual(@as(u64, 89_160), decoded.audio.duration_ms);
+        try testing.expect(!decoded.audio.playing);
+    }
+    {
         const paths = [_][]const u8{ "/tmp/a.txt", "/tmp/b.txt" };
         const decoded = try roundTripEvent(.{ .files_dropped = .{
             .window_id = 1,
@@ -1240,6 +1280,22 @@ test "effect codec round-trips payloads and outcomes" {
     try testing.expectEqualStrings("warning: x", exit_decoded.stderr_tail);
     try testing.expectEqual(@as(i32, 2), exit_decoded.code);
     try testing.expect(exit_decoded.output_truncated);
+
+    const audio_encoded = try encodeEffect(.{
+        .kind = .audio,
+        .key = 41,
+        .audio_kind = .position,
+        .audio_position_ms = 1_500,
+        .audio_duration_ms = 89_160,
+        .audio_playing = true,
+    }, &buffer);
+    const audio_decoded = try decodeEffect(audio_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.audio, audio_decoded.kind);
+    try testing.expectEqual(@as(u64, 41), audio_decoded.key);
+    try testing.expectEqual(runtime_effects.EffectAudioEventKind.position, audio_decoded.audio_kind);
+    try testing.expectEqual(@as(u64, 1_500), audio_decoded.audio_position_ms);
+    try testing.expectEqual(@as(u64, 89_160), audio_decoded.audio_duration_ms);
+    try testing.expect(audio_decoded.audio_playing);
 }
 
 test "header, checkpoint, screenshot, and end codecs round-trip" {

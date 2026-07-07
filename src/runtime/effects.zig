@@ -424,6 +424,39 @@ pub const EffectTimer = struct {
     outcome: EffectTimerOutcome = .fired,
 };
 
+/// Longest audio file path `playAudio` accepts, mirroring the platform
+/// bound. Longer paths deliver exactly one `.rejected` audio event Msg.
+pub const max_effect_audio_path_bytes: usize = platform.max_audio_path_bytes;
+
+/// How an audio event Msg came to be. `loaded` acknowledges a successful
+/// `playAudio` load with the real decoded duration; `position` ticks at
+/// the platform's coarse honest cadence (~500ms) only while playing;
+/// `completed` fires exactly once at the track's natural end; `failed`
+/// reports a load/decode/device failure or a platform without audio
+/// playback — always as a Msg, never a crash and never silence;
+/// `rejected` reports a command the effects layer refused before the
+/// platform was asked (an empty or oversized path).
+pub const EffectAudioEventKind = enum(u8) {
+    loaded,
+    position,
+    completed,
+    failed,
+    rejected,
+};
+
+/// Payload for `on_event` Msg constructors of audio effects. Positions
+/// and durations are milliseconds; `playing` is the player's honest
+/// state when the event was produced. All fields are plain data — safe
+/// to store in the model, unlike the borrowed byte slices other effect
+/// families carry.
+pub const EffectAudio = struct {
+    key: u64,
+    kind: EffectAudioEventKind,
+    position_ms: u64 = 0,
+    duration_ms: u64 = 0,
+    playing: bool = false,
+};
+
 /// Base platform timer id for fx timers: slot N arms the platform timer
 /// `effect_timer_platform_id_base + N`. Lives in the framework-reserved
 /// id range (`platform.reserved_timer_id_base`) with an `0x00f7_0000`
@@ -449,6 +482,7 @@ pub const EffectResultKind = enum(u8) {
     clipboard = 5,
     timer = 6,
     clock = 7,
+    audio = 8,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
@@ -485,6 +519,11 @@ pub const EffectResultRecord = struct {
     timer_outcome: EffectTimerOutcome = .fired,
     /// `.clock` records: the wall-clock value `Effects.wallMs` returned.
     clock_wall_ms: i64 = 0,
+    /// `.audio` records: the delivered audio event, verbatim.
+    audio_kind: EffectAudioEventKind = .position,
+    audio_position_ms: u64 = 0,
+    audio_duration_ms: u64 = 0,
+    audio_playing: bool = false,
 };
 
 /// Type-erased sink the drain reports every delivered result to while a
@@ -591,6 +630,7 @@ pub fn Effects(comptime Msg: type) type {
         pub const FileMsgFn = *const fn (result: EffectFileResult) Msg;
         pub const ClipboardMsgFn = *const fn (result: EffectClipboardResult) Msg;
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
+        pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
 
         /// Comptime Msg constructor for `on_line`, following
         /// `canvas.Ui(Msg).inputMsg`: `lineMsg(.agent_line)` builds
@@ -659,6 +699,18 @@ pub fn Effects(comptime Msg: type) type {
             return struct {
                 fn make(timer: EffectTimer) Msg {
                     return @unionInit(Msg, @tagName(tag), timer);
+                }
+            }.make;
+        }
+
+        /// Comptime Msg constructor for `on_event` of audio playback:
+        /// `audioMsg(.audio_event)` builds
+        /// `Msg{ .audio_event = event }` — the variant's payload type
+        /// must be `native_sdk.EffectAudio`.
+        pub fn audioMsg(comptime tag: std.meta.Tag(Msg)) AudioMsgFn {
+            return struct {
+                fn make(event: EffectAudio) Msg {
+                    return @unionInit(Msg, @tagName(tag), event);
                 }
             }.make;
         }
@@ -839,6 +891,24 @@ pub fn Effects(comptime Msg: type) type {
             on_fire: ?TimerMsgFn = null,
         };
 
+        pub const PlayAudioOptions = struct {
+            /// Caller-chosen identity, stored in the model and echoed in
+            /// every event for this playback. Audio keys are their own
+            /// namespace (like timer keys); a new `playAudio` replaces
+            /// the previous playback outright — one player is the whole
+            /// surface.
+            key: u64,
+            /// Local file path (≤ `max_effect_audio_path_bytes`; longer
+            /// or empty is rejected with one `.rejected` event). Copied
+            /// at call time — the caller's buffer may be reused
+            /// immediately.
+            path: []const u8,
+            /// Msg constructor every playback event flows through (see
+            /// `audioMsg`). Without one, playback still runs; the app
+            /// just hears nothing back.
+            on_event: ?AudioMsgFn = null,
+        };
+
         /// A recorded fx timer, exposed by the fake executor for test
         /// assertions.
         pub const TimerRequest = struct {
@@ -854,6 +924,51 @@ pub fn Effects(comptime Msg: type) type {
             mode: TimerMode = .one_shot,
             interval_ms: u64 = 0,
             on_fire: ?TimerMsgFn = null,
+        };
+
+        /// The single audio playback channel — one player is the whole
+        /// platform surface, so the effects layer holds exactly one.
+        /// Like timers it is a platform service arm, not a worker-thread
+        /// effect: it consumes no `max_effects` slots and its key is its
+        /// own namespace. The mirrors below track what the app has been
+        /// told (commands optimistically, platform events authoritatively)
+        /// so the automation snapshot can report playback state honestly.
+        const AudioChannel = struct {
+            active: bool = false,
+            fake: bool = false,
+            key: u64 = 0,
+            on_event: ?AudioMsgFn = null,
+            playing: bool = false,
+            position_ms: u64 = 0,
+            duration_ms: u64 = 0,
+            volume: f32 = 1.0,
+            path_buffer: [max_effect_audio_path_bytes]u8 = undefined,
+            path_len: usize = 0,
+
+            fn path(channel: *const AudioChannel) []const u8 {
+                return channel.path_buffer[0..channel.path_len];
+            }
+        };
+
+        /// Playback state the automation snapshot exposes: honest — it
+        /// reports what the platform has told us, not what the UI wishes.
+        pub const AudioSnapshot = struct {
+            active: bool = false,
+            key: u64 = 0,
+            playing: bool = false,
+            position_ms: u64 = 0,
+            duration_ms: u64 = 0,
+        };
+
+        /// A recorded audio playback request, exposed by the fake
+        /// executor for test assertions. `path` borrows the channel's
+        /// storage — valid until the next `playAudio`.
+        pub const AudioRequest = struct {
+            key: u64,
+            path: []const u8,
+            playing: bool,
+            position_ms: u64,
+            volume: f32,
         };
 
         /// `draining`: the worker is done and the terminal entry is
@@ -925,6 +1040,12 @@ pub fn Effects(comptime Msg: type) type {
             file: struct { result: EffectFileResult, file_fn: ?FileMsgFn },
             clipboard: struct { result: EffectClipboardResult, clipboard_fn: ?ClipboardMsgFn },
             timer: struct { timer: EffectTimer, timer_fn: ?TimerMsgFn },
+            /// `resolve`: a fed audio event (fake executor / replay)
+            /// whose key and handler come from the live channel at
+            /// delivery time — exactly how a platform event resolves in
+            /// `takeAudioMsg`. Non-resolving entries (rejections and
+            /// synchronous failures) are fully formed at enqueue.
+            audio: struct { event: EffectAudio, audio_fn: ?AudioMsgFn, resolve: bool },
 
             fn addDropped(pending: *PendingMsg, count: u32) void {
                 switch (pending.*) {
@@ -935,6 +1056,9 @@ pub fn Effects(comptime Msg: type) type {
                     // EffectTimer carries no drop counter; a repeating
                     // timer's next fire replaces the lost one anyway.
                     .timer => {},
+                    // EffectAudio carries no drop counter either; the
+                    // next position tick supersedes a lost one.
+                    .audio => {},
                 }
             }
 
@@ -945,6 +1069,7 @@ pub fn Effects(comptime Msg: type) type {
                     .file => |entry| entry.result.dropped_before,
                     .clipboard => |entry| entry.result.dropped_before,
                     .timer => 0,
+                    .audio => 0,
                 };
             }
         };
@@ -1120,6 +1245,9 @@ pub fn Effects(comptime Msg: type) type {
         /// Fixed fx timer table (see `max_effect_timers`): timers live
         /// beside the effect slots, never in them. Loop-thread only.
         timer_slots: [max_effect_timers]TimerSlot = [_]TimerSlot{.{}} ** max_effect_timers,
+        /// The single audio playback channel (see `AudioChannel`).
+        /// Loop-thread only, like the timer table.
+        audio: AudioChannel = .{},
         queue_mutex: SpinMutex = .{},
         queue: [max_effect_queue_entries]Entry = undefined,
         queue_head: usize = 0,
@@ -1169,6 +1297,12 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 timer_slot.* = .{};
             }
+            // Silence the platform audio player (best effort) and clear
+            // the channel.
+            if (self.audio.active and !self.audio.fake) {
+                if (self.services) |services| services.audioStop() catch {};
+            }
+            self.audio = .{};
             for (&self.slots) |*slot| {
                 if (slot.state.load(.acquire) == .running and !slot.fake) {
                     slot.cancel_requested.store(true, .release);
@@ -1929,6 +2063,181 @@ pub fn Effects(comptime Msg: type) type {
             return fire_fn(.{ .key = key, .timestamp_ns = timestamp_ns, .outcome = .fired });
         }
 
+        /// Load a track by path into the app's single audio player and
+        /// start playing it, replacing whatever played before. TEA all
+        /// the way down: every report — the load acknowledgment with the
+        /// real duration, coarse position ticks while playing, the one
+        /// completion at natural end, failures — arrives as an
+        /// `on_event` Msg (payload `EffectAudio`) through the ordinary
+        /// update path. Never fails from the caller's view: an empty or
+        /// oversized path delivers one `.rejected` event; a platform
+        /// without audio playback (Linux/Windows today) or an unreadable
+        /// file delivers one `.failed` event — never a crash, never
+        /// silence. The audio key is its own namespace (like timer keys)
+        /// and identifies the playback in every event; it consumes no
+        /// `max_effects` slots.
+        pub fn playAudio(self: *Self, options: PlayAudioOptions) void {
+            if (options.path.len == 0 or options.path.len > max_effect_audio_path_bytes) {
+                self.deliverLoopAudio(.{ .key = options.key, .kind = .rejected }, options.on_event);
+                return;
+            }
+            const volume = self.audio.volume;
+            self.audio = .{
+                .active = true,
+                .fake = self.executor == .fake,
+                .key = options.key,
+                .on_event = options.on_event,
+                // Optimistic command mirror; the platform's events are
+                // the authority from the `.loaded` acknowledgment on.
+                .playing = true,
+                .volume = volume,
+            };
+            @memcpy(self.audio.path_buffer[0..options.path.len], options.path);
+            self.audio.path_len = options.path.len;
+            if (self.audio.fake) return;
+            const services = self.services orelse return self.failAudioChannel();
+            services.audioLoad(options.path) catch return self.failAudioChannel();
+            services.audioPlay() catch return self.failAudioChannel();
+            if (volume != 1.0) services.audioSetVolume(volume) catch {};
+        }
+
+        /// Pause the current playback in place. Idle channels no-op; no
+        /// event echoes — the caller commanded it, so the caller knows.
+        pub fn pauseAudio(self: *Self) void {
+            if (!self.audio.active) return;
+            self.audio.playing = false;
+            if (self.audio.fake) return;
+            const services = self.services orelse return;
+            services.audioPause() catch {};
+        }
+
+        /// Resume paused playback. Idle channels no-op; a player the
+        /// platform can no longer resume (or a platform without audio)
+        /// delivers one `.failed` event instead of silence.
+        pub fn resumeAudio(self: *Self) void {
+            if (!self.audio.active) return;
+            self.audio.playing = true;
+            if (self.audio.fake) return;
+            const services = self.services orelse return self.failAudioChannel();
+            services.audioPlay() catch return self.failAudioChannel();
+        }
+
+        /// Stop playback and release the player. No event echoes; the
+        /// channel goes idle and later platform stragglers are swallowed.
+        pub fn stopAudio(self: *Self) void {
+            if (!self.audio.active) return;
+            const fake = self.audio.fake;
+            const volume = self.audio.volume;
+            self.audio = .{ .volume = volume };
+            if (fake) return;
+            const services = self.services orelse return;
+            services.audioStop() catch {};
+        }
+
+        /// Jump the current playback to `position_ms` (the platform
+        /// clamps to the duration). Idle channels no-op; no event echoes
+        /// — the next position tick reports from the new position.
+        pub fn seekAudio(self: *Self, position_ms: u64) void {
+            if (!self.audio.active) return;
+            self.audio.position_ms = if (self.audio.duration_ms > 0)
+                @min(position_ms, self.audio.duration_ms)
+            else
+                position_ms;
+            if (self.audio.fake) return;
+            const services = self.services orelse return;
+            services.audioSeek(position_ms) catch {};
+        }
+
+        /// Set playback volume, clamped to 0.0—1.0. Remembered across
+        /// tracks: the next `playAudio` re-applies it.
+        pub fn setAudioVolume(self: *Self, volume: f32) void {
+            const clamped = std.math.clamp(volume, 0.0, 1.0);
+            self.audio.volume = clamped;
+            if (!self.audio.active or self.audio.fake) return;
+            const services = self.services orelse return;
+            services.audioSetVolume(clamped) catch {};
+        }
+
+        /// Route a platform audio event back into an `on_event` Msg for
+        /// the active channel, updating the playback mirrors on the way.
+        /// Null when the channel is idle (a straggler after `stopAudio`)
+        /// or has no handler. Loop-thread only; called by
+        /// `UiApp.handleEvent` for `.audio` platform events.
+        pub fn takeAudioMsg(self: *Self, platform_event: platform.AudioEvent) ?Msg {
+            // Under replay the journaled effect records are the ONLY
+            // Msg source (fed through `feedAudioEvent`); the replayed
+            // platform `.audio` events would double-deliver.
+            if (self.replay) return null;
+            const kind: EffectAudioEventKind = switch (platform_event.kind) {
+                .loaded => .loaded,
+                .position => .position,
+                .completed => .completed,
+                .failed => .failed,
+            };
+            const audio_fn = self.audio.on_event;
+            const event = self.applyAudioEvent(.{
+                .key = 0,
+                .kind = kind,
+                .position_ms = platform_event.position_ms,
+                .duration_ms = platform_event.duration_ms,
+                .playing = platform_event.playing,
+            }) orelse return null;
+            const event_fn = audio_fn orelse return null;
+            self.journalNote(.{
+                .kind = .audio,
+                .key = event.key,
+                .audio_kind = event.kind,
+                .audio_position_ms = event.position_ms,
+                .audio_duration_ms = event.duration_ms,
+                .audio_playing = event.playing,
+            });
+            return event_fn(event);
+        }
+
+        /// The playback state mirrors, for the automation snapshot.
+        pub fn audioSnapshot(self: *const Self) AudioSnapshot {
+            return .{
+                .active = self.audio.active,
+                .key = self.audio.key,
+                .playing = self.audio.playing,
+                .position_ms = self.audio.position_ms,
+                .duration_ms = self.audio.duration_ms,
+            };
+        }
+
+        /// Fake executor: the recorded playback request on the single
+        /// audio channel, or null when nothing was asked to play.
+        pub fn pendingAudio(self: *const Self) ?AudioRequest {
+            if (!self.audio.active) return null;
+            return .{
+                .key = self.audio.key,
+                .path = self.audio.path(),
+                .playing = self.audio.playing,
+                .position_ms = self.audio.position_ms,
+                .volume = self.audio.volume,
+            };
+        }
+
+        /// Fake executor / replay: feed one audio event as the platform
+        /// would deliver it. The event resolves against the live channel
+        /// at drain time (key and handler from the channel, mirrors
+        /// updated), mirroring `takeAudioMsg` exactly. Fails when no
+        /// playback is active to receive it.
+        pub fn feedAudioEvent(self: *Self, kind: EffectAudioEventKind, position_ms: u64, duration_ms: u64, playing: bool) !void {
+            if (!self.audio.active) return error.EffectNotFound;
+            self.deliverPending(.{ .audio = .{
+                .event = .{
+                    .key = self.audio.key,
+                    .kind = kind,
+                    .position_ms = position_ms,
+                    .duration_ms = duration_ms,
+                    .playing = playing,
+                },
+                .audio_fn = null,
+                .resolve = true,
+            } });
+        }
+
         /// Number of effects currently in flight (running slots).
         pub fn activeCount(self: *Self) usize {
             self.reclaimSlots();
@@ -2012,6 +2321,30 @@ pub fn Effects(comptime Msg: type) type {
                                 .timer_outcome = entry.timer.outcome,
                             });
                             return timer_fn(entry.timer);
+                        },
+                        .audio => |entry| {
+                            var event = entry.event;
+                            var audio_fn = entry.audio_fn;
+                            if (entry.resolve) {
+                                // Fed events resolve against the live
+                                // channel exactly like a platform event:
+                                // mirrors update, key and handler come
+                                // from the channel, a stopped channel
+                                // swallows the event. Capture the handler
+                                // first — a `.failed` apply resets it.
+                                audio_fn = self.audio.on_event;
+                                event = self.applyAudioEvent(event) orelse continue;
+                            }
+                            const event_fn = audio_fn orelse continue;
+                            self.journalNote(.{
+                                .kind = .audio,
+                                .key = event.key,
+                                .audio_kind = event.kind,
+                                .audio_position_ms = event.position_ms,
+                                .audio_duration_ms = event.duration_ms,
+                                .audio_playing = event.playing,
+                            });
+                            return event_fn(event);
                         },
                     }
                 }
@@ -2708,6 +3041,56 @@ pub fn Effects(comptime Msg: type) type {
         fn deliverLoopTimer(self: *Self, timer: EffectTimer, timer_fn: ?TimerMsgFn) void {
             if (timer_fn == null) return;
             self.deliverPending(.{ .timer = .{ .timer = timer, .timer_fn = timer_fn } });
+        }
+
+        /// Update the channel mirrors from one audio event and stamp the
+        /// channel's key into it. Null when the channel is idle — a
+        /// platform straggler after `stopAudio` (or a fed event racing a
+        /// stop) is swallowed rather than misattributed. Position and
+        /// duration are the platform's readout, taken verbatim;
+        /// `.completed` pins position to the duration and `.failed`
+        /// resets the channel (nothing is left to resume).
+        fn applyAudioEvent(self: *Self, event: EffectAudio) ?EffectAudio {
+            if (!self.audio.active) return null;
+            var resolved = event;
+            resolved.key = self.audio.key;
+            switch (resolved.kind) {
+                .loaded, .position => {
+                    self.audio.position_ms = resolved.position_ms;
+                    if (resolved.duration_ms > 0) self.audio.duration_ms = resolved.duration_ms;
+                    self.audio.playing = resolved.playing;
+                },
+                .completed => {
+                    if (resolved.duration_ms > 0) self.audio.duration_ms = resolved.duration_ms;
+                    resolved.position_ms = self.audio.duration_ms;
+                    resolved.playing = false;
+                    self.audio.position_ms = self.audio.duration_ms;
+                    self.audio.playing = false;
+                },
+                .failed, .rejected => {
+                    resolved.playing = false;
+                    self.audio = .{ .volume = self.audio.volume };
+                },
+            }
+            return resolved;
+        }
+
+        /// A synchronous platform refusal (`audioLoad`/`audioPlay`
+        /// errored, or no services are bound): reset the channel and
+        /// deliver one `.failed` event on the next drain — the honest
+        /// degrade for hosts without audio playback.
+        fn failAudioChannel(self: *Self) void {
+            const key = self.audio.key;
+            const on_event = self.audio.on_event;
+            self.audio = .{ .volume = self.audio.volume };
+            self.deliverLoopAudio(.{ .key = key, .kind = .failed }, on_event);
+        }
+
+        /// Queue an audio event Msg produced on the loop thread
+        /// (rejections and synchronous failures) for the next drain.
+        fn deliverLoopAudio(self: *Self, event: EffectAudio, audio_fn: ?AudioMsgFn) void {
+            if (audio_fn == null) return;
+            self.deliverPending(.{ .audio = .{ .event = event, .audio_fn = audio_fn, .resolve = false } });
         }
 
         fn effectTimerPlatformId(slot_index: usize) u64 {

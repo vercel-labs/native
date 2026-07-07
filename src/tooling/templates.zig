@@ -1100,6 +1100,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\            app_mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
         \\        }
         \\        app_mod.linkFramework("AppKit", .{});
+        \\        app_mod.linkFramework("AVFoundation", .{});
         \\        app_mod.linkFramework("Foundation", .{});
         \\        app_mod.linkFramework("CoreText", .{});
         \\        app_mod.linkFramework("UniformTypeIdentifiers", .{});

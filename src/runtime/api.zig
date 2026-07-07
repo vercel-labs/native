@@ -248,6 +248,10 @@ pub const Event = union(enum) {
     /// (`PlatformServices.wake_fn`): apps drain their effect completion
     /// queues here, on the loop thread, and dispatch the resulting Msgs.
     effects_wake,
+    /// A platform audio player report (load acknowledgment, position
+    /// tick, completion, failure): the ui-app layer routes it back
+    /// through `Effects.takeAudioMsg` into the app's `on_event` Msg.
+    audio: platform.AudioEvent,
     files_dropped: platform.FileDropEvent,
     gpu_surface_frame: GpuSurfaceFrameEvent,
     gpu_surface_resized: GpuSurfaceResizeEvent,
@@ -273,6 +277,7 @@ pub const Event = union(enum) {
             .shortcut => "shortcut",
             .timer => "timer",
             .effects_wake => "effects_wake",
+            .audio => "audio",
             .files_dropped => "files_dropped",
             .gpu_surface_frame => "gpu_surface_frame",
             .gpu_surface_resized => "gpu_surface_resized",

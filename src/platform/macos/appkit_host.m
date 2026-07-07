@@ -1,6 +1,7 @@
 #import "appkit_host.h"
 
 #import <AppKit/AppKit.h>
+#import <AVFoundation/AVFoundation.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <WebKit/WebKit.h>
@@ -568,7 +569,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) uint32_t modifiers;
 @end
 
-@interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate>
+@interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate, AVAudioPlayerDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) WKWebView *webView;
 @property(nonatomic, strong) NativeSdkWindowDelegate *delegate;
@@ -613,6 +614,13 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
  * block starts still gets its own turn. */
 @property(atomic, assign) BOOL crossThreadFramePending;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSTimer *> *appTimers;
+/* The app's single audio player and its position-tick timer. One player
+ * is the whole surface: a music app plays one track at a time, and a
+ * second concurrent stream would be mixer design the platform seam has
+ * not earned. The tick timer runs only while playing, at a coarse
+ * honest cadence — position is a readout, not a frame clock. */
+@property(nonatomic, strong) AVAudioPlayer *audioPlayer;
+@property(nonatomic, strong) NSTimer *audioPositionTimer;
 @property(nonatomic, strong) NSString *appName;
 /* The human-facing app name (app.zon display_name, falling back through
  * the window title to the binary name). Everything the OS labels the
@@ -740,6 +748,14 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)cancelAppTimerWithId:(uint64_t)timerId;
 - (void)appTimerFired:(NSTimer *)timer;
 - (void)invalidateAppTimers;
+- (int)audioLoadPath:(NSString *)path;
+- (int)audioPlay;
+- (int)audioPause;
+- (int)audioStop;
+- (int)audioSeekToMs:(uint64_t)positionMs;
+- (int)audioSetVolume:(double)volume;
+- (void)emitAudioEventOfKind:(int)kind;
+- (void)stopAudioPositionTimer;
 - (void)wakeFromAnyThread;
 - (void)scheduleBridgeFrames;
 - (void)emitFrame;
@@ -6156,6 +6172,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
 - (void)dealloc {
     [self invalidateAppTimers];
+    [self audioStop];
     [self stopAppearanceObservers];
     if (self.shortcutEventMonitor) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
@@ -7802,6 +7819,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     [self.timer invalidate];
     self.timer = nil;
     [self invalidateAppTimers];
+    [self audioStop];
     if (self.shortcutEventMonitor) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
@@ -8047,6 +8065,162 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
         [timer invalidate];
     }
     [self.appTimers removeAllObjects];
+}
+
+/* Emit one audio report carrying the player's live position/duration
+ * readout. Runs on the loop thread — every audio entry point is
+ * loop-thread only, and AVAudioPlayer delegate callbacks arrive on the
+ * thread that started playback (this one). */
+- (void)emitAudioEventOfKind:(int)kind {
+    AVAudioPlayer *player = self.audioPlayer;
+    uint64_t position_ms = 0;
+    uint64_t duration_ms = 0;
+    int playing = 0;
+    if (player) {
+        NSTimeInterval position = player.currentTime;
+        NSTimeInterval duration = player.duration;
+        if (position > 0) position_ms = (uint64_t)llround(position * 1000.0);
+        if (duration > 0) duration_ms = (uint64_t)llround(duration * 1000.0);
+        playing = player.isPlaying ? 1 : 0;
+    }
+    if (kind == NATIVE_SDK_APPKIT_AUDIO_EVENT_COMPLETED) {
+        /* A finished player rewinds itself to zero; report the honest
+         * terminal position instead. */
+        position_ms = duration_ms;
+        playing = 0;
+    }
+    [self emitEvent:(native_sdk_appkit_event_t){
+        .kind = NATIVE_SDK_APPKIT_EVENT_AUDIO,
+        .audio_kind = kind,
+        .audio_position_ms = position_ms,
+        .audio_duration_ms = duration_ms,
+        .audio_playing = playing,
+        .timestamp_ns = NativeSdkTimestampNanoseconds(),
+    }];
+}
+
+- (void)stopAudioPositionTimer {
+    [self.audioPositionTimer invalidate];
+    self.audioPositionTimer = nil;
+}
+
+- (void)audioPositionTimerFired:(NSTimer *)timer {
+    if (!self.audioPlayer) {
+        [self stopAudioPositionTimer];
+        return;
+    }
+    [self emitAudioEventOfKind:NATIVE_SDK_APPKIT_AUDIO_EVENT_POSITION];
+}
+
+- (int)audioLoadPath:(NSString *)path {
+    [self audioStop];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return 1;
+    NSError *error = nil;
+    AVAudioPlayer *player = [[AVAudioPlayer alloc] initWithContentsOfURL:[NSURL fileURLWithPath:path]
+                                                                   error:&error];
+    if (!player || error) return 2;
+    player.delegate = self;
+    if (![player prepareToPlay]) return 2;
+    self.audioPlayer = player;
+    /* The LOADED acknowledgment is asynchronous by contract: emitting it
+     * inside this service call would re-enter the runtime while it is
+     * still dispatching the command that asked for the load. Next loop
+     * turn, and only if this player is still the loaded one. */
+    __weak NativeSdkAppKitHost *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NativeSdkAppKitHost *strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.didShutdown) return;
+        if (strongSelf.audioPlayer != player) return;
+        [strongSelf emitAudioEventOfKind:NATIVE_SDK_APPKIT_AUDIO_EVENT_LOADED];
+    });
+    return 0;
+}
+
+- (int)audioPlay {
+    AVAudioPlayer *player = self.audioPlayer;
+    if (!player) return 0;
+    if (![player play]) return 0;
+    if (!self.audioPositionTimer) {
+        /* Common modes for the same reason app timers use them: the
+         * readout must keep ticking while a menu is open or the window
+         * is live-resizing. */
+        NSTimer *tick = [NSTimer timerWithTimeInterval:0.5
+                                                target:self
+                                              selector:@selector(audioPositionTimerFired:)
+                                              userInfo:nil
+                                               repeats:YES];
+        [[NSRunLoop mainRunLoop] addTimer:tick forMode:NSRunLoopCommonModes];
+        self.audioPositionTimer = tick;
+    }
+    return 1;
+}
+
+- (int)audioPause {
+    AVAudioPlayer *player = self.audioPlayer;
+    if (!player) return 0;
+    [player pause];
+    [self stopAudioPositionTimer];
+    return 1;
+}
+
+- (int)audioStop {
+    AVAudioPlayer *player = self.audioPlayer;
+    [self stopAudioPositionTimer];
+    if (!player) return 0;
+    player.delegate = nil;
+    [player stop];
+    self.audioPlayer = nil;
+    return 1;
+}
+
+- (int)audioSeekToMs:(uint64_t)positionMs {
+    AVAudioPlayer *player = self.audioPlayer;
+    if (!player) return 0;
+    NSTimeInterval target = (NSTimeInterval)positionMs / 1000.0;
+    if (target > player.duration) target = player.duration;
+    player.currentTime = target;
+    return 1;
+}
+
+- (int)audioSetVolume:(double)volume {
+    AVAudioPlayer *player = self.audioPlayer;
+    if (!player) return 0;
+    player.volume = (float)volume;
+    return 1;
+}
+
+/* AVAudioPlayerDelegate: natural end of the track. `flag` is NO when
+ * playback died on a decode error mid-file — report that honestly as a
+ * failure, never as a completion. The finished player is retired BEFORE
+ * the event is emitted: the completion Msg routinely starts the NEXT
+ * track from inside its own dispatch (a music app auto-advancing), and
+ * retiring afterwards would destroy the player that load just
+ * installed. The duration is captured first so the event still carries
+ * the honest terminal position. */
+- (void)audioPlayerDidFinishPlaying:(AVAudioPlayer *)player successfully:(BOOL)flag {
+    if (player != self.audioPlayer) return;
+    [self stopAudioPositionTimer];
+    uint64_t duration_ms = 0;
+    if (player.duration > 0) duration_ms = (uint64_t)llround(player.duration * 1000.0);
+    player.delegate = nil;
+    self.audioPlayer = nil;
+    [self emitEvent:(native_sdk_appkit_event_t){
+        .kind = NATIVE_SDK_APPKIT_EVENT_AUDIO,
+        .audio_kind = (flag ? NATIVE_SDK_APPKIT_AUDIO_EVENT_COMPLETED
+                            : NATIVE_SDK_APPKIT_AUDIO_EVENT_FAILED),
+        .audio_position_ms = (flag ? duration_ms : 0),
+        .audio_duration_ms = duration_ms,
+        .audio_playing = 0,
+        .timestamp_ns = NativeSdkTimestampNanoseconds(),
+    }];
+}
+
+- (void)audioPlayerDecodeErrorDidOccur:(AVAudioPlayer *)player error:(NSError *)error {
+    if (player != self.audioPlayer) return;
+    [self stopAudioPositionTimer];
+    player.delegate = nil;
+    self.audioPlayer = nil;
+    [self emitAudioEventOfKind:NATIVE_SDK_APPKIT_AUDIO_EVENT_FAILED];
 }
 
 - (void)scheduleBridgeFrames {
@@ -8592,6 +8766,38 @@ void native_sdk_appkit_start_timer(native_sdk_appkit_host_t *host, uint64_t time
 void native_sdk_appkit_cancel_timer(native_sdk_appkit_host_t *host, uint64_t timer_id) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     [object cancelAppTimerWithId:timer_id];
+}
+
+int native_sdk_appkit_audio_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSString *path_string = [[NSString alloc] initWithBytes:path length:path_len encoding:NSUTF8StringEncoding];
+    if (!path_string) return 1;
+    return [object audioLoadPath:path_string];
+}
+
+int native_sdk_appkit_audio_play(native_sdk_appkit_host_t *host) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object audioPlay];
+}
+
+int native_sdk_appkit_audio_pause(native_sdk_appkit_host_t *host) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object audioPause];
+}
+
+int native_sdk_appkit_audio_stop(native_sdk_appkit_host_t *host) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object audioStop];
+}
+
+int native_sdk_appkit_audio_seek(native_sdk_appkit_host_t *host, uint64_t position_ms) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object audioSeekToMs:position_ms];
+}
+
+int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double volume) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object audioSetVolume:volume];
 }
 
 void native_sdk_appkit_wake(native_sdk_appkit_host_t *host) {

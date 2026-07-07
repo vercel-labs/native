@@ -236,7 +236,9 @@ fn trackRowView(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
         .selected = row.now,
         .on_press = Msg{ .play_track = row.id },
         // Two items per row on purpose: the per-view context-menu budget is
-        // 128 items (canvas_limits), and the all-songs list mounts 48 rows.
+        // 512 items (canvas_limits), and the all-songs list mounts every
+        // catalog track as a row — two items per row keeps a comfortable
+        // margin even as the manifest grows.
         .context_menu = &.{
             .{ .label = "Play Next", .msg = Msg{ .queue_track = row.id } },
             .{ .label = "Copy Title", .msg = Msg{ .copy_title = row.id } },

@@ -140,16 +140,26 @@ fn vfdPanel(ui: *Ui, model: *const Model) Ui.Node {
             // the AX-readable echo of the same clock.
             ui.el(.stack, .{ .width = layout.segment_area_width, .semantics = .{ .label = "Segment readout" } }, .{}),
             ui.column(.{ .gap = 4, .grow = 1, .main = .center }, .{
+                // NO MEDIA rides the marquee in signal amber — the one
+                // attention hue — so a failed load is unmistakable on
+                // the glass; the channel line below names the remedy.
                 ui.paragraph(.{ .semantics = .{ .label = "Marquee" } }, &.{
-                    .{ .text = model.marqueeText(ui.arena), .monospace = true, .weight = .bold, .scale = marquee_scale, .color = if (model.idle()) .text_muted else .accent },
+                    .{ .text = model.marqueeText(ui.arena), .monospace = true, .weight = .bold, .scale = marquee_scale, .color = if (model.mediaFailed()) .warning else if (model.idle()) .text_muted else .accent },
                 }),
-                ui.paragraph(.{ .semantics = .{ .label = "Channel" } }, &.{
-                    .{ .text = ui.fmt("{s}  {s} / {s}", .{
-                        model.channelLabel(ui.arena),
-                        model.elapsedLabel(ui.arena),
-                        model.durationLabel(ui.arena),
-                    }), .monospace = true, .color = .text_muted, .scale = readout_scale },
-                }),
+                if (model.mediaFailed())
+                    // The remedy at the tighter caption pitch, so the full
+                    // script name fits the VFD's text column.
+                    ui.paragraph(.{ .semantics = .{ .label = "Channel" } }, &.{
+                        .{ .text = model_mod.no_media_remedy, .monospace = true, .color = .warning, .scale = caption_scale },
+                    })
+                else
+                    ui.paragraph(.{ .semantics = .{ .label = "Channel" } }, &.{
+                        .{ .text = ui.fmt("{s}  {s} / {s}", .{
+                            model.channelLabel(ui.arena),
+                            model.elapsedLabel(ui.arena),
+                            model.durationLabel(ui.arena),
+                        }), .monospace = true, .color = .text_muted, .scale = readout_scale },
+                    }),
             }),
         }),
         ui.el(.progress, .{
@@ -284,11 +294,12 @@ fn monoCaption(ui: *Ui, text: []const u8, width: f32, alignment: canvas.TextAlig
 
 /// The playlist rack unit: a second model-declared window. ONE flat
 /// list of every song — no album rail, no sub-collections; search
-/// narrows it and the cue strip carries the queue. No chrome pass
-/// reaches secondary windows, so the rack look here is widgets and
-/// tokens only — the carbon-weave texture rides an `image` leaf behind
-/// the content (the same registered-image channel the chrome uses), and
-/// the machining is panel plates and hairline separators.
+/// narrows it and the deck strip carries the loaded record's sleeve and
+/// the queue. No chrome pass reaches secondary windows, so the rack look
+/// here is widgets and tokens only — the carbon-weave texture rides an
+/// `image` leaf behind the content (the same registered-image channel
+/// the chrome uses), and the machining is panel plates and hairline
+/// separators.
 pub fn playlistView(ui: *Ui, model: *const Model) Ui.Node {
     var backdrop = ui.image(.{
         .width = layout.playlist_width,
@@ -364,8 +375,9 @@ fn ledgerRow(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
         .height = layout.ledger_row_height,
         .padding = 5,
         .on_press = Msg{ .play_track = row.id },
-        // Two items per row on purpose: the per-view context-menu budget
-        // is 128 items and the full ledger mounts 48 rows.
+        // Two items per row on purpose: the full ledger mounts every
+        // catalog track, and two items per row keeps the mounted total
+        // well inside the per-view context-menu budget.
         .context_menu = &.{
             .{ .label = "Play Next", .msg = Msg{ .queue_track = row.id } },
             .{ .label = "Copy Title", .msg = Msg{ .copy_title = row.id } },
@@ -422,26 +434,65 @@ fn emptyLedger(ui: *Ui, model: *const Model) Ui.Node {
     }));
 }
 
-/// The up-next cue strip: the queue as amber plates, in play order.
+/// The bottom deck strip: the loaded record's sleeve window at the left,
+/// then the up-next queue as amber plates, in play order.
 fn cueStrip(ui: *Ui, model: *const Model) Ui.Node {
     const queued = model.queueRows(ui.arena);
-    return ui.row(.{ .gap = 6, .height = layout.cue_strip_height, .cross = .center, .padding = 4, .semantics = .{ .role = .list, .label = "Up next" } }, .{
-        ui.el(.stack, .{ .width = layout.rack_pad - 4 }, .{}),
-        engravedCaption(ui, "UP NEXT //"),
-        if (queued.len == 0)
-            ui.paragraph(.{}, &.{
-                .{ .text = "QUEUE EMPTY", .monospace = true, .color = .text_muted, .scale = caption_scale },
-            })
-        else
-            ui.el(.stack, .{}, .{}),
-        ui.row(.{ .gap = 4, .cross = .center }, ui.each(queued, trackKey, cuePlate)),
-        ui.spacer(1),
+    return ui.row(.{ .gap = 8, .height = layout.cue_strip_height, .cross = .center, .padding = layout.cue_strip_pad, .semantics = .{ .label = "Deck strip" } }, .{
+        ui.el(.stack, .{ .width = layout.rack_pad - layout.cue_strip_pad }, .{}),
+        sleevePane(ui, model),
+        ui.row(.{ .gap = 6, .grow = 1, .cross = .center, .semantics = .{ .role = .list, .label = "Up next" } }, .{
+            engravedCaption(ui, "UP NEXT //"),
+            if (queued.len == 0)
+                ui.paragraph(.{}, &.{
+                    .{ .text = "QUEUE EMPTY", .monospace = true, .color = .text_muted, .scale = caption_scale },
+                })
+            else
+                ui.el(.stack, .{}, .{}),
+            ui.row(.{ .gap = 4, .cross = .center }, ui.each(queued, trackKey, cuePlate)),
+            ui.spacer(1),
+        }),
     });
 }
 
+/// The sleeve window: the loaded record's committed cover in a small
+/// glass pane — real album art where the hardware would show the disc.
+/// The cover id is 0 while unregistered (the strict test decoder has no
+/// JPEG codec; live macOS decodes through the platform codec) or while
+/// the deck is idle, and the pane degrades to an engraved plate — a
+/// missing image can never break the strip.
+fn sleevePane(ui: *Ui, model: *const Model) Ui.Node {
+    const cover = model.nowCover();
+    if (cover != 0) {
+        var node = ui.image(.{
+            .width = layout.sleeve_size,
+            .height = layout.sleeve_size,
+            .image = cover,
+            .semantics = .{ .label = "Sleeve" },
+        });
+        node.widget.image_fit = .cover;
+        return node;
+    }
+    return ui.panel(.{
+        .width = layout.sleeve_size,
+        .height = layout.sleeve_size,
+        .style_tokens = .{ .background = .background, .radius = .sm, .border_color = .border },
+        .semantics = .{ .label = "Sleeve" },
+    }, ui.column(.{ .grow = 1, .main = .center, .cross = .center }, .{
+        engravedCaption(ui, if (model.idle()) "--" else "NO ART"),
+    }));
+}
+
+/// Cue plates carry the track number and a truncated uppercase title:
+/// the catalog holds titles longer than the strip, so the stamp cuts at
+/// a fixed budget (hardware voice — no ellipsis) while the semantics
+/// label keeps the full title for assistive tech.
+pub const cue_title_max = 16;
+
 fn cuePlate(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
+    const title = upper(ui, row.title[0..@min(row.title.len, cue_title_max)]);
     return ui.el(.badge, .{
-        .text = ui.fmt("{s} {s}", .{ row.number, upper(ui, row.title) }),
+        .text = ui.fmt("{s} {s}", .{ row.number, title }),
         .style_tokens = .{ .accent = .warning, .accent_foreground = .warning_text },
         .semantics = .{ .role = .listitem, .label = row.title },
     }, .{});

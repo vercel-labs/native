@@ -58,6 +58,13 @@ Native SDK capabilities are native OS services and app events exposed through `P
       <td><code>text/plain</code> on supported clipboard hosts; <code>text/html</code> and RTF on macOS system WebView, macOS Chromium, Linux system WebView, and Windows system WebView</td>
     </tr>
     <tr>
+      <td>Audio playback</td>
+      <td><code>fx.playAudio(options)</code> / <code>fx.pauseAudio()</code> / <code>fx.resumeAudio()</code> / <code>fx.stopAudio()</code> / <code>fx.seekAudio(ms)</code> / <code>fx.setAudioVolume(v)</code></td>
+      <td>None. Effects-channel API; every report arrives as an <code>on_event</code> Msg.</td>
+      <td>None. No bridge surface.</td>
+      <td>macOS system-engine host (one player, AVAudioPlayer); Linux, Windows, and macOS Chromium report unsupported and playback degrades to one explicit failed Msg</td>
+    </tr>
+    <tr>
       <td>File drops</td>
       <td><code>Event.files_dropped</code></td>
       <td><code>window.zero.on("drop:files")</code></td>
@@ -101,6 +108,7 @@ const support = {
   clipboardRichData: await window.zero.platform.supports("clipboard_rich_data"),
   credentials: await window.zero.platform.supports("credentials"),
   fileDrops: await window.zero.platform.supports("file_drops"),
+  audioPlayback: await window.zero.platform.supports("audio_playback"),
 };
 ```
 

@@ -189,6 +189,16 @@ pub const Runtime = struct {
     tray_created: bool = false,
     tray_title: []const u8 = "",
     tray_title_storage: [platform.max_tray_title_bytes]u8 = undefined,
+    /// Audio playback mirror for the automation snapshot, stamped by
+    /// the ui-app layer whenever a dispatch or effect drain may have
+    /// moved the effects channel's playback state. Like the tray, the
+    /// player itself lives outside every window capture, so this is
+    /// the only automation-visible evidence music is playing.
+    audio_active: bool = false,
+    audio_key: u64 = 0,
+    audio_playing: bool = false,
+    audio_position_ms: u64 = 0,
+    audio_duration_ms: u64 = 0,
     shell_layouts: [platform.max_windows]RuntimeShellLayout = undefined,
     shell_layout_count: usize = 0,
     next_window_id: platform.WindowId = 2,

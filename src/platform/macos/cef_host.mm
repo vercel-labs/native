@@ -2252,6 +2252,44 @@ void native_sdk_appkit_wake(native_sdk_appkit_host_t *host) {
     [object wakeFromAnyThread];
 }
 
+/* Audio playback lives in the system-engine AppKit host (AVAudioPlayer).
+ * The Chromium host reports the feature unsupported and the Zig side
+ * refuses before calling, so these exist only to satisfy the shared C
+ * ABI — each answers with its honest failure code. */
+int native_sdk_appkit_audio_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len) {
+    (void)host;
+    (void)path;
+    (void)path_len;
+    return 2;
+}
+
+int native_sdk_appkit_audio_play(native_sdk_appkit_host_t *host) {
+    (void)host;
+    return 0;
+}
+
+int native_sdk_appkit_audio_pause(native_sdk_appkit_host_t *host) {
+    (void)host;
+    return 0;
+}
+
+int native_sdk_appkit_audio_stop(native_sdk_appkit_host_t *host) {
+    (void)host;
+    return 0;
+}
+
+int native_sdk_appkit_audio_seek(native_sdk_appkit_host_t *host, uint64_t position_ms) {
+    (void)host;
+    (void)position_ms;
+    return 0;
+}
+
+int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double volume) {
+    (void)host;
+    (void)volume;
+    return 0;
+}
+
 void native_sdk_appkit_request_frame(native_sdk_appkit_host_t *host) {
     // The AppKit host pauses FRAME events when idle, so a cross-thread
     // frame request is how the automation arrival watcher wakes it. The

@@ -1,7 +1,11 @@
 <!-- The now-playing transport bar. The circular cover is the one image
      binding markup carries (the avatar's u64 ImageId); progress is a seek
      slider whose reconciled value reaches update through the sync hook.
-     Playback is simulated by a repeating timer effect — see model.zig.
+     Playback is REAL audio through the runtime audio effect family; the
+     player's position events advance the elapsed label and the slider —
+     see model.zig. The title/artist lines double as the status surface:
+     a failed load swaps in the assets-not-prepared notice so the user
+     knows to run the prepare script.
      The transport is icon-only buttons via the button icon attribute:
      the icon is part of the button's own rendering, so each control is
      ONE hit target whose icon follows the enabled/disabled tint (no

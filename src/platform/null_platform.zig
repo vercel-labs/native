@@ -168,6 +168,38 @@ pub const NullTimer = struct {
     active: bool = false,
 };
 
+/// Duration table entries for the fake audio player (see
+/// `setAudioDuration`): a loaded path whose tail matches `suffix` reports
+/// `duration_ms`. A table instead of real decoding keeps tests hermetic —
+/// no audio files, no codecs, still honest durations.
+pub const max_null_audio_durations: usize = 8;
+
+pub const NullAudioDuration = struct {
+    suffix: [128]u8 = undefined,
+    suffix_len: usize = 0,
+    duration_ms: u64 = 0,
+};
+
+/// Every loaded path without a table entry reports this duration.
+pub const default_null_audio_duration_ms: u64 = 120_000;
+
+/// The fake audio player's whole state: what a deterministic host would
+/// know. Position never advances on its own — tests move it explicitly
+/// with `advanceAudio`, mirroring how `fireTimer` drives timers.
+pub const NullAudio = struct {
+    loaded: bool = false,
+    playing: bool = false,
+    position_ms: u64 = 0,
+    duration_ms: u64 = 0,
+    volume: f32 = 1.0,
+    path_storage: [types.max_audio_path_bytes]u8 = undefined,
+    path_len: usize = 0,
+
+    pub fn path(self: *const NullAudio) []const u8 {
+        return self.path_storage[0..self.path_len];
+    }
+};
+
 pub const NullPlatform = struct {
     surface_value: Surface = .{},
     web_engine: WebEngine = .system,
@@ -369,6 +401,26 @@ pub const NullPlatform = struct {
     timer_count: usize = 0,
     timer_start_count: usize = 0,
     timer_cancel_count: usize = 0,
+    /// Whether this modeled host has an audio player. On by default (the
+    /// fake below stands in for AVAudioPlayer); tests modelling a
+    /// player-less host set it false, which nulls the services AND the
+    /// feature report — the same shape as GTK/Win32 today.
+    audio_playback: bool = true,
+    /// The deterministic fake audio player: services mutate it, tests
+    /// read it and synthesize the events a live host would deliver
+    /// (`takeAudioLoaded`, `advanceAudio`).
+    audio: NullAudio = .{},
+    /// A `.loaded` acknowledgment waiting to be taken — set by a
+    /// successful `audioLoad`, consumed by `takeAudioLoaded`.
+    audio_loaded_pending: bool = false,
+    audio_durations: [max_null_audio_durations]NullAudioDuration = [_]NullAudioDuration{.{}} ** max_null_audio_durations,
+    audio_duration_count: usize = 0,
+    audio_load_count: usize = 0,
+    audio_play_count: usize = 0,
+    audio_pause_count: usize = 0,
+    audio_stop_count: usize = 0,
+    audio_seek_count: usize = 0,
+    audio_volume_count: usize = 0,
     /// Pending cross-thread wake requests. Incremented atomically because
     /// `wake_fn` is the one service worker threads call; tests and the
     /// embed host drain it on their own thread via `takeWake` and then
@@ -486,6 +538,12 @@ pub const NullPlatform = struct {
                 .emit_window_event_fn = emitWindowEvent,
                 .start_timer_fn = startTimer,
                 .cancel_timer_fn = cancelTimer,
+                .audio_load_fn = if (self.audio_playback) audioLoad else null,
+                .audio_play_fn = if (self.audio_playback) audioPlay else null,
+                .audio_pause_fn = if (self.audio_playback) audioPause else null,
+                .audio_stop_fn = if (self.audio_playback) audioStop else null,
+                .audio_seek_fn = if (self.audio_playback) audioSeek else null,
+                .audio_set_volume_fn = if (self.audio_playback) audioSetVolume else null,
                 .wake_fn = wakeService,
                 .request_frame_fn = requestFrameService,
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
@@ -530,6 +588,7 @@ pub const NullPlatform = struct {
             // app-owned platform view into — reporting support would be a
             // lie the first adopt call exposes.
             .view_surface_adoption => false,
+            .audio_playback => self.audio_playback,
         };
     }
 
@@ -1098,6 +1157,126 @@ pub const NullPlatform = struct {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         self.timer_cancel_count += 1;
         if (self.findTimerIndex(id)) |index| self.timers[index].active = false;
+    }
+
+    fn audioLoad(context: ?*anyopaque, path: []const u8) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.audio_load_count += 1;
+        if (path.len > self.audio.path_storage.len) return error.AudioPathTooLarge;
+        @memcpy(self.audio.path_storage[0..path.len], path);
+        self.audio.path_len = path.len;
+        self.audio.loaded = true;
+        self.audio.playing = false;
+        self.audio.position_ms = 0;
+        self.audio.duration_ms = self.audioDurationFor(path);
+        self.audio_loaded_pending = true;
+    }
+
+    fn audioPlay(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.audio_play_count += 1;
+        if (!self.audio.loaded) return error.InvalidAudioOptions;
+        self.audio.playing = true;
+    }
+
+    fn audioPause(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.audio_pause_count += 1;
+        self.audio.playing = false;
+    }
+
+    fn audioStop(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.audio_stop_count += 1;
+        self.audio = .{ .volume = self.audio.volume };
+        self.audio_loaded_pending = false;
+    }
+
+    fn audioSeek(context: ?*anyopaque, position_ms: u64) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.audio_seek_count += 1;
+        if (!self.audio.loaded) return error.InvalidAudioOptions;
+        self.audio.position_ms = @min(position_ms, self.audio.duration_ms);
+    }
+
+    fn audioSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.audio_volume_count += 1;
+        self.audio.volume = volume;
+    }
+
+    fn audioDurationFor(self: *const NullPlatform, path: []const u8) u64 {
+        for (self.audio_durations[0..self.audio_duration_count]) |entry| {
+            const suffix = entry.suffix[0..entry.suffix_len];
+            if (suffix.len <= path.len and std.mem.eql(u8, path[path.len - suffix.len ..], suffix)) {
+                return entry.duration_ms;
+            }
+        }
+        return default_null_audio_duration_ms;
+    }
+
+    /// Test helper: register a duration for any loaded path ending in
+    /// `suffix`. Paths without a match report
+    /// `default_null_audio_duration_ms`.
+    pub fn setAudioDuration(self: *NullPlatform, suffix: []const u8, duration_ms: u64) !void {
+        if (suffix.len == 0 or suffix.len > 128) return error.InvalidAudioOptions;
+        if (self.audio_duration_count >= max_null_audio_durations) return error.InvalidAudioOptions;
+        var entry = &self.audio_durations[self.audio_duration_count];
+        @memcpy(entry.suffix[0..suffix.len], suffix);
+        entry.suffix_len = suffix.len;
+        entry.duration_ms = duration_ms;
+        self.audio_duration_count += 1;
+    }
+
+    /// Consume the pending `.loaded` acknowledgment, returning the
+    /// platform event a live host would deliver after a successful load
+    /// (or null when no load is waiting). Dispatch it through the runtime,
+    /// like `fireTimer`.
+    pub fn takeAudioLoaded(self: *NullPlatform) ?Event {
+        if (!self.audio_loaded_pending) return null;
+        self.audio_loaded_pending = false;
+        return .{ .audio = .{
+            .kind = .loaded,
+            .position_ms = self.audio.position_ms,
+            .duration_ms = self.audio.duration_ms,
+            .playing = self.audio.playing,
+        } };
+    }
+
+    /// Test helper: advance fake playback by `delta_ms` and synthesize
+    /// the event a live host's position timer would deliver — a
+    /// `.position` tick, or `.completed` when the track end is reached
+    /// (which stops playback, matching AVAudioPlayer). Returns null when
+    /// nothing is loaded or playing; position never advances on its own.
+    pub fn advanceAudio(self: *NullPlatform, delta_ms: u64) ?Event {
+        if (!self.audio.loaded or !self.audio.playing) return null;
+        self.audio.position_ms = @min(self.audio.position_ms + delta_ms, self.audio.duration_ms);
+        if (self.audio.position_ms >= self.audio.duration_ms) {
+            self.audio.playing = false;
+            self.audio.position_ms = self.audio.duration_ms;
+            return .{ .audio = .{
+                .kind = .completed,
+                .position_ms = self.audio.position_ms,
+                .duration_ms = self.audio.duration_ms,
+                .playing = false,
+            } };
+        }
+        return .{ .audio = .{
+            .kind = .position,
+            .position_ms = self.audio.position_ms,
+            .duration_ms = self.audio.duration_ms,
+            .playing = true,
+        } };
+    }
+
+    /// Test helper: synthesize an asynchronous decode/device failure,
+    /// the `.failed` event a live host would deliver. Unloads the player
+    /// like a real failure would.
+    pub fn failAudio(self: *NullPlatform) ?Event {
+        if (!self.audio.loaded) return null;
+        self.audio = .{ .volume = self.audio.volume };
+        self.audio_loaded_pending = false;
+        return .{ .audio = .{ .kind = .failed } };
     }
 
     fn wakeService(context: ?*anyopaque) anyerror!void {
