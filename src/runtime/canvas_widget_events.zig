@@ -590,11 +590,21 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
 
         /// Same contract as the pointer variant: returns the dismissed
         /// surface's id (0 = none); the caller dispatches the app event.
+        /// Two keys dismiss: Escape (any dismissible surface, with the
+        /// topmost-mounted fallback) and Tab (focus departure — but ONLY
+        /// when the keyboard sits inside an open menu or on its trigger;
+        /// the menu closes uncommitted and the Tab is consumed, leaving
+        /// focus back on the trigger).
         pub fn dismissCanvasWidgetSurfaceFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent) anyerror!canvas.ObjectId {
             if (input_event.kind != .key_down) return 0;
-            if (!canvasWidgetEscapeKey(input_event.key)) return 0;
+            const escape = canvasWidgetEscapeKey(input_event.key);
+            const tab = std.ascii.eqlIgnoreCase(input_event.key, "tab");
+            if (!escape and !tab) return 0;
             const modifiers = canvasWidgetKeyboardModifiers(input_event.modifiers);
-            if (modifiers.shift or modifiers.hasNavigationModifier()) return 0;
+            if (modifiers.hasNavigationModifier()) return 0;
+            // Shift+Tab is still focus departure; Shift+Escape is not a
+            // dismissal chord at all.
+            if (escape and modifiers.shift) return 0;
 
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return 0;
             if (self.views[index].kind != .gpu_surface or !self.views[index].focused) return 0;
@@ -604,9 +614,16 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // view method falls back to the topmost mounted anchored
             // surface when the focus chain yields none.
             const focused_id = self.views[index].canvas_widget_focused_id;
+            // Tab-away has no fallback: with nothing focused there is no
+            // focus to depart, so an unrelated Tab never tears down a
+            // floating menu the way Escape deliberately does.
+            if (tab and focused_id == 0) return 0;
 
             const previous_cursor = self.views[index].canvas_widget_cursor;
-            const dismissal = try self.views[index].dismissCanvasWidgetSurfaceFromEscape(focused_id) orelse return 0;
+            const dismissal = (if (tab)
+                try self.views[index].dismissCanvasWidgetMenuSurfaceForFocusDeparture(focused_id)
+            else
+                try self.views[index].dismissCanvasWidgetSurfaceFromEscape(focused_id)) orelse return 0;
             if (previous_cursor != self.views[index].canvas_widget_cursor) try syncCanvasWidgetCursorForView(self, index);
             try invalidateForCanvasWidgetDirty(self, index, dismissal.dirty);
             return dismissal.id;

@@ -402,6 +402,20 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
         }
 
+        /// Focus-departure dismissal (Tab while the keyboard sits inside
+        /// an open menu — or on the trigger that owns one): a menu is a
+        /// transient choice, so moving the keyboard on closes it WITHOUT
+        /// committing, exactly like a click outside. Scoped to menu
+        /// surfaces only: Tab through a persistent popover's form fields
+        /// must not tear the popover down.
+        pub fn dismissCanvasWidgetMenuSurfaceForFocusDeparture(self: *RuntimeView, focused_id: canvas.ObjectId) anyerror!?CanvasWidgetSurfaceDismissal {
+            const focused_index = self.canvasWidgetNodeIndexById(focused_id) orelse return null;
+            const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(focused_index) orelse return null;
+            const kind = self.widget_layout_nodes[surface_index].widget.kind;
+            if (kind != .menu_surface and kind != .dropdown_menu) return null;
+            return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
+        }
+
         pub fn dismissCanvasWidgetSurfaceForTarget(self: *RuntimeView, target_id: canvas.ObjectId) anyerror!?CanvasWidgetSurfaceDismissal {
             const target_index = self.canvasWidgetNodeIndexById(target_id) orelse return null;
             return self.dismissCanvasWidgetSurfaceForTargetIndex(target_index);

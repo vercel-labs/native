@@ -363,11 +363,12 @@ test "gpu components layout keeps finished controls visually separated" {
     try std.testing.expectEqualStrings("Preview", open_select.text);
     try std.testing.expectEqual(@as(?bool, true), open_select.state.expanded);
     // The menu now floats ANCHORED below the trigger stack (gap 4,
-    // stretched to the trigger width) instead of a hand-placed frame.
-    try expectComponentWidgetFrame(open_layout, environment_menu_id, contentRect(64, 492, 180, 96));
-    try expectComponentWidgetFrame(open_layout, environmentOptionId(0), contentRect(68, 496, 172, 28));
-    try expectComponentWidgetFrame(open_layout, environmentOptionId(1), contentRect(68, 526, 172, 28));
-    try expectComponentWidgetFrame(open_layout, environmentOptionId(2), contentRect(68, 556, 172, 28));
+    // stretched to the trigger width) instead of a hand-placed frame,
+    // with its rows on the comfortable 32px menu band.
+    try expectComponentWidgetFrame(open_layout, environment_menu_id, contentRect(64, 492, 180, 108));
+    try expectComponentWidgetFrame(open_layout, environmentOptionId(0), contentRect(68, 496, 172, 32));
+    try expectComponentWidgetFrame(open_layout, environmentOptionId(1), contentRect(68, 530, 172, 32));
+    try expectComponentWidgetFrame(open_layout, environmentOptionId(2), contentRect(68, 564, 172, 32));
     try std.testing.expect(!open_layout.findById(environmentOptionId(0)).?.widget.state.selected);
     try std.testing.expect(open_layout.findById(environmentOptionId(1)).?.widget.state.selected);
     try std.testing.expect(!open_layout.findById(environmentOptionId(2)).?.widget.state.selected);
@@ -658,7 +659,16 @@ test "gpu components display list renders stable reference snapshot" {
     // (fill/border/ink) to half strength instead of collapsing to a
     // gray block. Reviewed via regenerated docs button/toggle previews
     // in light and dark before blessing.
-    try std.testing.expectEqual(@as(u64, 53431914548693936), referenceSurfaceSignature(pixels));
+    // Re-pinned same day on the merged tree adding the select rework:
+    // the select trigger's open-below affordance is the registry
+    // chevron at the shared row-icon extent instead of two hand-drawn
+    // lines, menu rows moved to their own emitter (full-row wash for
+    // keyboard/hover, trailing checkmark for the committed row, no
+    // focus outline) on the comfortable 32px band — the visible menu
+    // specimen and its surface grew to hold three such rows. Reviewed
+    // via regenerated docs select/dropdown/menu previews and live
+    // light/dark captures before blessing.
+    try std.testing.expectEqual(@as(u64, 7885881543797400396), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));

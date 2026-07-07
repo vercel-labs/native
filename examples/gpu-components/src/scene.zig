@@ -724,7 +724,9 @@ pub fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutN
     const environment_closed_children = [_]canvas.Widget{environment_select_trigger};
     const environment_open_children = [_]canvas.Widget{ environment_select_trigger, canvas.builtinComponentWidget(.dropdown_menu, .{
         .id = environment_menu_id,
-        .frame = rect(0, 0, 180, 96),
+        // 3 rows on the menu's comfortable 32px band + the surface's
+        // 4px padding and 2px gaps.
+        .frame = rect(0, 0, 180, 108),
         .layout = .{ .anchor = .{ .placement = .below, .alignment = .stretch } },
         .semantics = .{ .label = "Environment options" },
         .children = &environment_menu_items,
@@ -760,7 +762,9 @@ pub fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutN
     const popover_children = [_]canvas.Widget{
         canvas.builtinComponentWidget(.dropdown_menu, .{
             .id = 141,
-            .frame = rect(12, 12, 236, 100),
+            // 3 rows on the menu's comfortable 32px band + the
+            // surface's 4px padding and 2px gaps.
+            .frame = rect(12, 12, 236, 108),
             .semantics = .{ .label = "Project actions menu" },
             .children = &menu_items,
         }),

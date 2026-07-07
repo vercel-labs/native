@@ -1811,6 +1811,8 @@ test "widget emitter applies menu item control tokens" {
         },
     };
 
+    // A PRESSED row takes the menu-item active background (attention
+    // states drive the wash; commit does not — see below).
     var commands: [3]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, .{
@@ -1818,7 +1820,7 @@ test "widget emitter applies menu item control tokens" {
         .kind = .menu_item,
         .frame = geometry.RectF.init(0, 0, 180, 30),
         .text = "Copy token",
-        .state = .{ .selected = true },
+        .state = .{ .pressed = true },
     }, tokens);
 
     const display_list = builder.displayList();
@@ -1835,6 +1837,28 @@ test "widget emitter applies menu item control tokens" {
             try std.testing.expectEqualStrings("Copy token", text.text);
             try std.testing.expectEqualDeep(Color.rgb8(240, 246, 252), text.color);
         },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // A COMMITTED row wears no wash at all: its marker is the trailing
+    // checkmark, tinted with the same menu-item foreground token.
+    var committed_commands: [5]CanvasCommand = undefined;
+    var committed_builder = Builder.init(&committed_commands);
+    try emitWidgetTree(&committed_builder, .{
+        .id = 55,
+        .kind = .menu_item,
+        .frame = geometry.RectF.init(0, 0, 180, 30),
+        .text = "Copy token",
+        .state = .{ .selected = true },
+    }, tokens);
+    const committed_list = committed_builder.displayList();
+    try std.testing.expectEqual(@as(usize, 4), committed_list.commandCount());
+    switch (committed_list.commands[0]) {
+        .draw_text => |text| try std.testing.expectEqualDeep(Color.rgb8(240, 246, 252), text.color),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (committed_list.commands[2]) {
+        .stroke_path => |stroke| try expectFillColor(Color.rgb8(240, 246, 252), stroke.stroke.fill),
         else => return error.TestUnexpectedResult,
     }
 }

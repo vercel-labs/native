@@ -373,7 +373,10 @@ pub fn emitSelectWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
     const radius = controlRadius(widget, visual, tokens.radius.md);
     const text_size = widgetBodyTextSize(widget, tokens);
     const inset = widgetControlInset(widget, tokens, tokens.spacing.md);
-    const chevron_size = @max(widgetSizedDensityValue(widget, tokens, 8), text_size - 4);
+    // The registry chevron at the shared row-icon extent: the trigger's
+    // open-below affordance matches every other icon in the control
+    // family instead of a hand-drawn two-line glyph.
+    const chevron_size = widgetRowIconExtent(widget, tokens);
     const chevron_extent = chevron_size + inset;
     const text_frame = geometry.RectF.init(
         widget.frame.x + inset,
@@ -420,18 +423,17 @@ pub fn emitSelectWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
 }
 
 fn emitSelectChevron(builder: *Builder, widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens, inset: f32, chevron_size: f32) Error!void {
-    const center = geometry.PointF.init(widget.frame.x + widget.frame.width - inset - chevron_size * 0.5, widget.frame.y + widget.frame.height * 0.5);
-    const half = chevron_size * 0.36;
-    const drop = chevron_size * 0.28;
-    const left = pixelSnapGeometryPoint(tokens, geometry.PointF.init(center.x - half, center.y - drop * 0.5));
-    const mid = pixelSnapGeometryPoint(tokens, geometry.PointF.init(center.x, center.y + drop * 0.5));
-    const right = pixelSnapGeometryPoint(tokens, geometry.PointF.init(center.x + half, center.y - drop * 0.5));
-    const stroke = Stroke{
-        .fill = colorFill(widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted)),
-        .width = tokens.stroke.regular,
-    };
-    try builder.drawLine(.{ .id = widgetPartId(widget.id, 4), .from = left, .to = mid, .stroke = stroke });
-    try builder.drawLine(.{ .id = widgetPartId(widget.id, 5), .from = mid, .to = right, .stroke = stroke });
+    const icon = icon_model.resolve("chevron-down") orelse return;
+    const icon_frame = geometry.RectF.init(
+        widget.frame.x + widget.frame.width - inset - chevron_size,
+        widget.frame.y + (widget.frame.height - chevron_size) * 0.5,
+        chevron_size,
+        chevron_size,
+    );
+    // Muted, like the trigger's placeholder register: the chevron is an
+    // affordance, not content, so it never outweighs the chosen label.
+    const color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
+    try emitVectorIcon(builder, widget.id, 4, icon_frame, color, icon);
 }
 
 pub fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
@@ -674,8 +676,93 @@ pub fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens
     }
 }
 
+/// The open menu's option row. Deliberately NOT the list-item emitter:
+/// a menu row never draws a focus outline — while the menu is open, the
+/// keyboard's position paints the same full-row wash hover does, and
+/// the row the app has committed carries a trailing checkmark instead
+/// of a wash. Highlight (where the keyboard is) and checkmark (what is
+/// committed) stay independent: arrowing away from the committed row
+/// moves the wash while its checkmark stays put.
 pub fn emitMenuItemWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    try emitListItemWidget(builder, widget, tokens);
+    const visual = listItemControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.sm);
+    const wash = menuItemWashColor(widget, tokens, visual);
+    if (wash.a > 0) {
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = widget.frame,
+            .radius = radius,
+            .fill = widgetBackgroundFill(widget, wash),
+        });
+    }
+    const text_size = widgetBodyTextSize(widget, tokens);
+    const text_inset = widgetControlInset(widget, tokens, tokens.spacing.md);
+    const content_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+    // EVERY row reserves the trailing checkmark slot, committed or not,
+    // so labels measure and elide identically and moving the commit
+    // never reflows a row's text.
+    const check_extent = widgetRowIconExtent(widget, tokens);
+    const check_gap = widgetRowIconGap(widget, tokens);
+    var text_frame = geometry.RectF.init(
+        widget.frame.x,
+        widget.frame.y,
+        @max(1, widget.frame.width - check_extent - check_gap),
+        widget.frame.height,
+    );
+    const icon = if (widget.icon.len > 0) icon_model.resolve(widget.icon) else null;
+    if (icon) |resolved| {
+        // Leading icon slot: shared row metrics, one tint with the
+        // label — the same contract list rows draw with.
+        const icon_extent = widgetRowIconExtent(widget, tokens);
+        const icon_frame = geometry.RectF.init(
+            widget.frame.x + text_inset,
+            widget.frame.y + (widget.frame.height - icon_extent) * 0.5,
+            icon_extent,
+            icon_extent,
+        );
+        try emitVectorIcon(builder, widget.id, 4, icon_frame, content_color, resolved);
+        const shift = icon_extent + widgetRowIconGap(widget, tokens);
+        text_frame = geometry.RectF.init(
+            text_frame.x + shift,
+            text_frame.y,
+            @max(1, text_frame.width - shift),
+            text_frame.height,
+        );
+    }
+    try builder.drawText(.{
+        .id = widgetPartId(widget.id, 3),
+        .font_id = tokens.typography.font_id,
+        .size = text_size,
+        .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, text_inset)),
+        .color = content_color,
+        .text = widget.text,
+        .text_layout = boundedTextLayout(text_frame, text_size, text_inset, .start, .none, widget.text_overflow, tokens),
+    });
+    if (widget.state.selected) {
+        if (icon_model.resolve("check")) |check_icon| {
+            // The commit marker: right-aligned inside the reserved slot,
+            // in the row's own content tint. Slots 12/13 sit clear of
+            // the leading icon's shape range (4..11).
+            const check_frame = geometry.RectF.init(
+                widget.frame.maxX() - text_inset - check_extent,
+                widget.frame.y + (widget.frame.height - check_extent) * 0.5,
+                check_extent,
+                check_extent,
+            );
+            try emitVectorIcon(builder, widget.id, 12, check_frame, content_color, check_icon);
+        }
+    }
+}
+
+/// Menu rows tint by ATTENTION, never by commit: the keyboard's active
+/// row and the hovered row share the hover wash, a press deepens it,
+/// and the committed row stays untinted (its marker is the trailing
+/// checkmark). `selected` deliberately does not reach the fill, and no
+/// state draws a focus ring.
+fn menuItemWashColor(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Color {
+    if (widget.state.pressed) return buttonStateBackground(visual, true, false, tokens.colors.surface_pressed);
+    if (widget.state.focused or widget.state.hovered) return buttonStateBackground(visual, false, true, tokens.colors.surface_subtle);
+    return widget_render_style.transparentColor();
 }
 
 pub fn emitListItemWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {

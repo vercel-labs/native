@@ -621,7 +621,9 @@ test "list and menu items draw a leading vector icon with the label shifted righ
     const registered = canvas.icons.find("folder").?;
     try std.testing.expectEqual(registered.elements.ptr, icon_stroke.elements.ptr);
 
-    // menu_item shares the emitter, so the same slot carries its icon.
+    // menu_item keeps the same leading-icon slot contract even though
+    // it draws with its own emitter (menu rows add the trailing
+    // checkmark slot and drop the focus ring).
     var menu = iconed;
     menu.kind = WidgetKind.menu_item;
     menu.icon = "trash";
@@ -635,6 +637,81 @@ test "list and menu items draw a leading vector icon with the label shifted righ
     const iconed_size = canvas.intrinsicWidgetSize(iconed, tokens);
     try std.testing.expect(iconed_size.width > plain_size.width);
     try std.testing.expectEqual(plain_size.height, iconed_size.height);
+}
+
+test "menu rows wash the active row, never outline, and checkmark the committed row" {
+    const tokens = DesignTokens{};
+    const base = Widget{
+        .id = 73,
+        .kind = WidgetKind.menu_item,
+        .frame = geometry.RectF.init(0, 0, 180, 32),
+        .text = "Staging",
+    };
+
+    // An idle row is quiet: no wash, no outline, no checkmark.
+    var idle_commands: [8]CanvasCommand = undefined;
+    var idle_builder = Builder.init(&idle_commands);
+    try emitWidgetTree(&idle_builder, base, tokens);
+    try std.testing.expect(idle_builder.displayList().findCommandById(widgetPartId(73, 1)) == null);
+    try std.testing.expect(idle_builder.displayList().findCommandById(widgetPartId(73, 2)) == null);
+    try std.testing.expect(idle_builder.displayList().findCommandById(widgetPartId(73, 13)) == null);
+
+    // The keyboard's active row paints the SAME full-row wash hover
+    // uses — and deliberately NO focus-ring outline (slot 2 stays
+    // empty; inside a menu the wash IS the keyboard affordance).
+    var focused = base;
+    focused.state.focused = true;
+    var focused_commands: [8]CanvasCommand = undefined;
+    var focused_builder = Builder.init(&focused_commands);
+    try emitWidgetTree(&focused_builder, focused, tokens);
+    const focused_wash = switch (focused_builder.displayList().findCommandById(widgetPartId(73, 1)).?.command) {
+        .fill_rounded_rect => |fill| fill,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(focused_builder.displayList().findCommandById(widgetPartId(73, 2)) == null);
+    var hovered = base;
+    hovered.state.hovered = true;
+    var hovered_commands: [8]CanvasCommand = undefined;
+    var hovered_builder = Builder.init(&hovered_commands);
+    try emitWidgetTree(&hovered_builder, hovered, tokens);
+    const hovered_wash = switch (hovered_builder.displayList().findCommandById(widgetPartId(73, 1)).?.command) {
+        .fill_rounded_rect => |fill| fill,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualDeep(hovered_wash.fill, focused_wash.fill);
+
+    // The COMMITTED row wears the registry checkmark at the trailing
+    // marker slot in the row's own content tint — and no wash: commit
+    // and highlight are independent affordances.
+    var committed = base;
+    committed.state.selected = true;
+    var committed_commands: [8]CanvasCommand = undefined;
+    var committed_builder = Builder.init(&committed_commands);
+    try emitWidgetTree(&committed_builder, committed, tokens);
+    try std.testing.expect(committed_builder.displayList().findCommandById(widgetPartId(73, 1)) == null);
+    const check_stroke = switch (committed_builder.displayList().findCommandById(widgetPartId(73, 13)).?.command) {
+        .stroke_path => |stroke| stroke,
+        else => return error.TestUnexpectedResult,
+    };
+    const check = canvas.icons.find("check").?;
+    try std.testing.expectEqual(check.elements.ptr, check_stroke.elements.ptr);
+    const label = switch (committed_builder.displayList().findCommandById(widgetPartId(73, 3)).?.command) {
+        .draw_text => |text| text,
+        else => return error.TestUnexpectedResult,
+    };
+    try expectFillColor(label.color, check_stroke.stroke.fill);
+
+    // A row that is committed AND under the keyboard carries both: the
+    // wash and the checkmark.
+    var both = base;
+    both.state.selected = true;
+    both.state.focused = true;
+    var both_commands: [8]CanvasCommand = undefined;
+    var both_builder = Builder.init(&both_commands);
+    try emitWidgetTree(&both_builder, both, tokens);
+    try std.testing.expect(both_builder.displayList().findCommandById(widgetPartId(73, 1)) != null);
+    try std.testing.expect(both_builder.displayList().findCommandById(widgetPartId(73, 13)) != null);
+    try std.testing.expect(both_builder.displayList().findCommandById(widgetPartId(73, 2)) == null);
 }
 
 test "icon buttons draw registry names as vector icons and keep the glyph fallback" {

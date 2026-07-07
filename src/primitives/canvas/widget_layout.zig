@@ -1123,7 +1123,14 @@ fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) 
         .search_field, .combobox => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 200), widgetControlHeight(widget, tokens)),
         .textarea => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 200), widgetSizedDensityValue(widget, tokens, 80)),
         .tooltip => intrinsicPaddedTextWidgetSize(widget, tokens, widgetLabelTextSize(widget, tokens), widgetControlInset(widget, tokens, tokens.spacing.sm)),
-        .menu_item => intrinsicRowTextWidgetSize(widget, tokens),
+        // Menu rows measure like list rows PLUS the trailing checkmark
+        // slot every option reserves (committed or not, so commit moves
+        // never reflow labels), on the menu's comfortable row band.
+        .menu_item => blk: {
+            const base = intrinsicRowTextWidgetSize(widget, tokens);
+            const check_reserve = widget_metrics.widgetRowIconExtent(widget, tokens) + widget_metrics.widgetRowIconGap(widget, tokens);
+            break :blk geometry.SizeF.init(base.width + check_reserve, widgetSizedDensityValue(widget, tokens, 32));
+        },
         .list_item => blk: {
             const base = intrinsicRowTextWidgetSize(widget, tokens);
             if (widget.children.len == 0) break :blk base;

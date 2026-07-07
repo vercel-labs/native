@@ -3,7 +3,7 @@ import { AttrTable } from "@/components/attr-table";
 
 # Select
 
-`select` is a trigger-only primitive — it takes no options attribute. Its content is the current value (`placeholder` shows while empty) and `on-press` opens. The options are composed as an anchored [dropdown-menu](/components/dropdown-menu) of menu-items beside the trigger in a `stack`, rendered under an `if` — the model owns the open flag, and `on-dismiss` clears it when Escape or a click outside closes the surface. For a trigger the user types into, see [combobox](/components/combobox).
+`select` is a trigger-only primitive — it takes no options attribute. Its content is the current value (`placeholder` shows while empty) and `on-press` opens. The options are composed as an anchored [dropdown-menu](/components/dropdown-menu) of menu-items beside the trigger in a `stack`, rendered under an `if` — the model owns the open flag, and `on-dismiss` clears it when Escape, Tab, or a click outside closes the surface. In the open menu the `selected` option wears a trailing checkmark, and the row under the keyboard or pointer carries a full-row highlight — the two are independent, so arrowing away from the committed option never moves its mark. For a trigger the user types into, see [combobox](/components/combobox).
 
 <ComponentPreview name="select" alt="Select triggers rendered by the engine" caption="a select trigger with a value, and a disabled trigger — press to open the anchored menu" />
 
@@ -11,7 +11,7 @@ import { AttrTable } from "@/components/attr-table";
 
 The full pattern: trigger and menu are siblings in a `stack`, the menu floats with `anchor="below"` (`anchor-alignment="stretch"` widens it to the trigger, the select-menu look), and every path back to closed goes through the model — picking dispatches `pick_env` and `on-dismiss` dispatches `close_env_picker`, both of which clear `env_picker_open` in `update`.
 
-The keyboard rides the same composition with no extra wiring: on the focused trigger, Enter, Space, or an arrow key presses it (the model-owned open); with the menu mounted, Down/Up move into and walk the options (entering at the `selected` one), Home/End jump to the edges, Enter picks the focused option, and Escape dismisses — focus returns to the trigger either way.
+The keyboard rides the same composition with no extra wiring: on the focused trigger, Enter, Space, or an arrow key presses it (the model-owned open); with the menu mounted, Down/Up move into and walk the options (entering at the `selected` one) and Home/End jump to the edges — walking only moves the highlight, it never dispatches a pick. Enter or a click commits the highlighted option (one `on-press`, then the model closes); Escape, Tab, or a click outside dismisses through `on-dismiss` with the committed value untouched — focus returns to the trigger either way.
 
 ```html
 <stack width="240">

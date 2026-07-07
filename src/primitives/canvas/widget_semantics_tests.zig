@@ -1096,12 +1096,13 @@ test "widget selects expose trigger semantics and render chevron chrome" {
             },
         },
     };
-    var commands: [6]CanvasCommand = undefined;
+    var commands: [7]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, select, tokens);
     const display_list = builder.displayList();
-    // Fill, border, offset focus ring, text, then the two chevron lines.
-    try std.testing.expectEqual(@as(usize, 6), display_list.commandCount());
+    // Fill, border, offset focus ring, text, then the registry chevron
+    // (a transform pair bracketing its stroked path).
+    try std.testing.expectEqual(@as(usize, 7), display_list.commandCount());
     switch (display_list.commands[0]) {
         .fill_rounded_rect => |fill| {
             try expectFillColor(Color.rgb8(20, 24, 28), fill.fill);
@@ -1134,15 +1135,19 @@ test "widget selects expose trigger semantics and render chevron chrome" {
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[4]) {
-        .draw_line => |line| try expectFillColor(Color.rgb8(238, 242, 246), line.stroke.fill),
+        .transform => {},
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[5]) {
-        .draw_line => |line| try expectFillColor(Color.rgb8(238, 242, 246), line.stroke.fill),
+        .stroke_path => |stroke| try expectFillColor(Color.rgb8(238, 242, 246), stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[6]) {
+        .transform => {},
         else => return error.TestUnexpectedResult,
     }
 
-    var placeholder_commands: [5]CanvasCommand = undefined;
+    var placeholder_commands: [6]CanvasCommand = undefined;
     var placeholder_builder = Builder.init(&placeholder_commands);
     try emitWidgetTree(&placeholder_builder, .{
         .id = 10,
@@ -1744,17 +1749,24 @@ test "widget menu surface groups menu items semantically" {
     const layout = try layoutWidgetTree(menu, menu.frame, &nodes);
     try std.testing.expectEqual(@as(usize, 3), layout.nodeCount());
     try expectLayoutFrame(layout, 1, geometry.RectF.init(20, 24, 180, 90));
-    try expectLayoutFrame(layout, 2, geometry.RectF.init(26, 30, 168, 28));
-    try expectLayoutFrame(layout, 3, geometry.RectF.init(26, 60, 168, 28));
+    // Menu rows sit on the comfortable 32px band.
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(26, 30, 168, 32));
+    try expectLayoutFrame(layout, 3, geometry.RectF.init(26, 64, 168, 32));
 
-    var commands: [8]CanvasCommand = undefined;
+    var commands: [10]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try layout.emitDisplayList(&builder, .{});
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 6), display_list.commandCount());
+    // Surface shadow/fill/border, then the committed row's label plus
+    // its trailing checkmark (a transform pair bracketing the stroked
+    // check path — commit paints a marker, not a wash), then the idle
+    // row's label.
+    try std.testing.expectEqual(@as(usize, 8), display_list.commandCount());
     try std.testing.expect(display_list.commands[0] == .shadow);
     try std.testing.expectEqual(@as(?ObjectId, widgetPartId(1, 2)), display_list.commands[1].objectId());
-    try std.testing.expectEqual(@as(?ObjectId, widgetPartId(2, 1)), display_list.commands[3].objectId());
+    try std.testing.expectEqual(@as(?ObjectId, widgetPartId(2, 3)), display_list.commands[3].objectId());
+    try std.testing.expectEqual(@as(?ObjectId, widgetPartId(2, 13)), display_list.commands[5].objectId());
+    try std.testing.expect(display_list.commands[5] == .stroke_path);
 
     try std.testing.expectEqual(@as(ObjectId, 2), layout.focusTarget(null, .forward).?.id);
     try std.testing.expectEqual(@as(ObjectId, 3), layout.focusTarget(2, .forward).?.id);
@@ -1834,9 +1846,9 @@ test "widget dropdown menus expose menu semantics with house surface chrome" {
     const layout = try layoutWidgetTreeWithTokens(dropdown, dropdown.frame, tokens, &nodes);
     try std.testing.expectEqual(@as(usize, 4), layout.nodeCount());
     try expectLayoutFrame(layout, 11, geometry.RectF.init(12, 16, 160, 112));
-    try expectLayoutFrame(layout, 12, geometry.RectF.init(16, 20, 152, 28));
-    try expectLayoutFrame(layout, 13, geometry.RectF.init(16, 50, 128, 1));
-    try expectLayoutFrame(layout, 14, geometry.RectF.init(16, 53, 152, 28));
+    try expectLayoutFrame(layout, 12, geometry.RectF.init(16, 20, 152, 32));
+    try expectLayoutFrame(layout, 13, geometry.RectF.init(16, 54, 128, 1));
+    try expectLayoutFrame(layout, 14, geometry.RectF.init(16, 57, 152, 32));
     try std.testing.expectEqual(@as(ObjectId, 12), layout.focusTarget(null, .forward).?.id);
     try std.testing.expectEqual(@as(ObjectId, 14), layout.focusTarget(12, .forward).?.id);
     const blank_hit = layout.hitTest(geometry.PointF.init(168, 124)).?;

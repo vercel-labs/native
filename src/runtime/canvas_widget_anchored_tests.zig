@@ -19,6 +19,9 @@ const canvas_label = "picker-canvas";
 const PickerModel = struct {
     open: bool = false,
     picked: u32 = 99,
+    // Counts commit Msgs so tests can pin "arrows never commit" and
+    // "Enter/click commits exactly once" independently of the value.
+    picks: u32 = 0,
     toggles: u32 = 0,
     dismissals: u32 = 0,
     holds: u32 = 0,
@@ -53,6 +56,7 @@ fn pickerUpdate(model: *PickerModel, msg: PickerMsg) void {
         },
         .pick => |index| {
             model.picked = index;
+            model.picks += 1;
             model.open = false;
         },
         .crumb_hold => model.holds += 1,
@@ -234,6 +238,9 @@ test "anchored picker: escape dismisses as a Msg the model owns" {
     try fixture.clickWidget(trigger_id);
     try std.testing.expect(fixture.app_state.model.open);
 
+    // Walk the highlight into the menu first: the dismissal below must
+    // discard the provisional position, not commit it.
+    try fixture.key("arrowdown");
     try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .gpu_surface_input = .{
         .label = canvas_label,
         .kind = .key_down,
@@ -241,6 +248,9 @@ test "anchored picker: escape dismisses as a Msg the model owns" {
     } });
     try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.dismissals);
     try std.testing.expect(!fixture.app_state.model.open);
+    // Dismissal never commits: the highlighted row died with the menu.
+    try std.testing.expectEqual(@as(u32, 99), fixture.app_state.model.picked);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.picks);
     // The rebuilt source tree agrees: the surface is gone, not hidden.
     try std.testing.expect(fixture.widgetIdByText(.menu_item, "Alpha") == null);
 }
@@ -303,11 +313,13 @@ test "anchored picker: click outside dismisses as a Msg; clicking the trigger to
     try fixture.clickWidget(trigger_id);
     try std.testing.expect(fixture.app_state.model.open);
 
-    // Click far outside trigger and menu: one dismissal Msg, no toggle.
+    // Click far outside trigger and menu: one dismissal Msg, no toggle,
+    // and — like every dismissal — no commit.
     try fixture.click(geometry.PointF.init(360, 280));
     try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.dismissals);
     try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.toggles);
     try std.testing.expect(!fixture.app_state.model.open);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.picks);
 
     // Re-open, then click the TRIGGER while open: the anchor owns its
     // surface's toggling — exactly one toggle Msg closes it, and no
@@ -362,18 +374,24 @@ test "anchored picker: the open-select keymap opens, walks, commits, and returns
     try fixture.key("arrowdown");
     try std.testing.expectEqual(alpha_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
 
-    // Arrows walk the rows; Home/End jump to the edges.
+    // Arrows walk the rows; Home/End jump to the edges. Walking is a
+    // PROVISIONAL highlight only: no commit Msg fires and the model's
+    // committed value never moves off the sentinel while arrowing.
     try fixture.key("arrowdown");
     try std.testing.expectEqual(beta_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
     try fixture.key("home");
     try std.testing.expectEqual(alpha_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
     try fixture.key("end");
     try std.testing.expectEqual(beta_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(u32, 99), fixture.app_state.model.picked);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.picks);
 
-    // Enter commits the focused row: the model picks and closes, and
-    // the keyboard returns to the trigger the menu came from.
+    // Enter commits the focused row: EXACTLY one commit Msg, the model
+    // picks and closes, and the keyboard returns to the trigger the
+    // menu came from.
     try fixture.key("enter");
     try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.picked);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.picks);
     try std.testing.expect(!fixture.app_state.model.open);
     try std.testing.expect(fixture.widgetIdByText(.menu_item, "Beta") == null);
     try std.testing.expectEqual(trigger_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
@@ -404,11 +422,110 @@ test "anchored picker: arrows enter at the marked row and escape returns focus t
     try std.testing.expectEqual(beta_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
 
     // Escape dismisses through the model and hands the keyboard back to
-    // the trigger, ready to reopen.
+    // the trigger, ready to reopen. Only the FIRST Enter committed.
     try fixture.key("escape");
     try std.testing.expect(!fixture.app_state.model.open);
     try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.dismissals);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.picks);
     try std.testing.expectEqual(trigger_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+}
+
+test "anchored picker: Tab while inside the open menu dismisses without committing" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    // Open from the keyboard and walk the highlight onto the first row.
+    const trigger_id = fixture.widgetIdByText(.select, "Repo").?;
+    var command_buffer: [96]u8 = undefined;
+    const focus_command = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} focus", .{ canvas_label, trigger_id });
+    try fixture.harness.runtime.dispatchAutomationCommand(fixture.app, focus_command);
+    try fixture.key("arrowdown");
+    try std.testing.expect(fixture.app_state.model.open);
+    const alpha_id = fixture.widgetIdByText(.menu_item, "Alpha").?;
+    try fixture.key("arrowdown");
+    try std.testing.expectEqual(alpha_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+
+    // Tab is focus departure: the menu is a transient choice, so the
+    // keyboard leaving closes it through the same on_dismiss Msg as
+    // Escape — no commit, and the Tab itself is consumed with focus
+    // handed back to the trigger.
+    try fixture.key("tab");
+    try std.testing.expect(!fixture.app_state.model.open);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.dismissals);
+    try std.testing.expectEqual(@as(u32, 99), fixture.app_state.model.picked);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.picks);
+    try std.testing.expectEqual(trigger_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+
+    // With the menu closed, Tab is plain focus traversal again — no
+    // phantom dismissal Msg.
+    try fixture.key("tab");
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.dismissals);
+}
+
+test "anchored picker: the open menu washes the ACTIVE row and checkmarks the COMMITTED row" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    // Commit Beta, then reopen: Beta is committed, and the keyboard
+    // entry lands on it (the marked row).
+    const trigger_id = fixture.widgetIdByText(.select, "Repo").?;
+    var command_buffer: [96]u8 = undefined;
+    const focus_command = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} focus", .{ canvas_label, trigger_id });
+    try fixture.harness.runtime.dispatchAutomationCommand(fixture.app, focus_command);
+    try fixture.key("arrowdown");
+    try fixture.key("arrowdown");
+    try fixture.key("arrowdown");
+    try fixture.key("enter");
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.picked);
+    try fixture.key("arrowdown");
+    const alpha_id = fixture.widgetIdByText(.menu_item, "Alpha").?;
+    const beta_id = fixture.widgetIdByText(.menu_item, "Beta").?;
+    try fixture.key("arrowdown");
+    try std.testing.expectEqual(beta_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+
+    // Arrow AWAY from the committed row: Alpha carries the highlight
+    // while Beta keeps the checkmark — independent affordances.
+    try fixture.key("arrowup");
+    try std.testing.expectEqual(alpha_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+
+    const display_list = try fixture.harness.runtime.canvasDisplayList(1, canvas_label);
+    var alpha_wash = false;
+    var alpha_outline = false;
+    var beta_outline = false;
+    var alpha_check = false;
+    var beta_check = false;
+    for (display_list.commands) |command| {
+        switch (command) {
+            // The active row's affordance is the FULL-ROW wash at the
+            // row's fill slot...
+            .fill_rounded_rect => |fill| {
+                if (fill.id == partId(alpha_id, 1)) alpha_wash = true;
+            },
+            // ...never a focus-ring outline on any row.
+            .stroke_rect => |stroke| {
+                if (stroke.id == partId(alpha_id, 2)) alpha_outline = true;
+                if (stroke.id == partId(beta_id, 2)) beta_outline = true;
+            },
+            // The committed row (and ONLY it) draws the checkmark path
+            // at the trailing marker slot (13 = the marker's stroke).
+            .stroke_path => |stroke| {
+                if (stroke.id == partId(beta_id, 13)) beta_check = true;
+                if (stroke.id == partId(alpha_id, 13)) alpha_check = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(alpha_wash);
+    try std.testing.expect(!alpha_outline);
+    try std.testing.expect(!beta_outline);
+    try std.testing.expect(beta_check);
+    try std.testing.expect(!alpha_check);
+}
+
+/// The engine's widget part-id scheme (id * 16 + slot), spelled out
+/// locally so display-list pins read as slot lookups.
+fn partId(id: canvas.ObjectId, slot: canvas.ObjectId) canvas.ObjectId {
+    return id *% 16 +% slot;
 }
 
 test "press-and-hold fires through the runtime timer path and suppresses the release press" {

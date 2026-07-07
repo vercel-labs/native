@@ -100,7 +100,14 @@ const expected_dashboard_interaction_command_count: usize = 72;
 // face at its wider advances), filled buttons cast the whisper shadow,
 // and pressed/disabled states read on the wash ladder. Reviewed via
 // the regenerated docs button previews in light and dark.
-const expected_dashboard_reference_signature: u64 = 5087161688614836056;
+// Re-pinned same day on the merged tree adding the select rework: menu
+// rows draw with their own emitter — full-row wash for keyboard/hover,
+// a trailing checkmark on the committed row instead of a selected wash,
+// no focus outline — and sit on the comfortable 32px band, so the
+// filter popover grew to hold its three rows. Reviewed via a live
+// automation capture (idle popover and a committed row with its
+// checkmark) before blessing.
+const expected_dashboard_reference_signature: u64 = 12478513245896516536;
 const expected_dashboard_widget_node_count: usize = 48;
 const expected_dashboard_snapshot_widget_count: usize = 48;
 const refresh_command = "dashboard.refresh";
@@ -507,7 +514,9 @@ fn sideColumn(ui: *DashboardUi, model: *const Model) DashboardUi.Node {
 
 fn filterPopover(ui: *DashboardUi, model: *const Model) DashboardUi.Node {
     var node = ui.el(.popover, .{
-        .height = 118,
+        // 3 filter rows on the menu's comfortable 32px band with 2px
+        // gaps, inside the popover's 12px padding.
+        .height = 124,
         .padding = 12,
         .semantics = .{ .label = "Revenue filter popover" },
     }, ui.el(.menu_surface, .{

@@ -469,6 +469,7 @@ pub const RuntimeView = struct {
     pub const canvasWidgetRenderState = CanvasWidgetTreeMethods.canvasWidgetRenderState;
     pub const reconcileCanvasWidgetRenderStateAfterScroll = CanvasWidgetTreeMethods.reconcileCanvasWidgetRenderStateAfterScroll;
     pub const dismissCanvasWidgetSurfaceFromEscape = CanvasWidgetTreeMethods.dismissCanvasWidgetSurfaceFromEscape;
+    pub const dismissCanvasWidgetMenuSurfaceForFocusDeparture = CanvasWidgetTreeMethods.dismissCanvasWidgetMenuSurfaceForFocusDeparture;
     pub const dismissCanvasWidgetSurfaceForTarget = CanvasWidgetTreeMethods.dismissCanvasWidgetSurfaceForTarget;
     pub const dismissCanvasWidgetSurfaceForTargetIndex = CanvasWidgetTreeMethods.dismissCanvasWidgetSurfaceForTargetIndex;
     pub const dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget = CanvasWidgetTreeMethods.dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget;
