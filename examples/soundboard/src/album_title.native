@@ -1,0 +1,8 @@
+<!-- The album detail page's heading: a markup SPAN PARAGRAPH whose one
+     bold run scales to 1.9x the body size — the same TextSpan channels
+     the Zig builder used before span scale reached markup. Compiled at
+     comptime (canvas.CompiledMarkupView) like the header and now-playing
+     fragments and composed as an ordinary child of the Zig detail
+     column; the label mirrors the visible title so assistive tech
+     announces the heading by name. -->
+<text label="{openAlbumTitle}"><span weight="bold" scale="1.9">{openAlbumTitle}</span></text>

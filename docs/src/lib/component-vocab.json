@@ -254,7 +254,7 @@
     },
     {
       "name": "span",
-      "doc": "Inline styled run inside a <text> paragraph: mixed-weight, mono, italic, and token-colored runs word-wrap as ONE paragraph and announce as one text run. Takes weight (regular|medium|bold), mono, italic, foreground; content is one run of text ({bindings} work). Whitespace between runs collapses to a single space; runs written with no whitespace between them abut. Spans do not nest; layout, events, and identity stay on the enclosing text."
+      "doc": "Inline styled run inside a <text> paragraph: mixed-weight, mono, italic, scaled, underlined, and token-colored runs word-wrap as ONE paragraph and announce as one text run. Takes weight (regular|medium|bold), mono, italic, scale (a positive multiplier on the paragraph's base size), underline, foreground; content is one run of text ({bindings} work). Whitespace between runs collapses to a single space; runs written with no whitespace between them abut. Spans do not nest; layout, events, and identity stay on the enclosing text."
     }
   ],
   "structure": [
@@ -750,6 +750,14 @@
       {
         "name": "italic",
         "doc": "span: slants the run (true/false or a {binding})."
+      },
+      {
+        "name": "scale",
+        "doc": "span: the run's size as a POSITIVE multiplier on the paragraph's base size — the text element's size rung included, so scale=\"1.5\" inside a heading paragraph draws at heading x 1.5 (a literal number or one {binding} producing one). The paragraph reserves ONE line height sized by its largest scale, and every run shares that line's baseline. Inline headings, hero stats, fine print."
+      },
+      {
+        "name": "underline",
+        "doc": "span: underlines the run (true/false or a {binding}) — purely visual, like every span channel; it is not a link (link spans stay Zig-builder territory)."
       },
       {
         "name": "foreground",

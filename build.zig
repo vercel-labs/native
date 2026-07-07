@@ -1615,27 +1615,23 @@ pub fn build(b: *std.Build) void {
         \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "segmented control automation click did not request a GPU frame" >&2; exit 1; fi
         \\if ! snapshot_contains 'Clicked segmented_control #119: selected.' || ! snapshot_contains 'widget @w1/components-canvas#117 role=tab' || ! snapshot_contains 'value=0' || ! snapshot_contains 'widget @w1/components-canvas#119 role=tab' || ! snapshot_contains 'focused=true' || ! snapshot_contains 'value=1'; then echo "segmented control automation click did not update retained selection state" >&2; exit 1; fi
         \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "segmented control automation click did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
-        \\gpu_frame_before="$(gpu_frame_from_snapshot)"
-        \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
-        \\gpu_frame_after="$gpu_frame_before"
+        \\# The catalog's project menu is an ACTIONS menu (no sibling declares a
+        \\# committed row), so automation select mints NO selection: value
+        \\# stays 0. Automation focus follows the pointer contract (rows take
+        \\# focus QUIETLY, no visible affordance), so nothing repaints and no
+        \\# frame is requested — the republished snapshot alone carries the
+        \\# focus move. A picker menu would mint value=1 and repaint; the
+        \\# select specimen's committed-row tests cover that register.
         \\"$cli" automate widget-action components-canvas 142 select >/dev/null 2>&1
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
         \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
-        \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
-        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
-        \\    case "$snapshot" in *'widget @w1/components-canvas#142 role=menuitem'*'focused=true'*'value=1'*)
-        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
-        \\      ;;
-        \\    esac
-        \\  fi
+        \\  case "$(printf '%s\\n' "$snapshot" | grep -F 'components-canvas#142 role=menuitem' | head -1)" in *'focused=true'*'value=0'*) break ;; esac
         \\  attempts=$((attempts + 1))
         \\  sleep 0.1
         \\done
-        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "menu item automation select did not request a GPU frame" >&2; exit 1; fi
-        \\case "$snapshot" in *'widget @w1/components-canvas#142 role=menuitem'*'focused=true'*'value=1'*) ;; *) echo "menu item automation select did not update retained selection state" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "menu item automation select did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
+        \\menu_item_line="$(printf '%s\\n' "$snapshot" | grep -F 'components-canvas#142 role=menuitem' | head -1)"
+        \\case "$menu_item_line" in *'focused=true'*'value=0'*) ;; *) echo "menu item automation select did not move quiet focus without minting a selection" >&2; exit 1 ;; esac
         \\"$cli" automate widget-action components-canvas 113 toggle >/dev/null 2>&1
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do

@@ -292,9 +292,10 @@ pub const elements = [_]ElementInfo{
     // Inline styled run inside a <text> paragraph: consumed by its parent
     // text leaf (lowered into the paragraph's flat span list, never to a
     // widget of its own), exactly like step/series/context-menu. Spans
-    // carry weight, mono, italic, and the existing foreground token
-    // channel; everything else about the paragraph (wrap, alignment,
-    // events, identity) stays on the enclosing text element.
+    // carry weight, mono, italic, scale, underline, and the existing
+    // foreground token channel; everything else about the paragraph
+    // (wrap, alignment, events, identity) stays on the enclosing text
+    // element.
     .{ .code = 64, .name = "span", .rule_hook = "span" },
 };
 
@@ -414,6 +415,15 @@ pub const attrs = [_]AttrInfo{
     .{ .code = 73, .name = "x-labels", .class = .binding_only, .group = .composite },
     .{ .code = 74, .name = "y-labels", .class = .flag, .group = .composite },
     .{ .code = 75, .name = "hover-details", .class = .flag, .group = .composite },
+    // Inline span attributes, round two (the <span> composite; its rule
+    // hook owns the closed set). scale multiplies the paragraph's base
+    // size — the text element's size rung included — so a 1.5 run inside
+    // a heading paragraph draws at heading x 1.5; the engine treats only
+    // positive finite multipliers as scaling, so markup requires exactly
+    // that. underline is the span model's underline decoration (purely
+    // visual, like every span channel).
+    .{ .code = 76, .name = "scale", .class = .number, .group = .composite },
+    .{ .code = 77, .name = "underline", .class = .flag, .group = .composite },
 };
 
 // ----------------------------------------------------------------- events

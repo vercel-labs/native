@@ -1905,8 +1905,12 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
 
         /// One `<span>`: the shared shape check (closed attribute set,
         /// exactly one run, no nesting), then the style channels resolved
-        /// against the scope — weight and the flags take bindings like any
-        /// option attribute, foreground stays a literal token name.
+        /// against the scope — weight, scale, and the flags take bindings
+        /// like any option attribute, foreground stays a literal token
+        /// name. A bound scale is held to the same positive-finite bound
+        /// the validator pins for literals: the engine draws anything
+        /// else at the base size, and a silently dead binding is worse
+        /// than a diagnostic.
         fn buildSpan(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!canvas.TextSpan {
             if (markup.spanShapeError(node)) |info| {
                 self.diagnostic = .{ .line = info.line, .column = info.column, .message = info.message, .path = info.path };
@@ -1919,10 +1923,22 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     span.weight = std.meta.stringToEnum(canvas.TextSpanWeight, text) orelse {
                         return self.failValue(node, markup.span_weight_value_message);
                     };
+                } else if (std.mem.eql(u8, attribute.name, "scale")) {
+                    const multiplier = switch (try self.evalAttrExpression(scope, node, attribute)) {
+                        .float => |float| float,
+                        .integer => |int| @as(f32, @floatFromInt(int)),
+                        else => return self.failValue(node, markup.span_scale_value_message),
+                    };
+                    if (!std.math.isFinite(multiplier) or multiplier <= 0) {
+                        return self.failValue(node, markup.span_scale_value_message);
+                    }
+                    span.scale = multiplier;
                 } else if (std.mem.eql(u8, attribute.name, "mono")) {
                     span.monospace = (try self.evalAttrExpression(scope, node, attribute)).truthy();
                 } else if (std.mem.eql(u8, attribute.name, "italic")) {
                     span.italic = (try self.evalAttrExpression(scope, node, attribute)).truthy();
+                } else if (std.mem.eql(u8, attribute.name, "underline")) {
+                    span.underline = (try self.evalAttrExpression(scope, node, attribute)).truthy();
                 } else if (std.mem.eql(u8, attribute.name, "foreground")) {
                     span.color = std.meta.stringToEnum(canvas.TextSpanColor, attribute.value) orelse {
                         return self.failValue(node, markup.unknown_color_token_message);

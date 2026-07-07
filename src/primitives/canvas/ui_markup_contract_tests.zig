@@ -206,6 +206,30 @@ const fixtures = [_]Fixture{
         .expect = "binding does not name a model field",
     },
     .{
+        // A span's scale binding is a number channel: float and integer
+        // model values both multiply the base size; underline resolves
+        // truthy like the other flags.
+        .name = "span scale and underline bindings accept numbers and flags",
+        .source =
+        \\<column>
+        \\  <text><span scale="{ratio}">{name}</span> of <span scale="{count}" underline="{active}">{count}</span></text>
+        \\</column>
+        ,
+        .expect = null,
+    },
+    .{
+        // A name cannot multiply a size: the contract holds scale
+        // bindings to numbers with the same teaching message the engines
+        // fail with.
+        .name = "a string-valued span scale binding rejects",
+        .source =
+        \\<column>
+        \\  <text><span scale="{name}">x</span> y</text>
+        \\</column>
+        ,
+        .expect = markup.span_scale_value_message,
+    },
+    .{
         // The buffer is the edit model, not the text: both checkers
         // teach the pub fn accessor shape with the SAME message (the
         // shared constant pins the vocabularies together, like

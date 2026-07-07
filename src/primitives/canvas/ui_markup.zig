@@ -1769,8 +1769,9 @@ pub const text_leaf_single_run_message = "text elements take a single run of tex
 pub const text_inline_children_message = "text takes one run of text and inline span children only - wrap other elements in a container (row, column, stack)";
 pub const span_parent_message = "span is only allowed inside text - it styles one run of the enclosing paragraph, so it needs a <text> parent";
 pub const span_text_only_message = "span is only supported inside text - the other text-bearing elements draw one single-style label; put the styled runs in a <text> paragraph composed next to this element";
-pub const span_attr_message = "unknown attribute for span - it takes weight (regular, medium, bold), mono, italic, and foreground; spans are visual runs, so events, keys, and layout stay on the enclosing text";
+pub const span_attr_message = "unknown attribute for span - it takes weight (regular, medium, bold), mono, italic, scale, underline, and foreground; spans are visual runs, so events, keys, and layout stay on the enclosing text";
 pub const span_weight_value_message = "unknown weight value - span takes regular, medium (the semibold rung), or bold";
+pub const span_scale_value_message = "scale takes a positive number - the run draws at the paragraph's base size (the text element's size rung included) times this multiplier, so 1.5 reads half again as large; zero, negative, and non-finite multipliers have no rendering - drop the attribute to inherit the base size";
 pub const span_content_message = "span takes a single run of text (a literal, {bindings}, or both) - spans do not nest and hold no element children (the paragraph lowers to one flat run list)";
 pub const span_paragraph_wrap_message = "wrap and overflow do not apply to a span paragraph - inline spans always word-wrap and the paragraph reserves its wrapped height; drop the attribute (or the spans)";
 
@@ -2477,11 +2478,12 @@ fn validateInputGroupActions(document: MarkupDocument, node: MarkupNode, templat
 }
 
 /// One `<span>` inside a text paragraph: a closed attribute set (weight,
-/// mono, italic, foreground — the span model's markup channels) around
-/// exactly one run of text. Spans do not nest: the engine's paragraph is
-/// a FLAT run list, so nesting would invent a cascade the renderer does
-/// not have. Pub and comptime-callable: the validator and BOTH engines
-/// run this one shape check, so the closed vocabulary is stated once.
+/// mono, italic, scale, underline, foreground — the span model's markup
+/// channels) around exactly one run of text. Spans do not nest: the
+/// engine's paragraph is a FLAT run list, so nesting would invent a
+/// cascade the renderer does not have. Pub and comptime-callable: the
+/// validator and BOTH engines run this one shape check, so the closed
+/// vocabulary is stated once.
 pub fn spanShapeError(node: MarkupNode) ?MarkupErrorInfo {
     for (node.attrs) |attribute| {
         if (std.mem.eql(u8, attribute.name, "weight")) {
@@ -2497,7 +2499,28 @@ pub fn spanShapeError(node: MarkupNode) ?MarkupErrorInfo {
             }
             continue;
         }
-        if (std.mem.eql(u8, attribute.name, "mono") or std.mem.eql(u8, attribute.name, "italic")) {
+        if (std.mem.eql(u8, attribute.name, "scale")) {
+            // The engine only scales for positive finite multipliers
+            // (anything else silently draws at the base size), so markup
+            // requires exactly that instead of letting a dead value rot.
+            // Literals are checked here; bindings resolve at build, where
+            // the engines enforce the same bound.
+            if (parseAttrExpression(attribute.value)) |expression| {
+                if (expression == .literal) {
+                    const multiplier = std.fmt.parseFloat(f32, expression.literal) catch {
+                        return attrError(node, attribute, span_scale_value_message);
+                    };
+                    if (!std.math.isFinite(multiplier) or multiplier <= 0) {
+                        return attrError(node, attribute, span_scale_value_message);
+                    }
+                }
+            }
+            if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+                return attrError(node, attribute, message);
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, attribute.name, "mono") or std.mem.eql(u8, attribute.name, "italic") or std.mem.eql(u8, attribute.name, "underline")) {
             if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
                 return attrError(node, attribute, message);
             }

@@ -3302,6 +3302,7 @@ pub const SpanModel = struct {
     total: []const u8 = "512 GB",
     emphasis: []const u8 = "bold",
     fixed_width: bool = true,
+    title_scale: f32 = 1.3,
 
     pub fn tool(model: *const SpanModel) []const u8 {
         _ = model;
@@ -3314,8 +3315,10 @@ const SpanMarkup = markup_view.MarkupView(SpanModel, SpanMsg);
 
 /// The span-paragraph fixture both engines build (the compiled parity
 /// suite reuses it): mixed weight/mono/italic/color runs, bindings inside
-/// spans, a bound weight, single-space collapsing between runs, and an
-/// abutting punctuation run (no whitespace, no separator).
+/// spans, a bound weight, single-space collapsing between runs, an
+/// abutting punctuation run (no whitespace, no separator), and — round
+/// two — a literal-scaled run carrying a binding, an underlined run, and
+/// a bound scale.
 pub const span_markup_source =
     \\<column gap="8" width="360">
     \\  <text>
@@ -3324,6 +3327,11 @@ pub const span_markup_source =
     \\    <span mono="{fixed_width}">{tool}</span><span italic="true">!</span>
     \\  </text>
     \\  <text label="Total line"><span weight="{emphasis}">Total</span> {used}</text>
+    \\  <text label="Report title">
+    \\    <span scale="1.5" weight="bold">{used}</span> free on
+    \\    <span underline="true">{total}</span> at
+    \\    <span scale="{title_scale}">{tool}</span>
+    \\  </text>
     \\</column>
 ;
 
@@ -3349,6 +3357,17 @@ pub fn handSpanView(ui: *SpanUi, model: *const SpanModel) SpanUi.Node {
             .{ .text = "Total", .weight = .bold },
             .{ .text = " " },
             .{ .text = model.used },
+        }),
+        ui.paragraph(.{ .semantics = .{ .label = "Report title" } }, &.{
+            .{ .text = model.used, .weight = .bold, .scale = 1.5 },
+            .{ .text = " " },
+            .{ .text = "free on" },
+            .{ .text = " " },
+            .{ .text = model.total, .underline = true },
+            .{ .text = " " },
+            .{ .text = "at" },
+            .{ .text = " " },
+            .{ .text = model.tool(), .scale = model.title_scale },
         }),
     });
 }
@@ -3395,12 +3414,70 @@ test "markup span paragraphs build the hand-written paragraph exactly" {
     try testing.expect(canvas.text_spans.textSpansEqual(hand_total.spans, markup_total.spans));
     try testing.expectEqual(canvas.TextSpanWeight.bold, markup_total.spans[0].weight);
 
+    // Round two: scale and underline lower to the engine's channels —
+    // the literal 1.5 multiplier rides a run whose text is a binding,
+    // underline is the decoration flag, and the bound scale resolves
+    // like any number attribute.
+    const markup_title = markup_tree.root.children[2];
+    const hand_title = hand_tree.root.children[2];
+    try testing.expectEqualStrings("182 GB free on 512 GB at native doctor", markup_title.text);
+    try testing.expect(canvas.text_spans.textSpansEqual(hand_title.spans, markup_title.spans));
+    try testing.expectEqual(@as(usize, 9), markup_title.spans.len);
+    try testing.expectEqual(@as(f32, 1.5), markup_title.spans[0].scale);
+    try testing.expectEqual(canvas.TextSpanWeight.bold, markup_title.spans[0].weight);
+    try testing.expect(markup_title.spans[4].underline);
+    try testing.expectEqual(@as(f32, 1.3), markup_title.spans[8].scale);
+
     // Accessibility pin: a span paragraph announces as ONE text run —
     // the widget carries the full concatenated text, no semantic
     // children (spans are visual), exactly like the builder paragraph.
+    // Scaled and underlined runs change nothing here.
     try testing.expectEqual(@as(usize, 0), markup_disk.children.len);
     try testing.expectEqual(@as(usize, 0), hand_disk.children.len);
+    try testing.expectEqual(@as(usize, 0), markup_title.children.len);
     try testing.expectEqualStrings("Total line", markup_total.semantics.label);
+    try testing.expectEqualStrings("Report title", markup_title.semantics.label);
+}
+
+test "scaled runs measure at their scaled size, so scale changes the wrap" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = SpanModel{};
+
+    // Two paragraphs with identical bytes; only the second scales its
+    // middle run. Layout honesty: line breaking measures every piece
+    // with the size it will draw at, so the scaled paragraph must break
+    // where the unscaled one still fits.
+    const source =
+        \\<column>
+        \\  <text label="plain">alpha beta <span>gamma delta</span></text>
+        \\  <text label="scaled">alpha beta <span scale="2">gamma delta</span></text>
+        \\</column>
+    ;
+    var view = try SpanMarkup.init(arena, source);
+    var ui = SpanUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const plain = tree.root.children[0];
+    const scaled = tree.root.children[1];
+
+    // Budget: exactly the unscaled paragraph's single-line advance. The
+    // unscaled paragraph fits one line; the scaled one cannot, because
+    // its 2x run really measures twice as wide.
+    const options = canvas.text_spans.TextSpanLayoutOptions{ .size = 14 };
+    const fit_width = canvas.text_spans.textSpansIntrinsicWidth(plain.spans, options);
+    var plain_runs: [canvas.text_spans.max_text_span_runs_per_paragraph]canvas.text_spans.TextSpanRun = undefined;
+    var scaled_runs: [canvas.text_spans.max_text_span_runs_per_paragraph]canvas.text_spans.TextSpanRun = undefined;
+    const wrap_options = canvas.text_spans.TextSpanLayoutOptions{ .size = 14, .max_width = fit_width };
+    const plain_layout = canvas.text_spans.layoutTextSpans(plain.spans, wrap_options, &plain_runs);
+    const scaled_layout = canvas.text_spans.layoutTextSpans(scaled.spans, wrap_options, &scaled_runs);
+    try testing.expectEqual(@as(usize, 1), plain_layout.line_count);
+    try testing.expect(scaled_layout.line_count > 1);
+
+    // The scaled paragraph also reserves the taller uniform line: ONE
+    // line height sized by the largest scale, shared by every run.
+    try testing.expectEqual(@as(f32, 14 * 1.25), plain_layout.line_height);
+    try testing.expectEqual(@as(f32, 14 * 2 * 1.25), scaled_layout.line_height);
 }
 
 test "span misuse fails the build with the pinned teaching messages" {
@@ -3422,6 +3499,13 @@ test "span misuse fails the build with the pinned teaching messages" {
         .{ .source = "<text><span on-press=\"noop\">x</span></text>", .message = canvas.ui_markup.span_attr_message },
         // The closed weight vocabulary.
         .{ .source = "<text><span weight=\"heavy\">x</span></text>", .message = canvas.ui_markup.span_weight_value_message },
+        // Scale multiplies the base size, so only positive finite
+        // literals mean anything: zero and negatives have no rendering
+        // (the engine would silently draw the base size), and a
+        // non-number cannot multiply at all.
+        .{ .source = "<text><span scale=\"0\">x</span> y</text>", .message = canvas.ui_markup.span_scale_value_message },
+        .{ .source = "<text><span scale=\"-1.5\">x</span> y</text>", .message = canvas.ui_markup.span_scale_value_message },
+        .{ .source = "<text><span scale=\"huge\">x</span> y</text>", .message = canvas.ui_markup.span_scale_value_message },
         // Spans do not nest and hold no elements.
         .{ .source = "<text><span><span>x</span></span></text>", .message = canvas.ui_markup.span_content_message },
         // An empty span is dead markup.
@@ -3445,5 +3529,55 @@ test "span misuse fails the build with the pinned teaching messages" {
         const document = try parser.parse();
         const info = canvas.ui_markup.validate(document) orelse return error.TestUnexpectedResult;
         try testing.expectEqualStrings(case.message, info.message);
+    }
+}
+
+test "a bound scale is held to the positive-finite bound at build" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A binding sails past the structural validator (it has no model),
+    // so the engine holds the resolved VALUE to the same bound the
+    // validator pins for literals — a zero multiplier is a diagnostic,
+    // never a run silently drawn at the base size.
+    const source = "<column>\n  <text><span scale=\"{title_scale}\">x</span> y</text>\n</column>";
+    const dead = SpanModel{ .title_scale = 0 };
+    var view = try SpanMarkup.init(arena, source);
+    var ui = SpanUi.init(arena);
+    try testing.expectError(error.MarkupBuild, view.build(&ui, &dead));
+    try testing.expectEqualStrings(canvas.ui_markup.span_scale_value_message, view.diagnostic.message);
+
+    // A string-valued binding is the same diagnostic (a name cannot
+    // multiply a size).
+    const wrong_kind = "<column>\n  <text><span scale=\"{emphasis}\">x</span> y</text>\n</column>";
+    const model = SpanModel{};
+    var kind_view = try SpanMarkup.init(arena, wrong_kind);
+    var kind_ui = SpanUi.init(arena);
+    try testing.expectError(error.MarkupBuild, kind_view.build(&kind_ui, &model));
+    try testing.expectEqualStrings(canvas.ui_markup.span_scale_value_message, kind_view.diagnostic.message);
+}
+
+test "scale and underline stay span-scoped" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = SpanModel{};
+
+    // On a span-less element they are not option attributes at all —
+    // the run channels live on <span>, everything paragraph-wide (size
+    // rungs, alignment, identity) stays on the enclosing text.
+    for ([_][]const u8{
+        "<column>\n  <text scale=\"1.5\">plain</text>\n</column>",
+        "<column>\n  <text underline=\"true\">plain</text>\n</column>",
+        "<column>\n  <badge scale=\"1.5\">count</badge>\n</column>",
+    }) |source| {
+        var parser = canvas.ui_markup.Parser.init(arena, source);
+        const document = try parser.parse();
+        const info = canvas.ui_markup.validate(document) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("unknown attribute", info.message);
+        var view = try SpanMarkup.init(arena, source);
+        var ui = SpanUi.init(arena);
+        try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
     }
 }

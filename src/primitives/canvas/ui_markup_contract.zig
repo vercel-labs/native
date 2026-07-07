@@ -1266,10 +1266,13 @@ const Checker = struct {
     }
 
     /// One `<span>` inside a text paragraph: weight resolves like any
-    /// option-name attribute (bindings must produce a string), the flags
-    /// resolve truthy over any kind, and the run's `{bindings}` check
-    /// through the child walk exactly like any rendered text. foreground
-    /// is a closed literal vocabulary — the structural validator's job.
+    /// option-name attribute (bindings must produce a string), scale
+    /// bindings must produce a NUMBER (the multiplier on the paragraph's
+    /// base size — positivity is a value check, the engines' job), the
+    /// flags resolve truthy over any kind, and the run's `{bindings}`
+    /// check through the child walk exactly like any rendered text.
+    /// foreground is a closed literal vocabulary — the structural
+    /// validator's job.
     fn checkSpan(self: *Checker, node: markup.MarkupNode) CheckErr!void {
         for (node.attrs) |attribute| {
             if (std.mem.eql(u8, attribute.name, "weight")) {
@@ -1277,7 +1280,12 @@ const Checker = struct {
                 try self.requireAttrKind(node, attribute, kind, &.{.string}, markup.span_weight_value_message);
                 continue;
             }
-            if (std.mem.eql(u8, attribute.name, "mono") or std.mem.eql(u8, attribute.name, "italic")) {
+            if (std.mem.eql(u8, attribute.name, "scale")) {
+                const kind = try self.attrKind(node, attribute, attribute.value);
+                try self.requireAttrKind(node, attribute, kind, &.{ .integer, .float }, markup.span_scale_value_message);
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "mono") or std.mem.eql(u8, attribute.name, "italic") or std.mem.eql(u8, attribute.name, "underline")) {
                 _ = try self.attrKind(node, attribute, attribute.value);
                 continue;
             }

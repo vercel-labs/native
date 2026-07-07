@@ -1,10 +1,10 @@
-//! soundboard views. Markup-first: the header and now-playing bars are
-//! compiled `.native` views (see header.native / nowplaying.native); this file holds
-//! the Zig-only sections the closed markup grammar cannot express —
-//! rounded-square cover images (`ElementOptions.image` outside the avatar),
-//! the album grid's column count, per-track native context menus, and the
-//! scaled paragraph heading on the album detail page — plus the root view
-//! that composes all of it into one tree.
+//! soundboard views. Markup-first: the header, the now-playing bar, and
+//! the album detail heading are compiled `.native` views (see
+//! header.native / nowplaying.native / album_title.native); this file
+//! holds the Zig-only sections the closed markup grammar cannot express —
+//! rounded-square cover images (`ElementOptions.image` outside the
+//! avatar), the album grid's column count, and per-track native context
+//! menus — plus the root view that composes all of it into one tree.
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
@@ -20,6 +20,12 @@ pub const header_markup = @embedFile("header.native");
 pub const nowplaying_markup = @embedFile("nowplaying.native");
 pub const CompiledHeaderView = canvas.CompiledMarkupView(Model, Msg, header_markup);
 pub const CompiledNowPlayingView = canvas.CompiledMarkupView(Model, Msg, nowplaying_markup);
+
+// The album detail heading: a markup span paragraph (one bold 1.9x-scaled
+// run bound to the open album's title), compiled like the other fragments
+// and composed into the Zig detail column. The tests hold it
+// widget-for-widget equal to the builder paragraph it replaced.
+pub const AlbumTitleView = canvas.CompiledMarkupView(Model, Msg, @embedFile("album_title.native"));
 
 const grid_columns: usize = 4;
 const card_width: f32 = 240;
@@ -149,9 +155,7 @@ fn albumDetailView(ui: *Ui, model: *const Model, album_id: u8) Ui.Node {
             }, album.initials),
             ui.column(.{ .gap = 8, .grow = 1, .main = .end }, .{
                 ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Album"),
-                ui.paragraph(.{ .semantics = .{ .label = album.title } }, &.{
-                    .{ .text = album.title, .weight = .bold, .scale = 1.9 },
-                }),
+                AlbumTitleView.build(ui, model),
                 ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, ui.fmt("{s} · {d} · {d} tracks", .{ album.artist, album.year, rows.len })),
                 ui.row(.{ .gap = 8, .cross = .center }, .{
                     playAlbumButton(ui, album.id),

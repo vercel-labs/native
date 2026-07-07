@@ -578,6 +578,38 @@ fn collectIds(widget: canvas.Widget, ids: *std.ArrayListUnmanaged(canvas.ObjectI
     for (widget.children) |child| try collectIds(child, ids, allocator);
 }
 
+test "the album detail heading moved to markup unchanged" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = Model{};
+    apply(&model, .{ .open_album = 2 });
+    const album = model_mod.albumById(2);
+
+    // The markup fragment (a <text> with one bold 1.9x-scaled <span>)
+    // builds the exact widget the builder paragraph produced: same kind,
+    // same text, same span list — weight AND scale — and the same
+    // accessible label, so the detail page renders pixel-identical.
+    var markup_ui = Ui.init(arena);
+    const markup_node = view_mod.AlbumTitleView.build(&markup_ui, &model);
+
+    var hand_ui = Ui.init(arena);
+    const hand_node = hand_ui.paragraph(.{ .semantics = .{ .label = album.title } }, &.{
+        .{ .text = album.title, .weight = .bold, .scale = 1.9 },
+    });
+
+    try testing.expectEqual(canvas.WidgetKind.text, markup_node.widget.kind);
+    try testing.expectEqualStrings(hand_node.widget.text, markup_node.widget.text);
+    try testing.expectEqualStrings(album.title, markup_node.widget.text);
+    try testing.expect(canvas.text_spans.textSpansEqual(hand_node.widget.spans, markup_node.widget.spans));
+    try testing.expectEqual(canvas.TextSpanWeight.bold, markup_node.widget.spans[0].weight);
+    try testing.expectEqual(@as(f32, 1.9), markup_node.widget.spans[0].scale);
+    try testing.expectEqualStrings(hand_node.widget.semantics.label, markup_node.widget.semantics.label);
+    // One text run for assistive tech: spans stay visual, scaled or not.
+    try testing.expectEqual(@as(usize, 0), markup_node.nodes.len);
+}
+
 test "every view lays out within the canvas and the widget budget" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

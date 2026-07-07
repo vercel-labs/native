@@ -81,7 +81,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "context-menu", .doc = "Right-click menu on its DIRECT parent (a pressable element): menu-item children (on-press required, disabled optional) and bare separators, with if/else/for around them. Presents through the platform's native menu; hosts without one mount the same items as an anchored surface automatically. Attribute-less; drive in tests with widget-context-menu." },
     .{ .name = "input-group", .doc = "Composer-grade grouped input: ONE bordered field wrapping exactly one textarea (first) plus an optional input-group-actions row inside the same border. The group wears the focus ring for its focused descendant and the textarea's own chrome dissolves, so the whole group reads as one field. Takes label, width, height, min-width, grow, key, global-key." },
     .{ .name = "input-group-actions", .doc = "The input-group's accessory row (only inside input-group, after its textarea): leading/trailing controls on one bottom row inside the group's border — put a <spacer grow=\"1\"/> between the leading controls and the trailing send. Children are ordinary elements (if/else/for work). Takes gap, key, global-key." },
-    .{ .name = "span", .doc = "Inline styled run inside a <text> paragraph: mixed-weight, mono, italic, and token-colored runs word-wrap as ONE paragraph and announce as one text run. Takes weight (regular|medium|bold), mono, italic, foreground; content is one run of text ({bindings} work). Whitespace between runs collapses to a single space; runs written with no whitespace between them abut. Spans do not nest; layout, events, and identity stay on the enclosing text." },
+    .{ .name = "span", .doc = "Inline styled run inside a <text> paragraph: mixed-weight, mono, italic, scaled, underlined, and token-colored runs word-wrap as ONE paragraph and announce as one text run. Takes weight (regular|medium|bold), mono, italic, scale (a positive multiplier on the paragraph's base size), underline, foreground; content is one run of text ({bindings} work). Whitespace between runs collapses to a single space; runs written with no whitespace between them abut. Spans do not nest; layout, events, and identity stay on the enclosing text." },
 };
 
 pub const structure_docs = [_]Doc{
@@ -242,6 +242,8 @@ pub const span_attr_docs = [_]Doc{
     .{ .name = "weight", .doc = "span: the run's weight — regular, medium (the semibold rung), or bold (a literal or one {binding} producing one of those names)." },
     .{ .name = "mono", .doc = "span: renders the run in the mono face (true/false or a {binding}) — inline code, file names, keyboard keys. Mono ignores weight and italic (one mono face ships)." },
     .{ .name = "italic", .doc = "span: slants the run (true/false or a {binding})." },
+    .{ .name = "scale", .doc = "span: the run's size as a POSITIVE multiplier on the paragraph's base size — the text element's size rung included, so scale=\"1.5\" inside a heading paragraph draws at heading x 1.5 (a literal number or one {binding} producing one). The paragraph reserves ONE line height sized by its largest scale, and every run shares that line's baseline. Inline headings, hero stats, fine print." },
+    .{ .name = "underline", .doc = "span: underlines the run (true/false or a {binding}) — purely visual, like every span channel; it is not a link (link spans stay Zig-builder territory)." },
     .{ .name = "foreground", .doc = "span: the run's color as a literal ColorTokens field name (e.g. text_muted, success, warning) — unset inherits the paragraph's foreground." },
 };
 

@@ -243,6 +243,16 @@ pub const Model = struct {
         return trackById(id);
     }
 
+    /// The open album's title, for the detail page's markup heading
+    /// (album_title.native binds it). Total over the model on purpose —
+    /// markup bindings resolve on every rebuild — so it answers "" when
+    /// no album is open (the grid page, where the fragment is not
+    /// composed).
+    pub fn openAlbumTitle(model: *const Model) []const u8 {
+        const id = model.open_album orelse return "";
+        return albumById(id).title;
+    }
+
     pub fn hasNowPlaying(model: *const Model) bool {
         return model.now != null;
     }

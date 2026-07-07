@@ -466,7 +466,7 @@ test "NSUI round-trips span paragraphs under their fresh codes" {
     const arena = arena_state.allocator();
     const source =
         \\<column gap="8">
-        \\  <text>Disk <span weight="bold">{used}</span> of <span foreground="text_muted">{total}</span>; run <span mono="true">native doctor</span><span italic="true">!</span></text>
+        \\  <text>Disk <span weight="bold">{used}</span> of <span foreground="text_muted">{total}</span>; run <span mono="true">native doctor</span><span italic="true">!</span> <span scale="1.5">Alerts</span> <span underline="true">now</span></text>
         \\</column>
     ;
     const document = try parseSource(arena, source);
@@ -481,20 +481,25 @@ test "NSUI round-trips span paragraphs under their fresh codes" {
     // runs too: spacing is structure, never a byte-gap artifact.
     const stripped = try nsui.encode(arena, document, .{ .spans = false, .provenance = false }, &diagnostic);
     const stripped_decoded = try nsui.decode(arena, stripped, &diagnostic);
-    // [Disk][ ][span][ ][of][ ][span]["; run"][ ][span][span] — the
-    // abutting "; run" and "!" runs keep their glue, the spaced runs
-    // keep exactly one separator each.
+    // [Disk][ ][span][ ][of][ ][span]["; run"][ ][span][span][ ][span]
+    // [ ][span] — the abutting "; run" and "!" runs keep their glue, the
+    // spaced runs (the scaled and underlined ones included) keep exactly
+    // one separator each.
     const text_node = stripped_decoded.root.?.children[0];
-    try testing.expectEqual(@as(usize, 11), text_node.children.len);
+    try testing.expectEqual(@as(usize, 15), text_node.children.len);
     try testing.expectEqualStrings(" ", text_node.children[3].text);
     try testing.expectEqualStrings("; run", text_node.children[7].text);
     try testing.expectEqualStrings("!", text_node.children[10].children[0].text);
+    try testing.expectEqualStrings("Alerts", text_node.children[12].children[0].text);
+    try testing.expectEqualStrings("now", text_node.children[14].children[0].text);
 
     // The wire carries the registry codes, never the names.
     try testing.expectEqual(@as(u16, 64), schema.elementByName("span").?.code);
     try testing.expectEqual(@as(u16, 68), schema.attrByName("weight").?.code);
     try testing.expectEqual(@as(u16, 69), schema.attrByName("mono").?.code);
     try testing.expectEqual(@as(u16, 70), schema.attrByName("italic").?.code);
+    try testing.expectEqual(@as(u16, 76), schema.attrByName("scale").?.code);
+    try testing.expectEqual(@as(u16, 77), schema.attrByName("underline").?.code);
 
     // The JSON inspection view (`native markup dump`) shows the spans:
     // element name, code, styled attributes, and the separator runs.
@@ -506,5 +511,7 @@ test "NSUI round-trips span paragraphs under their fresh codes" {
     try testing.expect(std.mem.indexOf(u8, json, "\"node\":\"span\",\"code\":64") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"name\":\"weight\",\"code\":68,\"value\":\"bold\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"name\":\"mono\",\"code\":69,\"value\":\"true\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"name\":\"scale\",\"code\":76,\"value\":\"1.5\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"name\":\"underline\",\"code\":77,\"value\":\"true\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"text\":\"{used}\"") != null);
 }

@@ -2246,9 +2246,10 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
         }
 
         /// Comptime mirror of the interpreter's `buildSpan`: the shared
-        /// shape check at comptime, literal weight and foreground resolved
-        /// at comptime (a typo is a compile error), bound weight and the
-        /// flags resolved at runtime like any option attribute.
+        /// shape check at comptime, literal weight, scale, and foreground
+        /// resolved at comptime (a typo or dead multiplier is a compile
+        /// error), bound weight, scale, and the flags resolved at runtime
+        /// like any option attribute.
         fn buildSpan(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype) canvas.TextSpan {
             comptime {
                 if (markup.spanShapeError(node)) |info| failInfo(info);
@@ -2269,11 +2270,37 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     span.weight = std.meta.stringToEnum(canvas.TextSpanWeight, text) orelse runtimeFail(canvas.TextSpanWeight, ui);
                 }
             }
+            if (comptime (node.attr("scale") != null)) {
+                const raw = comptime node.attr("scale").?;
+                const expression = comptime (markup.parseAttrExpression(raw) orelse fail(node, invalid_expression_message));
+                if (comptime (expression == .literal)) {
+                    // A literal multiplier resolves at comptime; the shared
+                    // shape check already proved it positive and finite.
+                    span.scale = comptime (std.fmt.parseFloat(f32, expression.literal) catch
+                        fail(node, markup.span_scale_value_message));
+                } else {
+                    // Bound scale: the binding must be a number, and the
+                    // value is held to the validator's positive-finite
+                    // bound (interpreter parity) — the engine draws
+                    // anything else at the base size, and a silently dead
+                    // binding is worse than a failed build.
+                    comptime requireVariant(exprVariant(node, entries, raw), &.{ .float, .integer }, node, markup.span_scale_value_message);
+                    const multiplier: f32 = switch (evalExpr(node, entries, raw, ui, model, scope)) {
+                        .float => |float| float,
+                        .integer => |int| @floatFromInt(int),
+                        else => runtimeFail(f32, ui),
+                    };
+                    span.scale = if (std.math.isFinite(multiplier) and multiplier > 0) multiplier else runtimeFail(f32, ui);
+                }
+            }
             if (comptime (node.attr("mono") != null)) {
                 span.monospace = evalExpr(node, entries, comptime node.attr("mono").?, ui, model, scope).truthy();
             }
             if (comptime (node.attr("italic") != null)) {
                 span.italic = evalExpr(node, entries, comptime node.attr("italic").?, ui, model, scope).truthy();
+            }
+            if (comptime (node.attr("underline") != null)) {
+                span.underline = evalExpr(node, entries, comptime node.attr("underline").?, ui, model, scope).truthy();
             }
             if (comptime (node.attr("foreground") != null)) {
                 span.color = comptime (std.meta.stringToEnum(canvas.TextSpanColor, node.attr("foreground").?) orelse
