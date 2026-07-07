@@ -1632,3 +1632,38 @@ test "compiled span paragraphs build the interpreter's and the hand-written para
     try testing.expectEqual(@as(usize, 0), compiled_title.children.len);
     try testing.expectEqualStrings("Total line", compiled.root.children[1].semantics.label);
 }
+
+// ------------------------------------------------ bubble reaction parity
+
+const ReactionsCompiled = canvas.CompiledMarkupView(fixture.SpanModel, fixture.SpanMsg, fixture.reactions_markup_source);
+
+test "compiled reactions lower onto the bubble's chrome-text channel exactly like the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = fixture.SpanModel{};
+
+    var view = try SpanInterpreter.init(arena, fixture.reactions_markup_source);
+    var interpreted_ui = SpanUi.init(arena);
+    const interpreted = try interpreted_ui.finalize(try view.build(&interpreted_ui, &model));
+
+    var compiled_ui = SpanUi.init(arena);
+    const compiled = try compiled_ui.finalize(ReactionsCompiled.build(&compiled_ui, &model));
+
+    try expectSameTree(fixture.SpanMsg, interpreted, compiled);
+    try expectSameTexts(interpreted.root, compiled.root);
+
+    // The pill run lands on widget.text, the reactions child is
+    // consumed, and the dock literal resolves at comptime: end without
+    // an attribute, start when declared. Interpolation in the run
+    // resolves at runtime like any text.
+    const received = compiled.root.children[0];
+    try testing.expectEqualStrings("+2", received.text);
+    try testing.expectEqual(canvas.TextAlign.end, received.text_alignment);
+    try testing.expectEqual(@as(usize, 1), received.children.len);
+    const sent = compiled.root.children[1];
+    try testing.expectEqualStrings("182 GB +1", sent.text);
+    try testing.expectEqual(canvas.TextAlign.start, sent.text_alignment);
+    try testing.expectEqual(@as(usize, 0), compiled.root.children[2].text.len);
+}

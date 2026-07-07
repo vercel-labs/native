@@ -1,6 +1,7 @@
 const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
+const text_model = @import("text.zig");
 const drawing_model = @import("drawing.zig");
 const icon_model = @import("icons.zig");
 const token_model = @import("tokens.zig");
@@ -24,6 +25,7 @@ const Widget = widget_model.Widget;
 
 const booleanControlSelected = widget_access.booleanControlSelected;
 const widgetBodyTextSize = widget_metrics.widgetBodyTextSize;
+const widgetLabelTextSize = widget_metrics.widgetLabelTextSize;
 const widgetLineHeight = widget_metrics.widgetLineHeight;
 const widgetTypographySize = widget_metrics.widgetTypographySize;
 const widgetControlInset = widget_metrics.widgetControlInset;
@@ -390,6 +392,86 @@ pub fn bubbleContentTokens(widget: Widget, tokens: DesignTokens) DesignTokens {
         .outline, .ghost => {},
     }
     return content;
+}
+
+// The reaction pill's chrome constants, measured off the reference chat
+// bubble: 6px/2px insets around one label-register line, docked 12
+// points in from the bubble's inline edge, straddling the bottom edge
+// (three quarters of the pill hangs below the frame), separated from
+// the bubble's fill by a 3px ring in the page background so the overlap
+// reads as "lifted off" rather than smeared into the capsule.
+const bubble_reactions_pad_h: f32 = 6;
+const bubble_reactions_pad_v: f32 = 2;
+const bubble_reactions_inset: f32 = 12;
+pub const bubble_reactions_ring: f32 = 3;
+
+/// The reaction pill a bubble docks at its bottom edge (a nonempty
+/// `widget.text` on a `.bubble` — the `<reactions>` child's run): pure
+/// geometry shared by the render emit and the dirty-invalidation
+/// outset, so the repainted region always covers the painted chrome.
+/// The dock rides `text_alignment` — the pill IS the bubble's chrome
+/// text — with `end` (the markup default) the trailing corner reactions
+/// conventionally hang from. Layout is untouched on purpose: like the
+/// reference, the pill consumes no flow space, so a thread gives the
+/// overlap breathing room with its own turn spacing.
+pub fn bubbleWidgetReactionsPillRect(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
+    if (widget.kind != .bubble or widget.text.len == 0) return null;
+    const frame = widget.frame.normalized();
+    if (frame.isEmpty()) return null;
+    const text_size = widgetLabelTextSize(widget, tokens);
+    const height = widgetLineHeight(text_size) + bubble_reactions_pad_v * 2;
+    const text_width = text_model.measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, widget.text, text_size);
+    // The capsule floor: a one-glyph pill stays a circle-ish chip
+    // instead of collapsing narrower than it is tall.
+    const width = @max(height, @ceil(text_width) + bubble_reactions_pad_h * 2);
+    const x = switch (widget.text_alignment) {
+        .start => frame.x + bubble_reactions_inset,
+        .center => frame.x + (frame.width - width) * 0.5,
+        .end => frame.maxX() - bubble_reactions_inset - width,
+    };
+    return geometry.RectF.init(x, frame.maxY() - height * 0.25, width, height);
+}
+
+/// Draw the reaction pill (see `bubbleWidgetReactionsPillRect`): the
+/// ring wash first (page background, so the pill separates from the
+/// capsule it overlaps), then the muted capsule, then the run in plain
+/// foreground ink. The pill sits on the PAGE plane, not the bubble's —
+/// a primary bubble's knockout ink never applies — so it draws from the
+/// page tokens regardless of variant.
+pub fn emitBubbleWidgetReactions(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const pill = bubbleWidgetReactionsPillRect(widget, tokens) orelse return;
+    const snapped = pixelSnapGeometryRect(tokens, pill);
+    const ring = snapped.inflate(geometry.InsetsF.all(bubble_reactions_ring));
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 4),
+        .rect = ring,
+        .radius = Radius.all(ring.height * 0.5),
+        .fill = colorFill(tokens.colors.background),
+    });
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 5),
+        .rect = snapped,
+        .radius = Radius.all(snapped.height * 0.5),
+        .fill = colorFill(tokens.colors.surface_subtle),
+    });
+    const text_size = widgetLabelTextSize(widget, tokens);
+    const line_height = widgetLineHeight(text_size);
+    // Baseline centered in the pill, the single-line label convention.
+    const baseline = snapped.y + @max(text_size, (snapped.height - line_height) * 0.5 + text_size);
+    try builder.drawText(.{
+        .id = widgetPartId(widget.id, 6),
+        .font_id = tokens.typography.font_id,
+        .size = text_size,
+        .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(snapped.x + bubble_reactions_pad_h, baseline)),
+        .color = tokens.colors.text,
+        .text = widget.text,
+        .text_layout = .{
+            .max_width = @max(1, snapped.width - bubble_reactions_pad_h),
+            .line_height = line_height,
+            .alignment = .start,
+            .measure = tokens.text_measure,
+        },
+    });
 }
 
 /// The house style accordion item: a BORDERLESS row — no fill, no outline,

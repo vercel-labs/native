@@ -701,6 +701,96 @@ test "flush button groups collapse corners and interior seams in both render wal
     try std.testing.expect(spaced_list.findCommandById(widgetPartId(4, 0)) == null);
 }
 
+test "the bubble reaction pill straddles the bottom edge on the page plane" {
+    const surfaces = @import("widget_render_surfaces.zig");
+    const tokens = DesignTokens{};
+    const message = [_]Widget{.{
+        .id = 8,
+        .kind = .text,
+        .frame = geometry.RectF.init(12, 10, 176, 18),
+        .text = "On my way",
+    }};
+    var bubble = Widget{
+        .id = 7,
+        .kind = .bubble,
+        .frame = geometry.RectF.init(0, 0, 200, 38),
+        .variant = .primary,
+        .text = "+2",
+        .text_alignment = .end,
+        .children = &message,
+    };
+
+    // The pure geometry the emit and the damage outset share: the pill
+    // hangs three quarters below the frame's bottom edge, docked 12
+    // points in from the trailing edge (text_alignment end — the markup
+    // default), never consuming layout space.
+    const pill = surfaces.bubbleWidgetReactionsPillRect(bubble, tokens).?;
+    try std.testing.expectApproxEqAbs(bubble.frame.maxY() - pill.height * 0.25, pill.y, 0.001);
+    try std.testing.expectApproxEqAbs(bubble.frame.maxX() - 12, pill.maxX(), 0.001);
+    // The capsule floor: a short run never collapses the pill narrower
+    // than it is tall.
+    try std.testing.expect(pill.width >= pill.height);
+    bubble.text_alignment = .start;
+    const leading = surfaces.bubbleWidgetReactionsPillRect(bubble, tokens).?;
+    try std.testing.expectApproxEqAbs(bubble.frame.x + 12, leading.x, 0.001);
+    bubble.text_alignment = .end;
+
+    // Emitted chrome: the page-background ring behind (part 4), the
+    // muted capsule (part 5), and the run in PLAIN foreground ink
+    // (part 6) — the pill sits on the conversation plane, so a primary
+    // bubble's knockout cascade never re-inks it.
+    var commands: [10]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, bubble, tokens);
+    const list = builder.displayList();
+    switch (list.findCommandById(widgetPartId(7, 4)).?.command) {
+        .fill_rounded_rect => |ring| try expectFillColor(tokens.colors.background, ring.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (list.findCommandById(widgetPartId(7, 5)).?.command) {
+        .fill_rounded_rect => |fill| {
+            try expectFillColor(tokens.colors.surface_subtle, fill.fill);
+            // Capsule: the corner arc is half the pill's height.
+            try std.testing.expectApproxEqAbs(fill.rect.height * 0.5, fill.radius.top_left, 0.001);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (list.findCommandById(widgetPartId(7, 6)).?.command) {
+        .draw_text => |text| {
+            try std.testing.expectEqualStrings("+2", text.text);
+            try std.testing.expectEqualDeep(tokens.colors.text, text.color);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // No run, no pill: a plain bubble keeps its classic command set.
+    var plain = bubble;
+    plain.text = "";
+    var plain_commands: [10]CanvasCommand = undefined;
+    var plain_builder = Builder.init(&plain_commands);
+    try emitWidgetTree(&plain_builder, plain, tokens);
+    try std.testing.expect(plain_builder.displayList().findCommandById(widgetPartId(7, 4)) == null);
+    try std.testing.expect(plain_builder.displayList().findCommandById(widgetPartId(7, 5)) == null);
+    try std.testing.expect(plain_builder.displayList().findCommandById(widgetPartId(7, 6)) == null);
+
+    // The layout walk paints the same pill — a live app and a static
+    // docs scene must render the same thread.
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(bubble, bubble.frame, &nodes);
+    var layout_commands: [10]CanvasCommand = undefined;
+    var layout_builder = Builder.init(&layout_commands);
+    try layout.emitDisplayList(&layout_builder, tokens);
+    const layout_list = layout_builder.displayList();
+    switch (layout_list.findCommandById(widgetPartId(7, 5)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_subtle, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (layout_list.findCommandById(widgetPartId(7, 6)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualDeep(tokens.colors.text, text.color),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "bubbles wear capsule chrome and re-ink their content by variant" {
     const tokens = DesignTokens{};
     const message = [_]Widget{.{

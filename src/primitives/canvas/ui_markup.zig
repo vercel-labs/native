@@ -1450,6 +1450,14 @@ pub fn nodeIsSpan(node: MarkupNode) bool {
     return node.kind == .element and std.mem.eql(u8, node.name, "span");
 }
 
+/// A `<reactions>` element child: consumed by its parent `<bubble>`
+/// (its run lowers onto the bubble widget's chrome-text channel, never
+/// built on its own). Shared by the validator and both engines;
+/// comptime-callable.
+pub fn nodeIsReactions(node: MarkupNode) bool {
+    return node.kind == .element and std.mem.eql(u8, node.name, "reactions");
+}
+
 /// Whether a text element's content is a span paragraph (any inline
 /// `<span>` child): the discriminator both engines use to pick the
 /// paragraph lowering over the plain single-run path. Comptime-callable.
@@ -1857,6 +1865,20 @@ pub const span_paragraph_wrap_message = "wrap and overflow do not apply to a spa
 /// holding the mirror equal to the live enum. `medium` is the semibold
 /// rung: the reserved medium sans face sits between regular and bold.
 pub const span_weight_value_names = [_][]const u8{ "regular", "medium", "bold" };
+
+pub const reactions_parent_message = "reactions is only allowed inside bubble - it is the enclosing chat bubble's reaction pill (docked on the bubble's bottom edge), so it needs a <bubble> parent";
+pub const reactions_single_message = "a bubble takes at most one reactions child - it draws ONE pill; put every reaction in that pill's text run";
+pub const reactions_attr_message = "unknown attribute for reactions - it takes text-alignment only (start, center, or end; end is the default trailing dock); the pill is bubble chrome, so events, keys, and layout stay on the enclosing bubble";
+pub const reactions_alignment_value_message = "unknown text-alignment value for reactions - the pill docks at the bubble's start, center, or end (end is the default: the trailing dock reactions conventionally hang from); a literal name, so the dock is a static design choice";
+pub const reactions_content_message = "reactions takes a single run of text (a literal, {bindings}, or both) - it draws ONE pill and holds no element children";
+pub const bubble_text_attr_message = "text does nothing on bubble - the message is the bubble's children, and the reaction pill is declared with a <reactions> child (its run lands on the bubble's chrome-text channel); for an accessible name use label";
+
+/// The reactions `text-alignment` vocabulary: where the pill docks along
+/// the bubble's bottom edge. The names are the `canvas.TextAlign`
+/// members on purpose — the pill is the bubble's chrome text, so its
+/// dock rides the existing text-alignment attribute (code 19) instead
+/// of minting a new one.
+pub const reactions_alignment_value_names = [_][]const u8{ "start", "center", "end" };
 pub const text_or_children_content_message = "this element takes either one run of text or element children - not both; move the text into a <text> child (and keep label= for the accessible name)";
 pub const table_row_parent_message = "table-row is only allowed inside a table (structure tags in between are fine)";
 pub const table_cell_parent_message = "table-cell is only allowed inside a table-row (structure tags in between are fine)";
@@ -2633,10 +2655,48 @@ fn validateSpan(node: MarkupNode) ?MarkupErrorInfo {
     return null;
 }
 
+/// One `<reactions>` inside a bubble: a closed attribute set (only a
+/// literal `text-alignment` naming the dock — the pill is a static
+/// design choice, like anchor placement) around one run of pill text.
+/// Pub and comptime-callable: the validator and BOTH engines run this
+/// one shape check, so the pill's closed shape is stated once.
+pub fn reactionsShapeError(node: MarkupNode) ?MarkupErrorInfo {
+    for (node.attrs) |attribute| {
+        if (std.mem.eql(u8, attribute.name, "text-alignment")) {
+            if (!nameInList(attribute.value, &reactions_alignment_value_names)) {
+                return attrError(node, attribute, reactions_alignment_value_message);
+            }
+            continue;
+        }
+        return attrError(node, attribute, reactions_attr_message);
+    }
+    var text_runs: usize = 0;
+    for (node.children) |child| {
+        if (child.kind != .text) return errorAt(child, reactions_content_message);
+        text_runs += 1;
+        if (text_runs > 1) return errorAt(child, text_leaf_single_run_message);
+    }
+    if (text_runs == 0) return errorAt(node, reactions_content_message);
+    return null;
+}
+
+/// The validator's reactions pass (run at the HOST bubble, where the
+/// parent node is in hand): the shared shape check plus the source-text
+/// guards (interpolation grammar and tofu) over the pill's run — the
+/// same pairing spans get.
+fn validateReactions(node: MarkupNode) ?MarkupErrorInfo {
+    if (reactionsShapeError(node)) |info| return info;
+    for (node.children) |child| {
+        if (textInterpolationError(child)) |info| return info;
+        if (textNodeCoverageError(child)) |info| return info;
+    }
+    return null;
+}
+
 /// The rule hooks the composite registry entries name. A registry entry
 /// whose hook this table does not implement is a compile error (below),
 /// so attachment and implementation can never drift.
-const rule_hook_names = [_][]const u8{ "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions", "span" };
+const rule_hook_names = [_][]const u8{ "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions", "span", "reactions" };
 
 comptime {
     for (schema.elements) |entry| {
@@ -2696,6 +2756,11 @@ fn validateRuleHook(hook: []const u8, document: MarkupDocument, node: MarkupNode
         // text leaf.
         return errorAt(node, span_parent_message);
     }
+    if (std.mem.eql(u8, hook, "reactions")) {
+        // Reactions inside a bubble are consumed by the bubble's host
+        // pass; one reaching the generic pass sits outside a bubble.
+        return errorAt(node, reactions_parent_message);
+    }
     // The comptime check above proves every registry hook lands in one of
     // the branches; a name reaching here is not a registry hook at all.
     unreachable;
@@ -2752,6 +2817,29 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                 if (context_menu_count > 1) return errorAt(child, context_menu_single_message);
                 if (!contextMenuHostEligible(node)) return errorAt(child, context_menu_host_message);
                 if (contextMenuShapeError(child)) |info| return info;
+            }
+            // Direct reactions children attach to THIS element the same
+            // way (the pill is bubble chrome, not content), so the
+            // bubble-scoped checks run here, where the host node is in
+            // hand. Off a bubble the placement error lands immediately
+            // instead of waiting for the rule-hook pass.
+            var reactions_count: usize = 0;
+            for (node.children) |child| {
+                if (!nodeIsReactions(child)) continue;
+                reactions_count += 1;
+                if (!std.mem.eql(u8, node.name, "bubble")) return errorAt(child, reactions_parent_message);
+                if (reactions_count > 1) return errorAt(child, reactions_single_message);
+                if (validateReactions(child)) |info| return info;
+            }
+            if (std.mem.eql(u8, node.name, "bubble")) {
+                // The bubble's chrome-text channel belongs to the
+                // reaction pill (declared with a <reactions> child); a
+                // bare text attribute would silently do nothing, so it
+                // is a teaching error (same policy as gap on stacking
+                // containers).
+                if (node.attrEntry("text")) |attribute| {
+                    return attrError(node, attribute, bubble_text_attr_message);
+                }
             }
             if (std.mem.eql(u8, node.name, "table-row")) {
                 if (parent_element) |parent_name| {
@@ -3151,6 +3239,12 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
             continue;
         }
         if (node.kind == .element and std.mem.eql(u8, node.name, "text") and nodeIsSpan(child)) {
+            previous_kind = child.kind;
+            continue;
+        }
+        // Reactions children of a bubble were consumed by the bubble's
+        // host pass the same way.
+        if (node.kind == .element and std.mem.eql(u8, node.name, "bubble") and nodeIsReactions(child)) {
             previous_kind = child.kind;
             continue;
         }

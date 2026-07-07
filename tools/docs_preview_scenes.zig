@@ -154,7 +154,7 @@ pub const scenes = [_]Scene{
     .{ .name = "tabs", .height = 230, .build = buildTabs },
     .{ .name = "menu", .height = 280, .build = stateless(buildMenu) },
     .{ .name = "tooltip", .height = 160, .build = stateless(buildTooltip), .hover = .{ .kind = .button } },
-    .{ .name = "bubble", .height = 200, .build = stateless(buildBubble) },
+    .{ .name = "bubble", .height = 300, .build = stateless(buildBubble) },
     .{ .name = "breadcrumb", .height = 140, .build = stateless(buildBreadcrumb) },
     .{ .name = "pagination", .height = 150, .build = stateless(buildPagination) },
     .{ .name = "list", .height = 260, .build = stateless(buildList) },
@@ -707,20 +707,28 @@ fn buildTooltip(ui: *Ui) Node {
 }
 
 fn buildBubble(ui: *Ui) Node {
-    // The two sides of a thread: received keeps the default muted wash
-    // on the left, sent wears the primary fill (knockout ink cascades
-    // to the text automatically) on the right. The bubble's own chat
-    // hug (10/12) does the insetting — no padding passed here.
+    // A two-turn thread with the measured reference rhythm: 8 points
+    // between bubbles of the SAME sender (a grouped run), 32 between
+    // turns. A grouped run is spacing, not vocabulary — the reference
+    // keeps full capsule corners inside a run, so there is no group
+    // container to reach for; a plain column carries it. Bubbles hug
+    // their message up to 80% of the thread, so received runs sit on
+    // the leading edge and the sent run right-aligns with cross=end.
+    // The received run's last bubble docks a reaction pill (the
+    // <reactions> child in markup; the text/text-alignment channels
+    // here) straddling its bottom edge — the 32-point turn gap below
+    // gives the overlap its breathing room.
     return tile(ui, .{
-        ui.column(.{ .gap = 16, .width = 340 }, .{
-            ui.row(.{}, .{
+        ui.column(.{ .gap = 32, .width = 340 }, .{
+            ui.column(.{ .gap = 8 }, .{
                 ui.el(.bubble, .{}, .{
                     ui.text(.{ .wrap = true }, "Ready to ship the components page?"),
                 }),
-                ui.spacer(1),
+                ui.el(.bubble, .{ .text = "+2", .text_alignment = .end }, .{
+                    ui.text(.{ .wrap = true }, "The previews and the docs page both need one more pass before we cut it."),
+                }),
             }),
-            ui.row(.{}, .{
-                ui.spacer(1),
+            ui.column(.{ .gap = 8, .cross = .end }, .{
                 ui.el(.bubble, .{ .variant = .primary }, .{
                     ui.text(.{ .wrap = true }, "Previews are rendering now."),
                 }),

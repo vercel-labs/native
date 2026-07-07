@@ -567,6 +567,10 @@ fn emitWidgetLayoutNodeContent(
             // recurses with its own tokens and returns before the shared
             // children pass below.
             try emitWidgetLayoutClippedChildren(builder, layout, node_index, widget_render_surfaces.bubbleContentTokens(paint_widget, tokens), state, paint_widget);
+            // The reaction pill paints LAST, above the capsule and its
+            // content, from the PAGE tokens (never the cascaded
+            // palette) — mirrors `emitBubbleWidget` on the widget walk.
+            try widget_render_surfaces.emitBubbleWidgetReactions(builder, paint_widget, tokens);
             return;
         },
         .resizable, .panel => try widget_render_surfaces.emitPanelWidgetChrome(builder, paint_widget, tokens),
@@ -809,6 +813,12 @@ fn emitBubbleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, dep
     // just direct children, because the recursion below threads these
     // tokens all the way down.
     try emitWidgetClippedChildren(builder, widget, widget_render_surfaces.bubbleContentTokens(widget, tokens), depth);
+    // The reaction pill paints LAST — it straddles the bubble's bottom
+    // edge above the capsule and its content, the reference's overlap
+    // treatment — and from the PAGE tokens, never the bubble's cascaded
+    // palette: the pill sits on the conversation plane, so a primary
+    // bubble's knockout ink does not apply to it.
+    try widget_render_surfaces.emitBubbleWidgetReactions(builder, widget, tokens);
 }
 
 // The HIERARCHICAL walk's disclosure is discrete: this path emits

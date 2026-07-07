@@ -21,12 +21,15 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // (append or slot them anywhere — order carries no meaning) and pin
     // the new fingerprint ONLY for additions; renames/renumbers are
     // schema-version-bump events, not silent edits.
-    try testing.expectEqual(@as(usize, 64), schema.elements.len);
+    try testing.expectEqual(@as(usize, 65), schema.elements.len);
     try testing.expectEqual(@as(usize, 77), schema.attrs.len);
     try testing.expectEqual(@as(usize, 10), schema.events.len);
     // Re-pinned for the span composite addition (element 64).
+    // Re-pinned for the bubble reactions composite addition (element
+    // 65); the pill's dock rides the existing text-alignment attribute,
+    // so the attr table is untouched.
     try testing.expectEqual(
-        @as(u64, 0x034c0f17117fe9c5),
+        @as(u64, 0x961be186c9929e4c),
         tableFingerprint(schema.ElementInfo, &schema.elements),
     );
     // Re-pinned on the merged tree carrying both same-day reservations:

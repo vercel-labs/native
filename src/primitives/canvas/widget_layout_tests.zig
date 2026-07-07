@@ -424,6 +424,59 @@ test "widget layout resolves row sizing and emits laid out commands" {
     }
 }
 
+test "chat bubbles cap at the thread fraction, never the full thread" {
+    // A hug-sized bubble in a WIDE thread: its message wants 700 points,
+    // the row offers 600, and the reference contract caps the bubble at
+    // 80% of the thread — 480 — so a long message wraps into a readable
+    // column instead of spanning wall to wall.
+    const wide_message = [_]Widget{.{ .id = 3, .kind = .text, .frame = geometry.RectF.init(0, 0, 700, 18), .text = "long" }};
+    const wide_children = [_]Widget{.{ .id = 2, .kind = .bubble, .children = &wide_message }};
+    const wide_row = Widget{ .id = 1, .kind = .row, .children = &wide_children };
+    var wide_nodes: [4]WidgetLayoutNode = undefined;
+    const wide = try layoutWidgetTree(wide_row, geometry.RectF.init(0, 0, 600, 60), &wide_nodes);
+    try std.testing.expectEqual(@as(f32, 480), wide.nodes[1].frame.width);
+
+    // A NARROW thread: the cap follows the thread down, so the bubble
+    // never exceeds what the row can offer (160 = 80% of 200).
+    var narrow_nodes: [4]WidgetLayoutNode = undefined;
+    const narrow = try layoutWidgetTree(wide_row, geometry.RectF.init(0, 0, 200, 60), &narrow_nodes);
+    try std.testing.expectEqual(@as(f32, 160), narrow.nodes[1].frame.width);
+
+    // Ghost bubbles are exempt (the reference lets the chrome-less
+    // variant run full width), and an explicit author width is definite
+    // through the frame channel — both keep the classic result.
+    const ghost_children = [_]Widget{.{ .id = 2, .kind = .bubble, .variant = .ghost, .children = &wide_message }};
+    const ghost_row = Widget{ .id = 1, .kind = .row, .children = &ghost_children };
+    var ghost_nodes: [4]WidgetLayoutNode = undefined;
+    const ghost = try layoutWidgetTree(ghost_row, geometry.RectF.init(0, 0, 600, 60), &ghost_nodes);
+    try std.testing.expectEqual(@as(f32, 700), ghost.nodes[1].frame.width);
+    const sized_children = [_]Widget{.{ .id = 2, .kind = .bubble, .frame = geometry.RectF.init(0, 0, 550, 0), .children = &wide_message }};
+    const sized_row = Widget{ .id = 1, .kind = .row, .children = &sized_children };
+    var sized_nodes: [4]WidgetLayoutNode = undefined;
+    const sized = try layoutWidgetTree(sized_row, geometry.RectF.init(0, 0, 600, 60), &sized_nodes);
+    try std.testing.expectEqual(@as(f32, 550), sized.nodes[1].frame.width);
+}
+
+test "column-direct chat bubbles hug their message up to the fraction" {
+    // The bubble is a message-hugging surface even under a column's
+    // default stretch alignment: a short message hugs (100 points, at
+    // the column's leading edge), a long one caps at 80% of the column
+    // (240 of 300) — the reference's fit-content bubble, never a
+    // stretched band.
+    const short_message = [_]Widget{.{ .id = 3, .kind = .text, .frame = geometry.RectF.init(0, 0, 100, 18), .text = "hi" }};
+    const long_message = [_]Widget{.{ .id = 5, .kind = .text, .frame = geometry.RectF.init(0, 0, 700, 18), .text = "long" }};
+    const column_children = [_]Widget{
+        .{ .id = 2, .kind = .bubble, .children = &short_message },
+        .{ .id = 4, .kind = .bubble, .children = &long_message },
+    };
+    const column = Widget{ .id = 1, .kind = .column, .layout = .{ .gap = 8 }, .children = &column_children };
+    var nodes: [8]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(column, geometry.RectF.init(0, 0, 300, 120), &nodes);
+    try std.testing.expectEqual(@as(f32, 100), layout.nodes[1].frame.width);
+    try std.testing.expectEqual(@as(f32, 0), layout.nodes[1].frame.x);
+    try std.testing.expectEqual(@as(f32, 240), layout.nodes[3].frame.width);
+}
+
 test "widget layout uses intrinsic sizes for unframed controls" {
     const tokens = DesignTokens{};
     const button = Widget{ .id = 2, .kind = .button, .text = "Run" };

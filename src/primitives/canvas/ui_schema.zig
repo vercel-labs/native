@@ -297,6 +297,15 @@ pub const elements = [_]ElementInfo{
     // (wrap, alignment, events, identity) stays on the enclosing text
     // element.
     .{ .code = 64, .name = "span", .rule_hook = "span" },
+    // Consumed by its parent bubble (like step/series/context-menu are
+    // consumed by theirs): the reaction pill — one small muted capsule
+    // docked at the bubble's bottom edge, straddling it the way the
+    // reference overlaps reactions on a chat message. Its single text
+    // run lowers onto the bubble widget's chrome-text channel and its
+    // dock side rides the existing `text-alignment` attribute (default
+    // end, the reference's trailing dock), so the element mints ONE
+    // code and no attribute codes at all.
+    .{ .code = 65, .name = "reactions", .rule_hook = "reactions" },
 };
 
 // ------------------------------------------------------------- attributes

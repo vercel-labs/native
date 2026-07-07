@@ -10,6 +10,7 @@ const plan_key_index = @import("plan_key_index.zig");
 const widget_tree = @import("widget_tree.zig");
 const widget_render = @import("widget_render.zig");
 const widget_render_style = @import("widget_render_style.zig");
+const widget_render_surfaces = @import("widget_render_surfaces.zig");
 const textSpansEqual = @import("text_spans.zig").textSpansEqual;
 const chartDataEqual = @import("chart.zig").chartDataEqual;
 
@@ -410,6 +411,13 @@ fn widgetFullPaintBoundsWithTransform(node: WidgetLayoutNode, transform: Affine,
     }
     if (widgetBackdropBlurPaintBounds(node.widget, tokens)) |blur_bounds| {
         bounds = geometry.RectF.unionWith(bounds, blur_bounds.normalized());
+    }
+    // A bubble's reaction pill straddles the frame's bottom edge (chrome
+    // painted outside the box, like a shadow halo), so its ring-inflated
+    // rect joins the damage region — the shared geometry guarantees the
+    // repaint covers exactly what the emit pass inks.
+    if (widget_render_surfaces.bubbleWidgetReactionsPillRect(widgetWithFrame(node.widget, node.frame), tokens)) |pill| {
+        bounds = geometry.RectF.unionWith(bounds, pill.inflate(geometry.InsetsF.all(widget_render_surfaces.bubble_reactions_ring)).normalized());
     }
     return transform.transformRect(bounds).normalized();
 }

@@ -252,6 +252,11 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 // parent.
                 return self.failNode(node, markup.span_parent_message);
             }
+            if (std.mem.eql(u8, node.name, "reactions")) {
+                // Reactions inside a bubble are consumed by the bubble's
+                // build below; one reaching here has no bubble parent.
+                return self.failNode(node, markup.reactions_parent_message);
+            }
             const kind = elementKind(node.name) orelse {
                 return self.failNode(node, "unknown element");
             };
@@ -272,11 +277,37 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 }
                 context_menu_child = child;
             }
-            if (context_menu_child != null) {
-                const filtered = try ui.arena.alloc(markup.MarkupNode, node.children.len - 1);
+            // Extract a direct reactions child the same way: the pill is
+            // bubble CHROME (it lowers onto the bubble widget's
+            // chrome-text channel), not content, so every content rule
+            // below sees the remaining children only. Mirrors the
+            // validator and the compiled engine.
+            var reactions_child: ?markup.MarkupNode = null;
+            for (node.children) |child| {
+                if (!markup.nodeIsReactions(child)) continue;
+                if (kind != .bubble) return self.failNode(child, markup.reactions_parent_message);
+                if (reactions_child != null) return self.failNode(child, markup.reactions_single_message);
+                if (markup.reactionsShapeError(child)) |info| {
+                    self.diagnostic = .{ .line = info.line, .column = info.column, .message = info.message, .path = info.path };
+                    return error.MarkupBuild;
+                }
+                reactions_child = child;
+            }
+            // The bubble's chrome-text channel belongs to the reaction
+            // pill; a bare text attribute would silently do nothing, so
+            // it is a build error. Mirrors the validator and the
+            // compiled engine.
+            if (kind == .bubble) {
+                if (node.attrEntry("text")) |_| {
+                    return self.failNode(node, markup.bubble_text_attr_message);
+                }
+            }
+            if (context_menu_child != null or reactions_child != null) {
+                const filtered = try ui.arena.alloc(markup.MarkupNode, node.children.len);
                 var filtered_len: usize = 0;
                 for (node.children) |child| {
                     if (markup.nodeIsContextMenu(child)) continue;
+                    if (markup.nodeIsReactions(child)) continue;
                     filtered[filtered_len] = child;
                     filtered_len += 1;
                 }
@@ -455,7 +486,22 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             // the Zig builder's tabs. Handlers ride the widget id, so
             // `selected=`/`on-press` bindings are untouched.
             if (kind == .tabs) lowerTabsTriggers(children.items);
-            return ui.el(kind, options, @as([]const Ui.Node, children.items));
+            var built = ui.el(kind, options, @as([]const Ui.Node, children.items));
+            // The extracted reactions run lands on the bubble widget's
+            // chrome-text channel — the render pass draws it as the
+            // docked pill — and the dock rides text_alignment (end is
+            // the default: the trailing dock reactions conventionally
+            // hang from). Interpolation applies to the run like any
+            // text content.
+            if (reactions_child) |pill_node| {
+                built.widget.text = try self.interpolatedText(ui, scope, pill_node);
+                built.widget.text_alignment = if (pill_node.attr("text-alignment")) |raw|
+                    std.meta.stringToEnum(canvas.TextAlign, raw) orelse
+                        return self.failNode(pill_node, markup.reactions_alignment_value_message)
+                else
+                    .end;
+            }
+            return built;
         }
 
         fn buildChildren(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, out: *std.ArrayListUnmanaged(Ui.Node)) BuildError!void {

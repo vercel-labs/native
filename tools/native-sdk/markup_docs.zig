@@ -56,7 +56,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "dropdown-menu", .doc = "Vertical menu surface; children are menu-item elements. anchor=\"below|above\" floats it against its parent (put it beside its trigger in a stack): late z-pass above the whole tree, window-clipped, auto-flipping at the edges. Pair with on-dismiss so Escape/click-outside close model-side." },
     .{ .name = "accordion", .doc = "Surface with a header (text attribute); children show when selected, dispatch with on-toggle." },
     .{ .name = "alert", .doc = "Alert surface; title via the text attribute, children stack inside." },
-    .{ .name = "bubble", .doc = "Bubble surface (chat message); children stack inside." },
+    .{ .name = "bubble", .doc = "Bubble surface (chat message); children stack inside. Hugs its message up to 80% of the thread's width (ghost is exempt; an explicit width wins). A <reactions> child docks the reaction pill on its bottom edge; text does nothing here (that channel belongs to the pill — use label for an accessible name)." },
     .{ .name = "dialog", .doc = "Modal dialog surface rendered in place; title via text, wrap in an if to show conditionally." },
     .{ .name = "drawer", .doc = "Drawer surface rendered in place; title via text, wrap in an if to show conditionally." },
     .{ .name = "sheet", .doc = "Sheet surface rendered in place; title via text, wrap in an if to show conditionally." },
@@ -82,6 +82,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "input-group", .doc = "Composer-grade grouped input: ONE bordered field wrapping exactly one textarea (first) plus an optional input-group-actions row inside the same border. The group wears the focus ring for its focused descendant and the textarea's own chrome dissolves, so the whole group reads as one field. Takes label, width, height, min-width, grow, key, global-key." },
     .{ .name = "input-group-actions", .doc = "The input-group's accessory row (only inside input-group, after its textarea): leading/trailing controls on one bottom row inside the group's border — put a <spacer grow=\"1\"/> between the leading controls and the trailing send. Children are ordinary elements (if/else/for work). Takes gap, key, global-key." },
     .{ .name = "span", .doc = "Inline styled run inside a <text> paragraph: mixed-weight, mono, italic, scaled, underlined, and token-colored runs word-wrap as ONE paragraph and announce as one text run. Takes weight (regular|medium|bold), mono, italic, scale (a positive multiplier on the paragraph's base size), underline, foreground; content is one run of text ({bindings} work). Whitespace between runs collapses to a single space; runs written with no whitespace between them abut. Spans do not nest; layout, events, and identity stay on the enclosing text." },
+    .{ .name = "reactions", .doc = "The bubble's reaction pill (only inside bubble, at most one): a small muted capsule straddling the bubble's bottom edge, holding one run of text ({bindings} work). Takes text-alignment naming the dock — start, center, or end (the default trailing dock). Consumes no layout space (it overlaps like the reference); give the next turn breathing room with the thread's own spacing. Draws on the page plane, so a primary bubble's knockout ink never applies." },
 };
 
 pub const structure_docs = [_]Doc{
@@ -112,7 +113,7 @@ pub const attribute_docs = [_]Doc{
     .{ .name = "cross", .doc = "Cross-axis alignment: stretch|start|center|end." },
     .{ .name = "wrap", .doc = "text only: true word-wraps the content at the width the element receives (reserving wrapped height in columns); false and unset are honest single-line - one line whose overflow follows the overflow attribute (trailing ellipsis by default), so a width-constrained title never paints over the row below." },
     .{ .name = "overflow", .doc = "text only: what a single line does with content that does not fit - ellipsis (the default) elides behind a trailing \u{2026}; clip hard-cuts at the frame for fixed-format content (a duration column) where a partial glyph beats losing the format. Wrapped paragraphs (wrap=\"true\") ignore it." },
-    .{ .name = "text-alignment", .doc = "Horizontal alignment of text content: start|center|end. Consumed by text (plain and wrapped), status-bar, and surface titles; controls that own their label placement (button, badge) ignore it." },
+    .{ .name = "text-alignment", .doc = "Horizontal alignment of text content: start|center|end. Consumed by text (plain and wrapped), status-bar, and surface titles; controls that own their label placement (button, badge) ignore it. On a bubble's reactions child it names the pill's dock (end is the default trailing dock)." },
     .{ .name = "columns", .doc = "grid only: fixed column count (plain number or one {binding}); omit for the derived near-square grid." },
     .{ .name = "virtualized", .doc = "Enable list virtualization (true/false)." },
     .{ .name = "virtual-item-extent", .doc = "Fixed item extent for virtualized lists (plain number)." },
@@ -245,6 +246,10 @@ pub const span_attr_docs = [_]Doc{
     .{ .name = "scale", .doc = "span: the run's size as a POSITIVE multiplier on the paragraph's base size — the text element's size rung included, so scale=\"1.5\" inside a heading paragraph draws at heading x 1.5 (a literal number or one {binding} producing one). The paragraph reserves ONE line height sized by its largest scale, and every run shares that line's baseline. Inline headings, hero stats, fine print." },
     .{ .name = "underline", .doc = "span: underlines the run (true/false or a {binding}) — purely visual, like every span channel; it is not a link (link spans stay Zig-builder territory)." },
     .{ .name = "foreground", .doc = "span: the run's color as a literal ColorTokens field name (e.g. text_muted, success, warning) — unset inherits the paragraph's foreground." },
+};
+
+pub const reactions_attr_docs = [_]Doc{
+    .{ .name = "text-alignment", .doc = "reactions: where the pill docks along the bubble's bottom edge — start, center, or end (the default trailing dock). A literal name: the dock is a static design choice, like anchor placement." },
 };
 
 pub const anchor_attr_docs = [_]Doc{

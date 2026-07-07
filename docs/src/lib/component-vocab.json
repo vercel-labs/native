@@ -154,7 +154,7 @@
     },
     {
       "name": "bubble",
-      "doc": "Bubble surface (chat message); children stack inside."
+      "doc": "Bubble surface (chat message); children stack inside. Hugs its message up to 80% of the thread's width (ghost is exempt; an explicit width wins). A <reactions> child docks the reaction pill on its bottom edge; text does nothing here (that channel belongs to the pill — use label for an accessible name)."
     },
     {
       "name": "dialog",
@@ -255,6 +255,10 @@
     {
       "name": "span",
       "doc": "Inline styled run inside a <text> paragraph: mixed-weight, mono, italic, scaled, underlined, and token-colored runs word-wrap as ONE paragraph and announce as one text run. Takes weight (regular|medium|bold), mono, italic, scale (a positive multiplier on the paragraph's base size), underline, foreground; content is one run of text ({bindings} work). Whitespace between runs collapses to a single space; runs written with no whitespace between them abut. Spans do not nest; layout, events, and identity stay on the enclosing text."
+    },
+    {
+      "name": "reactions",
+      "doc": "The bubble's reaction pill (only inside bubble, at most one): a small muted capsule straddling the bubble's bottom edge, holding one run of text ({bindings} work). Takes text-alignment naming the dock — start, center, or end (the default trailing dock). Consumes no layout space (it overlaps like the reference); give the next turn breathing room with the thread's own spacing. Draws on the page plane, so a primary bubble's knockout ink never applies."
     }
   ],
   "structure": [
@@ -358,7 +362,7 @@
     },
     {
       "name": "text-alignment",
-      "doc": "Horizontal alignment of text content: start|center|end. Consumed by text (plain and wrapped), status-bar, and surface titles; controls that own their label placement (button, badge) ignore it."
+      "doc": "Horizontal alignment of text content: start|center|end. Consumed by text (plain and wrapped), status-bar, and surface titles; controls that own their label placement (button, badge) ignore it. On a bubble's reactions child it names the pill's dock (end is the default trailing dock)."
     },
     {
       "name": "columns",
@@ -764,6 +768,12 @@
         "doc": "span: the run's color as a literal ColorTokens field name (e.g. text_muted, success, warning) — unset inherits the paragraph's foreground."
       }
     ],
+    "reactions": [
+      {
+        "name": "text-alignment",
+        "doc": "reactions: where the pill docks along the bubble's bottom edge — start, center, or end (the default trailing dock). A literal name: the dock is a static design choice, like anchor placement."
+      }
+    ],
     "dropdown-menu": [
       {
         "name": "anchor",
@@ -932,7 +942,7 @@
     },
     "bubble": {
       "width": 1120,
-      "height": 400
+      "height": 600
     },
     "breadcrumb": {
       "width": 1120,

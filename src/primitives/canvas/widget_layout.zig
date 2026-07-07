@@ -259,7 +259,11 @@ fn layoutAxisChildren(
         if (grow > 0) {
             grow_total += grow;
         } else {
-            fixed_extent += preferredMainExtentInCross(child, axis, cross_extent, style.cross_alignment, tokens);
+            // The bubble thread fraction binds on a row's main axis
+            // (the child's width): a hug-sized bubble measures at most
+            // 80% of the row, so a spacer beside it keeps real share
+            // and a long message wraps instead of overflowing.
+            fixed_extent += mainExtentWithBubbleCap(child, axis, available_extent, preferredMainExtentInCross(child, axis, cross_extent, style.cross_alignment, tokens));
         }
     }
 
@@ -285,7 +289,7 @@ fn layoutAxisChildren(
         const main_extent = if (grow > 0 and grow_total > 0)
             clampMainExtent(child, axis, remaining * grow / grow_total)
         else
-            preferredMainExtentInCross(child, axis, cross_extent, style.cross_alignment, tokens);
+            mainExtentWithBubbleCap(child, axis, available_extent, preferredMainExtentInCross(child, axis, cross_extent, style.cross_alignment, tokens));
         const cross = preferredCrossExtent(child, axis, cross_extent, style.cross_alignment, tokens);
         const cross_origin = alignedCrossAxisOrigin(content, axis, cross_extent, cross, child, style.cross_alignment);
         const child_frame = switch (axis) {
@@ -482,7 +486,15 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
             var flow_count: usize = 0;
             for (widget.children) |child| {
                 if (child.layout.anchor != null) continue;
-                const child_width = if (child.frame.width > 0) child.frame.width else inner_width;
+                // A column-direct bubble hugs up to the thread fraction
+                // (the cross-extent seam), so its wrapped height must
+                // measure at that same capped width.
+                const child_width = if (child.frame.width > 0)
+                    child.frame.width
+                else if (bubbleThreadCapEligible(child))
+                    bubbleThreadWidthCap(child, inner_width, @min(inner_width, intrinsicWidgetSizeDepth(child, tokens, depth + 1).width))
+                else
+                    inner_width;
                 sum += wrappedVerticalExtentForWidth(child, child_width, tokens, depth + 1);
                 flow_count += 1;
             }
@@ -575,7 +587,7 @@ fn rowChildWidth(row: Widget, available_width: f32, index: usize, tokens: Design
         if (grow > 0) {
             grow_total += grow;
         } else {
-            fixed_extent += preferredMainExtent(child, .horizontal, tokens);
+            fixed_extent += bubbleThreadWidthCap(child, available_width, preferredMainExtent(child, .horizontal, tokens));
         }
     }
     if (flow_count == 0) return available_width;
@@ -584,7 +596,10 @@ fn rowChildWidth(row: Widget, available_width: f32, index: usize, tokens: Design
     const child = children[index];
     const grow = nonNegative(child.layout.grow);
     if (grow > 0 and grow_total > 0) return clampMainExtent(child, .horizontal, remaining * grow / grow_total);
-    return preferredMainExtent(child, .horizontal, tokens);
+    // The same bubble thread cap `layoutAxisChildren` applies, replayed
+    // here so wrapped heights measure at the width the bubble will
+    // actually receive.
+    return bubbleThreadWidthCap(child, available_width, preferredMainExtent(child, .horizontal, tokens));
 }
 
 fn spanParagraphHeight(widget: Widget, width: f32, tokens: DesignTokens) f32 {
@@ -1641,6 +1656,42 @@ fn intrinsicIconExtent(widget: Widget, tokens: DesignTokens) f32 {
     return widgetSizedDensityValue(widget, tokens, 18);
 }
 
+/// The chat bubble's thread fraction: a bubble with no explicit width
+/// caps at 80% of the content width its container offers — the measured
+/// reference treatment — so one long message wraps into a readable
+/// column instead of spanning the whole thread. Ghost bubbles are
+/// exempt (the reference lets the chrome-less variant run full width:
+/// its content carries the message).
+pub const bubble_max_width_fraction: f32 = 0.8;
+
+/// Cap a bubble child's inline extent at the thread fraction. `value`
+/// is the width the container's math chose, `available` the container's
+/// content width. Only hug-sized bubbles participate: an explicit
+/// `width` (definite through the frame channel), an author `max_size`,
+/// or a ghost variant leaves the classic result untouched, and a
+/// container that offers no definite space (hug measurement) cannot
+/// name a fraction of it. An author min-width floor still wins over the
+/// cap, the same precedence `clampIntrinsicAxis` keeps everywhere.
+/// The row main-axis seam of the bubble thread cap: the main extent of
+/// a horizontal container's child is its width, so hug-sized bubbles
+/// cap at the thread fraction there. Vertical containers pass through —
+/// their main axis is height; the cross-extent seam in
+/// `preferredCrossExtent` owns the width there.
+fn mainExtentWithBubbleCap(child: Widget, axis: LayoutAxis, available: f32, value: f32) f32 {
+    if (axis != .horizontal) return value;
+    return bubbleThreadWidthCap(child, available, value);
+}
+
+fn bubbleThreadCapEligible(child: Widget) bool {
+    if (child.kind != .bubble or child.variant == .ghost) return false;
+    return child.frame.width <= 0 and child.layout.max_size.width <= 0;
+}
+
+fn bubbleThreadWidthCap(child: Widget, available: f32, value: f32) f32 {
+    if (!bubbleThreadCapEligible(child) or available <= 0) return value;
+    return @min(value, @max(available * bubble_max_width_fraction, nonNegative(child.layout.min_size.width)));
+}
+
 fn preferredMainExtent(widget: Widget, axis: LayoutAxis, tokens: DesignTokens) f32 {
     const value = switch (axis) {
         .horizontal => widget.frame.width,
@@ -1663,6 +1714,16 @@ fn preferredCrossExtent(widget: Widget, axis: LayoutAxis, available: f32, alignm
         .vertical => widget.layout.max_size.width,
     };
     if (value > 0) return @max(min_value, boundedByMax(value, max_value));
+    // The cross axis of a vertical container is the child's WIDTH, so
+    // the bubble thread contract applies here: a bubble directly in a
+    // column HUGS its message up to the thread fraction — even under
+    // the default stretch alignment, because a stretched message
+    // surface is exactly the shape the reference bubble never takes
+    // (fit-content, capped at 80% of the thread).
+    if (axis == .vertical and bubbleThreadCapEligible(widget) and available > 0) {
+        const fitted = @min(available, intrinsicCrossExtent(widget, axis, tokens));
+        return @max(min_value, boundedByMax(bubbleThreadWidthCap(widget, available, fitted), max_value));
+    }
     if (alignment == .stretch) return @max(min_value, boundedByMax(available, max_value));
     return @max(min_value, boundedByMax(@min(available, intrinsicCrossExtent(widget, axis, tokens)), max_value));
 }

@@ -3605,3 +3605,105 @@ test "scale and underline stay span-scoped" {
         try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
     }
 }
+
+// ------------------------------------------------------ bubble reactions
+
+/// The reactions fixture both engines build (the compiled parity suite
+/// reuses it): a default trailing pill, a leading pill whose run carries
+/// a binding, and a pill-less bubble that must keep an empty chrome-text
+/// channel.
+pub const reactions_markup_source =
+    \\<column gap="8" width="340">
+    \\  <bubble>
+    \\    <text wrap="true">On my way</text>
+    \\    <reactions>+2</reactions>
+    \\  </bubble>
+    \\  <bubble variant="primary">
+    \\    <text>Shipped</text>
+    \\    <reactions text-alignment="start">{used} +1</reactions>
+    \\  </bubble>
+    \\  <bubble>
+    \\    <text>quiet</text>
+    \\  </bubble>
+    \\</column>
+;
+
+test "markup reactions lower onto the bubble's chrome-text channel" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = SpanModel{};
+
+    var view = try SpanMarkup.init(arena, reactions_markup_source);
+    var ui = SpanUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+
+    // The pill run lands on widget.text (the alert-title convention:
+    // chrome text rides the text channel) and the reactions child is
+    // CONSUMED — the bubble keeps exactly its message child.
+    const received = tree.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.bubble, received.kind);
+    try testing.expectEqualStrings("+2", received.text);
+    // End is the default dock: the trailing corner reactions
+    // conventionally hang from, without an attribute.
+    try testing.expectEqual(canvas.TextAlign.end, received.text_alignment);
+    try testing.expectEqual(@as(usize, 1), received.children.len);
+    try testing.expectEqual(canvas.WidgetKind.text, received.children[0].kind);
+
+    // An explicit start dock, and interpolation in the run like any
+    // rendered text.
+    const sent = tree.root.children[1];
+    try testing.expectEqualStrings("182 GB +1", sent.text);
+    try testing.expectEqual(canvas.TextAlign.start, sent.text_alignment);
+
+    // No reactions child, no pill: the chrome-text channel stays empty.
+    const quiet = tree.root.children[2];
+    try testing.expectEqual(@as(usize, 0), quiet.text.len);
+}
+
+test "reactions misuse fails the build with the pinned teaching messages" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = SpanModel{};
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        // A pill with no bubble has no edge to dock on.
+        .{ .source = "<column>\n  <reactions>+2</reactions>\n</column>", .message = canvas.ui_markup.reactions_parent_message },
+        .{ .source = "<column>\n  <card><reactions>+2</reactions></card>\n</column>", .message = canvas.ui_markup.reactions_parent_message },
+        // One pill per bubble: it draws ONE capsule.
+        .{ .source = "<column>\n  <bubble><text>hi</text><reactions>+1</reactions><reactions>+2</reactions></bubble>\n</column>", .message = canvas.ui_markup.reactions_single_message },
+        // The closed attribute set: the pill is bubble chrome.
+        .{ .source = "<column>\n  <bubble><text>hi</text><reactions variant=\"primary\">+2</reactions></bubble>\n</column>", .message = canvas.ui_markup.reactions_attr_message },
+        .{ .source = "<column>\n  <bubble><text>hi</text><reactions on-press=\"noop\">+2</reactions></bubble>\n</column>", .message = canvas.ui_markup.reactions_attr_message },
+        // The dock is a literal from the TextAlign vocabulary.
+        .{ .source = "<column>\n  <bubble><text>hi</text><reactions text-alignment=\"stretch\">+2</reactions></bubble>\n</column>", .message = canvas.ui_markup.reactions_alignment_value_message },
+        // One run of text, no element children, never empty.
+        .{ .source = "<column>\n  <bubble><text>hi</text><reactions><badge>2</badge></reactions></bubble>\n</column>", .message = canvas.ui_markup.reactions_content_message },
+        .{ .source = "<column>\n  <bubble><text>hi</text><reactions/></bubble>\n</column>", .message = canvas.ui_markup.reactions_content_message },
+        // The bubble's chrome-text channel belongs to the pill; a bare
+        // text attribute would silently do nothing.
+        .{ .source = "<column>\n  <bubble text=\"+2\"><text>hi</text></bubble>\n</column>", .message = canvas.ui_markup.bubble_text_attr_message },
+    };
+    for (cases) |case| {
+        // The interpreter fails the build with the message...
+        var view = try SpanMarkup.init(arena, case.source);
+        var ui = SpanUi.init(arena);
+        try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
+        try testing.expectEqualStrings(case.message, view.diagnostic.message);
+        // ...and the model-agnostic validator reports the same one.
+        var parser = canvas.ui_markup.Parser.init(arena, case.source);
+        const document = try parser.parse();
+        const info = canvas.ui_markup.validate(document) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+    }
+
+    // The pill's literal run rides the tofu guard: a codepoint outside
+    // the bundled face renders as a tofu box on the reference path, so
+    // the validator teaches vector icons or plain words instead.
+    const emoji = "<column>\n  <bubble><text>hi</text><reactions>\u{1F44D}</reactions></bubble>\n</column>";
+    var parser = canvas.ui_markup.Parser.init(arena, emoji);
+    const document = try parser.parse();
+    const info = canvas.ui_markup.validate(document) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(canvas.ui_markup.font_coverage_message, info.message);
+}

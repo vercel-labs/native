@@ -302,13 +302,30 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 // parent.
                 comptime fail(node, markup.span_parent_message);
             }
+            if (comptime std.mem.eql(u8, node.name, "reactions")) {
+                // Reactions inside a bubble are consumed by the bubble's
+                // build below; one reaching here has no bubble parent.
+                comptime fail(node, markup.reactions_parent_message);
+            }
             const kind = comptime (interpreter.elementKind(node.name) orelse fail(node, "unknown element"));
             // Interpreter parity: extract a direct context-menu child —
             // metadata on this element (lowered to the declared
             // platform-menu items), not content — so every content rule
             // below sees the remaining children only.
             const context_menu_split = comptime splitContextMenuChild(node);
-            const inner = comptime context_menu_split.inner;
+            // Interpreter parity: extract a direct reactions child the
+            // same way — the pill is bubble CHROME (it lowers onto the
+            // bubble widget's chrome-text channel), not content.
+            const reactions_split = comptime splitReactionsChild(context_menu_split.inner, kind);
+            const inner = comptime reactions_split.inner;
+            comptime {
+                // Interpreter parity: the bubble's chrome-text channel
+                // belongs to the reaction pill; a bare text attribute
+                // would silently do nothing, so it is a compile error.
+                if (kind == .bubble and node.attr("text") != null) {
+                    fail(node, markup.bubble_text_attr_message);
+                }
+            }
             comptime {
                 // Interpreter parity: value/text handlers on
                 // non-hit-target kinds can never fire, so a dead handler
@@ -472,7 +489,22 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             // widget kind tab strips are built on (see
             // `interpreter.lowerTabsTriggers`).
             if (comptime (kind == .tabs)) interpreter.lowerTabsTriggers(children.items);
-            return ui.el(kind, options, @as([]const Ui.Node, children.items));
+            var built = ui.el(kind, options, @as([]const Ui.Node, children.items));
+            // Interpreter parity: the extracted reactions run lands on
+            // the bubble widget's chrome-text channel — the render pass
+            // draws it as the docked pill — and the dock rides
+            // text_alignment (end is the default: the trailing dock
+            // reactions conventionally hang from). The dock literal
+            // resolves at comptime; the run interpolates like any text.
+            if (comptime (reactions_split.pill != null)) {
+                built.widget.text = interpolatedText(comptime reactions_split.pill.?, entries, ui, model, scope);
+                built.widget.text_alignment = comptime blk: {
+                    const raw = reactions_split.pill.?.attr("text-alignment") orelse break :blk .end;
+                    break :blk std.meta.stringToEnum(canvas.TextAlign, raw) orelse
+                        fail(reactions_split.pill.?, markup.reactions_alignment_value_message);
+                };
+            }
+            return built;
         }
 
         /// One runtime step per child: elements and `use` expansions append
@@ -2462,6 +2494,38 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 var inner = node;
                 inner.children = filtered;
                 return .{ .inner = inner, .menu = menu };
+            }
+        }
+
+        /// Comptime mirror of the interpreter's reactions extraction:
+        /// splits one direct `<reactions>` child off a bubble (the pill
+        /// is chrome, not content) after the SAME shared checks — bubble
+        /// host only, a single pill, and the closed shape
+        /// (`markup.reactionsShapeError`).
+        const ReactionsSplit = struct {
+            inner: markup.MarkupNode,
+            pill: ?markup.MarkupNode,
+        };
+
+        fn splitReactionsChild(comptime node: markup.MarkupNode, comptime kind: canvas.WidgetKind) ReactionsSplit {
+            comptime {
+                var pill: ?markup.MarkupNode = null;
+                for (node.children) |child| {
+                    if (!markup.nodeIsReactions(child)) continue;
+                    if (kind != .bubble) fail(child, markup.reactions_parent_message);
+                    if (pill != null) fail(child, markup.reactions_single_message);
+                    if (markup.reactionsShapeError(child)) |info| failInfo(info);
+                    pill = child;
+                }
+                if (pill == null) return .{ .inner = node, .pill = null };
+                var filtered: []const markup.MarkupNode = &.{};
+                for (node.children) |child| {
+                    if (markup.nodeIsReactions(child)) continue;
+                    filtered = filtered ++ &[_]markup.MarkupNode{child};
+                }
+                var inner = node;
+                inner.children = filtered;
+                return .{ .inner = inner, .pill = pill };
             }
         }
 

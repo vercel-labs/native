@@ -436,6 +436,50 @@ test "NSUI round-trips context-menu composites through registry codes" {
     try testing.expect(base_hash != try nsui.documentHash(arena, edited));
 }
 
+test "NSUI round-trips bubble reactions through registry codes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source =
+        \\<column>
+        \\  <bubble variant="primary">
+        \\    <text wrap="true">{message.body}</text>
+        \\    <reactions text-alignment="start">{message.reactions} +1</reactions>
+        \\  </bubble>
+        \\</column>
+    ;
+    const document = try parseSource(arena, source);
+    try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(document));
+
+    var diagnostic = nsui.CodecDiagnostic{};
+    const bytes = try nsui.encode(arena, document, .{}, &diagnostic);
+    const decoded = try nsui.decode(arena, bytes, &diagnostic);
+    try expectNodesEqual(document.root.?, decoded.root.?);
+
+    // The reactions element rides its fresh registry code (65) and its
+    // dock rides the existing text-alignment code; decoded names are
+    // the registry's spellings.
+    const bubble_node = decoded.root.?.children[0];
+    const pill_node = bubble_node.children[1];
+    try testing.expectEqualStrings("reactions", pill_node.name);
+    try testing.expectEqualStrings("start", pill_node.attr("text-alignment").?);
+
+    // Determinism, and hash coverage: moving the dock is structural.
+    const again = try nsui.encode(arena, document, .{}, &diagnostic);
+    try testing.expectEqualSlices(u8, bytes, again);
+    const base_hash = try nsui.documentHash(arena, document);
+    const edited_source =
+        \\<column>
+        \\  <bubble variant="primary">
+        \\    <text wrap="true">{message.body}</text>
+        \\    <reactions>{message.reactions} +1</reactions>
+        \\  </bubble>
+        \\</column>
+    ;
+    const edited = try parseSource(arena, edited_source);
+    try testing.expect(base_hash != try nsui.documentHash(arena, edited));
+}
+
 test "NSUI round-trips chart composites through registry codes" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
