@@ -1573,17 +1573,28 @@ fn intrinsicAvatarWidgetSize(widget: Widget, tokens: DesignTokens) geometry.Size
 }
 
 fn intrinsicBadgeWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
+    const min_width = widgetSizedDensityValue(widget, tokens, 24);
+    const height = widgetSizedDensityValue(widget, tokens, 20);
+    // An ICON-ONLY badge carries no text insets: the renderer centers
+    // the glyph, so it takes the same minimum chip width a single-digit
+    // badge gets — a timeline's completed check and its numbered
+    // neighbors stay the same capsule instead of the icon one widening
+    // by the text insets.
+    if (widget.icon.len > 0 and widget.text.len == 0) {
+        const icon_extent = widget_metrics.widgetBadgeIconExtent(widget, tokens);
+        return geometry.SizeF.init(@max(min_width, icon_extent + tokens.spacing.xs * 2), height);
+    }
     const text_width = measuredTextWidth(tokens, widget.text, widget_metrics.widgetBadgeTextSize(widget, tokens));
     const inset = widgetControlInset(widget, tokens, tokens.spacing.sm);
     // An inline icon widens the badge by the same shared metrics
     // the renderer paints with (gap only when a label follows).
     const icon_width = if (widget.icon.len > 0)
-        widget_metrics.widgetBadgeIconExtent(widget, tokens) + (if (widget.text.len > 0) widget_metrics.widgetBadgeIconGap(widget, tokens) else 0)
+        widget_metrics.widgetBadgeIconExtent(widget, tokens) + widget_metrics.widgetBadgeIconGap(widget, tokens)
     else
         0;
     // The compact chip: a 20px band (the reference badge height) with
     // the tight 8px side insets.
-    return geometry.SizeF.init(@max(widgetSizedDensityValue(widget, tokens, 24), icon_width + text_width + inset * 2), widgetSizedDensityValue(widget, tokens, 20));
+    return geometry.SizeF.init(@max(min_width, icon_width + text_width + inset * 2), height);
 }
 
 fn intrinsicSquareControlSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
