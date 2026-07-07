@@ -2678,16 +2678,17 @@ test "widget emitter renders checkbox radio switch and slider controls" {
         .draw_text => |text| try std.testing.expectEqualStrings("Mode", text.text),
         else => return error.TestUnexpectedResult,
     }
-    // 6px slider track centered in the 32px row: y = 124 + 13.
+    // 4px slider rail centered in the 32px row: y = 124 + 14.
     switch (display_list.commands[15]) {
-        .fill_rounded_rect => |fill| try expectRect(geometry.RectF.init(0, 137, 40, 6), fill.rect),
+        .fill_rounded_rect => |fill| try expectRect(geometry.RectF.init(0, 138, 40, 4), fill.rect),
         else => return error.TestUnexpectedResult,
     }
-    // The knob keeps its primary border; focus adds the offset ring.
+    // The knob's resting hairline wears the focus-ring neutral; focus
+    // adds the offset ring in the same color outside it.
     switch (display_list.commands[17]) {
         .stroke_rect => |stroke| {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(13, 4)), stroke.id);
-            try expectFillColor(tokens.colors.accent, stroke.stroke.fill);
+            try expectFillColor(tokens.colors.focus_ring, stroke.stroke.fill);
         },
         else => return error.TestUnexpectedResult,
     }

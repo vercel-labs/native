@@ -675,7 +675,15 @@ test "gpu components display list renders stable reference snapshot" {
     // hand-drawn two-line glyph. Only the catalog's combobox pixels
     // move past the select-rework pin. Reviewed via the regenerated
     // docs combobox previews (the sole preview churn) before blessing.
-    try std.testing.expectEqual(@as(u64, 8874355866572474226), referenceSurfaceSignature(pixels));
+    // Re-pinned 2026-07-07 (slider fidelity round): the house slider
+    // takes its measured register — a 4px muted rail (down from 6)
+    // under a fixed 12px paper-white thumb (down from the row-coupled
+    // 16-20) whose resting hairline is the focus-ring neutral instead
+    // of the primary; disabled now mutes rail, range, and thumb to the
+    // half-strength wash as one piece. Only the slider tile moves.
+    // Reviewed via regenerated docs slider previews and the live docs
+    // tile in both schemes before blessing.
+    try std.testing.expectEqual(@as(u64, 4863232662243686658), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -736,13 +744,20 @@ test "gpu components display list renders stable geist reference snapshot" {
     // no emitter branches. Pinned 2026-07-06 alongside the pack's first
     // authoring; light and dark captures of the catalog under the pack
     // were reviewed by eye before blessing.
+    // Re-pinned 2026-07-07 (slider fidelity round): the pack's slider
+    // now states its own register — an 8px gray-200 rail, the blue-700
+    // range, and a 6x14 paper-white rectangular handle on a 1px corner
+    // with a black hairline — through the new slider metric tokens and
+    // the slider control table. Only the slider tile moves. Reviewed
+    // via the live docs tile under the pack in both schemes before
+    // blessing.
     const pixel_count = @as(usize, @intFromFloat(canvas_width)) * @as(usize, @intFromFloat(canvas_height)) * 4;
     const pixels = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(pixels);
     const scratch = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(scratch);
     const surface = try renderComponentsReferenceSurface(componentTokensForPack(.geist, .light), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 3464951459468051116), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 3652534619317080972), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -758,7 +773,7 @@ test "gpu components house reference snapshot is reproducible through the shared
     const scratch = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(scratch);
     _ = try renderComponentsReferenceSurface(componentTokens(), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 8874355866572474226), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 4863232662243686658), referenceSurfaceSignature(pixels));
 }
 
 test "gpu components catalog previews use canonical built-in foundations" {

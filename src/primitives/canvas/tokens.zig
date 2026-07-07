@@ -481,6 +481,14 @@ pub const ControlMetricTokens = struct {
     /// The whole-pixel step the sized control insets take around their
     /// base (sm = base - step, lg = base + step).
     size_inset_step: f32 = 2,
+    /// The slider's geometry register, promoted to tokens because thumb
+    /// SHAPE is a pack signature, not a color: the house slider is a
+    /// quiet 4px rail under a 12px round thumb, while other registers
+    /// pair a heavier rail with a narrow rectangular grab handle. All
+    /// three values are pre-size/density, like the rest of the ladder.
+    slider_track_height: f32 = 4,
+    slider_thumb_width: f32 = 12,
+    slider_thumb_height: f32 = 12,
 };
 
 pub const ShadowToken = struct {
@@ -1059,6 +1067,9 @@ pub const ControlMetricTokenOverrides = struct {
     icon_text_step: ?f32 = null,
     row_extent: ?f32 = null,
     size_inset_step: ?f32 = null,
+    slider_track_height: ?f32 = null,
+    slider_thumb_width: ?f32 = null,
+    slider_thumb_height: ?f32 = null,
 
     pub fn apply(self: ControlMetricTokenOverrides, base: ControlMetricTokens) ControlMetricTokens {
         return applyFlatTokenOverrides(ControlMetricTokens, base, self);

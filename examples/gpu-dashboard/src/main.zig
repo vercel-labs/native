@@ -115,7 +115,13 @@ const expected_dashboard_interaction_command_count: usize = 70;
 // destructive is the quiet red-wash chip with red ink instead of the
 // filled alarm block. Reviewed via the regenerated docs button previews
 // in light and dark.
-const expected_dashboard_reference_signature: u64 = 3267909799340529904;
+// Regenerated 2026-07-07 (slider fidelity round): the confidence slider
+// takes the measured house register — a 4px muted rail (down from 6)
+// under a fixed 12px paper-white thumb whose resting hairline is the
+// focus-ring neutral instead of the primary. Only the slider pixels
+// move. Reviewed via the regenerated docs slider previews and the live
+// docs tile in both schemes.
+const expected_dashboard_reference_signature: u64 = 2871108290690187392;
 const expected_dashboard_widget_node_count: usize = 48;
 const expected_dashboard_snapshot_widget_count: usize = 48;
 const refresh_command = "dashboard.refresh";

@@ -77,6 +77,13 @@ pub fn designTokens(color_scheme: ColorScheme, contrast: ColorContrast) DesignTo
             .button_inset_lg = 14,
             .button_label_sm_step = 0,
             .button_label_lg_step = 2,
+            // The pack's slider geometry: an 8px rail under a narrow
+            // 6x14 rectangular grab handle — the handle stands proud of
+            // the rail instead of dwarfing it, the opposite proportion
+            // of the house dot-on-a-line.
+            .slider_track_height = 8,
+            .slider_thumb_width = 6,
+            .slider_thumb_height = 14,
         },
     };
 }
@@ -312,6 +319,32 @@ fn controlTokens(color_scheme: ColorScheme, contrast: ColorContrast) ControlToke
             .disabled_background = disabled_background,
             .disabled_foreground = disabled_foreground,
             .stroke_width = 0,
+        },
+        // The slider is the one control whose fill keeps a hue in the
+        // monochrome register: rail on gray-200, range in blue-700 (the
+        // same #0072f5 step in both schemes), and a paper-white
+        // rectangular handle with a black hairline — translucent over
+        // light pages, solid on dark ones so the white chip keeps a
+        // crisp edge. The corner radius shapes the handle (the rail is
+        // always a pill). Disabled is the pack's swap register: the
+        // range drops to gray-500 while rail and handle keep full
+        // strength.
+        .slider = .{
+            .background = switch (color_scheme) {
+                .light => Color.rgb8(235, 235, 235),
+                .dark => Color.rgb8(31, 31, 31),
+            },
+            .active_background = Color.rgb8(0, 114, 245),
+            .foreground = Color.rgb8(255, 255, 255),
+            .border = switch (color_scheme) {
+                .light => Color.rgba8(0, 0, 0, 54),
+                .dark => Color.rgb8(0, 0, 0),
+            },
+            .disabled_background = switch (color_scheme) {
+                .light => Color.rgb8(201, 201, 201),
+                .dark => Color.rgb8(69, 69, 69),
+            },
+            .radius = 1,
         },
         // Floating and raised surfaces take the 12px corner; the
         // tooltip stays on the control corner (it is a label, not a

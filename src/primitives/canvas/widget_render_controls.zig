@@ -1088,36 +1088,65 @@ pub fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
     const track = sliderWidgetTrackRect(widget, tokens);
     const active = pixelSnapGeometryRect(tokens, geometry.RectF.init(track.x, track.y, track.width * value, track.height));
     const knob = sliderWidgetKnobRect(widget, tokens);
-    const track_radius = controlRadius(widget, visual, track.height * 0.5);
-    const knob_radius = controlRadius(widget, visual, knob.height * 0.5);
+    // The rail is a pill in every register; the RADIUS channel (widget
+    // style or the themed slider table) shapes only the thumb, because
+    // thumb shape is where slider registers actually differ — a round
+    // dot versus a barely-rounded grab handle — while a squared-off rail
+    // is no register at all.
+    const track_radius = Radius.all(track.height * 0.5);
+    const knob_radius = controlRadius(widget, visual, @min(knob.width, knob.height) * 0.5);
+
+    // Disabled register: with no themed statement the whole slider mutes
+    // to the half-strength wash as one piece — rail, range, and thumb
+    // together. A themed table that states a disabled color is the SWAP
+    // register: the stated color replaces the range fill and everything
+    // it does not restate keeps full strength (the swap is the pack's
+    // entire disabled statement).
+    const swap_disabled = visual.disabled_background != null or visual.disabled_foreground != null;
+    const washed = widget.state.disabled and !swap_disabled;
 
     // Track on the muted wash, filled range on the primary, and a
-    // near-white thumb ringed by a primary hairline — the slider reads
-    // as one primary-accented control rather than knob-with-border.
+    // paper-white thumb under a neutral hairline — the range carries the
+    // color; the thumb reads as a quiet handle on top of it.
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = track,
         .radius = track_radius,
-        .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle)),
+        .fill = colorFill(disabledWash(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle), washed, tokens.states.disabled_alpha)),
     });
+    const active_rest = widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 2),
         .rect = active,
         .radius = track_radius,
-        .fill = colorFill(widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent)),
+        .fill = colorFill(if (widget.state.disabled)
+            visual.disabled_background orelse disabledWash(active_rest, true, tokens.states.disabled_alpha)
+        else
+            active_rest),
     });
+    // Paper-white in BOTH schemes: the thumb must read against the
+    // filled range and the muted rail alike, and the palette carries no
+    // scheme-invariant white token — so the emitter states it, and a
+    // theme restates it through the slider table's foreground channel.
+    const knob_rest = widgetBackgroundColor(widget, visual.foreground orelse Color.rgb8(255, 255, 255));
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 3),
         .rect = knob,
         .radius = knob_radius,
-        .fill = colorFill(if (widget.state.disabled) tokens.colors.disabled else widgetBackgroundColor(widget, visual.foreground orelse tokens.colors.accent_text)),
+        .fill = colorFill(if (widget.state.disabled)
+            visual.disabled_foreground orelse disabledWash(knob_rest, washed, tokens.states.disabled_alpha)
+        else
+            knob_rest),
     });
+    // The thumb's resting hairline wears the focus-ring neutral (a mid
+    // gray in both schemes), so the ring on focus reads as a brighter
+    // echo of an edge the control already owns — not a recolor.
     try builder.strokeRect(.{
         .id = widgetPartId(widget.id, 4),
         .rect = knob,
         .radius = knob_radius,
         .stroke = .{
-            .fill = widgetBorderFill(widget, visual.border orelse (if (widget.state.disabled) tokens.colors.border else widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent))),
+            .fill = widgetBorderFill(widget, disabledWash(visual.border orelse tokens.colors.focus_ring, washed, tokens.states.disabled_alpha)),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
     });
@@ -1161,9 +1190,10 @@ pub fn toggleWidgetTrackRect(widget: Widget, tokens: DesignTokens) geometry.Rect
 }
 
 fn sliderWidgetTrackRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
-    // 6px track — thick enough for the muted wash to read against the
-    // page at 1x without turning the slider into a progress bar.
-    const track_height: f32 = widgetSizedDensityValue(widget, tokens, 6);
+    // The rail thickness comes off the metric ladder (house register:
+    // a quiet 4px line — the thumb, not the rail, gives the control its
+    // weight); packs with a heavier rail restate the token.
+    const track_height: f32 = @min(widget.frame.height, widgetSizedDensityValue(widget, tokens, tokens.metrics.slider_track_height));
     return pixelSnapGeometryRect(tokens, geometry.RectF.init(
         widget.frame.x,
         widget.frame.y + (widget.frame.height - track_height) * 0.5,
@@ -1174,18 +1204,23 @@ fn sliderWidgetTrackRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
 
 pub fn sliderWidgetKnobRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
     const value = std.math.clamp(widget.value, 0, 1);
-    // 16px thumb at default size/density — the size-4 slider thumb.
-    const knob_size = @min(@max(widgetSizedDensityValue(widget, tokens, 16), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
+    // Thumb geometry off the metric ladder (house register: a 12px dot;
+    // width and height are separate tokens because some registers use a
+    // narrow rectangular handle). Fixed-size on purpose — the thumb is
+    // a grab target, so it must not swell with the row it sits in —
+    // clamped only so a shallow row never overflows.
+    const knob_width = @min(widget.frame.width, widgetSizedDensityValue(widget, tokens, tokens.metrics.slider_thumb_width));
+    const knob_height = @min(widget.frame.height, widgetSizedDensityValue(widget, tokens, tokens.metrics.slider_thumb_height));
     const knob_x = std.math.clamp(
-        widget.frame.x + widget.frame.width * value - knob_size * 0.5,
+        widget.frame.x + widget.frame.width * value - knob_width * 0.5,
         widget.frame.x,
-        widget.frame.x + @max(0, widget.frame.width - knob_size),
+        widget.frame.x + @max(0, widget.frame.width - knob_width),
     );
     return pixelSnapGeometryRect(tokens, geometry.RectF.init(
         knob_x,
-        widget.frame.y + (widget.frame.height - knob_size) * 0.5,
-        knob_size,
-        knob_size,
+        widget.frame.y + (widget.frame.height - knob_height) * 0.5,
+        knob_width,
+        knob_height,
     ));
 }
 
