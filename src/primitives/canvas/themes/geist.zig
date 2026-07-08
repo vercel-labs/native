@@ -88,6 +88,12 @@ pub fn designTokens(color_scheme: ColorScheme, contrast: ColorContrast) DesignTo
             // the primary ink under the active label (see the tabs
             // entries in `controlTokens` below).
             .tabs_indicator_thickness = 2,
+            // The underline register's inter-trigger gap: measured at a
+            // 24px flex gap between triggers on the reference strip
+            // (28px optical once each trigger's 2px horizontal padding
+            // is counted). Applied only when the author leaves the
+            // strip's gap at 0.
+            .tabs_gap = 24,
             // The detached button-group register's inter-chip gap (see
             // the `button_group` entries in `controlTokens` below):
             // measured at 8px between chips on the reference strip.
@@ -422,7 +428,8 @@ fn controlTokens(color_scheme: ColorScheme, contrast: ColorContrast) ControlToke
         // overlapping the hairline where they meet. Inactive labels sit
         // in the secondary ink and preview the primary ink on hover; the
         // bar's ink itself falls back to `colors.text`, so no
-        // segmented_control entry is needed.
+        // segmented_control entry is needed. Triggers sit 24px apart
+        // through the `tabs_gap` metric above.
         .tabs_indicator = .underline,
         .tabs = .{
             // The strip hairline is a SOLID quiet-border step (gray-400:

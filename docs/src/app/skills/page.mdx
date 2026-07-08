@@ -4,7 +4,19 @@ Native SDK ships its agent guidance as skills: curated, versioned `SKILL.md` doc
 
 An agent should not assume it knows the Native SDK from general model knowledge. A skill closes that gap: it travels with the CLI, so the guidance an agent reads always matches the toolkit version it is building against — not whatever the model remembers.
 
-## Getting skills
+## Install for your agent
+
+One command sets an agent up:
+
+```sh
+npx skills add vercel-labs/native
+```
+
+It installs the Native SDK discovery skill into your agent's skills directory: a compact entry point that orients the agent and teaches it to load the full, version-matched skill content from the installed CLI with the `native skills` commands below. Install once — because the deep guidance is always read from the CLI, the agent stays current with whatever toolkit version each project uses.
+
+## Getting skills from the CLI
+
+The CLI itself serves the full skill content. This is the layer the installed discovery skill reads from, and the direct path when you want to print a skill or deliver one by hand — it needs nothing beyond the installed CLI, so it also works offline:
 
 ```sh
 native skills list                    # list built-in skills

@@ -799,6 +799,46 @@ test "detached button groups render chip members with the group table and the me
     try std.testing.expectApproxEqAbs(@as(f32, 4), spaced_layout.nodes[2].frame.x - spaced_layout.nodes[1].frame.maxX(), 0.001);
 }
 
+test "underline tab strips separate triggers by the tabs metric gap" {
+    // The underline register's inter-trigger spacing: a strip whose
+    // author left the gap at 0 flows its triggers `tabs_gap` apart, an
+    // author-stated gap still wins over the metric, and the house pill
+    // register (metric 0 by default) keeps its flush triggers.
+    var tokens = DesignTokens{};
+    tokens.controls.tabs_indicator = .underline;
+    tokens.metrics.tabs_gap = 24;
+
+    const triggers = [_]Widget{
+        .{ .id = 2, .kind = .segmented_control, .frame = geometry.RectF.init(0, 0, 80, 32), .text = "One", .state = .{ .selected = true } },
+        .{ .id = 3, .kind = .segmented_control, .frame = geometry.RectF.init(0, 0, 80, 32), .text = "Two" },
+    };
+    const strip = Widget{
+        .id = 1,
+        .kind = .tabs,
+        .frame = geometry.RectF.init(0, 0, 240, 32),
+        .children = &triggers,
+    };
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTreeWithTokens(strip, strip.frame, tokens, &nodes);
+    try std.testing.expectEqual(@as(f32, 0), layout.nodes[1].frame.x);
+    try std.testing.expectApproxEqAbs(@as(f32, 24), layout.nodes[2].frame.x - layout.nodes[1].frame.maxX(), 0.001);
+
+    // An author-stated gap still wins over the metric.
+    var spaced = strip;
+    spaced.layout = .{ .gap = 4 };
+    var spaced_nodes: [4]WidgetLayoutNode = undefined;
+    const spaced_layout = try layoutWidgetTreeWithTokens(spaced, spaced.frame, tokens, &spaced_nodes);
+    try std.testing.expectApproxEqAbs(@as(f32, 4), spaced_layout.nodes[2].frame.x - spaced_layout.nodes[1].frame.maxX(), 0.001);
+
+    // The house pill register ignores the metric even when a token set
+    // states one: gap-0 triggers stay flush inside the container wash.
+    var pill_tokens = DesignTokens{};
+    pill_tokens.metrics.tabs_gap = 24;
+    var pill_nodes: [4]WidgetLayoutNode = undefined;
+    const pill_layout = try layoutWidgetTreeWithTokens(strip, strip.frame, pill_tokens, &pill_nodes);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), pill_layout.nodes[2].frame.x - pill_layout.nodes[1].frame.maxX(), 0.001);
+}
+
 test "the bubble reaction pill straddles the bottom edge on the page plane" {
     const surfaces = @import("widget_render_surfaces.zig");
     const tokens = DesignTokens{};

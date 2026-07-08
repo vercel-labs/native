@@ -508,6 +508,12 @@ pub const ControlMetricTokens = struct {
     /// active trigger's label. Unused by the house `.pill` register —
     /// the default only matters once a theme opts into underlines.
     tabs_indicator_thickness: f32 = 2,
+    /// The inter-trigger gap of the `.underline` tab register (see
+    /// `ControlTokens.tabs_indicator`), applied only when the author
+    /// left the strip's gap at 0. Unused by the house `.pill` register —
+    /// its triggers sit flush inside the container wash on purpose, so
+    /// the default stays 0 and no-pack layout never moves.
+    tabs_gap: f32 = 0,
     /// The inter-chip gap of the `.detached` button-group register (see
     /// `ControlTokens.button_group_style`), applied only when the author
     /// left the group's gap at 0. Unused by the house `.segmented`
@@ -896,6 +902,8 @@ pub const PixelSnapTokens = struct {
 ///   (`ControlMetricTokens.tabs_indicator_thickness` weight, ink from
 ///   the `segmented_control` table's active_background channel, falling
 ///   back to the primary text color) that overlaps the strip hairline.
+///   Triggers sit apart by the author's gap or, when the author left
+///   the gap at 0, the pack's `ControlMetricTokens.tabs_gap`.
 pub const TabsIndicatorKind = enum {
     pill,
     underline,
@@ -1179,6 +1187,7 @@ pub const ControlMetricTokenOverrides = struct {
     slider_thumb_width: ?f32 = null,
     slider_thumb_height: ?f32 = null,
     tabs_indicator_thickness: ?f32 = null,
+    tabs_gap: ?f32 = null,
     button_group_gap: ?f32 = null,
     spinner_style: ?SpinnerStyleToken = null,
     spinner_segment_count: ?u32 = null,

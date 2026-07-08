@@ -892,6 +892,124 @@ test "house button group keeps the attached segmented bar through the shared spe
     try std.testing.expectEqual(@as(u64, 12529290438367463158), referenceSurfaceSignature(pixels));
 }
 
+/// Render a two-trigger tab strip (one active) on a small reference
+/// surface under `tokens`, laid out WITH those same tokens — the pinned
+/// specimen for the per-pack tab register below. The catalog pins above
+/// lay out at house metrics by construction (the scene's fixed tile
+/// geometry is built before the per-theme paint), so the underline
+/// register's inter-trigger gap — a LAYOUT effect, not a paint one —
+/// needs its own tokens-laid-out surface to be machine-verified.
+fn renderTabsReferenceSurface(tokens: canvas.DesignTokens, pixels: []u8, scratch: []u8) !canvas.ReferenceRenderSurface {
+    // Fixed trigger frames, like the button-group specimen's members:
+    // widths sized for the real bundled face so the labels never elide
+    // under the estimator's narrower guess.
+    const triggers = [_]canvas.Widget{
+        .{ .id = 2, .kind = .segmented_control, .frame = geometry.RectF.init(0, 0, 88, 30), .text = "Albums", .state = .{ .selected = true } },
+        .{ .id = 3, .kind = .segmented_control, .frame = geometry.RectF.init(0, 0, 76, 30), .text = "Songs" },
+    };
+    const strip = canvas.builtinComponentWidget(.tabs, .{
+        .id = 1,
+        .frame = geometry.RectF.init(16, 16, tabs_surface_width - 32, 36),
+        .children = &triggers,
+    });
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTreeWithTokens(strip, strip.frame, tokens, &nodes);
+
+    var commands: [32]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try layout.emitDisplayList(&builder, tokens);
+    const display_list = builder.displayList();
+
+    var render_commands: [64]canvas.RenderCommand = undefined;
+    var render_batches: [64]canvas.RenderBatch = undefined;
+    var pipeline_cache_entries: [max_component_pipelines]canvas.RenderPipelineCacheEntry = undefined;
+    var pipeline_cache_actions: [max_component_pipelines * 2]canvas.RenderPipelineCacheAction = undefined;
+    var layers: [64]canvas.RenderLayer = undefined;
+    var layer_cache_entries: [64]canvas.RenderLayerCacheEntry = undefined;
+    var layer_cache_actions: [64 * 2]canvas.RenderLayerCacheAction = undefined;
+    var resources: [64]canvas.RenderResource = undefined;
+    var cache_entries: [64]canvas.RenderResourceCacheEntry = undefined;
+    var cache_actions: [64 * 2]canvas.RenderResourceCacheAction = undefined;
+    var images: [64]canvas.RenderImage = undefined;
+    var image_cache_entries: [64]canvas.RenderImageCacheEntry = undefined;
+    var image_cache_actions: [64 * 2]canvas.RenderImageCacheAction = undefined;
+    var visual_effects: [64]canvas.VisualEffect = undefined;
+    var visual_effect_cache_entries: [64]canvas.VisualEffectCacheEntry = undefined;
+    var visual_effect_cache_actions: [64 * 2]canvas.VisualEffectCacheAction = undefined;
+    var glyphs: [256]canvas.GlyphAtlasEntry = undefined;
+    var glyph_cache_entries: [256]canvas.GlyphAtlasCacheEntry = undefined;
+    var glyph_cache_actions: [256 * 2]canvas.GlyphAtlasCacheAction = undefined;
+    var text_layout_plans: [64]canvas.TextLayoutPlan = undefined;
+    var text_layout_lines: [256]canvas.TextLine = undefined;
+    var text_layout_cache_entries: [64]canvas.TextLayoutCacheEntry = undefined;
+    var text_layout_cache_actions: [64 * 2]canvas.TextLayoutCacheAction = undefined;
+    var changes: [64 * 2 + 1]canvas.DiffChange = undefined;
+    const frame = try componentFrame(display_list, null, .{
+        .surface_size = geometry.SizeF.init(tabs_surface_width, tabs_surface_height),
+        .full_repaint = true,
+        .image_resources = &preview_images,
+    }, componentFrameStorage(&render_commands, &render_batches, &pipeline_cache_entries, &pipeline_cache_actions, &layers, &layer_cache_entries, &layer_cache_actions, &resources, &cache_entries, &cache_actions, &images, &image_cache_entries, &image_cache_actions, &visual_effects, &visual_effect_cache_entries, &visual_effect_cache_actions, &glyphs, &glyph_cache_entries, &glyph_cache_actions, &text_layout_plans, &text_layout_lines, &text_layout_cache_entries, &text_layout_cache_actions, &changes));
+
+    @memset(pixels, 0);
+    const surface = (try canvas.ReferenceRenderSurface.initWithScratch(tabs_surface_width, tabs_surface_height, pixels, scratch)).withImages(&preview_images);
+    try surface.renderPass(frame.renderPass(), tokens.colors.background);
+    return surface;
+}
+
+const tabs_surface_width: usize = 260;
+const tabs_surface_height: usize = 72;
+const tabs_surface_pixels: usize = tabs_surface_width * tabs_surface_height * 4;
+
+test "geist tabs separate underline triggers by the measured 24px gap in both schemes" {
+    // The pack's tab register laid out with the pack's own tokens: bare
+    // text triggers 24px apart (the `tabs_gap` metric, measured as the
+    // reference strip's flex gap), the strip's closing hairline, and the
+    // 2px active bar under the selected label. Pinned 2026-07-08 with the
+    // gap's first authoring; light and dark captures of this exact
+    // specimen were reviewed by eye before blessing.
+    const pixels = try std.testing.allocator.alloc(u8, tabs_surface_pixels);
+    defer std.testing.allocator.free(pixels);
+    const scratch = try std.testing.allocator.alloc(u8, tabs_surface_pixels);
+    defer std.testing.allocator.free(scratch);
+
+    const geist_light = componentTokensForPack(.geist, .light);
+    // The layout itself is asserted before pinning pixels: the second
+    // trigger starts exactly 24px after the first one ends.
+    const trigger_specimens = [_]canvas.Widget{
+        .{ .id = 2, .kind = .segmented_control, .frame = geometry.RectF.init(0, 0, 88, 30), .text = "Albums", .state = .{ .selected = true } },
+        .{ .id = 3, .kind = .segmented_control, .frame = geometry.RectF.init(0, 0, 76, 30), .text = "Songs" },
+    };
+    const strip = canvas.builtinComponentWidget(.tabs, .{
+        .id = 1,
+        .frame = geometry.RectF.init(16, 16, tabs_surface_width - 32, 36),
+        .children = &trigger_specimens,
+    });
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTreeWithTokens(strip, strip.frame, geist_light, &nodes);
+    try std.testing.expectApproxEqAbs(@as(f32, 24), layout.nodes[2].frame.x - layout.nodes[1].frame.maxX(), 0.001);
+
+    _ = try renderTabsReferenceSurface(geist_light, pixels, scratch);
+    try std.testing.expectEqual(@as(u64, 9163360927786161748), referenceSurfaceSignature(pixels));
+
+    _ = try renderTabsReferenceSurface(componentTokensForPack(.geist, .dark), pixels, scratch);
+    try std.testing.expectEqual(@as(u64, 13274207636910902760), referenceSurfaceSignature(pixels));
+}
+
+test "house tabs keep the flush pill strip through the shared specimen" {
+    // The same specimen under the house register: the pill container
+    // hugs its flush triggers (the `tabs_gap` metric stays 0 and the
+    // pill register never reads it), so this pin moving without the
+    // geist pin above is the loud signal that no-pack tab layout or
+    // rendering drifted. Pinned 2026-07-08 alongside the gap's first
+    // authoring.
+    const pixels = try std.testing.allocator.alloc(u8, tabs_surface_pixels);
+    defer std.testing.allocator.free(pixels);
+    const scratch = try std.testing.allocator.alloc(u8, tabs_surface_pixels);
+    defer std.testing.allocator.free(scratch);
+    _ = try renderTabsReferenceSurface(componentTokens(), pixels, scratch);
+    try std.testing.expectEqual(@as(u64, 1813963338460688705), referenceSurfaceSignature(pixels));
+}
+
 test "gpu components house reference snapshot is reproducible through the shared per-theme path" {
     // Sanity for the helper above: rendering the house register through
     // the per-theme path reproduces the pinned house signature exactly,
