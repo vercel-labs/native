@@ -11,7 +11,7 @@
 // <url_base>/<track .file>, verified against the track's .bytes.
 .{
     .version = 1,
-    .url_base = null,
+    .url_base = "https://xksenynjs1imkkii.public.blob.vercel-storage.com",
     .albums = .{
         .{
             .artist = "Harbor Sleep",

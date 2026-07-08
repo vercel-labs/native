@@ -14,14 +14,16 @@
 //! position ticks (with the stream's honest buffering flag), the one
 //! completion at natural end, failures — arrives as an `.audio_event`
 //! Msg through the ordinary update path. The audio files themselves are
-//! gitignored (the prepare script downloads them), and sources resolve
+//! gitignored (the prepare script produces them), and sources resolve
 //! in a fixed order: the prepared LOCAL file, then a verified CACHE
 //! entry, then a progressive STREAM from the catalog's URL base that
-//! fills the cache for next time. With no URL base configured a missing
-//! file surfaces as one `.failed` event and the model degrades to an
-//! honest "assets not prepared" notice; with one configured, a `.failed`
-//! means the stream itself died (offline with a cold cache) and the
-//! notice says so instead — browsing the catalog never needs the mp3s.
+//! fills the cache for next time. The committed manifest ships a hosted
+//! URL base, so a fresh clone streams on demand with zero setup; only
+//! with the base explicitly cleared (NATIVE_SDK_MUSIC_URL_BASE set
+//! empty) does a missing file surface as the honest "assets not
+//! prepared" notice. With a base configured, a `.failed` means the
+//! stream itself died (offline with a cold cache) and the notice says
+//! so instead — browsing the catalog never needs the mp3s.
 //!
 //! Everything the views show that is computable — filtered lists,
 //! progress fractions, time labels — is derived per rebuild into the
@@ -218,10 +220,13 @@ pub const FormFactor = enum { compact, regular };
 /// keys are the track ids themselves — one key namespace per channel.
 pub const copy_key: u64 = 2;
 
-/// The honest degraded state when a track's file cannot load (the audio
-/// assets are gitignored; the prepare script downloads them). The
-/// now-playing bar shows both lines so the user knows exactly what to
-/// run — never a crash, never silence, and the catalog browses fine.
+/// The honest degraded state when a track's file cannot load AND no
+/// URL base is configured to stream it (the audio assets are
+/// gitignored; the prepare script produces them). Reachable only with
+/// streaming explicitly disabled — the committed manifest ships a
+/// hosted URL base — but when it is, the now-playing bar shows both
+/// lines so the user knows exactly what to run — never a crash, never
+/// silence, and the catalog browses fine.
 pub const assets_missing_title = "music assets not prepared";
 pub const assets_missing_hint = "run tools/prepare-example-music.sh";
 
@@ -420,9 +425,10 @@ pub const Model = struct {
     /// the audio events' buffering flag so the bar can show the honest
     /// third state between playing and paused. Local files never set it.
     buffering: bool = false,
-    /// The streaming URL base: the manifest's committed value until
+    /// The streaming URL base: the manifest's committed value (the
+    /// hosted catalog mirror, so streaming works out of the box) until
     /// main overrides it from NATIVE_SDK_MUSIC_URL_BASE. Empty means
-    /// local-only playback (today's behavior, and the hermetic default).
+    /// local-only playback (the variable set empty disables streaming).
     url_base_buffer: [max_url_base]u8 = blk: {
         var buffer: [max_url_base]u8 = @splat(0);
         @memcpy(buffer[0..manifest_url_base.len], manifest_url_base);

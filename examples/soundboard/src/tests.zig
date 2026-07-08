@@ -617,14 +617,20 @@ test "track end auto-advances; the play-next queue wins over album order" {
 }
 
 test "a failed load lands the honest assets-not-prepared state" {
-    // The audio files are gitignored (the prepare script downloads
-    // them). A missing file surfaces as one `.failed` event: playback
-    // clears, the now-playing bar tells the user what to run, and the
-    // catalog keeps browsing — never a crash, never silence.
+    // The audio files are gitignored (the prepare script produces
+    // them). With no URL base a missing file surfaces as one `.failed`
+    // event: playback clears, the now-playing bar tells the user what
+    // to run, and the catalog keeps browsing — never a crash, never
+    // silence.
     const live = try LiveApp.start(true);
     defer live.stop();
     const app_state = live.app_state;
     const fx = &app_state.effects;
+
+    // The committed manifest ships a hosted streaming default, so the
+    // assets notice is reachable only with the URL base cleared — the
+    // state NATIVE_SDK_MUSIC_URL_BASE set empty produces at launch.
+    app_state.model.setUrlBase("");
 
     try live.dispatch(.{ .play_track = 1 });
     try fx.feedAudioEvent(.failed, 0, 0, false);
@@ -656,6 +662,23 @@ test "a failed load lands the honest assets-not-prepared state" {
     try live.dispatch(.toggle_play);
     try testing.expect(!app_state.model.assets_missing);
     try testing.expect(fx.pendingAudio() != null);
+}
+
+test "streaming is the committed default; the launch override replaces it" {
+    // The committed manifest ships a hosted .url_base, so a fresh clone
+    // streams the catalog with zero setup: a bare model boots with the
+    // manifest value installed. setUrlBase — main's launch path for
+    // NATIVE_SDK_MUSIC_URL_BASE — replaces it wholesale (trailing slash
+    // trimmed so URL assembly stays uniform), and the empty override is
+    // the one honest way to a local-only, notice-bearing state.
+    var model = Model{};
+    try testing.expect(model_mod.manifest_url_base.len > 0);
+    try testing.expectEqualStrings(model_mod.manifest_url_base, model.urlBase());
+    try testing.expect(model.streamingConfigured());
+    model.setUrlBase("http://127.0.0.1:8000/pack/");
+    try testing.expectEqualStrings("http://127.0.0.1:8000/pack", model.urlBase());
+    model.setUrlBase("");
+    try testing.expect(!model.streamingConfigured());
 }
 
 test "resolution order is honest: local file, then cache, then stream" {
@@ -1955,7 +1978,10 @@ test "the mini bar stays visible through playback, pause, and the honest notice"
 
     // A failed load clears playback but raises the notice — the bar
     // stays up to carry it (with no transport rail, it is the compact
-    // shell's only status surface).
+    // shell's only status surface). The URL base is cleared first: the
+    // committed manifest ships a hosted streaming default, and the
+    // assets notice exists only for the streaming-disabled state.
+    app_state.model.setUrlBase("");
     try live.dispatch(.toggle_play);
     try app_state.effects.feedAudioEvent(.failed, 0, 0, false);
     try live.wake();

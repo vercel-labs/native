@@ -30,6 +30,16 @@ set -euo pipefail
 
 SEED="native-sdk-soundboard-2026"
 
+# The hosted mirror of the prepared files: the exact bytes this script
+# writes under assets/music/ are served at
+# <HOSTED_URL_BASE>/music/<album-slug>/<track-slug>.mp3, so the manifest
+# ships this as its default .url_base and a fresh clone streams the
+# catalog with zero setup. NATIVE_SDK_MUSIC_URL_BASE overrides it — at
+# prepare time (baked into the manifest for a self-hosted pack) and
+# again at runtime (the examples read the same variable at launch, so a
+# locally served pack needs no re-prepare).
+HOSTED_URL_BASE="https://xksenynjs1imkkii.public.blob.vercel-storage.com"
+
 FFMPEG="${FFMPEG:-/opt/homebrew/bin/ffmpeg}"
 FFPROBE="${FFPROBE:-/opt/homebrew/bin/ffprobe}"
 SRC_ROOT="${NATIVE_SDK_MUSIC_SRC:-$HOME/Developer/music}"
@@ -263,13 +273,14 @@ for entry in "${CATALOG[@]}"; do
         "$(zon_escape "$artist")" "$(zon_escape "$album")" "$year" "$art_zon" "$tracks_block")"$'\n'
 done
 
-# The optional streaming base: baked into the manifest when the pack's
-# hosting URL is known at prepare time (NATIVE_SDK_MUSIC_URL_BASE), null
-# otherwise — the examples also honor the SAME variable at runtime, so a
-# locally served pack needs no re-prepare. Each track's URL is
-# <url_base>/<track .file>; .bytes is the prepared file's exact size,
-# the cache integrity gate for streamed plays.
-url_base_zon="null"
+# The streaming base baked into the manifest: the hosted mirror by
+# default (see HOSTED_URL_BASE at the top), or NATIVE_SDK_MUSIC_URL_BASE
+# when set at prepare time (a self-hosted pack) — the examples also
+# honor the SAME variable at runtime, so a locally served pack needs no
+# re-prepare. Each track's URL is <url_base>/<track .file>; .bytes is
+# the prepared file's exact size, the cache integrity gate for streamed
+# plays.
+url_base_zon="\"$(zon_escape "${HOSTED_URL_BASE%/}")\""
 if [ -n "${NATIVE_SDK_MUSIC_URL_BASE:-}" ]; then
     url_base_zon="\"$(zon_escape "${NATIVE_SDK_MUSIC_URL_BASE%/}")\""
 fi

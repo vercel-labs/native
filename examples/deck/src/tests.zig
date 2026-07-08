@@ -526,6 +526,23 @@ test "streaming resolution order drives the display honestly: stream, buffer, ca
     try testing.expectEqual(native_sdk.EffectAudioSource.cache, fx.audioSnapshot().source);
 }
 
+test "streaming is the committed default; the launch override replaces it" {
+    // The deck's manifest copy ships the same hosted .url_base as the
+    // soundboard's, so a fresh clone streams with zero setup: a bare
+    // model boots with the manifest value installed. setUrlBase —
+    // main's launch path for NATIVE_SDK_MUSIC_URL_BASE — replaces it
+    // wholesale (trailing slash trimmed), and the empty override is the
+    // one honest way to the local-only NO MEDIA state.
+    var model = Model{};
+    try testing.expect(model_mod.manifest_url_base.len > 0);
+    try testing.expectEqualStrings(model_mod.manifest_url_base, model.urlBase());
+    try testing.expect(model.streamingConfigured());
+    model.setUrlBase("http://127.0.0.1:8000/pack/");
+    try testing.expectEqualStrings("http://127.0.0.1:8000/pack", model.urlBase());
+    model.setUrlBase("");
+    try testing.expect(!model.streamingConfigured());
+}
+
 test "a dead stream stamps STREAM LOST, not the prepare-script remedy" {
     const live = try LiveApp.start(true);
     defer live.stop();
@@ -564,9 +581,14 @@ test "a failed load clears the deck and stamps the NO MEDIA remedy on the displa
     defer live.stop();
     const app_state = live.app_state;
 
-    // The mp3s are gitignored: on a machine that never ran the prepare
-    // script the platform reports one `.failed` event. The deck goes
-    // honestly idle — no crash, no silence.
+    // The committed manifest ships a hosted streaming default, so the
+    // NO MEDIA state is reachable only with the URL base cleared — the
+    // state NATIVE_SDK_MUSIC_URL_BASE set empty produces at launch.
+    app_state.model.setUrlBase("");
+
+    // The mp3s are gitignored: on a machine with no prepared audio and
+    // streaming disabled the platform reports one `.failed` event. The
+    // deck goes honestly idle — no crash, no silence.
     try live.dispatch(.{ .play_track = first_track.id });
     try live.feedAudio(.failed, 0, 0, false);
     try testing.expect(app_state.model.mediaFailed());

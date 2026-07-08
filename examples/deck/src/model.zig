@@ -13,11 +13,15 @@
 //! the clock stops — the same deterministic contract the timer
 //! simulation had, now fed by the platform player.
 //!
-//! A failed load (missing mp3s, a platform without audio) clears the
-//! deck and lights the honest degraded state: the display marquee stamps
-//! `NO MEDIA` and the channel line names the remedy
-//! (`tools/prepare-example-music.sh`). Browsing, search, and queueing
-//! never need the audio files — the catalog is committed.
+//! The committed manifest ships a hosted URL base, so a missing local
+//! file STREAMS on demand — a fresh clone plays with zero setup. Only
+//! with streaming explicitly disabled (NATIVE_SDK_MUSIC_URL_BASE set
+//! empty) does a failed load light the honest degraded state: the
+//! display marquee stamps `NO MEDIA` and the channel line names the
+//! remedy (`tools/prepare-example-music.sh`). With a base configured a
+//! failure stamps `STREAM LOST` instead — a network problem, a network
+//! remedy. Browsing, search, and queueing never need the audio files —
+//! the catalog is committed.
 //!
 //! Everything the views show that is computable — the filtered ledger,
 //! timecode labels, the 32-band spectrum — is derived per rebuild into
@@ -182,9 +186,12 @@ pub const eq_stop_labels = [eq_stops][]const u8{ "60", "240", "1K", "4K", "12K" 
 pub const marquee_window = 22;
 pub const marquee_step_ms: u32 = 500;
 
-/// The honest degraded state the display wears after a failed load: the
-/// marquee stamp, and the channel-line remedy naming the script that
-/// prepares the shared gitignored audio.
+/// The honest degraded state the display wears after a failed load
+/// with NO URL base configured: the marquee stamp, and the channel-line
+/// remedy naming the script that prepares the shared gitignored audio.
+/// The committed manifest ships a hosted base, so this is reachable
+/// only with streaming explicitly disabled (NATIVE_SDK_MUSIC_URL_BASE
+/// set empty).
 pub const no_media_marquee = "NO MEDIA";
 pub const no_media_remedy = "RUN TOOLS/PREPARE-EXAMPLE-MUSIC.SH";
 
