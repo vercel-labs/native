@@ -41,6 +41,15 @@ enum {
   NATIVE_SDK_KEY_PHASE_UP = 1,
 };
 
+// Audio event kinds accepted by native_sdk_app_audio_event (ordinals match
+// the runtime's AudioEventKind and the macOS host's constants).
+enum {
+  NATIVE_SDK_AUDIO_EVENT_LOADED = 0,
+  NATIVE_SDK_AUDIO_EVENT_POSITION = 1,
+  NATIVE_SDK_AUDIO_EVENT_COMPLETED = 2,
+  NATIVE_SDK_AUDIO_EVENT_FAILED = 3,
+};
+
 typedef struct native_sdk_canvas_pixels {
   uintptr_t width;
   uintptr_t height;
@@ -150,6 +159,30 @@ int native_sdk_app_text_input_state(void *app, native_sdk_text_input_state_t *ou
 // the estimator on the next layout.
 typedef double (*native_sdk_text_measure_fn)(void *context, uint64_t font_id, double size, const char *text, uintptr_t text_len);
 int native_sdk_app_set_text_measure(void *app, native_sdk_text_measure_fn measure, void *context);
+// Platform audio service: the host registers a real player behind these
+// callbacks (layout mirrors src/embed/types.zig MobileAudioService) and the
+// runtime's fx.playAudio family drives it; everything asynchronous reports
+// back through native_sdk_app_audio_event. Result conventions match the
+// macOS host: load returns 0 loaded / 1 missing / other decode failure;
+// load_url returns 0 stream started / 1 verified cache hit / other invalid
+// URL; play and seek return nonzero when they applied. Registration is
+// all-or-nothing for the playback tier (every entry except load_url);
+// load_url on top enables streaming. Register before native_sdk_app_start;
+// without a registration the runtime declines audio honestly.
+typedef struct native_sdk_audio_service {
+  int (*load)(void *context, const char *path, uintptr_t path_len);
+  int (*load_url)(void *context, const char *url, uintptr_t url_len, const char *cache_path, uintptr_t cache_path_len, uint64_t expected_bytes);
+  int (*play)(void *context);
+  int (*pause)(void *context);
+  int (*stop)(void *context);
+  int (*seek)(void *context, uint64_t position_ms);
+  int (*set_volume)(void *context, double volume);
+} native_sdk_audio_service_t;
+int native_sdk_app_set_audio_service(void *app, const native_sdk_audio_service_t *service, void *context);
+// One audio player report (kind ordinals above; position/duration in ms).
+// Call between runtime entry points on the loop thread, never from inside
+// an audio service callback.
+void native_sdk_app_audio_event(void *app, int kind, uint64_t position_ms, uint64_t duration_ms, int playing, int buffering);
 int native_sdk_app_set_automation_dir(void *app, const char *path, uintptr_t len);
 void native_sdk_app_set_asset_root(void *app, const char *path, uintptr_t len);
 uintptr_t native_sdk_app_widget_semantics_count(void *app);

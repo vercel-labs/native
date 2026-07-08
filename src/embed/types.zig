@@ -190,6 +190,83 @@ pub const MobileTextMeasureFn = *const fn (
     text_len: usize,
 ) callconv(.c) f64;
 
+// ------------------------------------------------------------------ audio
+//
+// The platform audio service over the embed C ABI. A mobile shim that owns
+// a real audio player (the iOS toolkit host: AVAudioPlayer for local files
+// and verified cache entries, AVPlayer for progressive URL streams)
+// registers this callback table through `native_sdk_app_set_audio_service`
+// and reports everything asynchronous back through
+// `native_sdk_app_audio_event`. Hosts without a registered service decline
+// audio honestly: `audio_playback`/`audio_streaming` report unsupported and
+// `fx.playAudio` degrades to one explicit `.failed` Msg — never a silent
+// fake player inside a real app.
+
+/// Synchronous local-file load. Returns 0 when the player loaded and
+/// decoded the file (the asynchronous `.loaded` acknowledgment with the
+/// real duration follows as an audio event), 1 when the file is missing
+/// or unreadable, anything else for a decode failure — the exact
+/// contract of the macOS host's `native_sdk_appkit_audio_load`.
+pub const MobileAudioLoadFn = *const fn (
+    context: ?*anyopaque,
+    path: ?[*]const u8,
+    path_len: usize,
+) callconv(.c) c_int;
+
+/// URL source resolution. Returns 1 when a verified cache entry at
+/// `cache_path` is playing locally (no network), 0 when a progressive
+/// stream started (the `.loaded` acknowledgment follows when the item is
+/// ready; the same bytes fill `cache_path` for the next play, gated by
+/// `expected_bytes`), anything else when the URL itself is unusable.
+pub const MobileAudioLoadUrlFn = *const fn (
+    context: ?*anyopaque,
+    url: ?[*]const u8,
+    url_len: usize,
+    cache_path: ?[*]const u8,
+    cache_path_len: usize,
+    expected_bytes: u64,
+) callconv(.c) c_int;
+
+/// Transport calls without arguments (play/pause/stop). Play returns
+/// nonzero when it applied to a loaded player and 0 when there is no
+/// player to start; pause and stop results are advisory.
+pub const MobileAudioTransportFn = *const fn (context: ?*anyopaque) callconv(.c) c_int;
+
+/// Seek to an absolute position (the player clamps to the duration).
+/// Returns nonzero when it applied, 0 when there is no player.
+pub const MobileAudioSeekFn = *const fn (context: ?*anyopaque, position_ms: u64) callconv(.c) c_int;
+
+/// Set playback volume (0.0–1.0, pre-clamped by the runtime). The result
+/// is advisory.
+pub const MobileAudioSetVolumeFn = *const fn (context: ?*anyopaque, volume: f64) callconv(.c) c_int;
+
+/// The audio service callback table (`native_sdk_audio_service_t` in the
+/// shim headers). Registration is tiered and all-or-nothing per tier:
+/// local playback needs every entry except `load_url`; `load_url` on top
+/// of that enables streaming (`audio_streaming`). A table with only some
+/// playback entries is refused — a player that can start but not stop is
+/// not a player.
+pub const MobileAudioService = extern struct {
+    load: ?MobileAudioLoadFn = null,
+    load_url: ?MobileAudioLoadUrlFn = null,
+    play: ?MobileAudioTransportFn = null,
+    pause: ?MobileAudioTransportFn = null,
+    stop: ?MobileAudioTransportFn = null,
+    seek: ?MobileAudioSeekFn = null,
+    set_volume: ?MobileAudioSetVolumeFn = null,
+
+    pub fn playbackComplete(self: MobileAudioService) bool {
+        return self.load != null and self.play != null and self.pause != null and
+            self.stop != null and self.seek != null and self.set_volume != null;
+    }
+
+    pub fn empty(self: MobileAudioService) bool {
+        return self.load == null and self.load_url == null and self.play == null and
+            self.pause == null and self.stop == null and self.seek == null and
+            self.set_volume == null;
+    }
+};
+
 /// Dimensions of a canvas render produced by
 /// `native_sdk_app_render_pixels` (tightly packed RGBA8).
 pub const MobileCanvasPixels = extern struct {

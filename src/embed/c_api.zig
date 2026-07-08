@@ -175,6 +175,40 @@ pub fn MobileCApi(comptime Host: type) type {
         /// `path` — an absolute directory inside the app's data container
         /// on device. The mobile counterpart of the desktop runners'
         /// `-Dautomation=true`.
+        /// Register (or clear, with a null/empty table) the shim's
+        /// platform audio service — the mobile counterpart of the desktop
+        /// hosts' `audio_*_fn` platform services. Registration flips the
+        /// host's `audio_playback`/`audio_streaming` capability answers to
+        /// match the table; without a registration the host declines audio
+        /// and `fx.playAudio` degrades to one explicit failed Msg. Register
+        /// before `native_sdk_app_start`. Asynchronous player reports come
+        /// back through `native_sdk_app_audio_event`.
+        pub fn native_sdk_app_set_audio_service(app: ?*anyopaque, service: ?*const types.MobileAudioService, context: ?*anyopaque) callconv(.c) c_int {
+            const self = hostApp(Host, app) orelse return 0;
+            const table: types.MobileAudioService = if (service) |value| value.* else .{};
+            host.setAudioService(self, table, context) catch |err| {
+                recordError(self, err);
+                return 0;
+            };
+            self.last_error = null;
+            return 1;
+        }
+
+        /// One report from the shim's audio player (kind ordinals: 0
+        /// loaded, 1 position, 2 completed, 3 failed), dispatched into the
+        /// embedded runtime exactly like a desktop platform's `.audio`
+        /// event. Call from the shim's loop thread between runtime entry
+        /// points, never from inside an audio service callback — the same
+        /// next-turn discipline the macOS host keeps.
+        pub fn native_sdk_app_audio_event(app: ?*anyopaque, kind: c_int, position_ms: u64, duration_ms: u64, playing: c_int, buffering: c_int) callconv(.c) void {
+            const self = hostApp(Host, app) orelse return;
+            self.embedded.audioEvent(kind, position_ms, duration_ms, playing != 0, buffering != 0) catch |err| {
+                recordError(self, err);
+                return;
+            };
+            self.last_error = null;
+        }
+
         pub fn native_sdk_app_set_automation_dir(app: ?*anyopaque, path: ?[*]const u8, len: usize) callconv(.c) c_int {
             const self = hostApp(Host, app) orelse return 0;
             const dir = inputSlice(path, len) catch |err| {
@@ -494,6 +528,8 @@ pub const native_sdk_app_viewport_state = FixedShellApi.native_sdk_app_viewport_
 pub const native_sdk_app_gpu_frame_state = FixedShellApi.native_sdk_app_gpu_frame_state;
 pub const native_sdk_app_text_input_state = FixedShellApi.native_sdk_app_text_input_state;
 pub const native_sdk_app_set_text_measure = FixedShellApi.native_sdk_app_set_text_measure;
+pub const native_sdk_app_set_audio_service = FixedShellApi.native_sdk_app_set_audio_service;
+pub const native_sdk_app_audio_event = FixedShellApi.native_sdk_app_audio_event;
 pub const native_sdk_app_set_automation_dir = FixedShellApi.native_sdk_app_set_automation_dir;
 pub const native_sdk_app_touch = FixedShellApi.native_sdk_app_touch;
 pub const native_sdk_app_scroll = FixedShellApi.native_sdk_app_scroll;

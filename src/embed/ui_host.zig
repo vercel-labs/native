@@ -81,6 +81,7 @@ pub fn UiAppHost(comptime AppDef: type) type {
         automation_dir_len: usize = 0,
         automation_io: ?*std.Io.Threaded = null,
         text_measure: host.MobileTextMeasure = .{},
+        audio: host.MobileAudio = .{},
 
         pub fn create() !*Self {
             const allocator = std.heap.page_allocator;
@@ -91,6 +92,14 @@ pub fn UiAppHost(comptime AppDef: type) type {
             if (!sceneHasMobileSurface(options.scene)) return error.ViewNotFound;
             self.null_platform = platform.NullPlatform.init(.{});
             self.null_platform.gpu_surfaces = true;
+            // Audio is declined until the shim registers a real service
+            // (`native_sdk_app_set_audio_service`): without one,
+            // `fx.playAudio` degrades to one explicit `.failed` Msg
+            // instead of the null platform's hermetic fake player
+            // pretending to play. Cleared before `platform()` is
+            // snapshotted below.
+            self.null_platform.audio_playback = false;
+            self.null_platform.audio_streaming = false;
             // The null packet presenter records only counts; disabling it
             // routes presentation through the CPU pixel path so frames
             // produce real pixels (the buffer M2's surface blit consumes).
@@ -108,6 +117,7 @@ pub fn UiAppHost(comptime AppDef: type) type {
             self.automation_dir_len = 0;
             self.automation_io = null;
             self.text_measure = .{};
+            self.audio = .{};
             // In-place init + pointer-targeted model assignment:
             // `initModel()`'s result writes straight into the heap
             // struct via result-location semantics, so a multi-MB Model

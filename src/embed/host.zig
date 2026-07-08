@@ -62,6 +62,108 @@ pub fn setTextMeasure(self: anytype, measure: ?types.MobileTextMeasureFn, contex
     }
 }
 
+/// Host-owned storage for the shim's registered audio service (callback
+/// table + shim context). Lives on the (heap-allocated) host beside the
+/// text-measure store so the platform-services bridge can reach it for
+/// the runtime's lifetime.
+pub const MobileAudio = struct {
+    service: types.MobileAudioService = .{},
+    context: ?*anyopaque = null,
+};
+
+/// Platform-services bridge from the runtime's audio service seam to the
+/// shim's registered C callbacks. The runtime's `PlatformServices` carries
+/// ONE shared context — the host's embedded `NullPlatform` — so the bridge
+/// recovers the host from that field and reads the `audio` store; result
+/// codes map exactly like the macOS host's (`src/platform/macos/root.zig`
+/// audioLoad/audioLoadUrl and friends), so the effect layer sees identical
+/// error semantics on every platform.
+fn MobileAudioBridge(comptime Host: type) type {
+    return struct {
+        fn hostFromContext(context: ?*anyopaque) *Host {
+            const null_platform: *platform.NullPlatform = @ptrCast(@alignCast(context.?));
+            return @alignCast(@fieldParentPtr("null_platform", null_platform));
+        }
+
+        fn audioLoad(context: ?*anyopaque, path: []const u8) anyerror!void {
+            const audio = &hostFromContext(context).audio;
+            const load_fn = audio.service.load orelse return error.UnsupportedService;
+            return switch (load_fn(audio.context, path.ptr, path.len)) {
+                0 => {},
+                1 => error.AudioSourceNotFound,
+                else => error.AudioDecodeFailed,
+            };
+        }
+
+        fn audioLoadUrl(context: ?*anyopaque, url: []const u8, cache_path: []const u8, expected_bytes: u64) anyerror!platform.AudioLoadResolution {
+            const audio = &hostFromContext(context).audio;
+            const load_fn = audio.service.load_url orelse return error.UnsupportedService;
+            return switch (load_fn(audio.context, url.ptr, url.len, if (cache_path.len > 0) cache_path.ptr else null, cache_path.len, expected_bytes)) {
+                0 => .stream,
+                1 => .cache,
+                else => error.InvalidAudioOptions,
+            };
+        }
+
+        fn audioPlay(context: ?*anyopaque) anyerror!void {
+            const audio = &hostFromContext(context).audio;
+            const play_fn = audio.service.play orelse return error.UnsupportedService;
+            if (play_fn(audio.context) == 0) return error.InvalidAudioOptions;
+        }
+
+        fn audioPause(context: ?*anyopaque) anyerror!void {
+            const audio = &hostFromContext(context).audio;
+            const pause_fn = audio.service.pause orelse return error.UnsupportedService;
+            _ = pause_fn(audio.context);
+        }
+
+        fn audioStop(context: ?*anyopaque) anyerror!void {
+            const audio = &hostFromContext(context).audio;
+            const stop_fn = audio.service.stop orelse return error.UnsupportedService;
+            _ = stop_fn(audio.context);
+        }
+
+        fn audioSeek(context: ?*anyopaque, position_ms: u64) anyerror!void {
+            const audio = &hostFromContext(context).audio;
+            const seek_fn = audio.service.seek orelse return error.UnsupportedService;
+            if (seek_fn(audio.context, position_ms) == 0) return error.InvalidAudioOptions;
+        }
+
+        fn audioSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
+            const audio = &hostFromContext(context).audio;
+            const volume_fn = audio.service.set_volume orelse return error.UnsupportedService;
+            _ = volume_fn(audio.context, volume);
+        }
+    };
+}
+
+/// Install (or clear, with an all-null table) the shim's platform audio
+/// service on the embedded runtime — the mobile counterpart of the desktop
+/// hosts' `audio_*_fn` platform services. Registration flips the host's
+/// `audio_playback`/`audio_streaming` capability answers to match what was
+/// actually registered, so `runtime.supports` stays honest in both
+/// directions. Register before `native_sdk_app_start` (like the text
+/// measure) so the first effect dispatch already sees the service; a
+/// partial playback table is refused whole with `error.InvalidCommand`.
+pub fn setAudioService(self: anytype, service: types.MobileAudioService, context: ?*anyopaque) anyerror!void {
+    const Host = std.meta.Child(@TypeOf(self));
+    const Bridge = MobileAudioBridge(Host);
+    const playback = service.playbackComplete();
+    if (!playback and !service.empty()) return error.InvalidCommand;
+    const streaming = playback and service.load_url != null;
+    self.audio = .{ .service = service, .context = if (playback) context else null };
+    const services = &self.embedded.runtime.options.platform.services;
+    services.audio_load_fn = if (playback) Bridge.audioLoad else null;
+    services.audio_load_url_fn = if (streaming) Bridge.audioLoadUrl else null;
+    services.audio_play_fn = if (playback) Bridge.audioPlay else null;
+    services.audio_pause_fn = if (playback) Bridge.audioPause else null;
+    services.audio_stop_fn = if (playback) Bridge.audioStop else null;
+    services.audio_seek_fn = if (playback) Bridge.audioSeek else null;
+    services.audio_set_volume_fn = if (playback) Bridge.audioSetVolume else null;
+    self.null_platform.audio_playback = playback;
+    self.null_platform.audio_streaming = streaming;
+}
+
 pub const EmbeddedApp = struct {
     app: runtime.App,
     runtime: runtime.Runtime,
@@ -217,6 +319,24 @@ pub const EmbeddedApp = struct {
         return state;
     }
 
+    /// One report from the shim's audio player, dispatched exactly like a
+    /// desktop platform's `.audio` event: the runtime routes it into the
+    /// active playback channel's `on_event` Msg (and the journal). Kind
+    /// ordinals match `platform.AudioEventKind` (0 loaded, 1 position,
+    /// 2 completed, 3 failed). Shims must call this between runtime entry
+    /// points (their loop thread, never from inside a service callback) —
+    /// the same next-turn discipline the macOS host keeps for its LOADED
+    /// acknowledgment.
+    pub fn audioEvent(self: *EmbeddedApp, kind: c_int, position_ms: u64, duration_ms: u64, playing: bool, buffering: bool) anyerror!void {
+        try self.runtime.dispatchPlatformEvent(self.app, .{ .audio = .{
+            .kind = try conversions.mobileAudioEventKindFromInt(kind),
+            .position_ms = position_ms,
+            .duration_ms = duration_ms,
+            .playing = playing,
+            .buffering = buffering,
+        } });
+    }
+
     pub fn stop(self: *EmbeddedApp) anyerror!void {
         try self.runtime.dispatchPlatformEvent(self.app, .app_shutdown);
     }
@@ -259,6 +379,7 @@ pub const MobileHostApp = struct {
     automation_dir_len: usize = 0,
     automation_io: ?*std.Io.Threaded = null,
     text_measure: MobileTextMeasure = .{},
+    audio: MobileAudio = .{},
     last_command_name: [max_mobile_command_name_bytes + 1]u8 = [_]u8{0} ** (max_mobile_command_name_bytes + 1),
 
     pub fn create() !*MobileHostApp {
@@ -266,6 +387,14 @@ pub const MobileHostApp = struct {
         const self = try allocator.create(MobileHostApp);
         errdefer allocator.destroy(self);
         self.null_platform = platform.NullPlatform.init(.{});
+        // Audio is declined until the shim registers a real service
+        // (`native_sdk_app_set_audio_service`): the null platform's
+        // deterministic fake player belongs to hermetic tests, not to a
+        // real app — a load that "succeeds" but never sounds or ticks
+        // would be a lie. Cleared before `platform()` is snapshotted
+        // below so the runtime's service table starts without audio.
+        self.null_platform.audio_playback = false;
+        self.null_platform.audio_streaming = false;
         self.last_error = null;
         self.activation_count = 0;
         self.deactivation_count = 0;
@@ -300,6 +429,7 @@ pub const MobileHostApp = struct {
         self.automation_dir_len = 0;
         self.automation_io = null;
         self.text_measure = .{};
+        self.audio = .{};
         self.last_command_name = [_]u8{0} ** (max_mobile_command_name_bytes + 1);
         self.embedded.initInPlace(.{
             .context = self,

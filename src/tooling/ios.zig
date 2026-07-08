@@ -71,7 +71,10 @@ pub fn bundleIdAlloc(allocator: std.mem.Allocator, id: []const u8) ![]u8 {
 /// The host-tier Info.plist: app identity from app.zon plus the fixed
 /// UIKit application keys (full-screen launch via the modern
 /// `UILaunchScreen` dictionary — without it iOS letterboxes the app and
-/// safe-area insets lie).
+/// safe-area insets lie). `NSAllowsLocalNetworking` scopes an App
+/// Transport Security exception to localhost and the local network only —
+/// the dev loop streams audio and other media from a server on the Mac —
+/// while HTTPS stays required for everything on the internet.
 pub fn infoPlistAlloc(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata) ![]u8 {
     const raw_bundle_id = try bundleIdAlloc(allocator, metadata.id);
     defer allocator.free(raw_bundle_id);
@@ -112,6 +115,11 @@ pub fn infoPlistAlloc(allocator: std.mem.Allocator, metadata: manifest_tool.Meta
         \\  <string>
     ++ deployment_target ++
         \\</string>
+        \\  <key>NSAppTransportSecurity</key>
+        \\  <dict>
+        \\    <key>NSAllowsLocalNetworking</key>
+        \\    <true/>
+        \\  </dict>
         \\  <key>UILaunchScreen</key>
         \\  <dict/>
         \\  <key>UISupportedInterfaceOrientations</key>
@@ -287,8 +295,8 @@ pub fn runDev(allocator: std.mem.Allocator, io: std.Io, options: DevOptions) !vo
         lib_path,        "-framework",   "UIKit",
         "-framework",    "Metal",        "-framework",
         "QuartzCore",    "-framework",   "Foundation",
-        "-framework",    "CoreGraphics", "-o",
-        executable_path,
+        "-framework",    "CoreGraphics", "-framework",
+        "AVFoundation",  "-o",           executable_path,
     }, error.HostCompileFailed);
     try runInherit(io, &.{ "codesign", "--force", "--sign", "-", bundle_path }, error.HostCompileFailed);
 
@@ -452,6 +460,10 @@ test "host info plist carries app identity and full-screen launch keys" {
     try std.testing.expect(std.mem.indexOf(u8, text, "UILaunchScreen") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "UISupportedInterfaceOrientations") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "CFBundleExecutable") != null);
+    // The ATS exception is scoped to local networking only (the dev loop
+    // streams media from the Mac); arbitrary loads stay forbidden.
+    try std.testing.expect(std.mem.indexOf(u8, text, "NSAllowsLocalNetworking") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "NSAllowsArbitraryLoads") == null);
 }
 
 test "the embedded host sources are the toolkit host" {
@@ -460,6 +472,15 @@ test "the embedded host sources are the toolkit host" {
     try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_app_set_text_measure") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "_dyld_get_image_header_containing_address") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_app_render_pixels") != null);
+    // The audio service: registered before start, session category
+    // playback, and the interruption handler that pauses the transport
+    // and reports the paused state through one immediate position event.
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_app_set_audio_service") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "AVAudioSessionCategoryPlayback") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "AVAudioSessionInterruptionNotification") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "handleSessionInterruption") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_audio_service_t") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_app_audio_event") != null);
 }
 
 test "simulator device parsing prefers booted devices then iPhones" {

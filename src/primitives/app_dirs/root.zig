@@ -155,7 +155,8 @@ pub fn resolveOne(app: AppInfo, platform: Platform, env: Env, kind: DirKind, out
         .linux => resolveLinux(app.pathName(), env, kind, output),
         .macos => resolveMacos(app.pathName(), env, kind, output),
         .windows => resolveWindows(app.pathName(), env, kind, output),
-        .ios, .android, .unknown => error.UnsupportedPlatform,
+        .ios => resolveIos(env, kind, output),
+        .android, .unknown => error.UnsupportedPlatform,
     };
 }
 
@@ -203,6 +204,27 @@ fn resolveMacos(app_name: []const u8, env: Env, kind: DirKind, output: []u8) Err
         .state => join(.macos, output, &.{ home, "Library", "Application Support", app_name, "State" }),
         .logs => join(.macos, output, &.{ home, "Library", "Logs", app_name }),
         .temp => join(.macos, output, &.{ env.tmpdir orelse "/tmp", app_name }),
+    };
+}
+
+/// iOS: every process runs inside its app's sandbox container and `HOME`
+/// is the container root, so the container itself is the per-app
+/// namespace — no `<app>` child directory (the macOS shape would just
+/// nest a redundant level the OS tooling never looks in). `.cache`
+/// resolves to the container's `Library/Caches`, which the system
+/// already treats as purgeable — exactly where the audio track cache
+/// belongs. `.temp` prefers `TMPDIR` (set to the container's `tmp/` in
+/// every iOS process) and falls back to that directory by convention.
+fn resolveIos(env: Env, kind: DirKind, output: []u8) Error![]const u8 {
+    const home = env.home orelse return error.MissingHome;
+
+    return switch (kind) {
+        .config => join(.ios, output, &.{ home, "Library", "Preferences" }),
+        .cache => join(.ios, output, &.{ home, "Library", "Caches" }),
+        .data => join(.ios, output, &.{ home, "Library", "Application Support" }),
+        .state => join(.ios, output, &.{ home, "Library", "Application Support", "State" }),
+        .logs => join(.ios, output, &.{ home, "Library", "Caches", "Logs" }),
+        .temp => if (env.tmpdir) |tmpdir| join(.ios, output, &.{tmpdir}) else join(.ios, output, &.{ home, "tmp" }),
     };
 }
 
@@ -323,10 +345,25 @@ test "missing required env produces explicit errors" {
     try std.testing.expectError(error.MissingRequiredEnv, resolveOne(app, .windows, .{ .app_data = "C:\\Roaming" }, .cache, testBuffers().cache));
 }
 
-test "ios android and unknown are unsupported in v1" {
+test "ios resolves inside the app sandbox container" {
+    const app: AppInfo = .{ .name = "demo" };
+    const home = "/var/mobile/Containers/Data/Application/ABC";
+    const env: Env = .{ .home = home, .tmpdir = home ++ "/tmp" };
+    const dirs = try resolve(app, .ios, env, testBuffers());
+
+    try expectEqualString(home ++ "/Library/Preferences", dirs.config);
+    try expectEqualString(home ++ "/Library/Caches", dirs.cache);
+    try expectEqualString(home ++ "/Library/Application Support", dirs.data);
+    try expectEqualString(home ++ "/Library/Application Support/State", dirs.state);
+    try expectEqualString(home ++ "/Library/Caches/Logs", dirs.logs);
+    try expectEqualString(home ++ "/tmp", dirs.temp);
+    try expectEqualString(home ++ "/tmp", try resolveOne(app, .ios, .{ .home = home }, .temp, testBuffers().temp));
+    try std.testing.expectError(error.MissingHome, resolveOne(app, .ios, .{}, .cache, testBuffers().cache));
+}
+
+test "android and unknown are unsupported in v1" {
     const app: AppInfo = .{ .name = "demo" };
 
-    try std.testing.expectError(error.UnsupportedPlatform, resolveOne(app, .ios, .{}, .config, testBuffers().config));
     try std.testing.expectError(error.UnsupportedPlatform, resolveOne(app, .android, .{}, .config, testBuffers().config));
     try std.testing.expectError(error.UnsupportedPlatform, resolveOne(app, .unknown, .{}, .config, testBuffers().config));
 }

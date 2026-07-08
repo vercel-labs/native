@@ -147,6 +147,19 @@ pub fn mobileWidgetActionKindFromInt(value: c_int) anyerror!runtime.CanvasWidget
     };
 }
 
+/// Audio event kind ordinals over the C ABI (`native_sdk_app_audio_event`),
+/// matching `platform.AudioEventKind` and the macOS host's constants:
+/// 0 loaded, 1 position, 2 completed, 3 failed.
+pub fn mobileAudioEventKindFromInt(kind: c_int) anyerror!platform.AudioEventKind {
+    return switch (kind) {
+        0 => .loaded,
+        1 => .position,
+        2 => .completed,
+        3 => .failed,
+        else => error.InvalidAudioOptions,
+    };
+}
+
 pub fn inputSlice(pointer: ?[*]const u8, len: usize) anyerror![]const u8 {
     if (len == 0) return "";
     const value = pointer orelse return error.InvalidCommand;

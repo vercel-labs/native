@@ -1384,3 +1384,357 @@ test "mobile C ABI dispatches native commands through embedded runtime" {
     try std.testing.expectEqualStrings("mobile.open", std.mem.span(native_sdk_app_last_command_name(app)));
     try std.testing.expectEqualStrings("", std.mem.span(native_sdk_app_last_error_name(app)));
 }
+
+// ------------------------------------------------------------ audio service
+//
+// The embed audio seam end to end: hosts decline audio until the shim
+// registers a real service (`native_sdk_app_set_audio_service`), a
+// registered callback table receives the fx.playAudio family through the
+// same PlatformServices seam AVAudioPlayer serves on macOS, and shim
+// reports (`native_sdk_app_audio_event`) land as the app's `on_event` Msg
+// with the runtime's playback mirrors updated. A position report with
+// playing=0 is the exact shape the iOS host emits from an audio-session
+// interruption, so its state flip is pinned here.
+
+const MobileAudioDef = struct {
+    pub const Model = struct {
+        event_count: usize = 0,
+        last_kind: ?runtime.EffectAudioEventKind = null,
+        last_position_ms: u64 = 0,
+        last_duration_ms: u64 = 0,
+        last_playing: bool = false,
+        last_buffering: bool = false,
+    };
+
+    pub const Msg = union(enum) {
+        play,
+        play_stream,
+        pause,
+        seek,
+        quiet,
+        audio_event: runtime.EffectAudio,
+    };
+
+    const App = runtime.UiApp(Model, Msg);
+
+    pub fn initModel() Model {
+        return .{};
+    }
+
+    pub fn mobileOptions() App.Options {
+        return .{
+            .name = "mobile-audio",
+            .scene = ui_host.mobile_shell_scene,
+            .canvas_label = mobile_gpu_surface_label,
+            .update_fx = update,
+            .view = view,
+        };
+    }
+
+    fn update(model: *Model, msg: Msg, fx: *App.Effects) void {
+        switch (msg) {
+            .play => fx.playAudio(.{
+                .key = 7,
+                .path = "/tmp/mobile-audio-track.mp3",
+                .on_event = App.Effects.audioMsg(.audio_event),
+            }),
+            .play_stream => fx.playAudio(.{
+                .key = 8,
+                .url = "https://music.example.test/pack/track.mp3",
+                .cache_path = "/tmp/mobile-audio-caches/audio/track.mp3",
+                .expected_bytes = 2_048,
+                .on_event = App.Effects.audioMsg(.audio_event),
+            }),
+            .pause => fx.pauseAudio(),
+            .seek => fx.seekAudio(12_000),
+            .quiet => fx.setAudioVolume(0.25),
+            .audio_event => |event| {
+                model.event_count += 1;
+                model.last_kind = event.kind;
+                model.last_position_ms = event.position_ms;
+                model.last_duration_ms = event.duration_ms;
+                model.last_playing = event.playing;
+                model.last_buffering = event.buffering;
+            },
+        }
+    }
+
+    fn view(ui: *App.Ui, model: *const Model) App.Ui.Node {
+        return ui.column(.{ .gap = 8, .padding = 12 }, .{
+            ui.text(.{}, ui.fmt("{d} events", .{model.event_count})),
+            ui.button(.{ .on_press = .play }, "Play"),
+            ui.button(.{ .on_press = .play_stream }, "Stream"),
+            ui.button(.{ .on_press = .pause }, "Pause"),
+            ui.button(.{ .on_press = .seek }, "Seek"),
+            ui.button(.{ .on_press = .quiet }, "Quiet"),
+        });
+    }
+};
+
+const MobileAudioHost = ui_host.UiAppHost(MobileAudioDef);
+const MobileAudioApi = c_api.MobileCApi(MobileAudioHost);
+
+/// What the fake shim service records — the mobile mirror of the null
+/// platform's call counters, held by the test and reached through the
+/// registered context pointer.
+const MobileAudioRecorder = struct {
+    load_count: usize = 0,
+    load_url_count: usize = 0,
+    play_count: usize = 0,
+    pause_count: usize = 0,
+    stop_count: usize = 0,
+    seek_count: usize = 0,
+    volume_count: usize = 0,
+    last_path: [256]u8 = undefined,
+    last_path_len: usize = 0,
+    last_url: [256]u8 = undefined,
+    last_url_len: usize = 0,
+    last_cache_path: [256]u8 = undefined,
+    last_cache_path_len: usize = 0,
+    last_expected_bytes: u64 = 0,
+    last_seek_ms: u64 = 0,
+    last_volume: f64 = 1.0,
+    load_result: c_int = 0,
+    load_url_result: c_int = 0,
+
+    fn from(context: ?*anyopaque) *MobileAudioRecorder {
+        return @ptrCast(@alignCast(context.?));
+    }
+};
+
+fn recorderAudioLoad(context: ?*anyopaque, path: ?[*]const u8, path_len: usize) callconv(.c) c_int {
+    const recorder = MobileAudioRecorder.from(context);
+    recorder.load_count += 1;
+    recorder.last_path_len = conversions.copyInputText(&recorder.last_path, if (path) |value| value[0..path_len] else "");
+    return recorder.load_result;
+}
+
+fn recorderAudioLoadUrl(context: ?*anyopaque, url: ?[*]const u8, url_len: usize, cache_path: ?[*]const u8, cache_path_len: usize, expected_bytes: u64) callconv(.c) c_int {
+    const recorder = MobileAudioRecorder.from(context);
+    recorder.load_url_count += 1;
+    recorder.last_url_len = conversions.copyInputText(&recorder.last_url, if (url) |value| value[0..url_len] else "");
+    recorder.last_cache_path_len = conversions.copyInputText(&recorder.last_cache_path, if (cache_path) |value| value[0..cache_path_len] else "");
+    recorder.last_expected_bytes = expected_bytes;
+    return recorder.load_url_result;
+}
+
+fn recorderAudioPlay(context: ?*anyopaque) callconv(.c) c_int {
+    MobileAudioRecorder.from(context).play_count += 1;
+    return 1;
+}
+
+fn recorderAudioPause(context: ?*anyopaque) callconv(.c) c_int {
+    MobileAudioRecorder.from(context).pause_count += 1;
+    return 1;
+}
+
+fn recorderAudioStop(context: ?*anyopaque) callconv(.c) c_int {
+    MobileAudioRecorder.from(context).stop_count += 1;
+    return 1;
+}
+
+fn recorderAudioSeek(context: ?*anyopaque, position_ms: u64) callconv(.c) c_int {
+    const recorder = MobileAudioRecorder.from(context);
+    recorder.seek_count += 1;
+    recorder.last_seek_ms = position_ms;
+    return 1;
+}
+
+fn recorderAudioSetVolume(context: ?*anyopaque, volume: f64) callconv(.c) c_int {
+    const recorder = MobileAudioRecorder.from(context);
+    recorder.volume_count += 1;
+    recorder.last_volume = volume;
+    return 1;
+}
+
+fn recorderAudioService() types.MobileAudioService {
+    return .{
+        .load = recorderAudioLoad,
+        .load_url = recorderAudioLoadUrl,
+        .play = recorderAudioPlay,
+        .pause = recorderAudioPause,
+        .stop = recorderAudioStop,
+        .seek = recorderAudioSeek,
+        .set_volume = recorderAudioSetVolume,
+    };
+}
+
+fn pressAudioButton(app: ?*anyopaque, label: []const u8) !void {
+    const count = MobileAudioApi.native_sdk_app_widget_semantics_count(app);
+    var index: usize = 0;
+    while (index < count) : (index += 1) {
+        var node: MobileWidgetSemantics = .{};
+        try std.testing.expectEqual(@as(c_int, 1), MobileAudioApi.native_sdk_app_widget_semantics_at(app, index, &node));
+        if (node.role != @intFromEnum(MobileWidgetRole.button)) continue;
+        const node_label = if (node.label) |ptr| ptr[0..node.label_len] else "";
+        if (!std.mem.eql(u8, node_label, label)) continue;
+        // A synthesized tap at the button's center — the same touch path
+        // the shim forwards — flows through typed dispatch into update.
+        const x = node.x + node.width / 2;
+        const y = node.y + node.height / 2;
+        MobileAudioApi.native_sdk_app_touch(app, 1, 0, x, y, 1);
+        MobileAudioApi.native_sdk_app_touch(app, 1, 1, x, y, 0);
+        try std.testing.expectEqualStrings("", std.mem.span(MobileAudioApi.native_sdk_app_last_error_name(app)));
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn startAudioHost(app: ?*anyopaque) !void {
+    MobileAudioApi.native_sdk_app_start(app);
+    var surface_token: u8 = 0;
+    MobileAudioApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileAudioApi.native_sdk_app_frame(app);
+    try std.testing.expectEqualStrings("", std.mem.span(MobileAudioApi.native_sdk_app_last_error_name(app)));
+}
+
+test "mobile hosts decline audio until the shim registers a service" {
+    const app = MobileAudioApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileAudioApi.native_sdk_app_destroy(app);
+    const self: *MobileAudioHost = @ptrCast(@alignCast(app));
+
+    // No registered service: the capability answers are honest noes and
+    // the runtime's service table carries no audio entries.
+    try std.testing.expect(!self.embedded.runtime.options.platform.supports(.audio_playback));
+    try std.testing.expect(!self.embedded.runtime.options.platform.supports(.audio_streaming));
+    try std.testing.expect(self.embedded.runtime.options.platform.services.audio_load_fn == null);
+
+    try startAudioHost(app);
+
+    // fx.playAudio degrades to exactly one explicit failed Msg (delivered
+    // on the next effects drain — a pumped frame), never silence.
+    try pressAudioButton(app, "Play");
+    MobileAudioApi.native_sdk_app_frame(app);
+    try std.testing.expectEqual(@as(usize, 1), self.ui.model.event_count);
+    try std.testing.expectEqual(runtime.EffectAudioEventKind.failed, self.ui.model.last_kind.?);
+
+    // Audio events from a shim that never registered still resolve
+    // against an idle channel: swallowed without error, no Msg.
+    MobileAudioApi.native_sdk_app_audio_event(app, 1, 500, 30_000, 1, 0);
+    try std.testing.expectEqual(@as(usize, 1), self.ui.model.event_count);
+}
+
+test "mobile audio service bridges effects out and events back" {
+    const app = MobileAudioApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileAudioApi.native_sdk_app_destroy(app);
+    const self: *MobileAudioHost = @ptrCast(@alignCast(app));
+
+    var recorder = MobileAudioRecorder{};
+    const service = recorderAudioService();
+    try std.testing.expectEqual(@as(c_int, 1), MobileAudioApi.native_sdk_app_set_audio_service(app, &service, &recorder));
+    try std.testing.expect(self.embedded.runtime.options.platform.supports(.audio_playback));
+    try std.testing.expect(self.embedded.runtime.options.platform.supports(.audio_streaming));
+
+    try startAudioHost(app);
+
+    // playAudio resolves the local path through the registered load and
+    // starts the transport through play.
+    try pressAudioButton(app, "Play");
+    try std.testing.expectEqual(@as(usize, 1), recorder.load_count);
+    try std.testing.expectEqualStrings("/tmp/mobile-audio-track.mp3", recorder.last_path[0..recorder.last_path_len]);
+    try std.testing.expectEqual(@as(usize, 1), recorder.play_count);
+
+    // The shim's loaded acknowledgment lands as the app's on_event Msg
+    // with the real decoded duration.
+    MobileAudioApi.native_sdk_app_audio_event(app, 0, 0, 30_000, 1, 0);
+    try std.testing.expectEqual(@as(usize, 1), self.ui.model.event_count);
+    try std.testing.expectEqual(runtime.EffectAudioEventKind.loaded, self.ui.model.last_kind.?);
+    try std.testing.expectEqual(@as(u64, 30_000), self.ui.model.last_duration_ms);
+
+    // Position ticks update the model and the runtime's honest mirrors.
+    MobileAudioApi.native_sdk_app_audio_event(app, 1, 1_500, 30_000, 1, 0);
+    try std.testing.expectEqual(runtime.EffectAudioEventKind.position, self.ui.model.last_kind.?);
+    try std.testing.expectEqual(@as(u64, 1_500), self.ui.model.last_position_ms);
+    try std.testing.expect(self.ui.model.last_playing);
+    try std.testing.expect(self.ui.effects.audioSnapshot().playing);
+
+    // A position report with playing=0 is the audio-session interruption
+    // shape the iOS host emits (the OS paused the route): the app and the
+    // playback mirrors flip to paused, honestly, without a pause command.
+    MobileAudioApi.native_sdk_app_audio_event(app, 1, 2_000, 30_000, 0, 0);
+    try std.testing.expect(!self.ui.model.last_playing);
+    try std.testing.expect(!self.ui.effects.audioSnapshot().playing);
+    try std.testing.expectEqual(@as(usize, 0), recorder.pause_count);
+
+    // Transport commands reach the service: pause, seek, volume.
+    try pressAudioButton(app, "Pause");
+    try std.testing.expectEqual(@as(usize, 1), recorder.pause_count);
+    try pressAudioButton(app, "Seek");
+    try std.testing.expectEqual(@as(usize, 1), recorder.seek_count);
+    try std.testing.expectEqual(@as(u64, 12_000), recorder.last_seek_ms);
+    try pressAudioButton(app, "Quiet");
+    try std.testing.expectEqual(@as(usize, 1), recorder.volume_count);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.25), recorder.last_volume, 0.0001);
+
+    // Exactly one completion at natural end, carrying the terminal
+    // position.
+    MobileAudioApi.native_sdk_app_audio_event(app, 2, 30_000, 30_000, 0, 0);
+    try std.testing.expectEqual(runtime.EffectAudioEventKind.completed, self.ui.model.last_kind.?);
+    try std.testing.expectEqual(@as(u64, 30_000), self.ui.model.last_position_ms);
+    try std.testing.expect(!self.ui.effects.audioSnapshot().playing);
+    try std.testing.expectEqual(@as(u64, 30_000), self.ui.effects.audioSnapshot().position_ms);
+
+    // An out-of-range event kind is refused loudly.
+    MobileAudioApi.native_sdk_app_audio_event(app, 9, 0, 0, 0, 0);
+    try std.testing.expectEqualStrings("InvalidAudioOptions", std.mem.span(MobileAudioApi.native_sdk_app_last_error_name(app)));
+}
+
+test "mobile audio streams resolve through the registered load_url" {
+    const app = MobileAudioApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileAudioApi.native_sdk_app_destroy(app);
+    const self: *MobileAudioHost = @ptrCast(@alignCast(app));
+
+    var recorder = MobileAudioRecorder{};
+    const service = recorderAudioService();
+    try std.testing.expectEqual(@as(c_int, 1), MobileAudioApi.native_sdk_app_set_audio_service(app, &service, &recorder));
+    try startAudioHost(app);
+
+    // load_url answering 0 is a started stream: buffering starts true
+    // optimistically until the loaded acknowledgment.
+    try pressAudioButton(app, "Stream");
+    try std.testing.expectEqual(@as(usize, 1), recorder.load_url_count);
+    try std.testing.expectEqualStrings("https://music.example.test/pack/track.mp3", recorder.last_url[0..recorder.last_url_len]);
+    try std.testing.expectEqualStrings("/tmp/mobile-audio-caches/audio/track.mp3", recorder.last_cache_path[0..recorder.last_cache_path_len]);
+    try std.testing.expectEqual(@as(u64, 2_048), recorder.last_expected_bytes);
+    try std.testing.expectEqual(runtime.EffectAudioSource.stream, self.ui.effects.audioSnapshot().source);
+    try std.testing.expect(self.ui.effects.audioSnapshot().buffering);
+
+    // load_url answering 1 is a verified cache hit: local playback, no
+    // buffering.
+    recorder.load_url_result = 1;
+    try pressAudioButton(app, "Stream");
+    try std.testing.expectEqual(@as(usize, 2), recorder.load_url_count);
+    try std.testing.expectEqual(runtime.EffectAudioSource.cache, self.ui.effects.audioSnapshot().source);
+    try std.testing.expect(!self.ui.effects.audioSnapshot().buffering);
+}
+
+test "mobile audio service registration is all-or-nothing per tier" {
+    const app = MobileAudioApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileAudioApi.native_sdk_app_destroy(app);
+    const self: *MobileAudioHost = @ptrCast(@alignCast(app));
+
+    var recorder = MobileAudioRecorder{};
+
+    // A partial playback table is refused whole; the host keeps declining.
+    var partial = types.MobileAudioService{};
+    partial.load = recorderAudioLoad;
+    partial.play = recorderAudioPlay;
+    try std.testing.expectEqual(@as(c_int, 0), MobileAudioApi.native_sdk_app_set_audio_service(app, &partial, &recorder));
+    try std.testing.expectEqualStrings("InvalidCommand", std.mem.span(MobileAudioApi.native_sdk_app_last_error_name(app)));
+    try std.testing.expect(!self.embedded.runtime.options.platform.supports(.audio_playback));
+
+    // The playback tier without load_url registers playback but declines
+    // streaming.
+    var local_only = recorderAudioService();
+    local_only.load_url = null;
+    try std.testing.expectEqual(@as(c_int, 1), MobileAudioApi.native_sdk_app_set_audio_service(app, &local_only, &recorder));
+    try std.testing.expect(self.embedded.runtime.options.platform.supports(.audio_playback));
+    try std.testing.expect(!self.embedded.runtime.options.platform.supports(.audio_streaming));
+    try std.testing.expect(self.embedded.runtime.options.platform.services.audio_load_url_fn == null);
+
+    // A null (or all-null) table clears the registration: back to the
+    // honest decline.
+    try std.testing.expectEqual(@as(c_int, 1), MobileAudioApi.native_sdk_app_set_audio_service(app, null, null));
+    try std.testing.expect(!self.embedded.runtime.options.platform.supports(.audio_playback));
+    try std.testing.expect(self.embedded.runtime.options.platform.services.audio_load_fn == null);
+}

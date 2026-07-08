@@ -51,6 +51,8 @@ pub const mobile_export_symbol_names = [_][]const u8{
     "native_sdk_app_gpu_frame_state",
     "native_sdk_app_text_input_state",
     "native_sdk_app_set_text_measure",
+    "native_sdk_app_set_audio_service",
+    "native_sdk_app_audio_event",
     "native_sdk_app_set_automation_dir",
     "native_sdk_app_touch",
     "native_sdk_app_scroll",
