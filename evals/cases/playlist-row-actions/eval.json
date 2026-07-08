@@ -1,0 +1,67 @@
+{
+  "name": "playlist-row-actions",
+  "description": "Exercises the interaction seams shipped with the soundboard round: row-level Enter as a list row's primary action (on-submit on list-item, distinct from select-on-press) and the app-level key fallback (Options.on_key) for keys no focused widget consumes.",
+  "prompt": "This workspace is a freshly scaffolded Native SDK native-frontend app (see README.md; the view is src/app.native, the logic src/main.zig). Replace the counter with a small playlist queue pane.\n\nRequirements:\n- A queue list rendered from model data, seeded with exactly three tracks displayed as exactly \"Golden Hour\", \"Night Drive\", and \"Morning Rain\" — one selectable row per track, each row reading as its track title to assistive tech.\n- Clicking a row selects it. Selection is model state, exactly one row is selected at a time, the selected row must read as selected to assistive tech, and \"Golden Hour\" starts selected.\n- Playing is model state only (no audio): pressing plain Enter on a keyboard-focused row starts playing THAT row's track — the row's PRIMARY action, distinct from selecting it. Wire this through the row itself so the keyboard activation carries the row's own identity in its message payload; do not reconstruct the target from the selection, and do not add a window-wide Enter mapping for it. The toolkit's list rows have a first-class channel for a row's primary action — use it.\n- Keys no focused widget claims must still work app-wide: with nothing focused (before any Tab), Space starts playing the selected track when nothing is playing and stops playback when something is, and ArrowDown/ArrowUp move the selection down/up, clamping at the ends (never wrapping). The toolkit has a first-class app-level seam for keys no focused widget consumes — use it; do not fake it with focus tricks or press handlers on layout elements, and leave keys the app does not own unclaimed.\n- A status bar reading exactly \"Selected: <selected title> · Playing: <playing title>\" (with that middle dot), where <playing title> is exactly \"none\" whenever nothing is playing, updating live. Derive it; do not store it.\n- Keep all logic in src/main.zig (Model, Msg, update); the markup only binds values and dispatches messages.\n- Validate the markup with `native markup check src/app.native`, and keep `zig build test` green — extend src/tests.zig so the tests: drive a row's keyboard activation through the real dispatch path (the finalized tree's keyboard channel), asserting that Enter on a row dispatches that row's play message and Space on the same row dispatches its select; exercise the app-level key mapping directly, asserting Space and both arrows map to the right messages and a key the app does not own maps to nothing; and assert through update that the selection clamps at both ends and that Space's play/stop toggle round-trips.\n\nWhen you are done, make sure `zig build test` passes and summarize what you built.",
+  "frontend": "native",
+  "timeoutMs": 1200000,
+  "maxTurns": 80,
+  "checks": [
+    {
+      "type": "build_test",
+      "args": ["-Dplatform=null"]
+    },
+    {
+      "type": "markup_check"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.native",
+      "pattern": "<list-item[\\s>]",
+      "expect": true,
+      "description": "tracks render as selectable list-item rows"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.native",
+      "pattern": "<list-item[^>]*on-submit=",
+      "expect": true,
+      "description": "plain Enter is the row's primary action via on-submit on the row itself"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.native",
+      "pattern": "<for\\s+[^>]*each=",
+      "expect": true,
+      "description": "rows render through a <for> loop from model data"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/main.zig",
+      "pattern": "\\.on_key\\s*=",
+      "expect": true,
+      "description": "unclaimed keys route through the app-level Options.on_key fallback"
+    },
+    {
+      "type": "snapshot_grep",
+      "patterns": [
+        "role=listitem name=\"Golden Hour\".*selected",
+        "role=listitem name=\"Night Drive\"",
+        "role=listitem name=\"Morning Rain\"",
+        "Selected: Golden Hour · Playing: none"
+      ],
+      "description": "live snapshot shows the three rows with Golden Hour selected and the idle derived status"
+    },
+    {
+      "type": "llm_judge",
+      "criteria": [
+        "Model/Msg/update follow The Elm Architecture idiomatically: the model owns the tracks, the selection, and the playing state; the status line and any per-row selected flags are derived, never stored; selection clamping and the play/stop toggle live in update arms.",
+        "The interaction seams are used honestly: the row's primary action rides the row's own submit channel with the row's identity in the payload (not reconstructed from the selection, not a window-wide Enter mapping), and the app-level key fallback maps exactly the keys the app owns — returning nothing for others — with no key handling faked through focus tricks or press handlers on layout elements.",
+        "Tests are meaningful: they drive Enter and Space on a row through the finalized tree's keyboard channel asserting the two distinct messages, exercise the fallback mapping directly including a key it does not own, and assert selection clamping at both ends plus the play/stop round-trip through update — not merely that the code compiles.",
+        "The markup stays declarative: rows render via a keyed <for>, the rows bind select and play messages with payloads, and no selection bookkeeping, clamping, or formatting is smuggled into the view."
+      ],
+      "minScore": 6,
+      "advisory": true,
+      "description": "quality of the row-action and key-fallback wiring beyond compliance"
+    }
+  ]
+}
