@@ -48,8 +48,8 @@
 #define NATIVE_SDK_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, NATIVE_SDK_LOG_TAG, __VA_ARGS__)
 
 // One activity drives one embed app per process (the manifest declares a
-// single launcher activity), so the host-side presentation and measure
-// state lives in a single static bundle.
+// single launcher activity), so the host-side presentation, measure, and
+// audio state lives in a single static bundle.
 static struct {
     ANativeWindow *window;
     uint8_t *pixels;
@@ -57,6 +57,17 @@ static struct {
     JavaVM *vm;
     jobject activity; // global ref while text measurement is registered
     jmethodID measure_method;
+    // Audio upcall targets, registered by nativeSetAudioService: the
+    // activity owns the platform player (android.media on the Java side),
+    // and the embed audio service callbacks below call back into it.
+    jobject audio_activity; // global ref while the audio service is registered
+    jmethodID audio_load_method;
+    jmethodID audio_load_url_method;
+    jmethodID audio_play_method;
+    jmethodID audio_pause_method;
+    jmethodID audio_stop_method;
+    jmethodID audio_seek_method;
+    jmethodID audio_set_volume_method;
 } host_state = {0};
 
 static void host_log_error(void *app, const char *stage) {
@@ -88,6 +99,17 @@ JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeDestroy
         (*env)->DeleteGlobalRef(env, host_state.activity);
         host_state.activity = NULL;
         host_state.measure_method = NULL;
+    }
+    if (host_state.audio_activity) {
+        (*env)->DeleteGlobalRef(env, host_state.audio_activity);
+        host_state.audio_activity = NULL;
+        host_state.audio_load_method = NULL;
+        host_state.audio_load_url_method = NULL;
+        host_state.audio_play_method = NULL;
+        host_state.audio_pause_method = NULL;
+        host_state.audio_stop_method = NULL;
+        host_state.audio_seek_method = NULL;
+        host_state.audio_set_volume_method = NULL;
     }
 }
 
@@ -360,6 +382,156 @@ JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeSetText
     native_sdk_app_set_text_measure((void *)app, host_measure_text, NULL);
     host_log_error((void *)app, "text_measure");
     NATIVE_SDK_LOGI("Paint text measure registered");
+}
+
+// ------------------------------------------------------------------ audio
+//
+// The embed audio service, bridged to the activity's Java-side player
+// (android.media.MediaPlayer — see the audio section in
+// NativeSdkActivity.java for the backend rationale and its constraints).
+// The service callbacks run INSIDE runtime dispatch on the main thread
+// (the runtime entry points are only ever called from the activity's
+// thread), so the upcalls resolve the JNIEnv through the stored JavaVM
+// exactly like the text-measure upcall; the Java side never emits an
+// event synchronously from inside these calls — every asynchronous report
+// (loaded, ticks, completion, failure) arrives on a later main-loop turn
+// through nativeAudioEvent, the same next-turn discipline the desktop
+// hosts keep.
+
+static JNIEnv *host_audio_env(void) {
+    if (!host_state.vm || !host_state.audio_activity) return NULL;
+    JNIEnv *env = NULL;
+    if ((*host_state.vm)->GetEnv(host_state.vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) return NULL;
+    return env;
+}
+
+// UTF-8 bytes cross as byte arrays (not jstring) so paths and URLs
+// survive the JNI modified-UTF-8 seam, mirroring the input direction.
+static jbyteArray host_audio_bytes(JNIEnv *env, const char *bytes, uintptr_t len) {
+    jbyteArray array = (*env)->NewByteArray(env, (jsize)len);
+    if (!array) return NULL;
+    if (len > 0) (*env)->SetByteArrayRegion(env, array, 0, (jsize)len, (const jbyte *)bytes);
+    return array;
+}
+
+static int host_audio_call_cleared(JNIEnv *env, int failure_result, jint result) {
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        return failure_result;
+    }
+    return (int)result;
+}
+
+static int host_audio_load(void *context, const char *path, uintptr_t path_len) {
+    (void)context;
+    JNIEnv *env = host_audio_env();
+    if (!env) return 2;
+    jbyteArray bytes = host_audio_bytes(env, path, path_len);
+    if (!bytes) return 2;
+    jint result = (*env)->CallIntMethod(env, host_state.audio_activity, host_state.audio_load_method, bytes);
+    (*env)->DeleteLocalRef(env, bytes);
+    return host_audio_call_cleared(env, 2, result);
+}
+
+static int host_audio_load_url(void *context, const char *url, uintptr_t url_len, const char *cache_path, uintptr_t cache_path_len, uint64_t expected_bytes) {
+    (void)context;
+    JNIEnv *env = host_audio_env();
+    if (!env) return 2;
+    jbyteArray url_bytes = host_audio_bytes(env, url, url_len);
+    if (!url_bytes) return 2;
+    jbyteArray cache_bytes = host_audio_bytes(env, cache_path ? cache_path : "", cache_path ? cache_path_len : 0);
+    if (!cache_bytes) {
+        (*env)->DeleteLocalRef(env, url_bytes);
+        return 2;
+    }
+    jint result = (*env)->CallIntMethod(env, host_state.audio_activity, host_state.audio_load_url_method, url_bytes, cache_bytes, (jlong)expected_bytes);
+    (*env)->DeleteLocalRef(env, url_bytes);
+    (*env)->DeleteLocalRef(env, cache_bytes);
+    return host_audio_call_cleared(env, 2, result);
+}
+
+static int host_audio_transport(jmethodID method) {
+    JNIEnv *env = host_audio_env();
+    if (!env || !method) return 0;
+    jint result = (*env)->CallIntMethod(env, host_state.audio_activity, method);
+    return host_audio_call_cleared(env, 0, result);
+}
+
+static int host_audio_play(void *context) {
+    (void)context;
+    return host_audio_transport(host_state.audio_play_method);
+}
+
+static int host_audio_pause(void *context) {
+    (void)context;
+    return host_audio_transport(host_state.audio_pause_method);
+}
+
+static int host_audio_stop(void *context) {
+    (void)context;
+    return host_audio_transport(host_state.audio_stop_method);
+}
+
+static int host_audio_seek(void *context, uint64_t position_ms) {
+    (void)context;
+    JNIEnv *env = host_audio_env();
+    if (!env) return 0;
+    jint result = (*env)->CallIntMethod(env, host_state.audio_activity, host_state.audio_seek_method, (jlong)position_ms);
+    return host_audio_call_cleared(env, 0, result);
+}
+
+static int host_audio_set_volume(void *context, double volume) {
+    (void)context;
+    JNIEnv *env = host_audio_env();
+    if (!env) return 0;
+    jint result = (*env)->CallIntMethod(env, host_state.audio_activity, host_state.audio_set_volume_method, (jdouble)volume);
+    return host_audio_call_cleared(env, 0, result);
+}
+
+// Register the activity's player as the embed platform audio service —
+// the full table (playback + streaming tiers), matching what the Java
+// side actually implements. Called before nativeStart, like the text
+// measure, so the first effect dispatch already sees the service.
+JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeSetAudioService(JNIEnv *env, jobject self, jlong app) {
+    if ((*env)->GetJavaVM(env, &host_state.vm) != JNI_OK) return;
+    if (host_state.audio_activity) (*env)->DeleteGlobalRef(env, host_state.audio_activity);
+    host_state.audio_activity = (*env)->NewGlobalRef(env, self);
+    jclass cls = (*env)->GetObjectClass(env, self);
+    host_state.audio_load_method = (*env)->GetMethodID(env, cls, "audioLoad", "([B)I");
+    host_state.audio_load_url_method = (*env)->GetMethodID(env, cls, "audioLoadUrl", "([B[BJ)I");
+    host_state.audio_play_method = (*env)->GetMethodID(env, cls, "audioPlay", "()I");
+    host_state.audio_pause_method = (*env)->GetMethodID(env, cls, "audioPause", "()I");
+    host_state.audio_stop_method = (*env)->GetMethodID(env, cls, "audioStop", "()I");
+    host_state.audio_seek_method = (*env)->GetMethodID(env, cls, "audioSeek", "(J)I");
+    host_state.audio_set_volume_method = (*env)->GetMethodID(env, cls, "audioSetVolume", "(D)I");
+    (*env)->DeleteLocalRef(env, cls);
+    if (!host_state.audio_activity || !host_state.audio_load_method || !host_state.audio_load_url_method ||
+        !host_state.audio_play_method || !host_state.audio_pause_method || !host_state.audio_stop_method ||
+        !host_state.audio_seek_method || !host_state.audio_set_volume_method) {
+        NATIVE_SDK_LOGE("audio_service registration failed");
+        return;
+    }
+    static const native_sdk_audio_service_t service = {
+        .load = host_audio_load,
+        .load_url = host_audio_load_url,
+        .play = host_audio_play,
+        .pause = host_audio_pause,
+        .stop = host_audio_stop,
+        .seek = host_audio_seek,
+        .set_volume = host_audio_set_volume,
+    };
+    native_sdk_app_set_audio_service((void *)app, &service, NULL);
+    host_log_error((void *)app, "audio_service");
+    NATIVE_SDK_LOGI("audio service registered");
+}
+
+// One player report from the Java side (kind ordinals in
+// native_sdk_app.h), called on the main thread between runtime entry
+// points — never from inside an audio service callback.
+JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeAudioEvent(JNIEnv *env, jobject self, jlong app, jint kind, jlong position_ms, jlong duration_ms, jint playing, jint buffering) {
+    (void)env;
+    (void)self;
+    native_sdk_app_audio_event((void *)app, (int)kind, (uint64_t)position_ms, (uint64_t)duration_ms, (int)playing, (int)buffering);
 }
 
 JNIEXPORT jstring JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeLastError(JNIEnv *env, jobject self, jlong app) {

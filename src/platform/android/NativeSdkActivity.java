@@ -43,6 +43,18 @@
 // so layout uses real typographic widths instead of the deterministic
 // estimator. Launch with the `estimator-text-metrics` boolean extra to
 // keep the estimator (before/after comparisons, deterministic goldens).
+//
+// Audio: the host registers the platform audio service (through the
+// native bridge's nativeSetAudioService) before start, mirroring the iOS
+// host's player: one android.media.MediaPlayer for local files, verified
+// cache entries, and progressive HTTP(S) URL streams, with a parallel
+// HttpURLConnection download filling the track cache (part file,
+// size-verified, atomic rename), ~500ms position ticks only while
+// playing, and one completion at natural end — all reported back through
+// nativeAudioEvent. Android additionally owns audio focus: requested on
+// play, and a focus loss pauses the player and reports the paused state
+// honestly through an immediate position event. See the audio section
+// below for the backend rationale and its constraints.
 
 package dev.native_sdk.host;
 
@@ -50,7 +62,13 @@ import android.app.Activity;
 import android.content.res.AssetManager;
 import android.graphics.Paint;
 import android.graphics.Typeface;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
+import android.media.MediaPlayer;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.InputType;
 import android.util.LruCache;
 import android.view.Choreographer;
@@ -95,6 +113,13 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
     private static final int IME_COMMIT_COMPOSITION = 1;
     private static final int IME_CANCEL_COMPOSITION = 2;
 
+    // Audio event kinds for nativeAudioEvent (ordinals match the embed
+    // ABI's audio event enum in native_sdk_app.h).
+    private static final int AUDIO_EVENT_LOADED = 0;
+    private static final int AUDIO_EVENT_POSITION = 1;
+    private static final int AUDIO_EVENT_COMPLETED = 2;
+    private static final int AUDIO_EVENT_FAILED = 3;
+
     private long nativeApp;
     private CanvasSurfaceView canvasView;
     private boolean surfaceReady;
@@ -110,9 +135,39 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
     private final LruCache<String, Double> measureCache = new LruCache<>(16384);
     private final Paint measurePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
+    // ------------------------------------------------------- audio state
+    // The single platform player behind the embed audio service (see the
+    // audio section below). All fields are main-thread only.
+    private MediaPlayer audioPlayer;
+    private boolean audioPrepared;
+    private boolean audioBuffering;
+    private boolean audioPendingPlay;
+    private long audioPendingSeekMs = -1;
+    private java.util.Timer audioTickTimer;
+    private java.util.concurrent.atomic.AtomicBoolean audioCacheCancel;
+    private AudioFocusRequest audioFocusRequest;
+    private boolean audioFocusHeld;
+    private final Handler audioMainHandler = new Handler(Looper.getMainLooper());
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // Export the per-app directory namespace into the process
+        // environment before any app code runs: Android gives app
+        // processes no per-app HOME of their own, so the host publishes
+        // the data directory as HOME and its cache child as TMPDIR — the
+        // same env-based convention iOS processes get from the OS — and
+        // env-driven directory resolution (the app_dirs primitive's
+        // Android mapping) stays honest. `.cache` under that HOME is
+        // exactly getCacheDir(), where the audio track cache belongs.
+        try {
+            android.system.Os.setenv("HOME", getDataDir().getAbsolutePath(), true);
+            android.system.Os.setenv("TMPDIR", getCacheDir().getAbsolutePath(), true);
+        } catch (Exception e) {
+            android.util.Log.e("native-sdk", "env export failed: " + e);
+        }
+
         System.loadLibrary("native_sdk_host");
 
         // Edge-to-edge: the decor never resizes for system bars, cutouts,
@@ -159,6 +214,12 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
             nativeSetTextMeasure(nativeApp);
         }
 
+        // The platform audio service (registered before start, like the
+        // text measure, so the first effect dispatch already sees it):
+        // one real player behind the embed audio seam — see the audio
+        // section below.
+        nativeSetAudioService(nativeApp);
+
         // Verification harness: `am start --ez native-sdk-automation true`
         // publishes snapshot.txt into the app's files dir, same protocol
         // as the desktop -Dautomation=true runners (readable over
@@ -198,10 +259,16 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
     protected void onDestroy() {
         Choreographer.getInstance().removeFrameCallback(this);
         if (nativeApp != 0) {
+            // Stop first: the runtime's shutdown path releases the audio
+            // channel through the still-registered service. Zeroing
+            // nativeApp afterwards cuts the event path, so a stray
+            // asynchronous report cannot reach a dead runtime; then the
+            // belt-and-braces teardown below retires whatever survived.
             nativeStop(nativeApp);
             nativeDestroy(nativeApp);
             nativeApp = 0;
         }
+        audioReleasePlayer(true);
         super.onDestroy();
     }
 
@@ -342,6 +409,516 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
         if (fontId == 5) return Typeface.create(Typeface.DEFAULT, Typeface.ITALIC);
         if (fontId == 6) return Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC);
         return Typeface.DEFAULT;
+    }
+
+    // -------------------------------------------------------------- audio
+    //
+    // The platform audio player behind the embed audio service. Backend
+    // choice, made deliberately: android.media.MediaPlayer, the platform's
+    // in-box media stack, driven from this activity. It covers the whole
+    // contract with no dependencies — local files and verified cache
+    // entries (synchronous prepare with the real decoded duration),
+    // progressive HTTP(S) streaming (playback starts while bytes arrive,
+    // never download-then-play), pause/seek/volume mid-stream, one
+    // completion listener, and honest buffering reports via the info
+    // callbacks. The plausible alternatives lose on this host's terms: a
+    // third-party player library is out of the question for the toolkit's
+    // in-box host, and a hand-rolled NDK pipeline (a decoder feeding a raw
+    // output stream) is an order of magnitude more code to reimplement
+    // seeking, buffering, and format coverage the platform already ships.
+    // MediaPlayer's honest constraints, all handled below: it cannot seek
+    // or pause before prepareAsync completes (a pre-prepared seek is
+    // stored and applied on the prepared callback; play before prepared
+    // records intent and starts on readiness, mirroring how a stream's
+    // play "applies" on every other platform), a released player object is
+    // never reusable (each load builds a fresh one), and its callbacks
+    // must be consumed on this thread's looper (they are — the player is
+    // created on the main thread).
+    //
+    // Contract mirror of the macOS/iOS hosts: exactly one player at a
+    // time, every asynchronous report — the loaded acknowledgment with the
+    // real duration, ~500ms position ticks only while playing, buffering
+    // flips, exactly one completion, explicit failures — arrives through
+    // nativeAudioEvent on the main thread, and the service entry points
+    // (called from native code inside runtime dispatch) never emit
+    // synchronously: the local-file LOADED acknowledgment defers one
+    // main-loop turn, exactly like the macOS host's.
+    //
+    // The cache fill is a PARALLEL download, not a tee off the player's
+    // own connection: a partially buffered stream must never masquerade as
+    // a cache entry. One extra request on a track's first (uncached) play
+    // buys a stock streaming path and a cache whose entries are whole
+    // files by construction: downloaded beside the final name,
+    // size-verified against the manifest, and renamed into place — a
+    // same-directory rename, so a partial file never occupies the cache
+    // name even across a crash.
+    //
+    // Android divergence, all focus-related: the host requests audio focus
+    // on play, and a focus loss (another app took the output route) pauses
+    // the player and reports the paused state honestly through one
+    // immediate position event with playing=0 — a platform-initiated pause
+    // the app did NOT command, so unlike app-driven pause it must echo.
+    // Focus regain never auto-resumes: the app (or the person holding the
+    // phone) decides. Media-session and notification integration (lock
+    // screen controls, background playback beyond the cached process) are
+    // out of scope for this host today.
+
+    private AudioAttributes audioAttributes() {
+        return new AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+            .build();
+    }
+
+    private static String audioUtf8(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) return null;
+        try {
+            return StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(bytes))
+                .toString();
+        } catch (CharacterCodingException e) {
+            return null;
+        }
+    }
+
+    // Emit one audio report carrying the live position/duration readout of
+    // the active player. Main thread only, between runtime entry points.
+    private void emitAudioEvent(int kind) {
+        if (nativeApp == 0) return;
+        long position = 0;
+        long duration = 0;
+        int playing = 0;
+        int buffering = 0;
+        MediaPlayer player = audioPlayer;
+        if (player != null) {
+            if (audioPrepared) {
+                try {
+                    int current = player.getCurrentPosition();
+                    if (current > 0) position = current;
+                    int total = player.getDuration();
+                    if (total > 0) duration = total;
+                    playing = player.isPlaying() ? 1 : 0;
+                } catch (IllegalStateException ignored) {
+                }
+            } else {
+                // A stream still preparing: the transport intent is the
+                // honest playing flag (un-paused, silent until bytes
+                // arrive), with buffering set beside it.
+                playing = audioPendingPlay ? 1 : 0;
+            }
+            buffering = audioBuffering ? 1 : 0;
+        }
+        if (kind == AUDIO_EVENT_COMPLETED) {
+            // A finished player rewinds itself; report the honest
+            // terminal position instead.
+            position = duration;
+            playing = 0;
+            buffering = 0;
+        }
+        nativeAudioEvent(nativeApp, kind, position, duration, playing, buffering);
+    }
+
+    // ~500ms position ticks while playing only. java.util.Timer runs on
+    // its own thread, deliberately independent of the Choreographer frame
+    // pump and any UI Handler cadence (a busy frame loop must not starve
+    // or skew the readout); each tick marshals onto the main thread — the
+    // runtime's thread — like every other host event.
+    private void startAudioTicks() {
+        if (audioTickTimer != null) return;
+        java.util.Timer timer = new java.util.Timer("native-sdk-audio-ticks", true);
+        timer.scheduleAtFixedRate(new java.util.TimerTask() {
+            @Override
+            public void run() {
+                runOnUiThread(() -> {
+                    if (audioPlayer == null) {
+                        stopAudioTicks();
+                        return;
+                    }
+                    emitAudioEvent(AUDIO_EVENT_POSITION);
+                });
+            }
+        }, 500, 500);
+        audioTickTimer = timer;
+    }
+
+    private void stopAudioTicks() {
+        if (audioTickTimer == null) return;
+        audioTickTimer.cancel();
+        audioTickTimer = null;
+    }
+
+    // Retire the player and its bookkeeping. The cache download is
+    // cancelled when a new load replaces the stream mid-flight or the
+    // transport stops or fails (a skipped track should not keep burning
+    // bandwidth) but ORPHANED on natural completion — it is usually
+    // already done, and letting a straggler finish installs the cache
+    // entry the completed play earned.
+    private void audioReleasePlayer(boolean cancelDownload) {
+        stopAudioTicks();
+        abandonAudioFocus();
+        if (cancelDownload) {
+            if (audioCacheCancel != null) audioCacheCancel.set(true);
+            audioCacheCancel = null;
+        } else {
+            audioCacheCancel = null;
+        }
+        audioPendingPlay = false;
+        audioPendingSeekMs = -1;
+        audioBuffering = false;
+        audioPrepared = false;
+        MediaPlayer player = audioPlayer;
+        audioPlayer = null;
+        if (player == null) return;
+        try {
+            player.release();
+        } catch (Exception ignored) {
+        }
+    }
+
+    // Natural end of the track (exactly once). Retire-before-emit
+    // discipline: the completion Msg routinely starts the NEXT track from
+    // inside its own dispatch (a music app auto-advancing), and retiring
+    // afterwards would destroy the player that load just installed. The
+    // duration is captured first so the event carries the honest terminal
+    // position.
+    private void audioPlayerCompleted(MediaPlayer player) {
+        if (audioPlayer != player) return;
+        long duration = 0;
+        try {
+            int total = player.getDuration();
+            if (total > 0) duration = total;
+        } catch (IllegalStateException ignored) {
+        }
+        audioReleasePlayer(false);
+        if (nativeApp != 0) {
+            nativeAudioEvent(nativeApp, AUDIO_EVENT_COMPLETED, duration, duration, 0, 0);
+        }
+    }
+
+    // The player died (unreachable host, undecodable payload, mid-stream
+    // network loss): one FAILED event, player retired first, cache
+    // download cancelled — bytes from a failing source are not
+    // trustworthy.
+    private void audioPlayerFailed(MediaPlayer player) {
+        if (audioPlayer != player) return;
+        audioReleasePlayer(true);
+        if (nativeApp != 0) {
+            nativeAudioEvent(nativeApp, AUDIO_EVENT_FAILED, 0, 0, 0, 0);
+        }
+    }
+
+    private void installAudioCallbacks(MediaPlayer player) {
+        player.setOnCompletionListener(this::audioPlayerCompleted);
+        player.setOnErrorListener((mp, what, extra) -> {
+            audioPlayerFailed(mp);
+            // Consumed: without this the platform follows an error with
+            // its own completion callback, and a failure must never
+            // masquerade as a finished track.
+            return true;
+        });
+        player.setOnInfoListener((mp, what, extra) -> {
+            if (audioPlayer != mp) return false;
+            // A stream stalled waiting for bytes (or recovered): flip the
+            // honest buffering flag and report the transition NOW as a
+            // position event, not at the next 500ms tick.
+            if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
+                audioBuffering = true;
+                emitAudioEvent(AUDIO_EVENT_POSITION);
+                return true;
+            }
+            if (what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
+                audioBuffering = false;
+                emitAudioEvent(AUDIO_EVENT_POSITION);
+                return true;
+            }
+            return false;
+        });
+    }
+
+    // Synchronous local-file load (also the verified-cache-entry path).
+    // Returns 0 loaded / 1 missing / 2 decode failure — the macOS host's
+    // contract. The LOADED acknowledgment is asynchronous by contract:
+    // emitting it inside this service call would re-enter the runtime
+    // while it is still dispatching the command that asked for the load,
+    // so it posts to the next main-loop turn, guarded on this player
+    // still being the loaded one.
+    private int audioLoadFile(String path) {
+        audioReleasePlayer(true);
+        if (path == null) return 1;
+        if (!new File(path).isFile()) return 1;
+        MediaPlayer player = new MediaPlayer();
+        try {
+            player.setAudioAttributes(audioAttributes());
+            player.setDataSource(path);
+            player.prepare();
+        } catch (Exception e) {
+            player.release();
+            return 2;
+        }
+        installAudioCallbacks(player);
+        audioPlayer = player;
+        audioPrepared = true;
+        audioBuffering = false;
+        audioMainHandler.post(() -> {
+            if (audioPlayer != player) return;
+            emitAudioEvent(AUDIO_EVENT_LOADED);
+        });
+        return 0;
+    }
+
+    @SuppressWarnings("unused") // called from android_host.c
+    int audioLoad(byte[] pathUtf8) {
+        String path = audioUtf8(pathUtf8);
+        return path == null ? 1 : audioLoadFile(path);
+    }
+
+    // URL source resolution: verified cache entry first (plays as a plain
+    // local file, no network), then a progressive MediaPlayer stream with
+    // a parallel cache-filling download. Returns 1 for the cache hit, 0
+    // for a started stream, 2 when the URL is unusable; everything
+    // asynchronous — readiness, stalls, natural end, network death —
+    // arrives as audio events.
+    @SuppressWarnings("unused") // called from android_host.c
+    int audioLoadUrl(byte[] urlUtf8, byte[] cacheUtf8, long expectedBytes) {
+        audioReleasePlayer(true);
+        String url = audioUtf8(urlUtf8);
+        if (url == null) return 2;
+        android.net.Uri uri = android.net.Uri.parse(url);
+        if (uri.getScheme() == null) return 2;
+        String cachePath = audioUtf8(cacheUtf8);
+        if (cachePath != null) {
+            File entry = new File(cachePath);
+            if (entry.isFile()) {
+                if ((expectedBytes == 0 || entry.length() == expectedBytes)
+                    && audioLoadFile(cachePath) == 0) {
+                    return 1;
+                }
+                // Partial, stale, or corrupt (right size but undecodable):
+                // a bad cache entry never plays, and never survives to
+                // fool the next lookup.
+                entry.delete();
+            }
+        }
+        MediaPlayer player = new MediaPlayer();
+        try {
+            player.setAudioAttributes(audioAttributes());
+            player.setDataSource(url);
+        } catch (Exception e) {
+            player.release();
+            return 2;
+        }
+        installAudioCallbacks(player);
+        player.setOnPreparedListener(mp -> {
+            if (audioPlayer != mp) return;
+            // The stream's LOADED acknowledgment: the duration is decoded
+            // and playback can roll. Apply what the app commanded while
+            // the player could not act on it yet.
+            audioPrepared = true;
+            audioBuffering = false;
+            if (audioPendingSeekMs >= 0) {
+                try {
+                    mp.seekTo(audioPendingSeekMs, MediaPlayer.SEEK_CLOSEST);
+                } catch (IllegalStateException ignored) {
+                }
+                audioPendingSeekMs = -1;
+            }
+            if (audioPendingPlay) {
+                audioPendingPlay = false;
+                try {
+                    mp.start();
+                    startAudioTicks();
+                } catch (IllegalStateException ignored) {
+                }
+            }
+            emitAudioEvent(AUDIO_EVENT_LOADED);
+        });
+        audioPlayer = player;
+        audioPrepared = false;
+        // Honest buffering from stream start until playback actually
+        // rolls; the info callbacks track stalls afterwards.
+        audioBuffering = true;
+        player.prepareAsync();
+        if (cachePath != null) {
+            startAudioCacheDownload(url, cachePath, expectedBytes);
+        }
+        return 0;
+    }
+
+    // Background cache fill: file and network bytes only, no player state,
+    // no events. A failed or cancelled download simply leaves no cache
+    // entry — the next play streams again.
+    private void startAudioCacheDownload(String url, String cachePath, long expectedBytes) {
+        final java.util.concurrent.atomic.AtomicBoolean cancelled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+        audioCacheCancel = cancelled;
+        Thread thread = new Thread(() -> {
+            java.net.HttpURLConnection connection = null;
+            File part = new File(cachePath + ".part");
+            boolean installed = false;
+            try {
+                connection = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                connection.setConnectTimeout(15000);
+                connection.setReadTimeout(30000);
+                if (connection.getResponseCode() != 200) return;
+                File parent = part.getParentFile();
+                if (parent != null) parent.mkdirs();
+                try (InputStream in = connection.getInputStream();
+                     OutputStream out = new FileOutputStream(part)) {
+                    byte[] buffer = new byte[65536];
+                    int count;
+                    while ((count = in.read(buffer)) > 0) {
+                        if (cancelled.get()) return;
+                        out.write(buffer, 0, count);
+                    }
+                }
+                if (cancelled.get()) return;
+                // Truncated or wrong content: never installed.
+                if (expectedBytes != 0 && part.length() != expectedBytes) return;
+                File entry = new File(cachePath);
+                entry.delete();
+                installed = part.renameTo(entry);
+            } catch (Exception ignored) {
+                // No cache entry; playback is unaffected.
+            } finally {
+                if (!installed) part.delete();
+                if (connection != null) connection.disconnect();
+            }
+        }, "native-sdk-audio-cache");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    // First play claims audio focus (deferred from load so a silent app
+    // never takes the route). A rejected request is not fatal — playback
+    // proceeds and the platform arbitrates, matching the iOS session
+    // posture.
+    private void requestAudioFocus() {
+        if (audioFocusHeld) return;
+        AudioManager manager = getSystemService(AudioManager.class);
+        if (manager == null) return;
+        if (audioFocusRequest == null) {
+            audioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(audioAttributes())
+                .setOnAudioFocusChangeListener(this::onAudioFocusChange, audioMainHandler)
+                .build();
+        }
+        audioFocusHeld =
+            manager.requestAudioFocus(audioFocusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+    }
+
+    private void abandonAudioFocus() {
+        if (!audioFocusHeld || audioFocusRequest == null) return;
+        AudioManager manager = getSystemService(AudioManager.class);
+        if (manager != null) manager.abandonAudioFocusRequest(audioFocusRequest);
+        audioFocusHeld = false;
+    }
+
+    // The system moved the output route to someone else (a call, another
+    // media app): the platform is about to silence this player anyway, so
+    // make the transport state match — pause explicitly, stop the ticks,
+    // and report the paused state NOW through one position event. This is
+    // the one pause that must echo: the app did not command it. A
+    // transient duck (short notification blip) keeps playing, and focus
+    // regain deliberately does not auto-resume.
+    private void onAudioFocusChange(int change) {
+        if (change != AudioManager.AUDIOFOCUS_LOSS
+            && change != AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+            return;
+        }
+        audioFocusHeld = false;
+        if (audioPlayer == null) return;
+        audioPendingPlay = false;
+        if (audioPrepared) {
+            try {
+                audioPlayer.pause();
+            } catch (IllegalStateException ignored) {
+            }
+        }
+        stopAudioTicks();
+        emitAudioEvent(AUDIO_EVENT_POSITION);
+    }
+
+    // Transport entry points, called from android_host.c inside runtime
+    // dispatch on the main thread. Results follow the desktop contract:
+    // play and seek return nonzero when they applied, pause/stop/volume
+    // results are advisory.
+
+    @SuppressWarnings("unused") // called from android_host.c
+    int audioPlay() {
+        if (audioPlayer == null) return 0;
+        requestAudioFocus();
+        if (!audioPrepared) {
+            // Stream still preparing: play applies when readiness lands
+            // (the prepared callback starts it) — a stream's play is
+            // asynchronous by nature on every platform. The ticks start
+            // NOW so the un-paused-but-silent state reports honestly
+            // (playing=1, buffering=1) while the network catches up.
+            audioPendingPlay = true;
+            startAudioTicks();
+            return 1;
+        }
+        try {
+            audioPlayer.start();
+        } catch (IllegalStateException e) {
+            return 0;
+        }
+        startAudioTicks();
+        return 1;
+    }
+
+    @SuppressWarnings("unused") // called from android_host.c
+    int audioPause() {
+        if (audioPlayer == null) return 0;
+        audioPendingPlay = false;
+        if (audioPrepared) {
+            try {
+                audioPlayer.pause();
+            } catch (IllegalStateException ignored) {
+            }
+        }
+        stopAudioTicks();
+        return 1;
+    }
+
+    @SuppressWarnings("unused") // called from android_host.c
+    int audioStop() {
+        boolean had = audioPlayer != null;
+        audioReleasePlayer(true);
+        return had ? 1 : 0;
+    }
+
+    @SuppressWarnings("unused") // called from android_host.c
+    int audioSeek(long positionMs) {
+        if (audioPlayer == null) return 0;
+        if (!audioPrepared) {
+            // MediaPlayer cannot seek before prepareAsync completes;
+            // store the target and apply it on the prepared callback so
+            // the seek still lands where the app asked.
+            audioPendingSeekMs = positionMs;
+            return 1;
+        }
+        long target = positionMs;
+        try {
+            int duration = audioPlayer.getDuration();
+            if (duration > 0 && target > duration) target = duration;
+            audioPlayer.seekTo(target, MediaPlayer.SEEK_CLOSEST);
+        } catch (IllegalStateException e) {
+            return 0;
+        }
+        return 1;
+    }
+
+    @SuppressWarnings("unused") // called from android_host.c
+    int audioSetVolume(double volume) {
+        if (audioPlayer == null) return 0;
+        float level = (float) volume;
+        try {
+            audioPlayer.setVolume(level, level);
+        } catch (IllegalStateException ignored) {
+        }
+        return 1;
     }
 
     // ------------------------------------------------------------- assets
@@ -707,5 +1284,7 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
     private native void nativeSetAssetRoot(long app, String path);
     private native void nativeSetAutomationDir(long app, String path);
     private native void nativeSetTextMeasure(long app);
+    private native void nativeSetAudioService(long app);
+    private native void nativeAudioEvent(long app, int kind, long positionMs, long durationMs, int playing, int buffering);
     private native String nativeLastError(long app);
 }

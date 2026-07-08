@@ -370,6 +370,9 @@ fn createAndroidArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
     // manifest's @mipmap reference always resolves) and bundled assets
     // in the layout the host mirrors onto the device at first launch.
     try writeAndroidIcons(allocator, io, dir, options.metadata);
+    const res_path = try std.fs.path.join(allocator, &.{ options.output_path, "res" });
+    defer allocator.free(res_path);
+    try android_tool.writeHostResources(io, res_path);
     const assets_output = try assetOutputPath(allocator, options.output_path, "assets/native-sdk", options);
     defer allocator.free(assets_output);
     const bundle_stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);

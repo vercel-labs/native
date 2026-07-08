@@ -136,7 +136,8 @@ pub fn manifestAlloc(allocator: std.mem.Allocator, metadata: manifest_tool.Metad
     return std.fmt.allocPrint(allocator,
         \\<?xml version="1.0" encoding="utf-8"?>
         \\<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="{s}" android:versionCode="1" android:versionName="{s}">
-        \\  <application android:label="{s}"{s} android:debuggable="true" android:extractNativeLibs="true" android:theme="@android:style/Theme.Material.NoActionBar">
+        \\  <uses-permission android:name="android.permission.INTERNET" />
+        \\  <application android:label="{s}"{s} android:debuggable="true" android:extractNativeLibs="true" android:networkSecurityConfig="@xml/network_security_config" android:theme="@android:style/Theme.Material.NoActionBar">
         \\    <activity android:name="
     ++ host_activity_class ++
         \\" android:exported="true" android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|uiMode" android:windowSoftInputMode="adjustResize">
@@ -149,6 +150,39 @@ pub fn manifestAlloc(allocator: std.mem.Allocator, metadata: manifest_tool.Metad
         \\</manifest>
         \\
     , .{ application_id, version, label, icon_attribute });
+}
+
+/// The manifest-referenced network security policy (`res/xml/`): TLS
+/// stays required for everything on the internet, with cleartext HTTP
+/// scoped to loopback and the emulator's host alias only — the dev loop
+/// streams audio and other media from a server on the development
+/// machine (which the emulator reaches at 10.0.2.2). The Android mirror
+/// of the iOS host's local-networking-only transport exception.
+pub const network_security_config_name = "network_security_config.xml";
+pub const network_security_config =
+    \\<?xml version="1.0" encoding="utf-8"?>
+    \\<network-security-config>
+    \\  <base-config cleartextTrafficPermitted="false" />
+    \\  <domain-config cleartextTrafficPermitted="true">
+    \\    <domain includeSubdomains="false">localhost</domain>
+    \\    <domain includeSubdomains="false">127.0.0.1</domain>
+    \\    <domain includeSubdomains="false">10.0.2.2</domain>
+    \\  </domain-config>
+    \\</network-security-config>
+    \\
+;
+
+/// Write the fixed host resources (the network security config the
+/// manifest references) into `res_dir`, preserving whatever else the
+/// caller already staged there (launcher mipmaps in the package path).
+pub fn writeHostResources(io: std.Io, res_dir: []const u8) !void {
+    var cwd = std.Io.Dir.cwd();
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const xml_dir = try std.fmt.bufPrint(&buffer, "{s}/xml", .{res_dir});
+    try cwd.createDirPath(io, xml_dir);
+    var dir = try cwd.openDir(io, xml_dir, .{});
+    defer dir.close(io);
+    try dir.writeFile(io, .{ .sub_path = network_security_config_name, .data = network_security_config });
 }
 
 // ---------------------------------------------------------------- toolchain
@@ -634,6 +668,7 @@ pub fn runDev(allocator: std.mem.Allocator, io: std.Io, options: DevOptions) !vo
     var cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(io, ".native/android");
     try writeHostSources(io, ".native/android/host");
+    try writeHostResources(io, ".native/android/res");
     const manifest_text = try manifestAlloc(allocator, metadata, false);
     defer allocator.free(manifest_text);
     {
@@ -657,6 +692,7 @@ pub fn runDev(allocator: std.mem.Allocator, io: std.Io, options: DevOptions) !vo
         .manifest_path = ".native/android/AndroidManifest.xml",
         .host_dir = ".native/android/host",
         .so_path = ".native/android/libnative_sdk_host.so",
+        .res_dir = ".native/android/res",
         .assets_dir = if (dirExists(io, "assets")) "assets" else null,
         .keystore_path = keystore_path,
         .out_apk = apk_path,
@@ -1057,6 +1093,12 @@ test "host manifest carries app identity, the host activity, and rotation surviv
     try std.testing.expect(std.mem.indexOf(u8, text, "orientation|screenSize") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "android:windowSoftInputMode=\"adjustResize\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "@mipmap/ic_launcher") != null);
+    // Networking for streamed audio (and other media): INTERNET plus the
+    // security policy that scopes cleartext to local networking only.
+    try std.testing.expect(std.mem.indexOf(u8, text, "android.permission.INTERNET") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "android:networkSecurityConfig=\"@xml/network_security_config\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, network_security_config, "cleartextTrafficPermitted=\"false\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, network_security_config, "10.0.2.2") != null);
 
     const bare = try manifestAlloc(std.testing.allocator, .{
         .id = "dev.native_sdk.hello",
@@ -1077,6 +1119,20 @@ test "the embedded host sources are the toolkit host" {
     try std.testing.expect(std.mem.indexOf(u8, host_bridge_source, "native_sdk_app_ime") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_bridge_source, "ANativeWindow_unlockAndPost") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_app_render_pixels") != null);
+    // The audio service: registered before start, the MediaPlayer engine
+    // with the parallel cache fill, audio focus, and the focus-loss
+    // handler that pauses the transport and reports the paused state
+    // through one immediate position event.
+    try std.testing.expect(std.mem.indexOf(u8, host_activity_source, "nativeSetAudioService") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_activity_source, "MediaPlayer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_activity_source, "AudioFocusRequest") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_activity_source, "onAudioFocusChange") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_activity_source, "startAudioCacheDownload") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_activity_source, "renameTo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_bridge_source, "native_sdk_app_set_audio_service") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_bridge_source, "nativeAudioEvent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_audio_service_t") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_app_audio_event") != null);
 }
 
 test "adb device parsing prefers ready devices and honors requests" {
