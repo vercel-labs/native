@@ -1,11 +1,19 @@
 {
   "name": "@native-sdk/cli-linux-x64-musl",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "The native CLI binary for Linux x64 (musl)",
-  "os": ["linux"],
-  "cpu": ["x64"],
-  "libc": ["musl"],
-  "files": ["bin"],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "musl"
+  ],
+  "files": [
+    "bin"
+  ],
   "preferUnplugged": true,
   "repository": {
     "type": "git",

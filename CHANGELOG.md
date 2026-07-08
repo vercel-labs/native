@@ -2,7 +2,9 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## Unreleased
+## 0.4.0
+
+<!-- release:start -->
 
 ### New Features
 
@@ -92,14 +94,14 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 - **Packaging**: signed bundles keep a valid code signature; packaged apps read their bundled assets and show their display name in the menu bar; archives are labeled with the real optimize mode; unbundled dev runs fall back to the embedded default Dock icon.
 - **Automation and CLI reliability**: commands queue with delivery acknowledgments instead of overwriting a single slot; a landing command wakes an idle app (~4 ms consumption); CLI and app handshake on a protocol version, and stale publishers or binaries are refused loudly; parseable payloads land on stdout; clicks aim at the rendered control, not its stretched box; `native dev` runs Debug so hot reload is actually compiled in; no CLI verb exits silently, and `--help` exits 0 everywhere.
 - **Hardening**: the markdown renderer survives hostile input (three quadratic blowups fixed, a fuzz corpus added); large models neither exhaust the comptime branch quota nor ride the stack (`UiApp.create` constructs in place); mobile embed libraries stage per target so cross-target builds cannot poison each other; oversized inline window sources fail loudly instead of leaving a blank window; docs live previews build, lay out with the selected pack's tokens, animate, and route keyboard shortcuts correctly.
+- **Measured-label controls no longer elide under pixel snapping**: a control sized exactly to its measured label — toggle chips (the system monitor's "PID" sort chip painted "PI…"), buttons, segmented controls and tab triggers, menu and list rows, tooltips, checkbox/radio/switch labels, hug-sized status bars — could lose a fraction of a pixel to render-time geometry snapping and swap real glyphs for an ellipsis. Every measured-label intrinsic width now rounds UP to the snap grid (the badge rule from the previous round), the switch additionally reserves its snapped track extent, and themes without geometry snapping stay bit-identical.
 
 ### Contributors
 
 - @ctate
+<!-- release:end -->
 
 ## 0.3.0
-
-<!-- release:start -->
 
 ### New Features
 
@@ -118,7 +120,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.2.0
 

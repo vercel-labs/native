@@ -1,10 +1,16 @@
 {
   "name": "@native-sdk/cli-darwin-x64",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "The native CLI binary for macOS on Intel (x64)",
-  "os": ["darwin"],
-  "cpu": ["x64"],
-  "files": ["bin"],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin"
+  ],
   "preferUnplugged": true,
   "repository": {
     "type": "git",
