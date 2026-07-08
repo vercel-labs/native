@@ -1380,6 +1380,16 @@ pub fn Effects(comptime Msg: type) type {
         /// Kill every running effect, wait for the workers to finish
         /// (draining their final queue posts), and release the executor
         /// io. Bounded: gives up waiting after ~5s.
+        ///
+        /// Idempotent, and only the FIRST call may touch platform
+        /// services — it ends by severing the services binding, so a
+        /// repeat call answers inert. That property carries the app
+        /// teardown ordering contract: the UiApp stop hook runs this
+        /// while the platform is still alive (the runtime guarantees the
+        /// hook fires before its loop returns), and the app owner's own
+        /// deinit — typically a main() defer that runs after the runner
+        /// has destroyed platform and runtime — reaches this a second
+        /// time, where any service call would dereference freed memory.
         pub fn deinit(self: *Self) void {
             self.shutdown.store(true, .release);
             // Disarm live platform timers (best effort) and clear the table.
@@ -1453,6 +1463,13 @@ pub fn Effects(comptime Msg: type) type {
                 self.allocator.free(buffer);
                 self.drain_heap_line = null;
             }
+            // Sever the services binding last: the platform this pointer
+            // reaches into may be destroyed before the next call arrives
+            // (main's deferred app deinit runs after the runner's platform
+            // teardown), and a severed channel already answers every
+            // transport command inert through its existing no-services
+            // paths instead of dereferencing freed memory.
+            self.services = null;
         }
 
         /// Discard every queued completion, freeing heap line payloads

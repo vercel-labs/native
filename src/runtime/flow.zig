@@ -130,6 +130,27 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             // away, so the watcher can never call into a dead host.
             defer if (command_watcher_running) command_watcher.stop();
 
+            // Teardown ordering contract: everything the app must do
+            // against the live platform — silencing an active audio
+            // player, disarming platform timers, joining effect workers
+            // that post through the platform's wake service — happens in
+            // the app's stop hook, and that hook is guaranteed to run
+            // before run() returns. The app's OWN deinit cannot serve
+            // this purpose: it is typically a `defer` in main that runs
+            // only after the runner's later-declared defers have already
+            // destroyed the platform host and freed the runtime, so any
+            // platform service call from there dereferences freed memory
+            // (the quit-while-audio-plays use-after-free). The platform's
+            // `.app_shutdown` event delivers the stop hook on the normal
+            // quit path; this defer delivers it when the loop exits any
+            // other way (an error unwind, a host that stops without a
+            // shutdown event) — exactly once either way, gated by
+            // `app_stop_delivered`.
+            defer if (!self.app_stop_delivered) {
+                self.app_stop_delivered = true;
+                app.stop(self) catch |err| log(self, "app.stop.failed", @errorName(err), &.{trace.string("app", app.name)});
+            };
+
             var context: RunContext = .{ .runtime = self, .app = app };
             try self.options.platform.run(handlePlatformEvent, &context);
 
@@ -399,6 +420,10 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .app_shutdown => {
                     try dispatchEvent(self, app, .{ .lifecycle = .stop });
                     if (self.options.extensions) |registry| try registry.stopAll(extensionContext(self));
+                    // Marked delivered BEFORE the call: if the hook itself
+                    // errors, the run loop's exit path must not invoke it a
+                    // second time (the hook contract is exactly-once).
+                    self.app_stop_delivered = true;
                     try app.stop(self);
                     log(self, "app.stop", "app stopped", &.{trace.string("app", app.name)});
                 },

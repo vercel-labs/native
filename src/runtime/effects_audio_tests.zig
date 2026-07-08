@@ -485,6 +485,59 @@ fn effectsCachePathNoExt(buffer: []u8) ![]const u8 {
     return effects_mod.audioCachePath(buffer, "/tmp/caches/app", "https://music.example.test/stream?id=42");
 }
 
+test "quit while playing: the stop hook silences audio on the live platform, and app deinit after platform teardown answers inert" {
+    // The desktop runner's exit ordering, replayed exactly: main defers
+    // app deinit FIRST and calls the runner, whose own defers destroy
+    // the platform host and free the runtime — so on quit the platform
+    // dies BEFORE the app's deinit runs. The runtime therefore delivers
+    // the app's stop hook before its loop returns; the hook must stop a
+    // live playback through the still-alive services and sever the
+    // effects channel's binding, so the late deinit never reaches into
+    // freed platform memory (the quit-while-audio-plays crash this
+    // pins: deinit used to call audioStop through the dead host).
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    errdefer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try std.testing.allocator.create(AudioApp);
+    errdefer std.testing.allocator.destroy(app_state);
+    app_state.* = AudioApp.init(std.heap.page_allocator, .{}, .{
+        .name = "effects-audio-quit",
+        .scene = audio_scene,
+        .canvas_label = canvas_label,
+        .update_fx = audioUpdate,
+        .view = audioView,
+    });
+    errdefer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    // A track is playing on the platform's player when the quit lands.
+    try app_state.dispatch(&harness.runtime, 1, .play);
+    try std.testing.expect(app_state.effects.audioSnapshot().active);
+    try std.testing.expect(harness.null_platform.audio.playing);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.audio_stop_count);
+
+    // The platform loop's final event: app_shutdown delivers the stop
+    // hook. It silences the player through the LIVE services and severs
+    // the channel's binding.
+    try harness.stop(app);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.audio_stop_count);
+    try std.testing.expect(!harness.null_platform.audio.loaded);
+    try std.testing.expect(app_state.effects.services == null);
+    try std.testing.expect(!app_state.effects.audioSnapshot().active);
+
+    // The runner's defers: platform host and runtime memory are gone
+    // now. (The harness allocation holds both; freeing it makes any
+    // late service call a real use-after-free, exactly like main.)
+    harness.destroy(std.testing.allocator);
+
+    // Main's deferred deinit runs last. It must free app-side memory
+    // only — no audioStop, no timer cancels, no worker wakes against
+    // the dead platform.
+    app_state.deinit();
+    std.testing.allocator.destroy(app_state);
+}
+
 test "a platform straggler after stop is swallowed, never misattributed" {
     var h = try Harness.create();
     defer h.destroy();

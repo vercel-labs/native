@@ -215,6 +215,17 @@ pub const Runtime = struct {
     next_window_id: platform.WindowId = 2,
     next_view_id: platform.ViewId = 1,
     invalidated: bool = true,
+    /// Whether the app's stop hook (`App.stop`) has been delivered.
+    /// Normally the platform's `.app_shutdown` event delivers it; the
+    /// run loop's exit path checks this flag and delivers a missed stop
+    /// itself (an error unwind can end the loop without a shutdown
+    /// event), so the hook runs exactly once and always while the
+    /// platform's service table is still alive. Apps use the hook to
+    /// release platform-backed resources (the UiApp effects channel
+    /// silences audio, disarms timers, and severs its services binding
+    /// there) because their own deinit typically runs from a `defer` in
+    /// main AFTER the runner has already destroyed platform and runtime.
+    app_stop_delivered: bool = false,
     started_timestamp_ns: u64 = 0,
     timestamp_ns: i128 = 0,
     frame_index: u64 = 0,

@@ -130,6 +130,7 @@ pub fn UiAppHost(comptime AppDef: type) type {
                 .name = options.name,
                 .scene_fn = hostScene,
                 .event_fn = hostEvent,
+                .stop_fn = hostStop,
             }, self.null_platform.platform());
             return self;
         }
@@ -194,6 +195,16 @@ pub fn UiAppHost(comptime AppDef: type) type {
                 else => {},
             }
             try self.inner_app.event(runtime_value, event);
+        }
+
+        /// Forward the stop hook to the inner UiApp: a shim-driven
+        /// shutdown (`native_sdk_app_stop` dispatching `.app_shutdown`)
+        /// tears the effects channel down while the host's service
+        /// table is alive, so the later `destroy` → `ui.deinit` repeats
+        /// nothing against the platform.
+        fn hostStop(context: *anyopaque, runtime_value: *runtime.Runtime) anyerror!void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            try self.inner_app.stop(runtime_value);
         }
     };
 }

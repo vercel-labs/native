@@ -892,6 +892,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         pub fn deinit(self: *Self) void {
+            // In an app main this usually runs AFTER the runner has
+            // already destroyed the platform and runtime (main's defer
+            // was declared first, so it fires last). The platform-facing
+            // half of this teardown therefore already happened in
+            // `stopFn` — effects.deinit is idempotent and severed its
+            // services binding there, so this second call frees app-side
+            // memory only and never touches the dead platform.
             self.effects.deinit();
             self.arenas[0].deinit();
             self.arenas[1].deinit();
@@ -919,8 +926,26 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .name = self.options.name,
                 .scene_fn = sceneFn,
                 .event_fn = eventFn,
+                .stop_fn = stopFn,
                 .replay_fn = replayFn,
             };
+        }
+
+        /// The app's stop hook (`App.stop`): the runtime guarantees it
+        /// runs before its loop returns, i.e. while the platform's
+        /// service table is still alive — and that is the LAST such
+        /// moment this app gets. Tear the effects channel down here in
+        /// full (silence a live audio player, disarm platform timers,
+        /// join effect workers that post through the platform's wake
+        /// service); the teardown also severs the channel's services
+        /// binding, so the `deinit` that main defers — which runs only
+        /// AFTER the runner has destroyed platform and runtime — repeats
+        /// none of these calls and answers inert instead of reaching
+        /// into freed memory.
+        fn stopFn(context: *anyopaque, runtime: *Runtime) anyerror!void {
+            _ = runtime;
+            const self: *Self = @ptrCast(@alignCast(context));
+            self.effects.deinit();
         }
 
         /// Bind the runtime-owned seams onto the effects channel (all
