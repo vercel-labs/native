@@ -281,13 +281,16 @@ test "play, pause, and seek drive the real audio effect" {
     try testing.expectEqualStrings(track.path, request.path);
     try testing.expect(request.playing);
 
-    // The manifest duration displays until the platform's `.loaded`
-    // acknowledgment reports the decoded one — the authority once known.
+    // The manifest duration is the displayed total for the whole
+    // playback; the platform's `.loaded` report is an estimate for this
+    // catalog (the prepared files ship without a seek header) and only
+    // lands in the mirror — the duration rule on `handleAudioEvent`.
     try testing.expectEqual(track.duration_ms, app_state.model.now_duration_ms);
     const decoded_ms: u64 = @as(u64, track.duration_ms) + 240;
     try fx.feedAudioEvent(.loaded, 0, decoded_ms, true);
     try live.wake();
-    try testing.expectEqual(@as(u32, @intCast(decoded_ms)), app_state.model.now_duration_ms);
+    try testing.expectEqual(track.duration_ms, app_state.model.now_duration_ms);
+    try testing.expectEqual(@as(u32, @intCast(decoded_ms)), app_state.model.platform_duration_ms);
 
     // Position ticks advance the elapsed clock and its rendered label.
     try fx.feedAudioEvent(.position, 61_000, decoded_ms, true);
@@ -440,6 +443,71 @@ test "the seek bar's rendered value advances with position events" {
         const expected_fraction = @as(f32, @floatFromInt(position_ms)) / duration;
         try testing.expectApproxEqAbs(expected_fraction, slider_value.?, 0.0001);
     }
+}
+
+test "a divergent platform duration never moves the displayed total off the manifest" {
+    // Regression: the transport bar used to adopt the platform player's
+    // duration report as its total while the track lists rendered the
+    // manifest value, so the same track showed two different lengths at
+    // once. The platform's number is an ESTIMATE for this catalog (the
+    // prepared files ship without a seek header, so a decoder can only
+    // extrapolate from bitrate — a progressive stream's early guess has
+    // measured minutes wrong, and even local playback reads seconds
+    // long). The duration rule on `handleAudioEvent`: the manifest total
+    // drives every display and the seek scale; the platform's report is
+    // mirrored, never displayed while the manifest has a value.
+    const live = try LiveApp.start(true);
+    defer live.stop();
+    const app_state = live.app_state;
+    const fx = &app_state.effects;
+    const track = model_mod.trackById(1);
+
+    try live.dispatch(.{ .play_track = track.id });
+
+    // A wildly high estimate — the mid-stream guess class of error.
+    const estimate_ms: u64 = @as(u64, track.duration_ms) + 104_000;
+    try fx.feedAudioEvent(.loaded, 0, estimate_ms, true);
+    try live.wake();
+    try fx.feedAudioEvent(.position, 30_000, estimate_ms, true);
+    try live.wake();
+
+    // The displayed total stays the manifest value through the load and
+    // every tick; the estimate is observable in the mirror only.
+    try testing.expectEqual(track.duration_ms, app_state.model.now_duration_ms);
+    try testing.expectEqual(@as(u32, @intCast(estimate_ms)), app_state.model.platform_duration_ms);
+
+    // The two surfaces agree: the transport's total label is the exact
+    // string the track list renders for the same track.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const rows = app_state.model.albumTrackRows(arena, track.album);
+    try testing.expectEqual(track.id, rows[0].id);
+    try testing.expectEqualStrings(rows[0].duration, app_state.model.durationLabel(arena));
+
+    // The scrubber fraction is elapsed over the MANIFEST total — sane,
+    // not shrunk by the inflated estimate.
+    const manifest_total: f32 = @floatFromInt(track.duration_ms);
+    const expected_fraction = 30_000.0 / manifest_total;
+    try testing.expectApproxEqAbs(expected_fraction, app_state.model.progressFraction(), 0.0001);
+
+    // A seek lands where the user pointed on the displayed timeline:
+    // the platform target is fraction times the manifest total, the
+    // same scale the scrubber renders.
+    const slider = findByKind(app_state.tree.?.root, .slider).?;
+    var command_buffer: [96]u8 = undefined;
+    const step = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} increment", .{ main.canvas_label, slider.id });
+    try live.harness.runtime.dispatchAutomationCommand(app_state.app(), step);
+    try testing.expect(app_state.model.seek_fraction > 0);
+    const expected_target = app_state.model.seek_fraction * manifest_total;
+    try testing.expectApproxEqAbs(expected_target, @as(f32, @floatFromInt(app_state.model.elapsed_ms)), 1);
+    try testing.expectEqual(@as(u64, app_state.model.elapsed_ms), fx.audioSnapshot().position_ms);
+
+    // Restarting a track resets the mirror with the rest of the
+    // playback state.
+    try live.dispatch(.{ .play_track = track.id + 1 });
+    try testing.expectEqual(@as(u32, 0), app_state.model.platform_duration_ms);
+    try testing.expectEqual(model_mod.trackById(track.id + 1).duration_ms, app_state.model.now_duration_ms);
 }
 
 test "space is the app-wide transport key; ring focus outranks it, quiet rows do not" {

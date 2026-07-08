@@ -10,10 +10,13 @@
 //!
 //! Playback is REAL audio through the runtime audio effect family:
 //! pressing play issues `fx.playAudio` for the track's file and every
-//! report — the load acknowledgment with the decoded duration, coarse
-//! position ticks (with the stream's honest buffering flag), the one
-//! completion at natural end, failures — arrives as an `.audio_event`
-//! Msg through the ordinary update path. The audio files themselves are
+//! report — the load acknowledgment, coarse position ticks (with the
+//! stream's honest buffering flag), the one completion at natural end,
+//! failures — arrives as an `.audio_event` Msg through the ordinary
+//! update path. Positions are the player's real clock and drive the
+//! elapsed display; the player's DURATION reports are estimates for
+//! this catalog and never replace the manifest total (the duration
+//! rule, documented on `handleAudioEvent`). The audio files themselves are
 //! gitignored (the prepare script produces them), and sources resolve
 //! in a fixed order: the prepared LOCAL file, then a verified CACHE
 //! entry, then a progressive STREAM from the catalog's URL base that
@@ -88,8 +91,11 @@ pub const Track = struct {
     /// The manifest's relative file path ("music/<album>/<track>.mp3"),
     /// doubling as the track's URL path under the streaming base.
     file: []const u8,
-    /// The manifest's duration — the display value until the platform's
-    /// `.loaded` acknowledgment reports the decoded one.
+    /// The manifest's duration, MEASURED from the intact source file by
+    /// the prepare script — the total every surface displays and the
+    /// seek math uses. The platform player's self-reported duration
+    /// never replaces it: see `handleAudioEvent` for why that number is
+    /// an estimate for this catalog.
     duration_ms: u32,
     /// The prepared file's exact byte size — the cache integrity gate
     /// for streamed plays (a cache entry whose size disagrees never
@@ -407,11 +413,19 @@ pub const Model = struct {
     /// clock. Never reset: a stale gap (pause, occlusion, boot) is
     /// bounded by the frame-interval clamp in `advanceRenderedClock`.
     frame_ns: u64 = 0,
-    /// The loaded track's duration for display and seek math: the
-    /// manifest value at start, replaced by the platform's decoded
-    /// duration when the `.loaded` acknowledgment arrives (the platform
-    /// is the authority once it has actually opened the file).
+    /// The loaded track's TOTAL for display and seek math: the manifest
+    /// duration, the same number the track lists render — the two
+    /// surfaces must agree. The platform's self-reported duration never
+    /// replaces a nonzero manifest value (it is an estimate for this
+    /// catalog — see `handleAudioEvent`); only a track the manifest
+    /// carries no duration for adopts the platform's report, since an
+    /// estimated scrubber beats a dead one.
     now_duration_ms: u32 = 0,
+    /// The platform player's own duration report, mirrored verbatim
+    /// from the audio events: observable state for tests and debugging,
+    /// and the fallback total above — never the displayed number while
+    /// the manifest has one.
+    platform_duration_ms: u32 = 0,
     /// A track's file failed to load (the gitignored audio assets are
     /// not prepared, no URL base is configured, or the platform has no
     /// audio playback): playback is cleared and the now-playing bar
@@ -466,6 +480,7 @@ pub const Model = struct {
         "detail_scroll",   "canvas_width",   "songs_scroll",
         "now",             "selected",       "playing",
         "elapsed_ms",      "frame_ns",       "now_duration_ms",
+        "platform_duration_ms",
         "assets_missing",  "stream_failed",  "buffering",
         "url_base_len",    "cache_dir_len",  "queue_dropped",
         "seek_fraction",   "copies_done",    "copy_failed",
@@ -878,22 +893,34 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
 /// Every playback report flows through here. The audio key is the track
 /// id, so a straggler for a track the model no longer plays is dropped
 /// by identity — never misattributed to the current one.
+///
+/// THE DURATION RULE. Events carry the platform player's own duration
+/// readout, and for this catalog that number is an ESTIMATE, never the
+/// truth: the prepare script strips the seek header from every prepared
+/// file (nothing of the source encoder may survive the strip), so a
+/// decoder can only extrapolate the length from the bitrate it has seen
+/// — a progressive stream's early guess has measured minutes wrong, and
+/// even a fully local file reads seconds long and wobbles between
+/// ticks. The manifest duration was measured from the intact SOURCE
+/// file and matches a full decode exactly, so `now_duration_ms` (the
+/// displayed total, the scrubber's denominator, the seek target's
+/// scale) keeps the manifest value and the platform's report only lands
+/// in `platform_duration_ms` — adopted as the total solely when the
+/// manifest carries no duration at all. Positions are different:
+/// position ticks are the player's REAL clock and stay authoritative.
 fn handleAudioEvent(model: *Model, fx: *Effects, event: native_sdk.EffectAudio) void {
     const now = model.now orelse return;
     if (event.key != now) return;
     switch (event.kind) {
         .loaded => {
-            // The platform decoded the file: its duration is the
-            // authority from here on (the manifest's estimate may differ
-            // by a little).
-            if (event.duration_ms > 0) model.now_duration_ms = @intCast(event.duration_ms);
+            adoptPlatformDuration(model, event.duration_ms);
             model.elapsed_ms = @intCast(event.position_ms);
             model.playing = event.playing;
             model.buffering = event.buffering;
         },
         .position => {
             const position: u32 = @intCast(event.position_ms);
-            if (event.duration_ms > 0) model.now_duration_ms = @intCast(event.duration_ms);
+            adoptPlatformDuration(model, event.duration_ms);
             // The stream's honest stall flag rides every tick; local
             // files always report false.
             model.buffering = event.buffering;
@@ -932,8 +959,19 @@ fn handleAudioEvent(model: *Model, fx: *Effects, event: native_sdk.EffectAudio) 
             model.buffering = false;
             model.elapsed_ms = 0;
             model.now_duration_ms = 0;
+            model.platform_duration_ms = 0;
         },
     }
+}
+
+/// Mirror the platform's duration report, and adopt it as the displayed
+/// total ONLY when the manifest gave none (see the duration rule on
+/// `handleAudioEvent`).
+fn adoptPlatformDuration(model: *Model, reported_ms: u64) void {
+    if (reported_ms == 0) return;
+    const clamped: u32 = @intCast(@min(reported_ms, std.math.maxInt(u32)));
+    model.platform_duration_ms = clamped;
+    if (model.now_duration_ms == 0) model.now_duration_ms = clamped;
 }
 
 /// The play gesture on a specific track (double click, Enter, context
@@ -1024,7 +1062,12 @@ fn startTrack(model: *Model, fx: *Effects, track_id: u8) void {
     // the now-playing slide-in window, so animation gating replays
     // deterministically (no live clock read anywhere).
     model.elapsed_ms = 0;
+    // The manifest's measured duration is the total for the whole
+    // playback — the same number the track lists render, so the two
+    // surfaces agree by construction (the duration rule on
+    // `handleAudioEvent`). The platform's estimate mirror restarts too.
     model.now_duration_ms = track.duration_ms;
+    model.platform_duration_ms = 0;
     // A fresh attempt clears the degraded notices; if the source is
     // still unplayable the `.failed` event raises the right one again.
     model.assets_missing = false;

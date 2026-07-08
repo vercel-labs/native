@@ -4,14 +4,17 @@
 //! state the deck binds to.
 //!
 //! Playback is REAL: pressing play issues `fx.playAudio` against the
-//! shared on-disk library and every report — the load acknowledgment
-//! with the decoded duration, coarse position ticks while playing, the
-//! one completion at natural end, failures — arrives as an
-//! `.audio_event` Msg through the ordinary update path. The progress
-//! clock (`elapsed_ms`) advances only on position events, so everything
-//! derived from it (the marquee, the spectrum) freezes on pause because
-//! the clock stops — the same deterministic contract the timer
-//! simulation had, now fed by the platform player.
+//! shared on-disk library and every report — the load acknowledgment,
+//! coarse position ticks while playing, the one completion at natural
+//! end, failures — arrives as an `.audio_event` Msg through the
+//! ordinary update path. The progress clock (`elapsed_ms`) advances
+//! only on position events, so everything derived from it (the
+//! marquee, the spectrum) freezes on pause because the clock stops —
+//! the same deterministic contract the timer simulation had, now fed
+//! by the platform player. Positions are the player's real clock; the
+//! player's DURATION reports are estimates for this catalog and never
+//! replace the manifest total (the duration rule, documented on
+//! `handleAudio`).
 //!
 //! The committed manifest ships a hosted URL base, so a missing local
 //! file STREAMS on demand — a fresh clone plays with zero setup. Only
@@ -101,8 +104,11 @@ pub const Track = struct {
     /// The manifest's relative file path, doubling as the track's URL
     /// path under the streaming base.
     file: []const u8,
-    /// Manifest duration: the display default until the platform's
-    /// `.loaded` acknowledgment reports the decoded duration.
+    /// The manifest's duration, MEASURED from the intact source file by
+    /// the prepare script — the total every surface displays and the
+    /// seek math uses. The platform player's self-reported duration
+    /// never replaces it: see `handleAudio` for why that number is an
+    /// estimate for this catalog.
     duration_ms: u32,
     /// The prepared file's exact byte size — the cache integrity gate
     /// for streamed plays.
@@ -280,10 +286,18 @@ pub const Model = struct {
     now: ?u8 = null, // loaded track id
     playing: bool = false,
     elapsed_ms: u32 = 0,
-    /// The loaded track's duration as the deck knows it: the manifest
-    /// value at load, replaced by the platform's decoded duration when
-    /// the `.loaded` acknowledgment arrives.
+    /// The loaded track's TOTAL for the timecode and seek math: the
+    /// manifest duration, the same number the ledger renders — the two
+    /// surfaces must agree. The platform's self-reported duration never
+    /// replaces a nonzero manifest value (it is an estimate for this
+    /// catalog — see `handleAudio`); only a track the manifest carries
+    /// no duration for adopts the platform's report.
     now_duration_ms: u32 = 0,
+    /// The platform player's own duration report, mirrored verbatim
+    /// from the audio events: observable state for tests and debugging,
+    /// and the fallback total above — never the displayed number while
+    /// the manifest has one.
+    platform_duration_ms: u32 = 0,
     /// A load failed (missing mp3s, no URL base, or a platform without
     /// audio): the display wears the NO MEDIA remedy until the next
     /// successful load attempt.
@@ -757,14 +771,28 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
 /// channel resolved them against; a straggler for a replaced track (the
 /// deck already started something else) is dropped rather than applied
 /// to the wrong record.
+///
+/// THE DURATION RULE (shared with the soundboard — one catalog, one
+/// rule). Events carry the platform player's own duration readout, and
+/// for this catalog that number is an ESTIMATE, never the truth: the
+/// prepare script strips the seek header from every prepared file
+/// (nothing of the source encoder may survive the strip), so a decoder
+/// can only extrapolate the length from the bitrate it has seen — a
+/// progressive stream's early guess has measured minutes wrong, and
+/// even a fully local file reads seconds long and wobbles between
+/// ticks. The manifest duration was measured from the intact SOURCE
+/// file and matches a full decode exactly, so `now_duration_ms` (the
+/// timecode total, the progress denominator, the seek target's scale)
+/// keeps the manifest value and the platform's report only lands in
+/// `platform_duration_ms` — adopted as the total solely when the
+/// manifest carries no duration at all. Positions are different:
+/// position ticks are the player's REAL clock and stay authoritative.
 fn handleAudio(model: *Model, fx: *Effects, event: native_sdk.EffectAudio) void {
     const id = model.now orelse return;
     if (event.key != @as(u64, id)) return;
     switch (event.kind) {
         .loaded => {
-            // The platform's decoded duration replaces the manifest's
-            // display default.
-            model.now_duration_ms = clampMs(event.duration_ms);
+            adoptPlatformDuration(model, event.duration_ms);
             model.buffering = event.buffering;
         },
         .position => {
@@ -773,6 +801,7 @@ fn handleAudio(model: *Model, fx: *Effects, event: native_sdk.EffectAudio) void 
             // so pause freezes it all deterministically. The stream's
             // honest stall flag rides every tick.
             model.elapsed_ms = clampMs(event.position_ms);
+            adoptPlatformDuration(model, event.duration_ms);
             model.buffering = event.buffering;
         },
         // Natural end: the play-next queue wins, else album order.
@@ -790,6 +819,7 @@ fn handleAudio(model: *Model, fx: *Effects, event: native_sdk.EffectAudio) void 
             model.buffering = false;
             model.elapsed_ms = 0;
             model.now_duration_ms = 0;
+            model.platform_duration_ms = 0;
             if (model.streamingConfigured()) {
                 model.stream_failed = true;
             } else {
@@ -803,12 +833,26 @@ fn clampMs(ms: u64) u32 {
     return @intCast(@min(ms, std.math.maxInt(u32)));
 }
 
+/// Mirror the platform's duration report, and adopt it as the displayed
+/// total ONLY when the manifest gave none (see the duration rule on
+/// `handleAudio`).
+fn adoptPlatformDuration(model: *Model, reported_ms: u64) void {
+    if (reported_ms == 0) return;
+    const clamped = clampMs(reported_ms);
+    model.platform_duration_ms = clamped;
+    if (model.now_duration_ms == 0) model.now_duration_ms = clamped;
+}
+
 fn startTrack(model: *Model, fx: *Effects, track_id: u8) void {
     const track = trackById(track_id);
     model.now = track_id;
     model.elapsed_ms = 0;
-    // Display default until `.loaded` reports the decoded duration.
+    // The manifest's measured duration is the total for the whole
+    // playback — the same number the ledger renders, so the two
+    // surfaces agree by construction (the duration rule on
+    // `handleAudio`). The platform's estimate mirror restarts too.
     model.now_duration_ms = track.duration_ms;
+    model.platform_duration_ms = 0;
     // A fresh load attempt is the retry path out of the failure states.
     model.media_failed = false;
     model.stream_failed = false;

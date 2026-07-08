@@ -429,7 +429,12 @@ pub const EffectTimer = struct {
 pub const max_effect_audio_path_bytes: usize = platform.max_audio_path_bytes;
 
 /// How an audio event Msg came to be. `loaded` acknowledges a successful
-/// `playAudio` load with the real decoded duration; `position` ticks at
+/// `playAudio` load with the platform player's duration readout — the
+/// player's own estimate, NOT a measured truth: a source without a seek
+/// header is extrapolated from bitrate, and a progressive stream's
+/// early readout can be minutes off (later ticks may revise it). An app
+/// holding an authoritative duration of its own (a catalog manifest)
+/// should prefer it for display; `position` ticks at
 /// the platform's coarse honest cadence (~500ms) only while playing;
 /// `completed` fires exactly once at the track's natural end; `failed`
 /// reports a load/decode/device failure or a platform without audio

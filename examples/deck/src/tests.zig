@@ -364,7 +364,8 @@ test "play, pause, seek, and volume drive the audio effect channel" {
     try live.dispatch(.{ .play_track = first_track.id });
     try testing.expect(app_state.model.playing);
     try testing.expectEqual(@as(?u8, first_track.id), app_state.model.now);
-    // The manifest duration is the display default until `.loaded`.
+    // The manifest duration is the displayed total for the whole
+    // playback — the same number the ledger renders.
     try testing.expectEqual(first_track.duration_ms, app_state.model.now_duration_ms);
     const request = app_state.effects.pendingAudio().?;
     try testing.expectEqual(@as(u64, first_track.id), request.key);
@@ -372,10 +373,14 @@ test "play, pause, seek, and volume drive the audio effect channel" {
     try testing.expect(request.playing);
     try testing.expectEqual(app_state.model.volume_fraction, request.volume);
 
-    // The loaded acknowledgment adopts the platform's decoded duration.
+    // The loaded acknowledgment's duration report is an estimate for
+    // this catalog (the prepared files ship without a seek header): it
+    // lands in the mirror and the displayed total keeps the manifest
+    // value — the duration rule on `handleAudio`.
     const decoded_ms: u64 = @as(u64, first_track.duration_ms) + 1_500;
     try live.feedAudio(.loaded, 0, decoded_ms, true);
-    try testing.expectEqual(@as(u32, @intCast(decoded_ms)), app_state.model.now_duration_ms);
+    try testing.expectEqual(first_track.duration_ms, app_state.model.now_duration_ms);
+    try testing.expectEqual(@as(u32, @intCast(decoded_ms)), app_state.model.platform_duration_ms);
 
     // Position ticks are the progress clock.
     try live.feedAudio(.position, 1_500, decoded_ms, true);
@@ -441,6 +446,56 @@ test "play, pause, seek, and volume drive the audio effect channel" {
     try testing.expectApproxEqAbs(@as(f32, 0.75), app_state.model.seek_fraction, 0.001);
     try testing.expectEqual(@as(u64, app_state.model.elapsed_ms), app_state.effects.audioSnapshot().position_ms);
     try testing.expectApproxEqAbs(0.75 * duration, @as(f32, @floatFromInt(app_state.model.elapsed_ms)), 1);
+}
+
+test "a divergent platform duration never moves the deck's total off the manifest" {
+    // Regression twin of the soundboard pin (one catalog, one rule):
+    // the timecode total used to adopt the platform player's duration
+    // report while the ledger rendered the manifest value, so the same
+    // track showed two lengths at once. The platform's number is an
+    // estimate for this catalog (the prepared files ship without a seek
+    // header); the manifest total drives the timecode, the progress
+    // fraction, and the seek scale — the duration rule on `handleAudio`.
+    const live = try LiveApp.start(true);
+    defer live.stop();
+    const app_state = live.app_state;
+
+    try live.dispatch(.{ .play_track = first_track.id });
+    const estimate_ms: u64 = @as(u64, first_track.duration_ms) + 104_000;
+    try live.feedAudio(.loaded, 0, estimate_ms, true);
+    try live.feedAudio(.position, 30_000, estimate_ms, true);
+
+    // The displayed total stays the manifest value; the estimate is
+    // observable in the mirror only.
+    try testing.expectEqual(first_track.duration_ms, app_state.model.now_duration_ms);
+    try testing.expectEqual(@as(u32, @intCast(estimate_ms)), app_state.model.platform_duration_ms);
+
+    // The two surfaces agree: the timecode's total is the exact string
+    // the ledger renders for the same track.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const rows = app_state.model.visibleTracks(arena);
+    try testing.expectEqual(first_track.id, rows[0].id);
+    try testing.expectEqualStrings(rows[0].duration, app_state.model.durationLabel(arena));
+
+    // The progress fraction is elapsed over the MANIFEST total.
+    const manifest_total: f32 = @floatFromInt(first_track.duration_ms);
+    try testing.expectApproxEqAbs(30_000.0 / manifest_total, app_state.model.progressFraction(), 0.0001);
+
+    // A seek lands on the same scale the display renders.
+    const seek_id = try live.widgetIdByLabel(main.canvas_label, 1, .slider, "Seek");
+    try live.widgetAction(main.canvas_label, seek_id, "increment");
+    try testing.expect(app_state.model.seek_fraction > 0);
+    const expected_target = app_state.model.seek_fraction * manifest_total;
+    try testing.expectApproxEqAbs(expected_target, @as(f32, @floatFromInt(app_state.model.elapsed_ms)), 1);
+    try testing.expectEqual(@as(u64, app_state.model.elapsed_ms), app_state.effects.audioSnapshot().position_ms);
+
+    // Restarting a track resets the mirror with the rest of the
+    // playback state.
+    try live.dispatch(.{ .play_track = first_track.id + 1 });
+    try testing.expectEqual(@as(u32, 0), app_state.model.platform_duration_ms);
+    try testing.expectEqual(model_mod.trackById(first_track.id + 1).duration_ms, app_state.model.now_duration_ms);
 }
 
 test "track end auto-advances; the play-next queue wins over album order" {
