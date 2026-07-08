@@ -87,6 +87,10 @@ const GtkEvent = extern struct {
     audio_duration_ms: u64,
     audio_playing: c_int,
     audio_buffering: c_int,
+    /// SPECTRUM report payload: the 32 band magnitude bytes on the
+    /// documented scale (log-spaced 50 Hz..16 kHz buckets, linear-in-dB
+    /// from -60 dBFS at 0 to full scale at 255). Zeros elsewhere.
+    audio_bands: [platform_mod.audio_spectrum_band_count]u8,
 };
 
 const GtkCallback = *const fn (context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void;
@@ -148,6 +152,7 @@ extern fn native_sdk_gtk_set_credential(host: *GtkHost, service: [*]const u8, se
 extern fn native_sdk_gtk_get_credential(host: *GtkHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_gtk_delete_credential(host: *GtkHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize) c_int;
 extern fn native_sdk_gtk_audio_available(host: *GtkHost) c_int;
+extern fn native_sdk_gtk_audio_spectrum_available(host: *GtkHost) c_int;
 extern fn native_sdk_gtk_audio_load(host: *GtkHost, path: [*]const u8, path_len: usize) c_int;
 extern fn native_sdk_gtk_audio_load_url(host: *GtkHost, url: [*]const u8, url_len: usize, cache_path: [*]const u8, cache_path_len: usize, expected_bytes: u64) c_int;
 extern fn native_sdk_gtk_audio_play(host: *GtkHost) c_int;
@@ -343,6 +348,12 @@ pub const LinuxPlatform = struct {
             // the library honestly answers false and playback degrades
             // to one explicit failed Msg instead of pretending.
             .audio_playback, .audio_streaming => self.web_engine == .system and audioAvailable(self.host),
+            // Spectrum analysis rides GStreamer's `spectrum` element in
+            // the same playbin (gst-plugins-good, packaged separately
+            // from the core library) — probed live like the player, so
+            // a host whose plugin set lacks it answers false and the
+            // deck's glass rests honestly instead of dancing on fakes.
+            .audio_spectrum => self.web_engine == .system and audioSpectrumAvailable(self.host),
             .tray => false,
             // Native scroll drivers, native context menus, and app-owned
             // view-surface adoption are macOS-only today; GTK keeps the
@@ -365,6 +376,12 @@ pub const LinuxPlatform = struct {
         if (comptime @import("builtin").is_test) return false;
         if (@import("builtin").target.os.tag != .linux) return false;
         return native_sdk_gtk_audio_available(host) != 0;
+    }
+
+    fn audioSpectrumAvailable(host: *GtkHost) bool {
+        if (comptime @import("builtin").is_test) return false;
+        if (@import("builtin").target.os.tag != .linux) return false;
+        return native_sdk_gtk_audio_spectrum_available(host) != 0;
     }
 
     fn run(context: *anyopaque, handler: platform_mod.EventHandler, handler_context: *anyopaque) anyerror!void {
@@ -503,6 +520,7 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
             .duration_ms = event.audio_duration_ms,
             .playing = event.audio_playing != 0,
             .buffering = event.audio_buffering != 0,
+            .bands = event.audio_bands,
         } }),
     }
 }
@@ -516,6 +534,7 @@ fn audioEventKindFromInt(value: c_int) platform_mod.AudioEventKind {
         0 => .loaded,
         1 => .position,
         2 => .completed,
+        4 => .spectrum,
         else => .failed,
     };
 }

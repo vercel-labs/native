@@ -5,6 +5,7 @@
 #include <glib/gstdio.h>
 #include <dlfcn.h>
 #include <limits.h>
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -202,7 +203,17 @@ typedef struct native_sdk_gtk_audio {
     char *cache_entry_path;
     void *playbin; /* GstElement* */
     void *bus;     /* GstBus* */
-    gulong bus_handlers[5];
+    /* The playbin's audio-filter `spectrum` analyzer (one ref owned
+     * here; the playbin holds its own). NULL whenever the analyzer
+     * could not be built — playback never depends on it, the SPECTRUM
+     * reports simply never flow. */
+    void *spectrum; /* GstElement* */
+    /* Sample rate learned from the analyzer's sink caps at the first
+     * spectrum message; 0 until negotiated. Per-pipeline state: every
+     * load builds a fresh playbin, so a track's rate never leaks into
+     * the next. */
+    int spectrum_rate;
+    gulong bus_handlers[6];
     GCancellable *download_cancel;
 } native_sdk_gtk_audio_t;
 
@@ -4104,11 +4115,28 @@ int native_sdk_gtk_delete_credential(native_sdk_gtk_host_t *host, const char *se
 #define NATIVE_SDK_AUDIO_EVENT_POSITION 1
 #define NATIVE_SDK_AUDIO_EVENT_COMPLETED 2
 #define NATIVE_SDK_AUDIO_EVENT_FAILED 3
+#define NATIVE_SDK_AUDIO_EVENT_SPECTRUM 4
 
 /* 500 ms is the shared coarse position cadence (macOS, Windows, and the
  * null platform tick the same), so frame-clock scrubber interpolation
  * behaves identically across hosts. */
 #define NATIVE_SDK_AUDIO_POSITION_INTERVAL_MS 500
+
+/* Spectrum analysis contract (shared across hosts, see the SDK's audio
+ * event documentation): 32 report bands with log-spaced buckets
+ * covering 50 Hz..16 kHz; each byte is the bucket's PEAK magnitude in
+ * dBFS clamped to [-60, 0] and mapped linearly onto 0..255. The
+ * analyzer itself runs at a higher LINEAR resolution (128 bins over
+ * 0..rate/2) so the log fold has real data in the low buckets, and
+ * posts every 40 ms — only while samples actually flow, so pause and
+ * stop starve the reports naturally. The interval is nanoseconds
+ * (GStreamer clock time, hand-mirrored like the other constants). */
+#define NATIVE_SDK_AUDIO_SPECTRUM_BANDS 32
+#define NATIVE_SDK_AUDIO_SPECTRUM_SOURCE_BANDS 128
+#define NATIVE_SDK_AUDIO_SPECTRUM_INTERVAL_NS ((guint64)40000000)
+#define NATIVE_SDK_AUDIO_SPECTRUM_FLOOR_DB (-60.0f)
+#define NATIVE_SDK_AUDIO_SPECTRUM_MIN_HZ 50.0f
+#define NATIVE_SDK_AUDIO_SPECTRUM_MAX_HZ 16000.0f
 
 /* GStreamer core constants, mirrored from the stable public API (the
  * same hand-mirroring the libsecret schema above uses): element states,
@@ -4211,6 +4239,80 @@ static native_sdk_gst_api_t *native_sdk_load_gst_api(void) {
     native_sdk_gst_api.handle = handle;
     native_sdk_gst_api.ready = 1;
     return &native_sdk_gst_api;
+}
+
+/* The spectrum-only slice of the GStreamer surface, resolved SEPARATELY
+ * from the core player symbols on purpose: these are needed only to
+ * parse the `spectrum` element's bus messages and read the negotiated
+ * sample rate, so a host where any of them is missing keeps a fully
+ * working player and merely reports analysis unavailable — the additive
+ * capability degrades alone, never the playback it rides on. GLib and
+ * GObject calls (g_object_set, g_value_get_float) stay direct links,
+ * as everywhere else in this file; only GStreamer goes through dlsym
+ * because the toolkit's link surface is GTK + WebKitGTK. */
+typedef const void *(*native_sdk_gst_message_get_structure_fn)(void *message);
+typedef const char *(*native_sdk_gst_structure_get_name_fn)(const void *structure);
+typedef const GValue *(*native_sdk_gst_structure_get_value_fn)(const void *structure, const char *fieldname);
+typedef unsigned (*native_sdk_gst_value_list_get_size_fn)(const GValue *value);
+typedef const GValue *(*native_sdk_gst_value_list_get_value_fn)(const GValue *value, unsigned index);
+typedef void *(*native_sdk_gst_element_get_static_pad_fn)(void *element, const char *name);
+typedef void *(*native_sdk_gst_pad_get_current_caps_fn)(void *pad);
+typedef void *(*native_sdk_gst_caps_get_structure_fn)(void *caps, unsigned index);
+typedef int (*native_sdk_gst_structure_get_int_fn)(const void *structure, const char *fieldname, int *value);
+typedef void (*native_sdk_gst_mini_object_unref_fn)(void *mini_object);
+
+typedef struct native_sdk_gst_spectrum_api {
+    int attempted;
+    int ready;
+    native_sdk_gst_message_get_structure_fn message_get_structure;
+    native_sdk_gst_structure_get_name_fn structure_get_name;
+    native_sdk_gst_structure_get_value_fn structure_get_value;
+    native_sdk_gst_value_list_get_size_fn value_list_get_size;
+    native_sdk_gst_value_list_get_value_fn value_list_get_value;
+    native_sdk_gst_element_get_static_pad_fn element_get_static_pad;
+    native_sdk_gst_pad_get_current_caps_fn pad_get_current_caps;
+    native_sdk_gst_caps_get_structure_fn caps_get_structure;
+    native_sdk_gst_structure_get_int_fn structure_get_int;
+    /* GstCaps is a GstMiniObject, not a GObject — its release goes
+     * through gst_mini_object_unref (the header-only gst_caps_unref is
+     * an inline over exactly this call). */
+    native_sdk_gst_mini_object_unref_fn mini_object_unref;
+} native_sdk_gst_spectrum_api_t;
+
+static native_sdk_gst_spectrum_api_t native_sdk_gst_spectrum_api = {0};
+
+static native_sdk_gst_spectrum_api_t *native_sdk_load_gst_spectrum_api(void) {
+    if (native_sdk_gst_spectrum_api.attempted) return native_sdk_gst_spectrum_api.ready ? &native_sdk_gst_spectrum_api : NULL;
+    /* Rides the core loader's handle: without a playable backend there
+     * is nothing to analyze. */
+    native_sdk_gst_api_t *gst = native_sdk_load_gst_api();
+    native_sdk_gst_spectrum_api.attempted = 1;
+    if (!gst) return NULL;
+    void *handle = gst->handle;
+    native_sdk_gst_spectrum_api.message_get_structure = (native_sdk_gst_message_get_structure_fn)native_sdk_dlsym(handle, "gst_message_get_structure");
+    native_sdk_gst_spectrum_api.structure_get_name = (native_sdk_gst_structure_get_name_fn)native_sdk_dlsym(handle, "gst_structure_get_name");
+    native_sdk_gst_spectrum_api.structure_get_value = (native_sdk_gst_structure_get_value_fn)native_sdk_dlsym(handle, "gst_structure_get_value");
+    native_sdk_gst_spectrum_api.value_list_get_size = (native_sdk_gst_value_list_get_size_fn)native_sdk_dlsym(handle, "gst_value_list_get_size");
+    native_sdk_gst_spectrum_api.value_list_get_value = (native_sdk_gst_value_list_get_value_fn)native_sdk_dlsym(handle, "gst_value_list_get_value");
+    native_sdk_gst_spectrum_api.element_get_static_pad = (native_sdk_gst_element_get_static_pad_fn)native_sdk_dlsym(handle, "gst_element_get_static_pad");
+    native_sdk_gst_spectrum_api.pad_get_current_caps = (native_sdk_gst_pad_get_current_caps_fn)native_sdk_dlsym(handle, "gst_pad_get_current_caps");
+    native_sdk_gst_spectrum_api.caps_get_structure = (native_sdk_gst_caps_get_structure_fn)native_sdk_dlsym(handle, "gst_caps_get_structure");
+    native_sdk_gst_spectrum_api.structure_get_int = (native_sdk_gst_structure_get_int_fn)native_sdk_dlsym(handle, "gst_structure_get_int");
+    native_sdk_gst_spectrum_api.mini_object_unref = (native_sdk_gst_mini_object_unref_fn)native_sdk_dlsym(handle, "gst_mini_object_unref");
+    const int resolved = native_sdk_gst_spectrum_api.message_get_structure &&
+        native_sdk_gst_spectrum_api.structure_get_name && native_sdk_gst_spectrum_api.structure_get_value &&
+        native_sdk_gst_spectrum_api.value_list_get_size && native_sdk_gst_spectrum_api.value_list_get_value &&
+        native_sdk_gst_spectrum_api.element_get_static_pad && native_sdk_gst_spectrum_api.pad_get_current_caps &&
+        native_sdk_gst_spectrum_api.caps_get_structure && native_sdk_gst_spectrum_api.structure_get_int &&
+        native_sdk_gst_spectrum_api.mini_object_unref;
+    if (!resolved) {
+        /* The handle belongs to the core api — never closed here. */
+        memset(&native_sdk_gst_spectrum_api, 0, sizeof(native_sdk_gst_spectrum_api));
+        native_sdk_gst_spectrum_api.attempted = 1;
+        return NULL;
+    }
+    native_sdk_gst_spectrum_api.ready = 1;
+    return &native_sdk_gst_spectrum_api;
 }
 
 typedef void *(*native_sdk_soup_session_new_fn)(void);
@@ -4355,6 +4457,26 @@ static void native_sdk_audio_emit_event(native_sdk_gtk_host_t *host, int kind) {
     native_sdk_audio_emit_report(host, kind, native_sdk_audio_position_ms(host), audio->duration_ms, audio->playing ? 1 : 0, audio->buffering ? 1 : 0);
 }
 
+/* The SPECTRUM sibling of the report emit above: the transport readout
+ * fills exactly like a position tick's (live position at emit time)
+ * with the folded band bytes on top. Every other emit in this section
+ * zero-initializes the event struct, so audio_bands is all zeros on
+ * every non-spectrum event by construction. */
+static void native_sdk_audio_emit_spectrum(native_sdk_gtk_host_t *host, const uint8_t bands[NATIVE_SDK_AUDIO_SPECTRUM_BANDS]) {
+    native_sdk_gtk_audio_t *audio = &host->audio;
+    native_sdk_gtk_event_t event = {
+        .kind = NATIVE_SDK_GTK_EVENT_AUDIO,
+        .timestamp_ns = native_sdk_gpu_timestamp_ns(),
+        .audio_kind = NATIVE_SDK_AUDIO_EVENT_SPECTRUM,
+        .audio_position_ms = native_sdk_audio_position_ms(host),
+        .audio_duration_ms = audio->duration_ms,
+        .audio_playing = audio->playing ? 1 : 0,
+        .audio_buffering = audio->buffering ? 1 : 0,
+    };
+    memcpy(event.audio_bands, bands, sizeof(event.audio_bands));
+    native_sdk_emit(host, event);
+}
+
 /* WM-timer analog for the audio position tick: one position report per
  * interval while a playback is live; a straggler after teardown retires
  * itself. Streams may learn their real duration late — re-query while
@@ -4413,6 +4535,12 @@ static void native_sdk_audio_release(native_sdk_gtk_host_t *host, int cancel_dow
         if (gst) gst->element_set_state(audio->playbin, NATIVE_SDK_GST_STATE_NULL);
         g_object_unref(audio->playbin);
         audio->playbin = NULL;
+    }
+    if (audio->spectrum) {
+        /* The playbin owned the analyzer's pipeline membership and is
+         * already released; this drops the one ref sunk at attach. */
+        g_object_unref(audio->spectrum);
+        audio->spectrum = NULL;
     }
     if (audio->download_cancel) {
         if (cancel_download) g_cancellable_cancel(audio->download_cancel);
@@ -4478,6 +4606,105 @@ static void native_sdk_audio_on_state_changed(void *bus, void *message, gpointer
     if (new_state != NATIVE_SDK_GST_STATE_PLAYING) return;
     audio->buffering = 0;
     native_sdk_audio_emit_event(host, NATIVE_SDK_AUDIO_EVENT_POSITION);
+}
+
+/* The sample rate the analyzer negotiated, read from its sink pad's
+ * current caps: the spectrum element reports linear bins over
+ * 0..rate/2, so the fold needs the real rate to place bin centers on
+ * the frequency axis. Cached once learned (one pipeline analyzes one
+ * track, the rate never changes mid-stream); until caps exist the
+ * fold assumes 48 kHz WITHOUT caching, so a later message can still
+ * learn the truth. */
+static int native_sdk_audio_spectrum_rate(native_sdk_gtk_host_t *host) {
+    native_sdk_gtk_audio_t *audio = &host->audio;
+    if (audio->spectrum_rate > 0) return audio->spectrum_rate;
+    native_sdk_gst_spectrum_api_t *api = native_sdk_load_gst_spectrum_api();
+    int rate = 0;
+    void *pad = api ? api->element_get_static_pad(audio->spectrum, "sink") : NULL;
+    if (pad) {
+        void *caps = api->pad_get_current_caps(pad);
+        if (caps) {
+            const void *structure = api->caps_get_structure(caps, 0);
+            if (!structure || !api->structure_get_int(structure, "rate", &rate)) rate = 0;
+            api->mini_object_unref(caps);
+        }
+        g_object_unref(pad);
+    }
+    if (rate > 0) {
+        audio->spectrum_rate = rate;
+        return rate;
+    }
+    return 48000;
+}
+
+/* ELEMENT bus messages: the analyzer posts one GstStructure named
+ * "spectrum" per interval — but only while samples flow through it, so
+ * pause, stop, and a buffering stall end the reports without any
+ * bookkeeping here. The "magnitude" field is a GValue LIST of floats,
+ * one dB magnitude per linear bin over 0..rate/2; the fold below maps
+ * each bin center onto the 32 log-spaced 50 Hz..16 kHz report buckets
+ * and keeps the bucket PEAK. Low buckets narrower than one linear bin
+ * borrow the bin that covers their center frequency, so the bass bars
+ * read the real (coarser) magnitude instead of resting at the floor. */
+static void native_sdk_audio_on_element(void *bus, void *message, gpointer data) {
+    (void)bus;
+    native_sdk_gtk_host_t *host = data;
+    native_sdk_gtk_audio_t *audio = &host->audio;
+    native_sdk_gst_spectrum_api_t *api = native_sdk_load_gst_spectrum_api();
+    if (!api || !audio->active || !audio->spectrum) return;
+    const void *structure = api->message_get_structure(message);
+    if (!structure) return;
+    const char *name = api->structure_get_name(structure);
+    if (!name || strcmp(name, "spectrum") != 0) return;
+    const GValue *magnitudes = api->structure_get_value(structure, "magnitude");
+    if (!magnitudes) return;
+    const unsigned bins = api->value_list_get_size(magnitudes);
+    if (bins == 0) return;
+
+    const int rate = native_sdk_audio_spectrum_rate(host);
+    const float bin_hz = ((float)rate * 0.5f) / (float)bins;
+    if (bin_hz <= 0.0f) return;
+    /* Log-spaced bucket edges: edge(k) = 50 Hz * (16000/50)^(k/32). */
+    const float span = logf(NATIVE_SDK_AUDIO_SPECTRUM_MAX_HZ / NATIVE_SDK_AUDIO_SPECTRUM_MIN_HZ);
+
+    float peak_db[NATIVE_SDK_AUDIO_SPECTRUM_BANDS];
+    int filled[NATIVE_SDK_AUDIO_SPECTRUM_BANDS] = {0};
+    for (int k = 0; k < NATIVE_SDK_AUDIO_SPECTRUM_BANDS; k++) peak_db[k] = NATIVE_SDK_AUDIO_SPECTRUM_FLOOR_DB;
+    for (unsigned i = 0; i < bins; i++) {
+        const float center = ((float)i + 0.5f) * bin_hz;
+        if (center < NATIVE_SDK_AUDIO_SPECTRUM_MIN_HZ || center >= NATIVE_SDK_AUDIO_SPECTRUM_MAX_HZ) continue;
+        int bucket = (int)((float)NATIVE_SDK_AUDIO_SPECTRUM_BANDS * logf(center / NATIVE_SDK_AUDIO_SPECTRUM_MIN_HZ) / span);
+        if (bucket < 0) bucket = 0;
+        if (bucket >= NATIVE_SDK_AUDIO_SPECTRUM_BANDS) bucket = NATIVE_SDK_AUDIO_SPECTRUM_BANDS - 1;
+        const GValue *value = api->value_list_get_value(magnitudes, i);
+        if (!value) continue;
+        const float magnitude = g_value_get_float(value);
+        if (!filled[bucket] || magnitude > peak_db[bucket]) {
+            peak_db[bucket] = magnitude;
+            filled[bucket] = 1;
+        }
+    }
+    for (int k = 0; k < NATIVE_SDK_AUDIO_SPECTRUM_BANDS; k++) {
+        if (filled[k]) continue;
+        /* No bin center landed in this bucket (it is narrower than one
+         * linear bin): read the bin covering the bucket's geometric
+         * center instead. */
+        const float lo = NATIVE_SDK_AUDIO_SPECTRUM_MIN_HZ * expf(span * (float)k / (float)NATIVE_SDK_AUDIO_SPECTRUM_BANDS);
+        const float hi = NATIVE_SDK_AUDIO_SPECTRUM_MIN_HZ * expf(span * (float)(k + 1) / (float)NATIVE_SDK_AUDIO_SPECTRUM_BANDS);
+        const unsigned bin = (unsigned)(sqrtf(lo * hi) / bin_hz);
+        if (bin >= bins) continue;
+        const GValue *value = api->value_list_get_value(magnitudes, bin);
+        if (value) peak_db[k] = g_value_get_float(value);
+    }
+
+    uint8_t bands[NATIVE_SDK_AUDIO_SPECTRUM_BANDS];
+    for (int k = 0; k < NATIVE_SDK_AUDIO_SPECTRUM_BANDS; k++) {
+        float magnitude = peak_db[k];
+        if (magnitude < NATIVE_SDK_AUDIO_SPECTRUM_FLOOR_DB) magnitude = NATIVE_SDK_AUDIO_SPECTRUM_FLOOR_DB;
+        if (magnitude > 0.0f) magnitude = 0.0f;
+        bands[k] = (uint8_t)((magnitude - NATIVE_SDK_AUDIO_SPECTRUM_FLOOR_DB) * (255.0f / -NATIVE_SDK_AUDIO_SPECTRUM_FLOOR_DB) + 0.5f);
+    }
+    native_sdk_audio_emit_spectrum(host, bands);
 }
 
 /* Stream buffering reports. Below 100% the queue is refilling: hold the
@@ -4573,6 +4800,34 @@ static int native_sdk_audio_attach(native_sdk_gtk_host_t *host, const char *uri,
     unsigned int flags = NATIVE_SDK_GST_PLAY_FLAG_AUDIO | NATIVE_SDK_GST_PLAY_FLAG_SOFT_VOLUME;
     if (streaming) flags |= NATIVE_SDK_GST_PLAY_FLAG_BUFFERING;
     g_object_set(playbin, "uri", uri, "flags", flags, "volume", audio->volume, NULL);
+    /* Spectrum analysis, strictly additive: a `spectrum` element
+     * (gst-plugins-good) installed as the playbin's audio-filter, so
+     * the analyzer sees exactly the samples this app plays — never a
+     * capture of the system mix. Built only when the spectrum-only
+     * symbol slice AND the element factory resolve; on any miss the
+     * playbin plays exactly as before and SPECTRUM reports simply
+     * never flow. Configured for the shared contract: a higher LINEAR
+     * bin count for the log fold, one message per 40 ms, the -60 dB
+     * analysis floor, magnitudes only (phase is never read). */
+    if (native_sdk_load_gst_spectrum_api()) {
+        void *analyzer = gst->element_factory_make("spectrum", "native-sdk-audio-spectrum");
+        if (analyzer) {
+            /* A fresh element is floating; sinking one ref here keeps
+             * the analyzer alive for rate queries until release even
+             * if the playbin drops its own. */
+            g_object_ref_sink(analyzer);
+            g_object_set(analyzer,
+                "bands", (guint)NATIVE_SDK_AUDIO_SPECTRUM_SOURCE_BANDS,
+                "interval", NATIVE_SDK_AUDIO_SPECTRUM_INTERVAL_NS,
+                "threshold", (gint)NATIVE_SDK_AUDIO_SPECTRUM_FLOOR_DB,
+                "post-messages", (gboolean)TRUE,
+                "message-magnitude", (gboolean)TRUE,
+                "message-phase", (gboolean)FALSE,
+                NULL);
+            g_object_set(playbin, "audio-filter", analyzer, NULL);
+            audio->spectrum = analyzer;
+        }
+    }
     void *bus = gst->element_get_bus(playbin);
     if (!bus) {
         g_object_unref(playbin);
@@ -4584,6 +4839,7 @@ static int native_sdk_audio_attach(native_sdk_gtk_host_t *host, const char *uri,
     audio->bus_handlers[2] = g_signal_connect(bus, "message::buffering", G_CALLBACK(native_sdk_audio_on_buffering), host);
     audio->bus_handlers[3] = g_signal_connect(bus, "message::async-done", G_CALLBACK(native_sdk_audio_on_async_done), host);
     audio->bus_handlers[4] = g_signal_connect(bus, "message::state-changed", G_CALLBACK(native_sdk_audio_on_state_changed), host);
+    if (audio->spectrum) audio->bus_handlers[5] = g_signal_connect(bus, "message::element", G_CALLBACK(native_sdk_audio_on_element), host);
     audio->playbin = playbin;
     audio->bus = bus;
     if (gst->element_set_state(playbin, NATIVE_SDK_GST_STATE_PAUSED) == NATIVE_SDK_GST_STATE_CHANGE_FAILURE) {
@@ -4678,6 +4934,22 @@ static int native_sdk_audio_load_url_internal(native_sdk_gtk_host_t *host, const
 int native_sdk_gtk_audio_available(native_sdk_gtk_host_t *host) {
     (void)host;
     return native_sdk_load_gst_api() ? 1 : 0;
+}
+
+/* Spectrum analysis is a separate capability from playback: the
+ * `spectrum` element ships in gst-plugins-good, packaged apart from
+ * the playbin set, so a host can play audio yet honestly lack the
+ * analyzer. Probed against the actual runtime variables — the core
+ * library, the spectrum-only symbol slice, and the element factory —
+ * exactly like the playbin probe in the loader above. */
+int native_sdk_gtk_audio_spectrum_available(native_sdk_gtk_host_t *host) {
+    (void)host;
+    native_sdk_gst_api_t *gst = native_sdk_load_gst_api();
+    if (!gst || !native_sdk_load_gst_spectrum_api()) return 0;
+    void *spectrum_factory = gst->element_factory_find("spectrum");
+    if (!spectrum_factory) return 0;
+    g_object_unref(spectrum_factory);
+    return 1;
 }
 
 int native_sdk_gtk_audio_load(native_sdk_gtk_host_t *host, const char *path, size_t path_len) {

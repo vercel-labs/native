@@ -62,7 +62,14 @@ Native SDK capabilities are native OS services and app events exposed through `P
       <td><code>fx.playAudio(options)</code> / <code>fx.pauseAudio()</code> / <code>fx.resumeAudio()</code> / <code>fx.stopAudio()</code> / <code>fx.seekAudio(ms)</code> / <code>fx.setAudioVolume(v)</code></td>
       <td>None. Effects-channel API; every report arrives as an <code>on_event</code> Msg.</td>
       <td>None. No bridge surface.</td>
-      <td>macOS system-engine host (one player: AVAudioPlayer for local files, AVPlayer for streamed URLs), Windows system WebView (one Media Foundation media session for local files and streamed URLs), Linux system WebView (one GStreamer playbin for local files and streamed URLs, loaded at runtime — a host without GStreamer reports unsupported), the iOS toolkit host (the same AVFoundation player pair behind the embed audio service, with an honest playback audio session — interruptions pause and report), and the Android toolkit host (one MediaPlayer for local files, verified cache entries, and progressive URL streams behind the same embed audio service, with honest audio focus — a focus loss pauses and reports); macOS Chromium and GStreamer-less Linux hosts report unsupported and playback degrades to one explicit failed Msg</td>
+      <td>macOS system-engine host (ONE AVPlayer for local files, verified cache entries, and streamed URLs — one tappable path), Windows system WebView (one Media Foundation media session for local files and streamed URLs), Linux system WebView (one GStreamer playbin for local files and streamed URLs, loaded at runtime — a host without GStreamer reports unsupported), the iOS toolkit host (the AVFoundation player behind the embed audio service, with an honest playback audio session — interruptions pause and report), and the Android toolkit host (one MediaPlayer for local files, verified cache entries, and progressive URL streams behind the same embed audio service, with honest audio focus — a focus loss pauses and reports); macOS Chromium and GStreamer-less Linux hosts report unsupported and playback degrades to one explicit failed Msg</td>
+    </tr>
+    <tr>
+      <td>Audio spectrum analysis</td>
+      <td>None to call — hosts that analyze deliver <code>.spectrum</code> audio events through the same <code>on_event</code> Msg as position ticks</td>
+      <td>None. Effects-channel events.</td>
+      <td>None. No bridge surface.</td>
+      <td>macOS system-engine host (an MTAudioProcessingTap on the app's single AVPlayer feeding a vDSP FFT — local files, cache entries, and streams alike), Windows system WebView (process-scoped WASAPI loopback capture of THIS app's audio session only — never other apps' audio — with an in-box FFT), and Linux system WebView (GStreamer's <code>spectrum</code> element as the playbin's audio-filter; requires gst-plugins-good, probed live); hosts that cannot analyze — macOS Chromium, pre-2004 Windows, spectrum-less GStreamer setups, iOS, Android — report <code>audio_spectrum</code> unsupported and simply never send the events: honest absence, never fabricated bands</td>
     </tr>
     <tr>
       <td>File drops</td>
@@ -103,6 +110,12 @@ Unsupported platform hosts reject with the standard unsupported-service error.
 
 The cache lives under the platform caches directory (the `app_dirs` `.cache` convention — `~/Library/Caches/<app>/audio/` on macOS, `$XDG_CACHE_HOME/<app>/audio/` on Linux, `%LOCALAPPDATA%\<app>\Cache\audio\` on Windows, the app sandbox container's `Library/Caches/audio/` on iOS and the app data directory's `cache/audio/` on Android — both namespaces are already per-app, and both systems treat those directories as reclaimable), keyed by the URL's hash (`native_sdk.audioCachePath` derives the path). Clearing the cache is deleting that one directory; the OS already treats caches there as reclaimable. Hosts with a player but no streaming path report `audio_streaming` unsupported and URL playback degrades to the same explicit failed Msg. For record/replay, streaming changes nothing: the delivered audio events are journaled at the effect boundary like every other result, so network timing — real-world nondeterminism — stays outside the recording and replay never touches the network.
 
+## Spectrum analysis
+
+Hosts with `audio_spectrum` analyze the audio the app itself is producing and deliver `.spectrum` events through the active playback's ordinary `on_event` Msg: 32 band magnitudes with log-spaced center frequencies covering roughly 50 Hz–16 kHz, each band a byte mapping linearly in decibels from the −60 dBFS analysis floor (0) to full scale (255) — divide by 255 for a 0..1 level, and equal visual steps read as equal dB steps, the way hardware analyzers do. Per band the host reports the peak FFT-bin magnitude inside the bucket. Events arrive at a steady ~25 Hz (40 ms cadence) only while audio is audibly playing: pause and stop starve the stream, and a buffering stall goes quiet with the speakers, so everything a UI derives from the bands freezes honestly. Silence while playing is a row of floor bytes, still delivered — the cadence follows the transport, the magnitudes tell the truth.
+
+The mechanisms are host-native and in-box: macOS taps the app's single AVPlayer with an MTAudioProcessingTap and folds a vDSP FFT into the bands (the tap sits pre-effects, so the bands describe the decoded track, not the app's volume fader); Windows captures the app's OWN audio session through process-scoped WASAPI loopback — never system-wide, so other apps' audio can never pollute the bands — and runs an in-box FFT; Linux installs GStreamer's `spectrum` element as the playbin's audio-filter and folds its linear bands into the documented log buckets. A host that cannot analyze (macOS Chromium, Windows before 10 2004, a GStreamer install without gst-plugins-good, iOS, Android) reports `audio_spectrum` unsupported and never sends the events — apps should show a resting state, not fake motion. For record/replay, the bands are honest non-determinism recorded at the edge: every `.spectrum` event journals verbatim at the effect boundary like a position tick, so replay repaints identical bars, and the null platform ships a deterministic fake generator so tests stay hermetic.
+
 ## Support discovery
 
 Use `runtime.supports(...)` before native code shows optional affordances. Trusted WebView code can make the same check with `native-sdk.platform.supports` when that built-in command is explicitly allowed:
@@ -116,6 +129,7 @@ const support = {
   fileDrops: await window.zero.platform.supports("file_drops"),
   audioPlayback: await window.zero.platform.supports("audio_playback"),
   audioStreaming: await window.zero.platform.supports("audio_streaming"),
+  audioSpectrum: await window.zero.platform.supports("audio_spectrum"),
 };
 ```
 

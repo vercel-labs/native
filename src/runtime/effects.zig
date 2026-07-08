@@ -477,13 +477,18 @@ pub const max_effect_audio_path_bytes: usize = platform.max_audio_path_bytes;
 /// reports a load/decode/device failure or a platform without audio
 /// playback — always as a Msg, never a crash and never silence;
 /// `rejected` reports a command the effects layer refused before the
-/// platform was asked (an empty or oversized path).
+/// platform was asked (an empty or oversized path); `spectrum` carries
+/// the platform's real band-magnitude analysis of the playing audio
+/// (see `EffectAudio.bands`) at a steady ~25 Hz while audio is audibly
+/// playing — hosts that cannot analyze simply never send it (the
+/// `audio_spectrum` platform feature names the difference).
 pub const EffectAudioEventKind = enum(u8) {
     loaded,
     position,
     completed,
     failed,
     rejected,
+    spectrum,
 };
 
 /// Payload for `on_event` Msg constructors of audio effects. Positions
@@ -502,6 +507,12 @@ pub const EffectAudio = struct {
     duration_ms: u64 = 0,
     playing: bool = false,
     buffering: bool = false,
+    /// `.spectrum` payload, verbatim from the platform event: 32 band
+    /// magnitudes, log-spaced 50 Hz..16 kHz, each byte linear-in-dB from
+    /// the -60 dBFS floor (0) to full scale (255) — divide by 255 for a
+    /// 0..1 level. All zeros on every other kind. Plain bytes like the
+    /// rest of this struct: safe to store in the model.
+    bands: [platform.audio_spectrum_band_count]u8 = @splat(0),
 };
 
 /// Where the active playback's bytes actually come from — the resolved
@@ -610,6 +621,10 @@ pub const EffectResultRecord = struct {
     audio_duration_ms: u64 = 0,
     audio_playing: bool = false,
     audio_buffering: bool = false,
+    /// `.spectrum` audio records: the delivered band bytes, verbatim —
+    /// the honest non-determinism (a real FFT of real audio) recorded at
+    /// the boundary so replay repaints identical bars.
+    audio_bands: [platform.audio_spectrum_band_count]u8 = @splat(0),
 };
 
 /// Type-erased sink the drain reports every delivered result to while a
@@ -1060,6 +1075,12 @@ pub fn Effects(comptime Msg: type) type {
             position_ms: u64 = 0,
             duration_ms: u64 = 0,
             volume: f32 = 1.0,
+            /// The latest `.spectrum` band bytes and a lifetime delivery
+            /// count for THIS playback — snapshot evidence that analysis
+            /// is flowing (the count moves) and freezing on pause (it
+            /// holds). Reset with the channel on every new `playAudio`.
+            spectrum_bands: [platform.audio_spectrum_band_count]u8 = @splat(0),
+            spectrum_events: u64 = 0,
             path_buffer: [max_effect_audio_path_bytes]u8 = undefined,
             path_len: usize = 0,
             url_buffer: [max_effect_audio_path_bytes]u8 = undefined,
@@ -1091,6 +1112,11 @@ pub fn Effects(comptime Msg: type) type {
             source: EffectAudioSource = .local,
             position_ms: u64 = 0,
             duration_ms: u64 = 0,
+            /// Spectrum mirrors (see `AudioChannel`): zero events means
+            /// no analysis has arrived for this playback — an honest
+            /// "this host does not analyze" is visible right here.
+            spectrum_bands: [platform.audio_spectrum_band_count]u8 = @splat(0),
+            spectrum_events: u64 = 0,
         };
 
         /// A recorded audio playback request, exposed by the fake
@@ -2422,6 +2448,7 @@ pub fn Effects(comptime Msg: type) type {
                 .position => .position,
                 .completed => .completed,
                 .failed => .failed,
+                .spectrum => .spectrum,
             };
             const audio_fn = self.audio.on_event;
             const event = self.applyAudioEvent(.{
@@ -2431,6 +2458,7 @@ pub fn Effects(comptime Msg: type) type {
                 .duration_ms = platform_event.duration_ms,
                 .playing = platform_event.playing,
                 .buffering = platform_event.buffering,
+                .bands = platform_event.bands,
             }) orelse return null;
             const event_fn = audio_fn orelse return null;
             self.journalNote(.{
@@ -2441,6 +2469,7 @@ pub fn Effects(comptime Msg: type) type {
                 .audio_duration_ms = event.duration_ms,
                 .audio_playing = event.playing,
                 .audio_buffering = event.buffering,
+                .audio_bands = event.bands,
             });
             return event_fn(event);
         }
@@ -2455,6 +2484,8 @@ pub fn Effects(comptime Msg: type) type {
                 .source = self.audio.source,
                 .position_ms = self.audio.position_ms,
                 .duration_ms = self.audio.duration_ms,
+                .spectrum_bands = self.audio.spectrum_bands,
+                .spectrum_events = self.audio.spectrum_events,
             };
         }
 
@@ -2496,6 +2527,27 @@ pub fn Effects(comptime Msg: type) type {
                     .duration_ms = duration_ms,
                     .playing = playing,
                     .buffering = buffering,
+                },
+                .audio_fn = null,
+                .resolve = true,
+            } });
+        }
+
+        /// Fake executor / replay: feed one `.spectrum` band report as
+        /// the platform would deliver it — the band bytes ride the same
+        /// resolve-at-drain path as every other fed audio event, so the
+        /// journal and the channel mirrors see exactly what a live
+        /// analysis tap produces.
+        pub fn feedAudioSpectrum(self: *Self, bands: [platform.audio_spectrum_band_count]u8, position_ms: u64, duration_ms: u64) !void {
+            if (!self.audio.active) return error.EffectNotFound;
+            self.deliverPending(.{ .audio = .{
+                .event = .{
+                    .key = self.audio.key,
+                    .kind = .spectrum,
+                    .position_ms = position_ms,
+                    .duration_ms = duration_ms,
+                    .playing = true,
+                    .bands = bands,
                 },
                 .audio_fn = null,
                 .resolve = true,
@@ -2608,6 +2660,7 @@ pub fn Effects(comptime Msg: type) type {
                                 .audio_duration_ms = event.duration_ms,
                                 .audio_playing = event.playing,
                                 .audio_buffering = event.buffering,
+                                .audio_bands = event.bands,
                             });
                             return event_fn(event);
                         },
@@ -3343,6 +3396,14 @@ pub fn Effects(comptime Msg: type) type {
                     resolved.playing = false;
                     resolved.buffering = false;
                     self.audio = .{ .volume = self.audio.volume };
+                },
+                // Band reports never steer the transport mirrors — the
+                // position ticks stay the clock authority; the channel
+                // only mirrors the latest bands (and counts deliveries)
+                // for the automation snapshot's live evidence.
+                .spectrum => {
+                    self.audio.spectrum_bands = resolved.bands;
+                    self.audio.spectrum_events +%= 1;
                 },
             }
             return resolved;

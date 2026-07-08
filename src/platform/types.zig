@@ -125,6 +125,19 @@ pub const PlatformFeature = enum {
     /// but no streaming path answer `error.UnsupportedService` from
     /// `audioLoadUrl` — named unsupported, not half-implemented.
     audio_streaming,
+    /// Real spectrum analysis of the app's own playback: hosts that can
+    /// reach the player's PCM deliver `.audio`/`.spectrum` events (32
+    /// band magnitudes, see `AudioEvent.bands`) at a steady coarse
+    /// cadence while audio is audibly playing (macOS: an
+    /// MTAudioProcessingTap on the single AVPlayer + vDSP FFT; Windows:
+    /// process-scoped WASAPI loopback capture of THIS app's audio
+    /// session only + an in-box FFT; Linux: the GStreamer `spectrum`
+    /// element as the playbin's audio-filter). Hosts that cannot
+    /// analyze report false here and simply never emit `.spectrum`
+    /// events — honest absence, never fabricated bands; the null
+    /// platform ships a deterministic fake generator behind the same
+    /// flag.
+    audio_spectrum,
 };
 
 pub const WebViewSourceKind = enum {
@@ -1232,17 +1245,36 @@ pub const TimerEvent = struct {
 /// with `error.AudioPathTooLarge` before the platform is asked.
 pub const max_audio_path_bytes: usize = 1024;
 
+/// How many band magnitudes every `.audio`/`.spectrum` event carries:
+/// 32 buckets with log-spaced center frequencies covering roughly
+/// 50 Hz .. 16 kHz — the audible span a bar analyzer honestly resolves.
+/// The count is part of the event ABI on every host, so a consumer can
+/// bind the array without negotiation.
+pub const audio_spectrum_band_count: usize = 32;
+
+/// The `.spectrum` magnitude reference scale: a band byte maps linearly
+/// in DECIBELS from the analysis floor to full scale — 0 is at or below
+/// `audio_spectrum_floor_db` dBFS (silence prints a row of zeros), 255
+/// is 0 dBFS. Consumers divide by 255 for a 0..1 level; equal visual
+/// steps are equal dB steps, which is how hardware analyzers read.
+pub const audio_spectrum_floor_db: f32 = -60.0;
+
 /// How the platform's audio player reports back. `loaded` answers a
 /// successful `audioLoad` with the real decoded duration; `position` ticks
 /// at the host's honest coarse cadence (about every 500ms) only while
 /// playing; `completed` fires exactly once when a track reaches its natural
 /// end; `failed` reports an asynchronous decode/device failure. Pause,
 /// stop, seek, and volume never echo events — the caller already knows.
+/// `spectrum` carries the real band magnitudes of the audio the app is
+/// producing (see `AudioEvent.bands`) at a steady ~25 Hz cadence, only
+/// while audio is audibly playing — pause, stop, and a buffering stall
+/// starve the stream, so everything derived from it freezes honestly.
 pub const AudioEventKind = enum(u8) {
     loaded,
     position,
     completed,
     failed,
+    spectrum,
 };
 
 /// One report from the platform audio player. Positions and durations are
@@ -1257,6 +1289,13 @@ pub const AudioEvent = struct {
     duration_ms: u64 = 0,
     playing: bool = false,
     buffering: bool = false,
+    /// `.spectrum` payload: `audio_spectrum_band_count` band magnitudes
+    /// on the documented scale (log-spaced 50 Hz..16 kHz buckets; byte
+    /// value linear-in-dB from `audio_spectrum_floor_db` dBFS at 0 to
+    /// full scale at 255). All zeros on every other event kind. Plain
+    /// bytes by design: the array journals verbatim at the event
+    /// boundary, so replay repaints identical bars.
+    bands: [audio_spectrum_band_count]u8 = @splat(0),
 };
 
 /// How `audioLoadUrl` resolved a URL source. `.cache` means a verified
@@ -2608,6 +2647,11 @@ fn defaultSupportsFeature(services: PlatformServices, feature: PlatformFeature) 
         .view_surface_adoption => services.adopt_view_surface_fn != null,
         .audio_playback => services.audio_load_fn != null,
         .audio_streaming => services.audio_load_url_fn != null,
+        // Spectrum analysis rides no service verb — the events arrive
+        // spontaneously with playback — so the generic services probe
+        // cannot see it; platforms that analyze answer through their own
+        // `supports_fn` (like file_drops and gpu_surfaces above).
+        .audio_spectrum => false,
     };
 }
 

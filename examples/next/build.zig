@@ -261,8 +261,13 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
             app_mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
         }
         app_mod.linkFramework("AppKit", .{});
-        // The audio playback service (AVAudioPlayer in the AppKit host).
+        // The audio playback service (the AppKit host's single AVPlayer).
         app_mod.linkFramework("AVFoundation", .{});
+        // Spectrum analysis of the app's own playback: the MediaToolbox
+        // audio tap hands the player's PCM to the host, and Accelerate
+        // (vDSP) turns it into band magnitudes.
+        app_mod.linkFramework("MediaToolbox", .{});
+        app_mod.linkFramework("Accelerate", .{});
         app_mod.linkFramework("Foundation", .{});
         app_mod.linkFramework("CoreText", .{});
         app_mod.linkFramework("UniformTypeIdentifiers", .{});

@@ -210,6 +210,13 @@ pub const Runtime = struct {
     audio_source: runtime_effects.EffectAudioSource = .local,
     audio_position_ms: u64 = 0,
     audio_duration_ms: u64 = 0,
+    /// The latest `.spectrum` band bytes and the delivery count for the
+    /// active playback — snapshot-visible so automation can prove real
+    /// analysis is flowing (the count moves while playing, holds on
+    /// pause) without a screen capture. Zero events on a host that
+    /// cannot analyze: honest absence, visible as such.
+    audio_spectrum_bands: [platform.audio_spectrum_band_count]u8 = @splat(0),
+    audio_spectrum_events: u64 = 0,
     shell_layouts: [platform.max_windows]RuntimeShellLayout = undefined,
     shell_layout_count: usize = 0,
     next_window_id: platform.WindowId = 2,

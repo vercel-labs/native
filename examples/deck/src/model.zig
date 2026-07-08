@@ -30,11 +30,18 @@
 //! is committed.
 //!
 //! Everything the views show that is computable — the filtered ledger,
-//! timecode labels, the 32-band spectrum — is derived per rebuild into
-//! the build arena, never stored. The spectrum is a pure function of
-//! (track id, elapsed ms): sum-of-sines shaped by a per-track seed and a
-//! mid-weighted envelope; it visualizes the playback clock, not decoded
-//! samples (an honest readout, not a fake FFT).
+//! timecode labels — is derived per rebuild into the build arena, never
+//! stored. The 32-band spectrum is REAL: hosts that can analyze their
+//! own playback deliver `.spectrum` audio events (32 band magnitudes,
+//! journaled at the effect boundary like every position tick), the
+//! model keeps the latest report as per-band targets, and the frame
+//! clock runs analyzer ballistics over them (instant attack, linear
+//! decay — see `band_decay_per_second`), so the glass stays smooth
+//! between the host's ~25 Hz reports and replay repaints identical
+//! bars. Pause starves both inputs and the bars FREEZE; stop and track
+//! changes reset the glass; a host that cannot analyze never sends
+//! bands and the display rests on its noise-floor comb — honest
+//! absence, never fake dancing.
 //!
 //! Fixed capacities (loud by design, documented in the README):
 //!   - the committed manifest's albums and tracks (comptime-derived
@@ -250,6 +257,16 @@ pub const FrameClock = struct {
 /// buffering flag has not reported yet), and honesty beats smoothness.
 const position_snap_slack_ms: u32 = 600;
 
+/// The spectrum envelope: classic analyzer ballistics over the host's
+/// band reports. A NEW report attacks instantly (a rising band jumps to
+/// its target the moment the event lands — transients read as hits, not
+/// fades), and every presented frame decays each displayed band toward
+/// its target at this linear rate, so a falling band takes ~1/3 s from
+/// full scale to floor — smooth at display rate between the host's
+/// ~25 Hz reports. Both inputs (the `.spectrum` events and the
+/// `frame_clock` Msgs) are journaled, so the envelope replays exactly.
+pub const band_decay_per_second: f32 = 3.0;
+
 // ------------------------------------------------------------------- model
 
 pub const Msg = union(enum) {
@@ -376,6 +393,19 @@ pub const Model = struct {
     /// the null platform every slot stays 0 and the sleeve pane degrades
     /// to its engraved plate — asserted in the suite).
     covers: [album_count]canvas.ImageId = @splat(0),
+    /// The spectrum glass, driven by REAL analysis: `band_targets` is
+    /// the latest `.spectrum` report (each byte / 255), `band_levels`
+    /// is what the chart draws — attacked instantly on report arrival,
+    /// decayed toward the targets by the frame clock (see
+    /// `band_decay_per_second`). Both journaled inputs, so replay
+    /// repaints identical bars.
+    band_targets: [spectrum_bands]f32 = @splat(0),
+    band_levels: [spectrum_bands]f32 = @splat(0),
+    /// Whether the CURRENT playback has delivered any `.spectrum`
+    /// report. Until it does — idle deck, a host that cannot analyze,
+    /// the instant before the first report — the glass shows the
+    /// resting comb: honest absence, never fake dancing.
+    spectrum_live: bool = false,
 
     // ------------------------------------------------------------- queries
 
@@ -530,30 +560,24 @@ pub const Model = struct {
         return formatMs(arena, model.now_duration_ms);
     }
 
-    /// One spectrum band's level in [0, 1] — THE pure function every
-    /// live display derives from: (track id, elapsed ms, band index) and
-    /// nothing else, so pause freezes every reader at once and the same
-    /// model state always paints the same glass. Idle shows the noise
-    /// floor — a fixed comb, so the display reads as powered-on hardware
-    /// rather than a dead widget.
+    /// The resting comb: the powered-on noise floor the glass wears
+    /// whenever no real analysis is on it — idle deck, a host without
+    /// `audio_spectrum`, the instant before the first report. A fixed
+    /// pattern, so the display reads as live hardware rather than a
+    /// dead widget, and honestly STILL: bands that are not measured do
+    /// not dance.
+    pub fn restingLevel(band: usize) f32 {
+        return if (band % 4 == 0) 0.05 else 0.02;
+    }
+
+    /// One spectrum band's displayed level in [0, 1]: the envelope over
+    /// the journaled `.spectrum` reports while real analysis is live,
+    /// the resting comb otherwise. Model state only — pause starves the
+    /// inputs and every reader freezes at once; replaying the journal
+    /// paints the same glass.
     pub fn bandLevel(model: *const Model, band: usize) f32 {
-        const track = model.nowTrack() orelse {
-            return if (band % 4 == 0) 0.05 else 0.02;
-        };
-        const seed: f32 = @floatFromInt(@as(u32, track.id) * 7 + 3);
-        const phase = @as(f32, @floatFromInt(model.elapsed_ms)) / 1000.0;
-        const x: f32 = @floatFromInt(band);
-        // Mid-weighted envelope: lows tall, highs rolled off.
-        const envelope = 0.35 + 0.65 * @exp(-x * x / 420.0);
-        // Temporal frequencies tuned for the frame-clock cadence: the
-        // slow component sweeps ~half a cycle per second and the fast
-        // one over a full cycle, so the bars visibly DANCE at display
-        // rate instead of drifting. Still a pure function of (track id,
-        // elapsed ms) — faster phase, same determinism.
-        const wave =
-            0.6 * @abs(@sin(phase * (3.4 + seed * 0.026) + x * 0.55 + seed)) +
-            0.4 * @abs(@sin(phase * 7.3 + x * 1.35 + seed * 0.5));
-        return std.math.clamp(0.06 + envelope * wave * 0.94, 0, 1);
+        if (model.now == null or !model.spectrum_live) return restingLevel(band);
+        return std.math.clamp(model.band_levels[band], 0, 1);
     }
 
     /// The 32 spectrum band levels, derived into the build arena per
@@ -698,9 +722,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 // Halt AND rewind, keeping the record loaded: pause the
                 // platform player, seek it home, and zero the progress
                 // clock so everything derived from it (marquee,
-                // spectrum, timecode) returns to the top deterministically.
+                // timecode) returns to the top deterministically. The
+                // spectrum glass RESTS (stop clears the analyzer, the
+                // classic stop-vs-pause distinction: pause freezes the
+                // bars, stop puts the comb back).
                 model.playing = false;
                 model.elapsed_ms = 0;
+                resetSpectrum(model);
                 fx.pauseAudio();
                 fx.seekAudio(0);
             }
@@ -788,6 +816,20 @@ fn handleAudio(model: *Model, fx: *Effects, event: native_sdk.EffectAudio) void 
                 model.elapsed_ms = position;
             }
         },
+        // Real analysis of the playing audio: the report becomes the
+        // per-band targets, and a RISING band attacks instantly (the
+        // frame clock only ever decays — see `advanceRenderedClock`).
+        // The first report flips the glass from the resting comb to
+        // live bars; pause simply stops the reports, so the last-drawn
+        // bars hold — freeze-on-pause with real data.
+        .spectrum => {
+            model.spectrum_live = true;
+            for (event.bands, 0..) |band, index| {
+                const target = @as(f32, @floatFromInt(band)) / 255.0;
+                model.band_targets[index] = target;
+                if (target > model.band_levels[index]) model.band_levels[index] = target;
+            }
+        },
         // Natural end: the next ledger row plays (see `advance`).
         .completed => advance(model, fx),
         // Playback could not run (`failed`), or the effects layer
@@ -804,6 +846,7 @@ fn handleAudio(model: *Model, fx: *Effects, event: native_sdk.EffectAudio) void 
             model.elapsed_ms = 0;
             model.now_duration_ms = 0;
             model.platform_duration_ms = 0;
+            resetSpectrum(model);
             if (model.streamingConfigured()) {
                 model.stream_failed = true;
             } else {
@@ -845,12 +888,34 @@ fn advanceRenderedClock(model: *Model, frame: FrameClock) void {
     const advanced = @as(u64, model.elapsed_ms) + delta_ns / std.time.ns_per_ms;
     const limit: u64 = if (model.now_duration_ms > 0) model.now_duration_ms else advanced;
     model.elapsed_ms = @intCast(@min(advanced, limit));
+    // Spectrum ballistics, the decay half (attack lives in the
+    // `.spectrum` arm of `handleAudio`): each displayed band falls
+    // linearly toward its latest reported target, on the same bounded
+    // frame delta the clock advanced by — deterministic per journal,
+    // frozen with the clock when nothing moves.
+    if (model.spectrum_live) {
+        const fall = band_decay_per_second *
+            (@as(f32, @floatFromInt(delta_ns)) / @as(f32, std.time.ns_per_s));
+        for (&model.band_levels, model.band_targets) |*level, target| {
+            if (level.* > target) level.* = @max(target, level.* - fall);
+        }
+    }
+}
+
+/// Put the spectrum glass back on its resting comb: a new playback, a
+/// stop, or a failure means the last-drawn bars no longer describe any
+/// audio; the next `.spectrum` report flips it live again.
+fn resetSpectrum(model: *Model) void {
+    model.spectrum_live = false;
+    model.band_targets = @splat(0);
+    model.band_levels = @splat(0);
 }
 
 fn startTrack(model: *Model, fx: *Effects, track_id: u8) void {
     const track = trackById(track_id);
     model.now = track_id;
     model.elapsed_ms = 0;
+    resetSpectrum(model);
     // The manifest's measured duration is the total for the whole
     // playback — the same number the ledger renders, so the two
     // surfaces agree by construction (the duration rule on

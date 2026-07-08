@@ -40,13 +40,23 @@ typedef enum {
  * (~500ms) only while playing; COMPLETED fires exactly once at a
  * track's natural end; FAILED reports an asynchronous decode/device
  * failure — or a network failure that killed a stream mid-flight.
- * Ordinals are mirrored by the Zig side (audioEventKindFromInt). */
+ * SPECTRUM carries a real band-magnitude analysis of the audio the
+ * player is producing (audio_bands below) at a steady ~25 Hz, only
+ * while audio is audibly playing — pause, stop, and a buffering stall
+ * starve it. Ordinals are mirrored by the Zig side
+ * (audioEventKindFromInt). */
 typedef enum {
     NATIVE_SDK_APPKIT_AUDIO_EVENT_LOADED = 0,
     NATIVE_SDK_APPKIT_AUDIO_EVENT_POSITION = 1,
     NATIVE_SDK_APPKIT_AUDIO_EVENT_COMPLETED = 2,
     NATIVE_SDK_APPKIT_AUDIO_EVENT_FAILED = 3,
+    NATIVE_SDK_APPKIT_AUDIO_EVENT_SPECTRUM = 4,
 } native_sdk_appkit_audio_event_kind_t;
+
+/* How many band magnitudes every SPECTRUM report carries: 32 buckets
+ * with log-spaced center frequencies covering roughly 50 Hz..16 kHz.
+ * Part of the event ABI — the Zig side binds the array by this count. */
+#define NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS 32
 
 typedef enum {
     NATIVE_SDK_APPKIT_COLOR_SCHEME_LIGHT = 0,
@@ -283,6 +293,11 @@ typedef struct {
      * a stream can be un-paused yet silent until bytes arrive. Local
      * files never buffer. */
     int audio_buffering;
+    /* SPECTRUM payloads: the band magnitudes on the documented scale
+     * (log-spaced 50 Hz..16 kHz buckets; each byte linear-in-dB from
+     * the -60 dBFS analysis floor at 0 to full scale at 255). Zeros on
+     * every other event kind. */
+    uint8_t audio_bands[NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS];
 } native_sdk_appkit_event_t;
 
 typedef void (*native_sdk_appkit_event_callback_t)(void *context, const native_sdk_appkit_event_t *event);

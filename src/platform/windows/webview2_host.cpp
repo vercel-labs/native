@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cctype>
 #include <climits>
+#include <cmath>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -51,6 +52,43 @@ using Microsoft::WRL::ComPtr;
 #include <mfidl.h>
 #include <mferror.h>
 #include <winhttp.h>
+
+/* WASAPI process-scoped loopback (the spectrum analysis capture below).
+ * The activation-parameter declarations arrived with the Windows 10 2004
+ * SDK in audioclientactivationparams.h; the mingw-w64 headers zig ships
+ * do not carry that file yet, so the handful of structures are declared
+ * locally when it is absent — byte-for-byte the OS ABI layout.
+ * ActivateAudioInterfaceAsync itself is resolved from mmdevapi.dll at
+ * runtime, so no new import library enters the build. */
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+#if __has_include(<audioclientactivationparams.h>)
+#include <audioclientactivationparams.h>
+#else
+typedef enum {
+    AUDIOCLIENT_ACTIVATION_TYPE_DEFAULT = 0,
+    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK = 1,
+} AUDIOCLIENT_ACTIVATION_TYPE;
+
+typedef enum {
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE = 0,
+    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE = 1,
+} PROCESS_LOOPBACK_MODE;
+
+typedef struct {
+    DWORD TargetProcessId;
+    PROCESS_LOOPBACK_MODE ProcessLoopbackMode;
+} AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS;
+
+typedef struct {
+    AUDIOCLIENT_ACTIVATION_TYPE ActivationType;
+    union {
+        AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS ProcessLoopbackParams;
+    };
+} AUDIOCLIENT_ACTIVATION_PARAMS;
+
+#define VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK L"VAD\\Process_Loopback"
+#endif
 
 namespace {
 
@@ -98,6 +136,13 @@ constexpr UINT kRequestFrameMessage = WM_APP + 44;
  * pump and source resolver); the window procedure hands the distilled
  * note to audioHandleSessionMessage on the message loop thread. */
 constexpr UINT kAudioSessionMessage = WM_APP + 45;
+/* Posted from the spectrum capture thread every ~40 ms; the window
+ * procedure snapshots the analysis bands and emits one SPECTRUM report
+ * on the loop thread. A posted message rather than a loop-thread timer
+ * on purpose: WM_TIMER is the lowest-priority message and a busy frame
+ * loop starves it far below the contract cadence, while posted messages
+ * keep their place in the queue. */
+constexpr UINT kAudioSpectrumMessage = WM_APP + 46;
 constexpr const char *kAssetVirtualOrigin = "https://native-sdk-app.localhost";
 
 constexpr int kViewWebView = 0;
@@ -174,6 +219,11 @@ struct WindowsEvent {
     uint64_t audio_duration_ms;
     int audio_playing;
     int audio_buffering;
+    /* SPECTRUM report payload: the 32 band magnitude bytes on the
+     * documented scale (log-spaced 50 Hz..16 kHz buckets, linear-in-dB
+     * from -60 dBFS at 0 to full scale at 255). Zeros on every other
+     * event kind — every emit site value-initializes the struct. */
+    uint8_t audio_bands[32];
 };
 
 struct WindowsOpenDialogOpts {
@@ -413,6 +463,34 @@ struct AudioDownloadCancel {
     std::atomic<bool> cancelled{false};
 };
 
+/* Band count of a SPECTRUM audio report — part of the event ABI on
+ * every host (see the spectrum analysis section further down). */
+constexpr size_t kAudioSpectrumBandCount = 32;
+
+/* State shared between the loop thread and the detached spectrum
+ * capture thread, download-cancel style: the loop thread flips `stop`
+ * and drops its reference; the capture thread owns its own reference
+ * and winds down without anyone blocking on a join. `bands` is the
+ * freshest analysis snapshot; `hwnd` and `generation` are fixed before
+ * the thread starts (the emission posts carry the generation so a
+ * replaced capture's stragglers are dropped on the loop side). */
+struct AudioSpectrumShared {
+    std::atomic<bool> stop{false};
+    std::mutex mutex;
+    uint8_t bands[kAudioSpectrumBandCount] = {};
+    HWND hwnd = nullptr;
+    uint64_t generation = 0;
+};
+
+/* The loop-thread half of spectrum analysis: the live capture handle
+ * (null while idle) and the running generation stamp. Deliberately
+ * OUTSIDE AudioState — releaseSession resets that struct wholesale, and
+ * the capture teardown must run as an explicit step, not a field wipe. */
+struct AudioSpectrumState {
+    std::shared_ptr<AudioSpectrumShared> shared;
+    uint64_t generation = 0;
+};
+
 /* The app's single audio player (see the audio section further down for
  * the backend rationale). All fields are message-loop-thread state; the
  * lifetime mutex additionally guards `generation` and `source` because
@@ -480,6 +558,7 @@ struct Host {
     int appearance_reduce_motion = -1;
     int appearance_high_contrast = -1;
     AudioState audio;
+    AudioSpectrumState spectrum;
     std::shared_ptr<HostLifetime> lifetime = std::make_shared<HostLifetime>();
 };
 
@@ -2554,6 +2633,7 @@ constexpr int kAudioEventLoaded = 0;
 constexpr int kAudioEventPosition = 1;
 constexpr int kAudioEventCompleted = 2;
 constexpr int kAudioEventFailed = 3;
+constexpr int kAudioEventSpectrum = 4;
 
 /* Distilled session notes (kAudioSessionMessage wparam); lparam carries
  * the generation the note belongs to. */
@@ -2572,6 +2652,13 @@ constexpr WPARAM kAudioNoteError = 8;
  * behaves identically across hosts. */
 constexpr UINT_PTR kAudioPositionTimerId = 0x3000;
 constexpr UINT kAudioPositionIntervalMs = 500;
+
+/* Spectrum emission cadence: ~25 Hz is the shared coarse analysis
+ * cadence every host that can reach the player's PCM emits at, fast
+ * enough for honest bar motion and far below any rate that would
+ * matter to the event channel. The capture thread paces itself to this
+ * interval and posts kAudioSpectrumMessage each beat. */
+constexpr UINT kAudioSpectrumIntervalMs = 40;
 
 /* IMFMediaSession::Start's time-format argument: GUID_NULL means
  * 100-nanosecond units. Defined locally like the WIC GUIDs. */
@@ -2890,6 +2977,24 @@ static void audioEmitEvent(Host *host, int kind) {
     audioEmitReport(host, kind, audioPositionMs(audio), audio.duration_ms, audio.playing ? 1 : 0, audio.buffering ? 1 : 0);
 }
 
+/* SPECTRUM report: the band snapshot plus the same live transport
+ * readout a position tick carries, so a consumer can bind bars and
+ * scrubber off one event. */
+static void audioEmitSpectrum(Host *host, const uint8_t bands[kAudioSpectrumBandCount]) {
+    if (!host || !host->callback) return;
+    AudioState &audio = host->audio;
+    WindowsEvent event = {};
+    event.kind = kAudio;
+    event.audio_kind = kAudioEventSpectrum;
+    event.audio_position_ms = audioPositionMs(audio);
+    event.audio_duration_ms = audio.duration_ms;
+    event.audio_playing = audio.playing ? 1 : 0;
+    event.audio_buffering = audio.buffering ? 1 : 0;
+    event.timestamp_ns = gpuTimestampNs();
+    memcpy(event.audio_bands, bands, kAudioSpectrumBandCount);
+    host->callback(host->callback_context, &event);
+}
+
 static void audioStopPositionTimer(Host *host) {
     AudioState &audio = host->audio;
     if (audio.position_timer_armed && audio.timer_hwnd) KillTimer(audio.timer_hwnd, kAudioPositionTimerId);
@@ -2908,6 +3013,422 @@ static void audioStartPositionTimer(Host *host) {
     }
 }
 
+/* ------------------------------------------------------ audio spectrum
+ *
+ * Real band magnitudes of the audio THIS APP is producing, captured
+ * through WASAPI process-scoped loopback (ActivateAudioInterfaceAsync on
+ * the VAD\Process_Loopback virtual device, include-target-process-tree,
+ * Windows 10 2004+). Process scope is the honesty line: a system-wide
+ * loopback would fold other applications' audio into the bands, and the
+ * event contract promises the app's own playback only.
+ *
+ * The pipeline: a detached capture thread (MTA — the activation
+ * completion must not depend on a pumping STA) drains the capture
+ * client, downmixes to mono, and runs a hand-rolled 2048-point radix-2
+ * FFT under a Hann window — in-box on purpose, no DSP dependency enters
+ * the toolkit for a bar display. Bin magnitudes fold into 32 log-spaced
+ * buckets covering 50 Hz..16 kHz (peak bin per bucket), convert to dBFS
+ * against 1.0 full-scale float PCM, clamp to [-60, 0], and map linearly
+ * to 0..255 — the shared scale every host emits. Every ~40 ms the
+ * capture thread posts kAudioSpectrumMessage (the kAudioSessionMessage
+ * marshalling, same reason: host state stays loop-thread-owned); the
+ * window procedure snapshots the freshest bands and emits them through
+ * the same callback path as every other audio report, so band delivery
+ * follows the transport: started at play, retired at pause/stop/
+ * teardown, skipped while a stream is buffering-stalled. Silence while
+ * playing is a row of zeros, still emitted — the cadence follows the
+ * transport, the magnitudes tell the truth.
+ *
+ * Everything here is additive: any failure (old OS, activation denied,
+ * format rejected) means NO spectrum events ever, and playback runs
+ * exactly as before — no crash, no retry storm. */
+
+constexpr size_t kAudioSpectrumFftSize = 2048;
+constexpr double kAudioSpectrumSampleRate = 48000.0;
+constexpr double kAudioSpectrumBandLowHz = 50.0;
+constexpr double kAudioSpectrumBandHighHz = 16000.0;
+constexpr double kAudioSpectrumFloorDb = -60.0;
+
+/* Signals the activation waiter below. Agile on purpose: the OS invokes
+ * the completion on one of its own worker threads, and an agile handler
+ * needs no apartment marshalling to get there. */
+struct AudioSpectrumActivateWaiter final : public IActivateAudioInterfaceCompletionHandler, public IAgileObject {
+    LONG refs = 1;
+    HANDLE done = nullptr;
+
+    AudioSpectrumActivateWaiter() { done = CreateEventW(nullptr, TRUE, FALSE, nullptr); }
+    ~AudioSpectrumActivateWaiter() {
+        if (done) CloseHandle(done);
+    }
+    AudioSpectrumActivateWaiter(const AudioSpectrumActivateWaiter &) = delete;
+    AudioSpectrumActivateWaiter &operator=(const AudioSpectrumActivateWaiter &) = delete;
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **out) override {
+        if (!out) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IActivateAudioInterfaceCompletionHandler) {
+            *out = static_cast<IActivateAudioInterfaceCompletionHandler *>(this);
+            AddRef();
+            return S_OK;
+        }
+        if (riid == IID_IAgileObject) {
+            *out = static_cast<IAgileObject *>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return (ULONG)InterlockedIncrement(&refs); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        LONG value = InterlockedDecrement(&refs);
+        if (value == 0) delete this;
+        return (ULONG)value;
+    }
+    HRESULT STDMETHODCALLTYPE ActivateCompleted(IActivateAudioInterfaceAsyncOperation *) override {
+        if (done) SetEvent(done);
+        return S_OK;
+    }
+};
+
+/* Activate an IAudioClient on the process-loopback virtual device for
+ * THIS process tree. ActivateAudioInterfaceAsync is resolved from
+ * mmdevapi.dll at runtime (module held for the process lifetime, like
+ * Media Foundation): an OS without the export answers cleanly instead
+ * of failing the toolkit's load. Called from an MTA thread — the
+ * completion fires on an OS worker, so a bounded wait here never
+ * deadlocks the way it would on the unpumped loop thread. */
+static HRESULT audioSpectrumActivateClient(IAudioClient **out_client) {
+    *out_client = nullptr;
+    static HMODULE mmdevapi = LoadLibraryW(L"mmdevapi.dll");
+    if (!mmdevapi) return E_NOTIMPL;
+    typedef HRESULT(WINAPI * ActivateAudioInterfaceAsyncFn)(const WCHAR *, REFIID, PROPVARIANT *, IActivateAudioInterfaceCompletionHandler *, IActivateAudioInterfaceAsyncOperation **);
+    static ActivateAudioInterfaceAsyncFn activate = reinterpret_cast<ActivateAudioInterfaceAsyncFn>(GetProcAddress(mmdevapi, "ActivateAudioInterfaceAsync"));
+    if (!activate) return E_NOTIMPL;
+
+    AUDIOCLIENT_ACTIVATION_PARAMS params = {};
+    params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+    params.ProcessLoopbackParams.TargetProcessId = GetCurrentProcessId();
+    params.ProcessLoopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
+    PROPVARIANT prop = {};
+    prop.vt = VT_BLOB;
+    prop.blob.cbSize = sizeof(params);
+    prop.blob.pBlobData = reinterpret_cast<BYTE *>(&params);
+
+    AudioSpectrumActivateWaiter *waiter = new AudioSpectrumActivateWaiter();
+    if (!waiter->done) {
+        waiter->Release();
+        return E_FAIL;
+    }
+    IActivateAudioInterfaceAsyncOperation *operation = nullptr;
+    HRESULT hr = activate(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, IID_IAudioClient, &prop, waiter, &operation);
+    if (SUCCEEDED(hr) && operation) {
+        /* Activation completes in milliseconds when it completes at all;
+         * the deadline only guards against a wedged audio service. A
+         * straggling completion after timeout lands on the waiter, whose
+         * refcount keeps it alive until the OS lets go. */
+        if (WaitForSingleObject(waiter->done, 5000) == WAIT_OBJECT_0) {
+            HRESULT activated = E_FAIL;
+            IUnknown *unknown = nullptr;
+            if (SUCCEEDED(operation->GetActivateResult(&activated, &unknown)) && SUCCEEDED(activated) && unknown) {
+                unknown->QueryInterface(IID_IAudioClient, reinterpret_cast<void **>(out_client));
+            }
+            if (unknown) unknown->Release();
+            hr = *out_client ? S_OK : (FAILED(activated) ? activated : E_NOINTERFACE);
+        } else {
+            hr = E_FAIL;
+        }
+    } else if (SUCCEEDED(hr)) {
+        hr = E_FAIL;
+    }
+    if (operation) operation->Release();
+    waiter->Release();
+    return hr;
+}
+
+/* Process-loopback clients expose no GetMixFormat (there is no shared
+ * mix on a virtual device), so the capture format is declared by us:
+ * 32-bit float stereo at 48 kHz, the format the loopback engine
+ * converts to on any modern box. Event-driven so the capture thread
+ * sleeps between packets instead of polling. */
+static HRESULT audioSpectrumInitializeClient(IAudioClient *client, HANDLE samples_ready) {
+    WAVEFORMATEX format = {};
+    format.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+    format.nChannels = 2;
+    format.nSamplesPerSec = (DWORD)kAudioSpectrumSampleRate;
+    format.wBitsPerSample = 32;
+    format.nBlockAlign = (WORD)(format.nChannels * format.wBitsPerSample / 8);
+    format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
+    /* 200 ms buffer (in 100 ns units): generous slack for a worker
+     * thread that also spends time in the FFT. */
+    HRESULT hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 2000000, 0, &format, nullptr);
+    if (FAILED(hr)) return hr;
+    return client->SetEventHandle(samples_ready);
+}
+
+/* The honest support probe behind
+ * native_sdk_windows_audio_spectrum_supported: attempt the real
+ * activation-and-initialize path once on a short-lived MTA thread and
+ * cache the verdict — never a version sniff, because policy (stripped
+ * SKUs, a disabled audio service) can deny what the version promises.
+ * The probe stream is released immediately; nothing keeps running. */
+static bool audioSpectrumSupported() {
+    static std::atomic<int> cached{-1};
+    const int known = cached.load(std::memory_order_relaxed);
+    if (known >= 0) return known != 0;
+    bool ok = false;
+    std::thread probe([&ok]() {
+        (void)CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE);
+        IAudioClient *client = nullptr;
+        if (SUCCEEDED(audioSpectrumActivateClient(&client)) && client) {
+            HANDLE ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (ready) {
+                ok = SUCCEEDED(audioSpectrumInitializeClient(client, ready));
+                CloseHandle(ready);
+            }
+            client->Release();
+        }
+        CoUninitialize();
+    });
+    probe.join();
+    cached.store(ok ? 1 : 0, std::memory_order_relaxed);
+    return ok;
+}
+
+/* In-place iterative radix-2 FFT (n a power of two): bit-reversal
+ * permutation, then butterfly passes with a double-precision running
+ * twiddle so rounding does not accumulate across the 1024-wide stages.
+ * Textbook and ~30 lines — the whole reason no DSP library is needed. */
+static void audioSpectrumFft(float *re, float *im, size_t n) {
+    for (size_t i = 1, j = 0; i < n; ++i) {
+        size_t bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j |= bit;
+        if (i < j) {
+            std::swap(re[i], re[j]);
+            std::swap(im[i], im[j]);
+        }
+    }
+    for (size_t len = 2; len <= n; len <<= 1) {
+        const double angle = -2.0 * 3.14159265358979323846 / (double)len;
+        const double step_re = cos(angle);
+        const double step_im = sin(angle);
+        for (size_t start = 0; start < n; start += len) {
+            double w_re = 1.0;
+            double w_im = 0.0;
+            for (size_t k = 0; k < len / 2; ++k) {
+                const size_t even = start + k;
+                const size_t odd = start + k + len / 2;
+                const double t_re = w_re * re[odd] - w_im * im[odd];
+                const double t_im = w_re * im[odd] + w_im * re[odd];
+                re[odd] = (float)(re[even] - t_re);
+                im[odd] = (float)(im[even] - t_im);
+                re[even] = (float)(re[even] + t_re);
+                im[even] = (float)(im[even] + t_im);
+                const double next_re = w_re * step_re - w_im * step_im;
+                w_im = w_re * step_im + w_im * step_re;
+                w_re = next_re;
+            }
+        }
+    }
+}
+
+/* The 32 buckets as FFT-bin index ranges, computed once per capture:
+ * log-spaced edges from 50 Hz to 16 kHz. A bucket narrower than one bin
+ * (the lowest few, at 23.4 Hz/bin) folds the single bin nearest its
+ * geometric center, so every bucket always reports a real magnitude. */
+struct AudioSpectrumBandRange {
+    size_t first = 0;
+    size_t last = 0;
+};
+
+static void audioSpectrumComputeBandRanges(AudioSpectrumBandRange ranges[kAudioSpectrumBandCount]) {
+    const double bin_hz = kAudioSpectrumSampleRate / (double)kAudioSpectrumFftSize;
+    const double ratio = kAudioSpectrumBandHighHz / kAudioSpectrumBandLowHz;
+    const size_t max_bin = kAudioSpectrumFftSize / 2 - 1;
+    for (size_t band = 0; band < kAudioSpectrumBandCount; ++band) {
+        const double lo = kAudioSpectrumBandLowHz * pow(ratio, (double)band / (double)kAudioSpectrumBandCount);
+        const double hi = kAudioSpectrumBandLowHz * pow(ratio, (double)(band + 1) / (double)kAudioSpectrumBandCount);
+        size_t first = (size_t)ceil(lo / bin_hz);
+        size_t last = hi / bin_hz > 1.0 ? (size_t)ceil(hi / bin_hz) - 1 : 0;
+        if (first < 1) first = 1;
+        if (last > max_bin) last = max_bin;
+        if (last < first) {
+            size_t nearest = (size_t)lround(sqrt(lo * hi) / bin_hz);
+            if (nearest < 1) nearest = 1;
+            if (nearest > max_bin) nearest = max_bin;
+            first = nearest;
+            last = nearest;
+        }
+        ranges[band].first = first;
+        ranges[band].last = last;
+    }
+}
+
+/* One analysis pass: Hann window over the newest kAudioSpectrumFftSize
+ * mono samples, FFT, then per bucket the PEAK bin magnitude converted
+ * to dBFS (full scale = a 1.0-amplitude sine; the 4/N factor undoes the
+ * FFT scaling and the Hann coherent gain of 0.5), clamped to [-60, 0]
+ * and mapped linearly to 0..255. Silence lands at the floor: zeros. */
+static void audioSpectrumAnalyze(const float *samples, const float *window, const AudioSpectrumBandRange *ranges, uint8_t out_bands[kAudioSpectrumBandCount]) {
+    float re[kAudioSpectrumFftSize];
+    float im[kAudioSpectrumFftSize];
+    for (size_t i = 0; i < kAudioSpectrumFftSize; ++i) {
+        re[i] = samples[i] * window[i];
+        im[i] = 0.0f;
+    }
+    audioSpectrumFft(re, im, kAudioSpectrumFftSize);
+    const double amplitude_scale = 4.0 / (double)kAudioSpectrumFftSize;
+    for (size_t band = 0; band < kAudioSpectrumBandCount; ++band) {
+        double peak = 0.0;
+        for (size_t bin = ranges[band].first; bin <= ranges[band].last; ++bin) {
+            const double magnitude = sqrt((double)re[bin] * re[bin] + (double)im[bin] * im[bin]);
+            if (magnitude > peak) peak = magnitude;
+        }
+        const double amplitude = peak * amplitude_scale;
+        double db = amplitude > 0.0 ? 20.0 * log10(amplitude) : kAudioSpectrumFloorDb;
+        if (db < kAudioSpectrumFloorDb) db = kAudioSpectrumFloorDb;
+        if (db > 0.0) db = 0.0;
+        out_bands[band] = (uint8_t)lround((db - kAudioSpectrumFloorDb) / -kAudioSpectrumFloorDb * 255.0);
+    }
+}
+
+/* The capture worker: bring the loopback stream up, then drain packets
+ * into a mono ring, refresh the shared band snapshot roughly every half
+ * FFT (~21 ms), and post one emission beat per ~40 ms until told to
+ * stop. Failure at any bring-up step just returns — nothing ever posts,
+ * so no spectrum events exist and playback never notices. */
+static void audioSpectrumCaptureThread(std::shared_ptr<AudioSpectrumShared> shared) {
+    (void)CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE);
+    IAudioClient *client = nullptr;
+    IAudioCaptureClient *capture = nullptr;
+    HANDLE ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    bool running = false;
+    do {
+        if (!ready) break;
+        if (FAILED(audioSpectrumActivateClient(&client)) || !client) break;
+        if (FAILED(audioSpectrumInitializeClient(client, ready))) break;
+        if (FAILED(client->GetService(IID_IAudioCaptureClient, reinterpret_cast<void **>(&capture))) || !capture) break;
+        if (FAILED(client->Start())) break;
+        running = true;
+    } while (false);
+
+    if (running) {
+        float window[kAudioSpectrumFftSize];
+        for (size_t i = 0; i < kAudioSpectrumFftSize; ++i) {
+            window[i] = (float)(0.5 * (1.0 - cos(2.0 * 3.14159265358979323846 * (double)i / (double)(kAudioSpectrumFftSize - 1))));
+        }
+        AudioSpectrumBandRange ranges[kAudioSpectrumBandCount];
+        audioSpectrumComputeBandRanges(ranges);
+        float ring[kAudioSpectrumFftSize] = {};
+        float ordered[kAudioSpectrumFftSize];
+        size_t ring_pos = 0;
+        size_t fresh_samples = 0;
+        ULONGLONG last_packet_tick = GetTickCount64();
+        ULONGLONG last_post_tick = 0;
+        bool bands_zeroed = false;
+
+        while (!shared->stop.load(std::memory_order_relaxed)) {
+            WaitForSingleObject(ready, kAudioSpectrumIntervalMs);
+            UINT32 frames = 0;
+            while (SUCCEEDED(capture->GetNextPacketSize(&frames)) && frames > 0) {
+                BYTE *data = nullptr;
+                DWORD flags = 0;
+                UINT32 got = 0;
+                if (FAILED(capture->GetBuffer(&data, &got, &flags, nullptr, nullptr))) break;
+                const float *stereo = reinterpret_cast<const float *>(data);
+                const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 || !data;
+                for (UINT32 frame = 0; frame < got; ++frame) {
+                    ring[ring_pos] = silent ? 0.0f : 0.5f * (stereo[frame * 2] + stereo[frame * 2 + 1]);
+                    ring_pos = (ring_pos + 1) & (kAudioSpectrumFftSize - 1);
+                }
+                fresh_samples += got;
+                capture->ReleaseBuffer(got);
+                last_packet_tick = GetTickCount64();
+            }
+            if (fresh_samples >= kAudioSpectrumFftSize / 2) {
+                fresh_samples = 0;
+                bands_zeroed = false;
+                const size_t tail = kAudioSpectrumFftSize - ring_pos;
+                memcpy(ordered, ring + ring_pos, tail * sizeof(float));
+                memcpy(ordered + tail, ring, ring_pos * sizeof(float));
+                uint8_t bands[kAudioSpectrumBandCount];
+                audioSpectrumAnalyze(ordered, window, ranges, bands);
+                std::lock_guard<std::mutex> guard(shared->mutex);
+                memcpy(shared->bands, bands, sizeof(bands));
+            } else if (!bands_zeroed && GetTickCount64() - last_packet_tick > 250) {
+                /* Loopback delivers packets only while the process
+                 * renders; a starved stream must read as silence, not as
+                 * the last magnitudes frozen mid-note. */
+                bands_zeroed = true;
+                memset(ring, 0, sizeof(ring));
+                std::lock_guard<std::mutex> guard(shared->mutex);
+                memset(shared->bands, 0, sizeof(shared->bands));
+            }
+            /* One emission beat per interval; the loop-thread handler
+             * gates on the live transport (paused, stalled, replaced),
+             * so a beat is never more than a queue hop plus a memcpy. */
+            const ULONGLONG now = GetTickCount64();
+            if (now - last_post_tick >= kAudioSpectrumIntervalMs) {
+                last_post_tick = now;
+                PostMessageW(shared->hwnd, kAudioSpectrumMessage, (WPARAM)shared->generation, 0);
+            }
+        }
+        client->Stop();
+    }
+
+    if (capture) capture->Release();
+    if (client) client->Release();
+    if (ready) CloseHandle(ready);
+    CoUninitialize();
+}
+
+/* Loop thread: hand the capture thread its stop flag and bump the
+ * generation so in-flight emission posts land dead; download-cancel
+ * style, nothing blocks. Idempotent, so every teardown path (pause,
+ * stop, replacement, failure, destroy) can call it unconditionally. */
+static void audioSpectrumStopCapture(Host *host) {
+    AudioSpectrumState &spectrum = host->spectrum;
+    spectrum.generation += 1;
+    if (spectrum.shared) {
+        spectrum.shared->stop.store(true, std::memory_order_relaxed);
+        spectrum.shared.reset();
+    }
+}
+
+/* Loop thread, on the play path: launch the capture worker. The cached
+ * support probe gates entry, so an unsupported box pays one probe ever
+ * and nothing per play. */
+static void audioSpectrumStartCapture(Host *host) {
+    AudioSpectrumState &spectrum = host->spectrum;
+    if (spectrum.shared) return;
+    if (!audioSpectrumSupported()) return;
+    HWND hwnd = parentWindow(host);
+    if (!hwnd) return;
+    spectrum.generation += 1;
+    spectrum.shared = std::make_shared<AudioSpectrumShared>();
+    spectrum.shared->hwnd = hwnd;
+    spectrum.shared->generation = spectrum.generation;
+    std::thread(audioSpectrumCaptureThread, spectrum.shared).detach();
+}
+
+/* One emission beat, marshalled from the capture thread; loop thread.
+ * Stale generations (a stopped or replaced capture's stragglers) drop
+ * here, and the live transport gates delivery: paused and stalled
+ * transports emit nothing — the bars freeze honestly — while silence on
+ * a rolling transport still emits its row of zeros. */
+static void audioHandleSpectrumMessage(Host *host, WPARAM generation) {
+    AudioState &audio = host->audio;
+    AudioSpectrumState &spectrum = host->spectrum;
+    if (!spectrum.shared || (uint64_t)generation != spectrum.generation) return;
+    if (!audio.active || !audio.playing || audio.buffering) return;
+    uint8_t bands[kAudioSpectrumBandCount];
+    {
+        std::lock_guard<std::mutex> guard(spectrum.shared->mutex);
+        memcpy(bands, spectrum.shared->bands, sizeof(bands));
+    }
+    audioEmitSpectrum(host, bands);
+}
+
 /* Release the whole pipeline. The session retires through Close(): the
  * event pump answers the MESessionClosed handshake by shutting source
  * and session down on the worker thread, so the loop never blocks. The
@@ -2920,6 +3441,7 @@ static void audioReleaseSession(Host *host, bool cancel_download) {
     std::lock_guard<std::recursive_mutex> guard(host->lifetime->mutex);
     AudioState &audio = host->audio;
     audioStopPositionTimer(host);
+    audioSpectrumStopCapture(host);
     audio.generation += 1;
     if (audio.clock) {
         audio.clock->Release();
@@ -3896,6 +4418,9 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             return 0;
         case kAudioSessionMessage:
             if (host) audioHandleSessionMessage(host, wparam, lparam);
+            return 0;
+        case kAudioSpectrumMessage:
+            if (host) audioHandleSpectrumMessage(host, wparam);
             return 0;
         case kNotificationCallbackMessage:
             if (host && host->tray_active) {
@@ -5623,6 +6148,10 @@ int native_sdk_windows_audio_play(Host *host) {
         audio.pending_play = true;
     }
     audioStartPositionTimer(host);
+    /* Spectrum capture follows the transport intent: it comes up here
+     * (loopback packets begin once the session actually renders) and
+     * retires at pause/stop/teardown. */
+    audioSpectrumStartCapture(host);
     return 1;
 }
 
@@ -5633,6 +6162,7 @@ int native_sdk_windows_audio_pause(Host *host) {
     audio.pending_play = false;
     if (audio.ready && audio.session) audio.session->Pause();
     audioStopPositionTimer(host);
+    audioSpectrumStopCapture(host);
     return 1;
 }
 
@@ -5663,6 +6193,15 @@ int native_sdk_windows_audio_set_volume(Host *host, double volume) {
     host->audio.volume = (float)volume;
     if (host->audio.ready) audioApplyVolume(host);
     return 1;
+}
+
+/* Whether process-scoped loopback capture — the spectrum analysis feed —
+ * can be activated on this OS. Answered by the cached live probe (one
+ * real activation attempt, see audioSpectrumSupported), never a version
+ * sniff. */
+int native_sdk_windows_audio_spectrum_supported(Host *host) {
+    if (!host) return 0;
+    return audioSpectrumSupported() ? 1 : 0;
 }
 
 }

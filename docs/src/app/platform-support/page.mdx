@@ -257,10 +257,28 @@ macOS, Linux, and Windows run full desktop apps through their own platform hosts
       <td>Unsupported</td>
       <td>Supported</td>
     </tr>
+    <tr>
+      <td>Audio playback + streaming</td>
+      <td>Supported (one AVPlayer for local files, cache entries, and streams)</td>
+      <td>Unsupported</td>
+      <td>Supported when GStreamer with playbin is present (runtime-loaded, probed live)</td>
+      <td>Unsupported</td>
+      <td>Supported (one Media Foundation session)</td>
+    </tr>
+    <tr>
+      <td>Audio spectrum analysis</td>
+      <td>Supported (MTAudioProcessingTap + vDSP on the single player)</td>
+      <td>Unsupported</td>
+      <td>Supported when GStreamer's <code>spectrum</code> element is present (gst-plugins-good, probed live)</td>
+      <td>Unsupported</td>
+      <td>Supported on Windows 10 2004+ (process-scoped WASAPI loopback of this app only, probed live)</td>
+    </tr>
   </tbody>
 </table>
 
 "Anchored fallback" for native context menus means the declared menu still presents — as an anchored canvas surface on the widget — because those hosts have no native menu presenter yet (GTK popover menus and the Win32 popup-menu API are the documented future seams). Authors declare one menu either way; the platform decides presentation.
+
+Audio spectrum analysis reads the app's OWN playback and nothing else: macOS taps the app's single player pre-effects, Windows captures the app's own audio session through process-scoped loopback (never system-wide — other apps' audio can never appear in the bands), and Linux analyzes inside the app's own playbin. Hosts that cannot analyze report `audio_spectrum` unsupported and simply never deliver `.spectrum` events; see the capabilities page for the band shape and cadence contract.
 
 ## How Support Is Verified
 

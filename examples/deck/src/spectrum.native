@@ -1,9 +1,12 @@
 <!-- The spectrum analyzer: 32 phosphor bars pinned to the absolute 0..1
      level domain — bars only, nothing riding their caps (the scanline
      chrome in front supplies the segmented-ladder read). The series
-     binds a model fn (the bands are a pure function of track id and
-     elapsed ms), so pausing freezes the display because the progress
-     clock stops. -->
+     binds a model fn fed by REAL analysis: the host's journaled
+     `.spectrum` band reports are the targets and the frame clock runs
+     the analyzer ballistics (instant attack, linear decay), so pausing
+     freezes the bars because both inputs stop. Idle — and any host that
+     cannot analyze its playback — shows the resting noise-floor comb
+     instead: honest absence, never fake dancing. -->
 <chart grow="1" y-min="0" y-max="1" label="Spectrum analyzer">
   <series kind="bar" values="{spectrumLevels}" color="accent" label="spectrum" />
 </chart>

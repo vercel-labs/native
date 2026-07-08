@@ -229,6 +229,13 @@ pub const Audio = struct {
     source: []const u8 = "local",
     position_ms: u64 = 0,
     duration_ms: u64 = 0,
+    /// Real spectrum analysis evidence: how many `.spectrum` band
+    /// reports this playback has delivered (moving while playing,
+    /// holding on pause — zero forever on a host that cannot analyze)
+    /// and the latest band bytes, printed as hex so magnitude variation
+    /// is provable from the snapshot alone.
+    spectrum_events: u64 = 0,
+    spectrum_bands: []const u8 = &.{},
 };
 
 pub const Input = struct {
@@ -552,7 +559,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
         }
     }
     if (input.audio) |audio| {
-        try writer.print("audio key={d} state={s} source={s} position_ms={d} duration_ms={d}\n", .{
+        try writer.print("audio key={d} state={s} source={s} position_ms={d} duration_ms={d} spectrum_events={d}", .{
             audio.key,
             // Buffering is the honest third state: the transport is not
             // paused, but a stalled stream is not audibly playing either.
@@ -560,7 +567,15 @@ pub fn writeText(input: Input, writer: anytype) !void {
             audio.source,
             audio.position_ms,
             audio.duration_ms,
+            audio.spectrum_events,
         });
+        // Band bytes print only once analysis has actually delivered —
+        // a host that cannot analyze shows `spectrum_events=0` and no
+        // bands line noise (honest absence, not a row of fake zeros).
+        if (audio.spectrum_events > 0) {
+            try writer.print(" spectrum_bands={x}", .{audio.spectrum_bands});
+        }
+        try writer.print("\n", .{});
     }
     for (input.errors) |dispatch_error| {
         if (dispatch_error.detail_len > 0) {

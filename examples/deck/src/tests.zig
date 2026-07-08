@@ -2,9 +2,12 @@
 //! player and the model-declared playlist rack), real playback through
 //! the audio effect channel's fake executor (request/feed round trips,
 //! the five-key transport, auto-advance, the honest NO MEDIA degrade),
-//! the pbcopy spawn, spectrum/marquee determinism on the rendered clock
-//! (frame-clock advance while playing, freeze on pause/stop, position
-//! ticks as the correcting truth), the skin-native window keys (close /
+//! the pbcopy spawn, the spectrum's journaled band reports through the
+//! analyzer envelope (instant attack, frame-clock decay, freeze on
+//! pause, resting comb for idle/stop/no-analysis), marquee determinism
+//! on the rendered clock (frame-clock advance while playing, freeze on
+//! pause/stop, position ticks as the correcting truth), the
+//! skin-native window keys (close /
 //! minimize on the chromeless windows, through the window-action
 //! effects), the image channel (the JPEG covers' pinned degrade under
 //! the strict decoder, codec-less fallback), the playlist window's full
@@ -185,6 +188,13 @@ const LiveApp = struct {
     /// update — the shape a live platform delivers playback reports in.
     fn feedAudio(self: LiveApp, kind: native_sdk.EffectAudioEventKind, position_ms: u64, duration_ms: u64, playing: bool) !void {
         try self.app_state.effects.feedAudioEvent(kind, position_ms, duration_ms, playing);
+        try self.wake();
+    }
+
+    /// Feed one `.spectrum` band report — the shape a live host's
+    /// analysis tap delivers (~25 Hz while audio is audibly playing).
+    fn feedSpectrum(self: LiveApp, bands: [native_sdk.platform.audio_spectrum_band_count]u8, position_ms: u64, duration_ms: u64) !void {
+        try self.app_state.effects.feedAudioSpectrum(bands, position_ms, duration_ms);
         try self.wake();
     }
 
@@ -955,7 +965,7 @@ test "a codec-less platform keeps the fascia whole, never broken" {
     try testing.expectEqual(chrome.prefix_commands + chrome.suffix_commands, builder.displayList().commands.len);
 }
 
-test "the spectrum is a deterministic function of the playback clock" {
+test "the spectrum draws the journaled band reports through the analyzer envelope" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -964,44 +974,73 @@ test "the spectrum is a deterministic function of the playback clock" {
     var idle_model = Model{};
     const idle_levels = idle_model.spectrumLevels(arena);
     try testing.expectEqual(@as(usize, model_mod.spectrum_bands), idle_levels.len);
-    for (idle_levels) |level| try testing.expect(level <= 0.05);
+    for (idle_levels, 0..) |level, band| {
+        try testing.expectEqual(Model.restingLevel(band), level);
+    }
 
-    // Live: the rendered clock advances only through the frame channel
-    // and the player's position ticks, and the same (track id, elapsed
-    // ms) always yields the same bars.
     const live = try LiveApp.start(true);
     defer live.stop();
     const app_state = live.app_state;
     const track = model_mod.albumTracks(2)[0];
     try live.dispatch(.{ .play_track = track.id });
+
+    // Playing but NO analysis yet (a host without `audio_spectrum`
+    // never gets past this state): the glass keeps the resting comb —
+    // honest absence, never fake dancing.
     try live.feedAudio(.position, 4_200, track.duration_ms, true);
-    try testing.expectEqual(@as(u32, 4_200), app_state.model.elapsed_ms);
-    const first = app_state.model.spectrumLevels(arena);
-    const second = app_state.model.spectrumLevels(arena);
-    try testing.expectEqualSlices(f32, first, second);
-    for (first) |level| {
-        try testing.expect(level >= 0);
-        try testing.expect(level <= 1);
+    for (app_state.model.spectrumLevels(arena), 0..) |level, band| {
+        try testing.expectEqual(Model.restingLevel(band), level);
     }
 
+    // The first band report flips the glass live, attacking instantly:
+    // the displayed level IS the report (byte / 255), and repeated
+    // reads of the same model state paint the same bars.
+    var bands: [model_mod.spectrum_bands]u8 = @splat(0);
+    bands[0] = 255;
+    bands[5] = 128;
+    try live.feedSpectrum(bands, 4_240, track.duration_ms);
+    const first = app_state.model.spectrumLevels(arena);
+    try testing.expectEqualSlices(f32, first, app_state.model.spectrumLevels(arena));
+    try testing.expectEqual(@as(f32, 1.0), first[0]);
+    try testing.expectApproxEqAbs(@as(f32, 128.0 / 255.0), first[5], 0.001);
+    try testing.expectEqual(@as(f32, 0), first[8]);
+
+    // Ballistics: a report that drops a band does NOT slam it down —
+    // the frame clock decays it linearly toward the new target
+    // (`band_decay_per_second`), while a rising band attacked already.
+    var quieter: [model_mod.spectrum_bands]u8 = @splat(0);
+    quieter[5] = 128; // held
+    try live.feedSpectrum(quieter, 4_280, track.duration_ms); // band 0 target -> 0
+    try testing.expectEqual(@as(f32, 1.0), app_state.model.band_levels[0]);
+    // One 16 ms presented frame: fall = 3.0 * 0.016 = 0.048.
+    try live.dispatch(.{ .frame_clock = .{ .timestamp_ns = 2_000_000, .interval_ns = 16_000_000 } });
+    try live.dispatch(.{ .frame_clock = .{ .timestamp_ns = 18_000_000, .interval_ns = 16_000_000 } });
+    const decayed = app_state.model.bandLevel(0);
+    try testing.expect(decayed < 1.0);
+    try testing.expect(decayed > 0.9);
+    try testing.expectApproxEqAbs(@as(f32, 128.0 / 255.0), app_state.model.bandLevel(5), 0.001);
+
     // Pause freezes the bars: the frame channel starves (see the
-    // frame-clock test) and position events stop, so the clock holds.
+    // frame-clock test) and the band reports stop with the audio, so
+    // the last-drawn glass holds — real data, frozen honestly.
     try live.dispatch(.toggle_play);
     const paused = app_state.model.spectrumLevels(arena);
-    try testing.expectEqualSlices(f32, first, paused);
+    try testing.expectEqualSlices(f32, paused, app_state.model.spectrumLevels(arena));
+    try testing.expectEqual(decayed, app_state.model.bandLevel(0));
 
-    // Resume; the next position tick moves them.
+    // Resume; the next report moves them again (attack is instant).
     try live.dispatch(.toggle_play);
-    try live.feedAudio(.position, 4_700, track.duration_ms, true);
-    const advanced = app_state.model.spectrumLevels(arena);
-    try testing.expect(!std.mem.eql(f32, first, advanced));
+    const louder: [model_mod.spectrum_bands]u8 = @splat(64);
+    try live.feedSpectrum(louder, 4_800, track.duration_ms);
+    try testing.expectApproxEqAbs(@as(f32, 64.0 / 255.0), app_state.model.bandLevel(8), 0.001);
 
-    // A different track reshapes the comb (per-track seed) — pure model,
-    // same clock value.
-    var other = Model{};
-    apply(&other, .{ .play_track = model_mod.albumTracks(4)[0].id });
-    other.elapsed_ms = 4_200;
-    try testing.expect(!std.mem.eql(f32, first, other.spectrumLevels(arena)));
+    // STOP clears the analyzer back to the resting comb (stop-vs-pause:
+    // pause freezes, stop rests), and a NEW track resets it too — the
+    // old bars describe audio that is no longer playing.
+    try live.dispatch(.stop);
+    for (app_state.model.spectrumLevels(arena), 0..) |level, band| {
+        try testing.expectEqual(Model.restingLevel(band), level);
+    }
 
     // The tree carries the levels as ONE chart widget with ONE series:
     // phosphor bars alone (no line riding their caps), over an honest

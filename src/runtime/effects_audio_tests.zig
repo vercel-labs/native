@@ -12,6 +12,7 @@ const app_manifest = @import("app_manifest");
 const core = @import("core.zig");
 const ui_app_model = @import("ui_app.zig");
 const effects_mod = @import("effects.zig");
+const platform = @import("../platform/root.zig");
 
 const canvas_label = "audio-canvas";
 
@@ -35,7 +36,9 @@ const AudioModel = struct {
     last_duration_ms: u64 = 0,
     last_playing: bool = false,
     last_buffering: bool = false,
+    last_bands: [platform.audio_spectrum_band_count]u8 = @splat(0),
     completed_count: usize = 0,
+    spectrum_count: usize = 0,
 
     fn record(model: *AudioModel, event: effects_mod.EffectAudio) void {
         model.event_count += 1;
@@ -45,7 +48,9 @@ const AudioModel = struct {
         model.last_duration_ms = event.duration_ms;
         model.last_playing = event.playing;
         model.last_buffering = event.buffering;
+        model.last_bands = event.bands;
         if (event.kind == .completed) model.completed_count += 1;
+        if (event.kind == .spectrum) model.spectrum_count += 1;
     }
 };
 
@@ -133,6 +138,11 @@ const Harness = struct {
         /// path: `audioLoadUrl` is absent and URL playback degrades to
         /// one loud failed Msg.
         audio_streaming: bool = true,
+        /// false models a host that plays but cannot analyze its own
+        /// playback: `audio_spectrum` reports unsupported and the fake
+        /// generator answers null — the honest-absence path consumers
+        /// must rest on instead of fabricating bands.
+        audio_spectrum: bool = true,
     };
 
     fn create() !Harness {
@@ -145,6 +155,7 @@ const Harness = struct {
         harness.null_platform.gpu_surfaces = true;
         harness.null_platform.audio_playback = config.audio_playback;
         harness.null_platform.audio_streaming = config.audio_streaming;
+        harness.null_platform.audio_spectrum = config.audio_spectrum;
         // The harness snapshots the services at create; re-capture so
         // the audio toggle above nulls the service fns the runtime
         // hands the effects channel — the same wiring a real
@@ -330,6 +341,86 @@ test "real executor drives the platform player and events round-trip" {
     try std.testing.expectEqual(@as(usize, 1), np.audio_stop_count);
     try std.testing.expect(!np.audio.loaded);
     try std.testing.expect(h.harness.runtime.automationSnapshot("Audio").audio == null);
+}
+
+test "real spectrum reports round-trip: deterministic fake, honest gating, snapshot evidence" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+    try np.setAudioDuration("cedar-ave.mp3", 89_160);
+
+    // No spectrum before anything plays: analysis rides playback.
+    try std.testing.expect(np.audioSpectrum() == null);
+
+    try h.app_state.dispatch(&h.harness.runtime, 1, .play);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.takeAudioLoaded().?);
+
+    // The fake generator is a pure function of (source, position): the
+    // same instant answers identical bands — the event-shape pin the
+    // journal round-trip and replay determinism rely on.
+    const first = np.audioSpectrum().?;
+    const again = np.audioSpectrum().?;
+    try std.testing.expectEqual(platform.AudioEventKind.spectrum, first.audio.kind);
+    try std.testing.expectEqualSlices(u8, &first.audio.bands, &again.audio.bands);
+    var nonzero = false;
+    for (first.audio.bands) |band| {
+        if (band != 0) nonzero = true;
+    }
+    try std.testing.expect(nonzero);
+
+    // Delivered like every audio event: through the channel into the
+    // app's Msg, bands verbatim, plus the snapshot's evidence mirrors.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, first);
+    try std.testing.expectEqual(effects_mod.EffectAudioEventKind.spectrum, h.app_state.model.last_kind.?);
+    try std.testing.expectEqual(track_key, h.app_state.model.last_key);
+    try std.testing.expectEqualSlices(u8, &first.audio.bands, &h.app_state.model.last_bands);
+    var snapshot = h.harness.runtime.automationSnapshot("Audio").audio.?;
+    try std.testing.expectEqual(@as(u64, 1), snapshot.spectrum_events);
+    try std.testing.expectEqualSlices(u8, &first.audio.bands, snapshot.spectrum_bands);
+
+    // Bands move with the playback position (per-instant determinism,
+    // not a frozen frame) ...
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.advanceAudio(500).?);
+    const later = np.audioSpectrum().?;
+    try std.testing.expect(!std.mem.eql(u8, &first.audio.bands, &later.audio.bands));
+
+    // ... and spectrum reports never steer the transport: the position
+    // mirror stays where the position ticks put it.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, later);
+    snapshot = h.harness.runtime.automationSnapshot("Audio").audio.?;
+    try std.testing.expectEqual(@as(u64, 500), snapshot.position_ms);
+    try std.testing.expectEqual(@as(u64, 2), snapshot.spectrum_events);
+
+    // Pause starves the stream — freeze-on-pause holds with real data.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .pause);
+    try std.testing.expect(np.audioSpectrum() == null);
+    try h.app_state.dispatch(&h.harness.runtime, 1, .unpause);
+
+    // Stop unloads: no more reports, and a straggler after stop is
+    // swallowed by the channel like every other audio event.
+    const straggler = np.audioSpectrum().?;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .stop);
+    try std.testing.expect(np.audioSpectrum() == null);
+    const before = h.app_state.model.event_count;
+    try h.harness.runtime.dispatchPlatformEvent(h.app, straggler);
+    try std.testing.expectEqual(before, h.app_state.model.event_count);
+}
+
+test "a host that cannot analyze reports audio_spectrum unsupported and never emits bands" {
+    var h = try Harness.createConfigured(.{ .audio_spectrum = false });
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+    try std.testing.expect(!h.harness.runtime.supports(.audio_spectrum));
+    try std.testing.expect(h.harness.runtime.supports(.audio_playback));
+    try h.app_state.dispatch(&h.harness.runtime, 1, .play);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.takeAudioLoaded().?);
+    // Playback itself is untouched; only analysis is absent — and the
+    // snapshot shows the honest zero instead of fabricated bands.
+    try std.testing.expect(np.audioSpectrum() == null);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.advanceAudio(500).?);
+    const snapshot = h.harness.runtime.automationSnapshot("Audio").audio.?;
+    try std.testing.expectEqual(@as(u64, 500), snapshot.position_ms);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.spectrum_events);
 }
 
 test "a platform without audio playback degrades to one failed event" {

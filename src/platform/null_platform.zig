@@ -440,6 +440,13 @@ pub const NullPlatform = struct {
     /// `audioLoadUrl` is absent and URL playback degrades to one loud
     /// `.failed` Msg, the same explicit degrade a player-less host ships.
     audio_streaming: bool = true,
+    /// Whether this modeled host can analyze its own playback into
+    /// `.spectrum` band events. On by default (the deterministic fake
+    /// generator below stands in for a real analysis tap); off models a
+    /// host that plays but cannot reach PCM — `audioSpectrum` answers
+    /// null and the feature reports false, so consumers exercise the
+    /// honest-absence path (resting glass, never fake dancing).
+    audio_spectrum: bool = true,
     /// Whether the modeled filesystem holds the local audio files apps
     /// name in `audioLoad`. On by default (loads succeed hermetically);
     /// off models the gitignored-assets-absent machine: every local load
@@ -641,6 +648,7 @@ pub const NullPlatform = struct {
             .view_surface_adoption => false,
             .audio_playback => self.audio_playback,
             .audio_streaming => self.audio_playback and self.audio_streaming,
+            .audio_spectrum => self.audio_playback and self.audio_spectrum,
         };
     }
 
@@ -1417,6 +1425,39 @@ pub const NullPlatform = struct {
             .playing = true,
             .buffering = true,
         } };
+    }
+
+    /// Test helper: synthesize the `.spectrum` band report a live host's
+    /// analysis tap would deliver at this instant — the deterministic
+    /// fake generator standing in for a real FFT, a pure function of
+    /// (loaded source, playback position), so the same fake playback
+    /// always paints the same bars and the journal round-trips exactly.
+    /// The shape mirrors the reference scale: a mid-weighted comb whose
+    /// motion derives from the position clock, quantized to the u8 band
+    /// bytes real hosts emit. Null while nothing is audibly playing
+    /// (pause and stop starve the stream exactly like real hosts) and on
+    /// a modeled host that cannot analyze (`audio_spectrum = false`).
+    pub fn audioSpectrum(self: *NullPlatform) ?Event {
+        if (!self.audio_playback or !self.audio_spectrum) return null;
+        if (!self.audio.loaded or !self.audio.playing) return null;
+        var event = Event{ .audio = .{
+            .kind = .spectrum,
+            .position_ms = self.audio.position_ms,
+            .duration_ms = self.audio.duration_ms,
+            .playing = true,
+        } };
+        const seed: f32 = @floatFromInt(audioUrlHash(self.audio.path()) % 97);
+        const phase = @as(f32, @floatFromInt(self.audio.position_ms)) / 1000.0;
+        for (&event.audio.bands, 0..) |*band, index| {
+            const x: f32 = @floatFromInt(index);
+            // Lows tall, highs rolled off — the plausible silhouette a
+            // consumer can sanity-check band ordering against.
+            const envelope = 0.35 + 0.65 * @exp(-x * x / 420.0);
+            const wave = 0.6 * @abs(@sin(phase * (3.4 + seed * 0.026) + x * 0.55 + seed)) +
+                0.4 * @abs(@sin(phase * 7.3 + x * 1.35 + seed * 0.5));
+            band.* = @intFromFloat(std.math.clamp(envelope * wave, 0.0, 1.0) * 255.0);
+        }
+        return event;
     }
 
     /// Test helper: synthesize an asynchronous decode/device failure,

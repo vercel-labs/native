@@ -974,6 +974,12 @@ fn handleAudioEvent(model: *Model, fx: *Effects, event: native_sdk.EffectAudio) 
                 model.elapsed_ms = position;
             }
         },
+        // Real band-magnitude reports from hosts that analyze their own
+        // playback. The soundboard draws no analyzer — its identity is
+        // the clean catalog, not phosphor glass — so the reports are
+        // consciously ignored (the deck is the surface that adopts
+        // them).
+        .spectrum => {},
         .completed => advance(model, fx),
         .failed, .rejected => {
             // Playback could not run. With a URL base configured the

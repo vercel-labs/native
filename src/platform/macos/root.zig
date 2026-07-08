@@ -110,6 +110,10 @@ const AppKitEvent = extern struct {
     /// Nonzero while a streamed source is stalled waiting for network
     /// bytes (distinct from `audio_playing`, the transport intent).
     audio_buffering: c_int,
+    /// SPECTRUM report payload: the 32 band magnitude bytes on the
+    /// documented scale (log-spaced 50 Hz..16 kHz buckets, linear-in-dB
+    /// from -60 dBFS at 0 to full scale at 255). Zeros elsewhere.
+    audio_bands: [platform_mod.audio_spectrum_band_count]u8,
 };
 
 const AppKitCallback = *const fn (context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) void;
@@ -670,12 +674,16 @@ pub const MacPlatform = struct {
             .gpu_surfaces,
             .gpu_surface_scroll_drivers,
             .view_surface_adoption,
-            // Audio lives in the AppKit host (AVAudioPlayer locally,
-            // AVPlayer for streamed URL sources); the Chromium host
-            // stubs the C ABI and reports honestly unsupported rather
-            // than half-implementing a second player.
+            // Audio lives in the AppKit host (one AVPlayer for local
+            // files and streamed URL sources); the Chromium host stubs
+            // the C ABI and reports honestly unsupported rather than
+            // half-implementing a second player. Spectrum analysis
+            // ships with the player (an MTAudioProcessingTap feeding
+            // vDSP — both in-box on every macOS this toolkit runs on),
+            // so its report rides the same engine gate.
             .audio_playback,
             .audio_streaming,
+            .audio_spectrum,
             => self.web_engine == .system,
         };
     }
@@ -838,6 +846,7 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             .duration_ms = event.audio_duration_ms,
             .playing = event.audio_playing != 0,
             .buffering = event.audio_buffering != 0,
+            .bands = event.audio_bands,
         } }),
         .widget_accessibility_action => if (widgetAccessibilityActionFromInt(event.widget_action)) |action| {
             state.emit(.{ .widget_accessibility_action = .{
@@ -877,6 +886,7 @@ fn audioEventKindFromInt(value: c_int) platform_mod.AudioEventKind {
         0 => .loaded,
         1 => .position,
         2 => .completed,
+        4 => .spectrum,
         else => .failed,
     };
 }

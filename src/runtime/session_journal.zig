@@ -69,8 +69,9 @@ pub const magic = "NSDKSJNL";
 /// Journal format version. Any change to record layouts or journaled
 /// enum orders bumps this; readers refuse other versions loudly rather
 /// than misreading yesterday's shape. v2 added the stream `buffering`
-/// flag to audio event and audio effect records.
-pub const format_version: u32 = 2;
+/// flag to audio event and audio effect records; v3 added the spectrum
+/// band bytes to both (and the `.spectrum` audio kind).
+pub const format_version: u32 = 3;
 
 // ------------------------------------------------------------- budgets
 //
@@ -469,6 +470,7 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeInt(u64, audio.duration_ms);
             try cursor.writeBool(audio.playing);
             try cursor.writeBool(audio.buffering);
+            try cursor.writeBytes(&audio.bands);
         },
         .files_dropped => |drop| {
             try cursor.writeEnum(EventTag.files_dropped);
@@ -656,13 +658,15 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
         },
         .audio => blk: {
             const kind = try cursor.readEnum(platform.AudioEventKind);
-            break :blk .{ .audio = .{
+            var decoded: platform.AudioEvent = .{
                 .kind = kind,
                 .position_ms = try cursor.readInt(u64),
                 .duration_ms = try cursor.readInt(u64),
                 .playing = try cursor.readBool(),
                 .buffering = try cursor.readBool(),
-            } };
+            };
+            @memcpy(&decoded.bands, try cursor.readBytes(decoded.bands.len));
+            break :blk .{ .audio = decoded };
         },
         .files_dropped => blk: {
             const window_id = try cursor.readInt(u64);
@@ -827,12 +831,13 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeInt(u64, record.audio_duration_ms);
     try cursor.writeBool(record.audio_playing);
     try cursor.writeBool(record.audio_buffering);
+    try cursor.writeBytes(&record.audio_bands);
     return buffer[0..cursor.len];
 }
 
 pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
     var cursor = ReadCursor{ .bytes = bytes };
-    const record: EffectResultRecord = .{
+    var record: EffectResultRecord = .{
         .kind = try cursor.readEnum(runtime_effects.EffectResultKind),
         .key = try cursor.readInt(u64),
         .payload = try cursor.readStr(),
@@ -858,6 +863,7 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         .audio_playing = try cursor.readBool(),
         .audio_buffering = try cursor.readBool(),
     };
+    @memcpy(&record.audio_bands, try cursor.readBytes(record.audio_bands.len));
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
 }
@@ -1160,6 +1166,23 @@ test "event codec round-trips every payload variant" {
         try testing.expect(!decoded.audio.playing);
     }
     {
+        // Spectrum events journal their band bytes verbatim — replay
+        // must repaint identical bars from the decoded record alone.
+        var bands: [platform.audio_spectrum_band_count]u8 = undefined;
+        for (&bands, 0..) |*band, index| band.* = @intCast(index * 7 % 256);
+        const decoded = try roundTripEvent(.{ .audio = .{
+            .kind = .spectrum,
+            .position_ms = 4_240,
+            .duration_ms = 89_160,
+            .playing = true,
+            .bands = bands,
+        } });
+        try testing.expectEqual(platform.AudioEventKind.spectrum, decoded.audio.kind);
+        try testing.expectEqual(@as(u64, 4_240), decoded.audio.position_ms);
+        try testing.expect(decoded.audio.playing);
+        try testing.expectEqualSlices(u8, &bands, &decoded.audio.bands);
+    }
+    {
         const paths = [_][]const u8{ "/tmp/a.txt", "/tmp/b.txt" };
         const decoded = try roundTripEvent(.{ .files_dropped = .{
             .window_id = 1,
@@ -1303,6 +1326,23 @@ test "effect codec round-trips payloads and outcomes" {
     try testing.expectEqual(@as(u64, 89_160), audio_decoded.audio_duration_ms);
     try testing.expect(audio_decoded.audio_playing);
     try testing.expect(audio_decoded.audio_buffering);
+
+    // Spectrum effect records carry their band bytes verbatim: the
+    // journaled record is the replay's ONLY source for the bars.
+    var spectrum_bands: [platform.audio_spectrum_band_count]u8 = undefined;
+    for (&spectrum_bands, 0..) |*band, index| band.* = @intCast((index * 11 + 3) % 256);
+    const spectrum_encoded = try encodeEffect(.{
+        .kind = .audio,
+        .key = 41,
+        .audio_kind = .spectrum,
+        .audio_position_ms = 4_240,
+        .audio_duration_ms = 89_160,
+        .audio_playing = true,
+        .audio_bands = spectrum_bands,
+    }, &buffer);
+    const spectrum_decoded = try decodeEffect(spectrum_encoded);
+    try testing.expectEqual(runtime_effects.EffectAudioEventKind.spectrum, spectrum_decoded.audio_kind);
+    try testing.expectEqualSlices(u8, &spectrum_bands, &spectrum_decoded.audio_bands);
 }
 
 test "header, checkpoint, screenshot, and end codecs round-trip" {

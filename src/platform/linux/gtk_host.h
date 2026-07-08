@@ -85,6 +85,10 @@ typedef struct {
     uint64_t audio_duration_ms;
     int audio_playing;
     int audio_buffering;
+    /* SPECTRUM report payload: 32 band magnitude bytes, log-spaced
+     * 50 Hz..16 kHz buckets, each linear-in-dB from -60 dBFS at 0 to
+     * full scale at 255. All zeros on every other event kind. */
+    uint8_t audio_bands[32];
 } native_sdk_gtk_event_t;
 
 typedef void (*native_sdk_gtk_event_callback_t)(void *context, const native_sdk_gtk_event_t *event);
@@ -232,6 +236,13 @@ int native_sdk_gtk_delete_credential(native_sdk_gtk_host_t *host, const char *se
  * 3 = no backend; audio_load_url additionally answers 1 for a verified
  * cache entry now playing as a local file (0 = a stream started). */
 int native_sdk_gtk_audio_available(native_sdk_gtk_host_t *host);
+/* Whether playback analysis can deliver SPECTRUM reports: 1 only when
+ * the runtime-loaded GStreamer is present AND the `spectrum` element
+ * factory resolves (gst-plugins-good, packaged separately from the
+ * core library). A host without it still plays audio — analysis is
+ * additive, so the capability degrades to honest absence, never to a
+ * broken player. */
+int native_sdk_gtk_audio_spectrum_available(native_sdk_gtk_host_t *host);
 int native_sdk_gtk_audio_load(native_sdk_gtk_host_t *host, const char *path, size_t path_len);
 int native_sdk_gtk_audio_load_url(native_sdk_gtk_host_t *host, const char *url, size_t url_len, const char *cache_path, size_t cache_path_len, uint64_t expected_bytes);
 int native_sdk_gtk_audio_play(native_sdk_gtk_host_t *host);

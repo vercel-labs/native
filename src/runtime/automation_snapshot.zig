@@ -113,6 +113,8 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                 .source = @tagName(self.audio_source),
                 .position_ms = self.audio_position_ms,
                 .duration_ms = self.audio_duration_ms,
+                .spectrum_events = self.audio_spectrum_events,
+                .spectrum_bands = &self.audio_spectrum_bands,
             };
         }
 

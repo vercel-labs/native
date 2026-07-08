@@ -11,6 +11,7 @@ const app_manifest = @import("app_manifest");
 const core = @import("core.zig");
 const ui_app_mod = @import("ui_app.zig");
 const effects_mod = @import("effects.zig");
+const platform = @import("../platform/root.zig");
 const journal = @import("session_journal.zig");
 const session_record = @import("session_record.zig");
 const session_replay = @import("session_replay.zig");
@@ -26,6 +27,11 @@ const SessionModel = struct {
     exit_code: i32 = -999,
     tick_timestamp_ns: u64 = 0,
     stamp_ms: i64 = 0,
+    /// Spectrum band reports fold into a checksum: identical bars on
+    /// replay means an identical checksum — the band-byte determinism
+    /// pin, without 32 array fields in the equality check.
+    spectrum_count: u32 = 0,
+    band_checksum: u64 = 0,
 
     fn bodyText(self: *const SessionModel) []const u8 {
         return self.body[0..self.body_len];
@@ -37,10 +43,12 @@ const SessionMsg = union(enum) {
     stamp,
     start_fetch,
     start_spawn,
+    start_audio,
     fetched: effects_mod.EffectResponse,
     line: effects_mod.EffectLine,
     exited: effects_mod.EffectExit,
     tick: effects_mod.EffectTimer,
+    audio_event: effects_mod.EffectAudio,
 };
 
 const SessionApp = ui_app_mod.UiApp(SessionModel, SessionMsg);
@@ -67,11 +75,22 @@ fn sessionUpdate(model: *SessionModel, msg: SessionMsg, fx: *SessionApp.Effects)
                 .on_fire = SessionApp.Effects.timerMsg(.tick),
             });
         },
+        .start_audio => fx.playAudio(.{
+            .key = 9,
+            .path = "assets/session-track.mp3",
+            .on_event = SessionApp.Effects.audioMsg(.audio_event),
+        }),
         .fetched => |response| {
             model.fetch_status = response.status;
             const len = @min(response.body.len, model.body.len);
             @memcpy(model.body[0..len], response.body[0..len]);
             model.body_len = len;
+        },
+        .audio_event => |event| if (event.kind == .spectrum) {
+            model.spectrum_count += 1;
+            var checksum: u64 = 0;
+            for (event.bands) |band| checksum = checksum *% 31 +% band;
+            model.band_checksum = checksum;
         },
         .line => model.line_count += 1,
         .exited => |exit| model.exit_code = exit.code,
@@ -93,6 +112,7 @@ fn sessionCommand(name: []const u8) ?SessionMsg {
     if (std.mem.eql(u8, name, "session.stamp")) return .stamp;
     if (std.mem.eql(u8, name, "session.fetch")) return .start_fetch;
     if (std.mem.eql(u8, name, "session.spawn")) return .start_spawn;
+    if (std.mem.eql(u8, name, "session.audio")) return .start_audio;
     return null;
 }
 
@@ -208,6 +228,17 @@ fn recordReferenceSession(gpa: std.mem.Allocator, buffer: *JournalBuffer) !Recor
     try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "session.stamp", .window_id = 1 } });
     try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
 
+    // Real spectrum analysis, journaled at the boundary: playback starts
+    // and the world answers one `.spectrum` band report — honest
+    // non-determinism recorded at the edge, so replay repaints the same
+    // bars (the model folds them into a checksum the equality pins).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "session.audio", .window_id = 1 } });
+    var bands: [platform.audio_spectrum_band_count]u8 = undefined;
+    for (&bands, 0..) |*band, index| band.* = @intCast((index * 13 + 5) % 256);
+    try app_state.effects.feedAudioSpectrum(bands, 1_000, 30_000);
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
     recorder.finish();
     try std.testing.expect(!recorder.failed);
 
@@ -257,11 +288,13 @@ test "a recorded session replays to identical model state and fingerprints" {
     try std.testing.expectEqual(@as(i32, 0), recorded.model.exit_code);
     try std.testing.expectEqual(@as(u64, 42_000_000), recorded.model.tick_timestamp_ns);
     try std.testing.expect(recorded.model.stamp_ms != 0);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.spectrum_count);
+    try std.testing.expect(recorded.model.band_checksum != 0);
 
     const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes());
     try std.testing.expect(replayed.report.ok());
     try std.testing.expect(replayed.report.events_replayed > 0);
-    try std.testing.expectEqual(@as(u64, 4), replayed.report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 5), replayed.report.effects_fed);
     try std.testing.expect(replayed.report.checkpoints_verified > 0);
     try std.testing.expectEqualDeep(recorded.model, replayed.model);
     try std.testing.expectEqual(recorded.fingerprint, replayed.fingerprint);

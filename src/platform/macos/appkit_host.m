@@ -2,6 +2,12 @@
 
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
+/* Spectrum analysis of the app's own playback: MediaToolbox provides
+ * the MTAudioProcessingTap that hands the player's PCM to the host, and
+ * Accelerate (vDSP) provides the FFT that turns it into band
+ * magnitudes. Both in-box system frameworks — no third-party DSP. */
+#import <MediaToolbox/MediaToolbox.h>
+#import <Accelerate/Accelerate.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <WebKit/WebKit.h>
@@ -13,6 +19,7 @@
 #include <dlfcn.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,13 +36,16 @@ static const uint32_t NativeSdkShortcutModifierControl = 1u << 2;
 static const uint32_t NativeSdkShortcutModifierOption = 1u << 3;
 static const uint32_t NativeSdkShortcutModifierShift = 1u << 4;
 static void *NativeSdkAppKitAppearanceObservationContext = &NativeSdkAppKitAppearanceObservationContext;
-/* KVO contexts for the streaming audio player: the AVPlayerItem's load
- * status (readyToPlay -> the LOADED acknowledgment; failed -> one FAILED
- * event) and the AVPlayer's timeControlStatus (waiting-to-play IS the
- * honest buffering signal — the transport is not paused, but no audio
- * comes out until bytes arrive). */
-static void *NativeSdkAppKitStreamItemStatusContext = &NativeSdkAppKitStreamItemStatusContext;
-static void *NativeSdkAppKitStreamTimeControlContext = &NativeSdkAppKitStreamTimeControlContext;
+/* KVO contexts for the app's single audio player: the AVPlayerItem's
+ * load status (readyToPlay -> the LOADED acknowledgment; failed -> one
+ * FAILED event) and the AVPlayer's timeControlStatus (waiting-to-play
+ * IS the honest buffering signal for streamed sources — the transport
+ * is not paused, but no audio comes out until bytes arrive). */
+static void *NativeSdkAppKitAudioItemStatusContext = &NativeSdkAppKitAudioItemStatusContext;
+static void *NativeSdkAppKitAudioTimeControlContext = &NativeSdkAppKitAudioTimeControlContext;
+/* Render-thread ring state for the spectrum tap; defined with the rest
+ * of the spectrum machinery in the audio section below. */
+typedef struct native_sdk_spectrum_tap_state native_sdk_spectrum_tap_state_t;
 static NSRect constrainFrame(NSRect frame);
 static NSString *NativeSdkAppKitBridgeScript(void);
 static NSString *NativeSdkMimeTypeForPath(NSString *path);
@@ -628,7 +638,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) uint32_t modifiers;
 @end
 
-@interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate, AVAudioPlayerDelegate>
+@interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) WKWebView *webView;
 @property(nonatomic, strong) NativeSdkWindowDelegate *delegate;
@@ -677,31 +687,46 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
  * is the whole surface: a music app plays one track at a time, and a
  * second concurrent stream would be mixer design the platform seam has
  * not earned. The tick timer runs only while playing, at a coarse
- * honest cadence — position is a readout, not a frame clock. */
-@property(nonatomic, strong) AVAudioPlayer *audioPlayer;
+ * honest cadence — position is a readout, not a frame clock.
+ *
+ * ONE AVPlayer serves every source. Local files and verified cache
+ * hits used to ride AVAudioPlayer, but that player exposes no PCM, and
+ * the SPECTRUM reports need the rendered samples — so local sources
+ * moved onto the same AVPlayer the streams always used, where one
+ * MTAudioProcessingTap covers everything the deck can play. The proven
+ * synchronous decode verdict AVAudioPlayer gave local loads survives
+ * as a probe (see audioLoadPath). */
+@property(nonatomic, strong) AVPlayer *audioPlayer;
+@property(nonatomic, strong) AVPlayerItem *audioItem;
 @property(nonatomic, strong) NSTimer *audioPositionTimer;
-/* URL sources ride AVPlayer, not AVAudioPlayer — AVAudioPlayer wants a
- * complete local file, while AVPlayer streams progressively (playback
- * starts as soon as enough bytes arrive, never download-then-play) and
- * keeps seek and volume working mid-stream. Exactly one of audioPlayer/
- * streamPlayer is non-nil at a time: local files and verified cache
- * hits stay on AVAudioPlayer (a proven, simpler decode path), streams
- * use this pair. */
-@property(nonatomic, strong) AVPlayer *streamPlayer;
-@property(nonatomic, strong) AVPlayerItem *streamItem;
-/* NSNotificationCenter block-observer tokens for the stream item's
- * natural end and mid-flight failure; removed on teardown. */
-@property(nonatomic, strong) id streamEndObserver;
-@property(nonatomic, strong) id streamFailObserver;
+/* Whether the loaded source is a local file (a plain path or a
+ * verified cache entry): local sources never report buffering and run
+ * no cache-fill download. */
+@property(nonatomic, assign) BOOL audioSourceIsLocal;
+/* NSNotificationCenter block-observer tokens for the item's natural
+ * end and mid-flight failure; removed on teardown. */
+@property(nonatomic, strong) id audioEndObserver;
+@property(nonatomic, strong) id audioFailObserver;
 /* KVO registration flag so teardown removes observers exactly once. */
-@property(nonatomic, assign) BOOL streamObservingStatus;
-/* The LOADED acknowledgment fires once per stream (item status can
+@property(nonatomic, assign) BOOL audioObservingStatus;
+/* The LOADED acknowledgment fires once per load (item status can
  * bounce through readyToPlay again after a stall). */
-@property(nonatomic, assign) BOOL streamLoadedEmitted;
+@property(nonatomic, assign) BOOL audioLoadedEmitted;
 /* The honest buffering mirror emitted with every audio event: YES from
  * stream start (no bytes yet) until the player reports it is actually
- * rolling, then follows timeControlStatus. */
-@property(nonatomic, assign) BOOL streamBuffering;
+ * rolling, then follows timeControlStatus. Never set for local files. */
+@property(nonatomic, assign) BOOL audioBuffering;
+/* The spectrum tap (see the spectrum section): the MediaToolbox tap on
+ * the item's audio mix, its render-thread ring state, the 40 ms
+ * analysis timer, the freshness cursor that keeps a stalled tap from
+ * re-emitting yesterday's window, and the lazily built vDSP plan
+ * (created once, kept for the host's lifetime). */
+@property(nonatomic, assign) MTAudioProcessingTapRef audioSpectrumTap;
+@property(nonatomic, assign) native_sdk_spectrum_tap_state_t *audioSpectrumState;
+@property(nonatomic, strong) NSTimer *audioSpectrumTimer;
+@property(nonatomic, assign) uint64_t audioSpectrumLastWritten;
+@property(nonatomic, assign) uint64_t audioSpectrumFreshNs;
+@property(nonatomic, assign) FFTSetup audioSpectrumFft;
 /* The cache fill: a parallel download of the same URL, installed at
  * the cache path only after an atomic size-verified rename. Cancelled
  * when a new load replaces the stream; orphaned (left to finish) when
@@ -837,12 +862,13 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)invalidateAppTimers;
 - (int)audioLoadPath:(NSString *)path;
 - (int)audioLoadURL:(NSString *)urlString cachePath:(NSString *)cachePath expectedBytes:(uint64_t)expectedBytes;
+- (void)audioInstallItem:(AVPlayerItem *)item asset:(AVURLAsset *)asset localSource:(BOOL)localSource;
 - (void)startAudioCacheDownloadFrom:(NSURL *)url toPath:(NSString *)cachePath expectedBytes:(uint64_t)expectedBytes;
-- (void)audioTearDownStreamCancellingDownload:(BOOL)cancelDownload;
-- (void)streamItemStatusChanged;
-- (void)streamTimeControlChanged;
-- (void)streamDidPlayToEnd;
-- (void)streamDidFail;
+- (void)audioTearDownPlayerCancellingDownload:(BOOL)cancelDownload;
+- (void)audioItemStatusChanged;
+- (void)audioTimeControlChanged;
+- (void)audioDidPlayToEnd;
+- (void)audioDidFail;
 - (int)audioPlay;
 - (int)audioPause;
 - (int)audioStop;
@@ -850,6 +876,10 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (int)audioSetVolume:(double)volume;
 - (void)emitAudioEventOfKind:(int)kind;
 - (void)stopAudioPositionTimer;
+- (void)audioInstallSpectrumTapForItem:(AVPlayerItem *)item asset:(AVURLAsset *)asset;
+- (void)audioTearDownSpectrumTap;
+- (void)stopAudioSpectrumTimer;
+- (void)audioSpectrumTimerFired:(NSTimer *)timer;
 - (void)wakeFromAnyThread;
 - (void)scheduleBridgeFrames;
 - (void)emitFrame;
@@ -6380,6 +6410,12 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 - (void)dealloc {
     [self invalidateAppTimers];
     [self audioStop];
+    /* The vDSP plan outlives individual playbacks (created lazily
+     * once); the host's end is where it retires. */
+    if (self.audioSpectrumFft) {
+        vDSP_destroy_fftsetup(self.audioSpectrumFft);
+        self.audioSpectrumFft = NULL;
+    }
     [self stopAppearanceObservers];
     if (self.shortcutEventMonitor) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
@@ -8158,17 +8194,17 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     /* AVPlayer/AVPlayerItem KVO can fire on background threads; every
      * audio entry point is loop-thread only, so hop before touching
      * player state or emitting. */
-    if (context == NativeSdkAppKitStreamItemStatusContext) {
+    if (context == NativeSdkAppKitAudioItemStatusContext) {
         __weak NativeSdkAppKitHost *weakSelf = self;
         dispatch_async(dispatch_get_main_queue(), ^{
-            [weakSelf streamItemStatusChanged];
+            [weakSelf audioItemStatusChanged];
         });
         return;
     }
-    if (context == NativeSdkAppKitStreamTimeControlContext) {
+    if (context == NativeSdkAppKitAudioTimeControlContext) {
         __weak NativeSdkAppKitHost *weakSelf = self;
         dispatch_async(dispatch_get_main_queue(), ^{
-            [weakSelf streamTimeControlChanged];
+            [weakSelf audioTimeControlChanged];
         });
         return;
     }
@@ -8349,34 +8385,177 @@ static CMTime NativeSdkCMTimeFromMs(uint64_t ms) {
     return time;
 }
 
+/* ---------------------------------------------------- spectrum tap
+ *
+ * Real spectrum analysis of the app's own playback: an
+ * MTAudioProcessingTap on the single AVPlayer's audio mix hands every
+ * rendered PCM buffer to the host, a render-thread-safe mono ring
+ * buffer carries the samples to the loop thread, and a 40 ms timer
+ * (the SPECTRUM cadence, ~25 Hz) runs a vDSP FFT over the freshest
+ * window and folds the bins into the 32 documented bands (log-spaced
+ * 50 Hz..16 kHz; each byte linear-in-dB from -60 dBFS to full scale).
+ * The tap sits PRE-effects, so the bands describe the decoded signal —
+ * the track itself — not the app's volume fader.
+ *
+ * Threading: the process callback runs on CoreAudio's render thread
+ * and must never touch ObjC or block, so it only downmixes into the
+ * ring and bumps an atomic write counter. The loop-thread reader copies
+ * the last FFT window by that counter; the writer could only overwrite
+ * bytes under the copy after producing RING-FFT_SIZE further samples
+ * (tens of milliseconds of audio) inside a microseconds-long memcpy,
+ * so a torn window is not a real case — and the worst outcome would be
+ * one blended visualization frame, not corrupted state. */
+
+#define NATIVE_SDK_SPECTRUM_FFT_SIZE 2048
+#define NATIVE_SDK_SPECTRUM_FFT_LOG2 11
+#define NATIVE_SDK_SPECTRUM_RING_SIZE 8192
+#define NATIVE_SDK_SPECTRUM_INTERVAL_SECONDS 0.04
+#define NATIVE_SDK_SPECTRUM_FLOOR_DB (-60.0f)
+#define NATIVE_SDK_SPECTRUM_LOW_HZ 50.0
+#define NATIVE_SDK_SPECTRUM_HIGH_HZ 16000.0
+
+struct native_sdk_spectrum_tap_state {
+    float ring[NATIVE_SDK_SPECTRUM_RING_SIZE];
+    /* Total mono samples ever written; the ring index is written %
+     * RING_SIZE. Release-published by the render thread, acquired by
+     * the loop-thread reader. */
+    _Atomic uint64_t written;
+    /* From the tap's prepare callback: the processing format the
+     * process callback will see. */
+    _Atomic double sample_rate;
+    _Atomic int channels;
+    _Atomic int interleaved;
+};
+
+static void NativeSdkSpectrumTapInit(MTAudioProcessingTapRef tap, void *clientInfo, void **tapStorageOut) {
+    (void)tap;
+    *tapStorageOut = clientInfo;
+}
+
+/* The tap owns its state's lifetime end: finalize runs once the mix
+ * and every render-thread user are done with the tap, which is the
+ * only moment the buffer is provably unreachable. The host clears its
+ * own pointer BEFORE releasing the tap (same thread as the reader), so
+ * nothing reads after free. */
+static void NativeSdkSpectrumTapFinalize(MTAudioProcessingTapRef tap) {
+    free(MTAudioProcessingTapGetStorage(tap));
+}
+
+static void NativeSdkSpectrumTapPrepare(MTAudioProcessingTapRef tap, CMItemCount maxFrames, const AudioStreamBasicDescription *format) {
+    (void)maxFrames;
+    native_sdk_spectrum_tap_state_t *state = MTAudioProcessingTapGetStorage(tap);
+    atomic_store(&state->sample_rate, format->mSampleRate);
+    atomic_store(&state->channels, (int)format->mChannelsPerFrame);
+    atomic_store(&state->interleaved, (format->mFormatFlags & kAudioFormatFlagIsNonInterleaved) ? 0 : 1);
+}
+
+static void NativeSdkSpectrumTapUnprepare(MTAudioProcessingTapRef tap) {
+    (void)tap;
+}
+
+static void NativeSdkSpectrumTapProcess(MTAudioProcessingTapRef tap, CMItemCount numberFrames, MTAudioProcessingTapFlags flags, AudioBufferList *bufferListInOut, CMItemCount *numberFramesOut, MTAudioProcessingTapFlags *flagsOut) {
+    (void)flags;
+    if (MTAudioProcessingTapGetSourceAudio(tap, numberFrames, bufferListInOut, flagsOut, NULL, numberFramesOut) != noErr) return;
+    native_sdk_spectrum_tap_state_t *state = MTAudioProcessingTapGetStorage(tap);
+    const int channels = atomic_load(&state->channels);
+    const int interleaved = atomic_load(&state->interleaved);
+    if (channels <= 0 || bufferListInOut->mNumberBuffers == 0) return;
+    uint64_t written = atomic_load_explicit(&state->written, memory_order_relaxed);
+    const CMItemCount frames = *numberFramesOut;
+    for (CMItemCount frame = 0; frame < frames; frame += 1) {
+        float sum = 0.0f;
+        if (interleaved) {
+            const float *samples = (const float *)bufferListInOut->mBuffers[0].mData;
+            if (!samples) return;
+            for (int channel = 0; channel < channels; channel += 1) {
+                sum += samples[frame * channels + channel];
+            }
+        } else {
+            const UInt32 buffers = bufferListInOut->mNumberBuffers;
+            for (UInt32 buffer = 0; buffer < buffers; buffer += 1) {
+                const float *samples = (const float *)bufferListInOut->mBuffers[buffer].mData;
+                if (samples) sum += samples[frame];
+            }
+        }
+        state->ring[written % NATIVE_SDK_SPECTRUM_RING_SIZE] = sum / (float)channels;
+        written += 1;
+    }
+    atomic_store_explicit(&state->written, written, memory_order_release);
+}
+
+/* Fold the freshest FFT window into the 32 documented bands. Returns 0
+ * when the ring has not yet seen a full window (bands untouched). The
+ * dB reference: a full-scale sine (amplitude 1.0) lands at 0 dBFS —
+ * with vDSP_fft_zrip's 2x packing and the Hann window's 0.5 coherent
+ * gain, that sine's peak bin magnitude is N/2, so amplitude =
+ * 2*sqrt(power)/N against zvmags' squared magnitudes. */
+static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state, FFTSetup fft, const float *window, uint8_t bands[NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS]) {
+    const uint64_t written = atomic_load_explicit(&state->written, memory_order_acquire);
+    if (written < NATIVE_SDK_SPECTRUM_FFT_SIZE) return 0;
+    const double sample_rate = atomic_load(&state->sample_rate);
+    if (sample_rate <= 0) return 0;
+
+    float samples[NATIVE_SDK_SPECTRUM_FFT_SIZE];
+    const uint64_t start = written - NATIVE_SDK_SPECTRUM_FFT_SIZE;
+    for (int index = 0; index < NATIVE_SDK_SPECTRUM_FFT_SIZE; index += 1) {
+        samples[index] = state->ring[(start + index) % NATIVE_SDK_SPECTRUM_RING_SIZE];
+    }
+    vDSP_vmul(samples, 1, window, 1, samples, 1, NATIVE_SDK_SPECTRUM_FFT_SIZE);
+
+    float real[NATIVE_SDK_SPECTRUM_FFT_SIZE / 2];
+    float imag[NATIVE_SDK_SPECTRUM_FFT_SIZE / 2];
+    DSPSplitComplex split = { .realp = real, .imagp = imag };
+    vDSP_ctoz((const DSPComplex *)samples, 2, &split, 1, NATIVE_SDK_SPECTRUM_FFT_SIZE / 2);
+    vDSP_fft_zrip(fft, &split, 1, NATIVE_SDK_SPECTRUM_FFT_LOG2, kFFTDirection_Forward);
+    float power[NATIVE_SDK_SPECTRUM_FFT_SIZE / 2];
+    vDSP_zvmags(&split, 1, power, 1, NATIVE_SDK_SPECTRUM_FFT_SIZE / 2);
+
+    /* Log-spaced bucket edges over 50 Hz..16 kHz; per bucket the PEAK
+     * bin, matching how a bar analyzer reads (an average would smear
+     * narrow tones into invisibility). Bin 0 (DC) never contributes. */
+    const double ratio = NATIVE_SDK_SPECTRUM_HIGH_HZ / NATIVE_SDK_SPECTRUM_LOW_HZ;
+    const double hz_per_bin = sample_rate / (double)NATIVE_SDK_SPECTRUM_FFT_SIZE;
+    for (int band = 0; band < NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS; band += 1) {
+        const double low_hz = NATIVE_SDK_SPECTRUM_LOW_HZ * pow(ratio, (double)band / NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS);
+        const double high_hz = NATIVE_SDK_SPECTRUM_LOW_HZ * pow(ratio, (double)(band + 1) / NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS);
+        int low_bin = (int)(low_hz / hz_per_bin);
+        int high_bin = (int)ceil(high_hz / hz_per_bin);
+        if (low_bin < 1) low_bin = 1;
+        if (high_bin > NATIVE_SDK_SPECTRUM_FFT_SIZE / 2 - 1) high_bin = NATIVE_SDK_SPECTRUM_FFT_SIZE / 2 - 1;
+        if (high_bin < low_bin) high_bin = low_bin;
+        float peak = 0.0f;
+        for (int bin = low_bin; bin <= high_bin; bin += 1) {
+            if (power[bin] > peak) peak = power[bin];
+        }
+        const float amplitude = 2.0f * sqrtf(peak) / (float)NATIVE_SDK_SPECTRUM_FFT_SIZE;
+        float db = amplitude > 0.0f ? 20.0f * log10f(amplitude) : NATIVE_SDK_SPECTRUM_FLOOR_DB;
+        if (db < NATIVE_SDK_SPECTRUM_FLOOR_DB) db = NATIVE_SDK_SPECTRUM_FLOOR_DB;
+        if (db > 0.0f) db = 0.0f;
+        bands[band] = (uint8_t)lroundf((db - NATIVE_SDK_SPECTRUM_FLOOR_DB) / -NATIVE_SDK_SPECTRUM_FLOOR_DB * 255.0f);
+    }
+    return 1;
+}
+
 /* Emit one audio report carrying the live position/duration readout of
- * whichever player is active (the local AVAudioPlayer or the streaming
- * AVPlayer). Runs on the loop thread — every audio entry point is
- * loop-thread only; AVAudioPlayer delegate callbacks arrive on the
- * thread that started playback (this one), and the stream player's KVO
- * and notification handlers hop to the main queue before landing here. */
+ * the app's single AVPlayer. Runs on the loop thread — every audio
+ * entry point is loop-thread only; the player's KVO and notification
+ * handlers hop to the main queue before landing here. */
 - (void)emitAudioEventOfKind:(int)kind {
-    AVAudioPlayer *player = self.audioPlayer;
-    AVPlayer *stream = self.streamPlayer;
+    AVPlayer *player = self.audioPlayer;
     uint64_t position_ms = 0;
     uint64_t duration_ms = 0;
     int playing = 0;
     int buffering = 0;
     if (player) {
-        NSTimeInterval position = player.currentTime;
-        NSTimeInterval duration = player.duration;
-        if (position > 0) position_ms = (uint64_t)llround(position * 1000.0);
-        if (duration > 0) duration_ms = (uint64_t)llround(duration * 1000.0);
-        playing = player.isPlaying ? 1 : 0;
-    } else if (stream) {
-        double position = NativeSdkSecondsFromCMTime(stream.currentTime);
-        double duration = self.streamItem ? NativeSdkSecondsFromCMTime(self.streamItem.duration) : 0.0;
+        double position = NativeSdkSecondsFromCMTime(player.currentTime);
+        double duration = self.audioItem ? NativeSdkSecondsFromCMTime(self.audioItem.duration) : 0.0;
         if (position > 0) position_ms = (uint64_t)llround(position * 1000.0);
         if (duration > 0) duration_ms = (uint64_t)llround(duration * 1000.0);
         /* rate > 0 is the transport intent (un-paused); the buffering
-         * flag beside it says whether audio is actually coming out. */
-        playing = stream.rate > 0 ? 1 : 0;
-        buffering = self.streamBuffering ? 1 : 0;
+         * flag beside it says whether audio is actually coming out.
+         * Local files never buffer — the flag is stream-only. */
+        playing = player.rate > 0 ? 1 : 0;
+        buffering = (!self.audioSourceIsLocal && self.audioBuffering) ? 1 : 0;
     }
     if (kind == NATIVE_SDK_APPKIT_AUDIO_EVENT_COMPLETED) {
         /* A finished player rewinds itself to zero; report the honest
@@ -8402,34 +8581,101 @@ static CMTime NativeSdkCMTimeFromMs(uint64_t ms) {
 }
 
 - (void)audioPositionTimerFired:(NSTimer *)timer {
-    if (!self.audioPlayer && !self.streamPlayer) {
+    if (!self.audioPlayer) {
         [self stopAudioPositionTimer];
         return;
     }
     [self emitAudioEventOfKind:NATIVE_SDK_APPKIT_AUDIO_EVENT_POSITION];
 }
 
+- (void)stopAudioSpectrumTimer {
+    [self.audioSpectrumTimer invalidate];
+    self.audioSpectrumTimer = nil;
+}
+
+/* One SPECTRUM report per 40 ms tick, and only when the analysis is
+ * honestly live: a player, an un-paused transport, no buffering stall,
+ * and a tap that has rendered RECENTLY. The render side delivers PCM
+ * in bursts larger than one tick (ahead-of-time decode), so freshness
+ * is a short grace window rather than per-tick: emits stay at the
+ * steady ~25 Hz cadence between bursts, and a render that actually
+ * stopped (a stall the transport has not reported, a route change)
+ * goes quiet within a quarter second — never re-emitting yesterday's
+ * window as if the music were still moving. Silence while playing is
+ * a row of floor bytes, emitted: the cadence follows the transport,
+ * the magnitudes tell the truth. */
+- (void)audioSpectrumTimerFired:(NSTimer *)timer {
+    (void)timer;
+    AVPlayer *player = self.audioPlayer;
+    native_sdk_spectrum_tap_state_t *state = self.audioSpectrumState;
+    if (!player) {
+        [self stopAudioSpectrumTimer];
+        return;
+    }
+    /* The tap attaches asynchronously (the asset's track table loads
+     * off-thread) and may never attach at all (no analyzable track):
+     * tick idle until samples exist — honest absence, not an error. */
+    if (!state) return;
+    if (player.rate <= 0) return;
+    if (!self.audioSourceIsLocal && self.audioBuffering) return;
+    const uint64_t now_ns = NativeSdkTimestampNanoseconds();
+    const uint64_t written = atomic_load_explicit(&state->written, memory_order_acquire);
+    if (written < NATIVE_SDK_SPECTRUM_FFT_SIZE) return;
+    if (written != self.audioSpectrumLastWritten) {
+        self.audioSpectrumLastWritten = written;
+        self.audioSpectrumFreshNs = now_ns;
+    } else if (self.audioSpectrumFreshNs == 0 || now_ns - self.audioSpectrumFreshNs > 250000000ull) {
+        return;
+    }
+    if (!self.audioSpectrumFft) {
+        self.audioSpectrumFft = vDSP_create_fftsetup(NATIVE_SDK_SPECTRUM_FFT_LOG2, kFFTRadix2);
+        if (!self.audioSpectrumFft) return;
+    }
+    /* The Hann window is a pure function of the FFT size; computed
+     * once. DENORM is the textbook 0.5-0.5cos shape whose 0.5 coherent
+     * gain the dB calibration in NativeSdkSpectrumComputeBands assumes. */
+    static float window[NATIVE_SDK_SPECTRUM_FFT_SIZE];
+    static dispatch_once_t window_once;
+    dispatch_once(&window_once, ^{
+        vDSP_hann_window(window, NATIVE_SDK_SPECTRUM_FFT_SIZE, vDSP_HANN_DENORM);
+    });
+    native_sdk_appkit_event_t event = {
+        .kind = NATIVE_SDK_APPKIT_EVENT_AUDIO,
+        .audio_kind = NATIVE_SDK_APPKIT_AUDIO_EVENT_SPECTRUM,
+        .timestamp_ns = NativeSdkTimestampNanoseconds(),
+    };
+    if (!NativeSdkSpectrumComputeBands(state, self.audioSpectrumFft, window, event.audio_bands)) return;
+    double position = NativeSdkSecondsFromCMTime(player.currentTime);
+    double duration = self.audioItem ? NativeSdkSecondsFromCMTime(self.audioItem.duration) : 0.0;
+    if (position > 0) event.audio_position_ms = (uint64_t)llround(position * 1000.0);
+    if (duration > 0) event.audio_duration_ms = (uint64_t)llround(duration * 1000.0);
+    event.audio_playing = 1;
+    [self emitEvent:event];
+}
+
+/* Local files (plain paths and verified cache entries) on the SAME
+ * AVPlayer streams use — one tappable path, so the SPECTRUM analysis
+ * covers everything the player can play. AVAudioPlayer still serves
+ * one job it does better: a synchronous decode verdict. AVPlayer only
+ * discovers an undecodable file asynchronously, but this seam's
+ * callers pin two behaviors on the synchronous answer — a corrupt
+ * cache entry must be discarded and re-streamed HERE (audioLoadURL's
+ * cache branch), and a plain local decode failure must refuse the
+ * load without falling through to the URL — so a throwaway
+ * AVAudioPlayer probes the file first (header decode, no playback,
+ * discarded before return) and the proven verdict survives the player
+ * unification. */
 - (int)audioLoadPath:(NSString *)path {
     [self audioStop];
     if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return 1;
     NSError *error = nil;
-    AVAudioPlayer *player = [[AVAudioPlayer alloc] initWithContentsOfURL:[NSURL fileURLWithPath:path]
-                                                                   error:&error];
-    if (!player || error) return 2;
-    player.delegate = self;
-    if (![player prepareToPlay]) return 2;
-    self.audioPlayer = player;
-    /* The LOADED acknowledgment is asynchronous by contract: emitting it
-     * inside this service call would re-enter the runtime while it is
-     * still dispatching the command that asked for the load. Next loop
-     * turn, and only if this player is still the loaded one. */
-    __weak NativeSdkAppKitHost *weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NativeSdkAppKitHost *strongSelf = weakSelf;
-        if (!strongSelf || strongSelf.didShutdown) return;
-        if (strongSelf.audioPlayer != player) return;
-        [strongSelf emitAudioEventOfKind:NATIVE_SDK_APPKIT_AUDIO_EVENT_LOADED];
-    });
+    AVAudioPlayer *probe = [[AVAudioPlayer alloc] initWithContentsOfURL:[NSURL fileURLWithPath:path]
+                                                                  error:&error];
+    if (!probe || error) return 2;
+    if (![probe prepareToPlay]) return 2;
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:path] options:nil];
+    AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
+    [self audioInstallItem:item asset:asset localSource:YES];
     return 0;
 }
 
@@ -8458,46 +8704,110 @@ static CMTime NativeSdkCMTimeFromMs(uint64_t ms) {
             [manager removeItemAtPath:cachePath error:nil];
         }
     }
-    AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
+    AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
+    [self audioInstallItem:item asset:asset localSource:NO];
+    if (cachePath.length > 0) {
+        [self startAudioCacheDownloadFrom:url toPath:cachePath expectedBytes:expectedBytes];
+    }
+    return 0;
+}
+
+/* Shared install for both sources: the single AVPlayer, its status and
+ * time-control observers, the end/failure notifications, and the
+ * spectrum tap. The LOADED acknowledgment stays asynchronous by
+ * contract (readyToPlay KVO -> audioItemStatusChanged): emitting inside
+ * the service call would re-enter the runtime while it is still
+ * dispatching the command that asked for the load. */
+- (void)audioInstallItem:(AVPlayerItem *)item asset:(AVURLAsset *)asset localSource:(BOOL)localSource {
     AVPlayer *player = [AVPlayer playerWithPlayerItem:item];
-    /* The default stall policy: start as soon as sustained playback is
-     * likely, keep rolling through short gaps. Stated explicitly
-     * because immediate progressive start is the contract here. */
-    player.automaticallyWaitsToMinimizeStalling = YES;
-    self.streamItem = item;
-    self.streamPlayer = player;
-    self.streamBuffering = YES;
-    self.streamLoadedEmitted = NO;
+    /* Stall policy by source: a local file has all its bytes, so
+     * playback starts immediately; a stream keeps the default — start
+     * as soon as sustained playback is likely, roll through short gaps.
+     * Stated explicitly because immediate progressive start is the
+     * contract for streams. */
+    player.automaticallyWaitsToMinimizeStalling = localSource ? NO : YES;
+    self.audioItem = item;
+    self.audioPlayer = player;
+    self.audioSourceIsLocal = localSource;
+    /* A stream starts with no bytes; a local file never buffers. */
+    self.audioBuffering = localSource ? NO : YES;
+    self.audioLoadedEmitted = NO;
     [item addObserver:self
            forKeyPath:@"status"
               options:NSKeyValueObservingOptionNew
-              context:NativeSdkAppKitStreamItemStatusContext];
+              context:NativeSdkAppKitAudioItemStatusContext];
     [player addObserver:self
              forKeyPath:@"timeControlStatus"
                 options:NSKeyValueObservingOptionNew
-                context:NativeSdkAppKitStreamTimeControlContext];
-    self.streamObservingStatus = YES;
+                context:NativeSdkAppKitAudioTimeControlContext];
+    self.audioObservingStatus = YES;
     __weak NativeSdkAppKitHost *weakSelf = self;
-    self.streamEndObserver = [[NSNotificationCenter defaultCenter]
+    self.audioEndObserver = [[NSNotificationCenter defaultCenter]
         addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
                     object:item
                      queue:[NSOperationQueue mainQueue]
                 usingBlock:^(NSNotification *note) {
                     (void)note;
-                    [weakSelf streamDidPlayToEnd];
+                    [weakSelf audioDidPlayToEnd];
                 }];
-    self.streamFailObserver = [[NSNotificationCenter defaultCenter]
+    self.audioFailObserver = [[NSNotificationCenter defaultCenter]
         addObserverForName:AVPlayerItemFailedToPlayToEndTimeNotification
                     object:item
                      queue:[NSOperationQueue mainQueue]
                 usingBlock:^(NSNotification *note) {
                     (void)note;
-                    [weakSelf streamDidFail];
+                    [weakSelf audioDidFail];
                 }];
-    if (cachePath.length > 0) {
-        [self startAudioCacheDownloadFrom:url toPath:cachePath expectedBytes:expectedBytes];
-    }
-    return 0;
+    [self audioInstallSpectrumTapForItem:item asset:asset];
+}
+
+/* Attach the MTAudioProcessingTap once the asset's tracks are known —
+ * the audio mix needs the real audio track, and a remote asset loads
+ * its track table asynchronously. Failure at any step means NO
+ * spectrum for this playback (the resting-glass degrade downstream),
+ * never a playback failure: analysis is additive. */
+- (void)audioInstallSpectrumTapForItem:(AVPlayerItem *)item asset:(AVURLAsset *)asset {
+    __weak NativeSdkAppKitHost *weakSelf = self;
+    [asset loadValuesAsynchronouslyForKeys:@[ @"tracks" ] completionHandler:^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NativeSdkAppKitHost *strongSelf = weakSelf;
+            if (!strongSelf || strongSelf.didShutdown) return;
+            /* A replaced or stopped playback loads no tap: the item is
+             * no longer the player's. */
+            if (strongSelf.audioItem != item) return;
+            if ([asset statusOfValueForKey:@"tracks" error:NULL] != AVKeyValueStatusLoaded) return;
+            NSArray<AVAssetTrack *> *tracks = [asset tracksWithMediaType:AVMediaTypeAudio];
+            if (tracks.count == 0) return;
+            native_sdk_spectrum_tap_state_t *state = calloc(1, sizeof(*state));
+            if (!state) return;
+            MTAudioProcessingTapCallbacks callbacks = {
+                .version = kMTAudioProcessingTapCallbacksVersion_0,
+                .clientInfo = state,
+                .init = NativeSdkSpectrumTapInit,
+                .finalize = NativeSdkSpectrumTapFinalize,
+                .prepare = NativeSdkSpectrumTapPrepare,
+                .unprepare = NativeSdkSpectrumTapUnprepare,
+                .process = NativeSdkSpectrumTapProcess,
+            };
+            MTAudioProcessingTapRef tap = NULL;
+            if (MTAudioProcessingTapCreate(kCFAllocatorDefault, &callbacks, kMTAudioProcessingTapCreationFlag_PreEffects, &tap) != noErr || !tap) {
+                /* The tap never took ownership; the state is still ours
+                 * to free. */
+                free(state);
+                return;
+            }
+            AVMutableAudioMixInputParameters *parameters = [AVMutableAudioMixInputParameters audioMixInputParametersWithTrack:tracks.firstObject];
+            parameters.audioTapProcessor = tap;
+            AVMutableAudioMix *mix = [AVMutableAudioMix audioMix];
+            mix.inputParameters = @[ parameters ];
+            item.audioMix = mix;
+            strongSelf.audioSpectrumTap = tap;
+            strongSelf.audioSpectrumState = state;
+            strongSelf.audioSpectrumLastWritten = 0;
+            strongSelf.audioSpectrumFreshNs = 0;
+        });
+    }];
 }
 
 /* The cache fill is a PARALLEL download, not a tee off the player's
@@ -8542,82 +8852,102 @@ static CMTime NativeSdkCMTimeFromMs(uint64_t ms) {
     [task resume];
 }
 
-/* Release the stream player and its observers. The download is
- * cancelled when a new load replaces the stream mid-flight (a skipped
- * track should not keep burning bandwidth) but ORPHANED on natural
- * completion — it is usually already done, and letting a straggler
- * finish installs the cache entry the completed play earned. */
-- (void)audioTearDownStreamCancellingDownload:(BOOL)cancelDownload {
-    AVPlayerItem *item = self.streamItem;
-    AVPlayer *player = self.streamPlayer;
-    if (self.streamObservingStatus) {
-        [item removeObserver:self forKeyPath:@"status" context:NativeSdkAppKitStreamItemStatusContext];
-        [player removeObserver:self forKeyPath:@"timeControlStatus" context:NativeSdkAppKitStreamTimeControlContext];
-        self.streamObservingStatus = NO;
+/* Retire the spectrum tap with its item: the mix is detached, the
+ * host's state pointer is cleared BEFORE the tap is released (same
+ * thread as every reader), and the tap's finalize frees the ring once
+ * the render side is provably done with it. */
+- (void)audioTearDownSpectrumTap {
+    [self stopAudioSpectrumTimer];
+    if (self.audioItem) self.audioItem.audioMix = nil;
+    self.audioSpectrumState = NULL;
+    self.audioSpectrumLastWritten = 0;
+    self.audioSpectrumFreshNs = 0;
+    if (self.audioSpectrumTap) {
+        CFRelease(self.audioSpectrumTap);
+        self.audioSpectrumTap = NULL;
     }
-    if (self.streamEndObserver) {
-        [[NSNotificationCenter defaultCenter] removeObserver:self.streamEndObserver];
-        self.streamEndObserver = nil;
+}
+
+/* Release the player and its observers. The download is cancelled when
+ * a new load replaces a stream mid-flight (a skipped track should not
+ * keep burning bandwidth) but ORPHANED on natural completion — it is
+ * usually already done, and letting a straggler finish installs the
+ * cache entry the completed play earned. */
+- (void)audioTearDownPlayerCancellingDownload:(BOOL)cancelDownload {
+    [self audioTearDownSpectrumTap];
+    AVPlayerItem *item = self.audioItem;
+    AVPlayer *player = self.audioPlayer;
+    if (self.audioObservingStatus) {
+        [item removeObserver:self forKeyPath:@"status" context:NativeSdkAppKitAudioItemStatusContext];
+        [player removeObserver:self forKeyPath:@"timeControlStatus" context:NativeSdkAppKitAudioTimeControlContext];
+        self.audioObservingStatus = NO;
     }
-    if (self.streamFailObserver) {
-        [[NSNotificationCenter defaultCenter] removeObserver:self.streamFailObserver];
-        self.streamFailObserver = nil;
+    if (self.audioEndObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self.audioEndObserver];
+        self.audioEndObserver = nil;
+    }
+    if (self.audioFailObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self.audioFailObserver];
+        self.audioFailObserver = nil;
     }
     [player pause];
-    self.streamItem = nil;
-    self.streamPlayer = nil;
-    self.streamBuffering = NO;
-    self.streamLoadedEmitted = NO;
+    self.audioItem = nil;
+    self.audioPlayer = nil;
+    self.audioSourceIsLocal = NO;
+    self.audioBuffering = NO;
+    self.audioLoadedEmitted = NO;
     if (cancelDownload) [self.audioCacheDownload cancel];
     self.audioCacheDownload = nil;
 }
 
 /* Item status flipped (main queue, hopped from KVO): readyToPlay is
- * the stream's LOADED acknowledgment — the duration is decoded and
+ * the load's LOADED acknowledgment — the duration is decoded and
  * playback is rolling or about to; failed is the honest terminal
  * report for an unreachable host or an undecodable payload. */
-- (void)streamItemStatusChanged {
-    AVPlayerItem *item = self.streamItem;
+- (void)audioItemStatusChanged {
+    AVPlayerItem *item = self.audioItem;
     if (!item) return;
     if (item.status == AVPlayerItemStatusReadyToPlay) {
-        if (self.streamLoadedEmitted) return;
-        self.streamLoadedEmitted = YES;
+        if (self.audioLoadedEmitted) return;
+        self.audioLoadedEmitted = YES;
         [self emitAudioEventOfKind:NATIVE_SDK_APPKIT_AUDIO_EVENT_LOADED];
         return;
     }
     if (item.status == AVPlayerItemStatusFailed) {
-        [self streamDidFail];
+        [self audioDidFail];
     }
 }
 
 /* timeControlStatus flipped (main queue, hopped from KVO): waiting to
- * play at the requested rate IS buffering. Emit the transition
- * immediately as a position report so the UI flips its buffering
- * state now, not at the next 500ms tick. */
-- (void)streamTimeControlChanged {
-    AVPlayer *player = self.streamPlayer;
-    if (!player) return;
+ * play at the requested rate IS buffering — for streams. A local file
+ * has all its bytes, so the flag never surfaces for local sources
+ * (waits-to-minimize-stalling is off for them anyway). Emit the
+ * transition immediately as a position report so the UI flips its
+ * buffering state now, not at the next 500ms tick. */
+- (void)audioTimeControlChanged {
+    AVPlayer *player = self.audioPlayer;
+    if (!player || self.audioSourceIsLocal) return;
     BOOL buffering = player.timeControlStatus == AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate;
-    if (buffering == self.streamBuffering) return;
-    self.streamBuffering = buffering;
+    if (buffering == self.audioBuffering) return;
+    self.audioBuffering = buffering;
     [self emitAudioEventOfKind:NATIVE_SDK_APPKIT_AUDIO_EVENT_POSITION];
 }
 
-/* Natural end of a streamed track. Same retire-before-emit discipline
- * as the AVAudioPlayer delegate below: the completion Msg routinely
- * starts the NEXT track from inside its own dispatch, and tearing
- * down afterwards would destroy the player that load just installed.
- * The duration is captured first so the event still carries the
- * honest terminal position. */
-- (void)streamDidPlayToEnd {
-    if (!self.streamPlayer) return;
+/* Natural end of the track, both sources. Retire-before-emit: the
+ * completion Msg routinely starts the NEXT track from inside its own
+ * dispatch (a music app auto-advancing), and tearing down afterwards
+ * would destroy the player that load just installed. The duration is
+ * captured first so the event still carries the honest terminal
+ * position. */
+- (void)audioDidPlayToEnd {
+    if (!self.audioPlayer) return;
     [self stopAudioPositionTimer];
     uint64_t duration_ms = 0;
-    if (self.streamItem) {
-        double duration = NativeSdkSecondsFromCMTime(self.streamItem.duration);
+    if (self.audioItem) {
+        double duration = NativeSdkSecondsFromCMTime(self.audioItem.duration);
         if (duration > 0) duration_ms = (uint64_t)llround(duration * 1000.0);
     }
-    [self audioTearDownStreamCancellingDownload:NO];
+    [self audioTearDownPlayerCancellingDownload:NO];
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_AUDIO,
         .audio_kind = NATIVE_SDK_APPKIT_AUDIO_EVENT_COMPLETED,
@@ -8629,14 +8959,15 @@ static CMTime NativeSdkCMTimeFromMs(uint64_t ms) {
     }];
 }
 
-/* A stream died mid-flight (network loss, server reset, undecodable
- * bytes) or never became playable (offline with a cold cache): one
- * FAILED event, player retired first. The cache download is cancelled
- * too — bytes from a failing source are not trustworthy. */
-- (void)streamDidFail {
-    if (!self.streamPlayer) return;
+/* Playback died — a stream lost its network, a local file hit a decode
+ * error mid-file, or an item never became playable (offline with a
+ * cold cache): one FAILED event, player retired first. The cache
+ * download is cancelled too — bytes from a failing source are not
+ * trustworthy. */
+- (void)audioDidFail {
+    if (!self.audioPlayer) return;
     [self stopAudioPositionTimer];
-    [self audioTearDownStreamCancellingDownload:YES];
+    [self audioTearDownPlayerCancellingDownload:YES];
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_AUDIO,
         .audio_kind = NATIVE_SDK_APPKIT_AUDIO_EVENT_FAILED,
@@ -8649,16 +8980,12 @@ static CMTime NativeSdkCMTimeFromMs(uint64_t ms) {
 }
 
 - (int)audioPlay {
-    if (self.streamPlayer) {
-        /* AVPlayer's play is asynchronous by nature (it starts when
-         * buffered bytes allow), so a stream's play always "applies" —
-         * readiness and stalls report through the event stream. */
-        [self.streamPlayer play];
-    } else {
-        AVAudioPlayer *player = self.audioPlayer;
-        if (!player) return 0;
-        if (![player play]) return 0;
-    }
+    AVPlayer *player = self.audioPlayer;
+    if (!player) return 0;
+    /* AVPlayer's play is asynchronous by nature (it starts when
+     * buffered bytes allow), so play always "applies" — readiness and
+     * stalls report through the event stream. */
+    [player play];
     if (!self.audioPositionTimer) {
         /* Common modes for the same reason app timers use them: the
          * readout must keep ticking while a menu is open or the window
@@ -8671,101 +8998,60 @@ static CMTime NativeSdkCMTimeFromMs(uint64_t ms) {
         [[NSRunLoop mainRunLoop] addTimer:tick forMode:NSRunLoopCommonModes];
         self.audioPositionTimer = tick;
     }
+    if (!self.audioSpectrumTimer) {
+        /* The analysis cadence (~25 Hz). Armed with the transport like
+         * the position tick; the fire handler additionally requires
+         * fresh tap samples, so a stalled or tapless playback emits
+         * nothing — never stale bars. */
+        NSTimer *tick = [NSTimer timerWithTimeInterval:NATIVE_SDK_SPECTRUM_INTERVAL_SECONDS
+                                                target:self
+                                              selector:@selector(audioSpectrumTimerFired:)
+                                              userInfo:nil
+                                               repeats:YES];
+        [[NSRunLoop mainRunLoop] addTimer:tick forMode:NSRunLoopCommonModes];
+        self.audioSpectrumTimer = tick;
+    }
     return 1;
 }
 
 - (int)audioPause {
-    if (self.streamPlayer) {
-        [self.streamPlayer pause];
-        [self stopAudioPositionTimer];
-        return 1;
-    }
-    AVAudioPlayer *player = self.audioPlayer;
+    AVPlayer *player = self.audioPlayer;
     if (!player) return 0;
     [player pause];
     [self stopAudioPositionTimer];
+    [self stopAudioSpectrumTimer];
     return 1;
 }
 
 - (int)audioStop {
     [self stopAudioPositionTimer];
-    if (self.streamPlayer) {
-        /* Replacement or explicit stop mid-stream: the cache download
-         * dies with the playback — a skipped track should not keep
-         * burning bandwidth (its next play streams and fills again). */
-        [self audioTearDownStreamCancellingDownload:YES];
-        return 1;
-    }
-    AVAudioPlayer *player = self.audioPlayer;
-    if (!player) return 0;
-    player.delegate = nil;
-    [player stop];
-    self.audioPlayer = nil;
+    [self stopAudioSpectrumTimer];
+    if (!self.audioPlayer) return 0;
+    /* Replacement or explicit stop: a mid-flight cache download dies
+     * with the playback — a skipped track should not keep burning
+     * bandwidth (its next play streams and fills again). */
+    [self audioTearDownPlayerCancellingDownload:YES];
     return 1;
 }
 
 - (int)audioSeekToMs:(uint64_t)positionMs {
-    if (self.streamPlayer) {
-        /* Mid-stream seek: AVPlayer clamps to the seekable ranges it
-         * has (or fetches the range it needs); exact tolerance keeps
-         * the readout honest against the requested position. */
-        CMTime zero = NativeSdkCMTimeFromMs(0);
-        [self.streamPlayer seekToTime:NativeSdkCMTimeFromMs(positionMs)
-                      toleranceBefore:zero
-                       toleranceAfter:zero];
-        return 1;
-    }
-    AVAudioPlayer *player = self.audioPlayer;
+    AVPlayer *player = self.audioPlayer;
     if (!player) return 0;
-    NSTimeInterval target = (NSTimeInterval)positionMs / 1000.0;
-    if (target > player.duration) target = player.duration;
-    player.currentTime = target;
+    /* AVPlayer clamps to the seekable ranges it has (or fetches the
+     * range it needs); exact tolerance keeps the readout honest
+     * against the requested position. */
+    CMTime zero = NativeSdkCMTimeFromMs(0);
+    [player seekToTime:NativeSdkCMTimeFromMs(positionMs)
+       toleranceBefore:zero
+        toleranceAfter:zero];
     return 1;
 }
 
 - (int)audioSetVolume:(double)volume {
-    if (self.streamPlayer) {
-        self.streamPlayer.volume = (float)volume;
-        return 1;
-    }
-    AVAudioPlayer *player = self.audioPlayer;
+    AVPlayer *player = self.audioPlayer;
     if (!player) return 0;
     player.volume = (float)volume;
     return 1;
-}
-
-/* AVAudioPlayerDelegate: natural end of the track. `flag` is NO when
- * playback died on a decode error mid-file — report that honestly as a
- * failure, never as a completion. The finished player is retired BEFORE
- * the event is emitted: the completion Msg routinely starts the NEXT
- * track from inside its own dispatch (a music app auto-advancing), and
- * retiring afterwards would destroy the player that load just
- * installed. The duration is captured first so the event still carries
- * the honest terminal position. */
-- (void)audioPlayerDidFinishPlaying:(AVAudioPlayer *)player successfully:(BOOL)flag {
-    if (player != self.audioPlayer) return;
-    [self stopAudioPositionTimer];
-    uint64_t duration_ms = 0;
-    if (player.duration > 0) duration_ms = (uint64_t)llround(player.duration * 1000.0);
-    player.delegate = nil;
-    self.audioPlayer = nil;
-    [self emitEvent:(native_sdk_appkit_event_t){
-        .kind = NATIVE_SDK_APPKIT_EVENT_AUDIO,
-        .audio_kind = (flag ? NATIVE_SDK_APPKIT_AUDIO_EVENT_COMPLETED
-                            : NATIVE_SDK_APPKIT_AUDIO_EVENT_FAILED),
-        .audio_position_ms = (flag ? duration_ms : 0),
-        .audio_duration_ms = duration_ms,
-        .audio_playing = 0,
-        .timestamp_ns = NativeSdkTimestampNanoseconds(),
-    }];
-}
-
-- (void)audioPlayerDecodeErrorDidOccur:(AVAudioPlayer *)player error:(NSError *)error {
-    if (player != self.audioPlayer) return;
-    [self stopAudioPositionTimer];
-    player.delegate = nil;
-    self.audioPlayer = nil;
-    [self emitAudioEventOfKind:NATIVE_SDK_APPKIT_AUDIO_EVENT_FAILED];
 }
 
 - (void)scheduleBridgeFrames {

@@ -93,6 +93,10 @@ const WindowsEvent = extern struct {
     audio_duration_ms: u64,
     audio_playing: c_int,
     audio_buffering: c_int,
+    /// SPECTRUM report payload: the 32 band magnitude bytes on the
+    /// documented scale (log-spaced 50 Hz..16 kHz buckets, linear-in-dB
+    /// from -60 dBFS at 0 to full scale at 255). Zeros elsewhere.
+    audio_bands: [platform_mod.audio_spectrum_band_count]u8,
 };
 
 const WindowsCallback = *const fn (context: ?*anyopaque, event: *const WindowsEvent) callconv(.c) void;
@@ -170,6 +174,7 @@ extern fn native_sdk_windows_audio_pause(host: *WindowsHost) c_int;
 extern fn native_sdk_windows_audio_stop(host: *WindowsHost) c_int;
 extern fn native_sdk_windows_audio_seek(host: *WindowsHost, position_ms: u64) c_int;
 extern fn native_sdk_windows_audio_set_volume(host: *WindowsHost, volume: f64) c_int;
+extern fn native_sdk_windows_audio_spectrum_supported(host: *WindowsHost) c_int;
 
 const WindowsOpenDialogOpts = extern struct {
     title: [*]const u8,
@@ -349,12 +354,26 @@ pub const WindowsPlatform = struct {
             .audio_playback,
             .audio_streaming,
             => self.web_engine == .system,
+            // Spectrum analysis captures the app's OWN audio session
+            // through process-scoped WASAPI loopback, which the OS grew
+            // in Windows 10 2004 — the host probes the activation
+            // support live instead of assuming the build.
+            .audio_spectrum => self.web_engine == .system and audioSpectrumAvailable(self.host),
             // Native scroll drivers, native context menus, and app-owned
             // view-surface adoption are macOS-only today; Win32 keeps
             // the engine's wheel physics (TrackPopupMenu is the natural
             // future context-menu seam — the tray already uses it).
             .gpu_surface_scroll_drivers, .context_menus, .view_surface_adoption => false,
         };
+    }
+
+    /// Live probe for process-scoped loopback capture (the host asks
+    /// the audio activation API rather than trusting a version check).
+    /// Test builds link no Win32 host, so they answer the honest floor.
+    fn audioSpectrumAvailable(host: *WindowsHost) bool {
+        if (comptime @import("builtin").is_test) return false;
+        if (@import("builtin").target.os.tag != .windows) return false;
+        return native_sdk_windows_audio_spectrum_supported(host) != 0;
     }
 
     fn run(context: *anyopaque, handler: platform_mod.EventHandler, handler_context: *anyopaque) anyerror!void {
@@ -495,6 +514,7 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .duration_ms = event.audio_duration_ms,
             .playing = event.audio_playing != 0,
             .buffering = event.audio_buffering != 0,
+            .bands = event.audio_bands,
         } }),
     }
 }
@@ -507,6 +527,7 @@ fn audioEventKindFromInt(value: c_int) platform_mod.AudioEventKind {
         0 => .loaded,
         1 => .position,
         2 => .completed,
+        4 => .spectrum,
         else => .failed,
     };
 }
