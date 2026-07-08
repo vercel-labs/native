@@ -178,6 +178,43 @@ pub const RegisteredImage = struct {
     height: usize = 0,
 };
 
+/// Type-erased handle to the runtime's window verbs, bound onto the
+/// effects channel (`bindWindowActions`) so `update` can drive REAL OS
+/// window actions — the seam behind app-drawn close/minimize controls
+/// on chromeless windows. Label-addressed because labels are what apps
+/// declare (`ShellWindow.label`, `WindowDescriptor.label`); the runtime
+/// side resolves them to live window ids. Constructed by `UiApp`.
+pub const WindowActionBinding = struct {
+    context: *anyopaque,
+    close_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
+    minimize_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
+};
+
+/// Window-action label capacity (`Effects.closeWindow`/`minimizeWindow`):
+/// the mirror copies the last requested label so tests can pin it.
+pub const max_window_action_label = 64;
+
+/// The window-action mirror: observable state for every close/minimize
+/// request made through the channel, recorded before the runtime call
+/// (and INSTEAD of it under the fake executor — hermetic tests pin the
+/// counts, live runs also perform the verb).
+pub const WindowActionState = struct {
+    close_count: u32 = 0,
+    minimize_count: u32 = 0,
+    last_label_buffer: [max_window_action_label]u8 = @splat(0),
+    last_label_len: usize = 0,
+
+    pub fn lastLabel(self: *const WindowActionState) []const u8 {
+        return self.last_label_buffer[0..self.last_label_len];
+    }
+
+    fn record(self: *WindowActionState, label: []const u8) void {
+        const len = @min(label.len, max_window_action_label);
+        @memcpy(self.last_label_buffer[0..len], label[0..len]);
+        self.last_label_len = len;
+    }
+};
+
 /// How a spawn's stdout comes back. `.lines` streams each line as an
 /// `on_line` Msg as it arrives (the default; long-running streams).
 /// `.collect` accumulates whole stdout — single-line JSON far beyond the
@@ -1331,6 +1368,13 @@ pub fn Effects(comptime Msg: type) type {
         /// alongside the services so `update` can register fetched
         /// pixels synchronously (loop-thread only, not an effect).
         images: ?ImageRegistryBinding = null,
+        /// The runtime's window verbs (close/minimize by label), bound
+        /// by `UiApp` alongside the services — the seam behind
+        /// app-drawn window controls (loop-thread only).
+        window_actions: ?WindowActionBinding = null,
+        /// Window-action mirror: counts and the last requested label,
+        /// observable in tests (`windowActionState`).
+        window_action_state: WindowActionState = .{},
         /// The environment spawned children inherit and fetch honors
         /// (PATH for `spawnPath`-style lookups, proxy variables).
         /// Bound once from the loop thread before the first real
@@ -1524,6 +1568,13 @@ pub fn Effects(comptime Msg: type) type {
         /// Loop-thread only; the first bind sticks.
         pub fn bindJournal(self: *Self, binding: EffectJournal) void {
             if (self.journal == null) self.journal = binding;
+        }
+
+        /// Point window actions at the runtime's window verbs (bound by
+        /// `UiApp.bindEffectsChannel`, which resolves labels against the
+        /// live window table). Loop-thread only; the first bind sticks.
+        pub fn bindWindowActions(self: *Self, binding: WindowActionBinding) void {
+            if (self.window_actions == null) self.window_actions = binding;
         }
 
         /// Switch this channel into session-replay mode: the fake
@@ -2308,6 +2359,42 @@ pub fn Effects(comptime Msg: type) type {
             if (self.audio.fake) return;
             const services = self.services orelse return;
             services.audioSeek(position_ms) catch {};
+        }
+
+        /// Close a window by its declared label — the REAL OS close,
+        /// with the platform's full close semantics (closing the last
+        /// window follows the app's existing exit behavior). The seam
+        /// behind app-drawn close controls on chromeless windows;
+        /// model-declared secondary windows should usually close
+        /// DECLARATIVELY instead (stop declaring them in `windows_fn`).
+        /// Fire-and-forget: no event echoes, an unknown label is a
+        /// no-op, and the fake executor only records the request in the
+        /// mirror (`windowActionState`).
+        pub fn closeWindow(self: *Self, window_label: []const u8) void {
+            self.window_action_state.close_count += 1;
+            self.window_action_state.record(window_label);
+            if (self.executor == .fake) return;
+            const binding = self.window_actions orelse return;
+            _ = binding.close_fn(binding.context, window_label);
+        }
+
+        /// Minimize a window by its declared label — the REAL OS verb
+        /// (macOS genies into the Dock, Windows animates to the
+        /// taskbar, GTK minimizes). The seam behind app-drawn minimize
+        /// controls on chromeless windows. Fire-and-forget, same
+        /// contract as `closeWindow`.
+        pub fn minimizeWindow(self: *Self, window_label: []const u8) void {
+            self.window_action_state.minimize_count += 1;
+            self.window_action_state.record(window_label);
+            if (self.executor == .fake) return;
+            const binding = self.window_actions orelse return;
+            _ = binding.minimize_fn(binding.context, window_label);
+        }
+
+        /// The window-action mirror, for tests: how many close/minimize
+        /// requests rode the channel and the last label requested.
+        pub fn windowActionState(self: *const Self) WindowActionState {
+            return self.window_action_state;
         }
 
         /// Set playback volume, clamped to 0.0—1.0. Remembered across

@@ -1708,13 +1708,33 @@ constexpr DWORD kDwmwaUseImmersiveDarkMode = 20;
 constexpr DWORD kDwmwaCaptionColor = 35;
 
 static bool windowUsesHiddenTitlebar(const Window &window) {
-    return window.titlebar_style >= 1;
+    /* The hidden styles only (1, 2): they keep the system frame and the
+     * DWM caption buttons and reclaim just the band. Chromeless (3) is
+     * a different shape entirely — a caption-less popup with no DWM
+     * caption machinery — and must stay out of every branch this
+     * predicate gates. */
+    return window.titlebar_style == 1 || window.titlebar_style == 2;
+}
+
+/* titlebar_style 3 = chromeless: NO OS chrome at all — no caption, no
+ * caption buttons. The explicit opt-in for fully-skinned apps that draw
+ * their own working window controls. */
+static bool windowIsChromeless(const Window &window) {
+    return window.titlebar_style == 3;
 }
 
 static Window *hiddenTitlebarWindowForHwnd(Host *host, HWND hwnd) {
     if (!host || !hwnd) return nullptr;
     for (auto &entry : host->windows) {
         if (entry.second.hwnd == hwnd && windowUsesHiddenTitlebar(entry.second)) return &entry.second;
+    }
+    return nullptr;
+}
+
+static Window *chromelessWindowForHwnd(Host *host, HWND hwnd) {
+    if (!host || !hwnd) return nullptr;
+    for (auto &entry : host->windows) {
+        if (entry.second.hwnd == hwnd && windowIsChromeless(entry.second)) return &entry.second;
     }
     return nullptr;
 }
@@ -3787,6 +3807,22 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 break;
         }
     }
+    /* Chromeless windows (WS_POPUP, no caption): DefWindowProc owns the
+     * resize frame when one exists; the app's window-drag regions are
+     * the only caption there is, so a client-area hit inside one
+     * answers HTCAPTION — the system move loop and the right-click
+     * system menu for free, exactly like the hidden-titlebar shape. */
+    if (message == WM_NCHITTEST) {
+        Window *chromeless_window = chromelessWindowForHwnd(host, hwnd);
+        if (chromeless_window) {
+            const LRESULT def_hit = DefWindowProcW(hwnd, WM_NCHITTEST, wparam, lparam);
+            if (def_hit != HTCLIENT) return def_hit;
+            POINT point = { (int)(short)LOWORD(lparam), (int)(short)HIWORD(lparam) };
+            ScreenToClient(hwnd, &point);
+            if (windowDragRegionHit(host, *chromeless_window, point)) return HTCAPTION;
+            return HTCLIENT;
+        }
+    }
     switch (message) {
         case kWakeMessage:
             if (host) {
@@ -3976,6 +4012,16 @@ static bool createNativeWindow(Host *host, Window &window) {
      * is reclaimed in WM_NCCALCSIZE, everything else stays standard. */
     DWORD style = WS_OVERLAPPEDWINDOW;
     if (!window.resizable) style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    if (windowIsChromeless(window)) {
+        /* Chromeless: the caption-less popup shape — no caption band,
+         * no DWM caption buttons, nothing drawn. WS_SYSMENU and
+         * WS_MINIMIZEBOX keep the REAL window verbs alive (taskbar
+         * right-click, the host's close/minimize entrypoints) without
+         * drawing anything; the resize frame stays when the window is
+         * resizable. */
+        style = WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX;
+        if (window.resizable) style |= WS_THICKFRAME | WS_MAXIMIZEBOX;
+    }
     /* The requested frame is a CONTENT size (the other hosts size the
      * content area); grow it to the outer size for this style so the
      * client rect lands at the request. The menu bar is attached after
@@ -4587,6 +4633,17 @@ int native_sdk_windows_close_window(Host *host, uint64_t window_id) {
     destroyNativeViewsForWindow(host, window_id);
     destroyChildWebViewsForWindow(host, window_id);
     DestroyWindow(found->second.hwnd);
+    return 1;
+}
+
+/* The real OS minimize verb, for app-drawn window controls (a chromeless
+ * window has no caption buttons): the window animates to the taskbar
+ * exactly like the system minimize button. */
+int native_sdk_windows_minimize_window(Host *host, uint64_t window_id) {
+    if (!host) return 0;
+    auto found = host->windows.find(window_id);
+    if (found == host->windows.end() || !found->second.hwnd) return 0;
+    ShowWindow(found->second.hwnd, SW_MINIMIZE);
     return 1;
 }
 

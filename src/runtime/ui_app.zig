@@ -967,12 +967,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         /// Bind the runtime-owned seams onto the effects channel (all
         /// first-bind-sticks): platform services, spawn environment,
-        /// image registry, and — while a session is being recorded —
-        /// the recorder's result journal.
+        /// image registry, window verbs, and — while a session is being
+        /// recorded — the recorder's result journal.
         fn bindEffectsChannel(self: *Self, runtime: *Runtime) void {
             self.effects.bindServices(&runtime.options.platform.services);
             self.effects.bindEnviron(runtime.options.environ);
             self.effects.bindImages(runtime.canvasImageRegistryBinding());
+            self.effects.bindWindowActions(.{
+                .context = runtime,
+                .close_fn = effectsCloseWindowByLabel,
+                .minimize_fn = effectsMinimizeWindowByLabel,
+            });
             if (runtime.options.session_recorder) |recorder| {
                 self.effects.bindJournal(recorder.effectJournal());
             }
@@ -3177,4 +3182,34 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             return true;
         }
     };
+}
+
+/// Window-action resolvers for the effects channel's
+/// `WindowActionBinding` (`Effects.closeWindow`/`minimizeWindow`): apps
+/// address windows by their declared LABEL (`ShellWindow.label`,
+/// `WindowDescriptor.label`), and these resolve the label against the
+/// runtime's live window table at call time — a closed or never-opened
+/// label is honestly a no-op. Loop-thread only, like every effect call.
+fn effectsWindowIdByLabel(runtime: *Runtime, window_label: []const u8) ?platform.WindowId {
+    var buffer: [platform.max_windows]platform.WindowInfo = undefined;
+    for (runtime.listWindows(&buffer)) |info| {
+        if (info.open and std.mem.eql(u8, info.label, window_label)) return info.id;
+    }
+    return null;
+}
+
+fn effectsCloseWindowByLabel(context: *anyopaque, window_label: []const u8) bool {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return false;
+    // The runtime's own close: bookkeeping flips before the platform
+    // call, exactly like a reconcile close — see `Runtime.closeWindow`.
+    runtime.closeWindow(window_id) catch return false;
+    return true;
+}
+
+fn effectsMinimizeWindowByLabel(context: *anyopaque, window_label: []const u8) bool {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return false;
+    runtime.minimizeWindow(window_id) catch return false;
+    return true;
 }

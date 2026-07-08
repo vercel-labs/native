@@ -118,6 +118,15 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             self.invalidated = true;
         }
 
+        /// The real OS minimize verb for a tracked window (app-drawn
+        /// window controls on chromeless windows). No runtime
+        /// bookkeeping moves: a minimized window stays open and keeps
+        /// its views — it comes back from the Dock/taskbar.
+        pub fn minimizeWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
+            if (Self.findWindowIndexById(self, window_id) == null) return error.WindowNotFound;
+            try self.options.platform.services.minimizeWindow(window_id);
+        }
+
         pub fn updateWindowState(self: *Runtime, state: platform.WindowState) !void {
             try WindowStorageMethods.updateWindowState(self, state);
             if (!state.open) Self.removeWindowRuntimeViews(self, state.id);

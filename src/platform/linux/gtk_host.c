@@ -2524,7 +2524,15 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
      * resize borders all genuine. The app's canvas stays the full
      * client area below the bar; the bar carries only the window
      * controls. */
-    if (titlebar_style >= 1) {
+    if (titlebar_style == 3) {
+        /* Chromeless (titlebar_style 3): NO chrome at all — the
+         * undecorated window the hidden styles deliberately are not. No
+         * header bar, no themed buttons; the explicit opt-in for
+         * fully-skinned apps that draw their own working window
+         * controls, and the drag channel (gdk_toplevel_begin_move)
+         * works without decorations. */
+        gtk_window_set_decorated(win->gtk_window, FALSE);
+    } else if (titlebar_style >= 1) {
         GtkWidget *bar = gtk_header_bar_new();
         /* Explicit GtkWindowControls at both ends instead of the header
          * bar's built-in title buttons: the same themed clusters GTK
@@ -3249,6 +3257,16 @@ int native_sdk_gtk_close_window(native_sdk_gtk_host_t *host, uint64_t window_id)
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     if (!win || !win->gtk_window) return 0;
     gtk_window_close(win->gtk_window);
+    return 1;
+}
+
+/* The real OS minimize verb, for app-drawn window controls (a chromeless
+ * window has no themed button cluster): the same call the drag channel's
+ * double-click convention already uses. */
+int native_sdk_gtk_minimize_window(native_sdk_gtk_host_t *host, uint64_t window_id) {
+    native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
+    if (!win || !win->gtk_window) return 0;
+    gtk_window_minimize(win->gtk_window);
     return 1;
 }
 

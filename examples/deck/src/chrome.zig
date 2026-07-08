@@ -12,13 +12,14 @@
 //!   cluster and the volume block;
 //!
 //!   suffix (in front of the widgets): inset bevel frames around the
-//!   five glass bays and the seek fader, scanlines and a diagonal glare
-//!   wash over the display glass, the seven-segment elapsed readout
-//!   drawn as sheared hexagon paths (ghost segments always visible —
-//!   display ghosting — lit segments doubled with a translucent glow
-//!   stroke), the band monitor's five phosphor ladders, the analog
+//!   two glass bays (the display — the deck's ONE LED section — and the
+//!   art bay) and the seek fader, scanlines and a diagonal glare wash
+//!   over the glass, the seven-segment elapsed readout drawn as sheared
+//!   hexagon paths (ghost segments always visible — display ghosting —
+//!   lit segments doubled with a translucent glow stroke), the analog
 //!   volume knob face with its position dot over the volume slider, and
-//!   raised bevel edges on the six keys.
+//!   raised bevel edges on the transport keys and the cap band's window
+//!   keys (the chromeless window's own close/minimize controls).
 //!
 //! The chrome contract requires an EXACT command count per build, so
 //! every section emits a fixed number of commands regardless of model
@@ -51,12 +52,13 @@ const Model = model_mod.Model;
 
 // ------------------------------------------------------------- counts
 
-const glass_scanlines: usize = 20;
-const eq_scanlines: usize = 12;
+/// Scanline comb over the display glass: the one LED section is the
+/// full glass-row height now, so the comb carries more lines at the
+/// same ~4px pitch the old split bays wore.
+const glass_scanlines: usize = 36;
 const screw_commands: usize = 3;
 const ridge_pairs = 3; // comptime_int: used in both command counts and f32 machining
 const grain_lines: usize = 14;
-const eq_cells: usize = 6; // ladder cells per frequency stop
 const knob_ticks: usize = 5;
 
 pub const prefix_commands: usize =
@@ -72,13 +74,12 @@ pub const prefix_commands: usize =
     5; // volume well (fill + inset bevel)
 
 pub const suffix_commands: usize =
-    5 * 4 + // display + art + spectrum + monitor + seek inset bevels
-    glass_scanlines * 2 + eq_scanlines + // display, spectrum, monitor scanlines
-    4 + // glass glare washes (display, art, spectrum, monitor)
+    3 * 4 + // display + art + seek inset bevels
+    glass_scanlines + // display scanlines (the art bay keeps clear glass)
+    2 + // glass glare washes (display, art)
     segment_commands + // seven-segment elapsed readout
-    model_mod.eq_stops * eq_cells * 2 + // band ladders (ghost + lit per cell)
     knob_commands + // the volume knob face
-    6 * 4; // raised bevels: prev, play, pause, stop, next, PL
+    8 * 4; // raised bevels: close, minimize, prev, play, pause, stop, next, PL
 
 const segment_commands: usize = 3 * 21 + 6; // 3 digits x (ghost+glow+lit) + colon
 const knob_commands: usize = knob_ticks + 5; // ticks + slider cover + ring + face + dot glow + dot
@@ -114,7 +115,6 @@ const transparent = Color.rgba8(0, 0, 0, 0);
 const seg_lit = theme.phosphor;
 const seg_ghost = Color.rgba8(62, 224, 138, 24);
 const seg_glow = Color.rgba8(62, 224, 138, 60);
-const cell_ghost = Color.rgba8(62, 224, 138, 22);
 
 const faceplate_stops = [_]canvas.GradientStop{
     .{ .offset = 0, .color = faceplate_top },
@@ -160,9 +160,9 @@ const offscreen: f32 = 100_000;
 
 const display_rect = rect(layout.pad, layout.row1_y, layout.display_width, layout.row1_height);
 const art_rect = rect(layout.art_x, layout.row1_y, layout.art_size, layout.row1_height);
-const spectrum_rect = rect(layout.pad, layout.row2_y, layout.spectrum_width, layout.row2_height);
-const eq_rect = rect(layout.eq_x, layout.row2_y, layout.eq_width, layout.row2_height);
 const seek_rect = rect(layout.pad, layout.seek_y, W - layout.pad * 2, layout.seek_height);
+const close_key = rect(layout.cap_close_x, layout.cap_key_y, layout.cap_key_size, layout.cap_key_size);
+const min_key = rect(layout.cap_min_x, layout.cap_key_y, layout.cap_key_size, layout.cap_key_size);
 const prev_key = rect(layout.prev_x, layout.key_y, layout.btn_prev_width, layout.key_height);
 const play_key = rect(layout.play_x, layout.key_y, layout.btn_play_width, layout.key_height);
 const pause_key = rect(layout.pause_x, layout.key_y, layout.btn_pause_width, layout.key_height);
@@ -176,16 +176,18 @@ const volume_well = rect(layout.output_well_x, layout.well_y, layout.output_well
 // strip between the transport row and the window edge carries the four
 // screws' lower pair and the ridged grip band, both centered in it.
 const bottom_band_center: f32 = (layout.transport_y + layout.transport_height + H) / 2; // 258
-/// Screw centers: flush with the glass bays' outer edges horizontally,
-/// centered in the top strip (cap band to glass) and the bottom band.
+/// Screw centers: hard against the chassis edges horizontally (one grid
+/// unit of enamel between screw rim and window edge — real rack ears
+/// bolt at the extremes, not at the glass line), centered in the top
+/// strip (cap band to glass) and the bottom band vertically.
 const screw_radius: f32 = 4;
-const screw_left_x: f32 = layout.pad + screw_radius; // 16
-const screw_right_x: f32 = W - layout.pad - screw_radius; // 496
+const screw_left_x: f32 = layout.grid + screw_radius; // 8
+const screw_right_x: f32 = W - layout.grid - screw_radius; // 504
 const screw_top_y: f32 = (layout.cap_height + layout.row1_y) / 2; // 36
 const screw_bottom_y: f32 = bottom_band_center; // 258
 /// The ridge band runs between the screws with a clear grid gap.
-const ridge_x0: f32 = screw_left_x + screw_radius + layout.grid * 2; // 28
-const ridge_x1: f32 = screw_right_x - screw_radius - layout.grid * 2; // 484
+const ridge_x0: f32 = screw_left_x + screw_radius + layout.grid * 2; // 20
+const ridge_x1: f32 = screw_right_x - screw_radius - layout.grid * 2; // 492
 const ridge_pitch: f32 = 3;
 const ridge_y0: f32 = bottom_band_center - (ridge_pitch * (ridge_pairs - 1) + 1) / 2; // 254.5
 
@@ -195,29 +197,16 @@ const knob_cx: f32 = layout.knob_x + layout.knob_width / 2;
 const knob_cy: f32 = layout.transport_y + layout.transport_height / 2;
 const knob_radius: f32 = layout.knob_size / 2; // 17
 
-// The band monitor's ladder grid, derived from the same interior the
-// widget label row divides — stamps sit under their columns by
-// construction.
-const eq_inner_x: f32 = layout.eq_x + layout.glass_inset;
-const eq_inner_width: f32 = layout.eq_width - layout.glass_inset * 2; // 116
-const eq_stop_pitch: f32 = eq_inner_width / layout.eq_stop_count; // 23.2
-const eq_cell_width: f32 = 14;
-const eq_cell_height: f32 = 2.8;
-const eq_cell_pitch: f32 = 4;
-/// The ladders rise from the label strip's top edge; six cells at the
-/// 4px pitch land exactly on the glass interior's top.
-const eq_base_y: f32 = layout.row2_y + layout.row2_height - layout.glass_inset - layout.eq_label_height;
-
 // ------------------------------------------------------------- build
 
 pub fn build(model: *const Model, builder: *canvas.Builder, size: geometry.SizeF, tokens: canvas.DesignTokens) anyerror!void {
     _ = size; // fixed window: the machining is absolute geometry
     const hc = model.appearance.high_contrast;
-    try buildPrefix(model, builder, tokens, hc);
+    try buildPrefix(builder, tokens, hc);
     try buildSuffix(model, builder, tokens, hc);
 }
 
-fn buildPrefix(model: *const Model, builder: *canvas.Builder, tokens: canvas.DesignTokens, hc: bool) anyerror!void {
+fn buildPrefix(builder: *canvas.Builder, tokens: canvas.DesignTokens, hc: bool) anyerror!void {
     // Chassis fill, then the warm enamel faceplate gradient.
     try builder.fillRect(.{ .rect = rect(0, 0, W, H), .fill = .{ .color = if (hc) tokens.colors.background else chassis } });
     const faceplate = rect(0, layout.cap_height, W, H - layout.cap_height);
@@ -246,11 +235,11 @@ fn buildPrefix(model: *const Model, builder: *canvas.Builder, tokens: canvas.Des
     try hline(builder, 0, W, 0.5, if (hc) tokens.colors.border else bevel_light, 1);
     try hline(builder, 0, W, layout.cap_height + 0.5, if (hc) tokens.colors.border else bevel_shadow, 1);
 
-    // The raised brand plate under the D E C K stamp: its x tracks the
-    // live chrome inset plus the cap row's gap, exactly where the view's
-    // flow puts the stamp — so the embossed label always sits centered
-    // on its plate.
-    const brand = rect(model.chrome_leading + layout.pad + layout.cap_gap, layout.brand_y, layout.brand_width, layout.brand_height);
+    // The raised brand plate under the D E C K stamp: a layout-table
+    // constant (`layout.brand_x`, after the cap band's window keys) —
+    // the window is chromeless, so no live OS inset exists to track and
+    // the view's flow puts the stamp at the same constant.
+    const brand = rect(layout.brand_x, layout.brand_y, layout.brand_width, layout.brand_height);
     try builder.fillRect(.{ .rect = brand, .fill = .{ .color = if (hc) tokens.colors.surface else brand_face } });
     try bevelOut(builder, brand, tokens, hc);
 
@@ -281,11 +270,10 @@ fn buildPrefix(model: *const Model, builder: *canvas.Builder, tokens: canvas.Des
 }
 
 fn buildSuffix(model: *const Model, builder: *canvas.Builder, tokens: canvas.DesignTokens, hc: bool) anyerror!void {
-    // Inset bevels: every glass bay is recessed into the enamel.
+    // Inset bevels: both glass bays and the seek fader are recessed
+    // into the enamel.
     try bevelIn(builder, display_rect, tokens, hc);
     try bevelIn(builder, art_rect, tokens, hc);
-    try bevelIn(builder, spectrum_rect, tokens, hc);
-    try bevelIn(builder, eq_rect, tokens, hc);
     try bevelIn(builder, seek_rect, tokens, hc);
 
     // Scanlines over the printing glass (the art bay keeps clear glass:
@@ -293,25 +281,22 @@ fn buildSuffix(model: *const Model, builder: *canvas.Builder, tokens: canvas.Des
     // lines double as the classic segmented-ladder look — real bars,
     // honestly segmented by the glass in front of them.
     try scanlines(builder, display_rect, glass_scanlines, hc);
-    try scanlines(builder, spectrum_rect, glass_scanlines, hc);
-    try scanlines(builder, eq_rect, eq_scanlines, hc);
 
     // Diagonal glare wash: light falls across the glass from top-left.
     try glareWash(builder, display_rect, hc);
     try glareWash(builder, art_rect, hc);
-    try glareWash(builder, spectrum_rect, hc);
-    try glareWash(builder, eq_rect, hc);
 
     // The seven-segment elapsed readout on the display's clear glass.
     try segmentReadout(model, builder, tokens, hc);
 
-    // The band monitor's phosphor ladders.
-    try bandLadders(model, builder, tokens, hc);
-
     // The analog volume knob over the volume slider.
     try volumeKnob(model, builder, tokens, hc);
 
-    // Raised bevel edges on the sculpted keys.
+    // Raised bevel edges on the sculpted keys: the cap band's window
+    // keys (the chromeless window's own close/minimize controls), the
+    // transport cluster, and the PL toggle.
+    try bevelOut(builder, close_key, tokens, hc);
+    try bevelOut(builder, min_key, tokens, hc);
     try bevelOut(builder, prev_key, tokens, hc);
     try bevelOut(builder, play_key, tokens, hc);
     try bevelOut(builder, pause_key, tokens, hc);
@@ -388,31 +373,6 @@ fn glareWash(builder: *canvas.Builder, r: geometry.RectF, hc: bool) anyerror!voi
         .end = point(r.x + r.width * 0.7, r.y + r.height),
         .stops = if (hc) &hc_stops else &glare_stops,
     } } });
-}
-
-// ------------------------------------------------------- band ladders
-
-/// The band monitor: per frequency stop, a vertical ladder of phosphor
-/// cells lit from the bottom by the stop's level — the same pure
-/// spectrum function the chart binds (see model.eqStopLevels), so pause
-/// freezes the ladders with everything else. Ghost cells always draw
-/// (powered glass); lit cells shift offscreen when dark, keeping the
-/// command count fixed.
-fn bandLadders(model: *const Model, builder: *canvas.Builder, tokens: canvas.DesignTokens, hc: bool) anyerror!void {
-    const levels = model_mod.eqStopLevels(model);
-    const ghost = if (hc) transparent else cell_ghost;
-    const lit = if (hc) tokens.colors.text else seg_lit;
-    for (levels, 0..) |level, stop| {
-        const cx = eq_inner_x + (@as(f32, @floatFromInt(stop)) + 0.5) * eq_stop_pitch;
-        const x = cx - eq_cell_width / 2;
-        const lit_cells: usize = @intFromFloat(@round(level * eq_cells));
-        for (0..eq_cells) |cell| {
-            const y = eq_base_y - @as(f32, @floatFromInt(cell + 1)) * eq_cell_pitch;
-            try builder.fillRect(.{ .rect = rect(x, y, eq_cell_width, eq_cell_height), .fill = .{ .color = ghost } });
-            const shift: f32 = if (cell < lit_cells) 0 else offscreen;
-            try builder.fillRect(.{ .rect = rect(x + shift, y, eq_cell_width, eq_cell_height), .fill = .{ .color = lit } });
-        }
-    }
 }
 
 // ------------------------------------------------------- volume knob
@@ -504,10 +464,11 @@ var lit_paths: [3][7][7]canvas.PathElement = undefined;
 
 fn segmentReadout(model: *const Model, builder: *canvas.Builder, tokens: canvas.DesignTokens, hc: bool) anyerror!void {
     // Dead-centered in the clear glass the display reserves at its
-    // left: vertically in the full glass height, horizontally in the
-    // segment area (accounting for the shear lean).
+    // top-left: vertically in the display's top row (the spectrum chart
+    // rides beside it), horizontally in the segment area (accounting
+    // for the shear lean).
     const x0 = display_rect.x + layout.glass_inset + (layout.segment_area_width - readout_width - shear_reach) / 2;
-    const y0 = display_rect.y + (layout.row1_height - digit_height) / 2;
+    const y0 = display_rect.y + layout.glass_inset + (layout.display_top_row_height - digit_height) / 2;
 
     // Digits: M : S S. Idle shows dashes (G segments), the classic
     // no-signal readout.

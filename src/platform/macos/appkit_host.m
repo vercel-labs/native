@@ -250,6 +250,22 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
     } mutableCopy];
 }
 
+/// The chromeless (titlebarStyle 3) window class: a borderless NSWindow
+/// refuses key/main status by default, which would leave a fully-skinned
+/// app deaf to the keyboard — this subclass restores both. Used only for
+/// chromeless windows; every other style keeps plain NSWindow.
+@interface NativeSdkChromelessWindow : NSWindow
+@end
+
+@implementation NativeSdkChromelessWindow
+- (BOOL)canBecomeKeyWindow {
+    return YES;
+}
+- (BOOL)canBecomeMainWindow {
+    return YES;
+}
+@end
+
 @interface NativeSdkWindowDelegate : NSObject <NSWindowDelegate>
 @property(nonatomic, assign) NativeSdkAppKitHost *host;
 @property(nonatomic, assign) uint64_t windowId;
@@ -6087,10 +6103,30 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     if (titlebarStyle == 1 || titlebarStyle == 2) {
         styleMask |= NSWindowStyleMaskFullSizeContentView;
     }
-    NSWindow *window = [[NSWindow alloc] initWithContentRect:rect
-                                                   styleMask:styleMask
-                                                     backing:NSBackingStoreBuffered
-                                                       defer:NO];
+    // titlebarStyle 3 = chromeless (the fully-skinned-app shape): a
+    // borderless window — no titlebar band, no traffic lights, square
+    // hardware corners. Closable/Miniaturizable stay in the mask so the
+    // real window verbs (`closeWindowWithId:`, `miniaturizeWindowWithId:`,
+    // the drag channel's double-click convention) keep their OS
+    // semantics; without Titled nothing is drawn. The app declares this
+    // only when its chassis provides its own working window controls.
+    if (titlebarStyle == 3) {
+        styleMask = NSWindowStyleMaskBorderless |
+                    NSWindowStyleMaskClosable |
+                    NSWindowStyleMaskMiniaturizable;
+        if (resizable) {
+            styleMask |= NSWindowStyleMaskResizable;
+        }
+    }
+    NSWindow *window = titlebarStyle == 3
+        ? [[NativeSdkChromelessWindow alloc] initWithContentRect:rect
+                                                       styleMask:styleMask
+                                                         backing:NSBackingStoreBuffered
+                                                           defer:NO]
+        : [[NSWindow alloc] initWithContentRect:rect
+                                      styleMask:styleMask
+                                        backing:NSBackingStoreBuffered
+                                          defer:NO];
     // The host's `windows` dictionary owns the window's lifetime under
     // ARC. NSWindow's releasedWhenClosed defaults to YES, which sends
     // an extra ARC-invisible release on close — fatal for the
@@ -6240,7 +6276,27 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 - (void)closeWindowWithId:(uint64_t)windowId {
     NSWindow *window = self.windows[@(windowId)];
     if (!window) return;
+    // performClose: simulates the titlebar close button, which a
+    // chromeless (borderless) window does not have — AppKit just beeps.
+    // Closing directly runs the same delegate teardown
+    // (`windowWillClose`), so both paths carry identical semantics.
+    if ((window.styleMask & NSWindowStyleMaskTitled) == 0) {
+        [window close];
+        return;
+    }
     [window performClose:nil];
+}
+
+// The real OS minimize verb, for app-drawn window controls (chromeless
+// windows have no traffic lights to click): the window genies into the
+// Dock exactly like the yellow button. miniaturize: is used over
+// performMiniaturize: for the same reason closeWindowWithId: closes
+// directly — the perform variant simulates a titlebar button a
+// chromeless window does not have.
+- (void)miniaturizeWindowWithId:(uint64_t)windowId {
+    NSWindow *window = self.windows[@(windowId)];
+    if (!window) return;
+    [window miniaturize:nil];
 }
 
 // The window-drag region channel. Called synchronously while the runtime
@@ -9271,6 +9327,13 @@ int native_sdk_appkit_close_window(native_sdk_appkit_host_t *host, uint64_t wind
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     if (!object.windows[@(window_id)]) return 0;
     [object closeWindowWithId:window_id];
+    return 1;
+}
+
+int native_sdk_appkit_minimize_window(native_sdk_appkit_host_t *host, uint64_t window_id) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    if (!object.windows[@(window_id)]) return 0;
+    [object miniaturizeWindowWithId:window_id];
     return 1;
 }
 

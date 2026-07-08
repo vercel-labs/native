@@ -7,11 +7,14 @@
 //! shared on-disk library and every report — the load acknowledgment,
 //! coarse position ticks while playing, the one completion at natural
 //! end, failures — arrives as an `.audio_event` Msg through the
-//! ordinary update path. The progress clock (`elapsed_ms`) advances
-//! only on position events, so everything derived from it (the
-//! marquee, the spectrum) freezes on pause because the clock stops —
-//! the same deterministic contract the timer simulation had, now fed
-//! by the platform player. Positions are the player's real clock; the
+//! ordinary update path. The progress clock (`elapsed_ms`) advances on
+//! the presented-frame channel WHILE PLAYING (the soundboard's
+//! frame-clock idiom: `on_frame` emits a journaled `frame_clock` Msg
+//! per presented frame, so the spectrum and the marquee move at display
+//! rate) and the player's coarse position ticks CORRECT it; pause,
+//! stop, buffering, and idle starve the frame channel, so everything
+//! derived from the clock freezes deterministically — same Msg
+//! sequence, same glass. Positions are the player's real clock; the
 //! player's DURATION reports are estimates for this catalog and never
 //! replace the manifest total (the duration rule, documented on
 //! `handleAudio`).
@@ -179,17 +182,13 @@ pub fn albumTracks(album_id: u8) []const Track {
 pub const max_queue = 16;
 pub const max_search = 48;
 pub const spectrum_bands = 32;
-/// The band monitor's labeled frequency stops (see `eqStopLevels`): the
-/// classic equalizer fascia as a VISUALIZER — five phosphor ladders on
-/// stamped frequency labels, each averaging its slice of the spectrum.
-pub const eq_stops = 5;
-pub const eq_stop_labels = [eq_stops][]const u8{ "60", "240", "1K", "4K", "12K" };
-/// Marquee geometry: visible window in mono characters, and how much
-/// playback time advances the scroll by one character. 22 characters of
-/// bold mono at the view's pitch-snapped marquee scale (7 px pitch) fill
-/// the display's text column with clear glass to spare on both sides (24 ran
-/// flush against the right bevel).
-pub const marquee_window = 22;
+/// Marquee geometry: visible window in characters, and how much
+/// playback time advances the scroll by one character. 16 characters of
+/// the pixel face at the full-grid marquee scale fit the display bay's
+/// full interior width even when every glyph is the face's widest
+/// (0.76 em) — the face is proportional, so the budget is worst-case
+/// honest, not average-case hopeful.
+pub const marquee_window = 16;
 pub const marquee_step_ms: u32 = 500;
 
 /// The honest degraded state the display wears after a failed load
@@ -227,19 +226,55 @@ pub const manifest_url_base: []const u8 = catalog.url_base orelse "";
 /// never collides with the spawn key below.
 pub const copy_key: u64 = 2;
 
+/// The two windows' declared labels — the addresses the window-action
+/// effects (`fx.closeWindow`/`fx.minimizeWindow`) resolve. One spelling:
+/// main.zig's shell scene and windows_fn use these same constants.
+pub const main_window_label = "main";
+pub const playlist_window_label = "playlist";
+
+/// Which window a skin-native window key addresses (the chromeless
+/// chassis draws its own close/minimize controls in each cap band).
+pub const WindowRef = enum { player, playlist };
+
+/// One presented frame's clock reading, from the guarded `on_frame`
+/// hook (main.zig): the timestamp advances the rendered playback clock
+/// and the display's frame interval bounds the advance when frames were
+/// irregular (occlusion, a resume after pause), so a stale gap can
+/// never lurch the readouts.
+pub const FrameClock = struct {
+    timestamp_ns: u64,
+    interval_ns: u64,
+};
+
+/// How far the rendered clock may run AHEAD of a player position tick
+/// before the disagreement stops being interpolation drift and gets
+/// snapped. Drift per 500 ms tick is a few milliseconds; anything past a
+/// full tick means reality changed (an external seek, a stall the
+/// buffering flag has not reported yet), and honesty beats smoothness.
+const position_snap_slack_ms: u32 = 600;
+
 // ------------------------------------------------------------------- model
 
 pub const Msg = union(enum) {
     /// The PL key (and `primary+L`): the playlist window's open flag
     /// flips, and the windows_fn reconcile creates or closes the window.
     toggle_playlist,
-    /// The USER closed the playlist window (titlebar close): the window
+    /// The USER closed the playlist window (through the skin's own
+    /// close key or any OS route that survives chromeless): the window
     /// is already gone as an optimistic echo; the model agrees here.
     playlist_closed,
+    /// A skin-native CLOSE key (the chromeless chassis draws its own
+    /// window controls): the player's key closes the app's window for
+    /// real through the window-action effect; the playlist's closes
+    /// declaratively (presence in the declared set IS visibility).
+    close_window: WindowRef,
+    /// A skin-native MINIMIZE key: the real OS verb through the
+    /// window-action effect — the window genies into the Dock.
+    minimize_window: WindowRef,
+    /// One presented frame while playing (guarded in main.onFrame): the
+    /// rendered clock advances at display rate between position ticks.
+    frame_clock: FrameClock,
     set_appearance: native_sdk.Appearance,
-    /// Chrome overlay insets changed (hidden-inset titlebar): the cap
-    /// band's leading pad follows the traffic lights.
-    set_chrome_leading: f32,
     search_edit: canvas.TextInputEvent,
     clear_search,
     play_track: u8,
@@ -279,13 +314,23 @@ pub const Model = struct {
     /// the window exactly while this is set (presence IS visibility).
     playlist_open: bool = false,
     appearance: native_sdk.Appearance = .{},
-    /// Chrome overlay insets (hidden-inset titlebar): the cap band pads
-    /// its leading edge by this so the brand engraving clears the
-    /// traffic lights. Delivered through `on_chrome` before first build.
-    chrome_leading: f32 = 0,
     now: ?u8 = null, // loaded track id
     playing: bool = false,
+    /// The RENDERED playback clock — the one input every live display
+    /// derives from (marquee, spectrum, timecode, segment digits).
+    /// While playing it advances every presented frame (`frame_clock`,
+    /// bounded per-frame steps) and the player's coarse position ticks
+    /// correct it: forward corrections apply, small backward ones hold
+    /// flat (the readouts never visibly rewind mid-play), and only a
+    /// past-slack disagreement snaps. Paused, stopped, buffering, and
+    /// seeking snap exactly — interpolation exists only where there is
+    /// motion.
     elapsed_ms: u32 = 0,
+    /// The last `frame_clock` timestamp, the delta base for the
+    /// rendered clock. Never reset: a stale gap (pause, occlusion,
+    /// boot) is bounded by the frame-interval clamp in
+    /// `advanceRenderedClock`.
+    frame_ns: u64 = 0,
     /// The loaded track's TOTAL for the timecode and seek math: the
     /// manifest duration, the same number the ledger renders — the two
     /// surfaces must agree. The platform's self-reported duration never
@@ -516,9 +561,14 @@ pub const Model = struct {
         const x: f32 = @floatFromInt(band);
         // Mid-weighted envelope: lows tall, highs rolled off.
         const envelope = 0.35 + 0.65 * @exp(-x * x / 420.0);
+        // Temporal frequencies tuned for the frame-clock cadence: the
+        // slow component sweeps ~half a cycle per second and the fast
+        // one over a full cycle, so the bars visibly DANCE at display
+        // rate instead of drifting. Still a pure function of (track id,
+        // elapsed ms) — faster phase, same determinism.
         const wave =
-            0.6 * @abs(@sin(phase * (1.3 + seed * 0.01) + x * 0.55 + seed)) +
-            0.4 * @abs(@sin(phase * 2.9 + x * 1.35 + seed * 0.5));
+            0.6 * @abs(@sin(phase * (3.4 + seed * 0.026) + x * 0.55 + seed)) +
+            0.4 * @abs(@sin(phase * 7.3 + x * 1.35 + seed * 0.5));
         return std.math.clamp(0.06 + envelope * wave * 0.94, 0, 1);
     }
 
@@ -540,17 +590,6 @@ pub const Model = struct {
         return out;
     }
 
-    /// Output meter level: the mean of the current spectrum, scaled by
-    /// the volume fader — display state for the VU strip.
-    pub fn outputLevel(model: *const Model, arena: std.mem.Allocator) f32 {
-        const levels = model.spectrumLevels(arena);
-        if (levels.len == 0) return 0;
-        var sum: f32 = 0;
-        for (levels) |level| sum += level;
-        const mean = sum / @as(f32, @floatFromInt(levels.len));
-        return std.math.clamp(mean * std.math.clamp(model.volume_fraction, 0, 1) * 1.6, 0, 1);
-    }
-
     /// Ledger rows: the whole library as ONE flat list, narrowed by the
     /// search query, derived into the build arena.
     pub fn visibleTracks(model: *const Model, arena: std.mem.Allocator) []const TrackRow {
@@ -559,6 +598,9 @@ pub const Model = struct {
         for (&tracks) |*track| {
             if (!model.trackMatches(track)) continue;
             out[count] = model.trackRow(arena, track);
+            // The ledger rules BETWEEN rows only: the first visible row
+            // carries no hairline above it (and the last none below).
+            out[count].first = count == 0;
             count += 1;
         }
         return out[0..count];
@@ -626,29 +668,6 @@ pub const Model = struct {
     }
 };
 
-/// The band monitor's five stop levels: each labeled frequency stop
-/// averages its slice of the same 32 bands the spectrum draws — a
-/// VISUALIZER at equalizer-style stops, never a control (the deck has
-/// no equalizer DSP, and this skin refuses to fake one). No arena: the
-/// chrome pass calls this and chrome builds carry no allocator — a
-/// fixed array is the honest shape anyway. Module-scope on purpose: the
-/// markup reflection walks Model's method decls, and an array-returning
-/// method is outside the binding grammar it type-checks.
-pub fn eqStopLevels(model: *const Model) [eq_stops]f32 {
-    var out: [eq_stops]f32 = undefined;
-    const per_stop = spectrum_bands / eq_stops; // 6 whole bands each...
-    for (&out, 0..) |*level, stop| {
-        // ...with the remainder folded into the last stop so every
-        // band feeds exactly one meter.
-        const start = stop * per_stop;
-        const end = if (stop == eq_stops - 1) spectrum_bands else start + per_stop;
-        var sum: f32 = 0;
-        for (start..end) |band| sum += model.bandLevel(band);
-        level.* = sum / @as(f32, @floatFromInt(end - start));
-    }
-    return out;
-}
-
 pub const TrackRow = struct {
     id: u8,
     number: []const u8,
@@ -659,6 +678,9 @@ pub const TrackRow = struct {
     now: bool,
     playing: bool,
     queued: bool,
+    /// The ledger's first VISIBLE row: no hairline divider above it
+    /// (rules run between rows only). Cue plates never read it.
+    first: bool = false,
 };
 
 fn formatMs(arena: std.mem.Allocator, ms: u32) []const u8 {
@@ -692,8 +714,25 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     switch (msg) {
         .toggle_playlist => model.playlist_open = !model.playlist_open,
         .playlist_closed => model.playlist_open = false,
+        .close_window => |ref| switch (ref) {
+            // The player IS the app: its close key performs the REAL
+            // window close through the window-action effect, and the
+            // app exits by the host's existing last-window semantics.
+            .player => fx.closeWindow(main_window_label),
+            // The playlist rack closes DECLARATIVELY: presence in the
+            // declared window set is visibility, so clearing the flag
+            // IS the close (the reconcile tears the window down) — the
+            // same machinery the PL key rides.
+            .playlist => model.playlist_open = false,
+        },
+        // Minimize is the real OS verb on either unit — nothing
+        // declarative models "in the Dock", so both ride the effect.
+        .minimize_window => |ref| fx.minimizeWindow(switch (ref) {
+            .player => main_window_label,
+            .playlist => playlist_window_label,
+        }),
+        .frame_clock => |frame| advanceRenderedClock(model, frame),
         .set_appearance => |appearance| model.appearance = appearance,
-        .set_chrome_leading => |leading| model.chrome_leading = leading,
         .search_edit => |edit| model.search_buffer.apply(edit),
         .clear_search => model.search_buffer.apply(.clear),
         .play_track => |id| {
@@ -796,13 +835,25 @@ fn handleAudio(model: *Model, fx: *Effects, event: native_sdk.EffectAudio) void 
             model.buffering = event.buffering;
         },
         .position => {
-            // The progress clock: everything derived from playback time
-            // (marquee, spectrum, timecode) advances here and ONLY here,
-            // so pause freezes it all deterministically. The stream's
-            // honest stall flag rides every tick.
-            model.elapsed_ms = clampMs(event.position_ms);
+            const position = clampMs(event.position_ms);
             adoptPlatformDuration(model, event.duration_ms);
+            // The stream's honest stall flag rides every tick.
             model.buffering = event.buffering;
+            // The coarse tick CORRECTS the frame-advanced rendered
+            // clock. In motion, forward corrections apply and small
+            // backward ones hold flat — the readouts must never visibly
+            // rewind because our frames ran a few ms ahead of the
+            // player — while a past-slack disagreement is a real desync
+            // (an external seek, an unreported stall) and snaps. With
+            // no motion (paused, buffering) the tick is simply the
+            // truth.
+            if (model.playing and !model.buffering) {
+                if (position > model.elapsed_ms or model.elapsed_ms - position > position_snap_slack_ms) {
+                    model.elapsed_ms = position;
+                }
+            } else {
+                model.elapsed_ms = position;
+            }
         },
         // Natural end: the play-next queue wins, else album order.
         .completed => advance(model, fx),
@@ -841,6 +892,26 @@ fn adoptPlatformDuration(model: *Model, reported_ms: u64) void {
     const clamped = clampMs(reported_ms);
     model.platform_duration_ms = clamped;
     if (model.now_duration_ms == 0) model.now_duration_ms = clamped;
+}
+
+/// One presented frame while playing: advance the rendered clock by the
+/// real frame delta, clamped to a few display intervals so a stale gap
+/// (resume after pause, an occluded window, boot) steps gently instead
+/// of lurching, and capped at the duration. Motion-gated twice — the
+/// `on_frame` hook only emits the Msg while playing, and this re-checks
+/// so a replayed journal straddling a pause boundary stays exact.
+fn advanceRenderedClock(model: *Model, frame: FrameClock) void {
+    const last = model.frame_ns;
+    model.frame_ns = frame.timestamp_ns;
+    if (!model.playing or model.now == null or model.buffering) return;
+    const interval: u64 = if (frame.interval_ns > 0) frame.interval_ns else std.time.ns_per_s / 60;
+    const delta_ns: u64 = if (last == 0 or frame.timestamp_ns <= last)
+        interval
+    else
+        @min(frame.timestamp_ns - last, interval * 4);
+    const advanced = @as(u64, model.elapsed_ms) + delta_ns / std.time.ns_per_ms;
+    const limit: u64 = if (model.now_duration_ms > 0) model.now_duration_ms else advanced;
+    model.elapsed_ms = @intCast(@min(advanced, limit));
 }
 
 fn startTrack(model: *Model, fx: *Effects, track_id: u8) void {

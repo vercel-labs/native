@@ -1698,8 +1698,25 @@ fn intrinsicBadgeWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF
     else
         0;
     // The compact chip: a 20px band (the reference badge height) with
-    // the tight 8px side insets.
-    return geometry.SizeF.init(@max(min_width, icon_width + text_width + inset * 2), height);
+    // the tight 8px side insets. Under geometry pixel snapping the
+    // fractional exact-fit width rides a cliff: render snaps the chip's
+    // frame edges to the pixel grid, which can shave up to one snap
+    // step off the box the label was measured to fill exactly — and the
+    // elision pass then swaps real glyphs for an ellipsis. Rounding the
+    // intrinsic width UP to the snap grid keeps the snapped chip at
+    // least label-wide; themes without geometry snapping keep the exact
+    // measurement, bit-identical to before.
+    return geometry.SizeF.init(pixelSnapCeil(tokens, @max(min_width, icon_width + text_width + inset * 2)), height);
+}
+
+/// Round a length UP to the pixel-snap grid when geometry snapping is
+/// on (no-op otherwise): intrinsic boxes sized from measured text must
+/// survive the renderer's edge snapping without losing content width.
+fn pixelSnapCeil(tokens: DesignTokens, value: f32) f32 {
+    if (!tokens.pixel_snap.geometry) return value;
+    const scale = tokens.pixel_snap.scale;
+    if (!std.math.isFinite(scale) or scale <= 0) return value;
+    return @ceil(value * scale) / scale;
 }
 
 fn intrinsicSquareControlSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {

@@ -125,6 +125,7 @@ extern fn native_sdk_windows_start_timer(host: *WindowsHost, timer_id: u64, inte
 extern fn native_sdk_windows_cancel_timer(host: *WindowsHost, timer_id: u64) void;
 extern fn native_sdk_windows_focus_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_close_window(host: *WindowsHost, window_id: u64) c_int;
+extern fn native_sdk_windows_minimize_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_create_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
 extern fn native_sdk_windows_update_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, has_frame: c_int, x: f64, y: f64, width: f64, height: f64, has_layer: c_int, layer: c_int, has_visible: c_int, visible: c_int, has_enabled: c_int, enabled: c_int, has_role: c_int, role: [*]const u8, role_len: usize, has_accessibility_label: c_int, accessibility_label: [*]const u8, accessibility_label_len: usize, has_text: c_int, text: [*]const u8, text_len: usize, has_command: c_int, command: [*]const u8, command_len: usize) c_int;
 extern fn native_sdk_windows_set_view_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
@@ -265,6 +266,7 @@ pub const WindowsPlatform = struct {
                 .create_window_fn = createWindow,
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
+                .minimize_window_fn = minimizeWindow,
                 .start_window_drag_fn = startWindowDrag,
                 .set_window_drag_regions_fn = setWindowDragRegions,
                 .window_chrome_fn = windowChrome,
@@ -654,6 +656,7 @@ fn titlebarStyleInt(style: platform_mod.WindowTitlebarStyle) c_int {
         .standard => 0,
         .hidden_inset => 1,
         .hidden_inset_tall => 2,
+        .chromeless => 3,
     };
 }
 
@@ -687,6 +690,11 @@ fn focusWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!
 fn closeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_windows_close_window(self.host, window_id) == 0) return error.CloseFailed;
+}
+
+fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_windows_minimize_window(self.host, window_id) == 0) return error.WindowNotFound;
 }
 
 fn startWindowDrag(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {

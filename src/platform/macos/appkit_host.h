@@ -328,6 +328,10 @@ int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t win
 int native_sdk_appkit_set_window_content_min_size(native_sdk_appkit_host_t *host, uint64_t window_id, double min_width, double min_height);
 int native_sdk_appkit_focus_window(native_sdk_appkit_host_t *host, uint64_t window_id);
 int native_sdk_appkit_close_window(native_sdk_appkit_host_t *host, uint64_t window_id);
+// The real OS minimize verb (NSWindow miniaturize:), for app-drawn
+// window controls on chromeless windows. Returns 0 when the window id
+// is unknown.
+int native_sdk_appkit_minimize_window(native_sdk_appkit_host_t *host, uint64_t window_id);
 // Window-drag region channel: called during dispatch of the pointer-down
 // that starts the gesture. Single click hands the event to
 // -[NSWindow performWindowDragWithEvent:] (moves only on actual

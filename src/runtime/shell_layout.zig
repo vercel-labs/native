@@ -216,6 +216,7 @@ pub fn shellTitlebarStyle(style: app_manifest.WindowTitlebarStyle) platform.Wind
         .standard => .standard,
         .hidden_inset => .hidden_inset,
         .hidden_inset_tall => .hidden_inset_tall,
+        .chromeless => .chromeless,
     };
 }
 

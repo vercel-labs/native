@@ -2,12 +2,15 @@
 //! player and the model-declared playlist rack), real playback through
 //! the audio effect channel's fake executor (request/feed round trips,
 //! the five-key transport, auto-advance, the honest NO MEDIA degrade),
-//! the pbcopy spawn, spectrum/band-monitor/marquee determinism on the
-//! position-event clock, the image channel (the JPEG covers' pinned
-//! degrade under the strict decoder, codec-less fallback), the playlist
-//! window's full round-trip through real dispatch, the one-finish
-//! theming contract, markup engine parity, automation click-through on
-//! the transport, and layout/widget budgets at the fixed window sizes.
+//! the pbcopy spawn, spectrum/marquee determinism on the rendered clock
+//! (frame-clock advance while playing, freeze on pause/stop, position
+//! ticks as the correcting truth), the skin-native window keys (close /
+//! minimize on the chromeless windows, through the window-action
+//! effects), the image channel (the JPEG covers' pinned degrade under
+//! the strict decoder, codec-less fallback), the playlist window's full
+//! round-trip through real dispatch, the one-finish theming contract,
+//! markup engine parity, automation click-through on the transport, and
+//! layout/widget budgets at the fixed window sizes.
 //!
 //! Every content-coupled assertion derives from the committed manifest
 //! (`music_manifest.zon` through model.zig's comptime tables) — no track
@@ -315,7 +318,11 @@ test "layout audit sweep: nothing clips, overlaps, or escapes" {
         .text_expansions = &.{1},
     });
 
-    // The playlist rack window, same fixed-hardware contract.
+    // The playlist rack window, same fixed-hardware contract — and the
+    // same no-text-expansion rationale as the player: the rack's
+    // captions and per-row readouts (numbers, durations) are machined
+    // stampings in fixed column slots, and the dynamic content (titles,
+    // artists) elides at its column edge by design.
     const playlist = try buildPlaylistTree(arena_state.allocator(), &model);
     try canvas.expectLayoutAuditSweepClean(testing.allocator, playlist.root, .{
         .tokens = main.tokensFromModel(&model),
@@ -323,6 +330,7 @@ test "layout audit sweep: nothing clips, overlaps, or escapes" {
         .default_size = playlist_size,
         .large_size = playlist_size,
         .densities = &.{.compact},
+        .text_expansions = &.{1},
     });
 }
 
@@ -967,9 +975,9 @@ test "the spectrum is a deterministic function of the playback clock" {
     try testing.expectEqual(@as(usize, model_mod.spectrum_bands), idle_levels.len);
     for (idle_levels) |level| try testing.expect(level <= 0.05);
 
-    // Live: fed position events are the only thing that advances the
-    // clock, and the same (track id, elapsed ms) always yields the same
-    // bars.
+    // Live: the rendered clock advances only through the frame channel
+    // and the player's position ticks, and the same (track id, elapsed
+    // ms) always yields the same bars.
     const live = try LiveApp.start(true);
     defer live.stop();
     const app_state = live.app_state;
@@ -985,26 +993,11 @@ test "the spectrum is a deterministic function of the playback clock" {
         try testing.expect(level <= 1);
     }
 
-    // The band monitor's five stops derive from the SAME bands: each
-    // stop is the mean of its slice, computed here independently.
-    const stops = model_mod.eqStopLevels(&app_state.model);
-    try testing.expectEqual(@as(usize, model_mod.eq_stops), stops.len);
-    const per_stop = model_mod.spectrum_bands / model_mod.eq_stops;
-    for (stops, 0..) |level, stop| {
-        const start = stop * per_stop;
-        const end = if (stop == model_mod.eq_stops - 1) model_mod.spectrum_bands else start + per_stop;
-        var sum: f32 = 0;
-        for (first[start..end]) |band| sum += band;
-        try testing.expectApproxEqAbs(sum / @as(f32, @floatFromInt(end - start)), level, 0.0001);
-    }
-
-    // Pause freezes the bars: position events stop, the clock holds.
-    // The monitor stops freeze with them.
+    // Pause freezes the bars: the frame channel starves (see the
+    // frame-clock test) and position events stop, so the clock holds.
     try live.dispatch(.toggle_play);
     const paused = app_state.model.spectrumLevels(arena);
     try testing.expectEqualSlices(f32, first, paused);
-    const stops_paused = model_mod.eqStopLevels(&app_state.model);
-    try testing.expectEqualSlices(f32, &stops, &stops_paused);
 
     // Resume; the next position tick moves them.
     try live.dispatch(.toggle_play);
@@ -1276,9 +1269,211 @@ test "both windows lay out within their fixed canvases and the widget budget" {
         var nodes: [1024]canvas.WidgetLayoutNode = undefined;
         const layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, view_mod.playlist_width, view_mod.playlist_height), &nodes);
         try testing.expect(layout.nodes.len > 0);
-        try testing.expect(layout.nodes.len < 768); // three quarters of the 1024 budget
+        // The ruled ledger stacks a divider column onto every row but
+        // the first (two extra nodes per row), so the full-catalog tree
+        // sits higher than the plate-per-row round did — still inside
+        // the 1024 per-view budget with real headroom.
+        try testing.expect(layout.nodes.len < 960);
         _ = arena_state.reset(.retain_capacity);
     }
+}
+
+test "the frame clock advances the display only while audio moves" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The idle law, at the hook: idle, paused, and buffering decks emit
+    // NO frame Msg, so the frame channel starves and an idle deck
+    // presents zero frames.
+    var model = Model{};
+    const frame = native_sdk.platform.GpuFrame{ .timestamp_ns = 1_000_000_000, .frame_interval_ns = std.time.ns_per_s / 60 };
+    try testing.expectEqual(@as(?Msg, null), main.onFrame(&model, frame));
+    apply(&model, .{ .play_track = first_track.id });
+    apply(&model, .transport_pause);
+    try testing.expectEqual(@as(?Msg, null), main.onFrame(&model, frame));
+    apply(&model, .transport_play);
+    model.buffering = true;
+    try testing.expectEqual(@as(?Msg, null), main.onFrame(&model, frame));
+    model.buffering = false;
+
+    // Playing: each presented frame advances the rendered clock by the
+    // real frame delta (the first frame seeds the base at one interval).
+    const emitted = main.onFrame(&model, frame) orelse return error.TestUnexpectedResult;
+    apply(&model, emitted);
+    try testing.expectEqual(@as(u32, 16), model.elapsed_ms);
+    apply(&model, .{ .frame_clock = .{ .timestamp_ns = frame.timestamp_ns + 500 * std.time.ns_per_ms, .interval_ns = frame.frame_interval_ns } });
+    // A stale gap (occlusion, resume) is clamped to a few intervals —
+    // the readouts step gently, they never lurch.
+    try testing.expectEqual(@as(u32, 16 + 66), model.elapsed_ms);
+
+    // The marquee rides the same clock: half a second of frames
+    // rotates it exactly one character.
+    var stepper = Model{};
+    apply(&stepper, .{ .play_track = first_track.id });
+    const at_zero = try arena.dupe(u8, stepper.marqueeText(arena));
+    var ts: u64 = 1_000_000_000;
+    apply(&stepper, .{ .frame_clock = .{ .timestamp_ns = ts, .interval_ns = std.time.ns_per_s / 60 } });
+    stepper.elapsed_ms = 0; // re-zero after the seeding frame; deltas advance from here
+    // 35 whole-ms frame deltas (~16 ms each) cross one 500 ms marquee
+    // step without reaching two.
+    for (0..35) |_| {
+        ts += std.time.ns_per_s / 60;
+        apply(&stepper, .{ .frame_clock = .{ .timestamp_ns = ts, .interval_ns = std.time.ns_per_s / 60 } });
+    }
+    try testing.expect(stepper.elapsed_ms >= model_mod.marquee_step_ms);
+    try testing.expect(stepper.elapsed_ms < model_mod.marquee_step_ms * 2);
+    const at_one = stepper.marqueeText(arena);
+    try testing.expectEqualStrings(at_zero[1..], at_one[0 .. at_one.len - 1]);
+
+    // A replayed journal straddling a pause boundary stays exact: the
+    // model re-checks motion, so a frame Msg on a paused deck moves
+    // nothing even if one slipped through.
+    apply(&stepper, .transport_pause);
+    const held = stepper.elapsed_ms;
+    apply(&stepper, .{ .frame_clock = .{ .timestamp_ns = ts + std.time.ns_per_s, .interval_ns = std.time.ns_per_s / 60 } });
+    try testing.expectEqual(held, stepper.elapsed_ms);
+
+    // Position ticks are the correcting truth: forward corrections
+    // apply; a small backward disagreement (frames ran a few ms ahead)
+    // holds flat so the readouts never visibly rewind; a past-slack
+    // disagreement is a real desync and snaps.
+    apply(&stepper, .transport_play);
+    stepper.elapsed_ms = 10_000;
+    apply(&stepper, .{ .audio_event = .{ .key = first_track.id, .kind = .position, .position_ms = 10_400, .duration_ms = 0, .playing = true, .buffering = false } });
+    try testing.expectEqual(@as(u32, 10_400), stepper.elapsed_ms);
+    apply(&stepper, .{ .audio_event = .{ .key = first_track.id, .kind = .position, .position_ms = 10_200, .duration_ms = 0, .playing = true, .buffering = false } });
+    try testing.expectEqual(@as(u32, 10_400), stepper.elapsed_ms);
+    apply(&stepper, .{ .audio_event = .{ .key = first_track.id, .kind = .position, .position_ms = 9_000, .duration_ms = 0, .playing = true, .buffering = false } });
+    try testing.expectEqual(@as(u32, 9_000), stepper.elapsed_ms);
+
+    // STOP zeroes the clock and freezes it (the hook returns null, and
+    // a stray frame Msg re-checks): halt-and-rewind stays deterministic.
+    apply(&stepper, .stop);
+    try testing.expectEqual(@as(u32, 0), stepper.elapsed_ms);
+    try testing.expectEqual(@as(?Msg, null), main.onFrame(&stepper, frame));
+}
+
+test "the skin-native window keys are real: chromeless windows, real verbs" {
+    const live = try LiveApp.start(true);
+    defer live.stop();
+    const app_state = live.app_state;
+
+    // The MAIN window declares the chromeless style (the fully-skinned
+    // opt-in: no OS titleband, no system buttons — the cap band's keys
+    // are the window controls). The harness creates its surface window
+    // directly, so the config-level pin is the honest assertion here;
+    // the style's platform seam is pinned by the SDK's shell-layout
+    // suite, and the PLAYLIST window below exercises the descriptor
+    // path end to end.
+    try testing.expect(main.shell_scene.windows[0].titlebar == .chromeless);
+
+    // The cap band carries working close and minimize keys with proper
+    // names, reachable through the real automation path.
+    const min_id = try live.widgetIdByLabel(main.canvas_label, 1, .button, "Minimize window");
+    try live.widgetAction(main.canvas_label, min_id, "press");
+    var actions = app_state.effects.windowActionState();
+    try testing.expectEqual(@as(u32, 1), actions.minimize_count);
+    try testing.expectEqualStrings(model_mod.main_window_label, actions.lastLabel());
+
+    // The player's close key requests the REAL window close (the fake
+    // executor records the request instead of performing it — the suite
+    // must outlive the press).
+    const close_id = try live.widgetIdByLabel(main.canvas_label, 1, .button, "Close window");
+    try live.widgetAction(main.canvas_label, close_id, "press");
+    actions = app_state.effects.windowActionState();
+    try testing.expectEqual(@as(u32, 1), actions.close_count);
+    try testing.expectEqualStrings(model_mod.main_window_label, actions.lastLabel());
+
+    // The playlist rack: chromeless too (the descriptor path reaches
+    // the platform create seam), with its own key pair.
+    try live.dispatch(.toggle_playlist);
+    const info = live.playlistWindowInfo() orelse return error.TestUnexpectedResult;
+    try live.installPlaylistCanvas(info.id, 2);
+    for (live.harness.null_platform.windows[0..live.harness.null_platform.window_count], 0..) |window, index| {
+        if (window.id != info.id) continue;
+        try testing.expectEqual(native_sdk.WindowTitlebarStyle.chromeless, live.harness.null_platform.window_titlebar[index]);
+    }
+
+    // Its minimize key rides the effect with the playlist's label...
+    const rack_min = try live.widgetIdByLabel(main.playlist_canvas_label, info.id, .button, "Minimize window");
+    try live.widgetAction(main.playlist_canvas_label, rack_min, "press");
+    actions = app_state.effects.windowActionState();
+    try testing.expectEqual(@as(u32, 2), actions.minimize_count);
+    try testing.expectEqualStrings(main.playlist_window_label, actions.lastLabel());
+
+    // ...and its close key racks the unit back in DECLARATIVELY — the
+    // model stops declaring the window and the reconcile closes it for
+    // real, without touching the close effect (count unchanged).
+    const rack_close = try live.widgetIdByLabel(main.playlist_canvas_label, info.id, .button, "Close window");
+    try live.widgetAction(main.playlist_canvas_label, rack_close, "press");
+    try testing.expect(!app_state.model.playlist_open);
+    const closed = live.playlistWindowInfo();
+    try testing.expect(closed == null or !closed.?.open);
+    try testing.expectEqual(@as(u32, 1), app_state.effects.windowActionState().close_count);
+}
+
+test "the primary face is the registered pixel font, on its design grid" {
+    // The registration table carries the committed face at the app id
+    // the theme's typography slots point at — one face, both slots, so
+    // every span on the fascia prints in the pixel face.
+    try testing.expectEqual(@as(usize, 1), main.app_fonts.len);
+    try testing.expectEqual(theme.primary_font_id, main.app_fonts[0].id);
+    try testing.expect(main.app_fonts[0].ttf.len > 0);
+    const tokens = main.tokensFromModel(&Model{});
+    try testing.expectEqual(theme.primary_font_id, tokens.typography.font_id);
+    try testing.expectEqual(theme.primary_font_id, tokens.typography.mono_font_id);
+    // Sizes sit on the face's design grid (38/1000 em): the body at the
+    // half grid, the marquee scale doubling to the full grid — the
+    // crispness contract the shots verify visually.
+    try testing.expectApproxEqAbs(theme.pixel_grid_em / 2, tokens.typography.body_size, 0.0001);
+
+    // The face parses under the same bounded TrueType parser the
+    // runtime registration uses, and covers the fascia's ASCII text.
+    const face = try canvas.font_ttf.Face.parse(main.app_fonts[0].ttf);
+    for (" ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:/.-%\"") |byte| {
+        try testing.expect(face.glyphIndex(byte) != 0);
+    }
+
+    // High contrast abandons the pixel face with the rest of the skin:
+    // the toolkit's stock faces are the accessible register.
+    var hc = Model{};
+    hc.appearance = .{ .high_contrast = true };
+    const hc_tokens = main.tokensFromModel(&hc);
+    try testing.expect(hc_tokens.typography.font_id != theme.primary_font_id);
+}
+
+test "the ledger rules between rows: dividers, not boxes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = Model{};
+    apply(&model, .{ .play_track = first_track.id });
+    const tree = try buildPlaylistTree(arena, &model);
+
+    // Every row is a bare glass plate: no fill of its own (the loaded
+    // row's wash is the one exception) and no border stroke — the
+    // theme's default panel paints nothing.
+    const first_row = findByLabel(tree.root, model_mod.tracks[0].title).?;
+    try testing.expectEqual(canvas.WidgetKind.panel, first_row.kind);
+    const tokens = main.tokensFromModel(&model);
+    try testing.expectEqual(@as(u8, 0), tokens.controls.panel.background.?.a);
+    try testing.expectEqual(@as(u8, 0), tokens.controls.panel.border.?.a);
+
+    // Rules run BETWEEN rows: every visible row but the first stacks a
+    // 1px hairline above its plate, so N rows carry N-1 dividers.
+    const rows = model.visibleTracks(arena);
+    try testing.expect(rows.len > 1);
+    try testing.expect(rows[0].first);
+    for (rows[1..]) |row| try testing.expect(!row.first);
+    const ledger = findByLabel(tree.root, "Tracks").?;
+    var dividers: usize = 0;
+    for (ledger.children) |child| {
+        // A non-first row is a column of [hairline, plate].
+        if (child.kind == .column and child.children.len == 2 and child.children[0].kind == .panel) dividers += 1;
+    }
+    try testing.expectEqual(rows.len - 1, dividers);
 }
 
 // Env-gated screenshot renderer (skipped by default, never in CI): renders
@@ -1294,10 +1489,9 @@ test "render deck screenshots (env-gated)" {
     const live = try LiveApp.start(true);
     defer live.stop();
 
-    // The live macOS chrome inset (traffic lights on the gold band):
-    // the offscreen renderer has no host to deliver it, so the shots
-    // dispatch the same Msg `on_chrome` would.
-    try live.dispatch(.{ .set_chrome_leading = 70 });
+    // Chromeless window: no OS chrome inset exists — the cap band's
+    // window keys are layout-table constants, so the shots need no
+    // inset dispatch.
 
     // Idle player: STBY lamp, dashed segments, noise-floor spectrum.
     try presentShotFrame(live, 2);
@@ -1306,7 +1500,12 @@ test "render deck screenshots (env-gated)" {
 
     // Playing mid-song, one queued cue. The mid-song position comes from
     // REAL seek steps on the fader (the widget keyboard path), so the
-    // fader, the display's progress strip, and the timecode all agree.
+    // fader and the display's timecode agree. The transport then PAUSES
+    // for the two scheme captures: while playing every presented frame
+    // advances the rendered clock (the frame-clock channel), so two
+    // captures a frame apart would legitimately differ by clock motion
+    // — pausing freezes the glass, and any byte difference left between
+    // the schemes would be a finish difference.
     // Shot under a LIGHT OS scheme and again under DARK: the skin has
     // one finish, so the two captures must be byte-identical — diff the
     // artifacts for the honest proof.
@@ -1314,6 +1513,7 @@ test "render deck screenshots (env-gated)" {
     try live.dispatch(.{ .queue_track = model_mod.albumTracks(2)[3].id });
     const seek_id = try live.widgetIdByLabel(main.canvas_label, 1, .slider, "Seek");
     for (0..8) |_| try live.widgetAction(main.canvas_label, seek_id, "increment");
+    try live.dispatch(.transport_pause);
     try live.harness.runtime.dispatchPlatformEvent(live.app_state.app(), .{ .appearance_changed = .{ .color_scheme = .light } });
     try presentShotFrame(live, 3);
     live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/deck-shots/deck-playing-light-artifacts", "Deck");
@@ -1353,8 +1553,8 @@ test "render homepage screenshots (env-gated)" {
 
     // The hero state: a track playing mid-song, one queued cue, the full
     // ledger selected. The mid-song position comes from REAL seek steps
-    // on the fader (the widget keyboard path), so the fader, the display's
-    // progress strip, and the timecode all agree.
+    // on the fader (the widget keyboard path), so the fader and the
+    // display's timecode agree.
     try live.dispatch(.{ .play_track = model_mod.albumTracks(2)[0].id });
     try live.dispatch(.{ .queue_track = model_mod.albumTracks(2)[3].id });
     const seek_id = try live.widgetIdByLabel(main.canvas_label, 1, .slider, "Seek");

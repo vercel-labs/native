@@ -34,9 +34,28 @@ const native_sdk = @import("native_sdk");
 const canvas = native_sdk.canvas;
 const Color = canvas.Color;
 
-/// Paragraph base size (the typography token below): public because the
-/// views derive their pitch-snapped mono scales from it.
-pub const body_size: f32 = 12;
+/// The deck's primary text face: Geist Pixel (the Vercel pixel family,
+/// Square cut), registered at boot through `UiApp.Options.fonts` (see
+/// main.zig; the committed TTF and its OFL license live in src/fonts/).
+/// One registered face fills BOTH typography slots below — every span
+/// on the fascia, mono-flagged or not, prints in the pixel face; only
+/// the seven-segment clock stays custom-drawn chrome.
+pub const primary_font_id: canvas.FontId = canvas.min_registered_font_id;
+
+/// Geist Pixel's design grid: every outline coordinate in the face is a
+/// multiple of 38/1000 em, so ONE font-pixel is exactly one device
+/// pixel when the em size is 1000/38 px. All deck type sits on this
+/// grid — the body/readout size at the HALF grid (font-pixels land on
+/// half-pixel boundaries at 1x and exactly on device pixels at 2x) and
+/// the marquee at the FULL grid (pixel-perfect everywhere) — so the
+/// pixel face renders as blocks, never as anti-aliased mush.
+pub const pixel_grid_em: f32 = 1000.0 / 38.0; // ~26.32
+pub const pixel_grid_half_em: f32 = pixel_grid_em / 2.0; // ~13.16
+
+/// Paragraph base size (the typography token below): the pixel face's
+/// half-grid size. Public because the views derive their display scales
+/// from it (marquee = 2.0 => the full grid).
+pub const body_size: f32 = pixel_grid_half_em;
 
 pub fn tokens(high_contrast: bool, reduce_motion: bool) canvas.DesignTokens {
     var out = canvas.DesignTokens.theme(.{
@@ -55,11 +74,22 @@ pub fn tokens(high_contrast: bool, reduce_motion: bool) canvas.DesignTokens {
     // Softly beveled hardware: chunkier than machined chamfers, still
     // nothing close to a pill.
     out.radius = .{ .sm = 2, .md = 3, .lg = 4, .xl = 5 };
-    // Dense faceplate type; readouts go mono through paragraph spans.
+    // The pixel face is the PRIMARY type: both slots point at the
+    // registered Geist Pixel face, so mono-flagged readouts and plain
+    // text alike print in it (high contrast returned above with the
+    // toolkit's stock faces — accessibility beats brand). The face is
+    // proportional, so nothing below assumes a fixed pitch; alignment
+    // rides fixed column widths and text alignment instead.
+    out.typography.font_id = primary_font_id;
+    out.typography.mono_font_id = primary_font_id;
+    // Every size sits on the face's half-grid (see `pixel_grid_half_em`)
+    // so the blocks stay square; hierarchy comes from the phosphor
+    // registers and the marquee's full-grid scale, not from size steps
+    // the grid cannot honor.
     out.typography.body_size = body_size;
-    out.typography.label_size = 11;
-    out.typography.title_size = 15;
-    out.typography.button_size = 12;
+    out.typography.label_size = pixel_grid_half_em;
+    out.typography.title_size = pixel_grid_em;
+    out.typography.button_size = pixel_grid_half_em;
     // The long-travel fader: a slim track with a squared cap, stated as
     // metric tokens so both engines cut the same thumb.
     out.metrics.slider_track_height = 4;
@@ -116,11 +146,6 @@ pub fn tokens(high_contrast: bool, reduce_motion: bool) canvas.DesignTokens {
         .border = ink,
         .radius = 1,
     };
-    out.controls.progress = .{
-        .background = glass_deep,
-        .active_background = phosphor,
-        .radius = 1,
-    };
     out.controls.scrollbar = .{
         .background = Color.rgba8(0, 0, 0, 0),
         .foreground = Color.rgba8(94, 125, 104, 110),
@@ -128,13 +153,15 @@ pub fn tokens(high_contrast: bool, reduce_motion: bool) canvas.DesignTokens {
     out.controls.badge = .{
         .radius = 1,
     };
-    // Default panel plates read as GLASS rows, not enamel: the only
-    // panels that keep the default fill are the playlist bay's ledger
-    // rows (every chassis surface states its material explicitly), and
-    // a row plate one step above the smoked glass gives the bay its
-    // subtle striping.
+    // Default panels paint NOTHING — no fill, no stroke: every visible
+    // surface in this app states its material explicitly
+    // (`style_tokens`), the glass bays are framed by the chrome pass's
+    // bevels (not widget borders), and the panel family that leans on
+    // the default — the playlist bay's ledger rows — is bare glass by
+    // design: single hairline dividers between rows, no per-row plates.
     out.controls.panel = .{
-        .background = glass_row,
+        .background = Color.rgba8(0, 0, 0, 0),
+        .border = Color.rgba8(0, 0, 0, 0),
     };
     return out;
 }
@@ -159,8 +186,6 @@ const disabled_wash = Color.rgb8(222, 215, 198);
 // phosphor hue at three registers. Public because the chrome pass draws
 // its segment readout and band ladders in the same phosphor.
 pub const glass = Color.rgb8(12, 16, 13);
-const glass_deep = Color.rgb8(8, 11, 9);
-const glass_row = Color.rgb8(19, 25, 20);
 const glass_lifted = Color.rgb8(24, 40, 30);
 pub const phosphor = Color.rgb8(62, 224, 138);
 const phosphor_pale = Color.rgb8(168, 216, 180);

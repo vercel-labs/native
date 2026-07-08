@@ -2,18 +2,19 @@
 //! local music player (albums, tracks, transport, seek, queue, search)
 //! wearing vintage rack-unit hardware identity, in the true two-window
 //! shape: a SMALL, FIXED player window (the window IS the device —
-//! hidden-inset titlebar, the enamel cap band as the drag region) and a
-//! matching playlist unit declared through `windows_fn` while the model
-//! says it is open (the PL key and `primary+L` flip the flag).
+//! CHROMELESS, so the enamel cap band is the drag region and carries
+//! the skin's own working close/minimize keys) and a matching playlist
+//! unit declared through `windows_fn` while the model says it is open
+//! (the PL key and `primary+L` flip the flag).
 //! Everything visual comes from the deck theme's design tokens plus
-//! Zig-drawn chrome (the `ui.chart` spectrum, mono paragraph readouts,
-//! the seven-segment elapsed readout, the band ladders, the volume knob
-//! face) — pure fills, lines, gradients, and paths; this skin ships no
-//! bitmap texture assets, and nothing forks the engine. Playback is
-//! REAL: the audio effect channel drives the platform player over the
-//! shared committed catalog (the mp3s live once, in the soundboard's
-//! gitignored assets), and a failed load lands the honest NO MEDIA
-//! remedy on the display instead of a crash or silence.
+//! Zig-drawn chrome (the `ui.chart` spectrum, pixel-face readouts, the
+//! seven-segment elapsed readout, the volume knob face) — pure fills,
+//! lines, gradients, and paths; this skin ships no bitmap texture
+//! assets, and nothing forks the engine. Playback is REAL: the audio
+//! effect channel drives the platform player over the shared committed
+//! catalog (the mp3s live once, in the soundboard's gitignored assets),
+//! and a failed load lands the honest NO MEDIA remedy on the display
+//! instead of a crash or silence.
 //!
 //! Authoring split (markup where it fits): the playlist's status strip is
 //! a `.native` view compiled at comptime; the faceplate and the playlist
@@ -44,7 +45,7 @@ pub const canvas_label = "deck-canvas";
 pub const window_width: f32 = view_mod.window_width;
 pub const window_height: f32 = view_mod.window_height;
 
-pub const playlist_window_label = "playlist";
+pub const playlist_window_label = model_mod.playlist_window_label;
 pub const playlist_canvas_label = "playlist-canvas";
 
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
@@ -52,15 +53,19 @@ const shell_views = [_]native_sdk.ShellView{
     .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .role = "Deck canvas", .accessibility_label = "Deck music player", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
 };
 const shell_windows = [_]native_sdk.ShellWindow{.{
-    .label = "main",
+    .label = model_mod.main_window_label,
     .title = "Native SDK Deck",
     .width = window_width,
     .height = window_height,
     // The player is a piece of hardware: fixed size (the chrome pass
-    // machines absolute geometry) and no OS titlebar — the enamel cap
-    // band is the drag region.
+    // machines absolute geometry) and NO OS chrome at all — the
+    // explicit `chromeless` opt-in, honest here because the enamel cap
+    // band is the drag region AND carries the skin's own working
+    // close/minimize keys (wired to the real window-action effects).
+    // Apps that do not draw their own controls should use the hidden
+    // styles instead, which keep the real OS buttons.
     .resizable = false,
-    .titlebar = .hidden_inset,
+    .titlebar = .chromeless,
     .restore_state = false,
     .views = &shell_views,
 }};
@@ -68,11 +73,14 @@ pub const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
 
 // -------------------------------------------------------------- app icons
 
-/// The deck's own vector glyph: the transport STOP square, parsed at
-/// comptime from the common stroke-icon dialect (24x24, stroke-width 2,
-/// currentColor) — the built-in set carries every other transport verb
-/// but no square, and this skin refuses a text-labeled stop key.
+/// The deck's own vector glyphs, parsed at comptime from the common
+/// stroke-icon dialect (24x24, stroke-width 2, currentColor): the
+/// transport STOP square (the built-in set carries every other
+/// transport verb but no square, and this skin refuses a text-labeled
+/// stop key) and the cap band's MINIMIZE bar (the chromeless windows
+/// draw their own window controls; the built-in set has no minus).
 const stop_icon = canvas.svg_icon.parseComptime(@embedFile("icons/stop.svg"));
+const minimize_icon = canvas.svg_icon.parseComptime(@embedFile("icons/minimize.svg"));
 
 /// The registered icon table: ONE declaration feeds boot-time
 /// registration (`registerIcons`, called from main and the test
@@ -81,6 +89,7 @@ const stop_icon = canvas.svg_icon.parseComptime(@embedFile("icons/stop.svg"));
 /// app registers.
 pub const app_icons = [_]canvas.icons.Entry{
     .{ .name = "stop", .icon = &stop_icon },
+    .{ .name = "minimize", .icon = &minimize_icon },
 };
 
 /// Install the app icon table; once, before views build (main does it
@@ -160,6 +169,20 @@ pub fn onKey(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
 
 pub const DeckApp = native_sdk.UiApp(Model, Msg);
 
+// ------------------------------------------------------------------ fonts
+
+/// The deck's primary text face: Geist Pixel (Square), committed at
+/// src/fonts/ with its OFL license and registered at boot through the
+/// app-fonts seam — the theme's typography tokens point BOTH face slots
+/// at this id (see theme.zig), so every span on the fascia prints in
+/// the pixel face. The face is TrueType-glyf and well inside the
+/// registry's per-font byte budget.
+pub const app_fonts = [_]DeckApp.FontRegistration{.{
+    .id = theme.primary_font_id,
+    .name = "GeistPixel-Square.ttf",
+    .ttf = @embedFile("fonts/GeistPixel-Square.ttf"),
+}};
+
 pub fn deckOptions() DeckApp.Options {
     return .{
         .name = "deck",
@@ -168,6 +191,7 @@ pub fn deckOptions() DeckApp.Options {
         .update_fx = update,
         .init_fx = boot,
         .view = rootView,
+        .fonts = &app_fonts,
         .tokens_fn = tokensFromModel,
         // The sculpted hardware layer: enamel chassis and cap band,
         // bevels, wells, screws, scanlines, the seven-segment readout,
@@ -183,9 +207,9 @@ pub fn deckOptions() DeckApp.Options {
         .windows_fn = deckWindows,
         .window_view = deckWindowView,
         .on_appearance = onAppearance,
-        .on_chrome = onChrome,
         .on_command = command,
         .on_key = onKey,
+        .on_frame = onFrame,
         .sync = sync,
     };
 }
@@ -203,10 +227,11 @@ fn deckWindows(model: *const Model, scratch: *DeckApp.WindowsScratch) []const De
             .title = "Deck Playlist",
             .width = view_mod.playlist_width,
             .height = view_mod.playlist_height,
-            // A matching rack unit: fixed size, its own cap strip as
-            // the drag region.
+            // A matching rack unit: fixed size and chromeless like the
+            // player — its cap strip is the drag region and carries the
+            // skin's own working close/minimize keys.
             .resizable = false,
-            .titlebar = .hidden_inset,
+            .titlebar = .chromeless,
             .on_close = .playlist_closed,
         };
         count += 1;
@@ -233,11 +258,20 @@ fn onAppearance(appearance: native_sdk.Appearance) ?Msg {
     return Msg{ .set_appearance = appearance };
 }
 
-/// Chrome overlay insets flow into the model (hidden-inset titlebar):
-/// the cap band pads its leading edge so the brand engraving clears the
-/// traffic lights; fullscreen zeroes it and the band reclaims the space.
-fn onChrome(window_chrome: native_sdk.WindowChrome) ?Msg {
-    return Msg{ .set_chrome_leading = window_chrome.insets.left };
+/// The frame clock, WHILE PLAYING ONLY (the soundboard idiom): each
+/// presented frame's timestamp advances the rendered playback clock
+/// (`advanceRenderedClock`), whose changed spectrum/marquee/timecode
+/// present the next frame — the dispatch loop sustains itself exactly
+/// as long as audio moves. Pause, stop, buffering, or idle return null,
+/// the display list stops changing, and the frame channel starves on
+/// its own: zero frames while nothing moves (the idle law), with no
+/// arming flag to forget to clear. Journaled like every Msg, so replay
+/// is deterministic.
+pub fn onFrame(model: *const Model, frame: native_sdk.platform.GpuFrame) ?Msg {
+    if (model.playing and model.now != null and !model.buffering) {
+        return Msg{ .frame_clock = .{ .timestamp_ns = frame.timestamp_ns, .interval_ns = frame.frame_interval_ns } };
+    }
+    return null;
 }
 
 /// The runtime owns transient slider state (`.change` carries no value);

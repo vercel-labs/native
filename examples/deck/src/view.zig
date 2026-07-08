@@ -3,21 +3,34 @@
 //! window IS the rack unit) and a matching playlist unit declared
 //! through `windows_fn` while the model says it is open.
 //!
+//! Both windows are CHROMELESS (no OS titlebar, no system buttons), so
+//! each cap band carries the skin's OWN close and minimize keys — real
+//! controls wired to the runtime's window-action effects, with proper
+//! roles and labels; nothing decorative.
+//!
 //! Markup-first where markup fits (the playlist's status strip and the
 //! spectrum analyzer chart are compiled `.native` views); everything else
 //! is Zig because the fascia needs what the closed markup grammar
-//! excludes — mono paragraph readouts at custom scales, per-row native
+//! excludes — paragraph readouts at custom scales, per-row native
 //! context menus, the registered-image cover leaf, and model-conditional
 //! plate styling.
 //!
 //! Every color in this file is a design-token reference (`style_tokens`);
 //! the widget skin lives in `theme.zig`, the sculpted hardware layer
-//! (enamel, bevels, screws, scanlines, the segment readout, the band
-//! ladders, the volume knob face) in `chrome.zig`, and EVERY shared
-//! dimension in `layout.zig` — the one chassis table both this file and
-//! the chrome pass machine against. The glass bays fill with the
-//! `background` token (the smoked glass) so the chrome's inset bevels
-//! read as depth into the enamel.
+//! (enamel, bevels, screws, scanlines, the segment readout, the volume
+//! knob face) in `chrome.zig`, and EVERY shared dimension in
+//! `layout.zig` — the one chassis table both this file and the chrome
+//! pass machine against. The glass bays fill with the `background`
+//! token (the smoked glass) so the chrome's inset bevels read as depth
+//! into the enamel.
+//!
+//! Type: ONE face — Geist Pixel, the deck's registered primary — fills
+//! both typography slots (theme.zig), so mono-flagged readouts and
+//! plain text print in the same pixel face. Scales sit on the face's
+//! design grid: readouts and captions at the half grid (scale 1.0), the
+//! marquee at the full grid (scale 2.0, one font-pixel per device
+//! pixel at 1x). The face is proportional; column alignment rides fixed
+//! widths and text alignment, never an assumed pitch.
 //!
 //! Token registers, by material (see theme.zig): on GLASS, `accent` is
 //! live phosphor, `success` the pale resting print, `info` the dim
@@ -40,7 +53,8 @@ pub const CompiledStatusBarView = canvas.CompiledMarkupView(Model, Msg, statusba
 
 /// The spectrum analyzer chart: a compiled `.native` fragment (one
 /// `<chart>` with bar + peak-line series binding model fns), built into
-/// the Zig glass-bay chrome as an ordinary child.
+/// the display bay's glass beside the segment clock — the deck's ONE
+/// animated band.
 pub const CompiledSpectrumView = canvas.CompiledMarkupView(Model, Msg, @embedFile("spectrum.native"));
 
 /// The chassis layout table (see layout.zig): re-exported so app wiring
@@ -51,27 +65,15 @@ pub const window_height = layout.window_height;
 pub const playlist_width = layout.playlist_width;
 pub const playlist_height = layout.playlist_height;
 
-/// Every mono scale in the deck is pitch-snapped: the mono advance is
-/// `canvas.mono_advance_em` (0.6 em), and at an arbitrary scale each
-/// glyph's pen lands on a different subpixel phase — the anti-aliasing
-/// then renders every stamp a little differently and the spacing reads
-/// as bad kerning. Snapping the scale so the pitch is a whole pixel at
-/// 1x keeps every glyph on the same phase at 1x AND at every integer
-/// display scale, so the stampings come out even and deliberate.
-fn monoScale(comptime target: f32) f32 {
-    const em = canvas.mono_advance_em * theme.body_size;
-    return @round(em * target) / em;
-}
-
-/// Engraved caption scale: uppercase mono at reduced size, everywhere a
-/// panel is stamped. One scale, so the stampings read as one process
-/// (5 px pitch at the 12 px body).
-const caption_scale: f32 = monoScale(0.72);
-/// Readout scale for mono numerals and short labels (the display's
-/// channel line, VOL, ledger numbers and durations): 6 px pitch.
-const readout_scale: f32 = monoScale(0.8);
-/// The marquee's full-size mono: 7 px pitch.
-const marquee_scale: f32 = monoScale(1.0);
+/// Scales on the pixel face's design grid (see theme.zig): 1.0 is the
+/// half-grid body size — every caption and readout — and 2.0 is the
+/// full grid, where one font-pixel is exactly one device pixel at 1x.
+/// Nothing between: sizes off the grid render the pixel blocks as
+/// anti-aliased mush, so hierarchy comes from the phosphor registers
+/// and the one full-grid marquee.
+const caption_scale: f32 = 1.0;
+const readout_scale: f32 = 1.0;
+const marquee_scale: f32 = 2.0;
 
 // ------------------------------------------------------------ player root
 
@@ -85,22 +87,19 @@ pub fn rootView(ui: *Ui, model: *const Model) Ui.Node {
                 displayBay(ui, model),
                 artBay(ui, model),
             }),
-            ui.row(.{ .gap = layout.gap, .height = layout.row2_height }, .{
-                spectrumBay(ui, model),
-                monitorBay(ui, model),
-            }),
             seekRow(ui, model),
             transportRow(ui, model),
         }),
     });
 }
 
-/// The enamel cap band: the window's drag region and its brand plate in
-/// one — the window IS the device, so the titlebar is cream enamel
-/// (chrome draws the band and the raised brand plate; this row is
-/// transparent). The leading spacer clears the traffic lights by the
-/// live chrome inset; the brand paragraph is centered on the chrome's
-/// plate because both derive from the same inset + layout constants.
+/// The enamel cap band: the window's drag region, the skin's OWN window
+/// keys, and the brand plate in one — the window IS the device and it
+/// is chromeless, so the close and minimize keys here are the real
+/// controls (wired to the window-action effects), not decoration. The
+/// chrome draws the band, the key bevels, and the raised brand plate;
+/// this row is transparent. All x-positions are layout-table constants
+/// (no OS chrome inset exists to track).
 fn capBand(ui: *Ui, model: *const Model) Ui.Node {
     return ui.row(.{
         .height = layout.cap_height,
@@ -109,7 +108,11 @@ fn capBand(ui: *Ui, model: *const Model) Ui.Node {
         .window_drag = true,
         .semantics = .{ .label = "Cap band" },
     }, .{
-        ui.el(.stack, .{ .width = model.chrome_leading + layout.pad }, .{}),
+        // Leading margin: with the row gap, the close key lands at
+        // layout.cap_close_x.
+        ui.el(.stack, .{ .width = layout.pad - layout.cap_gap }, .{}),
+        windowKey(ui, "x", Msg{ .close_window = .player }, "Close window"),
+        windowKey(ui, "app:minimize", Msg{ .minimize_window = .player }, "Minimize window"),
         brandStamp(ui),
         ui.spacer(1),
         // The unit's model designation — hardware fascia lettering, not
@@ -127,8 +130,23 @@ fn capBand(ui: *Ui, model: *const Model) Ui.Node {
                 .{ .text = if (model.playing) "RUN" else "STBY", .monospace = true, .color = .text_muted, .scale = caption_scale },
             }),
         }),
-        ui.el(.stack, .{ .width = layout.pad }, .{}),
+        ui.el(.stack, .{ .width = layout.pad - layout.cap_gap }, .{}),
     });
+}
+
+/// One skin-native window key: a real button with a real verb behind it
+/// (close or minimize through the runtime's window-action effects) —
+/// the affordance-honesty bar for a chromeless window. Square enamel,
+/// dark glyph; the chrome pass adds the raised bevel.
+fn windowKey(ui: *Ui, icon: []const u8, msg: Msg, label: []const u8) Ui.Node {
+    return ui.button(.{
+        .variant = .outline,
+        .width = layout.cap_key_size,
+        .height = layout.cap_key_size,
+        .icon = icon,
+        .on_press = msg,
+        .semantics = .{ .label = label },
+    }, "");
 }
 
 /// The embossed DECK stamp, centered on the chrome's raised brand plate
@@ -142,72 +160,76 @@ fn brandStamp(ui: *Ui) Ui.Node {
     return node;
 }
 
-/// The main display bay: smoked glass printing in phosphor — the
-/// seven-segment elapsed readout (chrome-drawn into the clear area
-/// reserved on the left), the rotating title marquee, the channel +
-/// timecode line, the honest bitrate/size readout, and the phosphor
-/// progress strip. The strip is the authoritative playback readout (a
-/// `.progress` leaf, model-driven); the long-travel fader below the
-/// glass rows is the seek CONTROL — slider positions are runtime-owned
-/// between rebuilds by engine rule, so a scrubber that is also the
-/// readout would fight the user's hand.
+/// The display bay: the deck's ONE glass LED section — everything
+/// phosphor lives here. Top row: clear glass for the chrome-drawn
+/// seven-segment elapsed readout, with the spectrum chart (the one
+/// animated band) beside it. Below: the rotating title marquee at the
+/// full pixel grid, then the channel + timecode line (with the LIVE /
+/// HOLD lamp) and the honest bitrate/size readout (with the SPECTRUM//32
+/// engraving). No progress strip: the long-travel seek fader below the
+/// glass is both the seek control AND the position readout — one
+/// affordance, not two.
 fn displayBay(ui: *Ui, model: *const Model) Ui.Node {
     return ui.panel(.{
         .width = layout.display_width,
         .padding = layout.glass_inset,
         .style_tokens = .{ .background = .background, .radius = .sm },
         .semantics = .{ .label = "Display bay" },
-    }, ui.column(.{ .gap = 5, .grow = 1 }, .{
-        ui.row(.{ .gap = layout.gap, .grow = 1 }, .{
+    }, ui.column(.{ .gap = layout.display_row_gap, .grow = 1 }, .{
+        ui.row(.{ .gap = layout.gap, .height = layout.display_top_row_height }, .{
             // Clear glass: the chrome pass draws the sheared segment
-            // digits here; the mono timecode line under the marquee is
-            // the AX-readable echo of the same clock.
+            // digits here; the timecode line below is the AX-readable
+            // echo of the same clock.
             ui.el(.stack, .{ .width = layout.segment_area_width, .semantics = .{ .label = "Segment readout" } }, .{}),
-            ui.column(.{ .gap = 3, .grow = 1, .main = .center }, .{
-                // Failure stamps ride the marquee in signal amber — the
-                // one attention hue — so a failed load is unmistakable
-                // on the glass; the channel line below names the remedy.
-                ui.paragraph(.{ .semantics = .{ .label = "Marquee" } }, &.{
-                    .{ .text = model.marqueeText(ui.arena), .monospace = true, .weight = .bold, .scale = marquee_scale, .color = if (model.mediaFailed()) .warning else if (model.idle()) .info else .accent },
+            CompiledSpectrumView.build(ui, model),
+        }),
+        // Failure stamps ride the marquee in signal amber — the one
+        // attention hue — so a failed load is unmistakable on the
+        // glass; the channel line below names the remedy.
+        ui.paragraph(.{ .semantics = .{ .label = "Marquee" } }, &.{
+            .{ .text = model.marqueeText(ui.arena), .monospace = true, .weight = .bold, .scale = marquee_scale, .color = if (model.mediaFailed()) .warning else if (model.idle()) .info else .accent },
+        }),
+        ui.row(.{ .cross = .center, .gap = layout.gap }, .{
+            if (model.mediaFailed())
+                // The remedy on the channel line, full display width.
+                // Which remedy depends on which failure: prepare the
+                // assets, or check the network.
+                ui.paragraph(.{ .semantics = .{ .label = "Channel" } }, &.{
+                    .{ .text = model.remedyText(), .monospace = true, .color = .warning, .scale = caption_scale },
+                })
+            else
+                ui.paragraph(.{ .semantics = .{ .label = "Channel" } }, &.{
+                    .{ .text = ui.fmt("{s}  {s} / {s}", .{
+                        model.channelLabel(ui.arena),
+                        model.elapsedLabel(ui.arena),
+                        model.durationLabel(ui.arena),
+                    }), .monospace = true, .color = .success, .scale = readout_scale },
                 }),
-                if (model.mediaFailed())
-                    // The remedy at the tighter caption pitch, so the full
-                    // script name fits the display's text column. Which
-                    // remedy depends on which failure: prepare the assets,
-                    // or check the network.
-                    ui.paragraph(.{ .semantics = .{ .label = "Channel" } }, &.{
-                        .{ .text = model.remedyText(), .monospace = true, .color = .warning, .scale = caption_scale },
-                    })
-                else
-                    ui.paragraph(.{ .semantics = .{ .label = "Channel" } }, &.{
-                        .{ .text = ui.fmt("{s}  {s} / {s}", .{
-                            model.channelLabel(ui.arena),
-                            model.elapsedLabel(ui.arena),
-                            model.durationLabel(ui.arena),
-                        }), .monospace = true, .color = .success, .scale = readout_scale },
-                    }),
-                // The source line: bitrate + size computed from the
-                // manifest's real bytes — see model.sourceLabel for why
-                // nothing here is invented.
-                ui.paragraph(.{ .semantics = .{ .label = "Source" } }, &.{
-                    .{ .text = model.sourceLabel(ui.arena), .monospace = true, .color = .info, .scale = caption_scale },
-                }),
+            ui.spacer(1),
+            ui.paragraph(.{}, &.{
+                .{ .text = if (model.playing) "LIVE" else "HOLD", .monospace = true, .color = if (model.playing) .accent else .info, .scale = caption_scale },
             }),
         }),
-        ui.el(.progress, .{
-            .height = 3,
-            .value = model.progressFraction(),
-            .semantics = .{ .label = "Progress" },
-        }, .{}),
+        ui.row(.{ .cross = .center, .gap = layout.gap }, .{
+            // The source line: bitrate + size computed from the
+            // manifest's real bytes — see model.sourceLabel for why
+            // nothing here is invented.
+            ui.paragraph(.{ .semantics = .{ .label = "Source" } }, &.{
+                .{ .text = model.sourceLabel(ui.arena), .monospace = true, .color = .info, .scale = caption_scale },
+            }),
+            ui.spacer(1),
+            glassCaption(ui, "SPECTRUM//32"),
+        }),
     }));
 }
 
 /// The art bay: the loaded record's committed cover in its own glass
-/// window — real album art where the hardware would show the disc. The
-/// cover id is 0 while unregistered (the strict test decoder has no
-/// JPEG codec; live macOS decodes through the platform codec) or while
-/// the deck is idle, and the bay degrades to an engraved plate — a
-/// missing image can never break the fascia.
+/// window — real album art where the hardware would show the disc,
+/// square at the glass row's full height. The cover id is 0 while
+/// unregistered (the strict test decoder has no JPEG codec; live macOS
+/// decodes through the platform codec) or while the deck is idle, and
+/// the bay degrades to an engraved plate — a missing image can never
+/// break the fascia.
 fn artBay(ui: *Ui, model: *const Model) Ui.Node {
     const cover = model.nowCover();
     if (cover != 0) {
@@ -230,68 +252,12 @@ fn artBay(ui: *Ui, model: *const Model) Ui.Node {
     }));
 }
 
-/// The visualization bay: one markup `<chart>` (see spectrum.native)
-/// over the model's 32 deterministic band levels — phosphor bars plus a
-/// pale phosphor peak-trace line riding their caps. The chrome's
-/// scanlines over this glass segment the bars into the classic ladder
-/// look without faking per-cell state.
-fn spectrumBay(ui: *Ui, model: *const Model) Ui.Node {
-    return ui.panel(.{
-        .width = layout.spectrum_width,
-        .padding = layout.glass_inset,
-        .style_tokens = .{ .background = .background, .radius = .sm },
-        .semantics = .{ .label = "Spectrum bay" },
-    }, ui.column(.{ .gap = 4, .grow = 1 }, .{
-        CompiledSpectrumView.build(ui, model),
-        ui.row(.{ .cross = .center }, .{
-            glassCaption(ui, "SPECTRUM//32"),
-            ui.spacer(1),
-            ui.paragraph(.{}, &.{
-                .{ .text = if (model.playing) "LIVE" else "HOLD", .monospace = true, .color = if (model.playing) .accent else .info, .scale = caption_scale },
-            }),
-        }),
-    }));
-}
-
-/// The band-monitor bay: five phosphor ladders on labeled frequency
-/// stops, chrome-drawn into the clear glass above this label row. It
-/// wears the equalizer FASCIA but it is a monitor: the deck's audio
-/// surface has volume and seek and nothing else — no equalizer DSP, no
-/// balance bus — so this bay visualizes the same pure spectrum function
-/// the chart binds instead of faking controls that would move nothing.
-fn monitorBay(ui: *Ui, model: *const Model) Ui.Node {
-    _ = model;
-    const stop_width = (layout.eq_width - layout.glass_inset * 2) / layout.eq_stop_count;
-    return ui.panel(.{
-        .width = layout.eq_width,
-        .padding = layout.glass_inset,
-        .style_tokens = .{ .background = .background, .radius = .sm },
-        .semantics = .{ .label = "Band monitor" },
-    }, ui.column(.{ .grow = 1 }, .{
-        // Clear glass for the chrome-drawn ladders.
-        ui.el(.stack, .{ .grow = 1, .semantics = .{ .label = "Band ladders" } }, .{}),
-        ui.row(.{ .height = layout.eq_label_height, .cross = .center }, .{
-            stopLabel(ui, model_mod.eq_stop_labels[0], stop_width),
-            stopLabel(ui, model_mod.eq_stop_labels[1], stop_width),
-            stopLabel(ui, model_mod.eq_stop_labels[2], stop_width),
-            stopLabel(ui, model_mod.eq_stop_labels[3], stop_width),
-            stopLabel(ui, model_mod.eq_stop_labels[4], stop_width),
-        }),
-    }));
-}
-
-fn stopLabel(ui: *Ui, text: []const u8, width: f32) Ui.Node {
-    var node = ui.paragraph(.{ .width = width }, &.{
-        .{ .text = text, .monospace = true, .color = .info, .scale = caption_scale },
-    });
-    node.widget.text_alignment = .center;
-    return node;
-}
-
-/// The long-travel seek fader. Re-keyed per track so it takes the source
-/// position once on every load (snaps home) — slider values are
-/// runtime-owned between rebuilds, so an un-keyed fader would hold its
-/// last drag across track changes. The explicit height matches the
+/// The long-travel seek fader: the seek control AND the deck's position
+/// affordance (the display carries the timecode; a second progress bar
+/// would duplicate this fader's travel). Re-keyed per track so it takes
+/// the source position once on every load (snaps home) — slider values
+/// are runtime-owned between rebuilds, so an un-keyed fader would hold
+/// its last drag across track changes. The explicit height matches the
 /// chrome's glass frame, so the thumb rides inside the bevel.
 fn seekRow(ui: *Ui, model: *const Model) Ui.Node {
     return ui.row(.{ .height = layout.seek_height, .cross = .center, .semantics = .{ .label = "Seek row" } }, .{
@@ -438,18 +404,25 @@ pub fn playlistView(ui: *Ui, model: *const Model) Ui.Node {
     }));
 }
 
-/// The rack's own cap strip: drag region plus engraved unit label. The
-/// leading pad is the hardcoded compact-titlebar constant (secondary
-/// windows have no chrome-inset hook yet).
+/// The rack's own cap strip: drag region, the skin's own window keys
+/// (chromeless window, like the player), and the engraved unit label.
+/// The close key racks the unit back in DECLARATIVELY — clearing
+/// `playlist_open` is the real close, through the same reconcile the PL
+/// key rides — and the minimize key is the real OS verb through the
+/// window-action effect.
 fn playlistHeader(ui: *Ui) Ui.Node {
     return ui.row(.{
         .height = layout.playlist_header_height,
-        .gap = 8,
+        .gap = layout.cap_gap,
         .cross = .center,
         .window_drag = true,
         .semantics = .{ .label = "Playlist cap" },
     }, .{
-        ui.el(.stack, .{ .width = layout.playlist_chrome_leading }, .{}),
+        // Same leading margin as the player's cap band: the two units'
+        // window keys align when the windows stack.
+        ui.el(.stack, .{ .width = layout.pad - layout.cap_gap }, .{}),
+        windowKey(ui, "x", Msg{ .close_window = .playlist }, "Close window"),
+        windowKey(ui, "app:minimize", Msg{ .minimize_window = .playlist }, "Minimize window"),
         enamelCaption(ui, "PLAYLIST"),
         ui.spacer(1),
         enamelCaption(ui, "DECK MK-48 // 1U"),
@@ -458,10 +431,12 @@ fn playlistHeader(ui: *Ui) Ui.Node {
 }
 
 /// The playlist bay: ONE flat list of every song on dark glass — a
-/// dense phosphor table, no cards, no covers. Each row is pressable
-/// (load/toggle) and carries the native context menu. The caption row's
-/// fixed height keeps the scroll viewport folding on a whole row (the
-/// layout table's comptime assert holds it).
+/// dense phosphor table, no cards, no covers, and no per-row plates:
+/// single hairline rules BETWEEN the rows (the first row carries none
+/// above, the last none below). Each row is pressable (load/toggle) and
+/// carries the native context menu. The caption row's fixed height
+/// keeps the scroll viewport folding on a whole row (the layout table's
+/// comptime assert holds it).
 fn ledgerView(ui: *Ui, model: *const Model) Ui.Node {
     // The ledger is glass — the playlist IS a display on this machine —
     // so a panel (containers paint nothing) fills the bay with the
@@ -481,7 +456,6 @@ fn ledgerView(ui: *Ui, model: *const Model) Ui.Node {
             .grow = 1,
             .semantics = .{ .label = "Track ledger" },
         }, ui.el(.list, .{
-            .gap = layout.ledger_row_gap,
             .semantics = .{ .role = .list, .label = "Tracks" },
         }, ui.each(rows, trackKey, ledgerRow))),
     }));
@@ -491,7 +465,23 @@ fn trackKey(row: *const model_mod.TrackRow) canvas.UiKey {
     return canvas.uiKey(@as(u32, row.id));
 }
 
+/// One ledger row, with its rule: every row but the first stacks a 1px
+/// hairline ABOVE its plate, so the bay reads as one ruled glass table
+/// — dividers between rows, never a box around each row.
 fn ledgerRow(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
+    if (row.first) return ledgerRowPlate(ui, row);
+    return ui.column(.{}, .{
+        // The rule: the same phosphor-tinted lift the loaded row washes
+        // in, one pixel tall — a hairline in the glass, not a border.
+        ui.el(.panel, .{
+            .height = layout.ledger_divider_height,
+            .style_tokens = .{ .background = .surface_subtle },
+        }, .{}),
+        ledgerRowPlate(ui, row),
+    });
+}
+
+fn ledgerRowPlate(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
     return ui.panel(.{
         .global_key = canvas.uiKey(@as(u32, row.id)),
         .height = layout.ledger_row_height,
@@ -504,12 +494,13 @@ fn ledgerRow(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
             .{ .label = "Play Next", .msg = Msg{ .queue_track = row.id } },
             .{ .label = "Copy Title", .msg = Msg{ .copy_title = row.id } },
         },
-        // The loaded row lifts on a phosphor-tinted glass wash — the
-        // "current row" highlight of the bay.
+        // Rows are bare glass (the theme's default panel paints
+        // nothing); the loaded row alone lifts on a phosphor-tinted
+        // wash — the "current row" highlight of the bay.
         .style_tokens = if (row.now)
             .{ .background = .surface_subtle, .radius = .sm }
         else
-            .{ .radius = .sm },
+            .{},
         .semantics = .{ .role = .listitem, .label = row.title },
     }, ui.row(.{ .gap = 8, .cross = .center }, .{
         ui.row(.{ .width = layout.ledger_number_width, .cross = .center }, .{
@@ -540,7 +531,7 @@ fn ledgerRow(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
         }),
         monoCaption(ui, row.duration, layout.ledger_duration_width, .end, .info),
         // The overlay scrollbar's lane: keeps the duration digits clear
-        // of the thumb (the plate itself stays full width).
+        // of the thumb (the row itself stays full width).
         ui.el(.stack, .{ .width = layout.ledger_scroll_lane }, .{}),
     }));
 }
@@ -582,7 +573,10 @@ fn cueStrip(ui: *Ui, model: *const Model) Ui.Node {
 /// The sleeve window: the loaded record's committed cover in a small
 /// glass pane — real album art where the hardware would show the disc.
 /// Same degrade story as the player's art bay: a missing decode leaves
-/// an engraved plate, never a hole.
+/// an engraved plate, never a hole. The pane is too small for lettering
+/// at the pixel face's caption size, so the engraving is the powered-on
+/// dashes in every fallback state; the player's full-size art bay
+/// carries the NO ART stamp.
 fn sleevePane(ui: *Ui, model: *const Model) Ui.Node {
     const cover = model.nowCover();
     if (cover != 0) {
@@ -601,7 +595,7 @@ fn sleevePane(ui: *Ui, model: *const Model) Ui.Node {
         .style_tokens = .{ .background = .background, .radius = .sm },
         .semantics = .{ .label = "Sleeve" },
     }, ui.column(.{ .grow = 1, .main = .center, .cross = .center }, .{
-        glassCaption(ui, if (model.idle()) "--" else "NO ART"),
+        glassCaption(ui, "--"),
     }));
 }
 
@@ -622,11 +616,9 @@ fn cuePlate(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
 
 // ---------------------------------------------------------------- shared
 
-/// Engraved caption on GLASS: uppercase mono at the caption scale in the
-/// dim phosphor register, natural advance. (Round 1 letter-spaced these
-/// by interleaving spaces; the interleave split digit groups and "//"
-/// marks and wrapped loudly in narrow panels — the mono face's own
-/// spacing is the honest stamping.)
+/// Engraved caption on GLASS: uppercase at the caption scale in the dim
+/// phosphor register, natural advance — the pixel face's own spacing is
+/// the honest stamping.
 fn glassCaption(ui: *Ui, text: []const u8) Ui.Node {
     return ui.paragraph(.{}, &.{
         .{ .text = text, .monospace = true, .color = .info, .scale = caption_scale },

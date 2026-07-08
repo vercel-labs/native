@@ -370,10 +370,22 @@ pub const WindowRestorePolicy = enum {
 /// `titlebarSeparatorStyle = .none` — pure geometry, nothing drawn).
 /// Pick it when the app's own header row is toolbar-height, so the
 /// lights sit centered against the header instead of hugging its top.
+///
+/// `.chromeless` is the fully-skinned-app shape: NO OS chrome at all —
+/// no titlebar band and no system window buttons (macOS: a borderless
+/// styleMask, so the traffic lights are gone too; Windows: a
+/// caption-less `WS_POPUP` window; Linux: `gtk_window_set_decorated
+/// FALSE`). An EXPLICIT opt-in for apps whose chassis draws its OWN
+/// working close/minimize controls wired to real window actions
+/// (`close_window_fn` / `minimize_window_fn`); ordinary apps should use
+/// the hidden styles above, which keep the real OS controls — a window
+/// with no chrome and no replacement controls is an affordance lie.
+/// Drag still rides the widget `window_drag` channel.
 pub const WindowTitlebarStyle = enum {
     standard,
     hidden_inset,
     hidden_inset_tall,
+    chromeless,
 };
 
 /// The host-reported form factor (size class) of the surface an app
@@ -1869,6 +1881,11 @@ pub const PlatformServices = struct {
     create_window_fn: ?*const fn (context: ?*anyopaque, options: WindowOptions) anyerror!WindowInfo = null,
     focus_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
     close_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    /// The real OS minimize verb (macOS miniaturize-to-Dock, Windows
+    /// `SW_MINIMIZE`, GTK `gtk_window_minimize`), for app-drawn window
+    /// controls — chromeless windows have no system button to click.
+    /// Platforms without the concept leave this null.
+    minimize_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
     /// Hand the ACTIVE pointer-down to the platform as a window-drag
     /// gesture (the hidden-titlebar drag-region channel): the window
     /// moves once the pointer actually moves — a plain click moves
@@ -2136,6 +2153,11 @@ pub const PlatformServices = struct {
     pub fn closeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
         const close_fn = self.close_window_fn orelse return error.UnsupportedService;
         return close_fn(self.context, window_id);
+    }
+
+    pub fn minimizeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
+        const minimize_fn = self.minimize_window_fn orelse return error.UnsupportedService;
+        return minimize_fn(self.context, window_id);
     }
 
     pub fn startWindowDrag(self: PlatformServices, window_id: WindowId) anyerror!void {

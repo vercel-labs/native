@@ -260,6 +260,11 @@ pub const NullPlatform = struct {
     /// like `windows` — same seam-regression purpose as
     /// `window_resizable` (the startup create used to hardcode it).
     window_titlebar: [max_windows]WindowTitlebarStyle = [_]WindowTitlebarStyle{.standard} ** max_windows,
+    /// Minimize calls per window (`minimize_window_fn`), indexed like
+    /// `windows`: the observable seam for app-drawn minimize controls —
+    /// the null platform has no Dock to genie into, so the count IS the
+    /// behavior tests pin.
+    window_minimize_count: [max_windows]u32 = [_]u32{0} ** max_windows,
     /// Captured `WindowOptions.show` per created window: the
     /// present-before-show policy that must survive to the create seam.
     window_show: [max_windows]types.WindowShowMode = [_]types.WindowShowMode{.immediate} ** max_windows,
@@ -545,6 +550,7 @@ pub const NullPlatform = struct {
                 .create_window_fn = createWindow,
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
+                .minimize_window_fn = minimizeWindow,
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
                 .set_window_drag_regions_fn = setWindowDragRegions,
@@ -855,6 +861,15 @@ pub const NullPlatform = struct {
         self.windows[index].focused = false;
         self.removeViewsForWindow(window_id);
         self.removeWebViewsForWindow(window_id);
+    }
+
+    fn minimizeWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        // A minimized window stays OPEN (it comes back from the Dock);
+        // only focus leaves. The count is the pinned observable.
+        self.windows[index].focused = false;
+        self.window_minimize_count[index] += 1;
     }
 
     fn createView(context: ?*anyopaque, options: ViewOptions) anyerror!void {
@@ -1792,6 +1807,13 @@ pub const NullPlatform = struct {
         } };
     }
 
+    /// Test seam: minimize calls observed for a window (the null host
+    /// has no Dock, so the count is the pinned behavior).
+    pub fn minimizeCountForWindow(self: *const NullPlatform, window_id: WindowId) u32 {
+        const index = self.findWindowIndex(window_id) orelse return 0;
+        return self.window_minimize_count[index];
+    }
+
     fn removeWindowAt(self: *NullPlatform, index: usize) void {
         if (index >= self.window_count) return;
         var cursor = index;
@@ -1800,6 +1822,7 @@ pub const NullPlatform = struct {
             self.window_resizable[cursor] = self.window_resizable[cursor + 1];
             self.window_min_width[cursor] = self.window_min_width[cursor + 1];
             self.window_min_height[cursor] = self.window_min_height[cursor + 1];
+            self.window_minimize_count[cursor] = self.window_minimize_count[cursor + 1];
         }
         self.window_count -= 1;
     }

@@ -176,6 +176,7 @@ fn windowTitlebarStyle(comptime window: anytype) native_sdk.WindowTitlebarStyle 
     if (comptime std.mem.eql(u8, value, "standard")) return .standard;
     if (comptime std.mem.eql(u8, value, "hidden_inset")) return .hidden_inset;
     if (comptime std.mem.eql(u8, value, "hidden_inset_tall")) return .hidden_inset_tall;
+    if (comptime std.mem.eql(u8, value, "chromeless")) return .chromeless;
     @compileError("unknown app.zon window titlebar style");
 }
 

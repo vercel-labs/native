@@ -407,6 +407,8 @@ Automation reaches every window with the same verbs: snapshots enumerate all win
 
 macOS-first, like `resizable = false`: GTK and Win32 hosts keep standard chrome (both `hidden_inset` variants are harmless there), report zero insets, and treat drag-region presses as dead space. See `examples/markdown-viewer` for the full retrofit.
 
+`titlebar = "chromeless"` removes ALL OS chrome — the titleband AND the system buttons, on every desktop (macOS borderless, Windows caption-less popup, Linux undecorated). It is an EXPLICIT opt-in for fully-skinned apps whose chassis draws its own working close/minimize controls wired to the real window-action effects (`fx.closeWindow(label)` / `fx.minimizeWindow(label)`); ordinary apps should keep the hidden styles above, which keep the real OS buttons. Drag regions keep working; chrome insets are honestly zero. See `examples/deck` for the full shape.
+
 ## Images
 
 Image pixels are runtime-registered resources: the app registers decoded straight-alpha RGBA8 under a caller-chosen `ImageId` (a `u64` kept in the model, effect-key style; 0 is the "no image" sentinel), and `image`, `icon_button`, and `avatar` widgets reference the id. Native SDK bundles no image codecs — encoded bytes (PNG, JPEG, whatever the OS decodes) go through the platform decoder: CGImageSource on macOS and the iOS toolkit host, gdk-pixbuf on GTK, WIC on Windows, BitmapFactory on the Android toolkit host (both mobile hosts register the codec over the embed image service; an embed host without one reports `error.UnsupportedService`).

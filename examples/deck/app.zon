@@ -22,7 +22,7 @@
                 .width = 512,
                 .height = 264,
                 .resizable = false,
-                .titlebar = "hidden_inset",
+                .titlebar = "chromeless",
                 .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .views = .{

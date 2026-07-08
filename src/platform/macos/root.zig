@@ -138,6 +138,7 @@ extern fn native_sdk_appkit_create_window(host: *AppKitHost, window_id: u64, win
 extern fn native_sdk_appkit_set_window_content_min_size(host: *AppKitHost, window_id: u64, min_width: f64, min_height: f64) c_int;
 extern fn native_sdk_appkit_focus_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_close_window(host: *AppKitHost, window_id: u64) c_int;
+extern fn native_sdk_appkit_minimize_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_start_window_drag(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_window_chrome_insets(host: *AppKitHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
 extern fn native_sdk_appkit_create_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
@@ -572,6 +573,7 @@ pub const MacPlatform = struct {
                 .create_window_fn = createWindow,
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
+                .minimize_window_fn = minimizeWindow,
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
                 .create_view_fn = createView,
@@ -1010,6 +1012,7 @@ fn titlebarStyleInt(style: platform_mod.WindowTitlebarStyle) c_int {
         .standard => 0,
         .hidden_inset => 1,
         .hidden_inset_tall => 2,
+        .chromeless => 3,
     };
 }
 
@@ -1056,6 +1059,11 @@ fn focusWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!
 fn closeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_appkit_close_window(self.host, window_id) == 0) return error.CloseFailed;
+}
+
+fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_minimize_window(self.host, window_id) == 0) return error.WindowNotFound;
 }
 
 fn startWindowDrag(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {

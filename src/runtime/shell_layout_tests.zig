@@ -563,6 +563,23 @@ test "shell window titlebar style reaches the platform create seam" {
         }
     }
 
+    // The chromeless opt-in (fully-skinned apps: no titlebar band, no
+    // system buttons) rides the same seam.
+    const chromeless_window: app_manifest.ShellWindow = .{
+        .label = "chromeless",
+        .title = "Chromeless",
+        .width = 640,
+        .height = 480,
+        .titlebar = .chromeless,
+        .views = &shell_views,
+    };
+    const chromeless = try harness.runtime.createShellWindow(chromeless_window, platform.WebViewSource.html("<h1>Chromeless</h1>"));
+    for (harness.null_platform.windows[0..harness.null_platform.window_count], 0..) |info, index| {
+        if (info.id == chromeless.id) {
+            try std.testing.expectEqual(platform.WindowTitlebarStyle.chromeless, harness.null_platform.window_titlebar[index]);
+        }
+    }
+
     // The default stays standard chrome.
     const standard_window: app_manifest.ShellWindow = .{
         .label = "standard",

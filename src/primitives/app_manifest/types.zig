@@ -282,10 +282,19 @@ pub const WindowRestorePolicy = enum {
 /// macOS vertically centers the traffic lights in the band. Declare it
 /// when the header row replacing the titlebar is toolbar-height, so the
 /// lights center against it instead of sitting high.
+///
+/// `.chromeless` removes ALL OS chrome — the titlebar band AND the
+/// system window buttons (macOS drops the traffic lights, Windows the
+/// DWM caption buttons, Linux the header-bar CSD). An EXPLICIT opt-in
+/// for fully-skinned apps whose chassis draws its OWN working
+/// close/minimize controls (wired to the runtime's real window-action
+/// effects); ordinary apps should declare the hidden styles above,
+/// which keep the real OS controls on every desktop.
 pub const WindowTitlebarStyle = enum {
     standard,
     hidden_inset,
     hidden_inset_tall,
+    chromeless,
 };
 
 pub const Window = struct {

@@ -2132,6 +2132,16 @@ int native_sdk_appkit_close_window(native_sdk_appkit_host_t *host, uint64_t wind
     return 1;
 }
 
+int native_sdk_appkit_minimize_window(native_sdk_appkit_host_t *host, uint64_t window_id) {
+    NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) return 0;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [window miniaturize:nil];
+    });
+    return 1;
+}
+
 int native_sdk_appkit_start_window_drag(native_sdk_appkit_host_t *host, uint64_t window_id) {
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     NSWindow *window = object.windows[@(window_id)];

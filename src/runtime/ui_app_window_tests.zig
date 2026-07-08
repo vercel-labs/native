@@ -308,3 +308,135 @@ test "input from the secondary window dispatches through its own tree with its w
     } });
     try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.bumps);
 }
+
+// ------------------------------------------------- window-action effects
+
+const VerbModel = struct {
+    settings_open: bool = true,
+};
+
+const VerbMsg = union(enum) {
+    minimize_settings,
+    minimize_main,
+    close_settings,
+    settings_closed,
+};
+
+const VerbApp = ui_app_model.UiApp(VerbModel, VerbMsg);
+
+fn verbUpdate(model: *VerbModel, msg: VerbMsg, fx: *VerbApp.Effects) void {
+    switch (msg) {
+        .minimize_settings => fx.minimizeWindow(settings_window_label),
+        .minimize_main => fx.minimizeWindow("main"),
+        // The imperative close, for the seam test — a real app's
+        // model-declared window usually closes declaratively instead.
+        .close_settings => fx.closeWindow(settings_window_label),
+        .settings_closed => model.settings_open = false,
+    }
+}
+
+fn verbView(ui: *VerbApp.Ui, model: *const VerbModel) VerbApp.Ui.Node {
+    _ = model;
+    return ui.text(.{}, "main");
+}
+
+fn verbWindows(model: *const VerbModel, scratch: *VerbApp.WindowsScratch) []const VerbApp.WindowDescriptor {
+    var count: usize = 0;
+    if (model.settings_open) {
+        scratch.windows[count] = .{
+            .label = settings_window_label,
+            .canvas_label = settings_canvas_label,
+            .title = "Settings",
+            .width = 320,
+            .height = 240,
+            .on_close = .settings_closed,
+        };
+        count += 1;
+    }
+    return scratch.windows[0..count];
+}
+
+fn verbWindowView(ui: *VerbApp.Ui, model: *const VerbModel, window_label: []const u8) VerbApp.Ui.Node {
+    _ = model;
+    std.debug.assert(std.mem.eql(u8, window_label, settings_window_label));
+    return ui.text(.{}, "settings");
+}
+
+test "window-action effects resolve labels to live windows and drive the real verbs" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try VerbApp.create(std.heap.page_allocator, .{
+        .name = "ui-app-window-verbs",
+        .scene = panel_scene,
+        .canvas_label = canvas_label,
+        .update_fx = verbUpdate,
+        .view = verbView,
+        .windows_fn = verbWindows,
+        .window_view = verbWindowView,
+    });
+    defer app_state.destroy();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    // Real hosts report the startup window they created; the runtime
+    // adopts it into its window table (id 1, the app's "main" label) —
+    // the entry the label-addressed window actions resolve against.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = .{
+        .id = 1,
+        .label = "main",
+        .title = "Panel",
+        .frame = geometry.RectF.init(0, 0, 400, 300),
+        .scale_factor = 2,
+        .open = true,
+        .focused = true,
+    } });
+
+    // The settings window is declared open from boot.
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    var settings_id: support.platform.WindowId = 0;
+    for (harness.runtime.listWindows(&buffer)) |info| {
+        if (std.mem.eql(u8, info.label, settings_window_label)) settings_id = info.id;
+    }
+    try std.testing.expect(settings_id != 0);
+
+    // Minimize by label reaches the platform's minimize verb for a
+    // window the platform owns (the model-declared secondary was
+    // created through the create-window service). A minimized window
+    // stays OPEN.
+    try app_state.dispatch(&harness.runtime, 1, .minimize_settings);
+    try std.testing.expectEqual(@as(u32, 1), harness.null_platform.minimizeCountForWindow(settings_id));
+    for (harness.runtime.listWindows(&buffer)) |info| {
+        if (info.id == settings_id) try std.testing.expect(info.open);
+    }
+
+    // The main window resolves by label too (the runtime adopted the
+    // host-reported startup window above). The fake host never created
+    // a native window for it — live hosts own the startup window — so
+    // the pinned observable is the resolved request riding the channel:
+    // no error, and the mirror counts both minimizes.
+    try app_state.dispatch(&harness.runtime, 1, .minimize_main);
+    try std.testing.expectEqual(@as(u32, 2), app_state.effects.windowActionState().minimize_count);
+
+    // Close by label performs the runtime's REAL close (the platform's
+    // close verb runs and the runtime bookkeeping flips with it). The
+    // model still declares this window, so the reconcile's source-wins
+    // rule may re-create it on the next rebuild — which is exactly why
+    // model-declared windows should close DECLARATIVELY instead (the
+    // deck example does); the imperative seam exists for the main
+    // window and windows the model does not own.
+    try app_state.dispatch(&harness.runtime, 1, .close_settings);
+    try std.testing.expectEqual(@as(u32, 1), app_state.effects.windowActionState().close_count);
+
+    // Labels resolve at call time against the LIVE window set, so the
+    // main window still answers after the secondary's churn.
+    try app_state.dispatch(&harness.runtime, 1, .minimize_main);
+    try std.testing.expectEqual(@as(u32, 3), app_state.effects.windowActionState().minimize_count);
+}
