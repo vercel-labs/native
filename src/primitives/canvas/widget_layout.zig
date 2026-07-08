@@ -714,11 +714,15 @@ fn alignedCrossAxisOrigin(
         .horizontal => child.frame.y,
         .vertical => child.frame.x,
     };
-    const free_extent = @max(0, available_extent - child_extent);
     return start + offset + switch (alignment) {
         .stretch, .start => 0,
-        .center => free_extent * 0.5,
-        .end => free_extent,
+        // Centering keeps its promise when the child is BIGGER than the
+        // band: the free extent goes negative and the overflow splits
+        // evenly across both edges — a taller-than-the-row child sits
+        // optically centered instead of pinning to the top and pushing
+        // its whole overflow past the bottom edge.
+        .center => (available_extent - child_extent) * 0.5,
+        .end => @max(0, available_extent - child_extent),
     };
 }
 
@@ -1837,7 +1841,22 @@ fn preferredCrossExtent(widget: Widget, axis: LayoutAxis, available: f32, alignm
         return @max(min_value, boundedByMax(bubbleThreadWidthCap(widget, available, fitted), max_value));
     }
     if (alignment == .stretch) return @max(min_value, boundedByMax(available, max_value));
-    return @max(min_value, boundedByMax(@min(available, intrinsicCrossExtent(widget, axis, tokens)), max_value));
+    const intrinsic = intrinsicCrossExtent(widget, axis, tokens);
+    // A cross-CENTERED child of a horizontal container keeps its
+    // intrinsic HEIGHT even past the band, so the centering rule above
+    // (`alignedCrossAxisOrigin`) can split the overflow across both
+    // edges — clamping here handed an oversized stack a band-sized
+    // frame whose inner flow then spilled past the bottom edge only
+    // (top-heavy rows: a two-line text stack inside a fixed-height list
+    // row). Explicit heights already pass through unclamped (the
+    // `value` branch above); this extends the same honesty to intrinsic
+    // ones. The WIDTH cross axis (vertical containers) keeps the clamp:
+    // the offered width is what drives text wrap, and an unclamped
+    // width would un-wrap centered paragraphs.
+    if (axis == .horizontal and alignment == .center) {
+        return @max(min_value, boundedByMax(intrinsic, max_value));
+    }
+    return @max(min_value, boundedByMax(@min(available, intrinsic), max_value));
 }
 
 fn minMainExtent(widget: Widget, axis: LayoutAxis) f32 {

@@ -401,8 +401,10 @@ fn trackKey(row: *const model_mod.TrackRow) canvas.UiKey {
 ///   plays via `on_submit` for attached keyboards.
 ///
 /// The selection wears the inverted register in both shells — accent
-/// fill under window-background ink, stated per-widget through style
-/// tokens so the unselected rows keep their neutral hover/press washes.
+/// fill under the accent's knockout ink (`accent_text`, the same token
+/// the filled Play Album button pairs with the accent, white under this
+/// theme in both schemes), stated per-widget through style tokens so
+/// the unselected rows keep their neutral hover/press washes.
 fn trackRowView(ui: *Ui, form: FormFactor, row: *const model_mod.TrackRow) Ui.Node {
     const touch = form == .compact;
     // Two items per row on purpose: the per-view context-menu budget is
@@ -443,20 +445,25 @@ fn trackRowView(ui: *Ui, form: FormFactor, row: *const model_mod.TrackRow) Ui.No
     });
 }
 
-/// Row title ink: window-background on the selected (accent) row — the
-/// inverted register — accent on the loaded track's row, default
-/// otherwise.
+/// Row title ink: the accent's knockout ink (`accent_text`) on the
+/// selected (accent) row — the inverted register. The window-background
+/// token this used to take is only light-scheme white; in dark mode it
+/// resolves near-black and vanished into the accent fill, while
+/// `accent_text` is the ink the theme pairs with the accent in BOTH
+/// schemes (the filled Play Album button's white). Accent on the loaded
+/// track's row, default otherwise.
 fn rowTitleTokens(row: *const model_mod.TrackRow) canvas.StyleTokenRefs {
-    if (row.selected) return .{ .foreground = .background };
+    if (row.selected) return .{ .foreground = .accent_text };
     if (row.now) return .{ .foreground = .accent };
     return .{};
 }
 
 /// Row secondary ink (subtitle, duration, track number): muted at rest,
-/// window-background on the selected row — muted gray on the accent
-/// fill would fail the contrast the inverted register exists to keep.
+/// the accent's knockout ink on the selected row — muted gray on the
+/// accent fill would fail the contrast the inverted register exists to
+/// keep, and only `accent_text` keeps that promise in both schemes.
 fn rowMutedTokens(row: *const model_mod.TrackRow) canvas.StyleTokenRefs {
-    if (row.selected) return .{ .foreground = .background };
+    if (row.selected) return .{ .foreground = .accent_text };
     return .{ .foreground = .text_muted };
 }
 
@@ -473,7 +480,7 @@ fn trackIndicator(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
         return ui.text(.{ .width = 24, .size = .sm, .style_tokens = rowMutedTokens(row) }, row.number);
     }
     const icon_tokens: canvas.StyleTokenRefs = if (row.selected)
-        .{ .foreground = .background }
+        .{ .foreground = .accent_text }
     else if (row.playing)
         .{ .foreground = .accent }
     else

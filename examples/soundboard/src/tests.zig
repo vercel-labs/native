@@ -1227,15 +1227,23 @@ test "the selected row wears the inverted accent register; tiles hover quiet" {
     const unselected = &model_mod.tracks[0];
     apply(&model, .{ .select_track = selected.id });
 
-    // The selected row: accent fill under window-background ink — the
-    // per-widget style tokens resolve against the live theme, so the
+    // The selected row: accent fill under the accent's knockout ink —
+    // the per-widget style tokens resolve against the live theme, so the
     // assertion reads the same resolved colors the renderer will.
+    // Deliberately re-pinned from the background token to `accent_text`:
+    // background is only white in the light scheme (near-black in dark,
+    // where it vanished into the accent fill), while `accent_text` is
+    // the ink the theme pairs with the accent in BOTH schemes — the same
+    // white the filled Play Album button wears.
     const tree = try buildTree(arena, &model);
     const row = findByLabel(tree.root, selected.title).?;
     try testing.expect(row.state.selected);
     try testing.expectEqualDeep(theme.light_colors.accent, row.style.background.?);
     const title = findByText(row, .text, selected.title).?;
-    try testing.expectEqualDeep(theme.light_colors.background, title.style.foreground.?);
+    try testing.expectEqualDeep(theme.light_colors.accent_text, title.style.foreground.?);
+    // The dark palette resolves the SAME knockout ink for this theme, so
+    // the inverted row reads identically in both schemes.
+    try testing.expectEqualDeep(theme.dark_colors.accent_text, title.style.foreground.?);
 
     // Unselected rows keep the composite's own state washes (no
     // override) and their ordinary ink.

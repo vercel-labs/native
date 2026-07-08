@@ -575,6 +575,58 @@ test "widget layout aligns row children on main and cross axes" {
     try expectLayoutFrame(spaced_layout, 6, geometry.RectF.init(100, 0, 20, 16));
 }
 
+test "cross-centering splits the overflow of a taller-than-band child evenly" {
+    // A fixed-height list row whose centered text stack is TALLER than
+    // the padded band: the stack keeps its intrinsic height and the
+    // overflow splits evenly across both edges (the free extent goes
+    // negative and halves), so the content sits optically centered.
+    // Before this pin the stack was clamped to the band and its inner
+    // flow spilled past the bottom edge only — a visible top gap with
+    // the last line pressed against the row's bottom edge.
+    // Fixed-size leaves stand in for the text lines so the pinned
+    // numbers stay independent of font metrics.
+    const stack_children = [_]Widget{
+        .{ .id = 3, .kind = .stack, .frame = geometry.RectF.init(0, 0, 80, 18) },
+        .{ .id = 4, .kind = .stack, .frame = geometry.RectF.init(0, 0, 80, 16) },
+    };
+    const row_children = [_]Widget{
+        .{ .id = 2, .kind = .column, .layout = .{ .gap = 2 }, .children = &stack_children },
+    };
+    const row = Widget{
+        .id = 1,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(0, 0, 300, 44),
+        .layout = .{ .padding = geometry.InsetsF.all(10), .cross_alignment = .center },
+        .children = &row_children,
+    };
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(row, geometry.RectF.init(0, 0, 300, 44), &nodes);
+    // Stack intrinsic height 18 + 2 + 16 = 36 against the 24-point band
+    // (44 minus 10 padding per edge): the frame keeps 36 and centers at
+    // 10 + (24 - 36) / 2 = 4 — six points of overflow on EACH side.
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(10, 4, 80, 36));
+    // The lines flow inside the centered stack: both sit symmetric
+    // around the row's vertical middle (22).
+    try expectLayoutFrame(layout, 3, geometry.RectF.init(10, 4, 80, 18));
+    try expectLayoutFrame(layout, 4, geometry.RectF.init(10, 24, 80, 16));
+
+    // A child that FITS the band keeps the classic centering unchanged.
+    const fitting_children = [_]Widget{
+        .{ .id = 6, .kind = .stack, .frame = geometry.RectF.init(0, 0, 80, 16) },
+    };
+    const fitting = Widget{
+        .id = 5,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(0, 0, 300, 44),
+        .layout = .{ .padding = geometry.InsetsF.all(10), .cross_alignment = .center },
+        .children = &fitting_children,
+    };
+    var fitting_nodes: [3]WidgetLayoutNode = undefined;
+    const fitting_layout = try layoutWidgetTree(fitting, geometry.RectF.init(0, 0, 300, 44), &fitting_nodes);
+    try expectLayoutFrame(fitting_layout, 6, geometry.RectF.init(10, 14, 80, 16));
+}
+
 test "widget text alignment emits local text layout options" {
     const tokens = DesignTokens{
         .typography = .{ .font_id = 1, .body_size = 10 },
