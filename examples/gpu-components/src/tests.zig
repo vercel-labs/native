@@ -761,13 +761,23 @@ test "gpu components display list renders stable geist reference snapshot" {
     // pill register renders byte-identically). Reviewed via the live
     // docs tabs tile under the pack toggle in both site schemes before
     // blessing.
+    // Re-pinned 2026-07-08 (pure-black primary): the pack's light-mode
+    // primary FILL steps from gray-1000 #171717 to the register's true
+    // black #000000 — the pack's identity for filled controls in light —
+    // while gray-1000 stays the primary INK for text. Every accent-fed
+    // fill moves together (primary button, checked checkbox, toggle-on
+    // track, tooltip chip); ink, slider blue, and every dark/high-
+    // contrast register are untouched. The house pin above does not
+    // move (the default pack keeps its faithful #171717 primary).
+    // Reviewed via before/after catalog captures under the pack's light
+    // scheme before blessing.
     const pixel_count = @as(usize, @intFromFloat(canvas_width)) * @as(usize, @intFromFloat(canvas_height)) * 4;
     const pixels = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(pixels);
     const scratch = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(scratch);
     const surface = try renderComponentsReferenceSurface(componentTokensForPack(.geist, .light), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 13909327935355943876), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 13313358543749413523), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));

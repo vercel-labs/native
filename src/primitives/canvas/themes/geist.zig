@@ -2,7 +2,7 @@
 //! typeface family, expressed entirely through the token surface — no
 //! emitter knows this file exists. The register in one breath: a cool
 //! neutral gray scale over pure white/black pages, monochrome primaries
-//! (near-black filled controls in light, porcelain in dark), blue spent
+//! (pure-black filled controls in light, porcelain in dark), blue spent
 //! on focus rings and identity states, translucent hairline borders in
 //! BOTH schemes, uniform 6px control corners with 12px surfaces, and a
 //! taller 32/40/48 control ladder whose insets breathe with the rung
@@ -139,9 +139,13 @@ fn light() ColorTokens {
         .text_muted = Color.rgb8(77, 77, 77),
         // Hairline: black at 8% — the translucent border register.
         .border = Color.rgba8(0, 0, 0, 20),
-        // The monochrome primary: near-black filled controls with white
-        // knockout text, same identity as the primary ink.
-        .accent = Color.rgb8(23, 23, 23),
+        // The monochrome primary FILL: pure black #000000 filled
+        // controls (button, checked toggle/checkbox, selected states)
+        // with white knockout text — the register's true-black control
+        // step, deliberately one step past the gray-1000 #171717 primary
+        // INK above. The two blacks are distinct roles, not a mismatch:
+        // ink tops out at gray-1000, fills go to the scale's extreme.
+        .accent = Color.rgb8(0, 0, 0),
         .accent_text = Color.rgb8(255, 255, 255),
         // Error solid: red-800 #ea001d under white text.
         .destructive = Color.rgb8(234, 0, 29),
