@@ -1,1 +1,0 @@
-fix: **Docs wasm preview builds again**: the text-measure generation stamp used a 64-bit atomic, which wasm32 cannot compile — the single-threaded wasm preview build now uses a plain counter behind the same accessors, so `zig build docs-wasm-preview` works and the live tiles carry current engine behavior.

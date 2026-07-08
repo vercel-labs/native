@@ -1,1 +1,0 @@
-fix: **Package archives are labeled with the real optimize mode**: `native package` stamped desktop archives `-Debug` while packaging the ReleaseFast binary `native build` installs. The optimize label now defaults to ReleaseFast on every target, and the `zig build package` step forwards the packaged binary's actual mode; pass `--optimize` to label a binary built any other way.

@@ -1,1 +1,0 @@
-fix: **Disabled selection controls render disabled**: checkbox, radio, and switch chrome washes to half strength when disabled (fills, borders, check/dot/thumb) instead of painting full-strength accent — a checked-but-disabled control still reads as checked, matching the house disabled register buttons already follow.

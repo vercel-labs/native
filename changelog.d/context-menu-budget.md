@@ -1,2 +1,0 @@
-improvement: **Context-menu budget quadrupled**: the per-view declared context-menu item budget rose 128 -> 512 (a real three-pane app with 24 sidebar rows of per-row menus, a detail menu, and run-ledger steps measured 124/128), costing 24 B per slot (12 KiB per view, 384 KiB across all 32 view slots of fixed address space).
-- **Context-menu headroom telemetry**: automation snapshots now report `context_menu_items=declared/budget` on every gpu_surface view line, beside the existing `widget_nodes=` and `widget_semantics=` headroom fields.

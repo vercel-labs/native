@@ -1,1 +1,0 @@
-fix: **Adopted native views own the keyboard**: a view adopted via `Runtime.adoptViewSurface` (a VM display, a video view) becomes the window's first responder at adoption and reclaims focus when clicked, and app shortcut handling stands down while it holds focus — typing reaches the adopted view instead of the app canvas.

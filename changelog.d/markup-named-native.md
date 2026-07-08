@@ -1,1 +1,0 @@
-improvement: **The markup language is Native markup, extension `.native`**: views live in `.native` files (`native init` scaffolds `src/app.native`), and the docs, skills, examples, evals, and the editor extension (`editors/native-markup/`, language id `native-markup`) all teach the one name.

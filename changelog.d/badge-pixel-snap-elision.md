@@ -1,1 +1,0 @@
-fix: **Badge exact-fit elision under pixel snapping**: a badge sized exactly to its measured label could lose a fraction of a pixel to render-time geometry snapping and fall off the elision cliff (real glyphs swapped for an ellipsis). Intrinsic badge widths now round UP to the snap grid when geometry snapping is on; themes without snapping are bit-identical.
