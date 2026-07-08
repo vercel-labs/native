@@ -879,6 +879,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)audioInstallSpectrumTapForItem:(AVPlayerItem *)item asset:(AVURLAsset *)asset;
 - (void)audioTearDownSpectrumTap;
 - (void)stopAudioSpectrumTimer;
+- (BOOL)anyHostWindowVisibleOnGlass;
 - (void)audioSpectrumTimerFired:(NSTimer *)timer;
 - (void)wakeFromAnyThread;
 - (void)scheduleBridgeFrames;
@@ -8614,6 +8615,21 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
     self.audioSpectrumTimer = nil;
 }
 
+/* Whether any of the host's windows currently reaches the glass: the
+ * per-window NSWindowOcclusionStateVisible fact — the exact signal the
+ * occluded frame heartbeat paces on — checked across the whole window
+ * table, because a spectrum consumer may draw its bands in any of the
+ * app's windows. Miniaturized windows, windows fully covered by other
+ * apps, windows on inactive Spaces, and a hidden app all report
+ * invisible; an empty table means nothing displays at all. Loop-thread
+ * only, like every audio entry point. */
+- (BOOL)anyHostWindowVisibleOnGlass {
+    for (NSWindow *window in [self.windows objectEnumerator]) {
+        if (window.occlusionState & NSWindowOcclusionStateVisible) return YES;
+    }
+    return NO;
+}
+
 /* One SPECTRUM report per 40 ms tick, and only when the analysis is
  * honestly live: a player, an un-paused transport, no buffering stall,
  * and a tap that has rendered RECENTLY. The render side delivers PCM
@@ -8639,6 +8655,20 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
     if (!state) return;
     if (player.rate <= 0) return;
     if (!self.audioSourceIsLocal && self.audioBuffering) return;
+    /* The occluded-emission rule: SPECTRUM bands describe a display.
+     * While no host window reaches the glass (all minimized, fully
+     * covered, or the app hidden — the same occlusion fact the occluded
+     * frame heartbeat paces on), there is nothing the bands could
+     * describe, so the tick parks HERE, before the FFT: no analysis is
+     * computed for a report that will not be sent, no event wakes the
+     * runtime's update loop, and the journal records the occluded
+     * stretch as honest silence (replay shows exactly what a viewer
+     * could have seen — nothing). The 40 ms cadence keeps ticking and
+     * the render tap keeps filling its ring, so the first tick after a
+     * reveal analyzes a fresh window immediately: the glass is honest
+     * within one report. Position ticks are untouched — the transport
+     * keeps telling the truth at its own cadence. */
+    if (![self anyHostWindowVisibleOnGlass]) return;
     const uint64_t now_ns = NativeSdkTimestampNanoseconds();
     const uint64_t written = atomic_load_explicit(&state->written, memory_order_acquire);
     if (written < NATIVE_SDK_SPECTRUM_FFT_SIZE) return;

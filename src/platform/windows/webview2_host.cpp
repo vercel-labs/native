@@ -3411,16 +3411,39 @@ static void audioSpectrumStartCapture(Host *host) {
     std::thread(audioSpectrumCaptureThread, spectrum.shared).detach();
 }
 
+/* Whether any of the host's top-level windows still reaches the glass.
+ * Minimize-keyed on purpose: IsIconic is the one occlusion fact this
+ * host trusts (the same decision the minimized frame heartbeat makes —
+ * the covered-but-not-minimized case has no reliable cheap signal on
+ * the DXGI presentation path), so covered windows keep full spectrum
+ * cadence and only an all-minimized app goes quiet. Checked across the
+ * whole window table because a spectrum consumer may draw its bands in
+ * any of the app's windows. */
+static bool audioAnyWindowReachesGlass(Host *host) {
+    for (auto &entry : host->windows) {
+        if (entry.second.hwnd && !IsIconic(entry.second.hwnd)) return true;
+    }
+    return false;
+}
+
 /* One emission beat, marshalled from the capture thread; loop thread.
  * Stale generations (a stopped or replaced capture's stragglers) drop
  * here, and the live transport gates delivery: paused and stalled
  * transports emit nothing — the bars freeze honestly — while silence on
- * a rolling transport still emits its row of zeros. */
+ * a rolling transport still emits its row of zeros. The occluded-
+ * emission rule gates delivery too: SPECTRUM bands describe a display,
+ * so while every window is minimized no report is emitted — no event
+ * wakes the runtime's update loop for glass nobody can see, and the
+ * journal records the stretch as honest silence. The capture thread
+ * keeps its ring fresh (it must drain the loopback client regardless,
+ * and its FFT runs off the loop thread), so the first beat after a
+ * restore delivers current bands — honest within one report. */
 static void audioHandleSpectrumMessage(Host *host, WPARAM generation) {
     AudioState &audio = host->audio;
     AudioSpectrumState &spectrum = host->spectrum;
     if (!spectrum.shared || (uint64_t)generation != spectrum.generation) return;
     if (!audio.active || !audio.playing || audio.buffering) return;
+    if (!audioAnyWindowReachesGlass(host)) return;
     uint8_t bands[kAudioSpectrumBandCount];
     {
         std::lock_guard<std::mutex> guard(spectrum.shared->mutex);

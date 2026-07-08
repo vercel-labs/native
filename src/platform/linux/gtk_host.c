@@ -4461,7 +4461,20 @@ static void native_sdk_audio_emit_event(native_sdk_gtk_host_t *host, int kind) {
  * fills exactly like a position tick's (live position at emit time)
  * with the folded band bytes on top. Every other emit in this section
  * zero-initializes the event struct, so audio_bands is all zeros on
- * every non-spectrum event by construction. */
+ * every non-spectrum event by construction.
+ *
+ * No occluded/minimized emission gate here, DELIBERATELY — the same
+ * reasoning as the frame emission's missing occlusion throttle: GTK4
+ * offers no visibility fact that holds across backends (full coverage
+ * is unreported, Wayland keeps minimize compositor-private, and the
+ * toplevel "suspended" state is compositor-dependent and can arrive
+ * late or never), and gating on a signal that may never clear would
+ * freeze visible bars on some desktops — worse than the CPU the gate
+ * saves. The macOS host parks its spectrum tick while no window is
+ * visible and the Windows host drops emission while every window is
+ * minimized; if a dependable cross-backend visibility fact lands in
+ * the toolkit's GTK floor, gate here exactly like them: no events
+ * while hidden, next report immediately on reveal. */
 static void native_sdk_audio_emit_spectrum(native_sdk_gtk_host_t *host, const uint8_t bands[NATIVE_SDK_AUDIO_SPECTRUM_BANDS]) {
     native_sdk_gtk_audio_t *audio = &host->audio;
     native_sdk_gtk_event_t event = {

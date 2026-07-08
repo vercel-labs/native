@@ -265,6 +265,15 @@ pub const NullPlatform = struct {
     /// the null platform has no Dock to genie into, so the count IS the
     /// behavior tests pin.
     window_minimize_count: [max_windows]u32 = [_]u32{0} ** max_windows,
+    /// Modeled occlusion per window, indexed like `windows`: true while
+    /// the modeled window does not reach the glass (minimized, or a
+    /// test covered it via `setWindowOccluded`). Drives the
+    /// occluded-emission rule for `.spectrum` reports (`audioSpectrum`
+    /// answers null while every open window is occluded), mirroring the
+    /// macOS/Windows hosts. Defaults to false — a modeled window is on
+    /// glass unless a test says otherwise — so window-less harnesses
+    /// and every suite that never occludes keep their reports.
+    window_occluded: [max_windows]bool = [_]bool{false} ** max_windows,
     /// Captured `WindowOptions.show` per created window: the
     /// present-before-show policy that must survive to the create seam.
     window_show: [max_windows]types.WindowShowMode = [_]types.WindowShowMode{.immediate} ** max_windows,
@@ -860,6 +869,10 @@ pub const NullPlatform = struct {
             self.show_op_seq += 1;
             self.window_shown_seq[focused_index] = self.show_op_seq;
         }
+        // Focusing brings a window back to the glass (clicking the Dock
+        // restores a minimized window and orders it in), so the modeled
+        // occlusion clears — spectrum reports resume on the next beat.
+        self.window_occluded[focused_index] = false;
     }
 
     fn closeWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
@@ -875,9 +888,13 @@ pub const NullPlatform = struct {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
         // A minimized window stays OPEN (it comes back from the Dock);
-        // only focus leaves. The count is the pinned observable.
+        // only focus leaves. The count is the pinned observable. A
+        // minimized window is off the glass, so the modeled occlusion
+        // flips too — the real hosts' spectrum gating keys on exactly
+        // this fact.
         self.windows[index].focused = false;
         self.window_minimize_count[index] += 1;
+        self.window_occluded[index] = true;
     }
 
     fn createView(context: ?*anyopaque, options: ViewOptions) anyerror!void {
@@ -1440,6 +1457,14 @@ pub const NullPlatform = struct {
     pub fn audioSpectrum(self: *NullPlatform) ?Event {
         if (!self.audio_playback or !self.audio_spectrum) return null;
         if (!self.audio.loaded or !self.audio.playing) return null;
+        // The occluded-emission rule, modeled: bands describe a display,
+        // so while every open window is off the glass (minimized or
+        // test-occluded via `setWindowOccluded`) the host emits nothing
+        // — the journal shows honest silence for the stretch, and the
+        // next report after a reveal carries current bands. Keyed on
+        // the modeled occlusion flag ONLY (default false), so
+        // window-less harnesses keep their deterministic reports.
+        if (self.allOpenWindowsOccluded()) return null;
         var event = Event{ .audio = .{
             .kind = .spectrum,
             .position_ms = self.audio.position_ms,
@@ -1855,6 +1880,29 @@ pub const NullPlatform = struct {
         return self.window_minimize_count[index];
     }
 
+    /// Test seam: model a window leaving or returning to the glass
+    /// without a minimize verb (fully covered by another app, revealed
+    /// again) — the occlusion fact the real hosts' spectrum gating
+    /// reads. Minimize sets the same flag; focus clears it.
+    pub fn setWindowOccluded(self: *NullPlatform, window_id: WindowId, occluded: bool) !void {
+        const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        self.window_occluded[index] = occluded;
+    }
+
+    /// Whether every open modeled window is off the glass — the
+    /// occluded-emission rule's gate. False while ANY open window is
+    /// unoccluded, and false with no windows at all (a window-less
+    /// harness models an app whose display nobody took away).
+    fn allOpenWindowsOccluded(self: *const NullPlatform) bool {
+        var any_open = false;
+        for (self.windows[0..self.window_count], 0..) |window, index| {
+            if (!window.open) continue;
+            any_open = true;
+            if (!self.window_occluded[index]) return false;
+        }
+        return any_open;
+    }
+
     fn removeWindowAt(self: *NullPlatform, index: usize) void {
         if (index >= self.window_count) return;
         var cursor = index;
@@ -1864,6 +1912,7 @@ pub const NullPlatform = struct {
             self.window_min_width[cursor] = self.window_min_width[cursor + 1];
             self.window_min_height[cursor] = self.window_min_height[cursor + 1];
             self.window_minimize_count[cursor] = self.window_minimize_count[cursor + 1];
+            self.window_occluded[cursor] = self.window_occluded[cursor + 1];
         }
         self.window_count -= 1;
     }

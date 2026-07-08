@@ -137,6 +137,20 @@ pub const PlatformFeature = enum {
     /// events — honest absence, never fabricated bands; the null
     /// platform ships a deterministic fake generator behind the same
     /// flag.
+    ///
+    /// The occluded-emission rule: `.spectrum` bands describe a
+    /// display, so a host that knows none of the app's windows reaches
+    /// the glass emits no spectrum events for the duration — playback
+    /// and the position/loaded/completed reports continue untouched,
+    /// the journal records the stretch as honest silence, and emission
+    /// resumes with the first analysis beat after reveal (within one
+    /// ~40 ms report). macOS keys on window occlusion (minimized,
+    /// fully covered, hidden, inactive Space) and skips the FFT while
+    /// parked; Windows keys on every window minimized (the same signal
+    /// its frame heartbeat trusts); Linux/GTK has no cross-backend
+    /// visibility fact (the documented frame-pacing reasoning) and
+    /// keeps emitting; the null platform models the rule through its
+    /// windows' modeled occlusion so the suites can pin it.
     audio_spectrum,
 };
 

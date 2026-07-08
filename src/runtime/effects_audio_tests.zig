@@ -406,6 +406,51 @@ test "real spectrum reports round-trip: deterministic fake, honest gating, snaps
     try std.testing.expectEqual(before, h.app_state.model.event_count);
 }
 
+test "occluded-emission rule: spectrum stops while every window is off the glass, resumes current on reveal" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+    try np.setAudioDuration("cedar-ave.mp3", 89_160);
+    // The headless harness models no windows of its own; create the one
+    // whose glass the modeled occlusion covers and reveals.
+    const window = try h.harness.runtime.createWindow(.{ .label = "glass", .title = "Audio", .source = platform.WebViewSource.html("<p>audio</p>") });
+    const window_id = window.id;
+
+    try h.app_state.dispatch(&h.harness.runtime, 1, .play);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.takeAudioLoaded().?);
+    try std.testing.expect(np.audioSpectrum() != null);
+
+    // Fully covered (no minimize verb involved): reports stop, while
+    // playback and the position ticks keep flowing untouched — the
+    // transport keeps telling the truth, only the display data pauses.
+    try np.setWindowOccluded(window_id, true);
+    try std.testing.expect(np.audioSpectrum() == null);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.advanceAudio(500).?);
+    var snapshot = h.harness.runtime.automationSnapshot("Audio").audio.?;
+    try std.testing.expectEqual(@as(u64, 500), snapshot.position_ms);
+    // The lifetime counter proves the occluded stretch delivered
+    // nothing: an occluded journal simply has no spectrum records.
+    try std.testing.expectEqual(@as(u64, 0), snapshot.spectrum_events);
+
+    // Reveal: the very next beat has a report, and it describes NOW —
+    // the position moved under the occlusion and the bands moved with
+    // it, not a replay of the pre-occlusion frame.
+    try np.setWindowOccluded(window_id, false);
+    const revealed = np.audioSpectrum().?;
+    try h.harness.runtime.dispatchPlatformEvent(h.app, revealed);
+    snapshot = h.harness.runtime.automationSnapshot("Audio").audio.?;
+    try std.testing.expectEqual(@as(u64, 1), snapshot.spectrum_events);
+    try std.testing.expectEqualSlices(u8, &revealed.audio.bands, snapshot.spectrum_bands);
+
+    // The minimize verb is the same fact: a minimized-away app emits
+    // no spectrum, and focus (the Dock-click restore) brings the
+    // reports back with the window.
+    try h.harness.runtime.minimizeWindow(window_id);
+    try std.testing.expect(np.audioSpectrum() == null);
+    try h.harness.runtime.focusWindow(window_id);
+    try std.testing.expect(np.audioSpectrum() != null);
+}
+
 test "a host that cannot analyze reports audio_spectrum unsupported and never emits bands" {
     var h = try Harness.createConfigured(.{ .audio_spectrum = false });
     defer h.destroy();
