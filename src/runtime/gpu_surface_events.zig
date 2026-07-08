@@ -102,6 +102,10 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     try enrichGpuSurfaceFrameDiagnostics(self, index, &enriched_frame_event);
                 } else if (self.views[index].info().gpuFrame()) |gpu_frame| {
                     enriched_frame_event = gpuSurfaceFrameEventFromGpuFrame(gpu_frame);
+                    // GpuFrame is persistent surface state; the occluded
+                    // fact is per-completion metadata and must survive
+                    // the rebuild so the app sees it honestly.
+                    enriched_frame_event.occluded = frame_event.occluded;
                 }
                 // Native scroll drivers reconcile against live host state
                 // on every presented frame (the relayout-stomp lesson: a
@@ -121,7 +125,18 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             //   - accessibility publishes the input dispatch deferred off
             //     the glass path flush here, after the pixels moved.
             if (runtimeFindViewIndex(self, frame_event.window_id, frame_event.label)) |index| {
-                self.views[index].recordGpuSurfaceInputLatencyForFrame(frame_event.timestamp_ns);
+                // An occluded logical completion is not a latency
+                // endpoint: its timestamp is the host's deliberate
+                // occluded heartbeat, not a present. It still RESOLVES
+                // the pending input (see the view method's comment), so
+                // neither this deliberately slow completion nor the
+                // eventual de-occlusion flush can be billed to the
+                // input as a manufactured budget overrun.
+                if (frame_event.occluded) {
+                    self.views[index].resolveGpuSurfaceInputForOccludedFrame();
+                } else {
+                    self.views[index].recordGpuSurfaceInputLatencyForFrame(frame_event.timestamp_ns);
+                }
                 const input_latency_recorded = had_pending_input and self.views[index].gpu_pending_input_timestamp_ns == 0;
                 if (input_latency_recorded) {
                     self.invalidateFor(.state, self.views[index].frame);
@@ -149,6 +164,14 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
         }
 
         pub fn dispatchGpuSurfaceInput(self: *Runtime, app: runtime_api.App(Runtime), input_event: platform.GpuSurfaceInputEvent) anyerror!void {
+            // Tell the host input landed BEFORE anything dispatches:
+            // hosts that throttle occluded/minimized frame completions
+            // to a heartbeat must let this input's responding frame fire
+            // at full promptness (automation drives covered windows
+            // constantly, and the responding present is the
+            // input-latency stamp's endpoint). Hosts without occluded
+            // pacing no-op.
+            self.options.platform.services.noteGpuSurfaceInput(input_event.window_id, input_event.label) catch {};
             // Secondary-button (right/ctrl-click, touch long-press) input
             // is the context-menu gesture: the press presents the
             // native menu and the whole button-1 stream is consumed so a

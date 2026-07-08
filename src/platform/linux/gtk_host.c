@@ -953,7 +953,21 @@ static gboolean native_sdk_gpu_surface_emit_scheduled(gpointer data) {
  * pending paint and relayout win each cycle instead, so every presented
  * frame reaches the glass before the next frame event spins the engine
  * again. The idle law is untouched: nothing here ticks periodically,
- * an emission still exists only when a producer armed one. */
+ * an emission still exists only when a producer armed one.
+ *
+ * No occluded/minimized throttle here, DELIBERATELY. The macOS host
+ * paces completions to a ~1 Hz heartbeat while the window is occluded
+ * and the Windows host does the same while minimized, because each has
+ * a reliable signal (the occlusion bit; IsIconic). GTK4 has none that
+ * holds across backends: a toplevel fully covered by other windows is
+ * not reported at all, minimize is invisible to the client on Wayland
+ * (only the compositor knows), and the toplevel "suspended" state is
+ * compositor-dependent, absent on X11, and can arrive seconds late or
+ * never. Throttling on a signal that may never fire (or never clear)
+ * would freeze visible windows on some desktops — worse than the CPU
+ * cost it saves. If a dependable cross-backend visibility fact lands in
+ * the toolkit's GTK floor, pace on it here exactly like the other
+ * hosts: heartbeat while hidden, immediate re-arm on reveal. */
 static void native_sdk_gpu_surface_schedule_frame_emission(native_sdk_gtk_native_view_t *view) {
     if (!view || !view->widget || !view->window || !view->window->host) return;
     if (view->gpu_emit_source) return;

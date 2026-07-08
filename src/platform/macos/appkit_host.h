@@ -265,6 +265,12 @@ typedef struct {
      * profile can attribute host time without a second channel. */
     uint64_t packet_decode_ns;
     uint64_t packet_draw_ns;
+    /* Nonzero when this frame completed LOGICALLY while the window was
+     * occluded (no glass flip; heartbeat pacing): the completion keeps
+     * frame-channel consumers current, but its timestamp measures the
+     * deliberate occluded cadence, not present latency — consumers must
+     * not stamp latency measurements from it. */
+    int occluded;
     /* EVENT_AUDIO payloads: the report kind
      * (native_sdk_appkit_audio_event_kind_t) plus the player's
      * position/duration readout in milliseconds at emit time. */
@@ -384,6 +390,10 @@ int native_sdk_appkit_present_gpu_surface_pixels(native_sdk_appkit_host_t *host,
 int native_sdk_appkit_present_gpu_surface_packet(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double surface_width, double surface_height, double scale, uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a, int requires_render, size_t command_count, size_t unsupported_command_count, int representable, const uint8_t *json, size_t json_len);
 int native_sdk_appkit_present_gpu_surface_packet_binary(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double surface_width, double surface_height, double scale, uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a, int requires_render, size_t command_count, size_t unsupported_command_count, int representable, const uint8_t *packet, size_t packet_len);
 int native_sdk_appkit_request_gpu_surface_frame(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len);
+/* Input was dispatched to the surface (real or automation-synthesized):
+ * the responding frame emission must not wait out the occluded
+ * heartbeat. One-shot; a no-op for hosts/views without occluded pacing. */
+int native_sdk_appkit_note_gpu_surface_input(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len);
 /* Binary image-upload side-channel: create or replace the host-wide image
  * for `image_id` from tightly packed, row-major, straight-alpha RGBA8
  * bytes (`rgba8_len` must equal width * height * 4). Packet upload cache

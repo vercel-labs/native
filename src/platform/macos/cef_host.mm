@@ -2350,6 +2350,14 @@ int native_sdk_appkit_request_gpu_surface_frame(native_sdk_appkit_host_t *host, 
     return 0;
 }
 
+int native_sdk_appkit_note_gpu_surface_input(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len) {
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    return 0;
+}
+
 int native_sdk_appkit_set_gpu_surface_scroll_drivers(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const native_sdk_appkit_scroll_driver_t *drivers, size_t count) {
     (void)host;
     (void)window_id;

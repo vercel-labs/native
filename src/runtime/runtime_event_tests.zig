@@ -737,6 +737,84 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(@as(u64, 25_000_000), relaxed_frame.input_latency_budget_ns);
     try std.testing.expectEqual(@as(usize, 0), relaxed_frame.input_latency_budget_exceeded_count);
     try std.testing.expect(relaxed_frame.input_latency_budget_ok);
+
+    // An OCCLUDED logical completion resolves a pending input WITHOUT
+    // recording a latency: its timestamp is the host's deliberate
+    // occluded heartbeat (up to a second after the input), not a
+    // present — stamping it would publish pacing policy as a
+    // manufactured budget overrun. The previous latency and verdict
+    // stand untouched.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .timestamp_ns = 200_000_000,
+        .x = 12,
+        .y = 18,
+        .button = 0,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(800, 450),
+        .scale_factor = 2,
+        .frame_index = 11,
+        .timestamp_ns = 1_200_000_000,
+        .nonblank = true,
+        .sample_color = 0xff336699,
+        .occluded = true,
+    } });
+    const occluded_frame = try harness.runtime.gpuSurfaceFrame(1, "canvas");
+    // The input's arrival is still recorded; only the latency stamp is
+    // withheld, so the pre-occlusion measurement survives verbatim.
+    try std.testing.expectEqual(@as(u64, 200_000_000), occluded_frame.input_timestamp_ns);
+    try std.testing.expectEqual(@as(u64, 20_000_000), occluded_frame.input_latency_ns);
+    try std.testing.expectEqual(@as(usize, 0), occluded_frame.input_latency_budget_exceeded_count);
+    try std.testing.expect(occluded_frame.input_latency_budget_ok);
+
+    // The pending input was RESOLVED (not left dangling): the next
+    // visible completion carries no stale input to bill, so the whole
+    // covered span can never surface as one giant latency reading.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(800, 450),
+        .scale_factor = 2,
+        .frame_index = 12,
+        .timestamp_ns = 2_210_000_000,
+        .nonblank = true,
+        .sample_color = 0xff336699,
+    } });
+    const revealed_frame = try harness.runtime.gpuSurfaceFrame(1, "canvas");
+    try std.testing.expectEqual(@as(u64, 20_000_000), revealed_frame.input_latency_ns);
+    try std.testing.expectEqual(@as(usize, 0), revealed_frame.input_latency_budget_exceeded_count);
+    try std.testing.expect(revealed_frame.input_latency_budget_ok);
+
+    // A fresh input against a VISIBLE completion still measures — the
+    // occluded path suppresses only its own deliberately slow endpoint,
+    // never real latency.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .timestamp_ns = 2_300_000_000,
+        .x = 12,
+        .y = 18,
+        .button = 0,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(800, 450),
+        .scale_factor = 2,
+        .frame_index = 13,
+        .timestamp_ns = 2_310_000_000,
+        .nonblank = true,
+        .sample_color = 0xff336699,
+    } });
+    const measured_frame = try harness.runtime.gpuSurfaceFrame(1, "canvas");
+    try std.testing.expectEqual(@as(u64, 2_300_000_000), measured_frame.input_timestamp_ns);
+    try std.testing.expectEqual(@as(u64, 10_000_000), measured_frame.input_latency_ns);
 }
 
 test "runtime starts, fires, and cancels platform timers" {

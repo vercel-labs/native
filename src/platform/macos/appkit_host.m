@@ -112,6 +112,22 @@ static uint64_t NativeSdkRetainedFrameIntervalNanoseconds(NSScreen *screen) {
     return NativeSdkNanosecondsPerSecond / (uint64_t)framesPerSecond;
 }
 
+/* Pacing interval for logical frame completions while the window is
+ * OCCLUDED: a ~1 Hz heartbeat instead of the display grid. An occluded
+ * window never presents (renderFrame's short-circuit), so display-grid
+ * completions only make the engine rebuild its display list at full
+ * refresh rate for glass nobody can see — a covered window playing
+ * audio measured a sustained ~100% of one core, enough to trip the OS
+ * CPU-usage watchdog. Stopping completions entirely would be worse:
+ * anything riding the frame channel (on_frame-driven interpolation,
+ * armed tweens) would freeze mid-flight and snap on de-occlusion. The
+ * heartbeat keeps those models gently current — event-driven truth
+ * (audio position reports, input) still flows at its own cadence — and
+ * the first-present exemption and glass-flush machinery are untouched:
+ * the throttle only engages after the first real present, and every
+ * heartbeat completion still marks the glass flush pending. */
+static const uint64_t NativeSdkOccludedFrameHeartbeatNs = 1000000000ull;
+
 static uint32_t NativeSdkModifierFlagsForEvent(NSEvent *event) {
     NSEventModifierFlags flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
     uint32_t modifiers = 0;
@@ -410,6 +426,22 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
  * nonblank, retained canvas state) are already view state by the time
  * the block fires, so the one event carries the freshest truth. */
 @property(nonatomic, assign) BOOL frameEventEmissionScheduled;
+/* Supersede token for the scheduled emission: a queued dispatch block
+ * whose captured generation no longer matches is stale and must no-op.
+ * Bumped on de-occlusion, where a heartbeat-paced emission (parked up
+ * to a second out) is replaced by an immediate full-cadence one — the
+ * dispatch source itself cannot be cancelled. */
+@property(nonatomic, assign) NSUInteger frameEventEmissionGeneration;
+/* One-shot: an input was dispatched to this surface and its responding
+ * frame must not wait out the occluded heartbeat. Input is external
+ * truth on its own cadence — automation drives covered windows
+ * constantly — and the response present (the input-latency stamp's
+ * endpoint) rides the next frame event, so a heartbeat-paced response
+ * would bill up to a second of pacing policy to a ~16 ms engine
+ * response. The flag survives until one emission fires; the armed
+ * animation loop that follows returns to the heartbeat, so a covered
+ * window's sustained spin stays impossible. */
+@property(nonatomic, assign) BOOL inputDrivenFramePending;
 /* Held while the frame channel is ARMED (an emission is scheduled and
  * each fired emission re-arms another): without it the OS is free to
  * app-nap the process mid-animation, and its timer coalescing stretches
@@ -554,13 +586,17 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)updateWidgetAccessibilityWithNodes:(const native_sdk_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count;
 - (void)stopDisplayTimer;
 - (void)requestRetainedCanvasFrame;
+- (void)noteGpuSurfaceInputActivity;
+- (void)rescheduleParkedFrameEventEmission;
 - (void)flushQueuedFirstCanvasFrameRequestNow;
 - (void)advanceRetainedFramePacingClock;
 - (void)emitFirstCanvasFrameRequest;
 - (void)renderFrame;
+- (BOOL)occludedFramePacingActive;
 - (void)scheduleFrameEventEmission;
+- (void)scheduleFrameEventEmissionForPresentCompletion:(BOOL)presentCompletion;
 - (void)emitScheduledFrameEvent;
-- (void)emitFrameEventWithFrameIndex:(NSUInteger)frameIndex sampleColor:(uint32_t)sampleColor nonblank:(BOOL)nonblank;
+- (void)emitFrameEventWithFrameIndex:(NSUInteger)frameIndex sampleColor:(uint32_t)sampleColor nonblank:(BOOL)nonblank occluded:(BOOL)occluded;
 - (void)emitResizeEvent;
 - (void)emitInputEventWithKind:(NSInteger)kind event:(NSEvent *)event button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY;
 - (void)queuePointerMotionInputEvent:(NSEvent *)event kind:(NSInteger)kind button:(NSInteger)button;
@@ -742,6 +778,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (NSInteger)presentGpuSurfacePacketInWindow:(uint64_t)windowId label:(NSString *)label surfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable json:(const uint8_t *)json byteLength:(NSUInteger)byteLength;
 - (NSInteger)presentGpuSurfacePacketBinaryInWindow:(uint64_t)windowId label:(NSString *)label surfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable packet:(const uint8_t *)packet byteLength:(NSUInteger)byteLength;
 - (BOOL)requestGpuSurfaceFrameInWindow:(uint64_t)windowId label:(NSString *)label;
+- (BOOL)noteGpuSurfaceInputInWindow:(uint64_t)windowId label:(NSString *)label;
 - (BOOL)setGpuSurfaceScrollDriversInWindow:(uint64_t)windowId label:(NSString *)label drivers:(const native_sdk_appkit_scroll_driver_t *)drivers count:(NSUInteger)count;
 - (BOOL)showContextMenuInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y token:(uint64_t)token items:(const native_sdk_appkit_context_menu_item_t *)items count:(NSUInteger)count;
 - (BOOL)uploadGpuSurfaceImageWithId:(uint64_t)imageId width:(NSUInteger)width height:(NSUInteger)height rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
@@ -3016,8 +3053,15 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 - (void)windowOcclusionStateChanged:(NSNotification *)notification {
     NSWindow *window = notification.object;
     if (window != self.window) return;
-    if (!self.glassFlushPending) return;
     if ((window.occlusionState & NSWindowOcclusionStateVisible) == 0) return;
+    // De-occlusion restores full cadence without dropping a beat: an
+    // armed channel may have its one emission parked on the heartbeat
+    // (up to a second out). The queued block cannot be cancelled, so
+    // supersede it — the last emit is at least a heartbeat old, so the
+    // replacement's display-grid delay computes to zero and it fires on
+    // the next queue turn.
+    [self rescheduleParkedFrameEventEmission];
+    if (!self.glassFlushPending) return;
     [self renderFrame];
 }
 
@@ -4944,6 +4988,35 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     [self scheduleFrameEventEmission];
 }
 
+/* The runtime dispatched an input to this surface (real or automation —
+ * automation input is synthesized runtime-side and never passes through
+ * this host's event methods, which is why the note crosses the ABI):
+ * the input's responding frame must fire at display-grid promptness even
+ * while occluded. A parked heartbeat emission is superseded the same way
+ * de-occlusion supersedes one; the one-shot flag covers the frame
+ * request that arrives during the input dispatch itself. */
+- (void)noteGpuSurfaceInputActivity {
+    self.inputDrivenFramePending = YES;
+    [self rescheduleParkedFrameEventEmission];
+}
+
+/* Supersede a parked emission with a freshly-paced one (de-occlusion,
+ * input activity): bump the generation to strand the queued block and
+ * schedule the replacement. If the reschedule is refused (the view went
+ * hidden or unavailable while the block was parked), release the armed-
+ * channel activity here — the stranded block no-ops on its generation
+ * check, so nothing else would. */
+- (void)rescheduleParkedFrameEventEmission {
+    if (!self.frameEventEmissionScheduled) return;
+    self.frameEventEmissionGeneration += 1;
+    self.frameEventEmissionScheduled = NO;
+    [self scheduleFrameEventEmission];
+    if (!self.frameEventEmissionScheduled && self.frameChannelActivity) {
+        [[NSProcessInfo processInfo] endActivity:self.frameChannelActivity];
+        self.frameChannelActivity = nil;
+    }
+}
+
 // Synchronous pre-run flush for a first-frame request queued during the
 // START dispatch: the async main-queue hop only runs once [NSApp run]
 // starts pumping, a measured ~40 ms after launch work is otherwise done.
@@ -5002,7 +5075,21 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     self.retainedFrameLastEmitNs = NativeSdkTimestampNanoseconds();
     const NSUInteger requestedFrameIndex = self.frameIndex;
     self.frameIndex += 1;
-    [self emitFrameEventWithFrameIndex:requestedFrameIndex sampleColor:0 nonblank:NO];
+    // Pre-first-present: the occluded short-circuit (and therefore the
+    // occluded pacing) is not yet in force, so this completion is never
+    // an occluded logical one.
+    [self emitFrameEventWithFrameIndex:requestedFrameIndex sampleColor:0 nonblank:NO occluded:NO];
+}
+
+/* Frame completions run on the occluded heartbeat when the window
+ * exists but is not being composited AND the first present has landed —
+ * the same two facts that gate renderFrame's occluded short-circuit, so
+ * every emission this paces is one that could not have flipped glass. A
+ * view not yet in a window, or one still owed its first present, keeps
+ * full cadence. */
+- (BOOL)occludedFramePacingActive {
+    NSWindow *window = self.window;
+    return window != nil && (window.occlusionState & NSWindowOcclusionStateVisible) == 0 && self.hasEverPresented;
 }
 
 /* Schedule the surface's next frame event on the display-interval grid.
@@ -5012,25 +5099,60 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
  * synchronous emission would re-enter the engine — and the pacing
  * clock's grid stamping keeps the queue hop out of the period. */
 - (void)scheduleFrameEventEmission {
-    if (self.frameEventEmissionScheduled) return;
+    [self scheduleFrameEventEmissionForPresentCompletion:NO];
+}
+
+/* presentCompletion distinguishes the one producer whose facts must not
+ * wait out a heartbeat: a REAL present's GPU completion (first-present
+ * exemption, or a visible window). Its verdicts (nonblank, the sample
+ * color automation reads) are new discrete facts, and while occluded
+ * only the exempt FIRST present ever completes — promptly emitting it
+ * cannot reopen the sustained spin, because every following cycle short-
+ * circuits without presenting. A present completion also SUPERSEDES an
+ * already-parked heartbeat emission (generation bump, same discipline as
+ * de-occlusion) so a request that armed first cannot hold the verdict
+ * hostage for a second. */
+- (void)scheduleFrameEventEmissionForPresentCompletion:(BOOL)presentCompletion {
     if (![self isAvailable] || self.hidden || self.bounds.size.width <= 0 || self.bounds.size.height <= 0) return;
+    if (self.frameEventEmissionScheduled) {
+        if (!presentCompletion) return;
+        self.frameEventEmissionGeneration += 1;
+        self.frameEventEmissionScheduled = NO;
+    }
     self.frameEventEmissionScheduled = YES;
     // Armed: suspend app-nap timer coalescing until the channel goes
-    // quiet, so the paced deadlines below fire on the display grid even
-    // for an unfocused or occluded window (see the property comment).
+    // quiet, so the paced deadlines below fire on time even for an
+    // unfocused or occluded window (see the property comment) — the
+    // occluded heartbeat relies on this as much as the display grid
+    // does; an app-napped heartbeat would stretch arbitrarily.
     if (!self.frameChannelActivity) {
         self.frameChannelActivity = [[NSProcessInfo processInfo] beginActivityWithOptions:(NSActivityUserInitiatedAllowingIdleSystemSleep | NSActivityLatencyCritical) reason:@"armed gpu-surface frame channel"];
     }
     const uint64_t now = NativeSdkTimestampNanoseconds();
     const uint64_t frameIntervalNs = NativeSdkRetainedFrameIntervalNanoseconds(self.window.screen ?: NSScreen.mainScreen);
+    // Occluded surfaces pace on the heartbeat, not the display grid:
+    // nothing this emission drives can reach the glass, so full cadence
+    // is pure display-list churn (see NativeSdkOccludedFrameHeartbeatNs).
+    // Exempt: a real present's completion and an input's responding
+    // frame (see the callers' comments) — neither can sustain a spin.
+    // De-occlusion supersedes a parked heartbeat emission immediately
+    // (windowOcclusionStateChanged), so the long delay never gates the
+    // return to full cadence.
+    const BOOL heartbeatPaced = !presentCompletion && !self.inputDrivenFramePending && [self occludedFramePacingActive];
+    const uint64_t paceNs = heartbeatPaced ? NativeSdkOccludedFrameHeartbeatNs : frameIntervalNs;
     uint64_t delayNs = 0;
-    if (self.retainedFrameLastEmitNs > 0 && now < self.retainedFrameLastEmitNs + frameIntervalNs) {
-        delayNs = self.retainedFrameLastEmitNs + frameIntervalNs - now;
+    if (self.retainedFrameLastEmitNs > 0 && now < self.retainedFrameLastEmitNs + paceNs) {
+        delayNs = self.retainedFrameLastEmitNs + paceNs - now;
     }
+    const NSUInteger generation = self.frameEventEmissionGeneration;
     __weak NativeSdkMetalSurfaceView *weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delayNs), dispatch_get_main_queue(), ^{
         NativeSdkMetalSurfaceView *strongSelf = weakSelf;
         if (!strongSelf) return;
+        // Superseded (de-occlusion rescheduled a fresher emission while
+        // this block sat in the queue): the replacement owns the flag
+        // and the activity — touch nothing.
+        if (strongSelf.frameEventEmissionGeneration != generation) return;
         strongSelf.frameEventEmissionScheduled = NO;
         [strongSelf emitScheduledFrameEvent];
         // The emission's engine dispatch re-arms the channel when more
@@ -5049,13 +5171,17 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
  * event serves frame requests and present completions alike. */
 - (void)emitScheduledFrameEvent {
     if (![self isAvailable] || self.hidden || self.bounds.size.width <= 0 || self.bounds.size.height <= 0) return;
+    // The input's responding frame is THIS one; the follow-up schedule
+    // (an armed animation re-requesting) returns to the occluded
+    // heartbeat unless another input lands.
+    self.inputDrivenFramePending = NO;
     [self updateDrawableSize];
     [self advanceRetainedFramePacingClock];
     const NSUInteger requestedFrameIndex = self.frameIndex;
     self.frameIndex += 1;
     const BOOL nonblank = self.verifiedNonblankFrame || self.hasCanvasTexture;
     const uint32_t sampleColor = self.verifiedNonblankFrame ? self.lastSampleColor : 0;
-    [self emitFrameEventWithFrameIndex:requestedFrameIndex sampleColor:sampleColor nonblank:nonblank];
+    [self emitFrameEventWithFrameIndex:requestedFrameIndex sampleColor:sampleColor nonblank:nonblank occluded:[self occludedFramePacingActive]];
 }
 
 - (void)renderFrame {
@@ -5074,13 +5200,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
      * Whether an occluded layer vends drawables promptly, slowly, or
      * returns nil varies by OS release and pool pressure, so don't gamble
      * on it: the occlusion bit is the honest signal. The deliberate
-     * occluded cadence is the SAME display-interval grid the visible loop
-     * paces on (scheduleFrameEventEmission + the armed-channel activity
-     * assertion), so a tween completes in ~its duration while covered and
-     * the retained canvas is CURRENT the moment the window is composited
-     * again — the occlusion observer flushes it to the glass then. A view
-     * not yet in a window keeps the present path: there is no occlusion
-     * truth to read before the window exists. */
+     * occluded cadence is the ~1 Hz heartbeat (scheduleFrameEventEmission
+     * picks it via occludedFramePacingActive; the rationale lives at
+     * NativeSdkOccludedFrameHeartbeatNs): frame-channel consumers stay
+     * roughly current instead of stepping at full display rate for glass
+     * nobody can see, and the occlusion observer restores full cadence
+     * and flushes the retained canvas the moment the window is composited
+     * again. A view not yet in a window keeps the present path: there is
+     * no occlusion truth to read before the window exists. */
     NSWindow *window = self.window;
     const BOOL occluded = window != nil && (window.occlusionState & NSWindowOcclusionStateVisible) == 0;
     // The FIRST present is exempt from the occluded short-circuit: it is
@@ -5204,8 +5331,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
              * coalesces it with any pending frame request, so an armed
              * animation loop sees one event per interval, not one per
              * producer. The verdict above is already view state, so the
-             * scheduled event carries this completion's truth. */
-            [strongSelf scheduleFrameEventEmission];
+             * scheduled event carries this completion's truth. A real
+             * present's completion never waits out the occluded
+             * heartbeat (see the method's comment). */
+            [strongSelf scheduleFrameEventEmissionForPresentCompletion:YES];
         });
     }];
 
@@ -5328,7 +5457,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     [self emitInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_KEY_UP event:event button:0 deltaX:0 deltaY:0];
 }
 
-- (void)emitFrameEventWithFrameIndex:(NSUInteger)frameIndex sampleColor:(uint32_t)sampleColor nonblank:(BOOL)nonblank {
+- (void)emitFrameEventWithFrameIndex:(NSUInteger)frameIndex sampleColor:(uint32_t)sampleColor nonblank:(BOOL)nonblank occluded:(BOOL)occluded {
     if (!self.host || self.surfaceLabel.length == 0) return;
     const char *labelBytes = self.surfaceLabel.UTF8String ?: "";
     /* Capture-and-clear BEFORE the emit: the engine presents the next
@@ -5354,6 +5483,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         .sample_color = sampleColor,
         .packet_decode_ns = packetDecodeNs,
         .packet_draw_ns = packetDrawNs,
+        .occluded = occluded ? 1 : 0,
     }];
     [self.host scheduleFrame];
 }
@@ -6842,6 +6972,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     NSView *view = self.nativeViews[key];
     if (![view isKindOfClass:[NativeSdkMetalSurfaceView class]]) return NO;
     [(NativeSdkMetalSurfaceView *)view requestRetainedCanvasFrame];
+    return YES;
+}
+
+- (BOOL)noteGpuSurfaceInputInWindow:(uint64_t)windowId label:(NSString *)label {
+    NSString *key = [self nativeViewKeyForWindow:windowId label:label];
+    NSView *view = self.nativeViews[key];
+    if (![view isKindOfClass:[NativeSdkMetalSurfaceView class]]) return NO;
+    [(NativeSdkMetalSurfaceView *)view noteGpuSurfaceInputActivity];
     return YES;
 }
 
@@ -9434,6 +9572,12 @@ int native_sdk_appkit_request_gpu_surface_frame(native_sdk_appkit_host_t *host, 
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     return [object requestGpuSurfaceFrameInWindow:window_id label:labelString ?: @""] ? 1 : 0;
+}
+
+int native_sdk_appkit_note_gpu_surface_input(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    return [object noteGpuSurfaceInputInWindow:window_id label:labelString ?: @""] ? 1 : 0;
 }
 
 int native_sdk_appkit_set_gpu_surface_scroll_drivers(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const native_sdk_appkit_scroll_driver_t *drivers, size_t count) {

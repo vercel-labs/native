@@ -96,6 +96,10 @@ const AppKitEvent = extern struct {
     /// event (0 when no packet present happened since the last one).
     packet_decode_ns: u64,
     packet_draw_ns: u64,
+    /// Nonzero when the frame completed logically while the window was
+    /// occluded (no glass flip; heartbeat pacing) — its timestamp is
+    /// pacing policy, never a latency measurement endpoint.
+    occluded: c_int,
     /// Audio player report payload (`kind == .audio`): the
     /// `AudioEventKind` ordinal plus the player's position/duration
     /// readout at emit time.
@@ -151,6 +155,7 @@ extern fn native_sdk_appkit_close_view(host: *AppKitHost, window_id: u64, label:
 extern fn native_sdk_appkit_adopt_view_surface(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, ns_view: *anyopaque) c_int;
 extern fn native_sdk_appkit_release_view_surface(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_appkit_request_gpu_surface_frame(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
+extern fn native_sdk_appkit_note_gpu_surface_input(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_appkit_set_gpu_surface_scroll_drivers(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, drivers: [*]const AppKitScrollDriver, count: usize) c_int;
 extern fn native_sdk_appkit_show_context_menu(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, token: u64, items: [*]const AppKitContextMenuItem, count: usize) c_int;
 extern fn native_sdk_appkit_start_timer(host: *AppKitHost, timer_id: u64, interval_ns: u64, repeats: c_int) void;
@@ -622,6 +627,7 @@ pub const MacPlatform = struct {
                 .wake_fn = wake,
                 .request_frame_fn = requestFrame,
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
+                .note_gpu_surface_input_fn = noteGpuSurfaceInput,
                 .set_gpu_surface_scroll_drivers_fn = setGpuSurfaceScrollDrivers,
                 .show_context_menu_fn = showContextMenu,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
@@ -797,6 +803,7 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             .sample_color = event.sample_color,
             .packet_decode_ns = event.packet_decode_ns,
             .packet_draw_ns = event.packet_draw_ns,
+            .occluded = event.occluded != 0,
             .backend = .metal,
             .pixel_format = .bgra8_unorm,
             .present_mode = .timer,
@@ -1298,6 +1305,12 @@ fn requestGpuSurfaceFrame(context: ?*anyopaque, window_id: platform_mod.WindowId
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedService;
     if (native_sdk_appkit_request_gpu_surface_frame(self.host, window_id, label.ptr, label.len) == 0) return error.ViewNotFound;
+}
+
+fn noteGpuSurfaceInput(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return;
+    _ = native_sdk_appkit_note_gpu_surface_input(self.host, window_id, label.ptr, label.len);
 }
 
 fn setGpuSurfaceScrollDrivers(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, drivers: []const platform_mod.GpuSurfaceScrollDriver) anyerror!void {

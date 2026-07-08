@@ -1396,6 +1396,12 @@ pub const GpuSurfaceFrameEvent = struct {
     /// as the `host_decode`/`host_draw` stages while profiling is on.
     packet_decode_ns: u64 = 0,
     packet_draw_ns: u64 = 0,
+    /// The host completed this frame LOGICALLY while the window was
+    /// occluded: nothing reached the glass and the completion rides the
+    /// host's deliberate occluded pacing (a slow heartbeat), so its
+    /// timestamp keeps frame-channel consumers current but is never a
+    /// valid endpoint for latency measurements.
+    occluded: bool = false,
     backend: GpuSurfaceBackend = .metal,
     pixel_format: GpuSurfacePixelFormat = .bgra8_unorm,
     present_mode: GpuSurfacePresentMode = .timer,
@@ -1946,6 +1952,11 @@ pub const PlatformServices = struct {
     configure_shortcuts_fn: ?*const fn (context: ?*anyopaque, shortcuts: []const Shortcut) anyerror!void = null,
     emit_window_event_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void = null,
     request_gpu_surface_frame_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8) anyerror!void = null,
+    /// Input was dispatched to the surface: hosts that throttle occluded
+    /// frame completions to a heartbeat must let the input's responding
+    /// frame fire at full promptness (one-shot). Optional — hosts without
+    /// occluded pacing simply omit it.
+    note_gpu_surface_input_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8) anyerror!void = null,
     start_timer_fn: ?*const fn (context: ?*anyopaque, id: u64, interval_ns: u64, repeats: bool) anyerror!void = null,
     cancel_timer_fn: ?*const fn (context: ?*anyopaque, id: u64) anyerror!void = null,
     /// Load a local audio file into THE app's single audio player,
@@ -2388,6 +2399,15 @@ pub const PlatformServices = struct {
         if (label.len == 0 or label.len > max_view_label_bytes) return error.InvalidViewOptions;
         const request_fn = self.request_gpu_surface_frame_fn orelse return;
         return request_fn(self.context, window_id, label);
+    }
+
+    /// Tell the host an input was dispatched to this surface, so an
+    /// occluded-heartbeat host lets the responding frame fire promptly.
+    /// Silently a no-op on hosts without occluded pacing.
+    pub fn noteGpuSurfaceInput(self: PlatformServices, window_id: WindowId, label: []const u8) anyerror!void {
+        if (label.len == 0 or label.len > max_view_label_bytes) return error.InvalidViewOptions;
+        const note_fn = self.note_gpu_surface_input_fn orelse return;
+        return note_fn(self.context, window_id, label);
     }
 
     /// Start (or replace) a repeating or one-shot timer identified by `id`.

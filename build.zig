@@ -523,6 +523,42 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)scheduleFrameEventEmission" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)emitScheduledFrameEvent" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-gpu-occluded-frame-heartbeat", "Verify occluded windows throttle frame completions to a heartbeat and restore full cadence on reveal", &.{
+        // macOS: occluded surfaces pace logical completions on the ~1 Hz
+        // heartbeat (never stopping — on_frame-driven models stay gently
+        // current), de-occlusion supersedes the parked emission for an
+        // immediate return to the display grid, and heartbeat completions
+        // are flagged so the runtime never stamps input latency from them.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkOccludedFrameHeartbeatNs = 1000000000ull" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (BOOL)occludedFramePacingActive" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "heartbeatPaced ? NativeSdkOccludedFrameHeartbeatNs" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "self.frameEventEmissionGeneration += 1" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "occluded:[self occludedFramePacingActive]" },
+        // Exempt producers (a real present's completion, an input's
+        // responding frame) fire at grid promptness — neither can
+        // sustain a spin.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "scheduleFrameEventEmissionForPresentCompletion:YES" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)noteGpuSurfaceInputActivity" },
+        // Windows: the same throttle keyed on the one reliable Win32
+        // occlusion signal (minimize); restore re-arms the pending
+        // one-shot timer at the frame-grid delay, and the input /
+        // first-present exemptions ride one prompt-frame flag.
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "kGpuOccludedHeartbeatNs = 1000000000ull" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "gpuSurfaceOccludedPacingActive" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "IsIconic(root)" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "gpu_prompt_frame_pending" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "native_sdk_windows_note_gpu_surface_input" },
+        // The runtime side of the measurement honesty: occluded logical
+        // completions resolve pending inputs without a latency stamp,
+        // and every dispatched input notes the host for a prompt
+        // responding frame.
+        .{ .path = "src/runtime/gpu_surface_events.zig", .pattern = "resolveGpuSurfaceInputForOccludedFrame" },
+        .{ .path = "src/runtime/gpu_surface_events.zig", .pattern = "noteGpuSurfaceInput" },
+        // GTK: no reliable cross-backend occlusion signal — the decision
+        // to leave full cadence is documented at the scheduler, not
+        // implicit.
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "No occluded/minimized throttle here, DELIBERATELY" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-drawable-integral-pixels", "Verify AppKit GPU surfaces use integral drawable pixels", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "ceil(size.width * scale)" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "ceil(size.height * scale)" },

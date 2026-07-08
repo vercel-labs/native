@@ -151,6 +151,10 @@ struct WindowsEvent {
     uint64_t frame_interval_ns;
     int nonblank;
     uint32_t sample_color;
+    /* Nonzero when the frame completed logically while the top-level
+     * window was minimized (heartbeat pacing; nothing painted): its
+     * timestamp is pacing policy, never a latency endpoint. */
+    int occluded;
     int input_kind;
     int button;
     double delta_x;
@@ -322,6 +326,14 @@ struct NativeView {
      * idle law the macOS host enforces). */
     bool gpu_emission_scheduled = false;
     bool gpu_presented = false;
+    /* One-shot: the next scheduled emission must fire at grid
+     * promptness even while minimized. Two producers set it — an input
+     * dispatched to the surface (its responding frame is the
+     * input-latency stamp's endpoint; see
+     * native_sdk_windows_note_gpu_surface_input) and the FIRST present
+     * (its emission carries the nonblank verdict automation reads).
+     * Neither can sustain a spin. Cleared when the emission fires. */
+    bool gpu_prompt_frame_pending = false;
     uint64_t gpu_last_emit_ns = 0;
     uint64_t gpu_frame_index = 0;
     double gpu_emitted_width = 0;
@@ -1617,6 +1629,22 @@ constexpr int kGpuInputImeCommitComposition = 9;
 constexpr int kGpuInputImeCancelComposition = 10;
 constexpr int kGpuInputPointerCancel = 11;
 constexpr uint64_t kGpuFrameIntervalNs = 16666667ull;
+/* Pacing interval for logical frame completions while the top-level
+ * window is MINIMIZED: a ~1 Hz heartbeat instead of the frame grid. A
+ * minimized window's presents reach nothing (WM_PAINT never arrives for
+ * an iconic window; the DIB blit is deferred to restore), so frame-grid
+ * completions only make the engine rebuild its display list at 60 Hz
+ * for pixels nobody can see — a minimized app playing audio would burn
+ * a core forever. Stopping completions entirely would starve anything
+ * riding the frame channel (on_frame interpolation, armed tweens) and
+ * snap it on restore; the heartbeat keeps those models gently current
+ * while event-driven truth (audio position, input) flows at its own
+ * cadence. Minimize (IsIconic on the root window) is the one occlusion
+ * signal Win32 reports reliably for this GDI-presenting host; a window
+ * fully covered by other windows has no dependable signal without a
+ * DXGI presentation path, so covered-but-not-minimized windows keep
+ * full cadence deliberately rather than guess. */
+constexpr uint64_t kGpuOccludedHeartbeatNs = 1000000000ull;
 /* Placeholder pump timer (repeating, retired by the first present). */
 constexpr UINT_PTR kGpuFrameTimerId = 1;
 /* The one-shot scheduled-emission timer (the single frame-event gate). */
@@ -2139,10 +2167,25 @@ static void gpuSurfaceAdvancePacingClock(NativeView &view) {
     }
 }
 
+/* Frame completions run on the minimized heartbeat when the surface has
+ * presented at least once and its top-level window is iconic — the same
+ * first-present exemption the macOS occluded pacing keeps, so surface
+ * establishment (and the nonblank verdict automation reads) is never
+ * throttled. */
+static bool gpuSurfaceOccludedPacingActive(const NativeView &view) {
+    if (!view.gpu_presented || !view.hwnd) return false;
+    HWND root = GetAncestor(view.hwnd, GA_ROOT);
+    return root != nullptr && IsIconic(root);
+}
+
 /* The single frame-event emission: view state (nonblank verdict, sample
  * color, buffer geometry) is the payload, so one event serves frame
  * requests and present completions alike. */
 static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
+    /* The input's responding frame is THIS one; the follow-up schedule
+     * (an armed animation re-requesting) returns to the minimized
+     * heartbeat unless another input lands. */
+    view.gpu_prompt_frame_pending = false;
     const double scale = gpuSurfaceScale(hwnd);
     double width = 0;
     double height = 0;
@@ -2161,6 +2204,10 @@ static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
     event.frame_interval_ns = kGpuFrameIntervalNs;
     event.nonblank = view.gpu_nonblank;
     event.sample_color = view.gpu_sample_color;
+    /* Heartbeat-paced completions are not latency endpoints: their
+     * timestamp measures the deliberate minimized cadence, not a paint
+     * — the runtime skips input-latency stamping for them. */
+    event.occluded = gpuSurfaceOccludedPacingActive(view) ? 1 : 0;
     emitGpuSurfaceEvent(host, view, event);
 }
 
@@ -2174,9 +2221,16 @@ static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
 static void gpuSurfaceScheduleFrameEmission(NativeView &view) {
     if (!view.hwnd || view.gpu_emission_scheduled) return;
     const uint64_t now = gpuTimestampNs();
+    /* Minimized surfaces pace on the heartbeat, not the frame grid —
+     * see kGpuOccludedHeartbeatNs. Exempt: an input's responding frame
+     * (external truth on its own cadence; it cannot sustain a spin).
+     * Restore re-arms the pending timer at the grid delay (the
+     * top-level WM_SIZE handler), so the long delay never gates the
+     * return to full cadence. */
+    const uint64_t pace_ns = (!view.gpu_prompt_frame_pending && gpuSurfaceOccludedPacingActive(view)) ? kGpuOccludedHeartbeatNs : kGpuFrameIntervalNs;
     uint64_t delay_ns = 0;
-    if (view.gpu_last_emit_ns > 0 && now < view.gpu_last_emit_ns + kGpuFrameIntervalNs) {
-        delay_ns = view.gpu_last_emit_ns + kGpuFrameIntervalNs - now;
+    if (view.gpu_last_emit_ns > 0 && now < view.gpu_last_emit_ns + pace_ns) {
+        delay_ns = view.gpu_last_emit_ns + pace_ns - now;
     }
     const UINT delay_ms = (UINT)((delay_ns + 500000ull) / 1000000ull);
     if (SetTimer(view.hwnd, kGpuEmitTimerId, delay_ms, nullptr)) {
@@ -3916,6 +3970,22 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                         emit(host, entry.second, kResize);
                     }
                 }
+                /* Restore from minimize returns full cadence without
+                 * dropping a beat: a heartbeat-paced emission may be
+                 * parked up to a second out on a child surface's
+                 * one-shot timer. SetTimer with the same id REPLACES the
+                 * pending timer, so re-arming at the frame-grid delay
+                 * (the last emit is at least a heartbeat old, so that
+                 * delay computes to zero) is a clean supersede. */
+                if (wparam != SIZE_MINIMIZED) {
+                    for (auto &view_entry : host->native_views) {
+                        NativeView &surface = view_entry.second;
+                        if (surface.kind != kViewGpuSurface || !surface.hwnd || !surface.gpu_emission_scheduled) continue;
+                        if (GetAncestor(surface.hwnd, GA_ROOT) != hwnd) continue;
+                        surface.gpu_emission_scheduled = false;
+                        gpuSurfaceScheduleFrameEmission(surface);
+                    }
+                }
             }
             return 0;
         case WM_SETFOCUS:
@@ -4796,6 +4866,25 @@ int native_sdk_windows_request_gpu_surface_frame(Host *host, uint64_t window_id,
     return 1;
 }
 
+/* Input was dispatched to the surface (real or automation-synthesized —
+ * automation input never passes through this host's window procedures):
+ * the responding frame must not wait out the minimized heartbeat. The
+ * one-shot flag covers the frame request arriving during the input
+ * dispatch; a parked heartbeat timer is superseded by re-arming at the
+ * grid delay (SetTimer with the same id replaces the pending timer). */
+int native_sdk_windows_note_gpu_surface_input(Host *host, uint64_t window_id, const char *label, size_t label_len) {
+    if (!host || label_len == 0) return 0;
+    auto found = host->native_views.find(nativeViewKey(window_id, slice(label, label_len)));
+    if (found == host->native_views.end() || found->second.kind != kViewGpuSurface || !found->second.hwnd) return 0;
+    NativeView &view = found->second;
+    view.gpu_prompt_frame_pending = true;
+    if (view.gpu_emission_scheduled) {
+        view.gpu_emission_scheduled = false;
+        gpuSurfaceScheduleFrameEmission(view);
+    }
+    return 1;
+}
+
 int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id, const char *label, size_t label_len, size_t width, size_t height, double scale, int has_dirty_rect, double dirty_x, double dirty_y, double dirty_width, double dirty_height, const uint8_t *rgba8, size_t rgba8_len) {
     (void)scale;
     (void)has_dirty_rect;
@@ -4852,8 +4941,13 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
      * frame-event scheduler: the completion event it arms is what
      * drives the runtime's frame loop (an armed animation presents,
      * this echo steps it again). The first present also retires the
-     * placeholder pump — from here on frames exist only on demand. */
+     * placeholder pump — from here on frames exist only on demand. Its
+     * emission carries the nonblank verdict and must not wait out the
+     * minimized heartbeat (a window can launch minimized); steady-state
+     * presents keep the heartbeat — they ARE the spin being throttled. */
+    const bool first_present = !view.gpu_presented;
     view.gpu_presented = true;
+    if (first_present) view.gpu_prompt_frame_pending = true;
     gpuSurfaceScheduleFrameEmission(view);
     return 1;
 }

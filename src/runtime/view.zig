@@ -842,6 +842,20 @@ pub const RuntimeView = struct {
         self.refreshGpuSurfaceInputLatencyBudgetStatus();
     }
 
+    /// Resolve a pending input against an OCCLUDED logical frame
+    /// completion WITHOUT recording a latency. No glass flip happened —
+    /// the only available endpoint is the host's deliberately slow
+    /// occluded heartbeat, and stamping it would publish pacing policy
+    /// as input latency (a manufactured budget overrun). Leaving the
+    /// input pending is no better: the next real present is the
+    /// de-occlusion flush, which would bill the entire covered span to
+    /// one reading. The input's dispatch already ran to completion; the
+    /// glass-latency measurement simply does not exist for it, so the
+    /// previous recorded latency and budget verdict stand.
+    pub fn resolveGpuSurfaceInputForOccludedFrame(self: *RuntimeView) void {
+        self.gpu_pending_input_timestamp_ns = 0;
+    }
+
     pub fn refreshGpuSurfaceInputLatencyBudgetStatus(self: *RuntimeView) void {
         self.gpu_input_latency_budget_exceeded_count = if (self.gpu_input_latency_budget_ns > 0 and self.gpu_input_latency_ns > self.gpu_input_latency_budget_ns) 1 else 0;
         self.gpu_input_latency_budget_ok = self.gpu_input_latency_budget_exceeded_count == 0;

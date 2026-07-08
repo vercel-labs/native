@@ -66,6 +66,10 @@ const WindowsEvent = extern struct {
     frame_interval_ns: u64,
     nonblank: c_int,
     sample_color: u32,
+    /// Nonzero when the frame completed logically while the top-level
+    /// window was minimized (heartbeat pacing; nothing painted) — its
+    /// timestamp is pacing policy, never a latency endpoint.
+    occluded: c_int,
     input_kind: c_int,
     button: c_int,
     delta_x: f64,
@@ -133,6 +137,7 @@ extern fn native_sdk_windows_set_view_visible(host: *WindowsHost, window_id: u64
 extern fn native_sdk_windows_focus_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_windows_close_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_windows_request_gpu_surface_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
+extern fn native_sdk_windows_note_gpu_surface_input(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_windows_present_gpu_surface_pixels(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, width: usize, height: usize, scale: f64, has_dirty_rect: c_int, dirty_x: f64, dirty_y: f64, dirty_width: f64, dirty_height: f64, rgba8: [*]const u8, rgba8_len: usize) c_int;
 extern fn native_sdk_windows_create_webview(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, transparent: c_int, bridge_enabled: c_int) c_int;
 extern fn native_sdk_windows_set_webview_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
@@ -277,6 +282,7 @@ pub const WindowsPlatform = struct {
                 .focus_view_fn = focusView,
                 .close_view_fn = closeView,
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
+                .note_gpu_surface_input_fn = noteGpuSurfaceInput,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
@@ -457,6 +463,7 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .frame_interval_ns = event.frame_interval_ns,
             .nonblank = event.nonblank != 0,
             .sample_color = event.sample_color,
+            .occluded = event.occluded != 0,
             .backend = .software,
             .pixel_format = .bgra8_unorm,
             .present_mode = .timer,
@@ -865,6 +872,12 @@ fn requestGpuSurfaceFrame(context: ?*anyopaque, window_id: platform_mod.WindowId
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedService;
     if (native_sdk_windows_request_gpu_surface_frame(self.host, window_id, label.ptr, label.len) == 0) return error.ViewNotFound;
+}
+
+fn noteGpuSurfaceInput(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return;
+    _ = native_sdk_windows_note_gpu_surface_input(self.host, window_id, label.ptr, label.len);
 }
 
 fn presentGpuSurfacePixels(context: ?*anyopaque, pixels: platform_mod.GpuSurfacePixels) anyerror!void {
