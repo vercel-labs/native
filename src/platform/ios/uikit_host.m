@@ -10,13 +10,31 @@
 // Presentation mirrors the macOS raster path in
 // src/platform/macos/appkit_host.m — the embed host renders the retained
 // scene through the CPU reference renderer (`native_sdk_app_render_pixels`,
-// RGBA8); the host uploads those bytes to a shared MTLTexture and
-// blit-copies them to the CAMetalLayer drawable. A CADisplayLink pumps
-// `native_sdk_app_frame` and the canvas revision from
-// `native_sdk_app_gpu_frame_state` gates re-renders, so unchanged frames
-// cost one ABI call and no upload. The RGBA -> BGRA swizzle happens on the
-// CPU while filling the staging buffer (blit copies require matching pixel
-// formats).
+// RGBA8); the host uploads those bytes into a shared RGBA8 MTLTexture and
+// presents it as a fullscreen quad sampled by the same tiny pipeline the
+// macOS host's canvas presenter compiles (the render pass converts to the
+// drawable's BGRA on the way out, so no CPU swizzle pass exists). A
+// CADisplayLink pumps `native_sdk_app_frame` and the canvas revision from
+// `native_sdk_app_gpu_frame_state` gates re-renders, so an idle app costs
+// one ABI call per tick and acquires no drawable and uploads no bytes.
+// The embed pixel ABI carries no damage rects (the desktop dirty-rect
+// machinery lives behind the packet path, which mobile bypasses), so a
+// changed frame re-renders and re-uploads the full surface — the gate is
+// the revision, not a region. NATIVE_SDK_GPU_FRAME_TRACE=1 prints the
+// same per-present/nil-drawable trace lines the macOS host does, plus a
+// once-per-second structural summary (ticks, idle short-circuits,
+// presents, drawables acquired, upload bytes, present-path CPU).
+//
+// Lifecycle follows the app's scene state the way the macOS host follows
+// window occlusion: on entering the background the display link pauses
+// (a backgrounded app presents nothing, and Metal work submitted from
+// the background is killed by the watchdog); returning to the foreground
+// resumes the pump and re-presents the retained canvas once even when
+// the revision is unchanged, because the drawable pool may have been
+// purged while covered — the mobile mirror of the macOS occlusion
+// observer's glass flush. Resign/become-active additionally forward
+// `native_sdk_app_deactivate`/`activate`, matching the Android host's
+// onPause/onResume.
 //
 // Input: UITouch sequences forward through the ABI touch/scroll exports
 // in the same point coordinate space the viewport export established
@@ -86,6 +104,29 @@ const struct mach_header *_dyld_get_image_header_containing_address(const void *
         return (const struct mach_header *)info.dli_fbase;
     }
     return NULL;
+}
+
+// ---------------------------------------------------------------- frame trace
+
+/* Frame-trace mode (NATIVE_SDK_GPU_FRAME_TRACE=1): the iOS mirror of the
+ * macOS host's trace — one stderr line per REAL present naming how long
+ * nextDrawable held the main thread and how many bytes the frame
+ * uploaded, plus a once-per-second cumulative summary (display ticks,
+ * idle short-circuits, presents, drawables acquired, upload bytes,
+ * present-path CPU time). The summary is how the idle law shows up as a
+ * number: an idle app's drawable/upload counters must not move. */
+static BOOL NativeSdkGpuFrameTraceEnabled(void) {
+    static BOOL enabled;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *value = getenv("NATIVE_SDK_GPU_FRAME_TRACE");
+        enabled = value && value[0] != 0 && strcmp(value, "0") != 0;
+    });
+    return enabled;
+}
+
+static uint64_t NativeSdkTimestampNanoseconds(void) {
+    return (uint64_t)([[NSDate date] timeIntervalSince1970] * 1000000000.0);
 }
 
 // ------------------------------------------------------------ text metrics
@@ -1302,14 +1343,39 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> commandQueue;
 @property(nonatomic, strong) id<MTLTexture> canvasTexture;
+/* The canvas presenter: the fullscreen-quad pipeline + nearest sampler
+ * that draws the RGBA8 canvas texture into the BGRA8 drawable — the
+ * iOS twin of appkit_host.m's ensureCanvasPresenter. Compiled once from
+ * source on first present. */
+@property(nonatomic, strong) id<MTLRenderPipelineState> canvasRenderPipeline;
+@property(nonatomic, strong) id<MTLSamplerState> canvasSampler;
 @property(nonatomic, strong) CADisplayLink *displayLink;
 @property(nonatomic) uint8_t *rgbaBytes;
-@property(nonatomic) uint8_t *bgraBytes;
 @property(nonatomic) size_t stagingCapacity;
 @property(nonatomic) uint64_t lastCanvasRevision;
 @property(nonatomic) BOOL hasPresentedRevision;
 @property(nonatomic) BOOL needsPresent;
 @property(nonatomic) CGFloat viewportScale;
+/* The drawable size last applied to the layer: reassigning drawableSize
+ * every present invalidates the layer's drawable pool on some OS
+ * releases, so it is only written when the rendered pixel size actually
+ * changed (mirroring the macOS host's updateDrawableSize compare). */
+@property(nonatomic) CGSize appliedDrawableSize;
+/* Scene-lifecycle observer tokens (background/foreground pump pausing,
+ * resign/become-active runtime activation), removed on teardown. */
+@property(nonatomic, strong) NSArray<id> *lifecycleObservers;
+/* Frame-trace counters (NATIVE_SDK_GPU_FRAME_TRACE=1 only): cumulative
+ * structural truth for the present path — how many display ticks ran,
+ * how many short-circuited idle, how many drawables were acquired, and
+ * how many bytes rode replaceRegion. Zero cost while the trace is off. */
+@property(nonatomic) uint64_t traceTickCount;
+@property(nonatomic) uint64_t traceIdleTickCount;
+@property(nonatomic) uint64_t tracePresentCount;
+@property(nonatomic) uint64_t traceDrawableCount;
+@property(nonatomic) uint64_t traceNilDrawableCount;
+@property(nonatomic) uint64_t traceUploadBytes;
+@property(nonatomic) uint64_t tracePresentCpuNs;
+@property(nonatomic) uint64_t traceLastSummaryNs;
 @end
 
 @implementation NativeSdkCanvasViewController
@@ -1336,8 +1402,11 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     CAMetalLayer *layer = [self metalLayer];
     layer.device = self.device;
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    // Blit destination: the drawable texture must stay CPU/blit-accessible.
-    layer.framebufferOnly = NO;
+    // The drawable is only ever a render-pass target (the canvas texture
+    // is sampled INTO it by the presenter quad; nothing blits from or
+    // samples the drawable itself), so it keeps the compositor-optimal
+    // framebuffer-only default.
+    layer.framebufferOnly = YES;
     layer.opaque = YES;
     self.view.backgroundColor = [UIColor whiteColor];
 
@@ -1418,10 +1487,64 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
 
     self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(displayLinkTick:)];
     [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+
+    // Scene lifecycle: the pump follows the app's visibility the way the
+    // macOS host follows window occlusion. A backgrounded app presents
+    // nothing — the display link pauses (GPU work submitted from the
+    // background is killed by the watchdog, and pixels nobody can see
+    // are pure battery drain) — and the runtime hears about activation
+    // honestly (deactivate on resign-active, activate on become-active;
+    // the Android host's onPause/onResume mirror). Returning to the
+    // foreground marks needsPresent: the drawable pool may have been
+    // purged while covered, so the retained canvas re-presents once even
+    // though its revision is unchanged — the mobile mirror of the macOS
+    // occlusion observer's glass flush. The launch-time first present
+    // needs no special case here: until the first present lands,
+    // hasPresentedRevision stays NO and every tick presents.
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+    __weak NativeSdkCanvasViewController *weakSelf = self;
+    self.lifecycleObservers = @[
+        [center addObserverForName:UIApplicationWillResignActiveNotification
+                            object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(NSNotification *note) {
+                            (void)note;
+                            NativeSdkCanvasViewController *strongSelf = weakSelf;
+                            if (strongSelf.nativeApp) native_sdk_app_deactivate(strongSelf.nativeApp);
+                        }],
+        [center addObserverForName:UIApplicationDidBecomeActiveNotification
+                            object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(NSNotification *note) {
+                            (void)note;
+                            NativeSdkCanvasViewController *strongSelf = weakSelf;
+                            if (strongSelf.nativeApp) native_sdk_app_activate(strongSelf.nativeApp);
+                        }],
+        [center addObserverForName:UIApplicationDidEnterBackgroundNotification
+                            object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(NSNotification *note) {
+                            (void)note;
+                            weakSelf.displayLink.paused = YES;
+                        }],
+        [center addObserverForName:UIApplicationWillEnterForegroundNotification
+                            object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(NSNotification *note) {
+                            (void)note;
+                            NativeSdkCanvasViewController *strongSelf = weakSelf;
+                            if (!strongSelf) return;
+                            strongSelf.needsPresent = YES;
+                            strongSelf.displayLink.paused = NO;
+                        }],
+    ];
 }
 
 - (void)dealloc {
     [self.displayLink invalidate];
+    for (id observer in self.lifecycleObservers) {
+        [[NSNotificationCenter defaultCenter] removeObserver:observer];
+    }
     if (self.nativeApp) {
         // Stop first: the runtime's shutdown path releases the audio
         // channel through the still-registered service. Then cut the
@@ -1433,7 +1556,6 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     }
     [self.audioEngine invalidate];
     free(self.rgbaBytes);
-    free(self.bgraBytes);
 }
 
 - (void)viewDidLayoutSubviews {
@@ -1468,6 +1590,10 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
 
 - (void)displayLinkTick:(CADisplayLink *)link {
     if (!self.nativeApp) return;
+    if (NativeSdkGpuFrameTraceEnabled()) {
+        self.traceTickCount += 1;
+        [self emitFrameTraceSummaryIfDue];
+    }
 
     // Host-pumped frame: synthesizes the gpu_surface_frame event (first
     // tick installs the widget tree, later ticks re-present).
@@ -1483,6 +1609,7 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     BOOL haveState = native_sdk_app_gpu_frame_state(self.nativeApp, &state) == 1;
     if (!self.needsPresent && haveState && self.hasPresentedRevision &&
         state.canvas_revision == self.lastCanvasRevision) {
+        if (NativeSdkGpuFrameTraceEnabled()) self.traceIdleTickCount += 1;
         return;
     }
 
@@ -1495,48 +1622,119 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     }
 }
 
+/* Once-per-second cumulative counter line while the frame trace is on. */
+- (void)emitFrameTraceSummaryIfDue {
+    const uint64_t now = NativeSdkTimestampNanoseconds();
+    if (self.traceLastSummaryNs != 0 && now - self.traceLastSummaryNs < 1000000000ull) return;
+    if (self.traceLastSummaryNs != 0) {
+        fprintf(stderr,
+                "native-sdk: gpu frame-trace summary ticks=%llu idle=%llu presents=%llu drawables=%llu nil=%llu upload_bytes=%llu present_cpu_us=%llu\n",
+                (unsigned long long)self.traceTickCount,
+                (unsigned long long)self.traceIdleTickCount,
+                (unsigned long long)self.tracePresentCount,
+                (unsigned long long)self.traceDrawableCount,
+                (unsigned long long)self.traceNilDrawableCount,
+                (unsigned long long)self.traceUploadBytes,
+                (unsigned long long)(self.tracePresentCpuNs / 1000));
+    }
+    self.traceLastSummaryNs = now;
+}
+
 - (BOOL)ensureStagingCapacity:(size_t)byteLength {
-    if (self.stagingCapacity >= byteLength && self.rgbaBytes && self.bgraBytes) return YES;
+    if (self.stagingCapacity >= byteLength && self.rgbaBytes) return YES;
     free(self.rgbaBytes);
-    free(self.bgraBytes);
     self.rgbaBytes = malloc(byteLength);
-    self.bgraBytes = malloc(byteLength);
-    self.stagingCapacity = (self.rgbaBytes && self.bgraBytes) ? byteLength : 0;
+    self.stagingCapacity = self.rgbaBytes ? byteLength : 0;
     return self.stagingCapacity != 0;
 }
 
+// The canvas presenter, mirrored from appkit_host.m's
+// ensureCanvasPresenter: a four-vertex fullscreen quad whose fragment
+// stage samples the canvas texture with nearest filtering (the canvas is
+// already rasterized at device scale — presentation must not resample
+// it). Sampling is what makes the pixel formats independent: the shader
+// reads RGBA semantics from the RGBA8 canvas texture and the pass writes
+// them into the BGRA8 drawable, so the RGBA -> BGRA conversion the old
+// blit path paid for with a CPU swizzle over every frame's bytes now
+// happens inside the render pass for free.
+- (BOOL)ensureCanvasPresenter {
+    if (self.canvasRenderPipeline && self.canvasSampler) return YES;
+    if (!self.device) return NO;
+
+    static NSString *shaderSource =
+        @"#include <metal_stdlib>\n"
+        @"using namespace metal;\n"
+        @"struct NativeSdkCanvasVertexOut { float4 position [[position]]; float2 uv; };\n"
+        @"vertex NativeSdkCanvasVertexOut native_sdk_canvas_vertex(uint vertex_id [[vertex_id]]) {\n"
+        @"  constexpr float2 positions[4] = { float2(-1.0, -1.0), float2(1.0, -1.0), float2(-1.0, 1.0), float2(1.0, 1.0) };\n"
+        @"  constexpr float2 uvs[4] = { float2(0.0, 1.0), float2(1.0, 1.0), float2(0.0, 0.0), float2(1.0, 0.0) };\n"
+        @"  NativeSdkCanvasVertexOut out;\n"
+        @"  out.position = float4(positions[vertex_id], 0.0, 1.0);\n"
+        @"  out.uv = uvs[vertex_id];\n"
+        @"  return out;\n"
+        @"}\n"
+        @"fragment float4 native_sdk_canvas_fragment(NativeSdkCanvasVertexOut in [[stage_in]], texture2d<float> canvas_texture [[texture(0)]], sampler texture_sampler [[sampler(0)]]) {\n"
+        @"  return canvas_texture.sample(texture_sampler, in.uv);\n"
+        @"}\n";
+
+    NSError *libraryError = nil;
+    id<MTLLibrary> library = [self.device newLibraryWithSource:shaderSource options:nil error:&libraryError];
+    if (!library) return NO;
+    id<MTLFunction> vertexFunction = [library newFunctionWithName:@"native_sdk_canvas_vertex"];
+    id<MTLFunction> fragmentFunction = [library newFunctionWithName:@"native_sdk_canvas_fragment"];
+    if (!vertexFunction || !fragmentFunction) return NO;
+
+    MTLRenderPipelineDescriptor *pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    pipelineDescriptor.label = @"native-sdk canvas presenter";
+    pipelineDescriptor.vertexFunction = vertexFunction;
+    pipelineDescriptor.fragmentFunction = fragmentFunction;
+    pipelineDescriptor.colorAttachments[0].pixelFormat = [self metalLayer].pixelFormat;
+
+    NSError *pipelineError = nil;
+    id<MTLRenderPipelineState> pipeline = [self.device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&pipelineError];
+    if (!pipeline) return NO;
+
+    MTLSamplerDescriptor *samplerDescriptor = [[MTLSamplerDescriptor alloc] init];
+    samplerDescriptor.minFilter = MTLSamplerMinMagFilterNearest;
+    samplerDescriptor.magFilter = MTLSamplerMinMagFilterNearest;
+    samplerDescriptor.mipFilter = MTLSamplerMipFilterNotMipmapped;
+    samplerDescriptor.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    samplerDescriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    id<MTLSamplerState> sampler = [self.device newSamplerStateWithDescriptor:samplerDescriptor];
+    if (!sampler) return NO;
+
+    self.canvasRenderPipeline = pipeline;
+    self.canvasSampler = sampler;
+    return YES;
+}
+
 - (BOOL)renderAndPresent {
+    const BOOL trace = NativeSdkGpuFrameTraceEnabled();
+    const uint64_t presentBeginNs = trace ? NativeSdkTimestampNanoseconds() : 0;
     float scale = (float)self.viewportScale;
 
     native_sdk_canvas_pixels_t info = {0};
     if (native_sdk_app_render_pixel_size(self.nativeApp, scale, &info) != 1) return NO;
     if (info.width == 0 || info.height == 0 || info.byte_len != info.width * info.height * 4) return NO;
     if (![self ensureStagingCapacity:info.byte_len]) return NO;
+    if (![self ensureCanvasPresenter]) return NO;
 
     native_sdk_canvas_pixels_t rendered = {0};
     if (native_sdk_app_render_pixels(self.nativeApp, scale, self.rgbaBytes, info.byte_len, &rendered) != 1) {
         [self logNativeErrorIfAny:@"render_pixels"];
         return NO;
     }
+    const uint64_t renderEndNs = trace ? NativeSdkTimestampNanoseconds() : 0;
     NSUInteger width = rendered.width;
     NSUInteger height = rendered.height;
     if (width == 0 || height == 0 || rendered.byte_len != width * height * 4) return NO;
 
-    // RGBA8 (renderer) -> BGRA8 (drawable) swizzle into the upload buffer.
-    const uint8_t *rgba = self.rgbaBytes;
-    uint8_t *bgra = self.bgraBytes;
-    size_t pixelCount = (size_t)width * (size_t)height;
-    for (size_t i = 0; i < pixelCount; i++) {
-        const size_t offset = i * 4;
-        bgra[offset + 0] = rgba[offset + 2];
-        bgra[offset + 1] = rgba[offset + 1];
-        bgra[offset + 2] = rgba[offset + 0];
-        bgra[offset + 3] = rgba[offset + 3];
-    }
-
+    // The canvas texture carries the renderer's bytes verbatim: RGBA8,
+    // uploaded straight from the staging buffer (the presenter's render
+    // pass converts to the drawable's BGRA — see ensureCanvasPresenter).
     if (!self.canvasTexture || self.canvasTexture.width != width || self.canvasTexture.height != height) {
         MTLTextureDescriptor *descriptor =
-            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                width:width
                                                               height:height
                                                            mipmapped:NO];
@@ -1545,31 +1743,86 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
         self.canvasTexture = [self.device newTextureWithDescriptor:descriptor];
     }
     if (!self.canvasTexture) return NO;
+    const uint64_t uploadBeginNs = trace ? NativeSdkTimestampNanoseconds() : 0;
     [self.canvasTexture replaceRegion:MTLRegionMake2D(0, 0, width, height)
                           mipmapLevel:0
-                            withBytes:bgra
+                            withBytes:self.rgbaBytes
                           bytesPerRow:width * 4];
+    const uint64_t uploadEndNs = trace ? NativeSdkTimestampNanoseconds() : 0;
+    if (trace) self.traceUploadBytes += (uint64_t)width * (uint64_t)height * 4;
 
     CAMetalLayer *layer = [self metalLayer];
-    layer.drawableSize = CGSizeMake(width, height);
+    CGSize drawableSize = CGSizeMake(width, height);
+    if (!CGSizeEqualToSize(self.appliedDrawableSize, drawableSize)) {
+        layer.drawableSize = drawableSize;
+        self.appliedDrawableSize = drawableSize;
+    }
+
+    // Drawable acquisition discipline: a CAMetalLayer vends a small fixed
+    // pool of drawables, and nextDrawable is the one call in this path
+    // that can BLOCK the main thread — the pool hands one back on the
+    // compositor's schedule, not ours. So the host acquires a drawable
+    // (a) only on frames that will really present (the canvas-revision
+    // gate in displayLinkTick already decided that) and (b) only after
+    // every CPU cost of the frame — the reference render and the texture
+    // upload — has been paid, so the block is the residual wait for the
+    // glass, never a hold across our own work. Acquiring early or on
+    // every tick is the classic stall-and-power sink: an idle app would
+    // pin a drawable per vsync and the throttled pool would pace the
+    // whole run loop.
+    const uint64_t vendBeginNs = trace ? NativeSdkTimestampNanoseconds() : 0;
     id<CAMetalDrawable> drawable = [layer nextDrawable];
-    if (!drawable) return NO;
+    const uint64_t vendEndNs = trace ? NativeSdkTimestampNanoseconds() : 0;
+    if (trace) {
+        if (drawable) self.traceDrawableCount += 1;
+        else self.traceNilDrawableCount += 1;
+    }
+    if (!drawable) {
+        // A declined drawable (mid-resize flux, transient pool pressure):
+        // needsPresent stays armed upstream, so the next tick retries —
+        // the retained canvas texture already holds the frame.
+        if (trace) {
+            self.tracePresentCpuNs += NativeSdkTimestampNanoseconds() - renderEndNs;
+            fprintf(stderr, "native-sdk: gpu frame-trace path=nil-drawable vend_us=%llu\n",
+                    (unsigned long long)((vendEndNs - vendBeginNs) / 1000));
+        }
+        return NO;
+    }
     if (drawable.texture.width != width || drawable.texture.height != height) return NO;
 
+    MTLRenderPassDescriptor *descriptor = [MTLRenderPassDescriptor renderPassDescriptor];
+    descriptor.colorAttachments[0].texture = drawable.texture;
+    // The quad covers every drawable pixel, so the pass needs no load; a
+    // clear is the cheapest correct load action on a tiled GPU.
+    descriptor.colorAttachments[0].loadAction = MTLLoadActionClear;
+    descriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
+    descriptor.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+
     id<MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
-    id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
-    [blit copyFromTexture:self.canvasTexture
-              sourceSlice:0
-              sourceLevel:0
-             sourceOrigin:MTLOriginMake(0, 0, 0)
-               sourceSize:MTLSizeMake(width, height, 1)
-                toTexture:drawable.texture
-         destinationSlice:0
-         destinationLevel:0
-        destinationOrigin:MTLOriginMake(0, 0, 0)];
-    [blit endEncoding];
+    if (!commandBuffer) return NO;
+    id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:descriptor];
+    [encoder setRenderPipelineState:self.canvasRenderPipeline];
+    [encoder setFragmentTexture:self.canvasTexture atIndex:0];
+    [encoder setFragmentSamplerState:self.canvasSampler atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    [encoder endEncoding];
     [commandBuffer presentDrawable:drawable];
     [commandBuffer commit];
+    if (trace) {
+        const uint64_t presentEndNs = NativeSdkTimestampNanoseconds();
+        self.tracePresentCount += 1;
+        /* Present-path CPU excludes the reference render: upload +
+         * drawable vend + encode/commit. The render is the renderer's
+         * cost, not the presentation seam's. */
+        self.tracePresentCpuNs += presentEndNs - renderEndNs;
+        fprintf(stderr, "native-sdk: gpu frame-trace path=present frame=%llu render_us=%llu upload_us=%llu vend_us=%llu upload_bytes=%llu total_us=%llu\n",
+                (unsigned long long)self.tracePresentCount,
+                (unsigned long long)((renderEndNs - presentBeginNs) / 1000),
+                (unsigned long long)((uploadEndNs - uploadBeginNs) / 1000),
+                (unsigned long long)((vendEndNs - vendBeginNs) / 1000),
+                (unsigned long long)((uint64_t)width * (uint64_t)height * 4),
+                (unsigned long long)((presentEndNs - presentBeginNs) / 1000));
+    }
     return YES;
 }
 
