@@ -40,6 +40,15 @@ pub const max_view_accessibility_label_bytes: usize = 256;
 pub const max_command_id_bytes: usize = 128;
 pub const max_commands: usize = 256;
 pub const max_command_title_bytes: usize = 128;
+/// The declared platform-chrome tab cap: the platform tab-bar idiom
+/// holds two to five destinations, and a set that would not fit a real
+/// system bar is refused at validation instead of squeezed at runtime.
+pub const max_shell_tabs: usize = 5;
+/// Chrome tab/action labels are control titles, not prose.
+pub const max_shell_chrome_label_bytes: usize = max_command_title_bytes;
+/// Chrome icon references are icon-vocabulary names (optionally
+/// `app:`-namespaced), never paths.
+pub const max_shell_chrome_icon_bytes: usize = 64;
 pub const max_menus: usize = 16;
 pub const max_menu_items: usize = 128;
 pub const max_menu_title_bytes: usize = 64;
@@ -431,8 +440,48 @@ pub const ShellWindow = struct {
     views: []const ShellView = &.{},
 };
 
+/// One declared platform-chrome tab. `id` is a command id: a tap on the
+/// projected native control dispatches it through the same command event
+/// path menus and native header buttons use, and the app maps it to a
+/// Msg via `on_command` — the bar is never the source of truth for
+/// selection. `icon` names an icon from the icon vocabulary (a built-in
+/// name, or `app:<name>` for an app-registered icon); the projecting
+/// host rasterizes the app's own glyph into a template image the system
+/// control tints, so the artwork is the app's while the bar's styling
+/// stays whatever the OS ships.
+pub const ShellTab = struct {
+    id: []const u8,
+    label: []const u8,
+    icon: []const u8 = "",
+};
+
+/// The optional single primary action declared beside the tab set — the
+/// one floating action button of the platform idiom. Same shape and
+/// dispatch contract as a tab: `id` is the command a press dispatches,
+/// `label` the accessibility title, `icon` the vocabulary glyph.
+pub const ShellPrimaryAction = struct {
+    id: []const u8,
+    label: []const u8,
+    icon: []const u8 = "",
+};
+
+/// Declared platform chrome: UI the app asks the HOST to project as
+/// REAL native controls (on iOS an actual system tab bar and a real
+/// button — current with whatever the OS ships, never imitated in
+/// canvas). Selection state lives in the app's model; the projected bar
+/// mirrors it (`selected_tab_fn`) and taps dispatch command events back
+/// into update, so the projection is deterministic and replayable.
+/// Hosts without a projection (desktop windows today, Android until its
+/// round lands) leave the declaration inert: nothing renders, nothing
+/// dispatches, and the app's own canvas chrome stays in charge.
+pub const ShellChrome = struct {
+    tabs: []const ShellTab = &.{},
+    primary_action: ?ShellPrimaryAction = null,
+};
+
 pub const ShellConfig = struct {
     windows: []const ShellWindow = &.{},
+    chrome: ShellChrome = .{},
 };
 
 pub const ShortcutModifiers = struct {

@@ -511,13 +511,17 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
 
         pub fn commandSourceForNativeView(self: *const Runtime, window_id: platform.WindowId, label: []const u8) CommandSource {
             const index = Self.findViewIndex(self, window_id, label) orelse return .native_view;
-            var view = self.views[index];
+            // Walk by POINTER: a View embeds its widget storage, so a
+            // by-value copy here is megabytes of stack — more than a
+            // mobile main thread has (iOS caps it at 1MB, and this runs
+            // on the host's display-link tick via automation commands).
+            var view = &self.views[index];
             var depth: usize = 0;
             while (depth < platform.max_views) : (depth += 1) {
                 if (view.kind == .toolbar) return .toolbar;
                 const parent_label = view.parent orelse return .native_view;
                 const parent_index = Self.findViewIndex(self, window_id, parent_label) orelse return .native_view;
-                view = self.views[parent_index];
+                view = &self.views[parent_index];
             }
             return .native_view;
         }

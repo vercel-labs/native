@@ -125,6 +125,59 @@ pub fn validateShell(shell: ShellConfig, compatibility_windows: []const Window) 
             if (std.mem.eql(u8, previous.label, window.label)) return error.DuplicateWindow;
         }
     }
+    try validateShellChrome(shell.chrome);
+}
+
+/// Declared platform chrome: a tab set is two to `max_shell_tabs`
+/// destinations (one tab is not a choice, and a set a real system bar
+/// cannot hold is refused here, not squeezed at runtime); tab and
+/// action ids are command ids, unique across the whole chrome
+/// declaration because every one dispatches through the same command
+/// event path; labels are required control titles; icons are
+/// icon-vocabulary names (charset-checked here — whether the name
+/// resolves is the icon registry's runtime concern, where a broken
+/// reference draws the visible missing glyph).
+pub fn validateShellChrome(chrome: types.ShellChrome) ValidationError!void {
+    if (chrome.tabs.len > types.max_shell_tabs) return error.InvalidLayout;
+    if (chrome.tabs.len == 1) return error.InvalidLayout;
+    for (chrome.tabs, 0..) |tab, index| {
+        try validateCommandId(tab.id);
+        try validateShellChromeLabel(tab.label);
+        try validateShellChromeIcon(tab.icon);
+        for (chrome.tabs[0..index]) |previous| {
+            if (std.mem.eql(u8, previous.id, tab.id)) return error.DuplicateCommand;
+        }
+    }
+    if (chrome.primary_action) |action| {
+        try validateCommandId(action.id);
+        try validateShellChromeLabel(action.label);
+        try validateShellChromeIcon(action.icon);
+        for (chrome.tabs) |tab| {
+            if (std.mem.eql(u8, tab.id, action.id)) return error.DuplicateCommand;
+        }
+    }
+}
+
+fn validateShellChromeLabel(label: []const u8) ValidationError!void {
+    if (label.len == 0 or label.len > types.max_shell_chrome_label_bytes) return error.InvalidName;
+    for (label) |ch| {
+        if (ch < 0x20 or ch == 0x7f) return error.InvalidName;
+    }
+}
+
+/// An icon reference is a vocabulary name — lowercase/digit/hyphen
+/// segments, optionally under the `app:` namespace — never a path.
+/// Empty means "no icon" (a text-only tab or action).
+fn validateShellChromeIcon(icon: []const u8) ValidationError!void {
+    if (icon.len == 0) return;
+    if (icon.len > types.max_shell_chrome_icon_bytes) return error.InvalidName;
+    var name = icon;
+    if (std.mem.startsWith(u8, icon, "app:")) name = icon["app:".len..];
+    if (name.len == 0) return error.InvalidName;
+    for (name) |ch| {
+        const ok = (ch >= 'a' and ch <= 'z') or (ch >= '0' and ch <= '9') or ch == '-' or ch == '_';
+        if (!ok) return error.InvalidName;
+    }
 }
 
 fn validateShellWindow(window: ShellWindow) ValidationError!void {

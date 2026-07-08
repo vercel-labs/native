@@ -117,6 +117,17 @@ pub const Metadata = struct {
             if (window.views.len > 0) allocator.free(window.views);
         }
         if (self.shell.windows.len > 0) allocator.free(self.shell.windows);
+        for (self.shell.chrome.tabs) |tab| {
+            allocator.free(tab.id);
+            allocator.free(tab.label);
+            allocator.free(tab.icon);
+        }
+        if (self.shell.chrome.tabs.len > 0) allocator.free(self.shell.chrome.tabs);
+        if (self.shell.chrome.primary_action) |action| {
+            allocator.free(action.id);
+            allocator.free(action.label);
+            allocator.free(action.icon);
+        }
         for (self.commands) |command| {
             allocator.free(command.id);
             allocator.free(command.title);
@@ -181,6 +192,24 @@ pub const WindowMetadata = struct {
 
 pub const ShellMetadata = struct {
     windows: []const ShellWindowMetadata = &.{},
+    chrome: ShellChromeMetadata = .{},
+};
+
+pub const ShellChromeMetadata = struct {
+    tabs: []const ShellTabMetadata = &.{},
+    primary_action: ?ShellPrimaryActionMetadata = null,
+};
+
+pub const ShellTabMetadata = struct {
+    id: []const u8,
+    label: []const u8,
+    icon: []const u8 = "",
+};
+
+pub const ShellPrimaryActionMetadata = struct {
+    id: []const u8,
+    label: []const u8,
+    icon: []const u8 = "",
 };
 
 pub const ShellWindowMetadata = struct {
@@ -541,7 +570,33 @@ fn convertRawWindows(allocator: std.mem.Allocator, windows: []const RawWindow) !
 }
 
 fn convertRawShell(allocator: std.mem.Allocator, shell: RawShell) !ShellMetadata {
-    return .{ .windows = try convertRawShellWindows(allocator, shell.windows) };
+    return .{
+        .windows = try convertRawShellWindows(allocator, shell.windows),
+        .chrome = try convertRawShellChrome(allocator, shell.chrome),
+    };
+}
+
+fn convertRawShellChrome(allocator: std.mem.Allocator, chrome: raw_manifest.RawShellChrome) !ShellChromeMetadata {
+    var converted: ShellChromeMetadata = .{};
+    if (chrome.tabs.len > 0) {
+        const tabs = try allocator.alloc(ShellTabMetadata, chrome.tabs.len);
+        for (chrome.tabs, 0..) |tab, index| {
+            tabs[index] = .{
+                .id = try allocator.dupe(u8, tab.id),
+                .label = try allocator.dupe(u8, tab.label),
+                .icon = try allocator.dupe(u8, tab.icon),
+            };
+        }
+        converted.tabs = tabs;
+    }
+    if (chrome.primary_action) |action| {
+        converted.primary_action = .{
+            .id = try allocator.dupe(u8, action.id),
+            .label = try allocator.dupe(u8, action.label),
+            .icon = try allocator.dupe(u8, action.icon),
+        };
+    }
+    return converted;
 }
 
 fn convertRawShellWindows(allocator: std.mem.Allocator, windows: []const RawShellWindow) ![]const ShellWindowMetadata {
@@ -766,7 +821,9 @@ fn convertWindows(allocator: std.mem.Allocator, windows: []const WindowMetadata)
 }
 
 fn parseShell(allocator: std.mem.Allocator, shell: ShellMetadata) !app_manifest.ShellConfig {
-    if (shell.windows.len == 0) return .{};
+    const chrome = try parseShellChrome(allocator, shell.chrome);
+    errdefer if (chrome.tabs.len > 0) allocator.free(chrome.tabs);
+    if (shell.windows.len == 0) return .{ .chrome = chrome };
     const windows = try allocator.alloc(app_manifest.ShellWindow, shell.windows.len);
     errdefer allocator.free(windows);
     var initialized: usize = 0;
@@ -800,7 +857,27 @@ fn parseShell(allocator: std.mem.Allocator, shell: ShellMetadata) !app_manifest.
         };
         initialized += 1;
     }
-    return .{ .windows = windows };
+    return .{ .windows = windows, .chrome = chrome };
+}
+
+/// Declared platform chrome from app.zon metadata: the strings pass
+/// through (Metadata owns them, exactly like window/view labels); only
+/// the tabs slice is parse-owned. Structural rules live in
+/// `app_manifest.validateShellChrome`, which `parseShell`'s caller runs
+/// over the whole shell.
+fn parseShellChrome(allocator: std.mem.Allocator, chrome: ShellChromeMetadata) !app_manifest.ShellChrome {
+    var parsed: app_manifest.ShellChrome = .{};
+    if (chrome.tabs.len > 0) {
+        const tabs = try allocator.alloc(app_manifest.ShellTab, chrome.tabs.len);
+        for (chrome.tabs, 0..) |tab, index| {
+            tabs[index] = .{ .id = tab.id, .label = tab.label, .icon = tab.icon };
+        }
+        parsed.tabs = tabs;
+    }
+    if (chrome.primary_action) |action| {
+        parsed.primary_action = .{ .id = action.id, .label = action.label, .icon = action.icon };
+    }
+    return parsed;
 }
 
 fn parseShellViews(allocator: std.mem.Allocator, values: []const ShellViewMetadata) ![]const app_manifest.ShellView {
@@ -847,6 +924,7 @@ fn deinitParsedShell(allocator: std.mem.Allocator, shell: app_manifest.ShellConf
         if (window.views.len > 0) allocator.free(window.views);
     }
     if (shell.windows.len > 0) allocator.free(shell.windows);
+    if (shell.chrome.tabs.len > 0) allocator.free(shell.chrome.tabs);
 }
 
 fn deinitParsedMenus(allocator: std.mem.Allocator, menus: []const app_manifest.Menu) void {
@@ -1410,6 +1488,49 @@ test "manifest metadata parser reads structured security policy" {
     try std.testing.expectEqualStrings("http://127.0.0.1:5173", metadata.security.navigation.allowed_origins[1]);
     try std.testing.expectEqualStrings("open_system_browser", metadata.security.navigation.external_links.action);
     try std.testing.expectEqualStrings("https://example.com/*", metadata.security.navigation.external_links.allowed_urls[0]);
+}
+
+test "manifest metadata parser reads declared platform chrome" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.2.3",
+        \\  .shell = .{
+        \\    .chrome = .{
+        \\      .tabs = .{
+        \\        .{ .id = "tabs.home", .label = "Home", .icon = "menu" },
+        \\        .{ .id = "tabs.settings", .label = "Settings", .icon = "settings" },
+        \\      },
+        \\      .primary_action = .{ .id = "action.new", .label = "New", .icon = "plus" },
+        \\    },
+        \\    .windows = .{
+        \\      .{
+        \\        .label = "main",
+        \\        .views = .{
+        \\          .{ .label = "content", .kind = "webview", .url = "zero://app/index.html", .fill = true },
+        \\        },
+        \\      },
+        \\    },
+        \\  },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), metadata.shell.chrome.tabs.len);
+    try std.testing.expectEqualStrings("tabs.home", metadata.shell.chrome.tabs[0].id);
+    try std.testing.expectEqualStrings("Home", metadata.shell.chrome.tabs[0].label);
+    try std.testing.expectEqualStrings("menu", metadata.shell.chrome.tabs[0].icon);
+    try std.testing.expectEqualStrings("action.new", metadata.shell.chrome.primary_action.?.id);
+
+    // The parsed shell carries the declaration through to the shared
+    // manifest validation, which accepts it whole.
+    const shell = try parseShell(std.testing.allocator, metadata.shell);
+    defer deinitParsedShell(std.testing.allocator, shell);
+    try std.testing.expectEqual(@as(usize, 2), shell.chrome.tabs.len);
+    try std.testing.expectEqualStrings("tabs.settings", shell.chrome.tabs[1].id);
+    try std.testing.expectEqualStrings("plus", shell.chrome.primary_action.?.icon);
+    try app_manifest.validateShellChrome(shell.chrome);
 }
 
 test "manifest metadata parser reads shell windows and views" {

@@ -88,6 +88,11 @@ pub fn UiAppHost(comptime AppDef: type) type {
         // with no registration `fx.registerImageBytes` reports
         // UnsupportedService and image/avatar widgets keep their fallback.
         image: host.MobileImage = .{},
+        /// Standing host chrome reports (see `host.setFormFactor` /
+        /// `host.setChromeTabsProjected`): composed into every
+        /// viewport-driven chrome publish.
+        form_factor: platform.FormFactor = .unknown,
+        chrome_tabs_projected: bool = false,
 
         pub fn create() !*Self {
             const allocator = std.heap.page_allocator;
@@ -125,6 +130,8 @@ pub fn UiAppHost(comptime AppDef: type) type {
             self.text_measure = .{};
             self.audio = .{};
             self.image = .{};
+            self.form_factor = .unknown;
+            self.chrome_tabs_projected = false;
             // In-place init + pointer-targeted model assignment:
             // `initModel()`'s result writes straight into the heap
             // struct via result-location semantics, so a multi-MB Model
@@ -188,6 +195,26 @@ pub fn UiAppHost(comptime AppDef: type) type {
         fn hostScene(context: *anyopaque) anyerror!app_manifest.ShellConfig {
             const self: *Self = @ptrCast(@alignCast(context));
             return self.ui.options.scene;
+        }
+
+        /// The app's declared platform-chrome tab set — the shell
+        /// metadata a projecting host builds a REAL native tab bar
+        /// from. Static manifest data, valid for the app's lifetime.
+        pub fn chromeTabs(self: *const Self) []const app_manifest.ShellTab {
+            return self.ui.options.scene.chrome.tabs;
+        }
+
+        /// The declared primary floating action, when the app declared
+        /// one beside its tab set.
+        pub fn chromePrimaryAction(self: *const Self) ?app_manifest.ShellPrimaryAction {
+            return self.ui.options.scene.chrome.primary_action;
+        }
+
+        /// The model's current selected tab id (the UiApp's
+        /// `selected_tab_fn` derivation, re-derived after every
+        /// rebuild) — what the projected bar mirrors.
+        pub fn chromeSelectedTab(self: *const Self) []const u8 {
+            return self.ui.chromeSelectedTab();
         }
 
         fn hostEvent(context: *anyopaque, runtime_value: *runtime.Runtime, event: runtime.Event) anyerror!void {

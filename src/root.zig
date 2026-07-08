@@ -91,6 +91,9 @@ pub const ShellWindow = app_manifest.ShellWindow;
 pub const ShellView = app_manifest.ShellView;
 pub const ShellEdge = app_manifest.ShellEdge;
 pub const ShellAxis = app_manifest.ShellAxis;
+pub const ShellTab = app_manifest.ShellTab;
+pub const ShellPrimaryAction = app_manifest.ShellPrimaryAction;
+pub const ShellChrome = app_manifest.ShellChrome;
 
 pub const WebViewSource = platform.WebViewSource;
 pub const WebViewSourceKind = platform.WebViewSourceKind;
@@ -121,6 +124,7 @@ pub const WindowState = platform.WindowState;
 pub const WindowRestorePolicy = platform.WindowRestorePolicy;
 pub const WindowTitlebarStyle = platform.WindowTitlebarStyle;
 pub const WindowChrome = platform.WindowChrome;
+pub const FormFactor = platform.FormFactor;
 pub const WindowDragRegion = platform.WindowDragRegion;
 pub const WindowShowMode = platform.WindowShowMode;
 pub const Menu = platform.Menu;

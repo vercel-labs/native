@@ -1421,9 +1421,26 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
 
 @end
 
-@interface NativeSdkCanvasViewController : UIViewController
+@interface NativeSdkCanvasViewController : UIViewController <UITabBarDelegate>
 @property(nonatomic) void *nativeApp;
 @property(nonatomic, strong) NativeSdkAudioEngine *audioEngine;
+/* Declared platform chrome (the app's shell-metadata tab set + optional
+ * primary action), projected as REAL native controls: an actual UITabBar
+ * with system styling and accessibility, and a real UIButton for the
+ * primary action. The canvas stays the full-bleed content region; the
+ * bar's overlap rides additionalSafeAreaInsets so the app's layout
+ * clears it through the existing chrome-inset channel. Selection is a
+ * PROJECTION of the model: each display tick polls
+ * native_sdk_app_chrome_selected_tab and moves the bar to match; a tap
+ * dispatches the tab's declared command id through
+ * native_sdk_app_command and the model answers — the bar is never the
+ * source of truth. */
+@property(nonatomic, strong) UITabBar *chromeTabBar;
+@property(nonatomic, copy) NSArray<NSString *> *chromeTabCommands;
+@property(nonatomic, strong) UIButton *chromeActionButton;
+@property(nonatomic, copy) NSString *chromeActionCommand;
+@property(nonatomic) NSInteger chromeSelectedIndex;
+@property(nonatomic) int reportedFormFactor;
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> commandQueue;
 @property(nonatomic, strong) id<MTLTexture> canvasTexture;
@@ -1575,9 +1592,19 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
         [self logNativeErrorIfAny:@"asset_root"];
     }
 
+    // Host chrome reports, filed BEFORE start so the pre-install chrome
+    // query already carries them: the size class the app can switch
+    // shells on (width derivation stays its fallback).
+    self.chromeSelectedIndex = -1;
+    [self reportFormFactor];
+
     native_sdk_app_start(self.nativeApp);
     native_sdk_app_activate(self.nativeApp);
     [self logNativeErrorIfAny:@"start"];
+
+    // Declared platform chrome: build the real system controls the shell
+    // metadata asks for (nothing when the app declares none).
+    [self installDeclaredChrome];
 
     self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(displayLinkTick:)];
     [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
@@ -1657,6 +1684,15 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     [self pushViewport];
 }
 
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    // Size-class flips (rotation on the larger phones, iPad multitasking)
+    // re-report the form factor; the layout pass that accompanies the
+    // trait change pushes the viewport, which delivers the changed
+    // chrome to the app.
+    [self reportFormFactor];
+}
+
 - (void)viewSafeAreaInsetsDidChange {
     [super viewSafeAreaInsetsDidChange];
     [self pushViewport];
@@ -1664,6 +1700,14 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
 
 // Report the view's size in points + contentScale + safe-area insets to the
 // embed host (keyboard insets stay zero: IME is M3).
+//
+// The projected tab bar's overlap folds into the reported BOTTOM inset
+// here rather than through additionalSafeAreaInsets: the bar is a
+// subview of this same view, so growing the controller's safe area
+// would propagate back INTO the bar and squeeze its own item layout.
+// The viewport export is the honest seam — the app pads for the bar
+// through the identical chrome channel it pads for the home indicator,
+// and the bar keeps the system's own safe-area geometry.
 - (void)pushViewport {
     if (!self.nativeApp) return;
     CGSize size = self.view.bounds.size;
@@ -1673,6 +1717,10 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     self.viewportScale = scale;
     [self metalLayer].contentsScale = scale;
     UIEdgeInsets safe = self.view.safeAreaInsets;
+    if (self.chromeTabBar && !CGRectIsEmpty(self.chromeTabBar.frame)) {
+        CGFloat bar_overlap = size.height - CGRectGetMinY(self.chromeTabBar.frame);
+        safe.bottom = MAX(safe.bottom, bar_overlap);
+    }
     native_sdk_app_viewport(self.nativeApp,
                              (float)size.width, (float)size.height, (float)scale,
                              (__bridge void *)[self metalLayer],
@@ -1697,6 +1745,11 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     // only after shim-forwarded input: focus can also move from keyboard
     // handling (tab/escape) or model updates.
     [[self canvasView] syncTextInput];
+
+    // The projected tab bar mirrors the MODEL's selected tab each tick
+    // (one integer readback): a Msg that moved the model moves the bar,
+    // and a tap the app ignored snaps the bar back — model truth wins.
+    [self syncDeclaredChromeSelection];
 
     // Only re-render + blit when the retained canvas actually changed.
     native_sdk_gpu_frame_state_t state = {0};
@@ -1918,6 +1971,198 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
                 (unsigned long long)((presentEndNs - presentBeginNs) / 1000));
     }
     return YES;
+}
+
+// ---------------------------------------------------- declared platform chrome
+//
+// The projection of ShellConfig.chrome onto REAL system controls. The
+// honest minimal integration with the single canvas surface: the canvas
+// view stays the root and full-bleed; a plain UITabBar (not a
+// UITabBarController — there is exactly one content view controller, so
+// a container would be a fiction) is pinned to the bottom edge as a
+// sibling overlay, and its overlap is folded into
+// additionalSafeAreaInsets so the app pads for it through the same
+// chrome channel it pads for the home indicator. Icons are the app's
+// own declared vocabulary glyphs, rasterized by the embed library
+// through the canvas vector core into template images the system tints
+// — the artwork is the app's, the bar's styling (background material,
+// selection tint, accessibility) is whatever the OS ships.
+
+/* A declared icon name -> template UIImage at the tab-bar glyph size,
+ * rasterized at the screen scale so the bar draws it crisp. Nil when the
+ * item declares no icon (a text-only tab stays honest). */
+- (UIImage *)chromeIconNamed:(const char *)name length:(uintptr_t)length {
+    if (!self.nativeApp || !name || length == 0) return nil;
+    const CGFloat points = 24;
+    CGFloat scale = UIScreen.mainScreen.scale > 0 ? UIScreen.mainScreen.scale : 1;
+    const uintptr_t pixels_per_side = (uintptr_t)llround(points * scale);
+    const uintptr_t byte_len = pixels_per_side * pixels_per_side * 4;
+    uint8_t *bytes = malloc(byte_len);
+    if (!bytes) return nil;
+    if (native_sdk_app_chrome_icon_pixels(self.nativeApp, name, length, pixels_per_side, bytes, byte_len) != 1) {
+        [self logNativeErrorIfAny:@"chrome_icon"];
+        free(bytes);
+        return nil;
+    }
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(bytes, pixels_per_side, pixels_per_side, 8, pixels_per_side * 4, space,
+                                                 kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGImageRef cg_image = context ? CGBitmapContextCreateImage(context) : NULL;
+    UIImage *image = nil;
+    if (cg_image) {
+        UIImage *raw = [UIImage imageWithCGImage:cg_image scale:scale orientation:UIImageOrientationUp];
+        /* Template mode: the system control owns the tint, exactly like
+         * an asset-catalog template icon. */
+        image = [raw imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        CGImageRelease(cg_image);
+    }
+    if (context) CGContextRelease(context);
+    CGColorSpaceRelease(space);
+    free(bytes);
+    return image;
+}
+
+- (void)installDeclaredChrome {
+    if (!self.nativeApp) return;
+    const uintptr_t tab_count = native_sdk_app_chrome_tab_count(self.nativeApp);
+    if (tab_count > 0) {
+        UITabBar *bar = [[UITabBar alloc] init];
+        bar.translatesAutoresizingMaskIntoConstraints = NO;
+        bar.delegate = self;
+        NSMutableArray<UITabBarItem *> *items = [NSMutableArray arrayWithCapacity:tab_count];
+        NSMutableArray<NSString *> *commands = [NSMutableArray arrayWithCapacity:tab_count];
+        for (uintptr_t index = 0; index < tab_count; index++) {
+            native_sdk_chrome_item_t item = {0};
+            if (native_sdk_app_chrome_tab_at(self.nativeApp, index, &item) != 1) continue;
+            NSString *identifier = item.id ? [[NSString alloc] initWithBytes:item.id length:item.id_len encoding:NSUTF8StringEncoding] : nil;
+            NSString *label = item.label ? [[NSString alloc] initWithBytes:item.label length:item.label_len encoding:NSUTF8StringEncoding] : nil;
+            if (!identifier || !label) continue;
+            UIImage *icon = [self chromeIconNamed:item.icon length:item.icon_len];
+            UITabBarItem *bar_item = [[UITabBarItem alloc] initWithTitle:label image:icon tag:(NSInteger)commands.count];
+            [items addObject:bar_item];
+            [commands addObject:identifier];
+        }
+        if (items.count > 0) {
+            bar.items = items;
+            [self.view addSubview:bar];
+            /* The bar spans the bottom edge INCLUDING the home-indicator
+             * band (its background material fills to the glass edge,
+             * like every system bar), with its top held the standard
+             * item-band height above the system safe area so the items
+             * keep their full band above the indicator. */
+            [NSLayoutConstraint activateConstraints:@[
+                [bar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+                [bar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+                [bar.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+                [bar.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-49],
+            ]];
+            self.chromeTabBar = bar;
+            self.chromeTabCommands = commands;
+            /* The chrome channel now says a native bar owns the tab
+             * affordance, so a canvas tab switcher can yield to it. */
+            native_sdk_app_set_chrome_tabs_projected(self.nativeApp, 1);
+            NSLog(@"native-sdk: declared chrome projected tabs=%lu", (unsigned long)items.count);
+            [self syncDeclaredChromeSelection];
+        }
+    }
+
+    native_sdk_chrome_item_t action = {0};
+    if (native_sdk_app_chrome_primary_action(self.nativeApp, &action) == 1) {
+        NSString *identifier = action.id ? [[NSString alloc] initWithBytes:action.id length:action.id_len encoding:NSUTF8StringEncoding] : nil;
+        NSString *label = action.label ? [[NSString alloc] initWithBytes:action.label length:action.label_len encoding:NSUTF8StringEncoding] : nil;
+        if (identifier && label) {
+            /* The one primary floating action: a real system button
+             * (filled circular configuration), floating above the
+             * content's bottom-trailing corner, clear of the bar. */
+            UIButtonConfiguration *configuration = [UIButtonConfiguration filledButtonConfiguration];
+            configuration.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+            UIImage *icon = [self chromeIconNamed:action.icon length:action.icon_len];
+            if (icon) configuration.image = icon;
+            UIButton *button = [UIButton buttonWithConfiguration:configuration primaryAction:nil];
+            if (!icon) [button setTitle:label forState:UIControlStateNormal];
+            button.translatesAutoresizingMaskIntoConstraints = NO;
+            button.accessibilityLabel = label;
+            [button addTarget:self action:@selector(chromeActionPressed:) forControlEvents:UIControlEventTouchUpInside];
+            [self.view addSubview:button];
+            NSLayoutYAxisAnchor *above = self.chromeTabBar ? self.chromeTabBar.topAnchor
+                                                           : self.view.safeAreaLayoutGuide.bottomAnchor;
+            [NSLayoutConstraint activateConstraints:@[
+                [button.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-16],
+                [button.bottomAnchor constraintEqualToAnchor:above constant:-16],
+                [button.widthAnchor constraintEqualToConstant:56],
+                [button.heightAnchor constraintEqualToConstant:56],
+            ]];
+            self.chromeActionButton = button;
+            self.chromeActionCommand = identifier;
+            NSLog(@"native-sdk: declared chrome projected primary action %@", identifier);
+        }
+    }
+}
+
+/* Model -> bar, once per display tick: one integer readback of the
+ * model's selected tab (via the app's selected_tab_fn derivation). The
+ * bar only ever moves here, so a model change lands visually within a
+ * tick and a tap the app ignored snaps back — deterministic both ways. */
+- (void)syncDeclaredChromeSelection {
+    if (!self.nativeApp || !self.chromeTabBar) return;
+    intptr_t selected = native_sdk_app_chrome_selected_tab(self.nativeApp);
+    if ((NSInteger)selected == self.chromeSelectedIndex) return;
+    self.chromeSelectedIndex = (NSInteger)selected;
+    if (selected >= 0 && (NSUInteger)selected < self.chromeTabBar.items.count) {
+        self.chromeTabBar.selectedItem = self.chromeTabBar.items[(NSUInteger)selected];
+    } else {
+        self.chromeTabBar.selectedItem = nil;
+    }
+    NSLog(@"native-sdk: chrome selected tab -> %ld", (long)selected);
+}
+
+/* Bar -> model: a tap dispatches the tab's declared command id through
+ * the embed command path (the same path native header buttons use); the
+ * app's on_command maps it to a Msg and update moves the model. The
+ * command dispatch is synchronous, so the model's answer is read back
+ * immediately and the bar lands on whatever the model decided. */
+- (void)tabBar:(UITabBar *)tabBar didSelectItem:(UITabBarItem *)item {
+    if (!self.nativeApp) return;
+    NSUInteger index = (NSUInteger)item.tag;
+    if (index >= self.chromeTabCommands.count) return;
+    NSString *command = self.chromeTabCommands[index];
+    NSLog(@"native-sdk: chrome tab tap -> command %@", command);
+    native_sdk_app_command(self.nativeApp, command.UTF8String, [command lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+    [self logNativeErrorIfAny:@"chrome_tab"];
+    /* Re-assert model truth now (not next tick): force the compare to
+     * re-read even when the model kept the same tab. */
+    self.chromeSelectedIndex = -2;
+    [self syncDeclaredChromeSelection];
+}
+
+- (void)chromeActionPressed:(UIButton *)sender {
+    (void)sender;
+    if (!self.nativeApp || self.chromeActionCommand.length == 0) return;
+    NSString *command = self.chromeActionCommand;
+    NSLog(@"native-sdk: chrome primary action -> command %@", command);
+    native_sdk_app_command(self.nativeApp, command.UTF8String, [command lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+    [self logNativeErrorIfAny:@"chrome_action"];
+}
+
+/* The host-reported form factor: the platform's own horizontal size
+ * class, reported over the window-chrome channel so apps switch shells
+ * on host truth (width derivation stays their fallback). */
+- (void)reportFormFactor {
+    if (!self.nativeApp) return;
+    int form_factor = NATIVE_SDK_FORM_FACTOR_UNKNOWN;
+    switch (self.traitCollection.horizontalSizeClass) {
+        case UIUserInterfaceSizeClassCompact: form_factor = NATIVE_SDK_FORM_FACTOR_COMPACT; break;
+        case UIUserInterfaceSizeClassRegular: form_factor = NATIVE_SDK_FORM_FACTOR_REGULAR; break;
+        default: break;
+    }
+    if (form_factor == self.reportedFormFactor) return;
+    self.reportedFormFactor = form_factor;
+    native_sdk_app_set_form_factor(self.nativeApp, form_factor);
+    [self logNativeErrorIfAny:@"form_factor"];
+    NSLog(@"native-sdk: form factor %s",
+          form_factor == NATIVE_SDK_FORM_FACTOR_COMPACT ? "compact"
+              : form_factor == NATIVE_SDK_FORM_FACTOR_REGULAR ? "regular"
+                                                              : "unknown");
 }
 
 - (void)logNativeErrorIfAny:(NSString *)stage {

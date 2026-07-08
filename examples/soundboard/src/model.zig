@@ -387,6 +387,20 @@ pub const Model = struct {
     /// bottom band to clear, so these stay untouched there.
     chrome_top: f32 = 0,
     chrome_bottom: f32 = 0,
+    /// The host-reported form factor from the window-chrome channel
+    /// (`chrome_changed`), null until a host reports one. When present
+    /// it OWNS the shell switch (`formFactor` below) and the width
+    /// derivation becomes the fallback for hosts that never report —
+    /// desktop windows, tests, older hosts. Sticky by design: a host
+    /// that reported once keeps its last report (an explicit `.unknown`
+    /// never arrives as a Msg payload worth erasing state over).
+    host_form_factor: ?FormFactor = null,
+    /// True while the host projects the declared chrome tabs as a REAL
+    /// native tab bar (`chrome_changed` carries the flag). The compact
+    /// header yields its in-canvas Albums/Songs switcher while set —
+    /// one tab affordance on screen, the system's — and keeps it
+    /// everywhere the declaration is inert.
+    native_tabs: bool = false,
     header_height: f32 = header_natural_height,
     /// The live canvas width, from `canvas_resized`. Seeds at the window
     /// min-width floor (see `min_canvas_width`) so pre-first-frame trees
@@ -486,7 +500,8 @@ pub const Model = struct {
         "seek_fraction",   "copies_done",    "copy_failed",
         "appearance",      "search_buffer",  "url_base_buffer",
         "cache_dir_buffer", "queue",         "covers",
-        "chrome_top",      "chrome_bottom",  "urlBase",
+        "chrome_top",      "chrome_bottom",  "host_form_factor",
+        "native_tabs",     "urlBase",
         "cacheDir",        "streamingConfigured", "searching",
         "colorScheme",     "hasNowPlaying",  "playingAlbum",
         "visibleAlbums",   "visibleTracks",  "miniBarVisible",
@@ -573,7 +588,13 @@ pub const Model = struct {
         return model.now != null;
     }
 
-    /// The width→shell rule, one strict comparison with no hysteresis:
+    /// The shell rule: the HOST-REPORTED form factor owns the switch
+    /// when a host has reported one (the window-chrome channel carries
+    /// it, so it arrived as a Msg and replays with the journal); the
+    /// width rule below is the fallback for hosts that never report —
+    /// desktop windows, tests, older hosts.
+    ///
+    /// The width fallback, one strict comparison with no hysteresis:
     /// COMPACT strictly below the desktop shell's proven min content
     /// width (`min_canvas_width` — the floor the desktop layout audit
     /// sweeps from), the desktop shell at the floor and above. The
@@ -581,9 +602,10 @@ pub const Model = struct {
     /// the desktop composition has never been proven clean on (desktop
     /// windows enforce the floor, so only phone-class surfaces ever
     /// report less), and exactly AT the floor the audit proves the
-    /// desktop shell clean. Derived from the per-frame surface width, so
+    /// desktop shell clean. Both inputs are per-frame model state, so
     /// the same Msg sequence always lands the same shell.
     pub fn formFactor(model: *const Model) FormFactor {
+        if (model.host_form_factor) |host| return host;
         return if (model.canvas_width < min_canvas_width) .compact else .regular;
     }
 
@@ -830,6 +852,18 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             // controls share the traffic lights' centerline; the natural
             // height is the floor when no band overlays the content.
             model.header_height = @max(header_natural_height, chrome.insets.top);
+            // Host-reported form factor: adopt when the host says one
+            // (sticky — see the field), leave the width fallback in
+            // charge when it never does.
+            switch (chrome.form_factor) {
+                .compact => model.host_form_factor = .compact,
+                .regular => model.host_form_factor = .regular,
+                .unknown => {},
+            }
+            // Whether a native bar owns the tab affordance right now:
+            // the compact header's switcher yields exactly while it is
+            // projected.
+            model.native_tabs = chrome.tabs_projected;
         },
         .canvas_resized => |width| model.canvas_width = width,
         .search_edit => |edit| model.search_buffer.apply(edit),

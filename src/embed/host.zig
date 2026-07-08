@@ -1,6 +1,7 @@
 const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
+const app_manifest = @import("app_manifest");
 const runtime = @import("../runtime/root.zig");
 const platform = @import("../platform/root.zig");
 const automation = @import("../automation/root.zig");
@@ -450,6 +451,11 @@ pub const MobileHostApp = struct {
     // registration `fx.registerImageBytes` reports UnsupportedService and
     // image/avatar widgets keep their fallback — never a bundled codec.
     image: MobileImage = .{},
+    /// Standing host chrome reports (see `setFormFactor` /
+    /// `setChromeTabsProjected`): composed into every viewport-driven
+    /// chrome publish.
+    form_factor: platform.FormFactor = .unknown,
+    chrome_tabs_projected: bool = false,
     last_command_name: [max_mobile_command_name_bytes + 1]u8 = [_]u8{0} ** (max_mobile_command_name_bytes + 1),
 
     pub fn create() !*MobileHostApp {
@@ -501,6 +507,8 @@ pub const MobileHostApp = struct {
         self.text_measure = .{};
         self.audio = .{};
         self.image = .{};
+        self.form_factor = .unknown;
+        self.chrome_tabs_projected = false;
         self.last_command_name = [_]u8{0} ** (max_mobile_command_name_bytes + 1);
         self.embedded.initInPlace(.{
             .context = self,
@@ -522,6 +530,25 @@ pub const MobileHostApp = struct {
 
     pub fn frame(self: *MobileHostApp) anyerror!void {
         try self.embedded.frame();
+    }
+
+    /// The fixed WebView shell declares no scene, so it declares no
+    /// platform chrome: the tab set is empty, there is no primary
+    /// action, and no selection exists — the honest zero a canvas-less
+    /// host answers the chrome ABI with.
+    pub fn chromeTabs(self: *const MobileHostApp) []const app_manifest.ShellTab {
+        _ = self;
+        return &.{};
+    }
+
+    pub fn chromePrimaryAction(self: *const MobileHostApp) ?app_manifest.ShellPrimaryAction {
+        _ = self;
+        return null;
+    }
+
+    pub fn chromeSelectedTab(self: *const MobileHostApp) []const u8 {
+        _ = self;
+        return "";
     }
 
     fn source(self: *MobileHostApp) platform.WebViewSource {
@@ -614,8 +641,35 @@ pub fn mobileApp(raw: ?*anyopaque) ?*MobileHostApp {
 /// the identical code path it pads for desktop chrome. The keyboard is
 /// input avoidance, not OS chrome, so it stays out of the report (the
 /// runtime keeps insetting layout by the keyboard's residual overlap).
+/// The host's standing chrome reports — form factor, projected declared
+/// tabs — ride every publish so a viewport push never erases them.
 pub fn publishViewportChrome(self: anytype, safe_area_insets: geometry.InsetsF) void {
-    self.null_platform.window_chrome = .{ .insets = safe_area_insets };
+    self.null_platform.window_chrome = .{
+        .insets = safe_area_insets,
+        .form_factor = self.form_factor,
+        .tabs_projected = self.chrome_tabs_projected,
+    };
+}
+
+/// Record the host-reported form factor (`native_sdk_app_set_form_factor`)
+/// on the window-chrome channel. The report is standing state: it
+/// composes into every later `publishViewportChrome` and updates the
+/// live chrome immediately, so the app's next chrome re-query (the
+/// resize the host's layout pass triggers, or the pre-install query)
+/// delivers it as an ordinary `on_chrome` Msg.
+pub fn setFormFactor(self: anytype, form_factor: platform.FormFactor) void {
+    self.form_factor = form_factor;
+    self.null_platform.window_chrome.form_factor = form_factor;
+}
+
+/// Record whether the host is projecting the app's declared chrome tabs
+/// as real native controls (`native_sdk_app_set_chrome_tabs_projected`).
+/// Standing state on the chrome channel, exactly like the form factor:
+/// an app whose canvas composes its own tab switcher yields it while
+/// this is set.
+pub fn setChromeTabsProjected(self: anytype, projected: bool) void {
+    self.chrome_tabs_projected = projected;
+    self.null_platform.window_chrome.tabs_projected = projected;
 }
 
 pub fn recordError(self: anytype, err: anyerror) void {

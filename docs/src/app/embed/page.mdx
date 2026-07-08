@@ -136,6 +136,31 @@ Mobile embedding uses the same runtime lifecycle through a thin native host:
 
 The mobile examples keep navigation/header UI in UIKit or Android views and keep rich content in `WKWebView` or Android `WebView`. Native header buttons and the Android system Back action dispatch command IDs through `native_sdk_app_command`, so mobile chrome can use the same command/event model as desktop menus, shortcuts, and native controls. App activation, safe areas, orientation, keyboard avoidance, back gestures, and platform lifecycle ownership stay in the native host. Keyboard changes are handled by native layout first and forwarded to the Native SDK as resize/frame work when the content surface changes. Mobile `ShellView` metadata maps to generated native host config for the header labels, command buttons, and WebView workspace; dynamic runtime view mutation remains a desktop API for now.
 
+## Declared platform chrome
+
+Apps can declare platform chrome — a tab set and optionally one primary floating action — in shell metadata (`ShellConfig.chrome` in a Zig scene, `.shell.chrome` in app.zon):
+
+```zig
+const scene: native_sdk.ShellConfig = .{
+    .windows = native_sdk.embed.mobile_shell_scene.windows,
+    .chrome = .{
+        .tabs = &.{
+            .{ .id = "tabs.albums", .label = "Albums", .icon = "app:albums" },
+            .{ .id = "tabs.songs", .label = "Songs", .icon = "music" },
+        },
+        .primary_action = .{ .id = "action.new", .label = "New", .icon = "plus" },
+    },
+};
+```
+
+On iOS the toolkit host projects the declaration as REAL native controls: an actual system tab bar and a real button, styled and made accessible by the OS — never imitated in canvas. Icons come from the icon vocabulary (built-in names, or `app:<name>` for icons the app registers) and are rasterized through the same vector core the canvas draws with into template images the system tints. The bar's overlap is folded into the safe-area insets the host already reports, so layout clears it through the existing `on_chrome` channel with no new code.
+
+Selection state lives in the app's model. A tab tap dispatches the tab's declared command id through `native_sdk_app_command` — the same path as native header buttons — and the app maps it to a Msg in `on_command`; the model's `selected_tab_fn` derivation drives which item the bar shows active. The bar is a projection of the model, never the source of truth, so the whole loop is deterministic and replays from the Msg journal.
+
+Where nothing projects the declaration it is honestly inert: desktop hosts today ignore it (desktop apps compose their own chrome in canvas), and Android projection is a later round. An app that also composes an in-canvas tab switcher can yield it while the chrome channel's `tabs_projected` flag is set, so exactly one tab affordance is ever on screen.
+
+The same chrome channel carries the host-reported form factor (`WindowChrome.form_factor`): the iOS host reports its horizontal size class (`compact`/`regular`), so apps that switch shells can prefer host truth and keep a width derivation as the fallback for hosts that never report.
+
 ## Testing with EmbeddedApp
 
 ```zig

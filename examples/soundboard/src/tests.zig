@@ -1963,6 +1963,110 @@ test "the form-factor rule: compact strictly below the desktop floor" {
     try testing.expectEqual(model_mod.FormFactor.compact, model.formFactor());
 }
 
+test "the host-reported form factor owns the shell switch when present" {
+    // The window-chrome channel's size-class report wins over the width
+    // derivation: a host that says compact gets the compact shell on
+    // any width, and one that says regular gets the desktop shell even
+    // on a phone-narrow surface. The width rule below stays exactly as
+    // pinned above for hosts that never report.
+    var model = Model{};
+    apply(&model, .{ .chrome_changed = .{ .insets = .{ .top = 47, .bottom = 34 }, .form_factor = .compact } });
+    model.canvas_width = main.window_width;
+    try testing.expectEqual(model_mod.FormFactor.compact, model.formFactor());
+
+    apply(&model, .{ .chrome_changed = .{ .insets = .{ .top = 24, .bottom = 20 }, .form_factor = .regular } });
+    model.canvas_width = phone_size.width;
+    try testing.expectEqual(model_mod.FormFactor.regular, model.formFactor());
+
+    // The report is sticky: a later chrome delivery that carries no
+    // size class (an ordinary inset change) keeps the last host truth.
+    apply(&model, .{ .chrome_changed = .{ .insets = .{ .top = 24, .bottom = 0 } } });
+    try testing.expectEqual(model_mod.FormFactor.regular, model.formFactor());
+}
+
+/// Whether any widget in a laid-out tree is a button showing this text
+/// (the compact switcher's Albums/Songs buttons carry text, not
+/// semantics labels).
+fn layoutHasButtonText(layout: canvas.WidgetLayoutTree, text: []const u8) bool {
+    for (layout.nodes) |node| {
+        if (node.widget.kind == .button and std.mem.eql(u8, node.widget.text, text)) return true;
+    }
+    return false;
+}
+
+test "the compact switcher yields to the projected native tab bar" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Without a projecting host the compact header keeps its in-canvas
+    // Albums/Songs switcher — the declaration is inert and the app is
+    // whole on its own.
+    var model = Model{};
+    model.canvas_width = phone_size.width;
+    var nodes: [1024]canvas.WidgetLayoutNode = undefined;
+    var tree = try buildTree(arena, &model);
+    var layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, phone_size.width, phone_size.height), &nodes);
+    try testing.expect(layoutHasButtonText(layout, "Albums"));
+    try testing.expect(layoutHasButtonText(layout, "Songs"));
+
+    // The chrome channel says a REAL native bar owns the tab affordance:
+    // the in-canvas switcher yields (one switcher on screen, the
+    // system's) while search keeps its full-width row.
+    apply(&model, .{ .chrome_changed = .{ .insets = .{ .top = 47, .bottom = 83 }, .form_factor = .compact, .tabs_projected = true } });
+    tree = try buildTree(arena, &model);
+    layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, phone_size.width, phone_size.height), &nodes);
+    try testing.expect(!layoutHasButtonText(layout, "Albums"));
+    try testing.expect(!layoutHasButtonText(layout, "Songs"));
+    var saw_search = false;
+    for (layout.nodes) |node| {
+        if (std.mem.eql(u8, node.widget.semantics.label, "Search library")) saw_search = true;
+    }
+    try testing.expect(saw_search);
+
+    // Navigation still flows through the same Msgs the bar's commands
+    // map to — the projected bar and the canvas switcher are the same
+    // journal entries.
+    apply(&model, .show_songs);
+    try testing.expectEqual(model_mod.Tab.songs, model.tab);
+
+    // And the bar going away (the report clearing) restores the
+    // in-canvas switcher: the yield is exactly as durable as the bar.
+    apply(&model, .{ .chrome_changed = .{ .insets = .{ .top = 47, .bottom = 34 }, .form_factor = .compact, .tabs_projected = false } });
+    apply(&model, .show_albums);
+    tree = try buildTree(arena, &model);
+    layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, phone_size.width, phone_size.height), &nodes);
+    try testing.expect(layoutHasButtonText(layout, "Albums"));
+}
+
+test "the declared mobile tab set projects the model and maps taps back" {
+    // The declaration: exactly the Albums/Songs pair, icons from the
+    // app's registered vocabulary plus a built-in, no primary action
+    // (the mini player owns the transport — a floating play control
+    // would project playback twice).
+    const options = main.mobileOptions();
+    const chrome = options.scene.chrome;
+    try testing.expectEqual(@as(usize, 2), chrome.tabs.len);
+    try testing.expectEqualStrings("tabs.albums", chrome.tabs[0].id);
+    try testing.expectEqualStrings("app:albums", chrome.tabs[0].icon);
+    try testing.expectEqualStrings("tabs.songs", chrome.tabs[1].id);
+    try testing.expectEqualStrings("music", chrome.tabs[1].icon);
+    try testing.expect(chrome.primary_action == null);
+    try native_sdk.app_manifest.validateShellChrome(chrome);
+
+    // Round trip: the model's selection derives each declared id, and
+    // the declared ids map back onto the exact Msgs the in-canvas
+    // switcher dispatches — one journal, two entry points.
+    var model = Model{};
+    try testing.expectEqualStrings("tabs.albums", main.selectedTab(&model));
+    apply(&model, main.onCommand("tabs.songs").?);
+    try testing.expectEqual(model_mod.Tab.songs, model.tab);
+    try testing.expectEqualStrings("tabs.songs", main.selectedTab(&model));
+    apply(&model, main.onCommand("tabs.albums").?);
+    try testing.expectEqual(model_mod.Tab.albums, model.tab);
+    try testing.expect(main.onCommand("tabs.unknown") == null);
+}
+
 test "the mobile entry is independent of the desktop window constants" {
     // The mobile scene is the canonical full-screen surface: no desktop
     // width, min-size floor, or titlebar constrains the phone.
@@ -2206,10 +2310,19 @@ test "one Msg journal drives both shells deterministically" {
         .close_album,
         .show_songs,
         .{ .canvas_resized = model_mod.compact_seed_canvas_width },
+        // The host-reported channel mid-journal: the size class takes
+        // the switch over from the width, the projected-tabs flag
+        // reshapes the compact header, and a later width Msg no longer
+        // moves the shell — all of it plain Msg data, so determinism
+        // holds through the host reports too.
+        .{ .chrome_changed = .{ .insets = .{ .top = 47, .bottom = 34 }, .form_factor = .regular } },
+        .{ .chrome_changed = .{ .insets = .{ .top = 47, .bottom = 83 }, .form_factor = .compact, .tabs_projected = true } },
+        .{ .canvas_resized = 1520 },
     };
     const expected_form = [journal.len]model_mod.FormFactor{
         .compact, .compact, .compact, .compact,
         .regular, .regular, .regular, .compact,
+        .regular, .compact,  .compact,
     };
 
     var first = Model{};

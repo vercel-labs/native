@@ -9,7 +9,8 @@
 //! now-playing rail); the COMPACT shell recomposes the same pieces for
 //! phone-class surfaces (stacked touch header, single-column content,
 //! a mini player, safe-area padding). The root view switches on the
-//! model's width-derived form factor — shell branching is Zig's job by
+//! model's form factor (host-reported size class when present, the
+//! width derivation as the fallback) — shell branching is Zig's job by
 //! design; the closed markup grammar has no conditionals.
 //!
 //! Zig-only sections remain what markup cannot express: rounded-square
@@ -121,11 +122,11 @@ pub fn compactGridFit(canvas_width: f32) GridFit {
 // ------------------------------------------------------------------ root
 
 pub fn rootView(ui: *Ui, model: *const Model) Ui.Node {
-    // The shell switch, on the model's width-derived form factor (the
-    // per-frame surface-width channel). When a host-reported size-class
-    // field lands, it replaces the width derivation inside
-    // `Model.formFactor` — this switch and both shells take the model
-    // unchanged, so the views never reshape.
+    // The shell switch, on the model's form factor: the host-reported
+    // size class when one arrived over the window-chrome channel, the
+    // width derivation as the fallback (`Model.formFactor` owns the
+    // rule). This switch and both shells take the model unchanged, so
+    // the views never reshaped when the host report landed.
     return switch (model.formFactor()) {
         .regular => desktopShell(ui, model),
         .compact => compactShell(ui, model),
@@ -553,16 +554,25 @@ fn compactShell(ui: *Ui, model: *const Model) Ui.Node {
 /// band, traffic-light spacers, a fixed trailing search column), so the
 /// compact shell composes its own. Search takes a full-width row of its
 /// own: reachable on every page without a persistent wide bar.
+///
+/// While the host projects the declared tab set as a REAL native tab
+/// bar (`model.native_tabs`, from the window-chrome channel), the
+/// in-canvas switcher yields — the system bar is the one tab affordance
+/// on screen — and only the search row remains. Everywhere the
+/// declaration is inert (no projecting host), the switcher stays.
 fn compactHeader(ui: *Ui, model: *const Model) Ui.Node {
     return ui.column(.{ .semantics = .{ .label = "Compact header" } }, .{
         ui.column(.{ .padding = compact_padding, .gap = 10 }, .{
-            ui.row(.{ .cross = .center }, .{
-                ui.el(.button_group, .{}, .{
-                    ui.button(.{ .size = .lg, .selected = model.albumsShowing(), .on_press = .show_albums }, "Albums"),
-                    ui.button(.{ .size = .lg, .selected = model.songsShowing(), .on_press = .show_songs }, "Songs"),
+            if (model.native_tabs)
+                ui.el(.stack, .{}, .{})
+            else
+                ui.row(.{ .cross = .center }, .{
+                    ui.el(.button_group, .{}, .{
+                        ui.button(.{ .size = .lg, .selected = model.albumsShowing(), .on_press = .show_albums }, "Albums"),
+                        ui.button(.{ .size = .lg, .selected = model.songsShowing(), .on_press = .show_songs }, "Songs"),
+                    }),
+                    ui.spacer(1),
                 }),
-                ui.spacer(1),
-            }),
             // The search field carries the built-in trailing clear
             // affordance whenever it holds text, same as the desktop
             // header's field — one binding, two shells.

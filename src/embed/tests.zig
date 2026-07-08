@@ -1986,3 +1986,281 @@ test "clearing the mobile image service returns to the honest decline" {
     try std.testing.expectEqual(error.UnsupportedService, self.ui.model.register_error.?);
     try std.testing.expectEqual(@as(usize, 0), recorder.decode_count);
 }
+
+// ------------------------------------------------------ declared platform chrome
+//
+// The declared-chrome seam end to end: the shell metadata's tab set and
+// primary action read back over the ABI, the model's selected_tab_fn
+// derivation projects as a declared index the host polls, taps dispatch
+// the declared command ids through the ordinary command path into
+// update, the host chrome reports (form factor, tabs-projected) ride
+// the window-chrome channel into on_chrome Msgs, icons rasterize as
+// template pixels through the canvas vector core, and the whole loop
+// replays deterministically — the same sequence into two fresh hosts
+// lands the same model and the same projected selection.
+
+const MobileTabsDef = struct {
+    pub const Model = struct {
+        tab: enum { feed, library } = .feed,
+        action_count: u32 = 0,
+        chrome_form_factor: platform.FormFactor = .unknown,
+        chrome_tabs_projected: bool = false,
+        chrome_bottom: f32 = 0,
+    };
+
+    pub const Msg = union(enum) {
+        show_feed,
+        show_library,
+        act,
+        chrome_changed: platform.WindowChrome,
+    };
+
+    const App = runtime.UiApp(Model, Msg);
+
+    const tabs = [_]@import("app_manifest").ShellTab{
+        .{ .id = "tabs.feed", .label = "Feed", .icon = "menu" },
+        .{ .id = "tabs.library", .label = "Library", .icon = "music" },
+    };
+
+    const scene: @import("app_manifest").ShellConfig = .{
+        .windows = ui_host.mobile_shell_scene.windows,
+        .chrome = .{
+            .tabs = &tabs,
+            .primary_action = .{ .id = "action.act", .label = "Act", .icon = "plus" },
+        },
+    };
+
+    pub fn initModel() Model {
+        return .{};
+    }
+
+    pub fn mobileOptions() App.Options {
+        return .{
+            .name = "mobile-tabs",
+            .scene = scene,
+            .canvas_label = mobile_gpu_surface_label,
+            .update = update,
+            .view = view,
+            .on_command = onCommand,
+            .on_chrome = onChrome,
+            .selected_tab_fn = selectedTab,
+        };
+    }
+
+    fn update(model: *Model, msg: Msg) void {
+        switch (msg) {
+            .show_feed => model.tab = .feed,
+            .show_library => model.tab = .library,
+            .act => model.action_count += 1,
+            .chrome_changed => |chrome_state| {
+                model.chrome_form_factor = chrome_state.form_factor;
+                model.chrome_tabs_projected = chrome_state.tabs_projected;
+                model.chrome_bottom = chrome_state.insets.bottom;
+            },
+        }
+    }
+
+    fn onCommand(name: []const u8) ?Msg {
+        if (std.mem.eql(u8, name, "tabs.feed")) return .show_feed;
+        if (std.mem.eql(u8, name, "tabs.library")) return .show_library;
+        if (std.mem.eql(u8, name, "action.act")) return .act;
+        return null;
+    }
+
+    fn onChrome(chrome_state: platform.WindowChrome) ?Msg {
+        return .{ .chrome_changed = chrome_state };
+    }
+
+    fn selectedTab(model: *const Model) []const u8 {
+        return switch (model.tab) {
+            .feed => "tabs.feed",
+            .library => "tabs.library",
+        };
+    }
+
+    fn view(ui: *App.Ui, model: *const Model) App.Ui.Node {
+        return ui.column(.{ .gap = 8, .padding = 12 }, .{
+            ui.text(.{}, switch (model.tab) {
+                .feed => "Feed page",
+                .library => "Library page",
+            }),
+            ui.text(.{}, ui.fmt("Acted {d}", .{model.action_count})),
+        });
+    }
+};
+
+const MobileTabsHost = ui_host.UiAppHost(MobileTabsDef);
+const MobileTabsApi = c_api.MobileCApi(MobileTabsHost);
+const MobileChromeItem = @import("chrome.zig").MobileChromeItem;
+
+fn chromeItemString(pointer: ?[*]const u8, len: usize) []const u8 {
+    const bytes = pointer orelse return "";
+    return bytes[0..len];
+}
+
+test "mobile C ABI exposes declared platform chrome and mirrors model selection" {
+    const app = MobileTabsApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileTabsApi.native_sdk_app_destroy(app);
+    const self: *MobileTabsHost = @ptrCast(@alignCast(app));
+
+    // The declaration reads back exactly as the scene states it.
+    try std.testing.expectEqual(@as(usize, 2), MobileTabsApi.native_sdk_app_chrome_tab_count(app));
+    var tab: MobileChromeItem = .{};
+    try std.testing.expectEqual(@as(c_int, 1), MobileTabsApi.native_sdk_app_chrome_tab_at(app, 0, &tab));
+    try std.testing.expectEqualStrings("tabs.feed", chromeItemString(tab.id, tab.id_len));
+    try std.testing.expectEqualStrings("Feed", chromeItemString(tab.label, tab.label_len));
+    try std.testing.expectEqualStrings("menu", chromeItemString(tab.icon, tab.icon_len));
+    try std.testing.expectEqual(@as(c_int, 0), MobileTabsApi.native_sdk_app_chrome_tab_at(app, 2, &tab));
+    var action: MobileChromeItem = .{};
+    try std.testing.expectEqual(@as(c_int, 1), MobileTabsApi.native_sdk_app_chrome_primary_action(app, &action));
+    try std.testing.expectEqualStrings("action.act", chromeItemString(action.id, action.id_len));
+
+    // Before the first rebuild no selection has been derived: the host
+    // projects "no selected item" honestly.
+    try std.testing.expectEqual(@as(isize, -1), MobileTabsApi.native_sdk_app_chrome_selected_tab(app));
+
+    MobileTabsApi.native_sdk_app_start(app);
+    var surface_token: u8 = 0;
+    MobileTabsApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileTabsApi.native_sdk_app_frame(app);
+    try std.testing.expect(self.ui.installed);
+
+    // The installing rebuild derived the model's selection.
+    try std.testing.expectEqual(@as(isize, 0), MobileTabsApi.native_sdk_app_chrome_selected_tab(app));
+
+    // A projected tap dispatches the declared command id through the
+    // ordinary command path; update moves the model and the projection
+    // follows on the same dispatch (synchronous).
+    MobileTabsApi.native_sdk_app_command(app, "tabs.library", "tabs.library".len);
+    try std.testing.expectEqual(.library, self.ui.model.tab);
+    try std.testing.expectEqual(@as(isize, 1), MobileTabsApi.native_sdk_app_chrome_selected_tab(app));
+
+    // The primary action dispatches like any command; selection holds.
+    MobileTabsApi.native_sdk_app_command(app, "action.act", "action.act".len);
+    try std.testing.expectEqual(@as(u32, 1), self.ui.model.action_count);
+    try std.testing.expectEqual(@as(isize, 1), MobileTabsApi.native_sdk_app_chrome_selected_tab(app));
+
+    // A programmatic Msg (no bar involved) moves the model; the next
+    // projection poll reads the new selection — the bar is downstream.
+    try self.embedded.runtime.dispatchCommand(self.embedded.app, .{ .name = "tabs.feed", .source = .menu, .window_id = 1 });
+    try std.testing.expectEqual(.feed, self.ui.model.tab);
+    try std.testing.expectEqual(@as(isize, 0), MobileTabsApi.native_sdk_app_chrome_selected_tab(app));
+}
+
+test "mobile host chrome reports ride the window-chrome channel" {
+    const app = MobileTabsApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileTabsApi.native_sdk_app_destroy(app);
+    const self: *MobileTabsHost = @ptrCast(@alignCast(app));
+
+    // The host files its standing reports before start (the iOS host's
+    // order): the pre-install chrome delivery already carries them.
+    try std.testing.expectEqual(@as(c_int, 1), MobileTabsApi.native_sdk_app_set_form_factor(app, 1));
+    try std.testing.expectEqual(@as(c_int, 1), MobileTabsApi.native_sdk_app_set_chrome_tabs_projected(app, 1));
+
+    MobileTabsApi.native_sdk_app_start(app);
+    var surface_token: u8 = 0;
+    MobileTabsApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 47, 0, 34, 0, 0, 0, 0, 0);
+    MobileTabsApi.native_sdk_app_frame(app);
+    try std.testing.expect(self.ui.installed);
+
+    // Both reports landed in the model as one on_chrome Msg, beside the
+    // safe-area insets the same channel always carried.
+    try std.testing.expectEqual(platform.FormFactor.compact, self.ui.model.chrome_form_factor);
+    try std.testing.expect(self.ui.model.chrome_tabs_projected);
+    try std.testing.expectEqual(@as(f32, 34), self.ui.model.chrome_bottom);
+
+    // A viewport push never erases the standing reports.
+    MobileTabsApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 47, 0, 40, 0, 0, 0, 0, 0);
+    MobileTabsApi.native_sdk_app_frame(app);
+    try std.testing.expectEqual(platform.FormFactor.compact, self.ui.model.chrome_form_factor);
+    try std.testing.expect(self.ui.model.chrome_tabs_projected);
+    try std.testing.expectEqual(@as(f32, 40), self.ui.model.chrome_bottom);
+
+    // The size-class flip arrives as a fresh chrome Msg with the next
+    // viewport-driven re-query (an iPad rotation's trait change).
+    try std.testing.expectEqual(@as(c_int, 1), MobileTabsApi.native_sdk_app_set_form_factor(app, 2));
+    MobileTabsApi.native_sdk_app_viewport(app, 1024, 768, 1, &surface_token, 24, 0, 20, 0, 0, 0, 0, 0);
+    MobileTabsApi.native_sdk_app_frame(app);
+    try std.testing.expectEqual(platform.FormFactor.regular, self.ui.model.chrome_form_factor);
+}
+
+test "chrome icon pixels rasterize declared vocabulary glyphs as templates" {
+    const app = MobileTabsApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileTabsApi.native_sdk_app_destroy(app);
+
+    const size: usize = 48;
+    var pixels: [size * size * 4]u8 = undefined;
+
+    // A built-in glyph inks alpha; color channels are premultiplied
+    // white (never exceeding alpha, equal at full coverage).
+    try std.testing.expectEqual(@as(c_int, 1), MobileTabsApi.native_sdk_app_chrome_icon_pixels(app, "plus", "plus".len, size, &pixels, pixels.len));
+    var ink: usize = 0;
+    var index: usize = 0;
+    while (index < pixels.len) : (index += 4) {
+        const alpha = pixels[index + 3];
+        if (alpha > 0) ink += 1;
+        try std.testing.expectEqual(alpha, pixels[index]);
+        try std.testing.expectEqual(alpha, pixels[index + 1]);
+        try std.testing.expectEqual(alpha, pixels[index + 2]);
+    }
+    try std.testing.expect(ink > 40);
+
+    // Determinism: the same request renders identical bytes.
+    var second: [size * size * 4]u8 = undefined;
+    try std.testing.expectEqual(@as(c_int, 1), MobileTabsApi.native_sdk_app_chrome_icon_pixels(app, "plus", "plus".len, size, &second, second.len));
+    try std.testing.expectEqualSlices(u8, &pixels, &second);
+
+    // An unresolvable name renders the honest missing glyph — visible,
+    // never an empty image.
+    try std.testing.expectEqual(@as(c_int, 1), MobileTabsApi.native_sdk_app_chrome_icon_pixels(app, "no-such-glyph", "no-such-glyph".len, size, &pixels, pixels.len));
+    ink = 0;
+    index = 3;
+    while (index < pixels.len) : (index += 4) {
+        if (pixels[index] > 0) ink += 1;
+    }
+    try std.testing.expect(ink > 40);
+
+    // Structurally invalid requests are refused loudly.
+    try std.testing.expectEqual(@as(c_int, 0), MobileTabsApi.native_sdk_app_chrome_icon_pixels(app, "plus", "plus".len, 0, &pixels, pixels.len));
+    try std.testing.expectEqualStrings("InvalidIconRequest", std.mem.span(MobileTabsApi.native_sdk_app_last_error_name(app)));
+    try std.testing.expectEqual(@as(c_int, 0), MobileTabsApi.native_sdk_app_chrome_icon_pixels(app, "plus", "plus".len, size, &pixels, pixels.len - 1));
+    try std.testing.expectEqual(@as(c_int, 0), MobileTabsApi.native_sdk_app_chrome_icon_pixels(app, "", 0, size, &pixels, pixels.len));
+}
+
+test "declared chrome projection replays deterministically" {
+    // One driving sequence into two fresh hosts: identical model state
+    // and identical projected selection at every step — the projection
+    // is a pure function of the Msg journal, so record/replay holds for
+    // the native bar exactly as it does for the canvas.
+    var selected_a: [8]isize = undefined;
+    var selected_b: [8]isize = undefined;
+    var model_a: MobileTabsDef.Model = undefined;
+    var model_b: MobileTabsDef.Model = undefined;
+
+    for (0..2) |round| {
+        const app = MobileTabsApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+        defer MobileTabsApi.native_sdk_app_destroy(app);
+        const self: *MobileTabsHost = @ptrCast(@alignCast(app));
+        const selected = if (round == 0) &selected_a else &selected_b;
+
+        _ = MobileTabsApi.native_sdk_app_set_form_factor(app, 1);
+        _ = MobileTabsApi.native_sdk_app_set_chrome_tabs_projected(app, 1);
+        MobileTabsApi.native_sdk_app_start(app);
+        var surface_token: u8 = 0;
+        MobileTabsApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 47, 0, 34, 0, 0, 0, 0, 0);
+        MobileTabsApi.native_sdk_app_frame(app);
+        selected[0] = MobileTabsApi.native_sdk_app_chrome_selected_tab(app);
+
+        const journal = [_][]const u8{ "tabs.library", "action.act", "tabs.feed", "tabs.library", "action.act" };
+        for (journal, 1..) |command_name, step| {
+            MobileTabsApi.native_sdk_app_command(app, command_name.ptr, command_name.len);
+            selected[step] = MobileTabsApi.native_sdk_app_chrome_selected_tab(app);
+        }
+        selected[journal.len + 1] = MobileTabsApi.native_sdk_app_chrome_selected_tab(app);
+        selected[journal.len + 2] = @intCast(self.ui.model.action_count);
+        if (round == 0) model_a = self.ui.model else model_b = self.ui.model;
+    }
+
+    try std.testing.expectEqualSlices(isize, &selected_a, &selected_b);
+    try std.testing.expectEqualDeep(model_a, model_b);
+}

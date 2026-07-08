@@ -56,6 +56,26 @@ typedef struct native_sdk_canvas_pixels {
   uintptr_t byte_len;
 } native_sdk_canvas_pixels_t;
 
+// Form-factor ordinals accepted by native_sdk_app_set_form_factor.
+enum {
+  NATIVE_SDK_FORM_FACTOR_UNKNOWN = 0,
+  NATIVE_SDK_FORM_FACTOR_COMPACT = 1,
+  NATIVE_SDK_FORM_FACTOR_REGULAR = 2,
+};
+
+// One declared platform-chrome tab (or the primary action) from the
+// app's shell metadata. Strings reference static app data (valid for
+// the app's lifetime, not NUL-terminated). Layout mirrors
+// src/embed/chrome.zig MobileChromeItem.
+typedef struct native_sdk_chrome_item {
+  const char *id;
+  uintptr_t id_len;
+  const char *label;
+  uintptr_t label_len;
+  const char *icon;
+  uintptr_t icon_len;
+} native_sdk_chrome_item_t;
+
 typedef struct native_sdk_text_input_state {
   int active;
   uint64_t widget_id;
@@ -202,6 +222,26 @@ void native_sdk_app_set_asset_root(void *app, const char *path, uintptr_t len);
 uintptr_t native_sdk_app_widget_semantics_count(void *app);
 int native_sdk_app_widget_semantics_at(void *app, uintptr_t index, native_sdk_widget_semantics_t *out);
 int native_sdk_app_widget_semantics_by_id(void *app, uint64_t id, native_sdk_widget_semantics_t *out);
+// Declared platform chrome (the app's shell-metadata tab set + optional
+// primary action): the host queries the declaration once at startup,
+// builds REAL native controls, polls the model-selected tab index each
+// frame (-1 = none), and dispatches taps back through
+// native_sdk_app_command with the declared ids. The icon rasterizer
+// renders a declared icon-vocabulary glyph as premultiplied white on
+// transparent RGBA8 (size_px * size_px * 4 bytes) — a template image
+// the system control tints.
+uintptr_t native_sdk_app_chrome_tab_count(void *app);
+int native_sdk_app_chrome_tab_at(void *app, uintptr_t index, native_sdk_chrome_item_t *out);
+int native_sdk_app_chrome_primary_action(void *app, native_sdk_chrome_item_t *out);
+intptr_t native_sdk_app_chrome_selected_tab(void *app);
+int native_sdk_app_chrome_icon_pixels(void *app, const char *name, uintptr_t name_len, uintptr_t size_px, uint8_t *pixels, uintptr_t pixels_len);
+// Tab taps travel the same command path as native header buttons.
+void native_sdk_app_command(void *app, const char *name, uintptr_t len);
+// Host chrome reports on the window-chrome channel: the reported form
+// factor (host truth apps prefer over width derivation) and whether the
+// declared tabs are currently projected as native controls.
+int native_sdk_app_set_form_factor(void *app, int form_factor);
+int native_sdk_app_set_chrome_tabs_projected(void *app, int projected);
 
 #ifdef __cplusplus
 }

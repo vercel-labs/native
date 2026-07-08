@@ -84,6 +84,24 @@ pub const RawWindow = struct {
 
 pub const RawShell = struct {
     windows: []const RawShellWindow = &.{},
+    chrome: RawShellChrome = .{},
+};
+
+pub const RawShellChrome = struct {
+    tabs: []const RawShellTab = &.{},
+    primary_action: ?RawShellPrimaryAction = null,
+};
+
+pub const RawShellTab = struct {
+    id: []const u8,
+    label: []const u8,
+    icon: []const u8 = "",
+};
+
+pub const RawShellPrimaryAction = struct {
+    id: []const u8,
+    label: []const u8,
+    icon: []const u8 = "",
 };
 
 pub const RawShellWindow = struct {

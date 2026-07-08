@@ -376,6 +376,23 @@ pub const WindowTitlebarStyle = enum {
     hidden_inset_tall,
 };
 
+/// The host-reported form factor (size class) of the surface an app
+/// runs on, riding the window-chrome channel beside the inset geometry.
+/// `.unknown` is the honest default everywhere the host has not said —
+/// desktop windows, tests, hosts that predate the report — so apps keep
+/// their own width-derived fallback and a missing report never lies.
+/// Mobile hosts report the platform's real size class (UIKit's
+/// horizontal size class on iOS): `.compact` is the phone-class shape,
+/// `.regular` the tablet/desktop-class one. Because the report arrives
+/// through the same chrome channel apps already map into a Msg, the
+/// value lives in the model and replays deterministically with the rest
+/// of the journal.
+pub const FormFactor = enum(u8) {
+    unknown,
+    compact,
+    regular,
+};
+
 /// What `window_chrome_fn` reports for a window: where OS window chrome
 /// overlays the app's content, so a hidden-titlebar header can pad AND
 /// vertically center against it honestly instead of hardcoding pixel
@@ -400,6 +417,19 @@ pub const WindowChrome = struct {
     /// (`buttons.y + buttons.height / 2` is their centerline).
     /// Zero-sized when no controls overlay the content.
     buttons: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
+    /// The host-reported form factor of the surface, `.unknown` when the
+    /// host reports none (desktop windows, tests). Apps that switch
+    /// shells on width keep that derivation as the fallback and prefer
+    /// this field when present.
+    form_factor: FormFactor = .unknown,
+    /// True while the host projects the app's declared chrome tabs
+    /// (`ShellConfig.chrome.tabs`) as REAL native controls — an actual
+    /// system tab bar owning the tab affordance. An app whose canvas
+    /// composes its own tab switcher yields it when this is set (the
+    /// native bar is the one switcher) and keeps it everywhere the
+    /// declaration is inert. Rides the chrome channel so the flag lands
+    /// in the model as a Msg and replays with the journal.
+    tabs_projected: bool = false,
 };
 
 /// One rectangle of a window's DRAG-REGION mirror (`window-drag="true"`

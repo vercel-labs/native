@@ -13,6 +13,7 @@ const std = @import("std");
 const geometry = @import("geometry");
 const types = @import("types.zig");
 const host = @import("host.zig");
+const chrome = @import("chrome.zig");
 const conversions = @import("conversions.zig");
 
 const MobileHostApp = host.MobileHostApp;
@@ -320,6 +321,114 @@ pub fn MobileCApi(comptime Host: type) type {
             self.frame() catch |err| recordError(self, err);
         }
 
+        // ------------------------------------------- declared platform chrome
+        //
+        // The read side of `ShellConfig.chrome`: a projecting host
+        // queries the declared tab set and primary action once at
+        // startup, builds REAL native controls from them, then polls the
+        // selected index each frame to keep the bar a projection of the
+        // model. Taps dispatch back through `native_sdk_app_command`
+        // with the declared ids — the same command path the mobile
+        // shell's native header buttons use — so selection state lives
+        // in the model and replays deterministically.
+
+        /// Number of declared platform-chrome tabs (0 when the app
+        /// declares none — the host projects no bar).
+        pub fn native_sdk_app_chrome_tab_count(app: ?*anyopaque) callconv(.c) usize {
+            const self = hostApp(Host, app) orelse return 0;
+            return self.chromeTabs().len;
+        }
+
+        /// One declared tab by index. The returned strings reference the
+        /// app's static shell metadata (valid for the app's lifetime).
+        pub fn native_sdk_app_chrome_tab_at(app: ?*anyopaque, index: usize, out: ?*chrome.MobileChromeItem) callconv(.c) c_int {
+            const self = hostApp(Host, app) orelse return 0;
+            const output = out orelse {
+                recordError(self, error.InvalidCommand);
+                return 0;
+            };
+            const tabs = self.chromeTabs();
+            if (index >= tabs.len) {
+                recordError(self, error.InvalidCommand);
+                return 0;
+            }
+            output.* = chrome.chromeItemFromTab(tabs[index]);
+            self.last_error = null;
+            return 1;
+        }
+
+        /// The declared primary floating action: 1 with `out` filled
+        /// when the app declared one, 0 when it did not (not an error).
+        pub fn native_sdk_app_chrome_primary_action(app: ?*anyopaque, out: ?*chrome.MobileChromeItem) callconv(.c) c_int {
+            const self = hostApp(Host, app) orelse return 0;
+            const output = out orelse {
+                recordError(self, error.InvalidCommand);
+                return 0;
+            };
+            const action = self.chromePrimaryAction() orelse return 0;
+            output.* = chrome.chromeItemFromAction(action);
+            self.last_error = null;
+            return 1;
+        }
+
+        /// The declared index of the tab the MODEL currently selects
+        /// (the app's `selected_tab_fn` derivation), or -1 when the
+        /// selection names no declared tab. The host's per-frame
+        /// projection poll: when this differs from the native bar's
+        /// selected item, the bar moves — never the other way around.
+        pub fn native_sdk_app_chrome_selected_tab(app: ?*anyopaque) callconv(.c) isize {
+            const self = hostApp(Host, app) orelse return -1;
+            return chrome.selectedTabIndex(self.chromeTabs(), self.chromeSelectedTab());
+        }
+
+        /// Rasterize a declared icon-vocabulary glyph (a tab's or the
+        /// primary action's `icon`) into the caller's tightly packed
+        /// `size_px` x `size_px` RGBA8 buffer as premultiplied white on
+        /// transparent — the template image shape system controls tint.
+        /// Renders through the same vector core the canvas draws with;
+        /// an unresolvable name renders the honest missing glyph.
+        pub fn native_sdk_app_chrome_icon_pixels(app: ?*anyopaque, name: ?[*]const u8, name_len: usize, size_px: usize, pixels: ?[*]u8, pixels_len: usize) callconv(.c) c_int {
+            const self = hostApp(Host, app) orelse return 0;
+            const name_value = inputSlice(name, name_len) catch |err| {
+                recordError(self, err);
+                return 0;
+            };
+            const buffer = pixels orelse {
+                recordError(self, error.InvalidCommand);
+                return 0;
+            };
+            chrome.renderIconPixels(name_value, size_px, buffer[0..pixels_len]) catch |err| {
+                recordError(self, err);
+                return 0;
+            };
+            self.last_error = null;
+            return 1;
+        }
+
+        /// Record the host-reported form factor (0 unknown, 1 compact,
+        /// 2 regular) on the window-chrome channel: it rides the next
+        /// chrome delivery into the app's `on_chrome` Msg, beside the
+        /// safe-area insets, so apps switch shells on a host-reported
+        /// field with width derivation as their fallback. Standing
+        /// state — later viewport pushes keep it.
+        pub fn native_sdk_app_set_form_factor(app: ?*anyopaque, form_factor: c_int) callconv(.c) c_int {
+            const self = hostApp(Host, app) orelse return 0;
+            host.setFormFactor(self, chrome.formFactorFromInt(form_factor));
+            self.last_error = null;
+            return 1;
+        }
+
+        /// Record whether the host projects the declared chrome tabs as
+        /// real native controls (nonzero = projected). Rides the chrome
+        /// channel like the form factor, so an app's canvas tab switcher
+        /// can yield to the native bar exactly while one exists.
+        pub fn native_sdk_app_set_chrome_tabs_projected(app: ?*anyopaque, projected: c_int) callconv(.c) c_int {
+            const self = hostApp(Host, app) orelse return 0;
+            host.setChromeTabsProjected(self, projected != 0);
+            self.last_error = null;
+            return 1;
+        }
+
         pub fn native_sdk_app_set_asset_root(app: ?*anyopaque, path: [*]const u8, len: usize) callconv(.c) void {
             const self = hostApp(Host, app) orelse return;
             if (len > self.asset_root.len) {
@@ -557,6 +666,13 @@ pub const native_sdk_app_text = FixedShellApi.native_sdk_app_text;
 pub const native_sdk_app_ime = FixedShellApi.native_sdk_app_ime;
 pub const native_sdk_app_command = FixedShellApi.native_sdk_app_command;
 pub const native_sdk_app_frame = FixedShellApi.native_sdk_app_frame;
+pub const native_sdk_app_chrome_tab_count = FixedShellApi.native_sdk_app_chrome_tab_count;
+pub const native_sdk_app_chrome_tab_at = FixedShellApi.native_sdk_app_chrome_tab_at;
+pub const native_sdk_app_chrome_primary_action = FixedShellApi.native_sdk_app_chrome_primary_action;
+pub const native_sdk_app_chrome_selected_tab = FixedShellApi.native_sdk_app_chrome_selected_tab;
+pub const native_sdk_app_chrome_icon_pixels = FixedShellApi.native_sdk_app_chrome_icon_pixels;
+pub const native_sdk_app_set_form_factor = FixedShellApi.native_sdk_app_set_form_factor;
+pub const native_sdk_app_set_chrome_tabs_projected = FixedShellApi.native_sdk_app_set_chrome_tabs_projected;
 pub const native_sdk_app_set_asset_root = FixedShellApi.native_sdk_app_set_asset_root;
 pub const native_sdk_app_set_asset_entry = FixedShellApi.native_sdk_app_set_asset_entry;
 pub const native_sdk_app_last_command_count = FixedShellApi.native_sdk_app_last_command_count;

@@ -12,7 +12,8 @@
 //! native context menus. `src/view.zig` composes both kinds under one
 //! root — the DESKTOP shell — and recomposes the same shared content
 //! pieces into a COMPACT shell for phone-class surfaces (the root view
-//! switches on the model's width-derived form factor). Widget identity,
+//! switches on the model's form factor: host-reported size class when
+//! present, width-derived as the fallback). Widget identity,
 //! dispatch, and theming behave exactly as in a single-source view in
 //! both shells.
 
@@ -77,6 +78,11 @@ pub const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
 /// contract's source hash covers icon changes-adjacent code).
 const waveform_icon = canvas.svg_icon.parseComptime(@embedFile("icons/waveform.svg"));
 
+/// The album-grid glyph for the declared mobile tab bar (a 2x2 tile
+/// grid): tab icons come from the registered app-icon vocabulary, so
+/// the projected native bar tints the app's own artwork.
+const albums_icon = canvas.svg_icon.parseComptime(@embedFile("icons/albums.svg"));
+
 /// The registered icon table: ONE declaration feeds boot-time
 /// registration (`registerIcons`, called from main and the test
 /// harness) AND the model contract's `app_icons` list (the emit step
@@ -84,6 +90,7 @@ const waveform_icon = canvas.svg_icon.parseComptime(@embedFile("icons/waveform.s
 /// by `native check` against exactly what the app registers.
 pub const app_icons = [_]canvas.icons.Entry{
     .{ .name = "waveform", .icon = &waveform_icon },
+    .{ .name = "albums", .icon = &albums_icon },
 };
 
 /// Install the app icon table; once, before views build (main does it
@@ -370,10 +377,51 @@ fn embedEnvValue(name: [*:0]const u8) ?[]const u8 {
     return std.mem.span(value);
 }
 
+/// Declared platform chrome for the mobile scene: the Albums/Songs
+/// navigation as a REAL system tab bar (the canonical music-app shape).
+/// The ids are command ids — a projected tap dispatches them through
+/// `onCommand` into the same `show_albums`/`show_songs` Msgs the
+/// in-canvas switcher sends, and `selectedTab` mirrors `model.tab` back
+/// so the bar always projects the model. No primary floating action on
+/// purpose: the transport lives in the mini player bar, and a floating
+/// play control would project playback twice.
+const mobile_tab_albums_command = "tabs.albums";
+const mobile_tab_songs_command = "tabs.songs";
+
+const mobile_chrome_tabs = [_]native_sdk.ShellTab{
+    .{ .id = mobile_tab_albums_command, .label = "Albums", .icon = "app:albums" },
+    .{ .id = mobile_tab_songs_command, .label = "Songs", .icon = "music" },
+};
+
+/// The canonical single-surface mobile scene plus the declared chrome.
+const mobile_scene: native_sdk.ShellConfig = .{
+    .windows = native_sdk.embed.mobile_shell_scene.windows,
+    .chrome = .{ .tabs = &mobile_chrome_tabs },
+};
+
+/// Projected chrome taps arrive as command events with the declared
+/// tab ids; they map onto the exact Msgs the canvas switcher dispatches,
+/// so the two entry points are indistinguishable in the journal.
+pub fn onCommand(name: []const u8) ?Msg {
+    if (std.mem.eql(u8, name, mobile_tab_albums_command)) return .show_albums;
+    if (std.mem.eql(u8, name, mobile_tab_songs_command)) return .show_songs;
+    return null;
+}
+
+/// The model's selected tab as its declared command id — the projection
+/// the native bar mirrors (an open album detail is still the Albums
+/// tab, exactly like the in-canvas switcher's selected state).
+pub fn selectedTab(model: *const Model) []const u8 {
+    return switch (model.tab) {
+        .albums => mobile_tab_albums_command,
+        .songs => mobile_tab_songs_command,
+    };
+}
+
 pub fn mobileOptions() SoundboardApp.Options {
     return .{
         .name = "soundboard",
-        .scene = native_sdk.embed.mobile_shell_scene,
+        .scene = mobile_scene,
         .canvas_label = native_sdk.embed.mobile_gpu_surface_label,
         .update_fx = update,
         .view = rootView,
@@ -381,6 +429,8 @@ pub fn mobileOptions() SoundboardApp.Options {
         .tokens_fn = tokensFromModel,
         .on_appearance = onAppearance,
         .on_chrome = onChrome,
+        .on_command = onCommand,
+        .selected_tab_fn = selectedTab,
         .on_key = onKey,
         .on_frame = onFrame,
         .animations = animations,

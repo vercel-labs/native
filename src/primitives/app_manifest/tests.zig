@@ -214,6 +214,72 @@ test "manifest validates shell windows and views" {
     }));
 }
 
+test "manifest validates declared platform chrome" {
+    // A well-formed declaration: two to max_shell_tabs tabs, unique
+    // command ids, control-title labels, vocabulary icon names (bare or
+    // app:-namespaced), and one optional primary action.
+    const tabs = [_]types.ShellTab{
+        .{ .id = "tabs.albums", .label = "Albums", .icon = "app:albums" },
+        .{ .id = "tabs.songs", .label = "Songs", .icon = "music" },
+    };
+    try validateShell(.{ .chrome = .{
+        .tabs = &tabs,
+        .primary_action = .{ .id = "action.play", .label = "Play", .icon = "play" },
+    } }, &.{});
+
+    // One tab is not a choice: the platform tab-bar idiom starts at two.
+    const one_tab = [_]types.ShellTab{.{ .id = "tabs.only", .label = "Only" }};
+    try std.testing.expectError(error.InvalidLayout, validateShell(.{ .chrome = .{ .tabs = &one_tab } }, &.{}));
+
+    // More destinations than a real system bar holds are refused at
+    // validation, not squeezed at runtime.
+    const too_many = [_]types.ShellTab{
+        .{ .id = "t.a", .label = "A" }, .{ .id = "t.b", .label = "B" },
+        .{ .id = "t.c", .label = "C" }, .{ .id = "t.d", .label = "D" },
+        .{ .id = "t.e", .label = "E" }, .{ .id = "t.f", .label = "F" },
+    };
+    try std.testing.expectError(error.InvalidLayout, validateShell(.{ .chrome = .{ .tabs = &too_many } }, &.{}));
+
+    // Every declared control dispatches through the one command path,
+    // so ids must be unique across the whole declaration — tabs against
+    // tabs, and the action against the tabs.
+    const duplicate_tabs = [_]types.ShellTab{
+        .{ .id = "tabs.same", .label = "One" },
+        .{ .id = "tabs.same", .label = "Two" },
+    };
+    try std.testing.expectError(error.DuplicateCommand, validateShell(.{ .chrome = .{ .tabs = &duplicate_tabs } }, &.{}));
+    try std.testing.expectError(error.DuplicateCommand, validateShell(.{ .chrome = .{
+        .tabs = &tabs,
+        .primary_action = .{ .id = "tabs.albums", .label = "Albums again" },
+    } }, &.{}));
+
+    // Labels are required control titles; icons are vocabulary NAMES
+    // (never paths), with an optional app: namespace whose remainder
+    // must still be a name.
+    const empty_label = [_]types.ShellTab{
+        .{ .id = "tabs.a", .label = "" },
+        .{ .id = "tabs.b", .label = "B" },
+    };
+    try std.testing.expectError(error.InvalidName, validateShell(.{ .chrome = .{ .tabs = &empty_label } }, &.{}));
+    const path_icon = [_]types.ShellTab{
+        .{ .id = "tabs.a", .label = "A", .icon = "assets/icons/a.svg" },
+        .{ .id = "tabs.b", .label = "B" },
+    };
+    try std.testing.expectError(error.InvalidName, validateShell(.{ .chrome = .{ .tabs = &path_icon } }, &.{}));
+    const empty_namespace = [_]types.ShellTab{
+        .{ .id = "tabs.a", .label = "A", .icon = "app:" },
+        .{ .id = "tabs.b", .label = "B" },
+    };
+    try std.testing.expectError(error.InvalidName, validateShell(.{ .chrome = .{ .tabs = &empty_namespace } }, &.{}));
+
+    // Ids are command ids, capped and charset-checked like every other.
+    const bad_id = [_]types.ShellTab{
+        .{ .id = "", .label = "A" },
+        .{ .id = "tabs.b", .label = "B" },
+    };
+    try std.testing.expectError(error.InvalidCommand, validateShell(.{ .chrome = .{ .tabs = &bad_id } }, &.{}));
+}
+
 test "manifest validates keyboard shortcuts" {
     const manifest: Manifest = .{
         .identity = .{ .id = "com.example.app", .name = "example" },

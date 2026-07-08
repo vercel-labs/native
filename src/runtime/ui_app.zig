@@ -466,6 +466,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// Optional mapping from shell command events (menus, shortcuts,
             /// native controls) into messages.
             on_command: ?*const fn (name: []const u8) ?MsgT = null,
+            /// Model-driven selection for declared platform chrome
+            /// (`scene.chrome.tabs`): returns the id of the tab the
+            /// model currently selects (one of the declared tab ids, or
+            /// "" for none). Consulted on install and after every
+            /// rebuild — the `status_item_fn` shape — and read by
+            /// projecting hosts through `chromeSelectedTab()`, so the
+            /// native bar is always a projection of the model: a tap
+            /// dispatches the tab's command id through `on_command`,
+            /// update moves the model, and this derivation moves the
+            /// bar. The bar itself is never the source of truth.
+            selected_tab_fn: ?*const fn (model: *const ModelT) []const u8 = null,
             /// Optional app-level key FALLBACK for canvas keyboard
             /// input: consulted for a key_down only after widget
             /// routing declines it. The precedence rule (enforced in
@@ -668,6 +679,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// (fullscreen transitions flip it; ordinary resizes do not).
         window_chrome: platform.WindowChrome = .{},
         window_chrome_known: bool = false,
+        /// The model's current selected chrome tab id (`selected_tab_fn`
+        /// re-derived after every rebuild), stored so projecting hosts
+        /// can poll `chromeSelectedTab()` between frames without touching
+        /// the model. Command ids are capped by the manifest vocabulary.
+        chrome_selected_tab_storage: [app_manifest.max_command_id_bytes]u8 = undefined,
+        chrome_selected_tab_len: usize = 0,
         /// The system appearance the platform last reported (delivered
         /// before the first view build, then on every OS-side change).
         /// The stock token derivation reads it when the app sets neither
@@ -1232,6 +1249,29 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.applyWebPanes(runtime, window_id, layout);
             self.applyStatusItem(runtime);
             self.applyWindows(runtime);
+            self.applyChromeSelection();
+        }
+
+        /// Re-derive the model's selected chrome tab after a rebuild
+        /// (`selected_tab_fn`, the `status_item_fn` cadence): the stored
+        /// id is what a projecting host reads through
+        /// `chromeSelectedTab()` to keep the native bar mirroring the
+        /// model. Without the hook the stored id stays empty and hosts
+        /// project no selection.
+        fn applyChromeSelection(self: *Self) void {
+            const derive = self.options.selected_tab_fn orelse return;
+            const id = derive(&self.model);
+            const len = @min(id.len, self.chrome_selected_tab_storage.len);
+            @memcpy(self.chrome_selected_tab_storage[0..len], id[0..len]);
+            self.chrome_selected_tab_len = len;
+        }
+
+        /// The model's current selected chrome tab id ("" when the app
+        /// declares no `selected_tab_fn`, or before the first rebuild).
+        /// Read by embed hosts to project the declared tab set's
+        /// selection onto the REAL native control.
+        pub fn chromeSelectedTab(self: *const Self) []const u8 {
+            return self.chrome_selected_tab_storage[0..self.chrome_selected_tab_len];
         }
 
         /// The window source backing `Ui.virtualWindow` during a rebuild:

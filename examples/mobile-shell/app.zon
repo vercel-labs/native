@@ -11,6 +11,19 @@
         .{ .id = "mobile.refresh", .title = "Refresh" },
     },
     .shell = .{
+        // Declared platform chrome: on hosts that project it (the iOS
+        // canvas host today) the tab set becomes a REAL system tab bar
+        // and the primary action a real button; taps dispatch the ids
+        // below through the same command path as the header buttons.
+        // Hosts without a projection (this fixed WebView shell's
+        // hand-written hosts, desktop, Android for now) leave it inert.
+        .chrome = .{
+            .tabs = .{
+                .{ .id = "mobile.tab.workspace", .label = "Workspace", .icon = "menu" },
+                .{ .id = "mobile.tab.status", .label = "Status", .icon = "info" },
+            },
+            .primary_action = .{ .id = "mobile.refresh", .label = "Refresh", .icon = "refresh-cw" },
+        },
         .windows = .{
             .{
                 .label = "main",
