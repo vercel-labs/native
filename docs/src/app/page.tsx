@@ -266,13 +266,13 @@ export default function HomePage() {
             macOS · Linux · Windows · iOS · Android
           </p>
           <h1 className="mx-auto mt-4 max-w-5xl heading-40 text-gray-1000 sm:heading-64 lg:heading-72">
-            Build beautiful{" "}
+            Toolkit for building{" "}
             <br className="hidden sm:block" />
-            native desktop apps.
+            native desktop apps
           </h1>
           <p className="mx-auto mt-4 max-w-2xl copy-16 text-gray-900 sm:copy-18">
-            The complete toolkit for building native desktop applications. Expressive
-            interfaces, rendered by its own engine into real OS windows. No browser. No WebView.
+            Write your interface in native markup and Zig. The toolkit&apos;s own engine renders
+            it into real OS windows — no browser, no WebView.
           </p>
           <div className="mx-auto mt-8 w-full max-w-xs sm:max-w-sm">
             <InstallToggle />

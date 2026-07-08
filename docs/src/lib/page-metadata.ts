@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { PAGE_TITLES } from "./page-titles";
 
 const DESCRIPTION =
-  "Build beautiful native desktop apps: declarative markup views, a predictable message-based state model, and a native renderer drawing into real OS windows — no browser or WebView in the binary.";
+  "Toolkit for building native desktop apps: declarative markup views, a predictable message-based state model, and its own engine rendering into real OS windows — no browser or WebView in the binary.";
 
 export function pageMetadata(slug: string): Metadata {
   const title = PAGE_TITLES[slug];
