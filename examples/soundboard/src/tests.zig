@@ -1726,8 +1726,14 @@ test "render selection screenshots (env-gated)" {
 // CI): renders the docs-homepage showcase state OFFSCREEN through the
 // deterministic reference renderer — the album grid with a track playing,
 // once per color scheme, same state in both. PNGs land in
-// /tmp/homepage-shots/soundboard-{light,dark}-artifacts/. To use:
+// /tmp/homepage-shots/soundboard-{light,dark}-artifacts/. To use
+// (the magick loop prepares RGBA twins of the committed covers once —
+// see the cover registration below for why):
 //
+//   mkdir -p /tmp/soundboard-art
+//   for f in examples/soundboard/src/art/*.jpg; do
+//     magick "$f" -depth 8 rgba:/tmp/soundboard-art/"$(basename "${f%.jpg}")".rgba
+//   done
 //   HOMEPAGE_SHOTS=1 zig build test
 test "render homepage screenshots (env-gated)" {
     if (!envGateSet("HOMEPAGE_SHOTS")) return error.SkipZigTest;
@@ -1735,6 +1741,40 @@ test "render homepage screenshots (env-gated)" {
 
     const live = try LiveApp.start(true);
     defer live.stop();
+
+    // The docs site overlays CSS stoplights on the capture, inside the
+    // header's own chrome gap. Reserve that gap for real: the standard
+    // macOS tall hidden-inset geometry (the same numbers the
+    // chrome-geometry test pins) arrives through the app's chrome
+    // channel, so the header pads exactly where the site's dots land.
+    try live.dispatch(main.onChrome(.{
+        .insets = .{ .top = 52, .left = 78 },
+        .buttons = geometry.RectF.init(20, 19, 52, 14),
+    }).?);
+
+    // Real covers for the hero. The committed art is JPEG, which the
+    // null platform's strict PNG-subset decoder honestly refuses (the
+    // degrade the cover tests pin), so the capture feeds RGBA twins of
+    // the SAME committed files — prepared by the magick loop in the
+    // header comment — back through the engine's own PNG writer and the
+    // register channel `main.boot` uses: real art on the real
+    // decode->register path, no side door into the registry.
+    var art_arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer art_arena_state.deinit();
+    const art_arena = art_arena_state.allocator();
+    for (model_mod.albums, 0..) |album, index| {
+        const art = album.art orelse continue;
+        var path_buffer: [160]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "/tmp/soundboard-art/{s}.rgba", .{std.fs.path.stem(art)});
+        const rgba = try readPreparedFile(io, art_arena, path);
+        const side = std.math.sqrt(rgba.len / 4);
+        try testing.expectEqual(side * side * 4, rgba.len);
+        const encoded = try art_arena.alloc(u8, try canvas.png.encodedRgba8ByteLen(side, side));
+        var png_writer = std.Io.Writer.fixed(encoded);
+        try canvas.png.writeRgba8(&png_writer, side, side, rgba);
+        _ = try live.app_state.effects.registerImageBytes(album.id, png_writer.buffered());
+        live.app_state.model.covers[index] = album.id;
+    }
 
     // The hero state: album grid, a track playing so the now-playing bar
     // and transport are on screen - a minute in, so the seek bar carries
@@ -1760,6 +1800,17 @@ test "render homepage screenshots (env-gated)" {
 fn envGateSet(name: [*:0]const u8) bool {
     if (comptime !@import("builtin").link_libc) return false;
     return std.c.getenv(name) != null;
+}
+
+/// Read one prepared capture input (see the homepage-shots header
+/// comment) fully into `arena` — loud on a missing or short file, so a
+/// mis-prepared /tmp fails the gated run instead of silently degrading.
+fn readPreparedFile(io: std.Io, arena: std.mem.Allocator, path: []const u8) ![]u8 {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var read_buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buffer);
+    return reader.interface.allocRemaining(arena, .limited(8 * 1024 * 1024));
 }
 
 // ------------------------------------------------------- adaptive grid

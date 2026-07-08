@@ -1579,13 +1579,20 @@ test "render deck screenshots (env-gated)" {
 // Env-gated homepage screenshot renderer (skipped by default, never in
 // CI): renders the docs-homepage showcase state OFFSCREEN through the
 // deterministic reference renderer — the chassis with a track playing
-// mid-song, then the playlist rack racked in through
+// mid-song and the analyzer glass lit by a fed band report, then the
+// playlist rack racked in through
 // the real PL toggle. Deck has ONE finish by design (the OS scheme
 // changes nothing), so unlike the other homepage shots there is exactly
 // one capture per window. PNGs land in
 // /tmp/homepage-shots/deck-dark-artifacts/ and
-// /tmp/homepage-shots/deck-playlist-dark-artifacts/. To use:
+// /tmp/homepage-shots/deck-playlist-dark-artifacts/. To use
+// (the magick loop prepares RGBA twins of the committed covers once —
+// see the cover registration below for why):
 //
+//   mkdir -p /tmp/deck-art
+//   for f in examples/deck/src/art/*.jpg; do
+//     magick "$f" -depth 8 rgba:/tmp/deck-art/"$(basename "${f%.jpg}")".rgba
+//   done
 //   HOMEPAGE_SHOTS=1 zig build test
 test "render homepage screenshots (env-gated)" {
     if (!envGateSet("HOMEPAGE_SHOTS")) return error.SkipZigTest;
@@ -1594,13 +1601,51 @@ test "render homepage screenshots (env-gated)" {
     const live = try LiveApp.start(true);
     defer live.stop();
 
+    // Real art in the display bay. The committed covers are JPEG, which
+    // the null platform's strict PNG-subset decoder honestly refuses
+    // (the degrade the cover tests pin), so the capture feeds RGBA
+    // twins of the SAME committed files — prepared by the magick loop
+    // in the header comment — back through the engine's own PNG writer
+    // and the register channel `main.boot` uses: real art on the real
+    // decode->register path, no side door into the registry.
+    var art_arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer art_arena_state.deinit();
+    const art_arena = art_arena_state.allocator();
+    for (model_mod.albums, 0..) |album, index| {
+        const art = album.art orelse continue;
+        var path_buffer: [160]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "/tmp/deck-art/{s}.rgba", .{std.fs.path.stem(art)});
+        const rgba = try readPreparedFile(io, art_arena, path);
+        const side = std.math.sqrt(rgba.len / 4);
+        try testing.expectEqual(side * side * 4, rgba.len);
+        const encoded = try art_arena.alloc(u8, try canvas.png.encodedRgba8ByteLen(side, side));
+        var png_writer = std.Io.Writer.fixed(encoded);
+        try canvas.png.writeRgba8(&png_writer, side, side, rgba);
+        _ = try live.app_state.effects.registerImageBytes(main.coverImageId(album.id), png_writer.buffered());
+        live.app_state.model.covers[index] = main.coverImageId(album.id);
+    }
+
     // The hero state: a track playing mid-song, the full ledger
     // selected. The mid-song position comes from REAL seek steps on the
     // fader (the widget keyboard path), so the fader and the display's
     // timecode agree.
-    try live.dispatch(.{ .play_track = model_mod.albumTracks(2)[0].id });
+    const track = model_mod.albumTracks(2)[0];
+    try live.dispatch(.{ .play_track = track.id });
     const seek_id = try live.widgetIdByLabel(main.canvas_label, 1, .slider, "Seek");
     for (0..8) |_| try live.widgetAction(main.canvas_label, seek_id, "increment");
+
+    // Light the analyzer glass through the same journaled channel a
+    // live host's analysis tap uses: one 32-band report with a
+    // low-heavy musical contour (bass energy tapering into highs, a
+    // few mid peaks), positioned at the model's own seeked clock so
+    // the glass, the fader, and the timecode all agree. Attack is
+    // instant, so the shot frame paints exactly these bars.
+    const contour = [model_mod.spectrum_bands]u8{
+        212, 236, 204, 178, 158, 186, 148, 132, 156, 124, 110, 138,
+        104, 92,  118, 86,  98,  72,  90,  62,  78,  56,  70,  48,
+        62,  42,  54,  36,  46,  30,  38,  24,
+    };
+    try live.feedSpectrum(contour, live.app_state.model.elapsed_ms, track.duration_ms);
     try presentShotFrame(live, 2);
     live.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/deck-dark-artifacts", "Deck");
     try live.harness.runtime.dispatchAutomationCommand(live.app_state.app(), "screenshot deck-canvas 2");
@@ -1634,4 +1679,15 @@ fn presentShotFrame(live: LiveApp, frame_index: u64) !void {
 fn envGateSet(name: [*:0]const u8) bool {
     if (comptime !@import("builtin").link_libc) return false;
     return std.c.getenv(name) != null;
+}
+
+/// Read one prepared capture input (see the homepage-shots header
+/// comment) fully into `arena` — loud on a missing or short file, so a
+/// mis-prepared /tmp fails the gated run instead of silently degrading.
+fn readPreparedFile(io: std.Io, arena: std.mem.Allocator, path: []const u8) ![]u8 {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var read_buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buffer);
+    return reader.interface.allocRemaining(arena, .limited(8 * 1024 * 1024));
 }

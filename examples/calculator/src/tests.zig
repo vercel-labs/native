@@ -742,8 +742,10 @@ test "render homepage screenshots (env-gated)" {
     defer live.stop();
 
     // 128 × 96 = 12,288 through the real dispatch path, then an operator
-    // pending so the expression line is live too.
-    for ([_]Msg{ .d1, .d2, .d8, .multiply, .d9, .d6, .equals }) |msg| {
+    // pending so the shot is genuinely mid-calculation: the memory line
+    // holds the finished multiply, the expression line shows the pending
+    // "12288 +", and the + key wears its live highlight.
+    for ([_]Msg{ .d1, .d2, .d8, .multiply, .d9, .d6, .equals, .add }) |msg| {
         try live.app_state.dispatch(&live.harness.runtime, 1, msg);
     }
 

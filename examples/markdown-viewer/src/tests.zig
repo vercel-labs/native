@@ -586,6 +586,17 @@ test "render homepage screenshots (env-gated)" {
     var h = try Harness.create();
     defer h.destroy();
 
+    // The docs site overlays CSS stoplights on the capture, inside the
+    // toolbar's own chrome gap. Reserve that gap for real: the standard
+    // macOS tall hidden-inset geometry (the same numbers the
+    // chrome-geometry test pins) arrives through the app's chrome
+    // channel, so the toolbar pads exactly where the site's dots land.
+    try h.dispatch(main.onChrome(.{
+        .insets = .{ .top = 52, .left = 78 },
+        .buttons = geometry.RectF.init(20, 19, 52, 14),
+    }).?);
+    try h.presentFrame(2);
+
     // The app follows the system appearance: drive the platform event
     // once per scheme, the same channel the OS uses.
     try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .appearance_changed = .{ .color_scheme = .light } });

@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useState } from "react";
 import { githubUrl } from "@/lib/site";
+import { WindowDots, type WindowDotsVariant } from "./window-dots";
 
 interface ShowcaseApp {
   id: string;
@@ -13,6 +14,13 @@ interface ShowcaseApp {
   width: number;
   height: number;
   portrait?: boolean;
+  /**
+   * The app's titlebar register: captures reserve the macOS chrome gap
+   * in their own header and the site overlays the stoplights there
+   * (see WindowDots for the shared geometry). Absent for chromeless
+   * apps (deck), whose skins draw their own window controls.
+   */
+  chrome?: WindowDotsVariant;
   /** Dark-only apps ship one capture that shows in both site themes. */
   darkOnly?: boolean;
   /**
@@ -31,6 +39,7 @@ interface ShowcaseApp {
 const apps: ShowcaseApp[] = [
   {
     id: "markdown-viewer",
+    chrome: "tall",
     name: "Markdown Viewer",
     tagline: "A split-pane editor whose preview is native widgets.",
     detail:
@@ -41,6 +50,7 @@ const apps: ShowcaseApp[] = [
   },
   {
     id: "soundboard",
+    chrome: "tall",
     name: "Soundboard",
     tagline: "A music library with album art, search, and a live transport.",
     detail:
@@ -76,6 +86,7 @@ const apps: ShowcaseApp[] = [
   },
   {
     id: "feed",
+    chrome: "tall",
     name: "Feed",
     tagline: "A 100,000-post timeline in one virtual list.",
     detail:
@@ -90,6 +101,7 @@ const apps: ShowcaseApp[] = [
   },
   {
     id: "notes",
+    chrome: "tall",
     name: "Notes",
     tagline: "Three-pane notes: folders, full-text search, autosave.",
     detail:
@@ -100,6 +112,7 @@ const apps: ShowcaseApp[] = [
   },
   {
     id: "system-monitor",
+    chrome: "tall",
     name: "System Monitor",
     tagline: "Real ps and vm_stat samples drawn as live sparklines.",
     detail:
@@ -110,6 +123,7 @@ const apps: ShowcaseApp[] = [
   },
   {
     id: "calculator",
+    chrome: "compact",
     name: "Calculator",
     tagline: "Classic immediate-execution arithmetic in a small window.",
     detail:
@@ -155,7 +169,8 @@ export function Showcase() {
           Every showcase window owns its own chrome (hidden-inset header
           bands or fixed chromeless chassis), so no capture gets an
           invented window frame — each sits on the page background as its
-          own silhouette. */}
+          own silhouette, and the site draws only the stoplights into the
+          chrome gap the capture's header reserved (WindowDots). */}
       {active.stack ? (
         // Chromeless fixed-size windows at natural scale on the page
         // background — never framed, never stretched to fill a tile.
@@ -179,24 +194,34 @@ export function Showcase() {
       ) : (
         // Single window: the app's own silhouette — rounded corners and
         // a shadow, like the real window on a desktop, no invented
-        // titlebar.
+        // titlebar. The relative wrapper hosts the stoplight overlay in
+        // the header gap the capture reserved.
         <div className="mt-6 flex justify-center py-4">
-          {(active.darkOnly ? (["dark"] as const) : (["light", "dark"] as const)).map((scheme) => (
-            <Image
-              key={`${active.id}-${scheme}`}
-              src={`/home/${active.id}-${scheme}.webp`}
-              alt={`The ${active.name} example app rendered by the Native SDK engine ${
-                active.darkOnly ? "(dark by design)" : `(${scheme} theme)`
-              }`}
-              width={active.width}
-              height={active.height}
-              quality={90}
-              loading="eager"
-              className={`h-auto overflow-hidden rounded-md border border-gray-alpha-400 shadow-modal ${
-                active.portrait ? "w-64 sm:w-72" : "w-full"
-              } ${active.darkOnly ? "" : scheme === "light" ? "dark:hidden" : "hidden dark:block"}`}
-            />
-          ))}
+          <div
+            className={`relative overflow-hidden rounded-md border border-gray-alpha-400 shadow-modal ${
+              active.portrait ? "w-64 sm:w-72" : "w-full"
+            }`}
+          >
+            {(active.darkOnly ? (["dark"] as const) : (["light", "dark"] as const)).map((scheme) => (
+              <Image
+                key={`${active.id}-${scheme}`}
+                src={`/home/${active.id}-${scheme}.webp`}
+                alt={`The ${active.name} example app rendered by the Native SDK engine ${
+                  active.darkOnly ? "(dark by design)" : `(${scheme} theme)`
+                }`}
+                width={active.width}
+                height={active.height}
+                quality={90}
+                loading="eager"
+                className={`block h-auto w-full ${
+                  active.darkOnly ? "" : scheme === "light" ? "dark:hidden" : "hidden dark:block"
+                }`}
+              />
+            ))}
+            {active.chrome && (
+              <WindowDots width={active.width / 2} height={active.height / 2} variant={active.chrome} />
+            )}
+          </div>
         </div>
       )}
 

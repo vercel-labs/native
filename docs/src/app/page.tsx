@@ -4,6 +4,7 @@ import { Code } from "@/components/code";
 import { Showcase } from "@/components/home/showcase";
 import { InstallToggle } from "@/components/home/install-toggle";
 import { HeroWindow } from "@/components/home/hero-window";
+import { WindowDots } from "@/components/home/window-dots";
 import { githubUrl, siteName } from "@/lib/site";
 
 // ---------------------------------------------------------------- samples
@@ -320,11 +321,13 @@ export default function HomePage() {
               chrome (soundboard's header IS its titlebar; deck is a fixed
               512x264 chassis), so neither gets an invented window frame —
               each capture sits on the page as its own silhouette, and the
-              size contrast is part of the point. Soundboard follows the
+              size contrast is part of the point. The site draws only the
+              stoplights into soundboard's reserved header gap (WindowDots);
+              deck's skin draws its own window keys. Soundboard follows the
               site theme; deck has one finish by design, so it never swaps. */}
           <figure className="mt-12">
             <div className="grid gap-6 lg:grid-cols-2">
-              <div className="overflow-hidden rounded-md border border-gray-alpha-400 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.18)] dark:shadow-[0_24px_48px_-24px_rgba(0,0,0,0.7)]">
+              <div className="relative overflow-hidden rounded-md border border-gray-alpha-400 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.18)] dark:shadow-[0_24px_48px_-24px_rgba(0,0,0,0.7)]">
                 {(["light", "dark"] as const).map((scheme) => (
                   <Image
                     key={scheme}
@@ -338,6 +341,7 @@ export default function HomePage() {
                     }`}
                   />
                 ))}
+                <WindowDots width={1080} height={720} />
               </div>
               <div className="flex items-center justify-center px-6 py-10 sm:px-10">
                 <Image

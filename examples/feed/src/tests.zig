@@ -210,6 +210,10 @@ const Harness = struct {
         self.harness.destroy(testing.allocator);
     }
 
+    fn dispatch(self: *Harness, msg: Msg) !void {
+        try self.app_state.dispatch(&self.harness.runtime, 1, msg);
+    }
+
     fn wheel(self: *Harness, delta: f32) !void {
         var buffer: [96]u8 = undefined;
         const command = try std.fmt.bufPrint(&buffer, "widget-wheel {s} {d} {d}", .{ main.canvas_label, timeline_id, delta });
@@ -516,6 +520,16 @@ test "render homepage screenshots (env-gated)" {
 
     var h = try Harness.create(.{});
     defer h.destroy();
+
+    // The docs site overlays CSS stoplights on the capture, inside the
+    // header's own chrome gap. Reserve that gap for real: the standard
+    // macOS tall hidden-inset geometry (the same numbers the
+    // chrome-geometry test pins) arrives through the app's chrome
+    // channel, so the header pads exactly where the site's dots land.
+    try h.dispatch(main.onChrome(.{
+        .insets = .{ .top = 52, .left = 78 },
+        .buttons = native_sdk.geometry.RectF.init(20, 19, 52, 14),
+    }).?);
 
     // A few posts in: wrapped multi-line bodies above and below the
     // fold. The extra nudge past the post boundary lands the band edge

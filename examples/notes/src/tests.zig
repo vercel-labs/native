@@ -1387,6 +1387,17 @@ test "render homepage screenshots (env-gated)" {
     var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
     defer h.destroy();
 
+    // The docs site overlays CSS stoplights on the capture, inside the
+    // header's own chrome gap. Reserve that gap for real: the standard
+    // macOS tall hidden-inset geometry (the same numbers the
+    // chrome-geometry test pins) arrives through the app's chrome
+    // channel, so the header pads exactly where the site's dots land.
+    try h.dispatch(main.onChrome(.{
+        .insets = .{ .top = 52, .left = 78 },
+        .buttons = native_sdk.geometry.RectF.init(20, 19, 52, 14),
+    }).?);
+    try presentShotFrame(&h, 2);
+
     h.harness.runtime.options.automation = native_sdk.automation.Server.init(io, "/tmp/homepage-shots/notes-light-artifacts", "Notes");
     try h.harness.runtime.dispatchAutomationCommand(h.app, "screenshot notes-canvas 2");
 
