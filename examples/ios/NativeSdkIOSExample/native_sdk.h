@@ -275,6 +275,14 @@ uintptr_t native_sdk_app_chrome_tab_count(void *app);
 int native_sdk_app_chrome_tab_at(void *app, uintptr_t index, native_sdk_chrome_item_t *out);
 int native_sdk_app_chrome_primary_action(void *app, native_sdk_chrome_item_t *out);
 intptr_t native_sdk_app_chrome_selected_tab(void *app);
+// Model-driven navigation depth for platform push/pop transitions (0 =
+// the root page, 1 = one push in; -1 = the app declares no navigation
+// projection), polled each tick, and the declared back command a
+// completed platform back gesture dispatches through
+// native_sdk_app_command (1 with out->id filled when declared, 0
+// otherwise — never arm the interactive back gesture without it).
+intptr_t native_sdk_app_chrome_navigation_depth(void *app);
+int native_sdk_app_chrome_navigation_back_command(void *app, native_sdk_chrome_item_t *out);
 int native_sdk_app_chrome_icon_pixels(void *app, const char *name, uintptr_t name_len, uintptr_t size_px, uint8_t *pixels, uintptr_t pixels_len);
 // Host chrome reports on the window-chrome channel: the reported form
 // factor (host truth apps prefer over width derivation) and whether the

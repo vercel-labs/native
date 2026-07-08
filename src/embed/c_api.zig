@@ -381,6 +381,40 @@ pub fn MobileCApi(comptime Host: type) type {
             return chrome.selectedTabIndex(self.chromeTabs(), self.chromeSelectedTab());
         }
 
+        /// The model's current navigation depth (the app's
+        /// `navigation_depth_fn` derivation: 0 = the root page, 1 = one
+        /// push in, ...), or -1 when the app declares no navigation
+        /// projection (or before the first rebuild derives one). The
+        /// host's per-tick poll for platform push/pop transitions: depth
+        /// grew since the last poll = present a push, shrank = present a
+        /// pop, and a poll that also moved the selected tab is a lateral
+        /// tab switch (reconcile with no transition). Presentation only —
+        /// the model owns navigation state and this is a pure derivation
+        /// of it.
+        pub fn native_sdk_app_chrome_navigation_depth(app: ?*anyopaque) callconv(.c) isize {
+            const self = hostApp(Host, app) orelse return -1;
+            return self.chromeNavigationDepth();
+        }
+
+        /// The declared back command the platform back gesture
+        /// dispatches through `native_sdk_app_command` when it completes:
+        /// 1 with `out.id` filled when the app declares one (static app
+        /// data, valid for the app's lifetime), 0 when it does not — the
+        /// host must not arm the interactive back gesture without it. A
+        /// cancelled gesture dispatches nothing.
+        pub fn native_sdk_app_chrome_navigation_back_command(app: ?*anyopaque, out: ?*chrome.MobileChromeItem) callconv(.c) c_int {
+            const self = hostApp(Host, app) orelse return 0;
+            const output = out orelse {
+                recordError(self, error.InvalidCommand);
+                return 0;
+            };
+            const command = self.chromeNavigationBackCommand();
+            if (command.len == 0) return 0;
+            output.* = .{ .id = command.ptr, .id_len = command.len };
+            self.last_error = null;
+            return 1;
+        }
+
         /// Rasterize a declared icon-vocabulary glyph (a tab's or the
         /// primary action's `icon`) into the caller's tightly packed
         /// `size_px` x `size_px` RGBA8 buffer as premultiplied white on
@@ -739,6 +773,8 @@ pub const native_sdk_app_chrome_tab_count = FixedShellApi.native_sdk_app_chrome_
 pub const native_sdk_app_chrome_tab_at = FixedShellApi.native_sdk_app_chrome_tab_at;
 pub const native_sdk_app_chrome_primary_action = FixedShellApi.native_sdk_app_chrome_primary_action;
 pub const native_sdk_app_chrome_selected_tab = FixedShellApi.native_sdk_app_chrome_selected_tab;
+pub const native_sdk_app_chrome_navigation_depth = FixedShellApi.native_sdk_app_chrome_navigation_depth;
+pub const native_sdk_app_chrome_navigation_back_command = FixedShellApi.native_sdk_app_chrome_navigation_back_command;
 pub const native_sdk_app_chrome_icon_pixels = FixedShellApi.native_sdk_app_chrome_icon_pixels;
 pub const native_sdk_app_set_form_factor = FixedShellApi.native_sdk_app_set_form_factor;
 pub const native_sdk_app_set_chrome_tabs_projected = FixedShellApi.native_sdk_app_set_chrome_tabs_projected;

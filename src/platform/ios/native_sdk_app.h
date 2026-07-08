@@ -261,6 +261,20 @@ uintptr_t native_sdk_app_chrome_tab_count(void *app);
 int native_sdk_app_chrome_tab_at(void *app, uintptr_t index, native_sdk_chrome_item_t *out);
 int native_sdk_app_chrome_primary_action(void *app, native_sdk_chrome_item_t *out);
 intptr_t native_sdk_app_chrome_selected_tab(void *app);
+// Model-driven navigation depth for platform push/pop transitions (the
+// app's navigation_depth_fn derivation: 0 = the root page, 1 = one push
+// in), or -1 when the app declares no navigation projection. The host
+// polls it each tick: depth grew = present a push, shrank = present a
+// pop, and a poll that also moved the selected tab is a lateral tab
+// switch (reconcile with no transition). Presentation only — the model
+// owns navigation state.
+intptr_t native_sdk_app_chrome_navigation_depth(void *app);
+// The declared back command a completed platform back gesture dispatches
+// through native_sdk_app_command: 1 with out->id filled when the app
+// declares one (static app data), 0 when it does not — never arm the
+// interactive back gesture without it. A cancelled gesture dispatches
+// nothing.
+int native_sdk_app_chrome_navigation_back_command(void *app, native_sdk_chrome_item_t *out);
 int native_sdk_app_chrome_icon_pixels(void *app, const char *name, uintptr_t name_len, uintptr_t size_px, uint8_t *pixels, uintptr_t pixels_len);
 // Tab taps travel the same command path as native header buttons.
 void native_sdk_app_command(void *app, const char *name, uintptr_t len);

@@ -477,6 +477,33 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// update moves the model, and this derivation moves the
             /// bar. The bar itself is never the source of truth.
             selected_tab_fn: ?*const fn (model: *const ModelT) []const u8 = null,
+            /// Model-driven navigation depth for platform push/pop
+            /// transitions: returns how many levels deep the model's
+            /// current page sits (0 = the root page, 1 = one push in,
+            /// ...). Consulted on install and after every rebuild — the
+            /// `selected_tab_fn` cadence — and read by projecting hosts
+            /// through `chromeNavigationDepth()`, which poll it and
+            /// present a REAL platform transition when the depth grows
+            /// (push) or shrinks (pop). The transition is presentation
+            /// only: the MODEL owns navigation state, the depth is a
+            /// pure derivation of it, and a journal replayed without a
+            /// host produces the identical model. Tab switches are
+            /// lateral, never depth: derive the depth of the CURRENT
+            /// tab's page stack, so switching tabs while a page is open
+            /// reads as a tab change (hosts reconcile without a
+            /// transition), not a pop.
+            navigation_depth_fn: ?*const fn (model: *const ModelT) usize = null,
+            /// The command id a projecting host dispatches when the
+            /// platform back affordance completes (iOS: the interactive
+            /// edge-swipe-back gesture finishing) — the same command
+            /// path tab taps and native header buttons ride, mapped to
+            /// a Msg in `on_command`, so a gesture-driven back and the
+            /// app's own back button are indistinguishable in the Msg
+            /// journal. A cancelled gesture dispatches nothing. Set it
+            /// together with `navigation_depth_fn`; hosts only arm the
+            /// back gesture when both exist (a pop that could dispatch
+            /// nothing would be a dead-end affordance).
+            navigation_back_command: []const u8 = "",
             /// Optional app-level key FALLBACK for canvas keyboard
             /// input: consulted for a key_down only after widget
             /// routing declines it. The precedence rule (enforced in
@@ -685,6 +712,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// the model. Command ids are capped by the manifest vocabulary.
         chrome_selected_tab_storage: [app_manifest.max_command_id_bytes]u8 = undefined,
         chrome_selected_tab_len: usize = 0,
+        /// The model's current navigation depth (`navigation_depth_fn`,
+        /// re-derived after every rebuild) plus whether a derivation has
+        /// happened yet, stored so projecting hosts can poll
+        /// `chromeNavigationDepth()` between frames without touching the
+        /// model. Before the first rebuild (and whenever the app declares
+        /// no derivation) hosts read -1 and project no transitions.
+        chrome_navigation_depth: usize = 0,
+        chrome_navigation_depth_known: bool = false,
         /// The system appearance the platform last reported (delivered
         /// before the first view build, then on every OS-side change).
         /// The stock token derivation reads it when the app sets neither
@@ -1263,6 +1298,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.applyStatusItem(runtime);
             self.applyWindows(runtime);
             self.applyChromeSelection();
+            self.applyChromeNavigation();
         }
 
         /// Re-derive the model's selected chrome tab after a rebuild
@@ -1285,6 +1321,36 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// selection onto the REAL native control.
         pub fn chromeSelectedTab(self: *const Self) []const u8 {
             return self.chrome_selected_tab_storage[0..self.chrome_selected_tab_len];
+        }
+
+        /// Re-derive the model's navigation depth after a rebuild
+        /// (`navigation_depth_fn`, the `applyChromeSelection` cadence):
+        /// the stored depth is what a projecting host polls through
+        /// `chromeNavigationDepth()` to decide push/pop transitions.
+        /// Without the hook nothing is stored and hosts read -1.
+        fn applyChromeNavigation(self: *Self) void {
+            const derive = self.options.navigation_depth_fn orelse return;
+            self.chrome_navigation_depth = derive(&self.model);
+            self.chrome_navigation_depth_known = true;
+        }
+
+        /// The model's current navigation depth, or -1 when the app
+        /// declares no `navigation_depth_fn` (or before the first
+        /// rebuild) — hosts treat -1 as "no navigation projection" and
+        /// present no transitions. Read by embed hosts each tick; one
+        /// integer, never a model touch.
+        pub fn chromeNavigationDepth(self: *const Self) isize {
+            if (!self.chrome_navigation_depth_known) return -1;
+            return std.math.lossyCast(isize, self.chrome_navigation_depth);
+        }
+
+        /// The declared back command a projecting host dispatches when
+        /// the platform back gesture completes ("" when the app declares
+        /// no navigation projection — hosts must not arm the gesture).
+        /// Static app data, valid for the app's lifetime.
+        pub fn chromeNavigationBackCommand(self: *const Self) []const u8 {
+            if (self.options.navigation_depth_fn == null) return "";
+            return self.options.navigation_back_command;
         }
 
         /// The window source backing `Ui.virtualWindow` during a rebuild:

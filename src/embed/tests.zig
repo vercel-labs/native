@@ -2006,6 +2006,9 @@ test "clearing the mobile image service returns to the honest decline" {
 const MobileTabsDef = struct {
     pub const Model = struct {
         tab: enum { feed, library } = .feed,
+        /// One page deep on the feed tab (the soundboard's album-detail
+        /// shape): the navigation projection derives depth from it.
+        open_item: bool = false,
         action_count: u32 = 0,
         chrome_form_factor: platform.FormFactor = .unknown,
         chrome_tabs_projected: bool = false,
@@ -2015,6 +2018,8 @@ const MobileTabsDef = struct {
     pub const Msg = union(enum) {
         show_feed,
         show_library,
+        open_item,
+        close_item,
         act,
         chrome_changed: platform.WindowChrome,
     };
@@ -2048,6 +2053,8 @@ const MobileTabsDef = struct {
             .on_command = onCommand,
             .on_chrome = onChrome,
             .selected_tab_fn = selectedTab,
+            .navigation_depth_fn = navigationDepth,
+            .navigation_back_command = "nav.back",
         };
     }
 
@@ -2055,6 +2062,8 @@ const MobileTabsDef = struct {
         switch (msg) {
             .show_feed => model.tab = .feed,
             .show_library => model.tab = .library,
+            .open_item => model.open_item = true,
+            .close_item => model.open_item = false,
             .act => model.action_count += 1,
             .chrome_changed => |chrome_state| {
                 model.chrome_form_factor = chrome_state.form_factor;
@@ -2067,6 +2076,8 @@ const MobileTabsDef = struct {
     fn onCommand(name: []const u8) ?Msg {
         if (std.mem.eql(u8, name, "tabs.feed")) return .show_feed;
         if (std.mem.eql(u8, name, "tabs.library")) return .show_library;
+        if (std.mem.eql(u8, name, "item.open")) return .open_item;
+        if (std.mem.eql(u8, name, "nav.back")) return .close_item;
         if (std.mem.eql(u8, name, "action.act")) return .act;
         return null;
     }
@@ -2080,6 +2091,13 @@ const MobileTabsDef = struct {
             .feed => "tabs.feed",
             .library => "tabs.library",
         };
+    }
+
+    /// Depth follows the VISIBLE page stack (the soundboard rule): the
+    /// open item counts only while the feed tab shows it, so a tab
+    /// switch with an item open reads as lateral, never as a pop.
+    fn navigationDepth(model: *const Model) usize {
+        return if (model.tab == .feed and model.open_item) 1 else 0;
     }
 
     fn view(ui: *App.Ui, model: *const Model) App.Ui.Node {
@@ -2231,13 +2249,84 @@ test "chrome icon pixels rasterize declared vocabulary glyphs as templates" {
     try std.testing.expectEqual(@as(c_int, 0), MobileTabsApi.native_sdk_app_chrome_icon_pixels(app, "", 0, size, &pixels, pixels.len));
 }
 
+test "mobile C ABI projects navigation depth and dispatches the back command" {
+    const app = MobileTabsApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileTabsApi.native_sdk_app_destroy(app);
+    const self: *MobileTabsHost = @ptrCast(@alignCast(app));
+
+    // The static half reads back before start: the declared back
+    // command is what a completed platform back gesture dispatches.
+    var back: MobileChromeItem = .{};
+    try std.testing.expectEqual(@as(c_int, 1), MobileTabsApi.native_sdk_app_chrome_navigation_back_command(app, &back));
+    try std.testing.expectEqualStrings("nav.back", chromeItemString(back.id, back.id_len));
+
+    // Before the first rebuild no depth has been derived: hosts read -1
+    // and present no transitions.
+    try std.testing.expectEqual(@as(isize, -1), MobileTabsApi.native_sdk_app_chrome_navigation_depth(app));
+
+    MobileTabsApi.native_sdk_app_start(app);
+    var surface_token: u8 = 0;
+    MobileTabsApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileTabsApi.native_sdk_app_frame(app);
+    try std.testing.expect(self.ui.installed);
+
+    // The installing rebuild derived the root depth.
+    try std.testing.expectEqual(@as(isize, 0), MobileTabsApi.native_sdk_app_chrome_navigation_depth(app));
+
+    // A Msg that opens a page moves the projection to 1 — the host
+    // reads the change on its next poll and presents the push.
+    MobileTabsApi.native_sdk_app_command(app, "item.open", "item.open".len);
+    try std.testing.expect(self.ui.model.open_item);
+    try std.testing.expectEqual(@as(isize, 1), MobileTabsApi.native_sdk_app_chrome_navigation_depth(app));
+
+    // A tab switch with the page open is LATERAL: the depth drops with
+    // the selected tab in the same poll (the host reconciles without a
+    // transition), and switching back restores it the same way — the
+    // model state never moved.
+    MobileTabsApi.native_sdk_app_command(app, "tabs.library", "tabs.library".len);
+    try std.testing.expectEqual(@as(isize, 0), MobileTabsApi.native_sdk_app_chrome_navigation_depth(app));
+    try std.testing.expectEqual(@as(isize, 1), MobileTabsApi.native_sdk_app_chrome_selected_tab(app));
+    try std.testing.expect(self.ui.model.open_item);
+    MobileTabsApi.native_sdk_app_command(app, "tabs.feed", "tabs.feed".len);
+    try std.testing.expectEqual(@as(isize, 1), MobileTabsApi.native_sdk_app_chrome_navigation_depth(app));
+
+    // The completed gesture's dispatch: the declared back command rides
+    // the ordinary command path, update closes the page, and the
+    // projection answers 0 on the same dispatch — exactly once.
+    MobileTabsApi.native_sdk_app_command(app, back.id, back.id_len);
+    try std.testing.expect(!self.ui.model.open_item);
+    try std.testing.expectEqual(@as(isize, 0), MobileTabsApi.native_sdk_app_chrome_navigation_depth(app));
+}
+
+test "apps without a navigation projection answer the honest zeros" {
+    // The damage def declares no navigation_depth_fn: depth stays -1
+    // forever (hosts present no transitions, never arm the gesture) and
+    // no back command exists.
+    const app = MobileDamageApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileDamageApi.native_sdk_app_destroy(app);
+
+    try std.testing.expectEqual(@as(isize, -1), MobileDamageApi.native_sdk_app_chrome_navigation_depth(app));
+    var back: MobileChromeItem = .{};
+    try std.testing.expectEqual(@as(c_int, 0), MobileDamageApi.native_sdk_app_chrome_navigation_back_command(app, &back));
+
+    MobileDamageApi.native_sdk_app_start(app);
+    var surface_token: u8 = 0;
+    MobileDamageApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileDamageApi.native_sdk_app_frame(app);
+    try std.testing.expectEqual(@as(isize, -1), MobileDamageApi.native_sdk_app_chrome_navigation_depth(app));
+    try std.testing.expectEqual(@as(c_int, 0), MobileDamageApi.native_sdk_app_chrome_navigation_back_command(app, &back));
+}
+
 test "declared chrome projection replays deterministically" {
     // One driving sequence into two fresh hosts: identical model state
-    // and identical projected selection at every step — the projection
-    // is a pure function of the Msg journal, so record/replay holds for
-    // the native bar exactly as it does for the canvas.
-    var selected_a: [8]isize = undefined;
-    var selected_b: [8]isize = undefined;
+    // and identical projected selection AND navigation depth at every
+    // step — both projections are pure functions of the Msg journal, so
+    // record/replay holds for the native bar and the push/pop stack
+    // exactly as it does for the canvas.
+    var selected_a: [12]isize = undefined;
+    var selected_b: [12]isize = undefined;
+    var depth_a: [10]isize = undefined;
+    var depth_b: [10]isize = undefined;
     var model_a: MobileTabsDef.Model = undefined;
     var model_b: MobileTabsDef.Model = undefined;
 
@@ -2246,6 +2335,7 @@ test "declared chrome projection replays deterministically" {
         defer MobileTabsApi.native_sdk_app_destroy(app);
         const self: *MobileTabsHost = @ptrCast(@alignCast(app));
         const selected = if (round == 0) &selected_a else &selected_b;
+        const depth = if (round == 0) &depth_a else &depth_b;
 
         _ = MobileTabsApi.native_sdk_app_set_form_factor(app, 1);
         _ = MobileTabsApi.native_sdk_app_set_chrome_tabs_projected(app, 1);
@@ -2254,11 +2344,16 @@ test "declared chrome projection replays deterministically" {
         MobileTabsApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 47, 0, 34, 0, 0, 0, 0, 0);
         MobileTabsApi.native_sdk_app_frame(app);
         selected[0] = MobileTabsApi.native_sdk_app_chrome_selected_tab(app);
+        depth[0] = MobileTabsApi.native_sdk_app_chrome_navigation_depth(app);
 
-        const journal = [_][]const u8{ "tabs.library", "action.act", "tabs.feed", "tabs.library", "action.act" };
+        // Tab moves, a push, a lateral switch away and back over the
+        // open page, the gesture's back dispatch, and a repeat push —
+        // the sequence a stress session produces.
+        const journal = [_][]const u8{ "tabs.library", "action.act", "tabs.feed", "item.open", "tabs.library", "tabs.feed", "nav.back", "item.open", "action.act" };
         for (journal, 1..) |command_name, step| {
             MobileTabsApi.native_sdk_app_command(app, command_name.ptr, command_name.len);
             selected[step] = MobileTabsApi.native_sdk_app_chrome_selected_tab(app);
+            depth[step] = MobileTabsApi.native_sdk_app_chrome_navigation_depth(app);
         }
         selected[journal.len + 1] = MobileTabsApi.native_sdk_app_chrome_selected_tab(app);
         selected[journal.len + 2] = @intCast(self.ui.model.action_count);
@@ -2266,6 +2361,7 @@ test "declared chrome projection replays deterministically" {
     }
 
     try std.testing.expectEqualSlices(isize, &selected_a, &selected_b);
+    try std.testing.expectEqualSlices(isize, &depth_a, &depth_b);
     try std.testing.expectEqualDeep(model_a, model_b);
 }
 

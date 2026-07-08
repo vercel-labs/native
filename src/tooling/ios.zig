@@ -497,6 +497,13 @@ test "the embedded host sources are the toolkit host" {
     try std.testing.expect(std.mem.indexOf(u8, host_source, "handleSessionInterruption") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_audio_service_t") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_app_audio_event") != null);
+    // Platform push/pop navigation: the depth projection poll, the REAL
+    // interactive pop recognizer, and the completed gesture's exactly-once
+    // back-command dispatch.
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_app_chrome_navigation_depth") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "interactivePopGestureRecognizer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "completeInteractivePop") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_app_chrome_navigation_back_command") != null);
 }
 
 test "simulator device parsing prefers booted devices then iPhones" {

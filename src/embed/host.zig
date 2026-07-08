@@ -787,6 +787,18 @@ pub const MobileHostApp = struct {
         return "";
     }
 
+    /// No scene means no navigation projection either: depth answers -1
+    /// (hosts present no transitions) and no back command exists.
+    pub fn chromeNavigationDepth(self: *const MobileHostApp) isize {
+        _ = self;
+        return -1;
+    }
+
+    pub fn chromeNavigationBackCommand(self: *const MobileHostApp) []const u8 {
+        _ = self;
+        return "";
+    }
+
     fn source(self: *MobileHostApp) platform.WebViewSource {
         if (self.asset_root_len > 0) {
             return platform.WebViewSource.assets(.{

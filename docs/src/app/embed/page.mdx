@@ -161,6 +161,28 @@ Where nothing projects the declaration it is honestly inert: desktop hosts today
 
 The same chrome channel carries the host-reported form factor (`WindowChrome.form_factor`): the iOS host reports its horizontal size class (`compact`/`regular`), so apps that switch shells can prefer host truth and keep a width derivation as the fallback for hosts that never report.
 
+## Platform push/pop navigation
+
+Apps whose model owns a page stack (a list opening into a detail) can project it as REAL platform navigation transitions. The seam is two options beside `selected_tab_fn`:
+
+```zig
+// Depth follows the VISIBLE page: 0 = the root, 1 = one push in. Tab
+// switches are lateral, never depth — derive the current tab's stack.
+pub fn navigationDepth(model: *const Model) usize {
+    return if (model.tab == .albums and model.open_album != null) 1 else 0;
+}
+
+// In mobileOptions():
+.navigation_depth_fn = navigationDepth,
+.navigation_back_command = "nav.back",
+```
+
+The MODEL owns navigation state; the platform contributes the transition, never the state. The iOS host polls the depth once per tick: when it grows by one the host presents the system push transition, and when it shrinks by one the system pop. Both sides of a transition are exact frames of the two model states — the outgoing page is the previous frame (retained from the damage path with zero extra renders), and the incoming state is rendered through the ordinary damage delivery before the animation starts, so the transition is pixel-correct for its whole run and the live canvas swaps back onto the top page the moment it lands. A depth change that arrives together with a selected-tab change is a lateral tab switch and reconciles with no transition, and so does any multi-level jump — standard platform behavior, no theater. Rapid changes coalesce the same way: the stack converges to the model's current depth rather than replaying every intermediate hop.
+
+The interactive edge-swipe-back is the system's own recognizer with its real physics, armed exactly while the depth is above zero and a `navigation_back_command` exists. Completing the gesture dispatches that command through the embed command path exactly once — the same journal entry the app's own back button produces when both map to the same Msg in `on_command` — and cancelling it dispatches nothing, leaving the model untouched. During the gesture the revealed page is the snapshot retained at push time (one full-resolution frame per depth level, bounded), which can be stale if the shallow page changed underneath; a fresh render replaces it the moment the gesture completes. If the app ignores the dispatched back command, the next poll sees the un-popped depth and pushes the page back — model truth wins, the tab-bar snap-back rule applied to navigation.
+
+Because the depth is a pure derivation and the gesture enters through the ordinary command path, the whole loop stays deterministic: a journal replayed without a host produces the identical model, and two hosts driven by the same journal project the identical stack. Where nothing projects the declaration it is honestly inert: desktop hosts ignore it (desktop apps compose their own navigation in canvas), and Android projection is a later round — the Android system back gesture will ride the same back command when it lands.
+
 ## Testing with EmbeddedApp
 
 ```zig

@@ -388,6 +388,13 @@ fn embedEnvValue(name: [*:0]const u8) ?[]const u8 {
 const mobile_tab_albums_command = "tabs.albums";
 const mobile_tab_songs_command = "tabs.songs";
 
+/// The platform back command: a completed edge-swipe-back on the album
+/// detail dispatches this id, which maps onto the exact `close_album`
+/// Msg the in-canvas back button sends — the gesture and the button are
+/// indistinguishable in the journal. A cancelled swipe dispatches
+/// nothing.
+const mobile_nav_back_command = "nav.back";
+
 const mobile_chrome_tabs = [_]native_sdk.ShellTab{
     .{ .id = mobile_tab_albums_command, .label = "Albums", .icon = "app:albums" },
     .{ .id = mobile_tab_songs_command, .label = "Songs", .icon = "music" },
@@ -405,6 +412,7 @@ const mobile_scene: native_sdk.ShellConfig = .{
 pub fn onCommand(name: []const u8) ?Msg {
     if (std.mem.eql(u8, name, mobile_tab_albums_command)) return .show_albums;
     if (std.mem.eql(u8, name, mobile_tab_songs_command)) return .show_songs;
+    if (std.mem.eql(u8, name, mobile_nav_back_command)) return .close_album;
     return null;
 }
 
@@ -416,6 +424,17 @@ pub fn selectedTab(model: *const Model) []const u8 {
         .albums => mobile_tab_albums_command,
         .songs => mobile_tab_songs_command,
     };
+}
+
+/// The model's navigation depth — the projection a host presents REAL
+/// push/pop transitions from (album grid -> album detail pushes; back
+/// pops). Depth follows the VISIBLE page stack, so an open album counts
+/// only while the Albums tab shows it: switching to Songs with a detail
+/// open is a lateral tab change (the host reconciles with no
+/// transition), exactly like switching back. Presentation only — the
+/// state is `model.open_album`, owned by update.
+pub fn navigationDepth(model: *const Model) usize {
+    return if (model.tab == .albums and model.open_album != null) 1 else 0;
 }
 
 pub fn mobileOptions() SoundboardApp.Options {
@@ -431,6 +450,8 @@ pub fn mobileOptions() SoundboardApp.Options {
         .on_chrome = onChrome,
         .on_command = onCommand,
         .selected_tab_fn = selectedTab,
+        .navigation_depth_fn = navigationDepth,
+        .navigation_back_command = mobile_nav_back_command,
         .on_key = onKey,
         .on_frame = onFrame,
         .animations = animations,

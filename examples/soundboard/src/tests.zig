@@ -2067,6 +2067,63 @@ test "the declared mobile tab set projects the model and maps taps back" {
     try testing.expect(main.onCommand("tabs.unknown") == null);
 }
 
+test "the navigation projection follows the visible page stack" {
+    // The declaration: the depth derivation and the back command ride
+    // the mobile options together (a gesture that could dispatch
+    // nothing must never arm).
+    const options = main.mobileOptions();
+    try testing.expect(options.navigation_depth_fn != null);
+    try testing.expectEqualStrings("nav.back", options.navigation_back_command);
+
+    // Depth follows the VISIBLE page: the grid is the root, an open
+    // album is one push in — but only while the Albums tab shows it.
+    var model = Model{};
+    try testing.expectEqual(@as(usize, 0), main.navigationDepth(&model));
+    apply(&model, .{ .open_album = 3 });
+    try testing.expectEqual(@as(usize, 1), main.navigationDepth(&model));
+
+    // A tab switch with the detail open is LATERAL: depth drops with
+    // the selected tab (the host reconciles without a transition), and
+    // switching back restores it — `open_album` never moved.
+    apply(&model, main.onCommand("tabs.songs").?);
+    try testing.expectEqual(@as(usize, 0), main.navigationDepth(&model));
+    try testing.expectEqual(@as(?u8, 3), model.open_album);
+    apply(&model, main.onCommand("tabs.albums").?);
+    try testing.expectEqual(@as(usize, 1), main.navigationDepth(&model));
+
+    // The completed edge-swipe dispatches the declared back command,
+    // which maps onto the exact Msg the in-canvas back button sends —
+    // one journal, two entry points, depth answers 0 either way.
+    const back = main.onCommand("nav.back") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(Msg.close_album, back);
+    apply(&model, back);
+    try testing.expectEqual(@as(?u8, null), model.open_album);
+    try testing.expectEqual(@as(usize, 0), main.navigationDepth(&model));
+
+    // Replay determinism: the same journal into two fresh models lands
+    // identical depth readouts at every step — the projection is a pure
+    // derivation, so a journal replayed without a host is identical.
+    const journal = [_]Msg{
+        .{ .open_album = 2 }, .show_songs, .show_albums, .close_album,
+        .{ .open_album = 5 }, .close_album,
+    };
+    var first = Model{};
+    var second = Model{};
+    var depths_first: [journal.len]usize = undefined;
+    var depths_second: [journal.len]usize = undefined;
+    for (journal, 0..) |msg, index| {
+        apply(&first, msg);
+        depths_first[index] = main.navigationDepth(&first);
+    }
+    for (journal, 0..) |msg, index| {
+        apply(&second, msg);
+        depths_second[index] = main.navigationDepth(&second);
+    }
+    try testing.expectEqualSlices(usize, &depths_first, &depths_second);
+    try testing.expectEqual(first.tab, second.tab);
+    try testing.expectEqual(first.open_album, second.open_album);
+}
+
 test "the mobile entry is independent of the desktop window constants" {
     // The mobile scene is the canonical full-screen surface: no desktop
     // width, min-size floor, or titlebar constrains the phone.

@@ -239,6 +239,21 @@ pub fn UiAppHost(comptime AppDef: type) type {
             return self.ui.chromeSelectedTab();
         }
 
+        /// The model's current navigation depth (the UiApp's
+        /// `navigation_depth_fn` derivation, re-derived after every
+        /// rebuild), or -1 when the app declares none — what a
+        /// projecting host polls to present push/pop transitions.
+        pub fn chromeNavigationDepth(self: *const Self) isize {
+            return self.ui.chromeNavigationDepth();
+        }
+
+        /// The declared back command the platform back gesture
+        /// dispatches on completion ("" when the app declares no
+        /// navigation projection). Static app data.
+        pub fn chromeNavigationBackCommand(self: *const Self) []const u8 {
+            return self.ui.chromeNavigationBackCommand();
+        }
+
         fn hostEvent(context: *anyopaque, runtime_value: *runtime.Runtime, event: runtime.Event) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(context));
             switch (event) {

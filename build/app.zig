@@ -66,6 +66,8 @@ pub const mobile_export_symbol_names = [_][]const u8{
     "native_sdk_app_chrome_tab_at",
     "native_sdk_app_chrome_primary_action",
     "native_sdk_app_chrome_selected_tab",
+    "native_sdk_app_chrome_navigation_depth",
+    "native_sdk_app_chrome_navigation_back_command",
     "native_sdk_app_chrome_icon_pixels",
     "native_sdk_app_set_form_factor",
     "native_sdk_app_set_chrome_tabs_projected",

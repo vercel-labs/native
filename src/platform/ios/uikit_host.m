@@ -1423,7 +1423,45 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
 
 @end
 
-@interface NativeSdkCanvasViewController : UIViewController <UITabBarDelegate>
+// ------------------------------------------------------- navigation pages
+//
+// One lightweight page in the platform navigation stack: a plain
+// container view holding either the LIVE canvas view (always the top
+// page) or a retained snapshot of a shallower page (the pages
+// underneath). The page carries no app logic — it exists so a real
+// UINavigationController can run its real push/pop transitions and its
+// real interactive edge-swipe-back recognizer over the single live
+// canvas. See the platform navigation section below for the full
+// contract.
+@interface NativeSdkNavPageViewController : UIViewController
+@property(nonatomic, strong) UIView *contentView;
+- (void)installContent:(UIView *)content;
+@end
+
+@implementation NativeSdkNavPageViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor whiteColor];
+}
+
+/* Install (or move in) the page's single content view, full-bleed with
+ * autoresizing — moving the live canvas between pages is an ordinary
+ * subview reparent, so the Metal layer keeps its drawables and scale. */
+- (void)installContent:(UIView *)content {
+    if (self.contentView == content && content.superview == self.viewIfLoaded) return;
+    if (self.contentView != content) [self.contentView removeFromSuperview];
+    self.contentView = content;
+    if (!content) return;
+    [self loadViewIfNeeded];
+    content.frame = self.view.bounds;
+    content.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:content];
+}
+
+@end
+
+@interface NativeSdkCanvasViewController : UIViewController <UITabBarDelegate, UINavigationControllerDelegate, UIGestureRecognizerDelegate>
 @property(nonatomic) void *nativeApp;
 @property(nonatomic, strong) NativeSdkAudioEngine *audioEngine;
 /* Declared platform chrome (the app's shell-metadata tab set + optional
@@ -1443,6 +1481,50 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
 @property(nonatomic, copy) NSString *chromeActionCommand;
 @property(nonatomic) NSInteger chromeSelectedIndex;
 @property(nonatomic) int reportedFormFactor;
+/* The live canvas view (the app's single surface). It always lives in
+ * the TOP page of the navigation stack below; the tab bar and primary
+ * action stay siblings of the stack on this controller's root view, so
+ * they hold still through push/pop exactly like the system's own bars. */
+@property(nonatomic, strong) NativeSdkCanvasView *canvasView;
+/* Platform push/pop navigation (see the section comment below): a real
+ * UINavigationController whose lightweight pages wrap the live canvas
+ * (top) and retained snapshots (underneath); the model's navigation
+ * depth is polled each tick and drives the stack — never the reverse,
+ * except the REAL interactive edge-swipe-back gesture, whose completion
+ * dispatches the app's declared back command exactly once. */
+@property(nonatomic, strong) UINavigationController *navController;
+/* Retained shallow-page snapshots, index = depth level (bounded; a
+ * level past the cap or without a captured frame keeps NSNull and shows
+ * the background wash during a gesture). */
+@property(nonatomic, strong) NSMutableArray *navSnapshots;
+/* The depth the navigation stack currently reflects (-1 until the app's
+ * projection first answers) and the selected tab seen beside it, so a
+ * depth change that arrives WITH a tab change reads as a lateral switch
+ * and reconciles without a transition. */
+@property(nonatomic) NSInteger navAppliedDepth;
+@property(nonatomic) NSInteger navAppliedTab;
+/* Transition bookkeeping: while a push/pop (host-driven or interactive)
+ * runs, depth reconciliation defers to the next tick; navHostTransition
+ * marks stack moves this host initiated so the delegate can tell them
+ * from the interactive gesture's. */
+@property(nonatomic) BOOL navTransitionActive;
+@property(nonatomic) BOOL navHostTransition;
+/* Whether the most recent damage delivery carried pixels (set by
+ * renderAndPresent): the transition pre-render loops its pump until the
+ * dispatched change's frame actually lands, because the runtime
+ * presents a change on a frame pump after its dispatch, not inside it. */
+@property(nonatomic) BOOL lastDeliveryHadDamage;
+/* The post-transition cover: the incoming page's exact frame held over
+ * the live canvas for a few ticks after a transition lands, while the
+ * canvas — freshly re-installed — re-presents underneath. Drawable
+ * presents are asynchronous and composite on the render server's
+ * schedule, not ours; the cover is what makes the canvas swap-in
+ * invisible instead of racing it. */
+@property(nonatomic, strong) UIView *navFreezeOverlay;
+@property(nonatomic) NSInteger navOverlayTicks;
+/* The app's declared back command ("" when the app declares no
+ * navigation projection — the gesture never arms without one). */
+@property(nonatomic, copy) NSString *navBackCommand;
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> commandQueue;
 @property(nonatomic, strong) id<MTLTexture> canvasTexture;
@@ -1484,15 +1566,15 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
 @implementation NativeSdkCanvasViewController
 
 - (CAMetalLayer *)metalLayer {
-    return (CAMetalLayer *)self.view.layer;
+    return (CAMetalLayer *)self.canvasView.layer;
 }
 
-- (NativeSdkCanvasView *)canvasView {
-    return (NativeSdkCanvasView *)self.view;
-}
-
+// The root view is a plain container: the live canvas rides inside the
+// navigation stack's top page (so real push/pop transitions can move
+// it), while the declared chrome (tab bar, primary action) stays on this
+// root — outside the stack — and holds still through transitions.
 - (void)loadView {
-    self.view = [[NativeSdkCanvasView alloc] init];
+    self.view = [[UIView alloc] init];
 }
 
 - (void)viewDidLoad {
@@ -1502,6 +1584,7 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     self.commandQueue = [self.device newCommandQueue];
     self.viewportScale = 1;
 
+    self.canvasView = [[NativeSdkCanvasView alloc] initWithFrame:self.view.bounds];
     CAMetalLayer *layer = [self metalLayer];
     layer.device = self.device;
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
@@ -1512,6 +1595,35 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     layer.framebufferOnly = YES;
     layer.opaque = YES;
     self.view.backgroundColor = [UIColor whiteColor];
+
+    // The navigation container: a REAL UINavigationController (bar
+    // hidden — apps draw their own headers in canvas) as a child, its
+    // root page holding the live canvas. Always present so the view
+    // hierarchy is one shape for every app; without a declared
+    // navigation projection the stack simply never moves and the
+    // edge-swipe recognizer never arms.
+    NativeSdkNavPageViewController *root_page = [[NativeSdkNavPageViewController alloc] init];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:root_page];
+    nav.navigationBarHidden = YES;
+    nav.delegate = self;
+    nav.view.backgroundColor = [UIColor whiteColor];
+    [self addChildViewController:nav];
+    nav.view.frame = self.view.bounds;
+    nav.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:nav.view];
+    [nav didMoveToParentViewController:self];
+    self.navController = nav;
+    self.navSnapshots = [NSMutableArray array];
+    self.navAppliedDepth = -1;
+    self.navAppliedTab = -1;
+    self.navBackCommand = @"";
+    [root_page installContent:self.canvasView];
+    // The REAL interactive pop recognizer: with the navigation bar
+    // hidden its default delegate never lets it begin, so this host is
+    // the delegate and arms it exactly while the app's projection says a
+    // page is open (gestureRecognizerShouldBegin below). The physics,
+    // tracking, and cancellation are entirely the system's.
+    nav.interactivePopGestureRecognizer.delegate = self;
 
     self.nativeApp = native_sdk_app_create();
     if (!self.nativeApp) {
@@ -1607,6 +1719,17 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     // Declared platform chrome: build the real system controls the shell
     // metadata asks for (nothing when the app declares none).
     [self installDeclaredChrome];
+
+    // The navigation projection's static half: the declared back command
+    // the completed edge-swipe dispatches. Without one the projection is
+    // inert — the stack never moves and the gesture never begins.
+    native_sdk_chrome_item_t back_item = {0};
+    if (native_sdk_app_chrome_navigation_back_command(self.nativeApp, &back_item) == 1 && back_item.id) {
+        self.navBackCommand = [[NSString alloc] initWithBytes:back_item.id
+                                                       length:back_item.id_len
+                                                     encoding:NSUTF8StringEncoding] ?: @"";
+        NSLog(@"native-sdk: platform navigation projected (back command %@)", self.navBackCommand);
+    }
 
     self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(displayLinkTick:)];
     [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
@@ -1752,6 +1875,25 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     // (one integer readback): a Msg that moved the model moves the bar,
     // and a tap the app ignored snaps the bar back — model truth wins.
     [self syncDeclaredChromeSelection];
+
+    // Platform navigation mirrors the MODEL's navigation depth each tick
+    // (one integer readback). Ordering is load-bearing: this runs BEFORE
+    // renderAndPresent, while the retained staging buffer still holds
+    // the pre-change frame — the snapshot a push transition slides out
+    // from under the incoming live canvas.
+    [self syncPlatformNavigation];
+
+    // The post-transition cover comes down a few ticks after the live
+    // canvas swapped back in beneath it — enough vsyncs for the flush
+    // present to composite, so the removal reveals identical pixels.
+    if (self.navFreezeOverlay && !self.navTransitionActive) {
+        if (self.navOverlayTicks > 0) {
+            self.navOverlayTicks -= 1;
+        } else {
+            [self.navFreezeOverlay removeFromSuperview];
+            self.navFreezeOverlay = nil;
+        }
+    }
 
     // Only re-render + blit when the retained canvas actually changed.
     native_sdk_gpu_frame_state_t state = {0};
@@ -1931,6 +2073,7 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
         return NO;
     }
     const BOOL hasDamage = damageWidth > 0 && damageHeight > 0;
+    self.lastDeliveryHadDamage = hasDamage;
     const uint64_t uploadBeginNs = trace ? NativeSdkTimestampNanoseconds() : 0;
     if (hasDamage) {
         [self.canvasTexture replaceRegion:MTLRegionMake2D(damageX, damageY, damageWidth, damageHeight)
@@ -2205,6 +2348,343 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     NSLog(@"native-sdk: chrome primary action -> command %@", command);
     native_sdk_app_command(self.nativeApp, command.UTF8String, [command lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
     [self logNativeErrorIfAny:@"chrome_action"];
+}
+
+// ------------------------------------------------------ platform navigation
+//
+// The projection of the app's navigation depth onto REAL UIKit push/pop
+// machinery. The contract, in the declared-chrome shape:
+//
+// - The MODEL owns navigation state. The app derives a depth from it
+//   (`navigation_depth_fn`) and the host polls one integer per tick.
+//   Depth grew by one = present the system push transition; shrank by
+//   one = present the system pop; anything else — the first sighting, a
+//   multi-level jump, or a depth change arriving WITH a selected-tab
+//   change (tabs are lateral, never depth) — reconciles the stack with
+//   no transition at all.
+// - The host has ONE live canvas. At rest it rides the TOP page of a
+//   real UINavigationController (bar hidden; pages are plain
+//   containers), and the pages underneath hold retained snapshots: on a
+//   push, the pre-change frame still sitting in the retained staging
+//   buffer (the damage path keeps it current) becomes the outgoing
+//   page's snapshot, captured with zero extra renders. One snapshot per
+//   depth level, bounded (NativeSdkNavSnapshotCap); a level without one
+//   shows the background wash. DURING a host-driven transition both
+//   sides are exact CPU bitmaps of the two model states (the incoming
+//   one pre-rendered through the ordinary damage delivery, so its
+//   pixels are the canvas's own): a Metal drawable present composites
+//   on the render server's schedule, not the animation's, so animating
+//   the live layer would play the transition against the previous frame
+//   and snap at the end — bitmaps make the transition pixel-correct for
+//   its whole run, and the live canvas swaps back onto the top page at
+//   completion under a brief cover of the same pixels
+//   (restoreLiveCanvasAfterTransition). Honesty judgment: a below-page
+//   snapshot can be STALE (the shallow page may have changed since its
+//   push) — it is only ever visible DURING the interactive gesture, and
+//   the fresh render replaces it the moment the gesture completes.
+// - The interactive edge-swipe-back is the REAL recognizer
+//   (interactivePopGestureRecognizer) with the system's physics, armed
+//   only while the projection says a page is open AND the app declared a
+//   back command. Completion dispatches that command exactly once
+//   through the embed command path (the same journal entry the app's
+//   own back button produces); cancellation dispatches nothing and the
+//   model is untouched. If the app IGNORES the dispatched command, the
+//   next tick's poll sees the un-popped depth and pushes the page back —
+//   the navigation mirror of the tab bar snapping back, model truth
+//   wins.
+// - The tab bar and primary action live on the root view, OUTSIDE the
+//   stack, so they hold still through push/pop like the system's own
+//   bars, and the safe-area/chrome insets are untouched (the canvas
+//   fills the same bounds it always did).
+
+/* Bounded snapshot retention: one full-resolution frame per depth level,
+ * at most this many (a phone-scale frame is ~13MB, so the cap bounds the
+ * cache near 50MB on pathologically deep stacks; real stacks hold one or
+ * two). Levels past the cap keep NSNull and present the background wash
+ * during a gesture — bounded memory beats a silent unbounded cache. */
+static const NSUInteger NativeSdkNavSnapshotCap = 4;
+
+/* The retained staging buffer as a UIImage — the previously presented
+ * frame, captured without rendering anything (the damage path keeps the
+ * buffer current). Nil before the first render or across a size change
+ * mid-flight; callers fall back to the background wash. */
+- (UIImage *)navSnapshotFromRetainedCanvas {
+    if (!self.rgbaBytes || !self.canvasTexture) return nil;
+    const size_t width = self.canvasTexture.width;
+    const size_t height = self.canvasTexture.height;
+    if (width == 0 || height == 0) return nil;
+    const size_t byte_len = width * height * 4;
+    if (self.stagingCapacity < byte_len) return nil;
+    NSData *data = [NSData dataWithBytes:self.rgbaBytes length:byte_len];
+    CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)data);
+    if (!provider) return nil;
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    /* The canvas renders an opaque surface, so alpha is skipped rather
+     * than interpreted — no premultiply question exists. */
+    CGImageRef image = space ? CGImageCreate(width, height, 8, 32, width * 4, space,
+                                             kCGBitmapByteOrder32Big | kCGImageAlphaNoneSkipLast,
+                                             provider, NULL, false, kCGRenderingIntentDefault)
+                             : NULL;
+    if (space) CGColorSpaceRelease(space);
+    CGDataProviderRelease(provider);
+    if (!image) return nil;
+    CGFloat scale = self.viewportScale > 0 ? self.viewportScale : 1;
+    UIImage *snapshot = [UIImage imageWithCGImage:image scale:scale orientation:UIImageOrientationUp];
+    CGImageRelease(image);
+    return snapshot;
+}
+
+/* A page's content for a stored snapshot slot: the image, or the honest
+ * background wash where no frame was retained. */
+- (UIView *)navPageContentForSnapshot:(id)stored {
+    if ([stored isKindOfClass:[UIImage class]]) {
+        UIImageView *image_view = [[UIImageView alloc] initWithImage:(UIImage *)stored];
+        return image_view;
+    }
+    UIView *placeholder = [[UIView alloc] init];
+    placeholder.backgroundColor = self.view.backgroundColor;
+    return placeholder;
+}
+
+/* Model -> stack, once per display tick, BEFORE the tick's render (so
+ * the retained buffer still shows the outgoing page). One integer
+ * readback; -1 (no projection, or pre-install) leaves the stack alone.
+ * While a transition or gesture runs, reconciliation defers — the
+ * applied depth stays stale and the next tick retries. */
+- (void)syncPlatformNavigation {
+    if (!self.nativeApp || !self.navController) return;
+    if (self.navTransitionActive) return;
+    const intptr_t depth_value = native_sdk_app_chrome_navigation_depth(self.nativeApp);
+    if (depth_value < 0) return;
+    const NSInteger depth = (NSInteger)depth_value;
+    const NSInteger tab = (NSInteger)native_sdk_app_chrome_selected_tab(self.nativeApp);
+
+    if (self.navAppliedDepth < 0) {
+        /* First sighting: adopt the model's depth with no transition
+         * (launching straight into a deep state must not animate). The
+         * launch stack is already one page holding the canvas, so only
+         * a deep launch rebuilds anything. */
+        if (depth > 0) [self reconcileNavigationStackToDepth:depth];
+        self.navAppliedDepth = depth;
+        self.navAppliedTab = tab;
+        return;
+    }
+    if (depth == self.navAppliedDepth) {
+        self.navAppliedTab = tab;
+        return;
+    }
+
+    const BOOL tab_moved = tab != self.navAppliedTab;
+    if (!tab_moved && depth == self.navAppliedDepth + 1) {
+        [self animateNavigationPush];
+    } else if (!tab_moved && depth == self.navAppliedDepth - 1) {
+        [self animateNavigationPop];
+    } else {
+        /* Lateral (a tab switch that also changed the visible page's
+         * depth) or a multi-level jump: standard platform behavior is
+         * no push/pop theater — reconcile instantly. */
+        [self reconcileNavigationStackToDepth:depth];
+    }
+    self.navAppliedDepth = depth;
+    self.navAppliedTab = tab;
+    NSLog(@"native-sdk: platform navigation depth -> %ld", (long)depth);
+}
+
+/* Render the model's CURRENT state onto the live canvas right now,
+ * before a transition begins. Two steps, both load-bearing: one extra
+ * frame pump (the damage contract presents a dispatched change one pump
+ * after its revision bump, so the pump makes the new frame deliverable),
+ * then the ordinary delivery + present. Doing this BEFORE the stack
+ * moves matters because a drawable presented while a navigation
+ * transition is animating composites only after the animation ends —
+ * pre-rendering is what makes the incoming page pixel-correct for the
+ * transition's whole run instead of snapping afterwards. */
+- (void)preRenderLiveCanvasForTransition {
+    /* Bounded pump loop: the change is deliverable once the runtime's
+     * own present has rastered it, which can take a pump or two after
+     * the dispatch. Idle pumps cost microseconds; the pump that rasters
+     * is work the transition needs anyway. */
+    for (int attempt = 0; attempt < 4; attempt++) {
+        native_sdk_app_frame(self.nativeApp);
+        self.lastDeliveryHadDamage = NO;
+        const BOOL presented = [self renderAndPresent];
+        if (NativeSdkGpuFrameTraceEnabled()) {
+            native_sdk_gpu_frame_state_t probe = {0};
+            const BOOL have = native_sdk_app_gpu_frame_state(self.nativeApp, &probe) == 1;
+            fprintf(stderr, "native-sdk: nav pre-render attempt=%d presented=%d damage=%d revision_live=%llu revision_delivered=%llu\n",
+                    attempt, presented ? 1 : 0, self.lastDeliveryHadDamage ? 1 : 0,
+                    have ? (unsigned long long)probe.canvas_revision : 0,
+                    (unsigned long long)self.lastCanvasRevision);
+        }
+        if (presented && self.lastDeliveryHadDamage) return;
+    }
+}
+
+/* Depth grew by one: the outgoing frame (the retained buffer BEFORE the
+ * pre-render) becomes the current top page's snapshot, the incoming
+ * state pre-renders and its exact pixels become the pushed page's
+ * content, and the REAL system push slides it in — pixel-correct on
+ * both sides for the animation's whole run. The transition animates
+ * bitmaps of the two model states deliberately: a drawable present
+ * composites on the render server's schedule, so animating the live
+ * layer plays the transition against the PREVIOUS frame and snaps at
+ * the end — the honest choice is exact CPU pixels during the ~350ms
+ * animation, with the live canvas swapped back in at completion
+ * (restoreLiveCanvasAfterTransition). */
+- (void)animateNavigationPush {
+    UIImage *outgoing = [self navSnapshotFromRetainedCanvas];
+    [self preRenderLiveCanvasForTransition];
+    UIImage *incoming = [self navSnapshotFromRetainedCanvas];
+    NativeSdkNavPageViewController *top = (NativeSdkNavPageViewController *)self.navController.topViewController;
+    id stored = (outgoing && self.navSnapshots.count < NativeSdkNavSnapshotCap) ? (id)outgoing : (id)[NSNull null];
+    [self.navSnapshots addObject:stored];
+    [top installContent:[self navPageContentForSnapshot:stored]];
+    NativeSdkNavPageViewController *page = [[NativeSdkNavPageViewController alloc] init];
+    [page installContent:[self navPageContentForSnapshot:(incoming ?: (id)[NSNull null])]];
+    self.navHostTransition = YES;
+    [self.navController pushViewController:page animated:YES];
+}
+
+/* Depth shrank by one through the model (the app's own back button, a
+ * programmatic Msg): the outgoing DEEP frame rides the popped page out
+ * while the pre-rendered shallow frame is revealed underneath —
+ * bitmaps on both sides, same reasoning as the push. The stored
+ * snapshot for the popped level is discarded, and the revealed page's
+ * content is the FRESH shallow frame, never the possibly-stale stored
+ * one. */
+- (void)animateNavigationPop {
+    NSArray<__kindof UIViewController *> *stack = self.navController.viewControllers;
+    if (stack.count < 2) {
+        [self reconcileNavigationStackToDepth:MAX(self.navAppliedDepth - 1, 0)];
+        return;
+    }
+    UIImage *outgoing = [self navSnapshotFromRetainedCanvas];
+    [self preRenderLiveCanvasForTransition];
+    UIImage *incoming = [self navSnapshotFromRetainedCanvas];
+    NativeSdkNavPageViewController *top = (NativeSdkNavPageViewController *)stack.lastObject;
+    NativeSdkNavPageViewController *below = (NativeSdkNavPageViewController *)stack[stack.count - 2];
+    [top installContent:[self navPageContentForSnapshot:(outgoing ?: (id)[NSNull null])]];
+    [below installContent:[self navPageContentForSnapshot:(incoming ?: (id)[NSNull null])]];
+    if (self.navSnapshots.count > 0) [self.navSnapshots removeLastObject];
+    self.navHostTransition = YES;
+    [self.navController popViewControllerAnimated:YES];
+}
+
+/* A host-driven transition just landed: put the live canvas back on the
+ * top page, but keep the page's transition bitmap ABOVE it for a few
+ * ticks while the canvas re-presents underneath (needsPresent flushes
+ * the retained texture) — the swap is invisible because the bitmap IS
+ * the canvas's current frame. */
+- (void)restoreLiveCanvasAfterTransition {
+    NativeSdkNavPageViewController *top = (NativeSdkNavPageViewController *)self.navController.topViewController;
+    if (top.contentView == self.canvasView) return;
+    UIView *cover = top.contentView;
+    [top installContent:self.canvasView];
+    if (cover) {
+        cover.frame = top.view.bounds;
+        cover.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [top.view addSubview:cover];
+        [self.navFreezeOverlay removeFromSuperview];
+        self.navFreezeOverlay = cover;
+        self.navOverlayTicks = 3;
+    }
+    self.needsPresent = YES;
+}
+
+/* Rebuild the stack to exactly depth+1 pages with no animation (first
+ * sighting, lateral tab switches, multi-level jumps): snapshots for the
+ * levels that retained one, the background wash for the rest, the live
+ * canvas on top. */
+- (void)reconcileNavigationStackToDepth:(NSInteger)depth {
+    while ((NSInteger)self.navSnapshots.count > depth) [self.navSnapshots removeLastObject];
+    while ((NSInteger)self.navSnapshots.count < depth) [self.navSnapshots addObject:[NSNull null]];
+    NSMutableArray<UIViewController *> *pages = [NSMutableArray arrayWithCapacity:(NSUInteger)depth + 1];
+    for (NSInteger level = 0; level < depth; level++) {
+        NativeSdkNavPageViewController *page = [[NativeSdkNavPageViewController alloc] init];
+        [page installContent:[self navPageContentForSnapshot:self.navSnapshots[(NSUInteger)level]]];
+        [pages addObject:page];
+    }
+    NativeSdkNavPageViewController *top = [[NativeSdkNavPageViewController alloc] init];
+    [top installContent:self.canvasView];
+    [pages addObject:top];
+    self.navHostTransition = YES;
+    [self.navController setViewControllers:pages animated:NO];
+    self.navHostTransition = NO;
+    self.needsPresent = YES;
+}
+
+/* A completed interactive pop: UIKit already moved the stack (that IS
+ * the gesture — real recognizer, real physics), so now the model hears
+ * about it: the declared back command dispatches exactly once, the live
+ * canvas moves onto the new top page (replacing the stale snapshot the
+ * gesture revealed — the honest swap the section comment names), and
+ * the applied depth follows the stack so the next tick's poll sees
+ * agreement. */
+- (void)completeInteractivePop {
+    if (self.navSnapshots.count > 0) [self.navSnapshots removeLastObject];
+    if (self.navAppliedDepth > 0) self.navAppliedDepth -= 1;
+    if (self.nativeApp && self.navBackCommand.length > 0) {
+        NSLog(@"native-sdk: navigation swipe-back -> command %@", self.navBackCommand);
+        native_sdk_app_command(self.nativeApp,
+                               self.navBackCommand.UTF8String,
+                               [self.navBackCommand lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        [self logNativeErrorIfAny:@"navigation_back"];
+        /* The dispatch just moved the model to the shallow state; the
+         * transition is over, so render it now — the fresh frame both
+         * replaces the (possibly stale) revealed snapshot on the glass
+         * and covers the canvas swap-in below. */
+        [self preRenderLiveCanvasForTransition];
+        NativeSdkNavPageViewController *top = (NativeSdkNavPageViewController *)self.navController.topViewController;
+        UIImage *fresh = [self navSnapshotFromRetainedCanvas];
+        [top installContent:[self navPageContentForSnapshot:(fresh ?: (id)[NSNull null])]];
+    }
+    [self restoreLiveCanvasAfterTransition];
+}
+
+/* Every animated stack move lands here (host pushes/pops and the
+ * interactive gesture alike). The transition coordinator's completion
+ * is the one honest place cancellation is knowable: a cancelled swipe
+ * completes with isCancelled and dispatches nothing — the model was
+ * never touched, so there is nothing to undo. */
+- (void)navigationController:(UINavigationController *)navigationController
+      willShowViewController:(UIViewController *)viewController
+                    animated:(BOOL)animated {
+    (void)viewController;
+    const BOOL host_initiated = self.navHostTransition;
+    self.navHostTransition = NO;
+    id<UIViewControllerTransitionCoordinator> coordinator = navigationController.transitionCoordinator;
+    if (!animated || !coordinator) return;
+    self.navTransitionActive = YES;
+    __weak NativeSdkCanvasViewController *weakSelf = self;
+    [coordinator animateAlongsideTransition:nil
+                                 completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+                                     NativeSdkCanvasViewController *strongSelf = weakSelf;
+                                     if (!strongSelf) return;
+                                     strongSelf.navTransitionActive = NO;
+                                     if (context.isCancelled) return;
+                                     if (host_initiated) {
+                                         [strongSelf restoreLiveCanvasAfterTransition];
+                                         return;
+                                     }
+                                     [strongSelf completeInteractivePop];
+                                 }];
+}
+
+/* Arm the REAL edge-swipe-back exactly while the projection says a page
+ * is open and a back command exists to dispatch; never mid-transition
+ * (a second gesture stacked on a running pop is how stacks corrupt). */
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer == self.navController.interactivePopGestureRecognizer) {
+        if (self.navTransitionActive) return NO;
+        /* The gesture drags the LIVE canvas, so it only begins while
+         * the canvas actually sits on the top page (not during the
+         * few covered ticks after a transition lands). */
+        NativeSdkNavPageViewController *top = (NativeSdkNavPageViewController *)self.navController.topViewController;
+        if (top.contentView != self.canvasView) return NO;
+        if (self.navBackCommand.length == 0) return NO;
+        return self.navController.viewControllers.count > 1;
+    }
+    return YES;
 }
 
 /* The host-reported form factor: the platform's own horizontal size
