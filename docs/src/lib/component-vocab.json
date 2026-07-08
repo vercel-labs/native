@@ -1322,5 +1322,22 @@
     "md",
     "lg",
     "xl"
+  ],
+  "ejectable": [
+    {
+      "name": "stepper",
+      "form": "Zig view function",
+      "path": "src/components/stepper.zig"
+    },
+    {
+      "name": "timeline",
+      "form": "markup template",
+      "path": "src/components/timeline.native"
+    },
+    {
+      "name": "timeline-item",
+      "form": "Zig view function",
+      "path": "src/components/timeline_item.zig"
+    }
   ]
 }

@@ -17,6 +17,7 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 const markup_docs = @import("native-sdk/markup_docs.zig");
+const eject_components = @import("eject_components");
 
 const canvas = native_sdk.canvas;
 const geometry = native_sdk.geometry;
@@ -241,6 +242,24 @@ fn writeVocabJson(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     try writeNameList(&js, &canvas.ui_markup.known_color_token_names);
     try js.objectField("radiusTokens");
     try writeNameList(&js, &canvas.ui_markup.known_radius_token_names);
+    // The ejectable registry, straight from the rows `native eject
+    // component <name>` dispatches on (src/tooling/eject_components.zig):
+    // the docs' <EjectSection> resolves its name, form, and destination
+    // path from here and fails the docs build on any name the CLI
+    // doesn't accept.
+    try js.objectField("ejectable");
+    try js.beginArray();
+    for (eject_components.components) |component| {
+        try js.beginObject();
+        try js.objectField("name");
+        try js.write(component.name);
+        try js.objectField("form");
+        try js.write(component.form);
+        try js.objectField("path");
+        try js.write(component.path);
+        try js.endObject();
+    }
+    try js.endArray();
     try js.endObject();
 
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = body.written() });

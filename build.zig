@@ -276,6 +276,11 @@ pub fn build(b: *std.Build) void {
     // docs/. Regenerate with `zig build docs-component-previews`.
     const docs_previews_mod = module(b, target, optimize, "tools/docs_component_previews.zig");
     docs_previews_mod.addImport("native_sdk", desktop_mod);
+    // The eject registry as its own lean module (its imports stay inside
+    // src/tooling/), so the vocab JSON's `ejectable` table is written from
+    // the same rows `native eject component` dispatches on — the docs'
+    // <EjectSection> resolves from that JSON and can never drift.
+    docs_previews_mod.addImport("eject_components", module(b, target, optimize, "src/tooling/eject_components.zig"));
     const docs_previews_exe = b.addExecutable(.{
         .name = "docs-component-previews",
         .root_module = docs_previews_mod,
