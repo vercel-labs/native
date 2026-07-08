@@ -62,7 +62,7 @@ Native SDK capabilities are native OS services and app events exposed through `P
       <td><code>fx.playAudio(options)</code> / <code>fx.pauseAudio()</code> / <code>fx.resumeAudio()</code> / <code>fx.stopAudio()</code> / <code>fx.seekAudio(ms)</code> / <code>fx.setAudioVolume(v)</code></td>
       <td>None. Effects-channel API; every report arrives as an <code>on_event</code> Msg.</td>
       <td>None. No bridge surface.</td>
-      <td>macOS system-engine host (one player: AVAudioPlayer for local files, AVPlayer for streamed URLs); Linux, Windows, and macOS Chromium report unsupported and playback degrades to one explicit failed Msg</td>
+      <td>macOS system-engine host (one player: AVAudioPlayer for local files, AVPlayer for streamed URLs) and Windows system WebView (one Media Foundation media session for local files and streamed URLs); Linux and macOS Chromium report unsupported and playback degrades to one explicit failed Msg</td>
     </tr>
     <tr>
       <td>File drops</td>

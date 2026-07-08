@@ -32,6 +32,7 @@ const WindowsEventKind = enum(c_int) {
     wake = 15,
     timer = 16,
     appearance = 17,
+    audio = 18,
 };
 
 const WindowsEvent = extern struct {
@@ -79,6 +80,15 @@ const WindowsEvent = extern struct {
     color_scheme: c_int,
     reduce_motion: c_int,
     high_contrast: c_int,
+    /// Audio player report payload (`kind == .audio`): the report kind
+    /// ordinal plus the live transport readout. `audio_buffering` is the
+    /// honest stream-stall mirror (an un-paused stream waiting for
+    /// bytes), distinct from `audio_playing` (the transport intent).
+    audio_kind: c_int,
+    audio_position_ms: u64,
+    audio_duration_ms: u64,
+    audio_playing: c_int,
+    audio_buffering: c_int,
 };
 
 const WindowsCallback = *const fn (context: ?*anyopaque, event: *const WindowsEvent) callconv(.c) void;
@@ -145,6 +155,13 @@ extern fn native_sdk_windows_clipboard_read(host: *WindowsHost, buffer: [*]u8, b
 extern fn native_sdk_windows_clipboard_write(host: *WindowsHost, text: [*]const u8, text_len: usize) void;
 extern fn native_sdk_windows_clipboard_read_data(host: *WindowsHost, mime_type: [*]const u8, mime_type_len: usize, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_windows_clipboard_write_data(host: *WindowsHost, mime_type: [*]const u8, mime_type_len: usize, bytes: [*]const u8, bytes_len: usize) c_int;
+extern fn native_sdk_windows_audio_load(host: *WindowsHost, path: [*]const u8, path_len: usize) c_int;
+extern fn native_sdk_windows_audio_load_url(host: *WindowsHost, url: [*]const u8, url_len: usize, cache_path: [*]const u8, cache_path_len: usize, expected_bytes: u64) c_int;
+extern fn native_sdk_windows_audio_play(host: *WindowsHost) c_int;
+extern fn native_sdk_windows_audio_pause(host: *WindowsHost) c_int;
+extern fn native_sdk_windows_audio_stop(host: *WindowsHost) c_int;
+extern fn native_sdk_windows_audio_seek(host: *WindowsHost, position_ms: u64) c_int;
+extern fn native_sdk_windows_audio_set_volume(host: *WindowsHost, volume: f64) c_int;
 
 const WindowsOpenDialogOpts = extern struct {
     title: [*]const u8,
@@ -275,6 +292,13 @@ pub const WindowsPlatform = struct {
                 .set_credential_fn = setCredential,
                 .get_credential_fn = getCredential,
                 .delete_credential_fn = deleteCredential,
+                .audio_load_fn = audioLoad,
+                .audio_load_url_fn = audioLoadUrl,
+                .audio_play_fn = audioPlay,
+                .audio_pause_fn = audioPause,
+                .audio_stop_fn = audioStop,
+                .audio_seek_fn = audioSeek,
+                .audio_set_volume_fn = audioSetVolume,
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
@@ -310,14 +334,14 @@ pub const WindowsPlatform = struct {
             .file_drops,
             .app_activation_events,
             .gpu_surfaces,
+            .audio_playback,
+            .audio_streaming,
             => self.web_engine == .system,
-            // Native scroll drivers, native context menus, app-owned
-            // view-surface adoption, and audio playback are macOS-only
-            // today; Win32 keeps the engine's wheel physics
-            // (TrackPopupMenu is the natural future context-menu seam —
-            // the tray already uses it) and wires no audio services, so
-            // every audio call answers `error.UnsupportedService`.
-            .gpu_surface_scroll_drivers, .context_menus, .view_surface_adoption, .audio_playback, .audio_streaming => false,
+            // Native scroll drivers, native context menus, and app-owned
+            // view-surface adoption are macOS-only today; Win32 keeps
+            // the engine's wheel physics (TrackPopupMenu is the natural
+            // future context-menu seam — the tray already uses it).
+            .gpu_surface_scroll_drivers, .context_menus, .view_surface_adoption => false,
         };
     }
 
@@ -452,7 +476,26 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .reduce_motion = event.reduce_motion != 0,
             .high_contrast = event.high_contrast != 0,
         } }),
+        .audio => state.emit(.{ .audio = .{
+            .kind = audioEventKindFromInt(event.audio_kind),
+            .position_ms = event.audio_position_ms,
+            .duration_ms = event.audio_duration_ms,
+            .playing = event.audio_playing != 0,
+            .buffering = event.audio_buffering != 0,
+        } }),
     }
+}
+
+/// Ordinals match the audio report kinds in webview2_host.cpp (the same
+/// set the macOS host uses); anything unknown degrades to `.failed` so a
+/// host/SDK skew is loud in the app instead of undefined behavior here.
+fn audioEventKindFromInt(value: c_int) platform_mod.AudioEventKind {
+    return switch (value) {
+        0 => .loaded,
+        1 => .position,
+        2 => .completed,
+        else => .failed,
+    };
 }
 
 fn gpuSurfaceInputEventFromWindowsEvent(event: *const WindowsEvent) platform_mod.GpuSurfaceInputEvent {
@@ -999,6 +1042,60 @@ fn deleteCredential(context: ?*anyopaque, key: platform_mod.CredentialKey) anyer
     ) == 0) return error.CredentialNotFound;
 }
 
+/// Map the audio host's synchronous load result: 0 loaded, 1 the file is
+/// missing/unreadable, anything else a decode failure. The asynchronous
+/// `.loaded` acknowledgment (with the decoded duration) follows as an
+/// `.audio` event on the message loop.
+fn audioLoad(context: ?*anyopaque, path: []const u8) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    return switch (native_sdk_windows_audio_load(self.host, path.ptr, path.len)) {
+        0 => {},
+        1 => error.AudioSourceNotFound,
+        else => error.AudioDecodeFailed,
+    };
+}
+
+/// Map the streaming host's synchronous result: 1 a verified cache entry
+/// is playing locally, 0 a progressive stream started (the `.loaded`
+/// acknowledgment follows when the topology is ready), anything else the
+/// URL itself was unusable. Network failures after this point are
+/// asynchronous and arrive as `.audio`/`.failed` events.
+fn audioLoadUrl(context: ?*anyopaque, url: []const u8, cache_path: []const u8, expected_bytes: u64) anyerror!platform_mod.AudioLoadResolution {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    return switch (native_sdk_windows_audio_load_url(self.host, url.ptr, url.len, cache_path.ptr, cache_path.len, expected_bytes)) {
+        0 => .stream,
+        1 => .cache,
+        else => error.InvalidAudioOptions,
+    };
+}
+
+fn audioPlay(context: ?*anyopaque) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_windows_audio_play(self.host) == 0) return error.InvalidAudioOptions;
+}
+
+fn audioPause(context: ?*anyopaque) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    _ = native_sdk_windows_audio_pause(self.host);
+}
+
+fn audioStop(context: ?*anyopaque) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    _ = native_sdk_windows_audio_stop(self.host);
+}
+
+fn audioSeek(context: ?*anyopaque, position_ms: u64) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_windows_audio_seek(self.host, position_ms) == 0) return error.InvalidAudioOptions;
+}
+
+fn audioSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    _ = native_sdk_windows_audio_set_volume(self.host, volume);
+}
+
 fn configureSecurityPolicy(context: ?*anyopaque, policy: security.Policy) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     var origins_buffer: [4096]u8 = undefined;
@@ -1240,6 +1337,8 @@ test "windows chromium reports unsupported native surfaces" {
     try std.testing.expect(WindowsPlatform.supportsFeature(&system, .native_control_commands));
     try std.testing.expect(WindowsPlatform.supportsFeature(&system, .menus));
     try std.testing.expect(WindowsPlatform.supportsFeature(&system, .gpu_surfaces));
+    try std.testing.expect(WindowsPlatform.supportsFeature(&system, .audio_playback));
+    try std.testing.expect(WindowsPlatform.supportsFeature(&system, .audio_streaming));
 
     var chromium = testPlatformWithEngine(.chromium);
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .main_webview));
@@ -1249,6 +1348,23 @@ test "windows chromium reports unsupported native surfaces" {
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .menus));
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .shortcuts));
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .gpu_surfaces));
+    try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .audio_playback));
+    try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .audio_streaming));
+}
+
+test "windows audio event maps kinds and payload" {
+    var event = std.mem.zeroes(WindowsEvent);
+    event.audio_kind = 1;
+    event.audio_position_ms = 1_500;
+    event.audio_duration_ms = 120_000;
+    event.audio_playing = 1;
+    event.audio_buffering = 1;
+    try std.testing.expectEqual(platform_mod.AudioEventKind.position, audioEventKindFromInt(event.audio_kind));
+    try std.testing.expectEqual(platform_mod.AudioEventKind.loaded, audioEventKindFromInt(0));
+    try std.testing.expectEqual(platform_mod.AudioEventKind.completed, audioEventKindFromInt(2));
+    // Unknown ordinals degrade loudly to failed, never to silence.
+    try std.testing.expectEqual(platform_mod.AudioEventKind.failed, audioEventKindFromInt(3));
+    try std.testing.expectEqual(platform_mod.AudioEventKind.failed, audioEventKindFromInt(99));
 }
 
 fn testPlatformWithEngine(web_engine: platform_mod.WebEngine) WindowsPlatform {

@@ -528,6 +528,11 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         app_mod.linkSystemLibrary("ole32", .{});
         app_mod.linkSystemLibrary("oleacc", .{});
         app_mod.linkSystemLibrary("shell32", .{});
+        // The audio backend: Media Foundation (session + source resolver
+        // + streaming audio renderer) and WinHTTP (the cache fill).
+        app_mod.linkSystemLibrary("mf", .{});
+        app_mod.linkSystemLibrary("mfplat", .{});
+        app_mod.linkSystemLibrary("winhttp", .{});
         if (web_engine == .chromium) app_mod.linkSystemLibrary("libcef", .{});
     }
 }

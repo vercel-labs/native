@@ -14,12 +14,14 @@
 #include <stdio.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <climits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if __has_include(<WebView2.h>) && __has_include(<wrl.h>)
@@ -36,6 +38,17 @@ using Microsoft::WRL::ComPtr;
  * WebViewNotFound at start. */
 #pragma message("WebView2.h not found: building the Windows host without the embedded WebView layer (canvas apps unaffected; WebView loads will report WebViewNotFound)")
 #endif
+
+/* Media Foundation (the audio backend below) + WinHTTP (the audio cache
+ * fill). initguid.h makes the DEFINE_GUID declarations in the MF headers
+ * instantiate here (selectany), so no separate GUID import library is
+ * needed — the same self-containment the WIC decoder uses further down.
+ * Included last so only the Media Foundation GUIDs are affected. */
+#include <initguid.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mferror.h>
+#include <winhttp.h>
 
 namespace {
 
@@ -58,6 +71,7 @@ enum EventKind {
     kWake = 15,
     kTimer = 16,
     kAppearance = 17,
+    kAudio = 18,
 };
 
 constexpr uint32_t kShortcutModifierPrimary = 1u << 0;
@@ -78,6 +92,10 @@ constexpr UINT kWakeMessage = WM_APP + 43;
  * automation arrival watcher uses it so a queued command wakes an idle
  * frame loop without depending on the 16 ms frame pump. */
 constexpr UINT kRequestFrameMessage = WM_APP + 44;
+/* Posted from Media Foundation worker threads (the audio backend's event
+ * pump and source resolver); the window procedure hands the distilled
+ * note to audioHandleSessionMessage on the message loop thread. */
+constexpr UINT kAudioSessionMessage = WM_APP + 45;
 constexpr const char *kAssetVirtualOrigin = "https://native-sdk-app.localhost";
 
 constexpr int kViewWebView = 0;
@@ -145,6 +163,11 @@ struct WindowsEvent {
     int color_scheme;
     int reduce_motion;
     int high_contrast;
+    int audio_kind;
+    uint64_t audio_position_ms;
+    uint64_t audio_duration_ms;
+    int audio_playing;
+    int audio_buffering;
 };
 
 struct WindowsOpenDialogOpts {
@@ -345,6 +368,47 @@ struct AppTimer {
     bool in_use = false;
 };
 
+/* Cancellation handle for the audio cache-fill download: the host and
+ * the detached download thread share it, so a replaced or stopped
+ * playback can abandon the transfer without touching thread state. */
+struct AudioDownloadCancel {
+    std::atomic<bool> cancelled{false};
+};
+
+/* The app's single audio player (see the audio section further down for
+ * the backend rationale). All fields are message-loop-thread state; the
+ * lifetime mutex additionally guards `generation` and `source` because
+ * the asynchronous URL source resolver hands its result over from a
+ * Media Foundation worker thread. */
+struct AudioState {
+    /* Bumped on every load/stop: worker-thread stragglers (resolver
+     * completions, retired-session events) carry the generation they
+     * were born with and are ignored when it no longer matches. */
+    uint64_t generation = 0;
+    bool active = false;
+    bool url_source = false;
+    /* Topology resolved: transport calls apply directly; before this
+     * they queue as pending_play / pending seek. */
+    bool ready = false;
+    /* Transport intent (un-paused), the `playing` flag events carry. */
+    bool playing = false;
+    /* The honest buffering mirror: true from a stream's load until the
+     * session actually starts, and across MEBufferingStarted/Stopped. */
+    bool buffering = false;
+    bool loaded_emitted = false;
+    bool pending_play = false;
+    bool has_pending_seek = false;
+    bool position_timer_armed = false;
+    float volume = 1.0f;
+    uint64_t pending_seek_ms = 0;
+    uint64_t duration_ms = 0;
+    HWND timer_hwnd = nullptr;
+    IMFMediaSession *session = nullptr;
+    IMFMediaSource *source = nullptr;
+    IMFPresentationClock *clock = nullptr;
+    std::shared_ptr<AudioDownloadCancel> download_cancel;
+};
+
 struct Host {
     HINSTANCE instance = GetModuleHandleW(nullptr);
     std::string app_name;
@@ -377,6 +441,7 @@ struct Host {
     int appearance_color_scheme = -1;
     int appearance_reduce_motion = -1;
     int appearance_high_contrast = -1;
+    AudioState audio;
     std::shared_ptr<HostLifetime> lifetime = std::make_shared<HostLifetime>();
 };
 
@@ -2072,6 +2137,729 @@ static const wchar_t *gpuSurfaceClassName(Host *host) {
     return L"NativeSdkGpuSurface";
 }
 
+/* ---------------------------------------------------------------- audio
+ *
+ * Backend: the Media Foundation MEDIA SESSION — IMFMediaSession driving
+ * a source-resolver media source into the Streaming Audio Renderer.
+ * The choice, weighed against the alternatives that ship with Windows
+ * 10/11: MFPlay (IMFPMediaPlayer) is deprecated and off the table;
+ * Source Reader + WASAPI means hand-rolling decode, resampling, device
+ * buffering, and a presentation clock — hundreds of lines to rebuild
+ * what the session already is; the session gives local MP3 decode, HTTP(S)
+ * progressive streaming (audible before the download finishes, with
+ * honest MEBufferingStarted/Stopped signals), pause/resume, sample-
+ * accurate seek, per-stream volume, duration, and natural-end events in
+ * one in-box object graph (mf.dll + mfplat.dll, no external
+ * dependencies).
+ *
+ * Contract mirror of the macOS host: one player for the whole app; URL
+ * sources resolve verified-cache-first, then stream while a PARALLEL
+ * WinHTTP download fills the cache (part file beside the final name,
+ * size-verified against the manifest, atomic same-directory rename —
+ * a partial file never occupies the cache name, even across a crash);
+ * LOADED is asynchronous (topology ready), position ticks ride a 500 ms
+ * timer armed only while playing, completion and failure are single
+ * terminal reports. Media Foundation callbacks land on its worker
+ * threads; everything they learn crosses to the message loop as a
+ * distilled kAudioSessionMessage PostMessage, the same marshalling the
+ * wake path uses, so all host state stays loop-thread-owned. */
+
+constexpr int kAudioEventLoaded = 0;
+constexpr int kAudioEventPosition = 1;
+constexpr int kAudioEventCompleted = 2;
+constexpr int kAudioEventFailed = 3;
+
+/* Distilled session notes (kAudioSessionMessage wparam); lparam carries
+ * the generation the note belongs to. */
+constexpr WPARAM kAudioNoteSourceResolved = 1;
+constexpr WPARAM kAudioNoteSourceFailed = 2;
+constexpr WPARAM kAudioNoteTopologyReady = 3;
+constexpr WPARAM kAudioNoteStarted = 4;
+constexpr WPARAM kAudioNoteEnded = 5;
+constexpr WPARAM kAudioNoteBufferingStarted = 6;
+constexpr WPARAM kAudioNoteBufferingStopped = 7;
+constexpr WPARAM kAudioNoteError = 8;
+
+/* Position tick on the first top-level window, outside the app-timer id
+ * range; 500 ms is the shared coarse cadence (macOS and the null
+ * platform tick the same), so frame-clock scrubber interpolation
+ * behaves identically across hosts. */
+constexpr UINT_PTR kAudioPositionTimerId = 0x3000;
+constexpr UINT kAudioPositionIntervalMs = 500;
+
+/* IMFMediaSession::Start's time-format argument: GUID_NULL means
+ * 100-nanosecond units. Defined locally like the WIC GUIDs. */
+static const GUID kNativeSdkAudioTimeFormat = { 0, 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } };
+
+/* One-time Media Foundation bring-up on the loop thread. COM and MF stay
+ * up for the process lifetime: retired sessions finish closing on Media
+ * Foundation worker threads, so pairing MFShutdown with host destroy
+ * would race their teardown; the OS reclaims both at process exit. */
+static bool audioEnsureMediaFoundation() {
+    static bool attempted = false;
+    static bool ready = false;
+    if (attempted) return ready;
+    attempted = true;
+    /* S_FALSE (already initialized) and RPC_E_CHANGED_MODE (an MTA is
+     * already active) both leave a usable COM state for MF. */
+    (void)CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    ready = SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_FULL));
+    return ready;
+}
+
+/* Pumps one media session's event queue on Media Foundation worker
+ * threads and posts distilled notes to the message loop. Owns its own
+ * reference plus one on the session and source; MESessionClosed (the
+ * handshake audioReleaseSession starts with Close) shuts the pipeline
+ * down right here — Shutdown is thread-safe — and retires the pump.
+ * Stale generations are filtered on the loop side, so a retired
+ * session's stragglers are inert. */
+struct AudioSessionEventForwarder final : public IMFAsyncCallback {
+    LONG refs = 1;
+    IMFMediaSession *session = nullptr;
+    IMFMediaSource *source = nullptr;
+    HWND hwnd = nullptr;
+    uint64_t generation = 0;
+
+    AudioSessionEventForwarder(IMFMediaSession *session_in, IMFMediaSource *source_in, HWND hwnd_in, uint64_t generation_in)
+        : session(session_in), source(source_in), hwnd(hwnd_in), generation(generation_in) {
+        session->AddRef();
+        source->AddRef();
+    }
+    ~AudioSessionEventForwarder() {
+        session->Release();
+        source->Release();
+    }
+    AudioSessionEventForwarder(const AudioSessionEventForwarder &) = delete;
+    AudioSessionEventForwarder &operator=(const AudioSessionEventForwarder &) = delete;
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **out) override {
+        if (!out) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IMFAsyncCallback) {
+            *out = static_cast<IMFAsyncCallback *>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return (ULONG)InterlockedIncrement(&refs); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        LONG value = InterlockedDecrement(&refs);
+        if (value == 0) delete this;
+        return (ULONG)value;
+    }
+    HRESULT STDMETHODCALLTYPE GetParameters(DWORD *, DWORD *) override { return E_NOTIMPL; }
+
+    HRESULT STDMETHODCALLTYPE Invoke(IMFAsyncResult *result) override {
+        IMFMediaEvent *event = nullptr;
+        if (FAILED(session->EndGetEvent(result, &event)) || !event) {
+            retire();
+            return S_OK;
+        }
+        MediaEventType type = MEUnknown;
+        event->GetType(&type);
+        HRESULT status = S_OK;
+        event->GetStatus(&status);
+        if (type == MESessionClosed) {
+            event->Release();
+            retire();
+            return S_OK;
+        }
+        WPARAM note = 0;
+        if (FAILED(status) || type == MEError) {
+            note = kAudioNoteError;
+        } else if (type == MESessionTopologyStatus) {
+            UINT32 topology_status = 0;
+            if (SUCCEEDED(event->GetUINT32(MF_EVENT_TOPOLOGY_STATUS, &topology_status)) && topology_status == MF_TOPOSTATUS_READY) {
+                note = kAudioNoteTopologyReady;
+            }
+        } else if (type == MESessionStarted) {
+            note = kAudioNoteStarted;
+        } else if (type == MESessionEnded) {
+            note = kAudioNoteEnded;
+        } else if (type == MEBufferingStarted) {
+            note = kAudioNoteBufferingStarted;
+        } else if (type == MEBufferingStopped) {
+            note = kAudioNoteBufferingStopped;
+        }
+        event->Release();
+        /* A destroyed window makes this a harmless no-op. */
+        if (note != 0) PostMessageW(hwnd, kAudioSessionMessage, note, (LPARAM)generation);
+        if (FAILED(session->BeginGetEvent(this, nullptr))) retire();
+        return S_OK;
+    }
+
+    void retire() {
+        source->Shutdown();
+        session->Shutdown();
+        Release();
+    }
+};
+
+/* Completes an asynchronous URL source resolution (worker thread) and
+ * hands the media source to the loop thread under the host lifetime
+ * mutex; a stale generation — the playback was replaced or stopped
+ * mid-resolve — shuts the source down right here instead. */
+struct AudioSourceResolveForwarder final : public IMFAsyncCallback {
+    LONG refs = 1;
+    IMFSourceResolver *resolver = nullptr;
+    Host *host = nullptr;
+    std::shared_ptr<HostLifetime> lifetime;
+    HWND hwnd = nullptr;
+    uint64_t generation = 0;
+
+    AudioSourceResolveForwarder(IMFSourceResolver *resolver_in, Host *host_in, std::shared_ptr<HostLifetime> lifetime_in, HWND hwnd_in, uint64_t generation_in)
+        : resolver(resolver_in), host(host_in), lifetime(std::move(lifetime_in)), hwnd(hwnd_in), generation(generation_in) {
+        resolver->AddRef();
+    }
+    ~AudioSourceResolveForwarder() { resolver->Release(); }
+    AudioSourceResolveForwarder(const AudioSourceResolveForwarder &) = delete;
+    AudioSourceResolveForwarder &operator=(const AudioSourceResolveForwarder &) = delete;
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **out) override {
+        if (!out) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IMFAsyncCallback) {
+            *out = static_cast<IMFAsyncCallback *>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return (ULONG)InterlockedIncrement(&refs); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        LONG value = InterlockedDecrement(&refs);
+        if (value == 0) delete this;
+        return (ULONG)value;
+    }
+    HRESULT STDMETHODCALLTYPE GetParameters(DWORD *, DWORD *) override { return E_NOTIMPL; }
+
+    HRESULT STDMETHODCALLTYPE Invoke(IMFAsyncResult *result) override {
+        MF_OBJECT_TYPE type = MF_OBJECT_INVALID;
+        IUnknown *object = nullptr;
+        HRESULT hr = resolver->EndCreateObjectFromURL(result, &type, &object);
+        IMFMediaSource *source = nullptr;
+        if (SUCCEEDED(hr) && object) object->QueryInterface(IID_IMFMediaSource, reinterpret_cast<void **>(&source));
+        if (object) object->Release();
+        std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
+        const bool current = lifetime->alive && host->audio.active && host->audio.generation == generation;
+        if (!current) {
+            if (source) {
+                source->Shutdown();
+                source->Release();
+            }
+            return S_OK;
+        }
+        if (!source) {
+            PostMessageW(hwnd, kAudioSessionMessage, kAudioNoteSourceFailed, (LPARAM)generation);
+            return S_OK;
+        }
+        /* Reference transferred; the loop thread attaches or (if it
+         * bumps the generation first) releases it in teardown. */
+        host->audio.source = source;
+        PostMessageW(hwnd, kAudioSessionMessage, kAudioNoteSourceResolved, (LPARAM)generation);
+        return S_OK;
+    }
+};
+
+static uint64_t audioFileSize(const std::wstring &path, bool *exists) {
+    *exists = false;
+    WIN32_FILE_ATTRIBUTE_DATA data = {};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) return 0;
+    if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return 0;
+    *exists = true;
+    return ((uint64_t)data.nFileSizeHigh << 32) | (uint64_t)data.nFileSizeLow;
+}
+
+static void audioCreateParentDirectories(const std::wstring &path) {
+    size_t slash = path.find_last_of(L"/\\");
+    if (slash == std::wstring::npos || slash == 0) return;
+    std::wstring directory = path.substr(0, slash);
+    for (wchar_t &ch : directory) {
+        if (ch == L'/') ch = L'\\';
+    }
+    SHCreateDirectoryExW(nullptr, directory.c_str(), nullptr);
+}
+
+/* One GET into the part file, cancellable between reads. Only a 200
+ * installs bytes — an error page must never masquerade as a track. */
+static bool audioHttpDownload(const std::string &url, const std::wstring &part_path, const std::shared_ptr<AudioDownloadCancel> &cancel) {
+    std::wstring url_wide = widen(url);
+    wchar_t host_name[256] = {};
+    wchar_t url_path[2048] = {};
+    wchar_t url_extra[1024] = {};
+    URL_COMPONENTS parts = {};
+    parts.dwStructSize = sizeof(parts);
+    parts.lpszHostName = host_name;
+    parts.dwHostNameLength = ARRAYSIZE(host_name) - 1;
+    parts.lpszUrlPath = url_path;
+    parts.dwUrlPathLength = ARRAYSIZE(url_path) - 1;
+    parts.lpszExtraInfo = url_extra;
+    parts.dwExtraInfoLength = ARRAYSIZE(url_extra) - 1;
+    if (!WinHttpCrackUrl(url_wide.c_str(), (DWORD)url_wide.size(), 0, &parts)) return false;
+    const bool secure = parts.nScheme == INTERNET_SCHEME_HTTPS;
+    if (!secure && parts.nScheme != INTERNET_SCHEME_HTTP) return false;
+    std::wstring object = std::wstring(url_path) + url_extra;
+    if (object.empty()) object = L"/";
+
+    bool ok = false;
+    HINTERNET session = WinHttpOpen(L"native-sdk-audio-cache", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    HINTERNET connection = session ? WinHttpConnect(session, host_name, parts.nPort, 0) : nullptr;
+    HINTERNET request = connection ? WinHttpOpenRequest(connection, L"GET", object.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0) : nullptr;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    do {
+        if (!request) break;
+        if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) break;
+        if (!WinHttpReceiveResponse(request, nullptr)) break;
+        DWORD status_code = 0;
+        DWORD status_size = sizeof(status_code);
+        if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status_code, &status_size, WINHTTP_NO_HEADER_INDEX)) break;
+        if (status_code != 200) break;
+        file = CreateFileW(part_path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) break;
+        std::vector<uint8_t> buffer(64 * 1024);
+        for (;;) {
+            if (cancel->cancelled.load()) break;
+            DWORD read = 0;
+            if (!WinHttpReadData(request, buffer.data(), (DWORD)buffer.size(), &read)) break;
+            if (read == 0) {
+                ok = true;
+                break;
+            }
+            DWORD written = 0;
+            if (!WriteFile(file, buffer.data(), read, &written, nullptr) || written != read) break;
+        }
+    } while (false);
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    if (request) WinHttpCloseHandle(request);
+    if (connection) WinHttpCloseHandle(connection);
+    if (session) WinHttpCloseHandle(session);
+    return ok && !cancel->cancelled.load();
+}
+
+/* The cache fill is a PARALLEL download, not a tee off the session's own
+ * network source: a partially buffered stream must never masquerade as a
+ * cache entry. One extra request on a track's first (uncached) play buys
+ * a stock streaming path and a cache whose entries are whole files by
+ * construction: downloaded beside the final name, size-verified against
+ * the manifest, and renamed into place — a same-directory rename, so a
+ * partial file never occupies the cache name even across a crash.
+ * Detached thread, file and network work only, never host state; a
+ * failed or cancelled download simply leaves no cache entry (the next
+ * play streams again). */
+static void audioCacheDownloadThread(std::string url, std::wstring cache_path, uint64_t expected_bytes, std::shared_ptr<AudioDownloadCancel> cancel) {
+    audioCreateParentDirectories(cache_path);
+    std::wstring part_path = cache_path + L".part";
+    DeleteFileW(part_path.c_str());
+    if (!audioHttpDownload(url, part_path, cancel)) {
+        DeleteFileW(part_path.c_str());
+        return;
+    }
+    bool exists = false;
+    const uint64_t size = audioFileSize(part_path, &exists);
+    if (!exists || (expected_bytes != 0 && size != expected_bytes)) {
+        /* Truncated or wrong content: never installed. */
+        DeleteFileW(part_path.c_str());
+        return;
+    }
+    DeleteFileW(cache_path.c_str());
+    if (!MoveFileExW(part_path.c_str(), cache_path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(part_path.c_str());
+    }
+}
+
+/* Live position off the session's presentation clock (fetched lazily —
+ * the clock exists once a topology is set). 100 ns units to ms. */
+static uint64_t audioPositionMs(AudioState &audio) {
+    if (!audio.session) return 0;
+    if (!audio.clock) {
+        IMFClock *clock = nullptr;
+        if (SUCCEEDED(audio.session->GetClock(&clock)) && clock) {
+            clock->QueryInterface(IID_IMFPresentationClock, reinterpret_cast<void **>(&audio.clock));
+            clock->Release();
+        }
+    }
+    if (!audio.clock) return 0;
+    MFTIME time = 0;
+    if (FAILED(audio.clock->GetTime(&time)) || time < 0) return 0;
+    return (uint64_t)time / 10000ull;
+}
+
+static void audioEmitReport(Host *host, int kind, uint64_t position_ms, uint64_t duration_ms, int playing, int buffering) {
+    if (!host || !host->callback) return;
+    WindowsEvent event = {};
+    event.kind = kAudio;
+    event.audio_kind = kind;
+    event.audio_position_ms = position_ms;
+    event.audio_duration_ms = duration_ms;
+    event.audio_playing = playing;
+    event.audio_buffering = buffering;
+    event.timestamp_ns = gpuTimestampNs();
+    host->callback(host->callback_context, &event);
+}
+
+static void audioEmitEvent(Host *host, int kind) {
+    AudioState &audio = host->audio;
+    audioEmitReport(host, kind, audioPositionMs(audio), audio.duration_ms, audio.playing ? 1 : 0, audio.buffering ? 1 : 0);
+}
+
+static void audioStopPositionTimer(Host *host) {
+    AudioState &audio = host->audio;
+    if (audio.position_timer_armed && audio.timer_hwnd) KillTimer(audio.timer_hwnd, kAudioPositionTimerId);
+    audio.position_timer_armed = false;
+    audio.timer_hwnd = nullptr;
+}
+
+static void audioStartPositionTimer(Host *host) {
+    AudioState &audio = host->audio;
+    if (audio.position_timer_armed) return;
+    HWND hwnd = parentWindow(host);
+    if (!hwnd) return;
+    if (SetTimer(hwnd, kAudioPositionTimerId, kAudioPositionIntervalMs, nullptr)) {
+        audio.timer_hwnd = hwnd;
+        audio.position_timer_armed = true;
+    }
+}
+
+/* Release the whole pipeline. The session retires through Close(): the
+ * event pump answers the MESessionClosed handshake by shutting source
+ * and session down on the worker thread, so the loop never blocks. The
+ * download is cancelled when the caller says so (replacement, explicit
+ * stop, failure — a skipped track should not keep burning bandwidth)
+ * but ORPHANED on natural completion: it is usually already done, and
+ * letting a straggler finish installs the cache entry the completed
+ * play earned. */
+static void audioReleaseSession(Host *host, bool cancel_download) {
+    std::lock_guard<std::recursive_mutex> guard(host->lifetime->mutex);
+    AudioState &audio = host->audio;
+    audioStopPositionTimer(host);
+    audio.generation += 1;
+    if (audio.clock) {
+        audio.clock->Release();
+        audio.clock = nullptr;
+    }
+    const bool had_session = audio.session != nullptr;
+    if (audio.session) {
+        if (FAILED(audio.session->Close())) {
+            /* Close refused (session already dead): shut down inline;
+             * the pump's next callback fails and retires itself. */
+            if (audio.source) audio.source->Shutdown();
+            audio.session->Shutdown();
+        }
+        audio.session->Release();
+        audio.session = nullptr;
+    }
+    if (audio.source) {
+        /* No session pump owns a pending (resolved-but-unattached)
+         * source, so it is shut down here. */
+        if (!had_session) audio.source->Shutdown();
+        audio.source->Release();
+        audio.source = nullptr;
+    }
+    if (cancel_download && audio.download_cancel) audio.download_cancel->cancelled.store(true);
+    const uint64_t generation = audio.generation;
+    audio = AudioState{};
+    audio.generation = generation;
+}
+
+/* Build the playback topology (every selected audio stream into a
+ * Streaming Audio Renderer; other streams deselected) on the pending
+ * source and arm the event pump. Duration comes off the presentation
+ * descriptor now; LOADED waits for the topology-ready note. */
+static bool audioAttachSession(Host *host) {
+    AudioState &audio = host->audio;
+    IMFMediaSource *source = audio.source;
+    if (!source) return false;
+    HWND hwnd = parentWindow(host);
+    if (!hwnd) return false;
+    IMFMediaSession *session = nullptr;
+    if (FAILED(MFCreateMediaSession(nullptr, &session)) || !session) return false;
+    IMFPresentationDescriptor *descriptor = nullptr;
+    IMFTopology *topology = nullptr;
+    bool ok = false;
+    do {
+        if (FAILED(source->CreatePresentationDescriptor(&descriptor)) || !descriptor) break;
+        UINT64 duration_hns = 0;
+        if (SUCCEEDED(descriptor->GetUINT64(MF_PD_DURATION, &duration_hns))) audio.duration_ms = duration_hns / 10000ull;
+        if (FAILED(MFCreateTopology(&topology)) || !topology) break;
+        DWORD stream_count = 0;
+        if (FAILED(descriptor->GetStreamDescriptorCount(&stream_count))) break;
+        DWORD audio_streams = 0;
+        for (DWORD index = 0; index < stream_count; ++index) {
+            BOOL selected = FALSE;
+            IMFStreamDescriptor *stream = nullptr;
+            if (FAILED(descriptor->GetStreamDescriptorByIndex(index, &selected, &stream)) || !stream) continue;
+            GUID major = {};
+            IMFMediaTypeHandler *handler = nullptr;
+            if (SUCCEEDED(stream->GetMediaTypeHandler(&handler)) && handler) {
+                handler->GetMajorType(&major);
+                handler->Release();
+            }
+            if (!selected || major != MFMediaType_Audio) {
+                if (selected) descriptor->DeselectStream(index);
+                stream->Release();
+                continue;
+            }
+            IMFTopologyNode *source_node = nullptr;
+            IMFTopologyNode *output_node = nullptr;
+            IMFActivate *renderer = nullptr;
+            const bool added = SUCCEEDED(MFCreateTopologyNode(MF_TOPOLOGY_SOURCESTREAM_NODE, &source_node)) &&
+                SUCCEEDED(source_node->SetUnknown(MF_TOPONODE_SOURCE, source)) &&
+                SUCCEEDED(source_node->SetUnknown(MF_TOPONODE_PRESENTATION_DESCRIPTOR, descriptor)) &&
+                SUCCEEDED(source_node->SetUnknown(MF_TOPONODE_STREAM_DESCRIPTOR, stream)) &&
+                SUCCEEDED(MFCreateTopologyNode(MF_TOPOLOGY_OUTPUT_NODE, &output_node)) &&
+                SUCCEEDED(MFCreateAudioRendererActivate(&renderer)) &&
+                SUCCEEDED(output_node->SetObject(renderer)) &&
+                SUCCEEDED(topology->AddNode(source_node)) &&
+                SUCCEEDED(topology->AddNode(output_node)) &&
+                SUCCEEDED(source_node->ConnectOutput(0, output_node, 0));
+            if (renderer) renderer->Release();
+            if (output_node) output_node->Release();
+            if (source_node) source_node->Release();
+            stream->Release();
+            if (added) audio_streams += 1;
+        }
+        if (audio_streams == 0) break;
+        if (FAILED(session->SetTopology(0, topology))) break;
+        ok = true;
+    } while (false);
+    if (topology) topology->Release();
+    if (descriptor) descriptor->Release();
+    if (!ok) {
+        session->Shutdown();
+        session->Release();
+        return false;
+    }
+    audio.session = session;
+    /* The pump owns its refs (constructor AddRefs) and self-releases at
+     * MESessionClosed or on pump failure. */
+    AudioSessionEventForwarder *pump = new AudioSessionEventForwarder(session, source, hwnd, audio.generation);
+    if (FAILED(session->BeginGetEvent(pump, nullptr))) {
+        pump->Release();
+        source->Shutdown();
+        session->Shutdown();
+        session->Release();
+        audio.session = nullptr;
+        return false;
+    }
+    return true;
+}
+
+/* Start (optionally at a position); a paused transport pauses again
+ * immediately — the session applies the queued pair in order, landing
+ * paused at the new position (the Media Foundation scrub idiom). */
+static void audioStartTransport(Host *host, bool has_position, uint64_t position_ms) {
+    AudioState &audio = host->audio;
+    if (!audio.session) return;
+    PROPVARIANT start = {};
+    if (has_position) {
+        start.vt = VT_I8;
+        start.hVal.QuadPart = (LONGLONG)position_ms * 10000;
+    } else {
+        start.vt = VT_EMPTY;
+    }
+    audio.session->Start(&kNativeSdkAudioTimeFormat, &start);
+    if (!audio.playing) audio.session->Pause();
+}
+
+/* Per-stream volume on the Streaming Audio Renderer — pipeline-local,
+ * unlike the policy (per-app mixer) volume service, so the app's mixer
+ * entry is never mutated. */
+static void audioApplyVolume(Host *host) {
+    AudioState &audio = host->audio;
+    if (!audio.session) return;
+    IMFAudioStreamVolume *volume = nullptr;
+    if (FAILED(MFGetService(audio.session, MR_STREAM_VOLUME_SERVICE, IID_IMFAudioStreamVolume, reinterpret_cast<void **>(&volume))) || !volume) return;
+    UINT32 channels = 0;
+    if (SUCCEEDED(volume->GetChannelCount(&channels)) && channels > 0 && channels <= 16) {
+        float levels[16];
+        for (UINT32 index = 0; index < channels; ++index) levels[index] = audio.volume;
+        volume->SetAllVolumes(channels, levels);
+    }
+    volume->Release();
+}
+
+/* Synchronous local-file load: 0 loaded (the asynchronous LOADED
+ * acknowledgment follows at topology ready), 1 missing file, 2
+ * undecodable — the macOS host's result contract. */
+static int audioLoadPathInternal(Host *host, const std::string &path) {
+    audioReleaseSession(host, true);
+    std::wstring wide = widen(path);
+    if (!regularFileExists(wide)) return 1;
+    if (!audioEnsureMediaFoundation()) return 2;
+    IMFSourceResolver *resolver = nullptr;
+    if (FAILED(MFCreateSourceResolver(&resolver)) || !resolver) return 2;
+    MF_OBJECT_TYPE type = MF_OBJECT_INVALID;
+    IUnknown *object = nullptr;
+    /* A cache entry's name is a hash, so resolution must sniff content
+     * instead of trusting the extension. */
+    const HRESULT hr = resolver->CreateObjectFromURL(wide.c_str(), MF_RESOLUTION_MEDIASOURCE | MF_RESOLUTION_CONTENT_DOES_NOT_HAVE_TO_MATCH_EXTENSION_OR_MIME_TYPE, nullptr, &type, &object);
+    resolver->Release();
+    if (FAILED(hr) || !object) return 2;
+    IMFMediaSource *source = nullptr;
+    object->QueryInterface(IID_IMFMediaSource, reinterpret_cast<void **>(&source));
+    object->Release();
+    if (!source) return 2;
+    AudioState &audio = host->audio;
+    audio.active = true;
+    audio.source = source;
+    if (!audioAttachSession(host)) {
+        audioReleaseSession(host, false);
+        return 2;
+    }
+    return 0;
+}
+
+/* URL sources: verified cache entry first (plays as a plain local file,
+ * no network), then an asynchronously resolved progressive stream with
+ * a parallel cache-filling download. Returns 1 for the cache hit, 0 for
+ * a started stream, 2 when the URL cannot be used; everything
+ * asynchronous — readiness, stalls, natural end, network death —
+ * arrives as audio reports. */
+static int audioLoadUrlInternal(Host *host, const std::string &url, const std::string &cache_path, uint64_t expected_bytes) {
+    audioReleaseSession(host, true);
+    if (url.find("://") == std::string::npos) return 2;
+    if (!cache_path.empty()) {
+        std::wstring cache_wide = widen(cache_path);
+        bool exists = false;
+        const uint64_t size = audioFileSize(cache_wide, &exists);
+        if (exists) {
+            if (expected_bytes == 0 || size == expected_bytes) {
+                if (audioLoadPathInternal(host, cache_path) == 0) return 1;
+                /* An entry with the right size that will not decode is
+                 * corrupt — fall through to discard and re-stream. */
+            }
+            /* Partial, stale, or corrupt: a bad cache entry never
+             * plays, and never survives to fool the next lookup. */
+            DeleteFileW(cache_wide.c_str());
+        }
+    }
+    if (!audioEnsureMediaFoundation()) return 2;
+    HWND hwnd = parentWindow(host);
+    if (!hwnd) return 2;
+    IMFSourceResolver *resolver = nullptr;
+    if (FAILED(MFCreateSourceResolver(&resolver)) || !resolver) return 2;
+    AudioState &audio = host->audio;
+    audio.active = true;
+    audio.url_source = true;
+    /* A fresh stream has no bytes yet: buffering starts true and drops
+     * when the session actually starts rolling. */
+    audio.buffering = true;
+    AudioSourceResolveForwarder *forwarder = new AudioSourceResolveForwarder(resolver, host, host->lifetime, hwnd, audio.generation);
+    const HRESULT hr = resolver->BeginCreateObjectFromURL(widen(url).c_str(), MF_RESOLUTION_MEDIASOURCE, nullptr, nullptr, forwarder, nullptr);
+    forwarder->Release();
+    resolver->Release();
+    if (FAILED(hr)) {
+        audioReleaseSession(host, false);
+        return 2;
+    }
+    if (!cache_path.empty()) {
+        audio.download_cancel = std::make_shared<AudioDownloadCancel>();
+        std::thread(audioCacheDownloadThread, url, widen(cache_path), expected_bytes, audio.download_cancel).detach();
+    }
+    return 0;
+}
+
+/* Topology resolved: apply the queued transport intent (volume, seek,
+ * play), THEN acknowledge with LOADED so the event carries the honest
+ * playing flag — the runtime issues play immediately after load, before
+ * readiness, exactly like the macOS local path. */
+static void audioTopologyReady(Host *host) {
+    AudioState &audio = host->audio;
+    audio.ready = true;
+    if (audio.volume != 1.0f) audioApplyVolume(host);
+    if (audio.has_pending_seek || audio.pending_play) {
+        audioStartTransport(host, audio.has_pending_seek, audio.pending_seek_ms);
+    }
+    audio.pending_play = false;
+    audio.has_pending_seek = false;
+    if (!audio.loaded_emitted) {
+        audio.loaded_emitted = true;
+        audioEmitEvent(host, kAudioEventLoaded);
+    }
+}
+
+/* Natural end of the track. Retire-before-emit discipline (mirroring
+ * the macOS host): the completion Msg routinely starts the NEXT track
+ * from inside its own dispatch, and tearing down afterwards would
+ * destroy the player that load just installed. The duration is captured
+ * first so the event carries the honest terminal position. The cache
+ * download is orphaned, not cancelled — completion is what earned the
+ * cache entry. */
+static void audioCompleted(Host *host) {
+    const uint64_t duration_ms = host->audio.duration_ms;
+    audioReleaseSession(host, false);
+    audioEmitReport(host, kAudioEventCompleted, duration_ms, duration_ms, 0, 0);
+}
+
+/* A load that never became playable or a pipeline that died mid-flight:
+ * one FAILED report, player retired first. The cache download dies too
+ * — bytes from a failing source are not trustworthy. */
+static void audioFailed(Host *host) {
+    audioReleaseSession(host, true);
+    audioEmitReport(host, kAudioEventFailed, 0, 0, 0, 0);
+}
+
+/* Distilled session notes, marshalled from Media Foundation worker
+ * threads via PostMessage; loop thread. Stale generations (a replaced
+ * or stopped playback's stragglers) are dropped here. */
+static void audioHandleSessionMessage(Host *host, WPARAM note, LPARAM generation) {
+    std::lock_guard<std::recursive_mutex> guard(host->lifetime->mutex);
+    AudioState &audio = host->audio;
+    if (!audio.active || (uint64_t)generation != audio.generation) return;
+    switch (note) {
+        case kAudioNoteSourceResolved:
+            if (!audioAttachSession(host)) audioFailed(host);
+            break;
+        case kAudioNoteSourceFailed:
+        case kAudioNoteError:
+            audioFailed(host);
+            break;
+        case kAudioNoteTopologyReady:
+            audioTopologyReady(host);
+            break;
+        case kAudioNoteStarted:
+            /* The transport is rolling: a fresh stream's optimistic
+             * buffering flag drops here and is emitted immediately (not
+             * at the next tick), like the macOS timeControl transition. */
+            if (audio.buffering) {
+                audio.buffering = false;
+                audioEmitEvent(host, kAudioEventPosition);
+            }
+            break;
+        case kAudioNoteBufferingStarted:
+            if (!audio.buffering) {
+                audio.buffering = true;
+                audioEmitEvent(host, kAudioEventPosition);
+            }
+            break;
+        case kAudioNoteBufferingStopped:
+            if (audio.buffering) {
+                audio.buffering = false;
+                audioEmitEvent(host, kAudioEventPosition);
+            }
+            break;
+        case kAudioNoteEnded:
+            audioCompleted(host);
+            break;
+        default:
+            break;
+    }
+}
+
+/* WM_TIMER for the audio position tick: emit one position report while
+ * a playback is live; a straggler after teardown retires itself. */
+static bool handleAudioTimerMessage(Host *host, WPARAM wparam) {
+    if (wparam != kAudioPositionTimerId) return false;
+    if (!host->audio.active) {
+        audioStopPositionTimer(host);
+        return true;
+    }
+    audioEmitEvent(host, kAudioEventPosition);
+    return true;
+}
+
 static void destroyChildWebViewsForWindow(Host *host, uint64_t window_id) {
     if (!host) return;
     for (auto it = host->webviews.begin(); it != host->webviews.end();) {
@@ -2606,6 +3394,9 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 if (host->callback) host->callback(host->callback_context, &frame);
             }
             return 0;
+        case kAudioSessionMessage:
+            if (host) audioHandleSessionMessage(host, wparam, lparam);
+            return 0;
         case kNotificationCallbackMessage:
             if (host && host->tray_active) {
                 UINT tray_event = LOWORD(lparam);
@@ -2692,6 +3483,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             return 0;
         case WM_TIMER:
             if (host && handleAppTimerMessage(host, wparam)) return 0;
+            if (host && handleAudioTimerMessage(host, wparam)) return 0;
             if (host && wparam == kFrameTimerId) {
                 for (auto &entry : host->windows) emit(host, entry.second, kFrame);
             }
@@ -2850,6 +3642,10 @@ void native_sdk_windows_destroy(Host *host) {
         slot.in_use = false;
         slot.hwnd = nullptr;
     }
+    /* Retire the audio pipeline: the session closes asynchronously on
+     * Media Foundation worker threads (the event pump owns the refs),
+     * so nothing here blocks. The cache download is cancelled. */
+    audioReleaseSession(host, true);
     removeNotificationIcon(host);
     destroyAllWindows(host);
     delete host;
@@ -4126,6 +4922,75 @@ int native_sdk_windows_clipboard_write_data(Host *host, const char *mime_type, s
     if (handle) GlobalFree(handle);
     CloseClipboard();
     return ok;
+}
+
+/* Audio entry points (see the audio section above). All loop-thread
+ * only, like every other service call: the runtime dispatches them from
+ * inside the message loop's event callback. */
+
+int native_sdk_windows_audio_load(Host *host, const char *path, size_t path_len) {
+    if (!host) return 2;
+    return audioLoadPathInternal(host, slice(path, path_len));
+}
+
+int native_sdk_windows_audio_load_url(Host *host, const char *url, size_t url_len, const char *cache_path, size_t cache_path_len, uint64_t expected_bytes) {
+    if (!host) return 2;
+    return audioLoadUrlInternal(host, slice(url, url_len), slice(cache_path, cache_path_len), expected_bytes);
+}
+
+int native_sdk_windows_audio_play(Host *host) {
+    if (!host || !host->audio.active) return 0;
+    AudioState &audio = host->audio;
+    audio.playing = true;
+    if (audio.ready) {
+        audioStartTransport(host, false, 0);
+    } else {
+        /* Applied at topology ready; readiness and stalls report
+         * through the event stream, so play always "applies" — the
+         * same asynchronous-by-nature contract as a macOS stream. */
+        audio.pending_play = true;
+    }
+    audioStartPositionTimer(host);
+    return 1;
+}
+
+int native_sdk_windows_audio_pause(Host *host) {
+    if (!host || !host->audio.active) return 0;
+    AudioState &audio = host->audio;
+    audio.playing = false;
+    audio.pending_play = false;
+    if (audio.ready && audio.session) audio.session->Pause();
+    audioStopPositionTimer(host);
+    return 1;
+}
+
+int native_sdk_windows_audio_stop(Host *host) {
+    if (!host) return 0;
+    const int had_player = host->audio.active ? 1 : 0;
+    /* Replacement or explicit stop: the cache download dies with the
+     * playback (its next play streams and fills again). */
+    audioReleaseSession(host, true);
+    return had_player;
+}
+
+int native_sdk_windows_audio_seek(Host *host, uint64_t position_ms) {
+    if (!host || !host->audio.active) return 0;
+    AudioState &audio = host->audio;
+    if (audio.duration_ms > 0 && position_ms > audio.duration_ms) position_ms = audio.duration_ms;
+    if (audio.ready) {
+        audioStartTransport(host, true, position_ms);
+    } else {
+        audio.has_pending_seek = true;
+        audio.pending_seek_ms = position_ms;
+    }
+    return 1;
+}
+
+int native_sdk_windows_audio_set_volume(Host *host, double volume) {
+    if (!host || !host->audio.active) return 0;
+    host->audio.volume = (float)volume;
+    if (host->audio.ready) audioApplyVolume(host);
+    return 1;
 }
 
 }

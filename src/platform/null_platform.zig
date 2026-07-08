@@ -418,13 +418,13 @@ pub const NullPlatform = struct {
     /// Whether this modeled host has an audio player. On by default (the
     /// fake below stands in for AVAudioPlayer); tests modelling a
     /// player-less host set it false, which nulls the services AND the
-    /// feature report — the same shape as GTK/Win32 today.
+    /// feature report — the same shape as GTK today.
     audio_playback: bool = true,
     /// Whether this modeled host can stream URL audio sources. On by
     /// default (paired with `audio_playback`, standing in for AVPlayer);
     /// off models a host with a local player but no streaming path —
     /// `audioLoadUrl` is absent and URL playback degrades to one loud
-    /// `.failed` Msg, the same explicit degrade GTK/Win32 ship.
+    /// `.failed` Msg, the same explicit degrade GTK ships.
     audio_streaming: bool = true,
     /// Whether the modeled filesystem holds the local audio files apps
     /// name in `audioLoad`. On by default (loads succeed hermetically);

@@ -109,13 +109,15 @@ pub const PlatformFeature = enum {
     /// `PlatformServices.adoptViewSurface`. macOS system host only today.
     view_surface_adoption,
     /// Single-player audio file playback (macOS: AVAudioPlayer in the
-    /// AppKit host; the null platform: a deterministic fake). Position
-    /// ticks and the completion arrive as `.audio` events. GTK/Win32
-    /// answer `error.UnsupportedService` today — named unsupported, not
+    /// AppKit host; Windows: a Media Foundation media session in the
+    /// Win32 host; the null platform: a deterministic fake). Position
+    /// ticks and the completion arrive as `.audio` events. GTK answers
+    /// `error.UnsupportedService` today — named unsupported, not
     /// half-implemented.
     audio_playback,
     /// URL audio sources on the same single player (macOS: AVPlayer in
-    /// the AppKit host): progressive streaming that starts before the
+    /// the AppKit host; Windows: the same Media Foundation session over
+    /// its network source): progressive streaming that starts before the
     /// download finishes, plus a byte-verified local cache fill so the
     /// next play of the same URL is local. Hosts with `audio_playback`
     /// but no streaming path answer `error.UnsupportedService` from

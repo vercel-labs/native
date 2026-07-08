@@ -2171,7 +2171,7 @@ pub fn Effects(comptime Msg: type) type {
         /// `EffectAudio`) through the ordinary update path. Never fails
         /// from the caller's view: an oversized string (or path and url
         /// both empty) delivers one `.rejected` event; a platform
-        /// without audio playback (Linux/Windows today), an unreadable
+        /// without audio playback (Linux today), an unreadable
         /// file with no url fallback, or a network failure delivers one
         /// `.failed` event — never a crash, never silence. The audio key
         /// is its own namespace (like timer keys) and identifies the
