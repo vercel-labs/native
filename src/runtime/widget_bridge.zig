@@ -214,17 +214,6 @@ pub fn canvasWidgetAccessibilityActionSupported(actions: canvas.WidgetActions, a
     };
 }
 
-pub fn canvasWidgetAccessibilitySemanticAction(action: CanvasWidgetAccessibilityActionKind) ?canvas.WidgetSemanticAction {
-    return switch (action) {
-        .press => .press,
-        .toggle => .toggle,
-        .select => .select,
-        .increment => .increment,
-        .decrement => .decrement,
-        else => null,
-    };
-}
-
 pub fn canvasWidgetAccessibilityActionKindFromPlatform(action: platform.WidgetAccessibilityActionKind) CanvasWidgetAccessibilityActionKind {
     return switch (action) {
         .focus => .focus,

@@ -1100,13 +1100,21 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
 
 @implementation NativeSdkWidgetAccessibilityElement
 
+/* The action-flag gate for advertising AXPress: press, toggle, and
+ * select all have an honest press-shaped actuation (activate, flip,
+ * or move the selection — the same things a pointer press does on
+ * those widgets). Focusability alone is NOT one: a press that merely
+ * moves focus is a no-op to the user who invoked "press", so a
+ * focus-only element must not advertise the action at all. */
+static const uint32_t NativeSdkWidgetPressActionFlags =
+    NATIVE_SDK_APPKIT_WIDGET_ACTION_PRESS |
+    NATIVE_SDK_APPKIT_WIDGET_ACTION_TOGGLE |
+    NATIVE_SDK_APPKIT_WIDGET_ACTION_SELECT;
+
 - (NSArray *)accessibilityActionNames {
     if (!self.accessibilityEnabled) return @[];
     NSMutableArray *actions = [NSMutableArray arrayWithCapacity:3];
-    if ((self.actionFlags & (NATIVE_SDK_APPKIT_WIDGET_ACTION_PRESS |
-                             NATIVE_SDK_APPKIT_WIDGET_ACTION_TOGGLE |
-                             NATIVE_SDK_APPKIT_WIDGET_ACTION_SELECT |
-                             NATIVE_SDK_APPKIT_WIDGET_ACTION_FOCUS)) != 0) {
+    if ((self.actionFlags & NativeSdkWidgetPressActionFlags) != 0) {
         [actions addObject:NSAccessibilityPressAction];
     }
     if ((self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_INCREMENT) != 0) {
@@ -1121,6 +1129,32 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
     return actions;
 }
 
+/* AppKit derives the action list an external assistive client sees
+ * from which accessibilityPerform* selectors the ELEMENT allows — not
+ * from accessibilityActionNames — so a class that implements all four
+ * selectors advertises all four actions on every element (AXIncrement
+ * on a static label), and performing an unsupported one "succeeds" as
+ * a no-op: AppKit reports success to the AX client regardless of the
+ * method's NO return. This override is the per-element truth: a
+ * selector is allowed exactly when the published widget's action
+ * flags back it, so unsupported actions disappear from the advertised
+ * list instead of no-op'ing on invocation. */
+- (BOOL)isAccessibilitySelectorAllowed:(SEL)selector {
+    if (selector == @selector(accessibilityPerformPress)) {
+        return self.accessibilityEnabled && (self.actionFlags & NativeSdkWidgetPressActionFlags) != 0;
+    }
+    if (selector == @selector(accessibilityPerformIncrement)) {
+        return self.accessibilityEnabled && (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_INCREMENT) != 0;
+    }
+    if (selector == @selector(accessibilityPerformDecrement)) {
+        return self.accessibilityEnabled && (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DECREMENT) != 0;
+    }
+    if (selector == @selector(accessibilityPerformCancel)) {
+        return self.accessibilityEnabled && (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DISMISS) != 0;
+    }
+    return [super isAccessibilitySelectorAllowed:selector];
+}
+
 - (BOOL)accessibilityPerformPress {
     if (!self.accessibilityEnabled) return NO;
     if ((self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_TOGGLE) != 0) {
@@ -1131,9 +1165,6 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
     }
     if ((self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_SELECT) != 0) {
         return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_SELECT];
-    }
-    if ((self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_FOCUS) != 0) {
-        return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_FOCUS];
     }
     return NO;
 }
@@ -1151,6 +1182,20 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
 - (BOOL)accessibilityPerformCancel {
     if (!self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DISMISS) == 0) return NO;
     return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_DISMISS];
+}
+
+/* An assistive client focuses a widget by WRITING AXFocused (the
+ * platform idiom for moving keyboard focus into a text field). The
+ * inherited setter only stores the flag on this snapshot element —
+ * the app's real focus never moves, which is the same
+ * success-without-actuation dishonesty the press path had. Route the
+ * write to the runtime's focus dispatch; the next semantics publish
+ * reports the app's actual focus back. */
+- (void)setAccessibilityFocused:(BOOL)focused {
+    [super setAccessibilityFocused:focused];
+    if (!focused || !self.accessibilityEnabled) return;
+    if ((self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_FOCUS) == 0) return;
+    [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_FOCUS];
 }
 
 - (BOOL)accessibilityIsAttributeSettable:(NSAccessibilityAttributeName)attribute {

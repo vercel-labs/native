@@ -762,7 +762,6 @@ pub const Runtime = struct {
 
     const AutomationWidgetMethods = runtime_automation_widget_dispatch.RuntimeAutomationWidgetDispatch(Runtime);
     const dispatchAutomationWidgetAction = AutomationWidgetMethods.dispatchAutomationWidgetAction;
-    const dispatchCanvasWidgetSemanticControlAction = AutomationWidgetMethods.dispatchCanvasWidgetSemanticControlAction;
     const dispatchAutomationWidgetClick = AutomationWidgetMethods.dispatchAutomationWidgetClick;
     const dispatchAutomationWidgetHold = AutomationWidgetMethods.dispatchAutomationWidgetHold;
     const dispatchAutomationWidgetContextPress = AutomationWidgetMethods.dispatchAutomationWidgetContextPress;

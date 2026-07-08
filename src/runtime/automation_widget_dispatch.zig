@@ -9,7 +9,6 @@ const runtime_clock = @import("clock.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
-const runtime_gpu_surface_events = @import("gpu_surface_events.zig");
 
 const AutomationWidgetAction = automation_commands.AutomationWidgetAction;
 const AutomationWidgetTarget = automation_commands.AutomationWidgetTarget;
@@ -46,55 +45,6 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 .drop_files => try dispatchAutomationCanvasWidgetFileDrop(self, app, view_index, action.id, action.value),
                 .dismiss => try dismissAutomationCanvasWidget(self, app, view_index, action.id),
             }
-        }
-
-        pub fn dispatchCanvasWidgetSemanticControlAction(
-            self: *Runtime,
-            app: runtime_api.App(Runtime),
-            view_index: usize,
-            id: canvas.ObjectId,
-            action: canvas.WidgetSemanticAction,
-            actions: canvas.WidgetActions,
-        ) anyerror!bool {
-            if (view_index >= self.view_count) return error.ViewNotFound;
-            const node_index = self.views[view_index].canvasWidgetNodeIndexById(id) orelse return false;
-            const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
-            const intent = canvas.widgetSemanticControlIntentWithActions(widget, action, actions) orelse return false;
-
-            self.views[view_index].recordGpuSurfaceInputTimestamp(automationInputTimestampNs());
-            CanvasWidgetDisplayMethods().beginCanvasWidgetDisplayListRefreshBatch(self);
-            var batch_active = true;
-            errdefer if (batch_active) CanvasWidgetDisplayMethods().cancelCanvasWidgetDisplayListRefreshBatch(self);
-
-            if (self.views[view_index].widgetLayoutTree().focusTargetById(id) != null) {
-                try focusAutomationCanvasWidget(self, view_index, id);
-            }
-
-            const toggle_animation = if (intent.kind == .toggle) self.views[view_index].canvasWidgetToggleAnimation(id) else null;
-            const dirty = try self.views[view_index].applyCanvasWidgetControlIntent(node_index, intent);
-            if (toggle_animation) |animation| try CanvasWidgetDisplayMethods().scheduleCanvasWidgetToggleAnimation(self, view_index, animation);
-            if (dirty) |bounds| {
-                const previous_cursor = self.views[view_index].canvas_widget_cursor;
-                switch (intent.kind) {
-                    .scroll_by, .scroll_to_start, .scroll_to_end => self.views[view_index].reconcileCanvasWidgetRenderStateAfterScroll(null),
-                    else => {},
-                }
-                if (previous_cursor != self.views[view_index].canvas_widget_cursor) try CanvasWidgetEventMethods().syncCanvasWidgetCursorForView(self, view_index);
-                try CanvasWidgetEventMethods().invalidateForCanvasWidgetDirty(self, view_index, bounds);
-            }
-
-            try CanvasWidgetDisplayMethods().endCanvasWidgetDisplayListRefreshBatch(self);
-            batch_active = false;
-
-            // Accessibility scroll actions observe like wheel scrolls:
-            // drain the pending scroll-event set so the app's on_scroll
-            // channel sees the applied offset immediately.
-            try runtime_gpu_surface_events.RuntimeGpuSurfaceEvents(Runtime).dispatchPendingCanvasWidgetScrollEvents(self, app, view_index);
-
-            if (action == .press and intent.actions.press) {
-                try CanvasWidgetEventMethods().dispatchCanvasWidgetCommandForId(self, app, view_index, id);
-            }
-            return true;
         }
 
         pub fn dispatchAutomationWidgetClick(self: *Runtime, app: runtime_api.App(Runtime), target: AutomationWidgetTarget) anyerror!void {

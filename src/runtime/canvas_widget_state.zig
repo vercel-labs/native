@@ -25,7 +25,6 @@ const CanvasWidgetTextReconcileEntry = canvas_widget_runtime.CanvasWidgetTextRec
 const canvasWidgetLayoutTreeWithRuntimeReconcileState = canvas_widget_runtime.canvasWidgetLayoutTreeWithRuntimeReconcileState;
 const canvasWidgetEditableTextKind = canvas_widget_runtime.canvasWidgetEditableTextKind;
 const canvasWidgetAccessibilityActionSupported = widget_bridge.canvasWidgetAccessibilityActionSupported;
-const canvasWidgetAccessibilitySemanticAction = widget_bridge.canvasWidgetAccessibilitySemanticAction;
 const canvasWidgetBooleanSelected = canvas_widget_runtime.canvasWidgetBooleanSelected;
 
 pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
@@ -188,17 +187,21 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             const actions = AutomationWidgetMethods(Runtime).canvasWidgetActionsForId(self, index, action.id) orelse return error.InvalidCommand;
             if (!canvasWidgetAccessibilityActionSupported(actions, action.action)) return error.InvalidCommand;
 
-            if (canvasWidgetAccessibilitySemanticAction(action.action)) |semantic_action| {
-                if (try AutomationWidgetMethods(Runtime).dispatchCanvasWidgetSemanticControlAction(self, app, index, action.id, semantic_action, actions)) {
-                    // The AX client that initiated this action reads the
-                    // platform tree next: force-flush the publish the
-                    // gesture's refresh batch deferred so it observes the
-                    // post-action tree, not the pre-action one.
-                    try CanvasWidgetDisplayMethods(Runtime).flushDeferredCanvasWidgetAccessibility(self);
-                    return self.views[index].info();
-                }
-            }
-
+            // Every assistive action rides the SAME machinery the
+            // automation widget verbs use — the key-driven activation for
+            // press/toggle/increment/decrement (quiet-list-row ring
+            // escalation included), the text editor for set_text and the
+            // composition family, the selection/dismiss verbs for the
+            // rest. An earlier "direct" shortcut here applied semantic
+            // control intents to the retained tree instead: it flipped
+            // echoes (toggle state, slider value) and dispatched only the
+            // widget's `command` string, so a widget wired through message
+            // handlers (an `on_press` tab, an `on_toggle` checkbox) kept
+            // reporting success while the app's model never heard the
+            // action — an advertised action an assistive-technology user
+            // could not actually invoke. The key-driven route reaches the
+            // same typed dispatch a real keyboard user's activation does,
+            // so anything a keyboard can actuate, an AX client can too.
             switch (action.action) {
                 .focus => try AutomationWidgetMethods(Runtime).focusAutomationCanvasWidget(self, index, action.id),
                 .press => try AutomationWidgetMethods(Runtime).dispatchAutomationWidgetKey(self, app, index, action.id, "enter"),

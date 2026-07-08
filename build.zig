@@ -651,6 +651,15 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilityPerformPress" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "emitWidgetAccessibilityActionWithId" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NATIVE_SDK_APPKIT_EVENT_WIDGET_ACCESSIBILITY_ACTION" },
+        // The per-element action gate: without it AppKit derives the
+        // advertised action list from the CLASS's selectors, so every
+        // widget element (a static label included) offers
+        // press/increment/decrement/cancel and performing an
+        // unsupported one reports success while actuating nothing.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "isAccessibilitySelectorAllowed" },
+        // An assistive client's AXFocused WRITE must move the app's
+        // real focus, not just flip a flag on the snapshot element.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "setAccessibilityFocused" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-widget-accessibility-text-ranges", "Verify AppKit GPU widget accessibility publishes text selection ranges", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilitySelectedTextRange" },

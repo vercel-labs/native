@@ -1147,12 +1147,21 @@ test "runtime dispatches automation canvas widget actions" {
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_keyboard_target_id);
 
-    const keyboard_count_after_automation_press = app_state.widget_keyboard_count;
+    // The accessibility press rides the SAME key-driven activation the
+    // automation press verb uses: the app hears the enter key on the
+    // target and the widget's command dispatches through the real
+    // activation path. A direct-command shortcut here would skip the
+    // keyboard channel, and any widget wired through message handlers
+    // instead of a command string would report success while actuating
+    // nothing.
+    const keyboard_count_before_ax_press = app_state.widget_keyboard_count;
     _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 2, .action = .press });
     try std.testing.expectEqual(@as(u32, 2), app_state.command_count);
     try std.testing.expectEqualStrings("widget.run", app_state.last_command);
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
-    try std.testing.expectEqual(keyboard_count_after_automation_press, app_state.widget_keyboard_count);
+    try std.testing.expectEqual(keyboard_count_before_ax_press + 1, app_state.widget_keyboard_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_keyboard_target_id);
+    try std.testing.expectEqualStrings("enter", app_state.last_keyboard_key);
 
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 2, .action = .drag, .value = "18 2" });
     try std.testing.expectEqual(@as(u32, 1), app_state.widget_drag_count);
@@ -1178,8 +1187,25 @@ test "runtime dispatches automation canvas widget actions" {
     try std.testing.expectEqual(@as(?f32, 1), runtimeViewWidgetSemantics(&harness.runtime.views[0])[2].value);
     try std.testing.expectError(error.InvalidCommand, dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 3, .action = .drag }));
 
+    // The accessibility toggle is the same space-key toggle: the
+    // retained value flips back AND the app hears the key — an
+    // echo-only flip would leave the model behind and revert on the
+    // next rebuild.
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 3, .action = .toggle });
+    try std.testing.expectEqual(@as(?f32, 0), runtimeViewWidgetSemantics(&harness.runtime.views[0])[2].value);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_keyboard_target_id);
+    try std.testing.expectEqualStrings("space", app_state.last_keyboard_key);
+
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 4, .action = .increment });
     try std.testing.expectApproxEqAbs(@as(f32, 0.55), runtimeViewWidgetSemantics(&harness.runtime.views[0])[3].value.?, 0.001);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 4), app_state.last_keyboard_target_id);
+    try std.testing.expectEqualStrings("arrowright", app_state.last_keyboard_key);
+
+    // The accessibility increment on a slider is the same arrow step
+    // the automation verb dispatches: value moves through the keyboard
+    // intent and the app hears the arrow key on the slider.
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 4, .action = .increment });
+    try std.testing.expectApproxEqAbs(@as(f32, 0.6), runtimeViewWidgetSemantics(&harness.runtime.views[0])[3].value.?, 0.001);
     try std.testing.expectEqual(@as(canvas.ObjectId, 4), app_state.last_keyboard_target_id);
     try std.testing.expectEqualStrings("arrowright", app_state.last_keyboard_key);
 
@@ -1206,15 +1232,20 @@ test "runtime dispatches automation canvas widget actions" {
     try std.testing.expectEqual(@as(f32, 0.0), scrolled_layout.findById(7).?.widget.value);
     try std.testing.expectEqualStrings("pageup", app_state.last_keyboard_key);
 
+    // AX scroll steps ride the page keys the automation verbs use, so
+    // the app's keyboard channel hears them like any live page scroll.
+    const keyboard_count_before_ax_scroll = app_state.widget_keyboard_count;
     _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 7, .action = .increment });
     scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectApproxEqAbs(@as(f32, 40.8), scrolled_layout.findById(7).?.widget.value, 0.001);
-    try std.testing.expectEqual(@as(u32, 5), app_state.widget_keyboard_count);
+    try std.testing.expectEqual(keyboard_count_before_ax_scroll + 1, app_state.widget_keyboard_count);
+    try std.testing.expectEqualStrings("pagedown", app_state.last_keyboard_key);
 
     _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 7, .action = .decrement });
     scrolled_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqual(@as(f32, 0.0), scrolled_layout.findById(7).?.widget.value);
-    try std.testing.expectEqual(@as(u32, 5), app_state.widget_keyboard_count);
+    try std.testing.expectEqual(keyboard_count_before_ax_scroll + 2, app_state.widget_keyboard_count);
+    try std.testing.expectEqualStrings("pageup", app_state.last_keyboard_key);
 
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 11, .action = .drop_files, .value = "/tmp/report.csv /tmp/chart.png" });
     try std.testing.expectEqual(@as(u32, 1), app_state.widget_file_drop_count);
@@ -1265,6 +1296,86 @@ test "runtime dispatches automation canvas widget actions" {
 
     try std.testing.expect(app_state.widget_keyboard_count >= 3);
     try std.testing.expect(app_state.raw_input_count >= 3);
+}
+
+test "accessibility press actuates widgets wired through message handlers" {
+    // The defect this pins: a widget whose press wiring is a bound
+    // message handler (no `command` string — every markup `on-press`
+    // and Zig-builder `on_press` widget) published `press` to the
+    // platform accessibility tree, and performing it reported success
+    // while dispatching nothing the app could hear. The honest route is
+    // the key-driven activation the automation press verb uses: the app
+    // receives the enter key ON the target, so the same typed dispatch
+    // a keyboard user's activation reaches fires the handler.
+    const TestApp = struct {
+        widget_keyboard_count: u32 = 0,
+        last_keyboard_target_id: canvas.ObjectId = 0,
+        last_keyboard_key: []const u8 = "",
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-ax-press-handlers", .source = platform.WebViewSource.html("<h1>GPU</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .canvas_widget_keyboard => |keyboard_event| {
+                    self.widget_keyboard_count += 1;
+                    if (keyboard_event.target) |target| self.last_keyboard_target_id = target.id;
+                    self.last_keyboard_key = keyboard_event.keyboard.key;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 180),
+    });
+
+    const children = [_]canvas.Widget{
+        // A commandless button: the segmented-switcher shape (a tab
+        // that binds on_press and nothing else).
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(10, 10, 96, 32), .text = "Songs" },
+        // A plain list row with a bound press (the album-card shape):
+        // quiet focus makes plain rows transparent to keys, so the
+        // dispatch must escalate this target to the ring register or
+        // the synthesized enter routes as a target-less event.
+        .{ .id = 3, .kind = .list_item, .frame = geometry.RectF.init(10, 52, 200, 40), .text = "Exit Signs", .semantics = .{ .actions = .{ .press = true } } },
+        // No press wiring at all: the runtime must refuse, never
+        // succeed-and-do-nothing.
+        .{ .id = 4, .kind = .text, .frame = geometry.RectF.init(10, 104, 96, 20), .text = "8 of 8" },
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &children }, geometry.RectF.init(0, 0, 320, 180), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 2, .action = .press });
+    try std.testing.expectEqual(@as(u32, 1), app_state.widget_keyboard_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_keyboard_target_id);
+    try std.testing.expectEqualStrings("enter", app_state.last_keyboard_key);
+
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 3, .action = .press });
+    try std.testing.expectEqual(@as(u32, 2), app_state.widget_keyboard_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_keyboard_target_id);
+    try std.testing.expectEqualStrings("enter", app_state.last_keyboard_key);
+    // The escalation is observable: the row now holds the ring
+    // register, exactly what a Tab-then-Enter would have left.
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_widget_focus_visible_id);
+
+    try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 4, .action = .press }));
+    try std.testing.expectEqual(@as(u32, 2), app_state.widget_keyboard_count);
 }
 
 test "runtime rejects automation canvas widget actions for scroll clipped targets" {
