@@ -19,6 +19,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const buildgraph = @import("buildgraph.zig");
+const embedlib = @import("embedlib.zig");
 const manifest_tool = @import("manifest.zig");
 const process_tree = @import("process_tree.zig");
 const toolchain = @import("toolchain.zig");
@@ -176,8 +177,17 @@ pub const LibBuildOptions = struct {
 /// Build the app's embed static library via `zig build lib` (the step
 /// `addApp`/`addMobileLib` register for mobile targets), synthesizing the
 /// generated build graph for non-ejected apps exactly like `native
-/// build`. Returns the installed library path (zig-out/lib/lib<name>.a),
-/// allocator-owned. Expects the caller to have chdir'd into the app dir.
+/// build`. Returns the installed library path, allocator-owned. Expects
+/// the caller to have chdir'd into the app dir.
+///
+/// The install prefix is keyed by the slice's target triple
+/// (.native/embed/<triple>): the simulator and device slices — and the
+/// Android tier — all build the same `lib` step, and a single shared
+/// destination let whichever slice built last own the bytes, so an
+/// interleaved run for another target poisoned the next host link. A
+/// private per-triple stage removes the collision; content freshness
+/// within the stage is the compiler's content-addressed cache, never
+/// wall-clock time.
 pub fn buildEmbedLib(allocator: std.mem.Allocator, io: std.Io, app_name: []const u8, options: LibBuildOptions) ![]const u8 {
     const zig_exe = try toolchain.resolveZig(allocator, io, options.base_env, .{ .assume_yes = options.assume_yes });
     defer allocator.free(zig_exe);
@@ -189,8 +199,6 @@ pub fn buildEmbedLib(allocator: std.mem.Allocator, io: std.Io, app_name: []const
     const ejected = buildgraph.fileExists(io, "build.zig");
     var build_file: ?[]const u8 = null;
     defer if (build_file) |path| allocator.free(path);
-    var prefix: ?[]const u8 = null;
-    defer if (prefix) |path| allocator.free(path);
     if (!ejected) {
         const framework_root = try buildgraph.resolveFrameworkRoot(allocator, io, options.base_env) orelse {
             std.debug.print(
@@ -206,11 +214,14 @@ pub fn buildEmbedLib(allocator: std.mem.Allocator, io: std.Io, app_name: []const
             .app_name = app_name,
             .framework_root = framework_root,
         });
-        const cwd_path = try std.process.currentPathAlloc(io, allocator);
-        defer allocator.free(cwd_path);
-        prefix = try std.fs.path.join(allocator, &.{ cwd_path, "zig-out" });
-        try argv.appendSlice(allocator, &.{ "--build-file", build_file.?, "--prefix", prefix.? });
+        try argv.appendSlice(allocator, &.{ "--build-file", build_file.? });
     }
+
+    const cwd_path = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_path);
+    const prefix = try embedlib.prefixAlloc(allocator, cwd_path, options.slice.zigTriple());
+    defer allocator.free(prefix);
+    try argv.appendSlice(allocator, &.{ "--prefix", prefix });
 
     const target_flag = try std.fmt.allocPrint(allocator, "-Dtarget={s}", .{options.slice.zigTriple()});
     defer allocator.free(target_flag);
@@ -222,7 +233,7 @@ pub fn buildEmbedLib(allocator: std.mem.Allocator, io: std.Io, app_name: []const
 
     try runInherit(io, argv.items, error.ZigBuildFailed);
 
-    const lib_path = try std.fmt.allocPrint(allocator, "zig-out/lib/lib{s}.a", .{app_name});
+    const lib_path = try embedlib.libPathAlloc(allocator, options.slice.zigTriple(), app_name);
     errdefer allocator.free(lib_path);
     if (!buildgraph.fileExists(io, lib_path)) {
         std.debug.print("native: expected the embed library at {s} after `zig build lib` - the app build did not install it\n", .{lib_path});
@@ -288,6 +299,10 @@ pub fn runDev(allocator: std.mem.Allocator, io: std.Io, options: DevOptions) !vo
     }
 
     std.debug.print("native dev (ios): compiling the toolkit UIKit host\n", .{});
+    // Content gate before the link: a staged archive built for another
+    // target (ELF from the Android tier) must fail here with the real
+    // cause, not as a confusing linker error.
+    embedlib.requireArchiveClass(allocator, io, lib_path, .macho, LibSlice.simulator.zigTriple()) catch return error.HostCompileFailed;
     try runInherit(io, &.{
         "xcrun",         "--sdk",        LibSlice.simulator.clangSdk(),
         "clang",         "-target",      LibSlice.simulator.clangTriple(),

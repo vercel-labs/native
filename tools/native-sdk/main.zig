@@ -621,11 +621,12 @@ fn initAppName(allocator: std.mem.Allocator, io: std.Io, destination: []const u8
 
 /// `native package --target ios` without --binary: build the DEVICE
 /// slice through the app's `zig build lib` step — always a fresh build,
-/// never a zig-out/lib discovery, because the dev loop installs the
-/// SIMULATOR slice at the same path and a stale wrong-slice library
-/// would silently break the archive. A failed build degrades to a
-/// libraryless project with a teaching warning (the repo-shaped webview
-/// apps have no mobile UiApp to compile) instead of aborting packaging.
+/// never a path discovery, and the install stage is keyed by the target
+/// triple (.native/embed/<triple>), so the dev loop's SIMULATOR slice
+/// and the Android tier can never leave wrong-target bytes where this
+/// build looks. A failed build degrades to a libraryless project with a
+/// teaching warning (the repo-shaped webview apps have no mobile UiApp
+/// to compile) instead of aborting packaging.
 fn iosPackageLibrary(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map, app_name: []const u8, optimize: []const u8) !?[]const u8 {
     std.debug.print("info[package.ios]: building the embed static library ({s}, {s})\n", .{ tooling.ios.LibSlice.device.zigTriple(), optimize });
     return tooling.ios.buildEmbedLib(allocator, io, app_name, .{

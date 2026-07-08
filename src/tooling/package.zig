@@ -435,7 +435,7 @@ fn assembleAndroidApk(allocator: std.mem.Allocator, io: std.Io, options: Package
     defer allocator.free(keystore_path);
 
     std.debug.print("native (android): compiling the toolkit host library ({s})\n", .{android_tool.clang_target});
-    try android_tool.compileHostLibrary(io, &tc, host_dir, binary_path, so_path);
+    try android_tool.compileHostLibrary(allocator, io, &tc, host_dir, binary_path, so_path);
     std.debug.print("native (android): assembling {s}\n", .{out_apk});
     try android_tool.assembleApk(allocator, io, .{
         .toolchain = &tc,

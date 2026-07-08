@@ -30,6 +30,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const buildgraph = @import("buildgraph.zig");
+const embedlib = @import("embedlib.zig");
 const manifest_tool = @import("manifest.zig");
 const process_tree = @import("process_tree.zig");
 const toolchain = @import("toolchain.zig");
@@ -385,8 +386,18 @@ pub const LibBuildOptions = struct {
 /// -Dtarget=aarch64-linux-android` (the step `addApp`/`addMobileLib`
 /// register for mobile targets), synthesizing the generated build graph
 /// for non-ejected apps exactly like `native build`. Returns the
-/// installed library path (zig-out/lib/lib<name>.a), allocator-owned.
-/// Expects the caller to have chdir'd into the app dir.
+/// installed library path, allocator-owned. Expects the caller to have
+/// chdir'd into the app dir.
+///
+/// The install prefix is keyed by the target triple
+/// (.native/embed/aarch64-linux-android): the iOS slices build the same
+/// `lib` step for other targets, and a single shared destination let
+/// whichever slice built last own the bytes — a Mach-O archive in the
+/// Android slot then linked *silently* into the host .so (a `-shared`
+/// link tolerates undefined symbols) and only failed at dlopen on the
+/// device. A private per-triple stage makes cross-target runs unable to
+/// clobber each other; content freshness within the stage is the
+/// compiler's content-addressed cache, never wall-clock time.
 pub fn buildEmbedLib(allocator: std.mem.Allocator, io: std.Io, app_name: []const u8, options: LibBuildOptions) ![]const u8 {
     const zig_exe = try toolchain.resolveZig(allocator, io, options.base_env, .{ .assume_yes = options.assume_yes });
     defer allocator.free(zig_exe);
@@ -398,8 +409,6 @@ pub fn buildEmbedLib(allocator: std.mem.Allocator, io: std.Io, app_name: []const
     const ejected = buildgraph.fileExists(io, "build.zig");
     var build_file: ?[]const u8 = null;
     defer if (build_file) |path| allocator.free(path);
-    var prefix: ?[]const u8 = null;
-    defer if (prefix) |path| allocator.free(path);
     if (!ejected) {
         const framework_root = try buildgraph.resolveFrameworkRoot(allocator, io, options.base_env) orelse {
             std.debug.print(
@@ -415,11 +424,14 @@ pub fn buildEmbedLib(allocator: std.mem.Allocator, io: std.Io, app_name: []const
             .app_name = app_name,
             .framework_root = framework_root,
         });
-        const cwd_path = try std.process.currentPathAlloc(io, allocator);
-        defer allocator.free(cwd_path);
-        prefix = try std.fs.path.join(allocator, &.{ cwd_path, "zig-out" });
-        try argv.appendSlice(allocator, &.{ "--build-file", build_file.?, "--prefix", prefix.? });
+        try argv.appendSlice(allocator, &.{ "--build-file", build_file.? });
     }
+
+    const cwd_path = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_path);
+    const prefix = try embedlib.prefixAlloc(allocator, cwd_path, zig_triple);
+    defer allocator.free(prefix);
+    try argv.appendSlice(allocator, &.{ "--prefix", prefix });
 
     try argv.append(allocator, "-Dtarget=" ++ zig_triple);
     const optimize_flag = try std.fmt.allocPrint(allocator, "-Doptimize={s}", .{options.optimize});
@@ -429,7 +441,7 @@ pub fn buildEmbedLib(allocator: std.mem.Allocator, io: std.Io, app_name: []const
 
     try runInherit(io, argv.items, error.ZigBuildFailed);
 
-    const lib_path = try std.fmt.allocPrint(allocator, "zig-out/lib/lib{s}.a", .{app_name});
+    const lib_path = try embedlib.libPathAlloc(allocator, zig_triple, app_name);
     errdefer allocator.free(lib_path);
     if (!buildgraph.fileExists(io, lib_path)) {
         std.debug.print("native: expected the embed library at {s} after `zig build lib` - the app build did not install it\n", .{lib_path});
@@ -442,7 +454,15 @@ pub fn buildEmbedLib(allocator: std.mem.Allocator, io: std.Io, app_name: []const
 /// static library) into `out_so` with the NDK compiler — the only
 /// toolchain that can link bionic. The max-page-size link flag keeps the
 /// library loadable on 16 KB page devices.
-pub fn compileHostLibrary(io: std.Io, tc: *const Toolchain, host_dir: []const u8, lib_path: []const u8, out_so: []const u8) !void {
+///
+/// Two honesty guards around the link: the staged embed archive must
+/// actually be ELF AArch64 (an archive built for another target has a
+/// symbol index that never matches, so the linker pulls nothing and
+/// only warns), and `--no-undefined` turns any dangling reference into
+/// a build-time failure here instead of an UnsatisfiedLinkError at
+/// dlopen on the device.
+pub fn compileHostLibrary(allocator: std.mem.Allocator, io: std.Io, tc: *const Toolchain, host_dir: []const u8, lib_path: []const u8, out_so: []const u8) !void {
+    embedlib.requireArchiveClass(allocator, io, lib_path, .elf_aarch64, zig_triple) catch return error.HostCompileFailed;
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
     const bridge_path = try std.fmt.bufPrint(&buffer, "{s}/" ++ host_bridge_name, .{host_dir});
     try runInherit(io, &.{
@@ -452,6 +472,7 @@ pub fn compileHostLibrary(io: std.Io, tc: *const Toolchain, host_dir: []const u8
         "-O2",
         "-fPIC",
         "-Wl,-z,max-page-size=16384",
+        "-Wl,--no-undefined",
         bridge_path,
         lib_path,
         "-landroid",
@@ -678,7 +699,7 @@ pub fn runDev(allocator: std.mem.Allocator, io: std.Io, options: DevOptions) !vo
     }
 
     std.debug.print("native dev (android): compiling the toolkit host library ({s})\n", .{clang_target});
-    try compileHostLibrary(io, &tc, ".native/android/host", lib_path, ".native/android/libnative_sdk_host.so");
+    try compileHostLibrary(allocator, io, &tc, ".native/android/host", lib_path, ".native/android/libnative_sdk_host.so");
 
     const apk_path = try std.fmt.allocPrint(allocator, ".native/android/{s}-debug.apk", .{metadata.name});
     defer allocator.free(apk_path);
