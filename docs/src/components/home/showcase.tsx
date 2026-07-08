@@ -198,7 +198,7 @@ export function Showcase() {
         // the header gap the capture reserved.
         <div className="mt-6 flex justify-center py-4">
           <div
-            className={`relative overflow-hidden rounded-md border border-gray-alpha-400 shadow-modal ${
+            className={`relative overflow-hidden rounded-md border border-gray-alpha-400 shadow-modal dark:border-gray-alpha-200 ${
               active.portrait ? "w-64 sm:w-72" : "w-full"
             }`}
           >

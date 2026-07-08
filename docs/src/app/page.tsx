@@ -327,7 +327,7 @@ export default function HomePage() {
               site theme; deck has one finish by design, so it never swaps. */}
           <figure className="mt-12">
             <div className="grid gap-6 lg:grid-cols-2">
-              <div className="relative overflow-hidden rounded-md border border-gray-alpha-400 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.18)] dark:shadow-[0_24px_48px_-24px_rgba(0,0,0,0.7)]">
+              <div className="relative overflow-hidden rounded-md border border-gray-alpha-400 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.18)] dark:border-gray-alpha-200 dark:shadow-[0_24px_48px_-24px_rgba(0,0,0,0.7)]">
                 {(["light", "dark"] as const).map((scheme) => (
                   <Image
                     key={scheme}
@@ -396,7 +396,7 @@ export default function HomePage() {
           </div>
           <figure className="mt-6">
             <div className="mx-auto max-w-4xl rounded-md border border-gray-alpha-400 bg-gradient-to-b from-gray-100 to-background-200 p-6 sm:p-8 dark:from-gray-alpha-100 dark:to-background-100">
-              <div className="mx-auto max-w-2xl overflow-hidden rounded-md border border-gray-alpha-400 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.3)] dark:shadow-[0_24px_48px_-16px_rgba(0,0,0,0.9)]">
+              <div className="mx-auto max-w-2xl overflow-hidden rounded-md border border-gray-alpha-400 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.3)] dark:border-gray-alpha-200 dark:shadow-[0_24px_48px_-16px_rgba(0,0,0,0.9)]">
                 <Image
                   src="/home/ui-inbox-macos.png"
                   alt="The ui-inbox example app running in a native macOS window: the window controls share the header band with a Clear done action, above a text field, filter tabs, a checklist of tasks, and a status bar"

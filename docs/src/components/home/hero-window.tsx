@@ -16,7 +16,7 @@ const shot = { id: "soundboard", name: "Soundboard", width: 2160, height: 1440 }
 export function HeroWindow() {
   return (
     <div className="mx-auto max-w-5xl px-6">
-      <div className="relative overflow-hidden rounded-md border border-gray-alpha-400 bg-background-100 shadow-[0_16px_40px_-24px_rgba(0,0,0,0.25)] dark:border-gray-alpha-500 dark:shadow-none">
+      <div className="relative overflow-hidden rounded-md border border-gray-alpha-400 bg-background-100 shadow-[0_16px_40px_-24px_rgba(0,0,0,0.25)] dark:border-gray-alpha-200 dark:shadow-none">
         {(["light", "dark"] as const).map((scheme) => (
           <Image
             key={scheme}
