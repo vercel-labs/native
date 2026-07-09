@@ -616,7 +616,7 @@ test "gpu components display list renders stable reference snapshot" {
     // on checked/filled states. Update deliberately when component
     // rendering changes, reviewing the rendered pixels (reference render
     // dump or docs previews — same emitters) first.
-    try std.testing.expectEqual(@as(u64, 16152968191708277931), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 9599670827131584552), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -693,7 +693,7 @@ test "gpu components display list renders stable geist reference snapshot" {
     const scratch = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(scratch);
     const surface = try renderComponentsReferenceSurface(componentTokensForPack(.geist, .light), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 1220950005983218984), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 12445785486770386627), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -935,7 +935,7 @@ test "gpu components house reference snapshot is reproducible through the shared
     const scratch = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(scratch);
     _ = try renderComponentsReferenceSurface(componentTokens(), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 16152968191708277931), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 9599670827131584552), referenceSurfaceSignature(pixels));
 }
 
 test "gpu components catalog previews use canonical built-in foundations" {
@@ -2189,4 +2189,37 @@ test "gpu components sidebar handle drag resizes retained layout" {
     try expectComponentWidgetFrame(layout, surface_overlay_id, drawer_frame);
     try std.testing.expectEqual(@as(f32, 0), drawer_frame.x);
     try std.testing.expectEqual(canvas_width, drawer_frame.width);
+}
+
+test "theme strip triggers never elide under geometry pixel snapping" {
+    // The toolbar's segmented theme strip hugs its measured labels, so
+    // its triggers sit exactly at the elision threshold. Under geometry
+    // snapping the renderer rounds every frame edge to the device grid,
+    // and a fractional label-exact width can lose most of a pixel to
+    // that rounding — swapping the third label's glyphs for a trailing
+    // ellipsis while the unsnapped layout fits it. The guard is
+    // layout/render token agreement: the scene lays out with the SAME
+    // tokens it renders with, so intrinsic label widths ceil to the
+    // snap grid and the snapped frame is never narrower than its label.
+    // Assert on the drawn text runs of all three triggers under every
+    // pack the catalog pins, snapping on, 1x — the exact configuration
+    // that elided "High" when the layout ran under mismatched tokens.
+    const packs = [_]canvas.ThemePack{ .house, .geist };
+    for (packs) |pack| {
+        const tokens = componentTokensForPack(pack, .light);
+        try std.testing.expect(tokens.pixel_snap.geometry);
+        var commands: [max_component_commands]canvas.CanvasCommand = undefined;
+        var builder = canvas.Builder.init(&commands);
+        try buildComponentsDisplayListFromWidgetsWithTokens(&builder, tokens);
+        const display_list = builder.displayList();
+        const modes = [_]ComponentThemeMode{ .light, .dark, .high };
+        for (modes) |mode| {
+            const ref = display_list.findCommandById(canvas.widgetPartId(themeModeTriggerId(mode), 3)) orelse return error.MissingTriggerText;
+            const text = ref.command.draw_text;
+            var lines: [4]canvas.TextLine = undefined;
+            const text_layout = try canvas.layoutTextRun(text, text.text_layout.?, &lines);
+            try std.testing.expect(text_layout.lines.len > 0);
+            for (text_layout.lines) |line| try std.testing.expect(!line.isElided());
+        }
+    }
 }
