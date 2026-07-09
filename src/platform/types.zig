@@ -1082,6 +1082,11 @@ pub const AppInfo = struct {
     window_title: []const u8 = "",
     bundle_id: []const u8 = "dev.native_sdk.app",
     icon_path: []const u8 = "",
+    /// Menu-bar-only app (app.zon `.macos.accessory`): the macOS host
+    /// adopts the accessory activation policy at startup — no Dock
+    /// tile, no app switcher entry — so dev binaries match the packaged
+    /// bundle's LSUIElement=true. Ignored on other platforms.
+    accessory: bool = false,
     main_window: WindowOptions = .{},
     windows: []const WindowOptions = &.{},
 

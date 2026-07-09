@@ -539,6 +539,11 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
     // dev runs pass to the panel directly.
     const about_line = try macosAboutLine(allocator, metadata);
     defer allocator.free(about_line);
+    // Menu-bar-only apps (app.zon `.macos.accessory`): LSUIElement makes
+    // launchd treat the bundle as a UI agent - no Dock tile, no app
+    // switcher entry - matching the accessory activation policy the
+    // runtime host adopts for dev runs.
+    const accessory_line = if (metadata.macos.accessory) "  <key>LSUIElement</key>\n  <true/>\n" else "";
     // CFBundleName is the SHORT user-visible name — the application
     // menu's title next to the Apple menu reads it — while
     // CFBundleDisplayName serves the Finder and longer surfaces. Both
@@ -569,11 +574,11 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
         \\  <string>{s}</string>
         \\  <key>CFBundleVersion</key>
         \\  <string>{s}</string>
-        \\{s}{s}{s}
+        \\{s}{s}{s}{s}
         \\</dict>
         \\</plist>
         \\
-    , .{ bundle_id, display_name, display_name, executable, icon, version, version, about_line, document_types, url_types });
+    , .{ bundle_id, display_name, display_name, executable, icon, version, version, accessory_line, about_line, document_types, url_types });
 }
 
 /// The optional NSHumanReadableCopyright entry (with trailing newline)
@@ -1890,6 +1895,15 @@ test "plist template includes identity executable and version" {
     const bare_plist = try macosInfoPlist(std.testing.allocator, bare, "demo");
     defer std.testing.allocator.free(bare_plist);
     try std.testing.expect(std.mem.indexOf(u8, bare_plist, "NSHumanReadableCopyright") == null);
+    // Not an accessory unless the manifest says so.
+    try std.testing.expect(std.mem.indexOf(u8, bare_plist, "LSUIElement") == null);
+}
+
+test "plist template marks accessory apps as LSUIElement" {
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.agent", .name = "agent", .version = "0.1.0", .macos = .{ .accessory = true } };
+    const plist = try macosInfoPlist(std.testing.allocator, metadata, "agent");
+    defer std.testing.allocator.free(plist);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "<key>LSUIElement</key>\n  <true/>") != null);
 }
 
 test "plist template includes document and URL registrations" {

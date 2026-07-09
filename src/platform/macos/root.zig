@@ -344,6 +344,7 @@ extern fn native_sdk_appkit_set_tray_callback(host: *AppKitHost, callback: AppKi
 extern fn native_sdk_appkit_set_tray_popover(host: *AppKitHost, window_label: [*]const u8, window_label_len: usize) void;
 extern fn native_sdk_appkit_toggle_tray_popover(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_set_tray_popover_callback(host: *AppKitHost, callback: AppKitTrayPopoverCallback, context: ?*anyopaque) void;
+extern fn native_sdk_appkit_set_activation_policy(host: *AppKitHost, policy: c_int) void;
 
 /// Whether a Dock icon path names a raw image source (.png/.svg) that
 /// `native package` would inset and mask onto the macOS icon grid.
@@ -549,6 +550,13 @@ pub const MacPlatform = struct {
         // (AppKit `contentMinSize`); the create call above registers
         // the window under its id, so the floor applies right after.
         applyWindowContentMinSize(host, window_options.id, window_options.min_width, window_options.min_height);
+        // Menu-bar-only apps (app.zon `.macos.accessory`): adopt the
+        // accessory activation policy before the loop starts, so even
+        // unbundled dev binaries never mount a Dock tile — the runtime
+        // twin of the packaged bundle's LSUIElement=true.
+        if (app_info.accessory) {
+            native_sdk_appkit_set_activation_policy(host, 1);
+        }
         return .{
             .host = host,
             .web_engine = web_engine,

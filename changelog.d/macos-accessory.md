@@ -1,0 +1,1 @@
+feature: **Menu-bar-only apps (macOS)**: app.zon's `.macos = .{ .accessory = true }` writes `LSUIElement=true` into the packaged Info.plist and makes the runtime host adopt the accessory activation policy at startup, so packaged bundles AND bare dev binaries run without a Dock tile or app switcher entry.

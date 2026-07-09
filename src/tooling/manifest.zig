@@ -10,6 +10,13 @@ pub const ValidationResult = struct {
     message: []const u8,
 };
 
+/// macOS-only knobs (app.zon `.macos`).
+pub const MacosMetadata = struct {
+    /// Menu-bar-only app: LSUIElement=true in the packaged Info.plist,
+    /// accessory activation policy at runtime (no Dock tile).
+    accessory: bool = false,
+};
+
 pub const Metadata = struct {
     id: []const u8,
     name: []const u8,
@@ -39,6 +46,7 @@ pub const Metadata = struct {
     shortcuts: []const ShortcutMetadata = &.{},
     file_associations: []const FileAssociationMetadata = &.{},
     url_schemes: []const UrlSchemeMetadata = &.{},
+    macos: MacosMetadata = .{},
 
     pub fn displayName(self: Metadata) []const u8 {
         return self.display_name orelse self.name;
@@ -487,6 +495,7 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .shortcuts = try convertRawShortcuts(allocator, raw.shortcuts),
         .file_associations = try convertRawFileAssociations(allocator, raw.file_associations),
         .url_schemes = try convertRawUrlSchemes(allocator, raw.url_schemes),
+        .macos = .{ .accessory = raw.macos.accessory },
     };
 }
 
@@ -1384,11 +1393,13 @@ test "manifest metadata parser reads identity version and lists" {
         \\  .url_schemes = .{
         \\    .{ .scheme = "example-app" },
         \\  },
+        \\  .macos = .{ .accessory = true },
         \\}
     );
     defer metadata.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("com.example.app", metadata.id);
+    try std.testing.expect(metadata.macos.accessory);
     try std.testing.expectEqualStrings("example", metadata.name);
     try std.testing.expectEqualStrings("Example App", metadata.displayName());
     try std.testing.expectEqualStrings("An example app for the manifest parser.", metadata.description.?);

@@ -23,6 +23,15 @@ pub const RawManifest = struct {
     shortcuts: []const RawShortcut = &.{},
     file_associations: []const RawFileAssociation = &.{},
     url_schemes: []const RawUrlScheme = &.{},
+    macos: RawMacos = .{},
+};
+
+/// macOS-only packaging/runtime knobs.
+pub const RawMacos = struct {
+    /// Menu-bar-only app: packaged bundles get LSUIElement=true in
+    /// Info.plist and the runtime host adopts the accessory activation
+    /// policy (no Dock tile, no app switcher entry) — dev binaries too.
+    accessory: bool = false,
 };
 
 pub const RawCef = struct {

@@ -2997,6 +2997,14 @@ void native_sdk_appkit_set_tray_popover_callback(native_sdk_appkit_host_t *host,
     (void)context;
 }
 
+void native_sdk_appkit_set_activation_policy(native_sdk_appkit_host_t *host, int policy) {
+    (void)host;
+    @autoreleasepool {
+        [NSApp setActivationPolicy:(policy == 1 ? NSApplicationActivationPolicyAccessory
+                                                : NSApplicationActivationPolicyRegular)];
+    }
+}
+
 /* Native context menu, CEF engine: same NSMenu presentation as the
  * system-engine host, anchored to the window content view (gpu-surface
  * views are system-engine-only, so `label` resolves to the window). */

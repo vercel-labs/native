@@ -64,6 +64,7 @@ pub const RunOptions = struct {
             .version = manifestStringField("version"),
             .description = manifestStringField("description"),
             .has_web_content = manifestHasWebContent(),
+            .accessory = manifestMacosAccessory(),
             .window_title = self.window_title,
             .bundle_id = self.bundle_id,
             .icon_path = self.icon_path,
@@ -252,6 +253,17 @@ pub fn manifestThemePack() native_sdk.canvas.ThemePack {
     const name: []const u8 = app_manifest.theme;
     return comptime native_sdk.canvas.ThemePack.fromName(name) orelse
         @compileError("unknown app.zon theme \"" ++ name ++ "\" — expected one of: house, geist");
+}
+
+/// Menu-bar-only apps: app.zon's `.macos = .{ .accessory = true }`.
+/// Rides `AppInfo.accessory` into the macOS host, which adopts the
+/// accessory activation policy (no Dock tile) — the dev-run twin of the
+/// packaged bundle's LSUIElement=true.
+fn manifestMacosAccessory() bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "macos")) return false;
+    const macos = app_manifest.macos;
+    if (comptime !@hasField(@TypeOf(macos), "accessory")) return false;
+    return macos.accessory;
 }
 
 /// Whether app.zon declares web content: the `webview` capability or a

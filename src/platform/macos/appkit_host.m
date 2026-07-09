@@ -10592,3 +10592,11 @@ void native_sdk_appkit_set_tray_popover_callback(native_sdk_appkit_host_t *host,
     object.trayPopoverCallback = callback;
     object.trayPopoverContext = context;
 }
+
+void native_sdk_appkit_set_activation_policy(native_sdk_appkit_host_t *host, int policy) {
+    (void)host;
+    @autoreleasepool {
+        [NSApp setActivationPolicy:(policy == 1 ? NSApplicationActivationPolicyAccessory
+                                                : NSApplicationActivationPolicyRegular)];
+    }
+}

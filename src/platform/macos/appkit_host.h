@@ -614,6 +614,10 @@ void native_sdk_appkit_set_tray_popover(native_sdk_appkit_host_t *host, const ch
  * queued), 0 when no popover-hosting tray exists. */
 int native_sdk_appkit_toggle_tray_popover(native_sdk_appkit_host_t *host);
 void native_sdk_appkit_set_tray_popover_callback(native_sdk_appkit_host_t *host, native_sdk_appkit_tray_popover_callback_t callback, void *context);
+/* Application activation policy: 0 = regular (Dock tile, app switcher),
+ * 1 = accessory (menu-bar-only; the runtime twin of a packaged bundle's
+ * LSUIElement=true). Call before the run loop starts. */
+void native_sdk_appkit_set_activation_policy(native_sdk_appkit_host_t *host, int policy);
 
 #ifdef __cplusplus
 }
