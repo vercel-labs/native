@@ -2,9 +2,21 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.4.0
+## 0.4.1
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- **npm package assets**: Ship the SDK's root `assets/` directory in `@native-sdk/cli` so installed packages include `assets/native-sdk.manifest`, the default macOS icon, and entitlements needed by generated apps (#72, #75).
+
+### Contributors
+
+- @ctate
+- @lzitser23
+<!-- release:end -->
+
+## 0.4.0
 
 ### New Features
 
@@ -99,7 +111,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.3.0
 
