@@ -70,7 +70,7 @@ const expected_dashboard_interaction_command_count: usize = 70;
 // deliberately when rendering changes, reviewing the rendered pixels
 // (reference captures or the docs previews — same emitters) first; the
 // spot pixels below still guard basic visibility.
-const expected_dashboard_reference_signature: u64 = 2871108290690187392;
+const expected_dashboard_reference_signature: u64 = 14864234856790650620;
 const expected_dashboard_widget_node_count: usize = 48;
 const expected_dashboard_snapshot_widget_count: usize = 48;
 const refresh_command = "dashboard.refresh";

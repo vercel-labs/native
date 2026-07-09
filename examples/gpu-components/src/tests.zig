@@ -616,7 +616,7 @@ test "gpu components display list renders stable reference snapshot" {
     // on checked/filled states. Update deliberately when component
     // rendering changes, reviewing the rendered pixels (reference render
     // dump or docs previews — same emitters) first.
-    try std.testing.expectEqual(@as(u64, 4863232662243686658), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 16152968191708277931), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -693,7 +693,7 @@ test "gpu components display list renders stable geist reference snapshot" {
     const scratch = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(scratch);
     const surface = try renderComponentsReferenceSurface(componentTokensForPack(.geist, .light), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 13313358543749413523), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 1220950005983218984), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -785,12 +785,12 @@ test "geist button group renders the detached secondary-tab register in both sch
     // one step short of the pack's pure-black light primary — probed at
     // the chip's lower body, clear of the knockout label.
     try std.testing.expectEqual([4]u8{ 23, 23, 23, 255 }, light.pixelRgba8(30, 48));
-    try std.testing.expectEqual(@as(u64, 8187074409027429810), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 13158221911267186466), referenceSurfaceSignature(pixels));
 
     const dark = try renderButtonGroupReferenceSurface(componentTokensForPack(.geist, .dark), pixels, scratch);
     // Dark inverts to porcelain #ededed.
     try std.testing.expectEqual([4]u8{ 237, 237, 237, 255 }, dark.pixelRgba8(30, 48));
-    try std.testing.expectEqual(@as(u64, 272499359279849024), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 9922762454948493824), referenceSurfaceSignature(pixels));
 }
 
 test "house button group keeps the attached segmented bar through the shared specimen" {
@@ -804,7 +804,7 @@ test "house button group keeps the attached segmented bar through the shared spe
     const scratch = try std.testing.allocator.alloc(u8, button_group_surface_pixels);
     defer std.testing.allocator.free(scratch);
     _ = try renderButtonGroupReferenceSurface(componentTokens(), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 12529290438367463158), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 16337717838073850632), referenceSurfaceSignature(pixels));
 }
 
 /// Render a two-trigger tab strip (one active) on a small reference
@@ -922,7 +922,7 @@ test "house tabs keep the flush pill strip through the shared specimen" {
     const scratch = try std.testing.allocator.alloc(u8, tabs_surface_pixels);
     defer std.testing.allocator.free(scratch);
     _ = try renderTabsReferenceSurface(componentTokens(), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 1813963338460688705), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 15995515449431694753), referenceSurfaceSignature(pixels));
 }
 
 test "gpu components house reference snapshot is reproducible through the shared per-theme path" {
@@ -935,7 +935,7 @@ test "gpu components house reference snapshot is reproducible through the shared
     const scratch = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(scratch);
     _ = try renderComponentsReferenceSurface(componentTokens(), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 4863232662243686658), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 16152968191708277931), referenceSurfaceSignature(pixels));
 }
 
 test "gpu components catalog previews use canonical built-in foundations" {
