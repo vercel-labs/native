@@ -123,6 +123,10 @@ The full documentation is at [native-sdk.dev](https://native-sdk.dev).
 - [Packaging](https://native-sdk.dev/packaging) — from binary to distributable app
 - [Platform Support](https://native-sdk.dev/platform-support) — what each host supports today
 
+## Community
+
+- [Awesome Native SDK](https://github.com/henryoman/awesome-native-sdk#readme) — Curated list of Native SDK apps, examples, framework integrations, and tooling.
+
 ## Contributing
 
 Native SDK is pre-1.0: APIs still move, and the toolkit is evolving quickly. Bug reports and focused pull requests are welcome — for larger changes, open an issue first so the design can be discussed. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the development setup and local checks.
