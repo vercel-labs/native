@@ -1543,3 +1543,42 @@ test "whitespace between a span paragraph's runs collapses to one spliced space"
     const commented = try comment_parser.parse();
     try testing.expectEqual(@as(usize, 2), commented.root.?.children[0].children.len);
 }
+
+test "calendar validates its closed attribute set and message tags" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The full attribute set validates (dates as literals or bindings,
+    // the closed mode/week-start vocabularies, bare event tags).
+    const valid = [_][]const u8{
+        "<calendar month=\"2026-07-01\" />",
+        "<calendar month=\"{visible}\" on-select=\"pick\" on-prev=\"prev\" on-next=\"next\" />",
+        "<calendar month=\"2026-07-01\" mode=\"range\" selected-dates=\"{stay}\" today=\"2026-07-15\" week-start=\"monday\" min-date=\"2026-07-01\" max-date=\"2026-07-31\" show-outside-days=\"false\" width=\"280\" label=\"Booking\" />",
+        "<calendar month=\"2026-07-01\" mode=\"multiple\" selected-dates=\"2026-07-08 2026-07-10\" />",
+    };
+    for (valid) |source| {
+        var parser = markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        .{ .source = "<calendar />", .message = markup.calendar_month_message },
+        .{ .source = "<calendar month=\"2026-07-01\" bogus=\"1\" />", .message = markup.calendar_attr_message },
+        .{ .source = "<calendar month=\"2026-07-01\" mode=\"weekly\" />", .message = markup.calendar_mode_message },
+        .{ .source = "<calendar month=\"2026-07-01\" week-start=\"friday\" />", .message = markup.calendar_week_start_message },
+        // on-select carries no payload — the calendar injects the day.
+        .{ .source = "<calendar month=\"2026-07-01\" on-select=\"pick:{d}\" />", .message = markup.calendar_select_message },
+        .{ .source = "<calendar month=\"2026-07-01\" on-prev=\"prev:{d}\" />", .message = markup.calendar_nav_message },
+        // Other on-* events have no surface on calendar.
+        .{ .source = "<calendar month=\"2026-07-01\" on-change=\"c\" />", .message = markup.calendar_nav_message },
+        .{ .source = "<calendar month=\"2026-07-01\"><text>x</text></calendar>", .message = markup.calendar_children_message },
+    };
+    for (cases) |case| {
+        var parser = markup.Parser.init(arena, case.source);
+        const info = markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+        try testing.expect(info.line > 0);
+        try testing.expect(info.column > 0);
+    }
+}

@@ -24,6 +24,7 @@ export const componentPages: ComponentPage[] = [
   { slug: "bubble", name: "Bubble", preview: "bubble-hero", blurb: "Chat-message surfaces for either side." },
   { slug: "button", name: "Button", preview: "button-hero", blurb: "Variants, sizes, inline icons, and states." },
   { slug: "button-group", name: "Button Group", preview: "button-group-hero", blurb: "Attached action buttons as one segmented bar." },
+  { slug: "calendar", name: "Calendar", preview: "calendar-hero", blurb: "Day-grid month picker with single, range, and multiple selection." },
   { slug: "card", name: "Card", preview: "card-hero", blurb: "The bordered, elevated surface container." },
   { slug: "chart", name: "Chart", preview: "chart-hero", blurb: "Line, bar, and band series (Zig builder)." },
   { slug: "checkbox", name: "Checkbox", preview: "checkbox-hero", blurb: "Binary choice with model-owned state." },

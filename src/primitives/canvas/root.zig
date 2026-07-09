@@ -167,6 +167,10 @@ pub const TextInputEvent = text_model.TextInputEvent;
 pub const TextEditState = text_model.TextEditState;
 pub const TextBuffer = text_model.TextBuffer;
 
+/// The `calendar` component's civil-date value (`Ui.calendar` selection,
+/// month, and `on_select` payload).
+pub const CalendarDate = @import("calendar_date.zig").CalendarDate;
+
 pub const CanvasCommand = command_model.CanvasCommand;
 pub const CommandRef = command_model.CommandRef;
 pub const DiffKind = command_model.DiffKind;

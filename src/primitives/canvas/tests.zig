@@ -1,4 +1,5 @@
 test {
+    _ = @import("calendar_date.zig");
     _ = @import("widget_tests.zig");
     _ = @import("ui_tests.zig");
     _ = @import("ui_schema_tests.zig");

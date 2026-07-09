@@ -25,6 +25,9 @@ const Msg = union(enum) {
     draft: canvas.TextInputEvent,
     confidence: f32,
     feed_scrolled: canvas.ScrollState,
+    prev_month,
+    next_month,
+    pick: canvas.CalendarDate,
 };
 
 const InboxUi = ui_model.Ui(Msg);
@@ -1428,5 +1431,155 @@ test "structural id goldens: the id algorithm is pinned end to end" {
     try testing.expectEqual(@as(canvas.ObjectId, 14648775719080514296), canvas.globalWidgetId(.text, canvas.uiKey("greeting")));
     try testing.expectEqual(@as(canvas.ObjectId, 10740830058688169295), canvas.globalWidgetId(.tree, .{ .index = 3 }));
     try testing.expectEqual(@as(canvas.ObjectId, 9835495177657875356), canvas.globalWidgetId(.split_divider, canvas.uiKey("divider")));
+}
+
+// --------------------------------------------------------------- calendar
+
+const D = canvas.CalendarDate;
+
+/// Count the cells wired to a `pick` press message (every enabled day cell).
+fn countPickHandlers(tree: InboxUi.Tree, widget: canvas.Widget) usize {
+    var total: usize = 0;
+    if (tree.msgFor(widget.id, .press)) |msg| {
+        if (msg == .pick) total += 1;
+    }
+    for (widget.children) |child| total += countPickHandlers(tree, child);
+    return total;
+}
+
+/// The day cell whose press dispatches `pick` for exactly `date`.
+fn findPickCell(tree: InboxUi.Tree, widget: canvas.Widget, date: D) ?canvas.Widget {
+    if (tree.msgFor(widget.id, .press)) |msg| {
+        if (msg == .pick and msg.pick.eql(date)) return widget;
+    }
+    for (widget.children) |child| {
+        if (findPickCell(tree, child, date)) |found| return found;
+    }
+    return null;
+}
+
+fn findPressMsg(tree: InboxUi.Tree, widget: canvas.Widget, want: Msg) ?canvas.Widget {
+    if (tree.msgFor(widget.id, .press)) |msg| {
+        if (std.meta.eql(msg, want)) return widget;
+    }
+    for (widget.children) |child| {
+        if (findPressMsg(tree, child, want)) |found| return found;
+    }
+    return null;
+}
+
+test "calendar emits a month grid with navigation and a selectable day" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = InboxUi.init(arena_state.allocator());
+
+    const tree = try ui.finalize(ui.calendar(.{
+        .month = .{ .year = 2026, .month = 7, .day = 1 },
+        .selection = .{ .single = .{ .year = 2026, .month = 7, .day = 8 } },
+        .today = .{ .year = 2026, .month = 7, .day = 15 },
+        .on_select = InboxUi.calendarSelectMsg(.pick),
+        .on_prev = .prev_month,
+        .on_next = .next_month,
+    }));
+
+    try testing.expectEqual(canvas.WidgetKind.column, tree.root.kind);
+    try testing.expectEqual(canvas.WidgetRole.group, tree.root.semantics.role);
+    try testing.expectEqualStrings("July 2026", tree.root.semantics.label);
+    // Caption month label and weekday header columns.
+    try testing.expect(findByText(tree.root, "July 2026") != null);
+    try testing.expect(findByText(tree.root, "Su") != null);
+    try testing.expect(findByText(tree.root, "Sa") != null);
+
+    // Six weeks of seven cells, all enabled and pressable.
+    try testing.expectEqual(@as(usize, 42), countPickHandlers(tree, tree.root));
+
+    // Pressing the 8th dispatches its date; the cell is marked selected.
+    const day8 = findPickCell(tree, tree.root, .{ .year = 2026, .month = 7, .day = 8 }).?;
+    try testing.expect(day8.state.selected);
+    const day9 = findPickCell(tree, tree.root, .{ .year = 2026, .month = 7, .day = 9 }).?;
+    try testing.expect(!day9.state.selected);
+
+    // Nav chevrons dispatch month steps.
+    try testing.expect(findPressMsg(tree, tree.root, .prev_month) != null);
+    try testing.expect(findPressMsg(tree, tree.root, .next_month) != null);
+}
+
+test "calendar disables days outside the min/max bounds" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = InboxUi.init(arena_state.allocator());
+
+    const tree = try ui.finalize(ui.calendar(.{
+        .month = .{ .year = 2026, .month = 7, .day = 1 },
+        .min = .{ .year = 2026, .month = 7, .day = 10 },
+        .max = .{ .year = 2026, .month = 7, .day = 20 },
+        .on_select = InboxUi.calendarSelectMsg(.pick),
+    }));
+
+    // Only 2026-07-10 .. 2026-07-20 (11 days) stay pressable.
+    try testing.expectEqual(@as(usize, 11), countPickHandlers(tree, tree.root));
+    try testing.expect(findPickCell(tree, tree.root, .{ .year = 2026, .month = 7, .day = 9 }) == null);
+    try testing.expect(findPickCell(tree, tree.root, .{ .year = 2026, .month = 7, .day = 10 }) != null);
+}
+
+test "calendar range selection marks both ends selected" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = InboxUi.init(arena_state.allocator());
+
+    const tree = try ui.finalize(ui.calendar(.{
+        .month = .{ .year = 2026, .month = 7, .day = 1 },
+        .selection = .{ .range = .{
+            .start = .{ .year = 2026, .month = 7, .day = 8 },
+            .end = .{ .year = 2026, .month = 7, .day = 12 },
+        } },
+        .on_select = InboxUi.calendarSelectMsg(.pick),
+    }));
+
+    try testing.expect(findPickCell(tree, tree.root, .{ .year = 2026, .month = 7, .day = 8 }).?.state.selected);
+    try testing.expect(findPickCell(tree, tree.root, .{ .year = 2026, .month = 7, .day = 12 }).?.state.selected);
+    // A day inside the band is highlighted (range middle) but is not a
+    // selected endpoint.
+    try testing.expect(!findPickCell(tree, tree.root, .{ .year = 2026, .month = 7, .day = 10 }).?.state.selected);
+}
+
+test "calendar multiple selection marks every day in the set" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = InboxUi.init(arena_state.allocator());
+
+    const days = [_]canvas.CalendarDate{
+        .{ .year = 2026, .month = 7, .day = 8 },
+        .{ .year = 2026, .month = 7, .day = 10 },
+        .{ .year = 2026, .month = 7, .day = 15 },
+    };
+    const tree = try ui.finalize(ui.calendar(.{
+        .month = .{ .year = 2026, .month = 7, .day = 1 },
+        .selection = .{ .multiple = &days },
+        .on_select = InboxUi.calendarSelectMsg(.pick),
+    }));
+
+    for (days) |day| {
+        try testing.expect(findPickCell(tree, tree.root, day).?.state.selected);
+    }
+    try testing.expect(!findPickCell(tree, tree.root, .{ .year = 2026, .month = 7, .day = 9 }).?.state.selected);
+}
+
+test "calendar hides adjacent-month days when show_outside_days is off" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = InboxUi.init(arena_state.allocator());
+
+    const tree = try ui.finalize(ui.calendar(.{
+        .month = .{ .year = 2026, .month = 7, .day = 1 },
+        .show_outside_days = false,
+        .on_select = InboxUi.calendarSelectMsg(.pick),
+    }));
+
+    // July 2026 has 31 days; with outside days hidden, only those cells are
+    // pressable.
+    try testing.expectEqual(@as(usize, 31), countPickHandlers(tree, tree.root));
+    // A June day that would fill the first row is absent.
+    try testing.expect(findPickCell(tree, tree.root, .{ .year = 2026, .month = 6, .day = 30 }) == null);
 }
 

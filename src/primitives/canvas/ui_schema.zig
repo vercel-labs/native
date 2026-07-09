@@ -306,6 +306,12 @@ pub const elements = [_]ElementInfo{
     // end, the reference's trailing dock), so the element mints ONE
     // code and no attribute codes at all.
     .{ .code = 65, .name = "reactions", .rule_hook = "reactions" },
+    // The day-grid calendar (the shadcn base-calendar shape): a leaf whose
+    // month, selection, today mark, and bounds ride attributes (dates are
+    // YYYY-MM-DD). Lowers through `Ui.calendar` to a plain column of day
+    // cells, not a widget kind of its own; day presses ride a bare
+    // on-select whose payload the engine fills with the pressed day.
+    .{ .code = 66, .name = "calendar", .rule_hook = "calendar" },
 };
 
 // ------------------------------------------------------------- attributes
@@ -442,6 +448,22 @@ pub const attrs = [_]AttrInfo{
     // (absent) declares no origin, so every existing document keeps
     // its mount-never-animates behavior.
     .{ .code = 78, .name = "resize-origin", .class = .number, .group = .option, .field = "resize_origin" },
+    // Calendar composite attributes (calendar only; the rule hook owns the
+    // closed set). The date-valued attributes (month, selected-dates,
+    // today, min-date, max-date) carry YYYY-MM-DD strings — one date, or,
+    // for selected-dates in range/multiple mode, a comma/space-separated
+    // list; they are NOT rendered label text, so no tofu guard. mode
+    // (single/range/multiple) and week-start (sunday/monday) are closed
+    // literal vocabularies the rule hook validates; show-outside-days is a
+    // flag.
+    .{ .code = 79, .name = "month", .class = .text, .group = .composite },
+    .{ .code = 80, .name = "selected-dates", .class = .text, .group = .composite },
+    .{ .code = 81, .name = "today", .class = .text, .group = .composite },
+    .{ .code = 82, .name = "mode", .class = .option, .group = .composite },
+    .{ .code = 83, .name = "week-start", .class = .option, .group = .composite },
+    .{ .code = 84, .name = "min-date", .class = .text, .group = .composite },
+    .{ .code = 85, .name = "max-date", .class = .text, .group = .composite },
+    .{ .code = 86, .name = "show-outside-days", .class = .flag, .group = .composite },
 };
 
 // ----------------------------------------------------------------- events
@@ -457,6 +479,14 @@ pub const events = [_]EventInfo{
     .{ .code = 8, .name = "hold" },
     .{ .code = 9, .name = "resize", .payload = .fraction, .only_on_element = "split" },
     .{ .code = 10, .name = "reach-end", .only_on_element = "scroll" },
+    // Calendar events (calendar only; the rule hook builds them). on-select
+    // fires for a day press and its Msg carries the pressed day (a
+    // CalendarDate the engine injects — no markup binding payload, so the
+    // schema payload stays `.message`); on-prev/on-next step the shown
+    // month.
+    .{ .code = 11, .name = "select", .only_on_element = "calendar" },
+    .{ .code = 12, .name = "prev", .only_on_element = "calendar" },
+    .{ .code = 13, .name = "next", .only_on_element = "calendar" },
 };
 
 // ------------------------------------------------------- token vocabulary

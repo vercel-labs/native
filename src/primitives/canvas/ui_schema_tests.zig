@@ -21,28 +21,29 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // (append or slot them anywhere — order carries no meaning) and pin
     // the new fingerprint ONLY for additions; renames/renumbers are
     // schema-version-bump events, not silent edits.
-    try testing.expectEqual(@as(usize, 65), schema.elements.len);
-    try testing.expectEqual(@as(usize, 78), schema.attrs.len);
-    try testing.expectEqual(@as(usize, 10), schema.events.len);
-    // The element table runs through the span composite (64) and the
-    // bubble-reactions composite (65); the reaction pill's dock rides
-    // the existing text-alignment attribute, so element additions can
-    // leave the attr table untouched.
+    try testing.expectEqual(@as(usize, 66), schema.elements.len);
+    try testing.expectEqual(@as(usize, 86), schema.attrs.len);
+    try testing.expectEqual(@as(usize, 13), schema.events.len);
+    // The element table runs through the span composite (64), the
+    // bubble-reactions composite (65), and the calendar composite (66).
     try testing.expectEqual(
-        @as(u64, 0x961be186c9929e4c),
+        @as(u64, 0xcfeed6b2e61a9486),
         tableFingerprint(schema.ElementInfo, &schema.elements),
     );
     // The attr table runs through the split layout-tween attributes
     // resize-duration (71) and resize-easing (72), the chart axis/hover
     // attributes x-labels (73), y-labels (74), and hover-details (75),
-    // the later span additions scale (76) and underline (77), and the
-    // split enter-from attribute resize-origin (78).
+    // the later span additions scale (76) and underline (77), the
+    // split enter-from attribute resize-origin (78), and the calendar
+    // composite attributes month (79) through show-outside-days (86).
     try testing.expectEqual(
-        @as(u64, 0x13fddf21980756c0),
+        @as(u64, 0xf3c06253f0ca1ed0),
         tableFingerprint(schema.AttrInfo, &schema.attrs),
     );
+    // The event table runs through the scroll reach-end signal (10) and
+    // the calendar events select (11), prev (12), and next (13).
     try testing.expectEqual(
-        @as(u64, 0x5c2d94636ea4cf1a),
+        @as(u64, 0xfd3acb34740a308b),
         tableFingerprint(schema.EventInfo, &schema.events),
     );
 }

@@ -83,6 +83,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "input-group-actions", .doc = "The input-group's accessory row (only inside input-group, after its textarea): leading/trailing controls on one bottom row inside the group's border — put a <spacer grow=\"1\"/> between the leading controls and the trailing send. Children are ordinary elements (if/else/for work). Takes gap, key, global-key." },
     .{ .name = "span", .doc = "Inline styled run inside a <text> paragraph: mixed-weight, mono, italic, scaled, underlined, and token-colored runs word-wrap as ONE paragraph and announce as one text run. Takes weight (regular|medium|bold), mono, italic, scale (a positive multiplier on the paragraph's base size), underline, foreground; content is one run of text ({bindings} work). Whitespace between runs collapses to a single space; runs written with no whitespace between them abut. Spans do not nest; layout, events, and identity stay on the enclosing text." },
     .{ .name = "reactions", .doc = "The bubble's reaction pill (only inside bubble, at most one): a small muted capsule straddling the bubble's bottom edge, holding one run of text ({bindings} work). Takes text-alignment naming the dock — start, center, or end (the default trailing dock). Consumes no layout space (it overlaps like the reference); give the next turn breathing room with the thread's own spacing. Draws on the page plane, so a primary bubble's knockout ink never applies." },
+    .{ .name = "calendar", .doc = "Day-grid calendar (lowered through Ui.calendar): a caption row (month/year + prev/next chevrons), a weekday header, and a 6x7 day grid. A leaf — dates ride attributes as YYYY-MM-DD strings. Takes month (required, the shown month), mode (single|range|multiple), selected-dates (the selection; one date, two for range, a comma/space list for multiple), today, week-start (sunday|monday), min-date, max-date, show-outside-days, width, key, global-key, label. Day presses dispatch on-select with the pressed day injected; on-prev/on-next step the month. Display-only: the app model owns the shown month and the selection." },
 };
 
 pub const structure_docs = [_]Doc{
@@ -270,6 +271,27 @@ pub const event_docs = [_]Doc{
     .{ .name = "on-hold", .doc = "Press-and-hold Msg: a pointer held ~350 ms dispatches it and the release then presses nothing; a quick click dispatches on-press as usual. A right/ctrl-click with no context menu on the route dispatches it immediately. Like on-press, binding it makes any element pressable." },
     .{ .name = "on-resize", .doc = "split element only: names a Msg variant with f32 payload; delivers the applied first-pane fraction after every divider drag, keyboard adjustment, and assistive increment/decrement. Echo it back into value - the delivered fraction never fights the reconcile." },
     .{ .name = "on-reach-end", .doc = "scroll element only: Msg (tag or tag:{payload}) dispatched when a user scroll comes within one viewport of the content end - the infinite-scroll fetch signal. Fires once per approach with hysteresis: it re-arms only after the offset retreats past 1.5 viewports, which appending a batch causes on its own by growing the extent." },
+    .{ .name = "on-select", .doc = "calendar element only: a BARE Msg tag whose payload is the pressed day (a canvas.CalendarDate variant, like pick: canvas.CalendarDate). The calendar injects the date, so on-select carries no {binding} payload." },
+    .{ .name = "on-prev", .doc = "calendar element only: a bare Msg tag dispatched by the previous-month chevron (step the shown month with CalendarDate.addMonths(-1) in update). Carries no payload." },
+    .{ .name = "on-next", .doc = "calendar element only: a bare Msg tag dispatched by the next-month chevron (step the shown month with CalendarDate.addMonths(1) in update). Carries no payload." },
+};
+
+pub const calendar_attr_docs = [_]Doc{
+    .{ .name = "month", .doc = "calendar: the shown month as a YYYY-MM-DD date (a literal or one {binding}; the day is ignored). Required." },
+    .{ .name = "mode", .doc = "calendar: selection mode — single (default), range, or multiple (a literal or one {binding}). Decides how selected-dates is read." },
+    .{ .name = "selected-dates", .doc = "calendar: the selection as YYYY-MM-DD dates (a literal or one {binding}) — one date for single, the first two (start, end) for range, or a comma/space-separated list for multiple. Malformed entries are skipped." },
+    .{ .name = "today", .doc = "calendar: the day to mark as today (a YYYY-MM-DD literal or one {binding}); omit to mark none. No clock is read — a controlled component takes today from the app." },
+    .{ .name = "week-start", .doc = "calendar: first weekday column — sunday (default) or monday (a literal or one {binding})." },
+    .{ .name = "min-date", .doc = "calendar: earliest selectable day (a YYYY-MM-DD literal or one {binding}); earlier days render disabled." },
+    .{ .name = "max-date", .doc = "calendar: latest selectable day (a YYYY-MM-DD literal or one {binding}); later days render disabled." },
+    .{ .name = "show-outside-days", .doc = "calendar: draw the adjacent-month days that fill the first and last weeks (true/false or a {binding}; default true). Off leaves those cells blank." },
+    .{ .name = "width", .doc = "Definite calendar width (plain number); 0/omitted sizes to content." },
+    .{ .name = "on-select", .doc = "calendar: a BARE Msg tag whose payload is the pressed day (a canvas.CalendarDate variant). The calendar injects the date, so it carries no {binding} payload." },
+    .{ .name = "on-prev", .doc = "calendar: a bare Msg tag dispatched by the previous-month chevron; carries no payload." },
+    .{ .name = "on-next", .doc = "calendar: a bare Msg tag dispatched by the next-month chevron; carries no payload." },
+    .{ .name = "key", .doc = "Sibling-scoped identity key." },
+    .{ .name = "global-key", .doc = "Parent-independent identity: ids survive reparenting between containers." },
+    .{ .name = "label", .doc = "Accessible name; omitted calendars announce as the shown month (\"July 2026\")." },
 };
 
 pub fn elementDoc(name: []const u8) ?[]const u8 {
@@ -293,6 +315,7 @@ pub fn attributeDoc(name: []const u8) ?[]const u8 {
     if (findDoc(&input_group_attr_docs, name)) |doc| return doc;
     if (findDoc(&input_group_actions_attr_docs, name)) |doc| return doc;
     if (findDoc(&span_attr_docs, name)) |doc| return doc;
+    if (findDoc(&calendar_attr_docs, name)) |doc| return doc;
     return findDoc(&if_attr_docs, name);
 }
 
