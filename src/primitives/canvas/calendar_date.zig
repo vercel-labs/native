@@ -135,8 +135,14 @@ pub const CalendarDate = struct {
         const mp: i64 = @divTrunc(5 * doy + 2, 153);
         const d: i64 = doy - @divTrunc(153 * mp + 2, 5) + 1;
         const m: i64 = if (mp < 10) mp + 3 else mp - 9;
+        // A month grid at the year boundaries (e.g. `0000-01` or `65535-12`)
+        // spills into the previous/next year, which can fall outside the u16
+        // `year` field. Saturate rather than `@intCast`-panic so an
+        // out-of-range grid cell degrades to a clamped date, keeping the
+        // module's "degrade, don't crash" contract.
+        const yr: i64 = if (m <= 2) y + 1 else y;
         return .{
-            .year = @intCast(if (m <= 2) y + 1 else y),
+            .year = std.math.cast(u16, yr) orelse (if (yr < 0) 0 else std.math.maxInt(u16)),
             .month = @intCast(m),
             .day = @intCast(d),
         };
