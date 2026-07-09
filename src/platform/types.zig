@@ -217,6 +217,7 @@ pub const max_tray_title_bytes: usize = 64;
 pub const max_tray_tooltip_bytes: usize = 256;
 pub const max_tray_item_label_bytes: usize = 256;
 pub const max_tray_item_command_bytes: usize = 128;
+pub const max_tray_popover_window_bytes: usize = 128;
 pub const max_drop_paths_bytes: usize = 8192;
 pub const max_drop_paths: usize = max_drop_paths_bytes / 2 + 1;
 pub const max_window_event_name_bytes: usize = 64;
@@ -1209,6 +1210,12 @@ pub const Credential = struct {
 
 pub const TrayItemId = u32;
 
+/// The status-item popover's visibility flipped (see
+/// `TrayOptions.popover_window`).
+pub const TrayPopoverEvent = struct {
+    visible: bool,
+};
+
 pub const TrayOptions = struct {
     icon_path: []const u8 = "",
     /// Status-bar button title, shown when no icon resolves (macOS
@@ -1216,6 +1223,19 @@ pub const TrayOptions = struct {
     title: []const u8 = "",
     tooltip: []const u8 = "",
     items: []const TrayMenuItem = &.{},
+    /// Label of an app window whose content anchors to the status item
+    /// as a transient popover (macOS `NSPopover`, the menu-bar-extra
+    /// panel shape). When set, LEFT-clicking the status button toggles
+    /// the popover instead of opening the dropdown menu (the `items`
+    /// menu, when present, moves to right-click); the named window is
+    /// never shown as a normal window — its content view is hosted by
+    /// the popover, sized from the window's configured width/height.
+    /// Open/close reports arrive as the platform `.tray_popover` event
+    /// (dispatched to apps as the `tray.popover_opened` /
+    /// `tray.popover_closed` commands, source `.tray`). Platforms
+    /// without the seam ignore the field; the tray keeps working as a
+    /// plain menu.
+    popover_window: []const u8 = "",
 };
 
 pub const TrayMenuItem = struct {
@@ -1856,6 +1876,11 @@ pub const Event = union(enum) {
     window_focused: WindowId,
     bridge_message: BridgeMessage,
     tray_action: TrayItemId,
+    /// The status-item popover opened or closed (a real click on the
+    /// status button, a click-away dismissal, or a programmatic
+    /// `toggleTrayPopover`). Only platforms hosting a tray popover
+    /// (`TrayOptions.popover_window`) emit it.
+    tray_popover: TrayPopoverEvent,
     shortcut: ShortcutEvent,
     native_command: NativeCommandEvent,
     menu_command: MenuCommandEvent,
@@ -1889,6 +1914,7 @@ pub const Event = union(enum) {
             .window_focused => "window_focused",
             .bridge_message => "bridge_message",
             .tray_action => "tray_action",
+            .tray_popover => "tray_popover",
             .shortcut => "shortcut",
             .native_command => "native_command",
             .menu_command => "menu_command",
@@ -2000,6 +2026,7 @@ pub const PlatformServices = struct {
     update_tray_menu_fn: ?*const fn (context: ?*anyopaque, items: []const TrayMenuItem) anyerror!void = null,
     update_tray_title_fn: ?*const fn (context: ?*anyopaque, title: []const u8) anyerror!void = null,
     remove_tray_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    toggle_tray_popover_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     configure_security_policy_fn: ?*const fn (context: ?*anyopaque, policy: security.Policy) anyerror!void = null,
     configure_menus_fn: ?*const fn (context: ?*anyopaque, menus: []const Menu) anyerror!void = null,
     configure_shortcuts_fn: ?*const fn (context: ?*anyopaque, shortcuts: []const Shortcut) anyerror!void = null,
@@ -2420,6 +2447,15 @@ pub const PlatformServices = struct {
     pub fn removeTray(self: PlatformServices) anyerror!void {
         const remove_fn = self.remove_tray_fn orelse return error.UnsupportedService;
         return remove_fn(self.context);
+    }
+
+    /// Toggle the status-item popover (see `TrayOptions.popover_window`)
+    /// exactly as a status-button click would — the seam the automation
+    /// harness and app logic drive without a real mouse. The resulting
+    /// visibility arrives asynchronously as the `.tray_popover` event.
+    pub fn toggleTrayPopover(self: PlatformServices) anyerror!void {
+        const toggle_fn = self.toggle_tray_popover_fn orelse return error.UnsupportedService;
+        return toggle_fn(self.context);
     }
 
     pub fn configureSecurityPolicy(self: PlatformServices, policy: security.Policy) anyerror!void {

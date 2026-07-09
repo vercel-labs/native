@@ -366,6 +366,10 @@ pub const NullPlatform = struct {
     tray_update_count: usize = 0,
     tray_title_update_count: usize = 0,
     tray_remove_count: usize = 0,
+    tray_popover_window: [types.max_tray_popover_window_bytes]u8 = undefined,
+    tray_popover_window_len: usize = 0,
+    tray_popover_visible: bool = false,
+    tray_popover_toggle_count: usize = 0,
     window_event_window_id: WindowId = 0,
     window_event_name: [max_window_event_name_bytes]u8 = undefined,
     window_event_name_len: usize = 0,
@@ -594,6 +598,7 @@ pub const NullPlatform = struct {
                 .update_tray_menu_fn = updateTrayMenu,
                 .update_tray_title_fn = updateTrayTitle,
                 .remove_tray_fn = removeTray,
+                .toggle_tray_popover_fn = toggleTrayPopover,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
                 .add_recent_document_fn = addRecentDocument,
@@ -1152,6 +1157,9 @@ pub const NullPlatform = struct {
         self.tray_icon_path_len = (try copyInto(&self.tray_icon_path, options.icon_path)).len;
         self.tray_title_len = (try copyInto(&self.tray_title, options.title)).len;
         self.tray_tooltip_len = (try copyInto(&self.tray_tooltip, options.tooltip)).len;
+        self.tray_popover_window = undefined;
+        self.tray_popover_window_len = (try copyInto(&self.tray_popover_window, options.popover_window)).len;
+        self.tray_popover_visible = false;
         try updateTrayMenu(context, options.items);
         self.tray_create_count += 1;
     }
@@ -1175,6 +1183,18 @@ pub const NullPlatform = struct {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         self.tray_item_count = 0;
         self.tray_remove_count += 1;
+        self.tray_popover_window_len = 0;
+        self.tray_popover_visible = false;
+    }
+
+    /// The headless popover: no glass, so the toggle records itself and
+    /// flips the visibility mirror synchronously — tests assert the
+    /// plumbing, not the panel.
+    fn toggleTrayPopover(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (self.tray_popover_window_len == 0) return error.UnsupportedService;
+        self.tray_popover_visible = !self.tray_popover_visible;
+        self.tray_popover_toggle_count += 1;
     }
 
     fn openExternalUrl(context: ?*anyopaque, url: []const u8) anyerror!void {
@@ -2087,6 +2107,18 @@ pub const NullPlatform = struct {
 
     pub fn trayRemoveCount(self: *const NullPlatform) usize {
         return self.tray_remove_count;
+    }
+
+    pub fn trayPopoverWindow(self: *const NullPlatform) []const u8 {
+        return self.tray_popover_window[0..self.tray_popover_window_len];
+    }
+
+    pub fn trayPopoverVisible(self: *const NullPlatform) bool {
+        return self.tray_popover_visible;
+    }
+
+    pub fn trayPopoverToggleCount(self: *const NullPlatform) usize {
+        return self.tray_popover_toggle_count;
     }
 
     pub fn lastWindowEventWindowId(self: *const NullPlatform) WindowId {

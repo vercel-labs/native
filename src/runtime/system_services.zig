@@ -113,6 +113,8 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             try self.options.platform.services.createTray(options);
             try storeTrayItems(self, options.items);
             self.tray_title = try copyInto(&self.tray_title_storage, options.title);
+            self.tray_popover_window = try copyInto(&self.tray_popover_window_storage, options.popover_window);
+            self.tray_popover_visible = false;
             self.tray_created = true;
         }
 
@@ -137,6 +139,21 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             self.tray_item_count = 0;
             self.tray_created = false;
             self.tray_title = "";
+            self.tray_popover_window = "";
+            self.tray_popover_visible = false;
+        }
+
+        /// Toggle the status-item popover programmatically — the same
+        /// show/dismiss a real click on the status button performs, for
+        /// app logic and the automation harness (`native automate
+        /// native-command native-sdk.tray.toggle-popover`). Requires a
+        /// live tray created with `TrayOptions.popover_window`; the
+        /// resulting visibility arrives as the platform `.tray_popover`
+        /// event (and the snapshot's `popover_visible`), never as a
+        /// synchronous return.
+        pub fn toggleTrayPopover(self: *Runtime) anyerror!void {
+            if (!self.tray_created or self.tray_popover_window.len == 0) return error.UnsupportedService;
+            try self.options.platform.services.toggleTrayPopover();
         }
 
         pub fn trayItemExists(self: *const Runtime, item_id: platform.TrayItemId) bool {

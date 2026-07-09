@@ -638,7 +638,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) uint32_t modifiers;
 @end
 
-@interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate>
+@interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate, NSPopoverDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) WKWebView *webView;
 @property(nonatomic, strong) NativeSdkWindowDelegate *delegate;
@@ -771,12 +771,33 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, assign) native_sdk_appkit_tray_callback_t trayCallback;
 @property(nonatomic, assign) void *trayContext;
+/* Popover hosting (native_sdk_appkit_set_tray_popover): the label of the
+ * app window whose CONTENT VIEW anchors to the status item as a
+ * transient NSPopover. The window itself is never ordered front — its
+ * content moves into the popover's view controller while shown and back
+ * into the (still-hidden) window on close, so the SDK's own metal canvas
+ * keeps rendering into the same NSView the whole time. */
+@property(nonatomic, strong) NSString *trayPopoverWindowLabel;
+@property(nonatomic, strong) NSPopover *trayPopover;
+@property(nonatomic, strong) NSViewController *trayPopoverController;
+/* The window whose content the OPEN popover currently borrows (0 when
+ * closed) — popoverDidClose returns the content there. */
+@property(nonatomic, assign) uint64_t trayPopoverHostedWindowId;
+/* In popover mode the dropdown menu moves off the status item (an
+ * assigned NSStatusItem.menu would swallow the left click that must
+ * toggle the popover) and pops up on right-click instead. */
+@property(nonatomic, strong) NSMenu *trayPopoverMenu;
+@property(nonatomic, assign) native_sdk_appkit_tray_popover_callback_t trayPopoverCallback;
+@property(nonatomic, assign) void *trayPopoverContext;
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
 - (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy;
 - (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy makeMain:(BOOL)makeMain;
 - (void)showDeferredWindowIfPending:(uint64_t)windowId reason:(const char *)reason;
+- (BOOL)windowIsTrayPopoverHosted:(uint64_t)windowId;
+- (uint64_t)trayPopoverWindowId;
+- (BOOL)toggleTrayPopover;
 - (void)applyWindowClearColor:(uint64_t)windowId red:(uint8_t)red green:(uint8_t)green blue:(uint8_t)blue alpha:(uint8_t)alpha;
 - (void)focusWindowWithId:(uint64_t)windowId;
 - (void)closeWindowWithId:(uint64_t)windowId;
@@ -6411,7 +6432,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         self.window = window;
         self.delegate = delegate;
         self.windowLabel = label.length > 0 ? label : @"main";
-    } else if (showPolicy != 1) {
+    } else if (showPolicy != 1 && ![self windowIsTrayPopoverHosted:windowId]) {
         [window makeKeyAndOrderFront:nil];
         [NSApp activate];
     }
@@ -6426,6 +6447,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     NSNumber *createdNs = self.deferredShowWindows[key];
     if (!createdNs) return;
     [self.deferredShowWindows removeObjectForKey:key];
+    // A popover-hosted window NEVER shows as a normal window: its first
+    // present retires the deferred-show entry without ordering front —
+    // the content becomes visible only inside the status-item popover.
+    if ([self windowIsTrayPopoverHosted:windowId]) return;
     NSWindow *window = self.windows[key];
     if (!window) return;
     if (getenv("NATIVE_SDK_WINDOW_TIMING")) {
@@ -9490,6 +9515,114 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
     }
 }
 
+// --------------------------------------------------------------- tray popover
+//
+// The menu-bar-extra panel shape: the status button's LEFT click toggles
+// a transient NSPopover whose content IS one of the app's windows — the
+// same container NSView (and the metal canvas inside it) the window
+// hosts, borrowed while the popover is shown and returned on close. The
+// window stays ordered out for its whole life (present-before-show is
+// suppressed for it), so the app renders one surface that only ever
+// appears under the menu bar.
+
+- (uint64_t)trayPopoverWindowId {
+    if (self.trayPopoverWindowLabel.length == 0) return 0;
+    for (NSNumber *key in self.windowLabels) {
+        if ([self.windowLabels[key] isEqualToString:self.trayPopoverWindowLabel]) {
+            return key.unsignedLongLongValue;
+        }
+    }
+    return 0;
+}
+
+- (BOOL)windowIsTrayPopoverHosted:(uint64_t)windowId {
+    if (self.trayPopoverWindowLabel.length == 0) return NO;
+    NSString *label = self.windowLabels[@(windowId)];
+    return label != nil && [label isEqualToString:self.trayPopoverWindowLabel];
+}
+
+- (void)trayStatusButtonClicked:(id)sender {
+    NSEvent *event = NSApp.currentEvent;
+    const BOOL secondary = event != nil && (event.type == NSEventTypeRightMouseUp || (event.modifierFlags & NSEventModifierFlagControl) != 0);
+    if (secondary && self.trayPopoverMenu != nil) {
+        NSStatusBarButton *button = self.statusItem.button;
+        [self.trayPopoverMenu popUpMenuPositioningItem:nil
+                                            atLocation:NSMakePoint(0, button.bounds.size.height + 4)
+                                                inView:button];
+        return;
+    }
+    [self toggleTrayPopover];
+}
+
+- (BOOL)toggleTrayPopover {
+    if (self.trayPopoverWindowLabel.length == 0 || !self.statusItem) return NO;
+    if (self.trayPopover != nil && self.trayPopover.shown) {
+        [self.trayPopover performClose:nil];
+        return YES;
+    }
+    const uint64_t windowId = [self trayPopoverWindowId];
+    NSWindow *window = self.windows[@(windowId)];
+    NSStatusBarButton *button = self.statusItem.button;
+    if (windowId == 0 || !window || !button) return NO;
+    NSView *content = window.contentView;
+    if (!content) return NO;
+    NSSize size = content.frame.size;
+    if (size.width < 1 || size.height < 1) {
+        size = [window contentRectForFrameRect:window.frame].size;
+    }
+    // Borrow the content: a fresh placeholder keeps the hidden window's
+    // contentView slot sane while the popover owns the real container.
+    window.contentView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, size.width, size.height)];
+    if (!self.trayPopoverController) {
+        self.trayPopoverController = [[NSViewController alloc] init];
+    }
+    content.frame = NSMakeRect(0, 0, size.width, size.height);
+    self.trayPopoverController.view = content;
+    if (!self.trayPopover) {
+        NSPopover *popover = [[NSPopover alloc] init];
+        popover.behavior = NSPopoverBehaviorTransient;
+        popover.animates = NO;
+        popover.delegate = self;
+        self.trayPopover = popover;
+    }
+    self.trayPopover.contentViewController = self.trayPopoverController;
+    self.trayPopover.contentSize = size;
+    self.trayPopoverHostedWindowId = windowId;
+    [NSApp activateIgnoringOtherApps:YES];
+    [self.trayPopover showRelativeToRect:button.bounds ofView:button preferredEdge:NSRectEdgeMinY];
+    return YES;
+}
+
+- (void)popoverDidShow:(NSNotification *)notification {
+    // The canvas must own the keyboard the moment the panel opens, and
+    // the surface owes the glass its retained pixels now that it is
+    // composited again (viewDidMoveToWindow re-registered its occlusion
+    // observer against the popover's window).
+    NSView *content = self.trayPopoverController.view;
+    for (NSView *subview in content.subviews) {
+        if ([subview isKindOfClass:[NativeSdkMetalSurfaceView class]]) {
+            [content.window makeFirstResponder:subview];
+            break;
+        }
+    }
+    [self scheduleFrame];
+    if (self.trayPopoverCallback) self.trayPopoverCallback(self.trayPopoverContext, 1);
+}
+
+- (void)popoverDidClose:(NSNotification *)notification {
+    NSView *content = self.trayPopoverController.view;
+    NSWindow *window = self.windows[@(self.trayPopoverHostedWindowId)];
+    self.trayPopoverHostedWindowId = 0;
+    // Return the borrowed content to its (still ordered-out) window so
+    // the next toggle finds it where a window's content lives.
+    self.trayPopoverController.view = [[NSView alloc] initWithFrame:NSZeroRect];
+    if (window != nil && content != nil) {
+        content.frame = NSMakeRect(0, 0, [window contentRectForFrameRect:window.frame].size.width, [window contentRectForFrameRect:window.frame].size.height);
+        window.contentView = content;
+    }
+    if (self.trayPopoverCallback) self.trayPopoverCallback(self.trayPopoverContext, 0);
+}
+
 @end
 
 static NSArray<NSString *> *NativeSdkPolicyListFromBytes(const char *bytes, size_t len, NSArray<NSString *> *fallback) {
@@ -10355,7 +10488,14 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
             item.enabled = enabled_flags[i] != 0;
             [menu addItem:item];
         }
-        object.statusItem.menu = menu;
+        if (object.trayPopoverWindowLabel.length > 0) {
+            // Popover mode: an assigned NSStatusItem.menu would swallow
+            // the left click that must toggle the popover, so the
+            // dropdown pops on right-click instead.
+            object.trayPopoverMenu = menu;
+        } else {
+            object.statusItem.menu = menu;
+        }
     }
 }
 
@@ -10379,6 +10519,11 @@ void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, const c
 
 void native_sdk_appkit_remove_tray(native_sdk_appkit_host_t *host) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    if (object.trayPopover != nil && object.trayPopover.shown) {
+        [object.trayPopover performClose:nil];
+    }
+    object.trayPopoverWindowLabel = nil;
+    object.trayPopoverMenu = nil;
     if (object.statusItem) {
         [[NSStatusBar systemStatusBar] removeStatusItem:object.statusItem];
         object.statusItem = nil;
@@ -10389,4 +10534,61 @@ void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     object.trayCallback = callback;
     object.trayContext = context;
+}
+
+void native_sdk_appkit_set_tray_popover(native_sdk_appkit_host_t *host, const char *window_label, size_t window_label_len) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    @autoreleasepool {
+        NSString *label = (window_label && window_label_len > 0)
+            ? [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding]
+            : nil;
+        object.trayPopoverWindowLabel = label.length > 0 ? label : nil;
+        if (!object.statusItem) return;
+        if (object.trayPopoverWindowLabel != nil) {
+            NSStatusBarButton *button = object.statusItem.button;
+            button.target = object;
+            button.action = @selector(trayStatusButtonClicked:);
+            [button sendActionOn:(NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp)];
+            // A menu assigned before popover hosting was configured
+            // moves to right-click (an NSStatusItem.menu owns the left
+            // click outright).
+            if (object.statusItem.menu != nil) {
+                object.trayPopoverMenu = object.statusItem.menu;
+                object.statusItem.menu = nil;
+            }
+            // The hosted window must never be visible as a normal
+            // window: retire a pending present-before-show entry and
+            // order out anything already on the glass.
+            const uint64_t windowId = [object trayPopoverWindowId];
+            if (windowId != 0) {
+                [object.deferredShowWindows removeObjectForKey:@(windowId)];
+                NSWindow *window = object.windows[@(windowId)];
+                if (window.isVisible) [window orderOut:nil];
+            }
+        } else {
+            // Back to the plain menu tray.
+            if (object.trayPopover != nil && object.trayPopover.shown) {
+                [object.trayPopover performClose:nil];
+            }
+            if (object.trayPopoverMenu != nil) {
+                object.statusItem.menu = object.trayPopoverMenu;
+                object.trayPopoverMenu = nil;
+            }
+            object.statusItem.button.target = nil;
+            object.statusItem.button.action = NULL;
+        }
+    }
+}
+
+int native_sdk_appkit_toggle_tray_popover(native_sdk_appkit_host_t *host) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    @autoreleasepool {
+        return [object toggleTrayPopover] ? 1 : 0;
+    }
+}
+
+void native_sdk_appkit_set_tray_popover_callback(native_sdk_appkit_host_t *host, native_sdk_appkit_tray_popover_callback_t callback, void *context) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    object.trayPopoverCallback = callback;
+    object.trayPopoverContext = context;
 }

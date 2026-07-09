@@ -212,6 +212,13 @@ pub const TrayItem = struct {
 pub const Tray = struct {
     title: []const u8 = "",
     items: []const TrayItem = &.{},
+    /// The window label the status item hosts as its popover
+    /// (`TrayOptions.popover_window`), empty for a plain menu tray.
+    popover_window: []const u8 = "",
+    /// Whether that popover is showing right now (the platform's last
+    /// `.tray_popover` report) — the automation-visible evidence a
+    /// toggle actually opened it.
+    popover_visible: bool = false,
 };
 
 /// Live audio playback state (the effects channel's single player), as
@@ -544,7 +551,11 @@ pub fn writeText(input: Input, writer: anytype) !void {
         try writer.writeByte('\n');
     }
     if (input.tray) |tray| {
-        try writer.print("tray title=\"{s}\" items={d}\n", .{ tray.title, tray.items.len });
+        try writer.print("tray title=\"{s}\" items={d}", .{ tray.title, tray.items.len });
+        if (tray.popover_window.len > 0) {
+            try writer.print(" popover_window=\"{s}\" popover_visible={any}", .{ tray.popover_window, tray.popover_visible });
+        }
+        try writer.writeByte('\n');
         for (tray.items) |item| {
             if (item.separator) {
                 try writer.writeAll("  tray-item separator\n");

@@ -96,6 +96,8 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
             return .{
                 .title = self.tray_title,
                 .items = self.automation_tray_items[0..count],
+                .popover_window = self.tray_popover_window,
+                .popover_visible = self.tray_popover_visible,
             };
         }
 

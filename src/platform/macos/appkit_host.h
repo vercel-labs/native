@@ -541,6 +541,10 @@ typedef struct {
 } native_sdk_appkit_message_dialog_opts_t;
 
 typedef void (*native_sdk_appkit_tray_callback_t)(void *context, uint32_t item_id);
+/* The status-item popover opened (visible=1) or closed (visible=0) —
+ * a status-button click, a transient click-away dismissal, or the
+ * programmatic toggle. */
+typedef void (*native_sdk_appkit_tray_popover_callback_t)(void *context, int visible);
 
 /* One native scroll driver's desired state (see PlatformServices
  * set_gpu_surface_scroll_drivers_fn). Frame coordinates are view-local
@@ -596,6 +600,20 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
 void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, const char *title, size_t title_len);
 void native_sdk_appkit_remove_tray(native_sdk_appkit_host_t *host);
 void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_sdk_appkit_tray_callback_t callback, void *context);
+/* Host the labeled window's content as a transient NSPopover anchored to
+ * the status item: LEFT-clicking the status button toggles the popover
+ * (the dropdown menu, when one is set, moves to right-click), and the
+ * window itself is never ordered front — its content view moves into the
+ * popover while shown and back while hidden, sized from the window's
+ * configured content size. An empty label clears popover hosting and
+ * restores plain menu behavior. Call after create_tray (it configures the
+ * live status item). */
+void native_sdk_appkit_set_tray_popover(native_sdk_appkit_host_t *host, const char *window_label, size_t window_label_len);
+/* Toggle the status-item popover exactly as a status-button click would.
+ * Returns 1 when a popover is configured (the toggle was performed or
+ * queued), 0 when no popover-hosting tray exists. */
+int native_sdk_appkit_toggle_tray_popover(native_sdk_appkit_host_t *host);
+void native_sdk_appkit_set_tray_popover_callback(native_sdk_appkit_host_t *host, native_sdk_appkit_tray_popover_callback_t callback, void *context);
 
 #ifdef __cplusplus
 }

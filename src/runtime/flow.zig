@@ -318,6 +318,20 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                         .tray_item_id = item_id,
                     });
                 },
+                .tray_popover => |popover| {
+                    // Mirror the platform's report for the snapshot (the
+                    // popover, like the menu bar, sits outside every
+                    // window capture), then hand the app the flip as an
+                    // ordinary command — a model refreshes on open
+                    // through `on_command`, no new app event surface.
+                    self.tray_popover_visible = popover.visible;
+                    log(self, "tray.popover", if (popover.visible) "popover opened" else "popover closed", &.{});
+                    try dispatchCommand(self, app, .{
+                        .name = if (popover.visible) "tray.popover_opened" else "tray.popover_closed",
+                        .source = .tray,
+                    });
+                    self.invalidateFor(.command, null);
+                },
                 .shortcut => |shortcut| {
                     try dispatchCommand(self, app, .{
                         .name = shortcut.id,
@@ -329,6 +343,17 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     self.invalidateFor(.command, null);
                 },
                 .native_command => |command| {
+                    // The reserved toggle rides the ordinary command
+                    // channel (a declared button, or `native automate
+                    // native-command ...`) so the popover is drivable
+                    // with zero app wiring; the resulting visibility
+                    // still reports through `.tray_popover`.
+                    if (std.mem.eql(u8, command.name, "native-sdk.tray.toggle-popover")) {
+                        SystemServiceMethods().toggleTrayPopover(self) catch |err| {
+                            log(self, "tray.popover_toggle_failed", @errorName(err), &.{});
+                        };
+                        return;
+                    }
                     try dispatchCommand(self, app, .{
                         .name = command.name,
                         .source = WindowViewMethods().commandSourceForNativeView(self, command.window_id, command.view_label),

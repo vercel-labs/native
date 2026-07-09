@@ -2977,6 +2977,26 @@ void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_
     object.trayContext = context;
 }
 
+/* Popover hosting is a system-engine (metal canvas) feature: the CEF
+ * host reports honestly unsupported rather than half-anchoring a
+ * WebView panel. */
+void native_sdk_appkit_set_tray_popover(native_sdk_appkit_host_t *host, const char *window_label, size_t window_label_len) {
+    (void)host;
+    (void)window_label;
+    (void)window_label_len;
+}
+
+int native_sdk_appkit_toggle_tray_popover(native_sdk_appkit_host_t *host) {
+    (void)host;
+    return 0;
+}
+
+void native_sdk_appkit_set_tray_popover_callback(native_sdk_appkit_host_t *host, native_sdk_appkit_tray_popover_callback_t callback, void *context) {
+    (void)host;
+    (void)callback;
+    (void)context;
+}
+
 /* Native context menu, CEF engine: same NSMenu presentation as the
  * system-engine host, anchored to the window content view (gpu-surface
  * views are system-engine-only, so `label` resolves to the window). */

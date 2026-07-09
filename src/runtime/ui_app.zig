@@ -229,6 +229,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// Menu items: `label` is the visible title, `command` the
             /// name handed to `on_command`, `id` a unique non-zero id.
             items: []const platform.TrayMenuItem = &.{},
+            /// Label of an app window the status item hosts as a
+            /// transient popover instead of opening a dropdown menu on
+            /// left click (see `platform.TrayOptions.popover_window`).
+            /// The window never shows as a normal window; open/close
+            /// arrive through `on_command` as `tray.popover_opened` /
+            /// `tray.popover_closed` (source `.tray`).
+            popover_window: []const u8 = "",
         };
 
         /// Model-derived status-item state returned by
@@ -2496,6 +2503,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .icon_path = static.icon_path,
                 .tooltip = static.tooltip,
                 .items = items,
+                .popover_window = static.popover_window,
             }) catch |err| {
                 ui_app_log.warn("status item install failed: {s}", .{@errorName(err)});
                 return;

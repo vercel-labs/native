@@ -331,6 +331,7 @@ const widget_action_drop_files: u32 = 1 << 9;
 const widget_action_dismiss: u32 = 1 << 10;
 
 const AppKitTrayCallback = *const fn (context: ?*anyopaque, item_id: u32) callconv(.c) void;
+const AppKitTrayPopoverCallback = *const fn (context: ?*anyopaque, visible: c_int) callconv(.c) void;
 
 extern fn native_sdk_appkit_show_open_dialog(host: *AppKitHost, opts: *const AppKitOpenDialogOpts, buffer: [*]u8, buffer_len: usize) AppKitOpenDialogResult;
 extern fn native_sdk_appkit_show_save_dialog(host: *AppKitHost, opts: *const AppKitSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
@@ -340,6 +341,9 @@ extern fn native_sdk_appkit_update_tray_menu(host: *AppKitHost, item_ids: [*]con
 extern fn native_sdk_appkit_update_tray_title(host: *AppKitHost, title: [*]const u8, title_len: usize) void;
 extern fn native_sdk_appkit_remove_tray(host: *AppKitHost) void;
 extern fn native_sdk_appkit_set_tray_callback(host: *AppKitHost, callback: AppKitTrayCallback, context: ?*anyopaque) void;
+extern fn native_sdk_appkit_set_tray_popover(host: *AppKitHost, window_label: [*]const u8, window_label_len: usize) void;
+extern fn native_sdk_appkit_toggle_tray_popover(host: *AppKitHost) c_int;
+extern fn native_sdk_appkit_set_tray_popover_callback(host: *AppKitHost, callback: AppKitTrayPopoverCallback, context: ?*anyopaque) void;
 
 /// Whether a Dock icon path names a raw image source (.png/.svg) that
 /// `native package` would inset and mask onto the macOS icon grid.
@@ -615,6 +619,7 @@ pub const MacPlatform = struct {
                 .update_tray_menu_fn = updateTrayMenu,
                 .update_tray_title_fn = updateTrayTitle,
                 .remove_tray_fn = removeTray,
+                .toggle_tray_popover_fn = toggleTrayPopover,
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
@@ -697,6 +702,7 @@ pub const MacPlatform = struct {
         };
         native_sdk_appkit_set_bridge_callback(self.host, appkitBridgeCallback, &self.state);
         native_sdk_appkit_set_tray_callback(self.host, appkitTrayCallback, &self.state);
+        native_sdk_appkit_set_tray_popover_callback(self.host, appkitTrayPopoverCallback, &self.state);
         native_sdk_appkit_run(self.host, appkitCallback, &self.state);
         if (self.state.failed) return error.CallbackFailed;
     }
@@ -2003,6 +2009,10 @@ const max_tray_items: usize = 32;
 fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     native_sdk_appkit_create_tray(self.host, options.icon_path.ptr, options.icon_path.len, options.title.ptr, options.title.len, options.tooltip.ptr, options.tooltip.len);
+    // Popover hosting rides a separate call so the create ABI stays
+    // put: the host re-homes the labeled window's content behind the
+    // status button and re-points the left click at the popover toggle.
+    native_sdk_appkit_set_tray_popover(self.host, options.popover_window.ptr, options.popover_window.len);
     if (options.items.len > 0) {
         try updateTrayMenu(context, options.items);
     }
@@ -2036,9 +2046,19 @@ fn removeTray(context: ?*anyopaque) anyerror!void {
     native_sdk_appkit_remove_tray(self.host);
 }
 
+fn toggleTrayPopover(context: ?*anyopaque) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_toggle_tray_popover(self.host) == 0) return error.UnsupportedService;
+}
+
 fn appkitTrayCallback(context: ?*anyopaque, item_id: u32) callconv(.c) void {
     const state: *RunState = @ptrCast(@alignCast(context.?));
     state.emit(.{ .tray_action = item_id });
+}
+
+fn appkitTrayPopoverCallback(context: ?*anyopaque, visible: c_int) callconv(.c) void {
+    const state: *RunState = @ptrCast(@alignCast(context.?));
+    state.emit(.{ .tray_popover = .{ .visible = visible != 0 } });
 }
 
 fn flattenFilters(filters: []const platform_mod.FileFilter, buffer: []u8) []const u8 {

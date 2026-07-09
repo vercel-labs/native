@@ -191,6 +191,15 @@ pub const Runtime = struct {
     tray_created: bool = false,
     tray_title: []const u8 = "",
     tray_title_storage: [platform.max_tray_title_bytes]u8 = undefined,
+    /// The window label the live tray hosts as its popover
+    /// (`TrayOptions.popover_window`), empty when the tray is a plain
+    /// menu. `tray_popover_visible` mirrors the platform's
+    /// `.tray_popover` reports; both feed the automation snapshot —
+    /// the popover, like the menu bar, sits outside every window
+    /// capture.
+    tray_popover_window: []const u8 = "",
+    tray_popover_window_storage: [platform.max_tray_popover_window_bytes]u8 = undefined,
+    tray_popover_visible: bool = false,
     /// Audio playback mirror for the automation snapshot, stamped by
     /// the ui-app layer whenever a dispatch or effect drain may have
     /// moved the effects channel's playback state. Like the tray, the
@@ -565,6 +574,7 @@ pub const Runtime = struct {
     pub const updateTrayMenu = SystemServiceMethods.updateTrayMenu;
     pub const updateTrayTitle = SystemServiceMethods.updateTrayTitle;
     pub const removeTray = SystemServiceMethods.removeTray;
+    pub const toggleTrayPopover = SystemServiceMethods.toggleTrayPopover;
     const trayCommandNameForItem = SystemServiceMethods.trayCommandNameForItem;
     const supportsFeatureFromJson = SystemServiceMethods.supportsFeatureFromJson;
     const readClipboardTextFromJson = SystemServiceMethods.readClipboardTextFromJson;
