@@ -9,6 +9,7 @@
   "types": "./native-sdk.d.ts",
   "files": [
     "bin/native.js",
+    "assets",
     "skill-data",
     "skills",
     "src",

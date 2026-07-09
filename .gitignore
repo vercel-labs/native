@@ -10,6 +10,7 @@ packages/native-sdk/bin/native-sdk-*
 packages/native-sdk/npm/*/bin/
 # SDK payload mirrored into the npm package at pack time (copy-framework.js)
 packages/native-sdk/src/
+packages/native-sdk/assets/
 packages/native-sdk/skills/
 packages/native-sdk/skill-data/
 packages/native-sdk/build/
