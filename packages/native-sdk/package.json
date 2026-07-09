@@ -33,7 +33,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vercel-labs/zero-native.git"
+    "url": "git+https://github.com/vercel-labs/native.git"
   },
   "homepage": "https://zero-native.dev",
   "scripts": {
