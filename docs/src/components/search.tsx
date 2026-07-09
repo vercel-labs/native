@@ -117,7 +117,7 @@ export function Search() {
     <>
       <button
         onClick={() => setOpen(true)}
-        className="hidden sm:flex h-8 items-center gap-2 rounded-md border border-gray-alpha-400 bg-background-200 px-3 label-14 text-gray-900 hover:text-gray-1000 hover:border-gray-alpha-500 transition-colors"
+        className="hidden md:flex h-8 items-center gap-2 rounded-md border border-gray-alpha-400 bg-background-200 px-3 label-14 text-gray-900 hover:text-gray-1000 hover:border-gray-alpha-500 transition-colors"
       >
         <svg
           xmlns="http://www.w3.org/2000/svg"
@@ -137,27 +137,6 @@ export function Search() {
         <kbd className="pointer-events-none flex h-5 items-center rounded border border-gray-alpha-400 bg-background-100 px-1 font-sans text-[11px] leading-none text-gray-900">
           &#8984;K
         </kbd>
-      </button>
-
-      <button
-        onClick={() => setOpen(true)}
-        className="sm:hidden flex items-center text-gray-900 hover:text-gray-1000 transition-colors"
-        aria-label="Search docs"
-      >
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <circle cx="11" cy="11" r="8" />
-          <path d="m21 21-4.3-4.3" />
-        </svg>
       </button>
 
       <Dialog open={open} onOpenChange={setOpen}>

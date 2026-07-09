@@ -6,7 +6,7 @@ import { GeistPixelSquare } from "geist/font/pixel";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Search } from "@/components/search";
-import { HeaderNav } from "@/components/header-nav";
+import { HeaderNav, HeaderMobileMenu } from "@/components/header-nav";
 import { DocsMobileNav } from "@/components/docs-mobile-nav";
 import { DocsNav } from "@/components/docs-nav";
 import { getStarCount } from "@/lib/github";
@@ -94,7 +94,10 @@ function Header({ stars }: { stars?: string }) {
             </svg>
             {stars && <span>{stars}</span>}
           </a>
-          <ThemeToggle />
+          <div className="hidden md:block">
+            <ThemeToggle />
+          </div>
+          <HeaderMobileMenu />
         </div>
       </div>
     </header>
