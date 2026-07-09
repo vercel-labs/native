@@ -11,6 +11,7 @@ const repoRoot = join(projectRoot, '..', '..');
 const mirrors = [
   { source: 'src', target: 'src' },
   { source: 'build', target: 'build' },
+  { source: 'assets', target: 'assets' },
   { source: 'build.zig', target: 'build.zig' },
   { source: 'build.zig.zon', target: 'build.zig.zon' },
   { source: 'app.zon', target: 'app.zon' },
@@ -83,6 +84,44 @@ function compareEntries(sourcePath, targetPath) {
 
 for (const mirror of mirrors) {
   compareEntries(join(repoRoot, mirror.source), join(projectRoot, mirror.target));
+}
+
+// Every file build/app.zig resolves from the installed package via
+// dep.path must actually ship with the package: it has to exist in the
+// staged mirror and sit under an entry of package.json "files", or every
+// generated app build fails on a missing input after install. Literals
+// reach dep.path directly, through the externalModule helper, and through
+// an inline switch, so collect all three forms.
+function collectDepPathLiterals(source) {
+  const literals = new Set();
+  for (const match of source.matchAll(/dep\.path\(\s*"([^"]+)"\s*\)/g)) {
+    literals.add(match[1]);
+  }
+  for (const match of source.matchAll(/externalModule\(\s*b\s*,\s*dep\s*,[^)]*?"([^"]+)"\s*\)/g)) {
+    literals.add(match[1]);
+  }
+  for (const match of source.matchAll(/dep\.path\(\s*switch\s*\([^)]*\)\s*\{([^}]*)\}/g)) {
+    for (const literal of match[1].matchAll(/"([^"]+)"/g)) {
+      literals.add(literal[1]);
+    }
+  }
+  return [...literals].sort();
+}
+
+const appZigPath = join(repoRoot, 'build', 'app.zig');
+const packageFiles = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8')).files ?? [];
+
+function coveredByFiles(literal) {
+  return packageFiles.some((entry) => literal === entry || literal.startsWith(`${entry}/`));
+}
+
+for (const literal of collectDepPathLiterals(readFileSync(appZigPath, 'utf8'))) {
+  if (!existsSync(join(projectRoot, literal))) {
+    addError(`build/app.zig dep.path("${literal}") is missing from the package mirror`);
+  }
+  if (!coveredByFiles(literal)) {
+    addError(`build/app.zig dep.path("${literal}") is not covered by package.json "files"`);
+  }
 }
 
 if (errors.length > 0) {
