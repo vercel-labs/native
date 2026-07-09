@@ -2278,6 +2278,13 @@ static int native_sdk_shortcut_modifiers_match(uint32_t shortcut_modifiers, GdkM
         has_command == needs_command;
 }
 
+static gboolean on_inspector_open_window(WebKitWebInspector *inspector, gpointer data) {
+    (void)inspector;
+    native_sdk_gtk_window_t *win = data;
+    win->inspector_open = 1;
+    return FALSE;
+}
+
 static void on_inspector_closed(WebKitWebInspector *inspector, gpointer data) {
     (void)inspector;
     native_sdk_gtk_window_t *win = data;
@@ -2619,6 +2626,7 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
     win->web_view = wv;
     WebKitSettings *wk_settings = webkit_web_view_get_settings(wv);
     webkit_settings_set_enable_developer_extras(wk_settings, TRUE);
+    g_signal_connect(webkit_web_view_get_inspector(wv), "open-window", G_CALLBACK(on_inspector_open_window), win);
     g_signal_connect(webkit_web_view_get_inspector(wv), "closed", G_CALLBACK(on_inspector_closed), win);
     if (!host->scheme_registered) {
         webkit_web_context_register_uri_scheme(webkit_web_view_get_context(wv), "zero", native_sdk_asset_scheme_request, host, NULL);
