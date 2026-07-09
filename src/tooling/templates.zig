@@ -932,7 +932,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, native_sdk_path, cef_dir, cef_auto_install);
         \\    b.installArtifact(exe);
         \\
-        \\    const frontend_install = b.addSystemCommand(&.{ "npm", "install", "--prefix", "frontend" });
+        \\    const frontend_install = b.addSystemCommand(&.{ "npm", "--prefix", "frontend", "install" });
         \\    const frontend_install_step = b.step("frontend-install", "Install frontend dependencies");
         \\    frontend_install_step.dependOn(&frontend_install.step);
         \\
@@ -2704,7 +2704,7 @@ fn readme(allocator: std.mem.Allocator, names: TemplateNames, framework_path: []
         \\`zig build dev`, `zig build run`, and `zig build package` install frontend dependencies automatically. To install them explicitly, run:
         \\
         \\```sh
-        \\npm install --prefix frontend
+        \\npm --prefix frontend install
         \\```
         \\
         \\The generated build defaults to this Native SDK framework path:
@@ -2830,7 +2830,7 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "npm") != null);
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, ".windows") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "frontend-install") != null);
-    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"npm\", \"install\", \"--prefix\", \"frontend\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"npm\", \"--prefix\", \"frontend\", \"install\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "frontend-build") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "frontend_build.step.dependOn(&frontend_install.step)") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"native\", \"dev\"") != null);
