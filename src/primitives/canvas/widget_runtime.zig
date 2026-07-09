@@ -50,6 +50,7 @@ pub const textInputClearButtonHitRect = widget_text_input.textInputClearButtonHi
 pub const textInputContentExtentForWidget = widget_text_input.textInputContentExtentForWidget;
 pub const textInputMaxScrollOffsetForWidget = widget_text_input.textInputMaxScrollOffsetForWidget;
 pub const clampedTextInputScrollOffsetForWidget = widget_text_input.clampedTextInputScrollOffsetForWidget;
+pub const textInputScrollOffsetToRevealCaret = widget_text_input.textInputScrollOffsetToRevealCaret;
 pub const textGeometryForWidget = widget_text_input.textGeometryForWidget;
 
 pub const WidgetLayoutTree = struct {

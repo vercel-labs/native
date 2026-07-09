@@ -37,7 +37,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             if (canvasWidgetTextEditUnchanged(current_state, next_state)) return null;
 
             try self.rewriteCanvasWidgetTextStorage(index, next_state);
-            self.scrollCanvasTextareaCaretIntoView(index);
+            self.scrollCanvasTextInputCaretIntoView(index);
             const semantics = try self.widgetLayoutTree().collectSemantics(&self.widget_semantics_nodes);
             self.widget_semantics_node_count = semantics.len;
             self.widget_revision += 1;
@@ -98,6 +98,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
 
             self.widget_layout_nodes[index].widget.text_selection = next_selection;
             self.widget_layout_nodes[index].widget.text_composition = null;
+            self.scrollCanvasTextInputCaretIntoView(index);
             try self.refreshCanvasWidgetSemantics();
             self.widget_revision += 1;
             return self.canvasWidgetDirtyBounds(index, widget.frame);
@@ -266,7 +267,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 .selection = canvas.TextSelection.collapsed(text.len),
                 .composition = null,
             });
-            self.scrollCanvasTextareaCaretIntoView(index);
+            self.scrollCanvasTextInputCaretIntoView(index);
             try self.refreshCanvasWidgetSemantics();
             self.widget_revision += 1;
             return self.canvasWidgetDirtyBounds(index, self.widget_layout_nodes[index].frame);

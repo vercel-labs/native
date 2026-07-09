@@ -90,19 +90,19 @@ fn widgetTextInputVerticalInset(widget: Widget, tokens: DesignTokens, text_size:
 }
 
 fn widgetTextInputScrollOffset(widget: Widget, tokens: DesignTokens, text_size: f32, text_inset: f32, options: TextLayoutOptions) f32 {
-    if (widget.kind != .textarea) return 0;
     return std.math.clamp(widget.value, 0, widgetTextInputMaxScrollOffset(widget, tokens, text_size, text_inset, options));
 }
 
 pub fn widgetTextInputOrigin(widget: Widget, tokens: DesignTokens, text_size: f32, inset: f32, options: TextLayoutOptions) geometry.PointF {
+    const scroll_offset = widgetTextInputScrollOffset(widget, tokens, text_size, inset, options);
     if (options.wrap != .none) {
-        const scroll_offset = widgetTextInputScrollOffset(widget, tokens, text_size, inset, options);
         return geometry.PointF.init(
             widget.frame.x + inset,
             widget.frame.y + widgetTextInputVerticalInset(widget, tokens, text_size, options) + text_size - scroll_offset,
         );
     }
-    return textInputOriginForFrame(widget.frame, text_size, inset);
+    const origin = textInputOriginForFrame(widget.frame, text_size, inset);
+    return geometry.PointF.init(origin.x - scroll_offset, origin.y);
 }
 
 pub fn widgetTextInputClipRect(widget: Widget, tokens: DesignTokens, text_size: f32, inset: f32, options: TextLayoutOptions) geometry.RectF {
@@ -149,7 +149,53 @@ pub fn clampedTextInputScrollOffsetForWidget(widget: Widget, tokens: DesignToken
 
 fn widgetTextInputMaxScrollOffset(widget: Widget, tokens: DesignTokens, text_size: f32, text_inset: f32, options: TextLayoutOptions) f32 {
     const viewport = widgetTextInputClipRect(widget, tokens, text_size, text_inset, options);
+    if (options.wrap == .none) {
+        const content_width = text_model.measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, widget.text, text_size);
+        return @max(0, content_width + 1 - viewport.width);
+    }
     return @max(0, textInputContentExtentForWidgetWithOptions(widget, tokens.typography.font_id, text_size, options) - viewport.height);
+}
+
+/// The retained scroll offset that keeps the selection's focus edge in
+/// the input viewport. Single-line fields move horizontally; wrapped
+/// fields and textareas keep their existing vertical behavior.
+pub fn textInputScrollOffsetToRevealCaret(widget: Widget, tokens: DesignTokens, padding: f32) f32 {
+    if (!widget_access.widgetTextInputKind(widget.kind) or widget.state.disabled) return 0;
+
+    const text_size = widgetTextInputSize(widget, tokens);
+    const text_inset = widgetTextInputInset(widget, tokens);
+    const options = widgetTextInputLayoutOptions(widget, tokens, text_size, text_inset);
+    const viewport = widgetTextInputClipRect(widget, tokens, text_size, text_inset, options);
+    const max_offset = widgetTextInputMaxScrollOffset(widget, tokens, text_size, text_inset, options);
+    const current = std.math.clamp(widget.value, 0, max_offset);
+
+    var scrolled = widget;
+    scrolled.value = current;
+    const origin = widgetTextInputOrigin(scrolled, tokens, text_size, text_inset, options);
+    const draw_text = widgetTextInputDrawText(scrolled, tokens, text_size, origin, tokens.colors.text, options);
+    const selection = widget.text_selection orelse TextSelection.collapsed(widget.text.len);
+    const caret = layoutTextCaretRect(draw_text, options, selection.focus) orelse return current;
+    const safe_padding = @max(0, padding);
+
+    var next = current;
+    if (options.wrap == .none) {
+        const left = viewport.x + safe_padding;
+        const right = viewport.maxX() - safe_padding;
+        if (caret.x < left) {
+            next -= left - caret.x;
+        } else if (caret.maxX() > right) {
+            next += caret.maxX() - right;
+        }
+    } else {
+        const top = viewport.y + safe_padding;
+        const bottom = viewport.maxY() - safe_padding;
+        if (caret.y < top) {
+            next -= top - caret.y;
+        } else if (caret.maxY() > bottom) {
+            next += caret.maxY() - bottom;
+        }
+    }
+    return std.math.clamp(next, 0, max_offset);
 }
 
 fn textInputContentExtentForWidgetWithOptions(widget: Widget, font_id: FontId, text_size: f32, options: TextLayoutOptions) f32 {

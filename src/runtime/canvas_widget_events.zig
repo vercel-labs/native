@@ -980,6 +980,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                         try self.views[view_index].refreshCanvasWidgetSemantics();
                         self.views[view_index].widget_revision += 1;
                     }
+                    self.views[view_index].scrollCanvasTextInputCaretIntoView(node_index);
                 }
             }
             try invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());

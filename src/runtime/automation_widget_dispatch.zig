@@ -349,6 +349,17 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 const previous_state = self.views[view_index].canvasWidgetRenderState();
                 self.views[view_index].canvas_widget_focused_id = target.id;
                 self.views[view_index].canvas_widget_focus_visible_id = focus_visible_id;
+                if (self.views[view_index].canEditCanvasWidgetText(target.id)) {
+                    if (self.views[view_index].canvasWidgetNodeIndexById(target.id)) |node_index| {
+                        const widget = &self.views[view_index].widget_layout_nodes[node_index].widget;
+                        if (widget.text_selection == null) {
+                            widget.text_selection = canvas.TextSelection.collapsed(widget.text.len);
+                            try self.views[view_index].refreshCanvasWidgetSemantics();
+                            self.views[view_index].widget_revision += 1;
+                        }
+                        self.views[view_index].scrollCanvasTextInputCaretIntoView(node_index);
+                    }
+                }
                 // A focus change repaints; record the automation input so
                 // the completing frame publishes (same contract as select
                 // and text edits). Callers that dispatch a follow-up input

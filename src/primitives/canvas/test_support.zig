@@ -314,6 +314,7 @@ pub const textInputViewportForWidget = canvas.textInputViewportForWidget;
 pub const textInputContentExtentForWidget = canvas.textInputContentExtentForWidget;
 pub const textInputMaxScrollOffsetForWidget = canvas.textInputMaxScrollOffsetForWidget;
 pub const clampedTextInputScrollOffsetForWidget = canvas.clampedTextInputScrollOffsetForWidget;
+pub const textInputScrollOffsetToRevealCaret = canvas.textInputScrollOffsetToRevealCaret;
 pub const intrinsicWidgetSize = canvas.intrinsicWidgetSize;
 pub const cursorForWidgetHit = canvas.cursorForWidgetHit;
 pub const cursorForWidgetTarget = canvas.cursorForWidgetTarget;

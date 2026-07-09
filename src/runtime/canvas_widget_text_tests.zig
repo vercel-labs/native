@@ -130,6 +130,82 @@ test "runtime exposes retained canvas widget text geometry" {
     try std.testing.expectError(error.InvalidCommand, harness.runtime.canvasWidgetTextGeometry(1, "canvas", 99));
 }
 
+test "single-line text fields clip overflow and scroll to keep the caret visible" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-text-horizontal-scroll", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 80),
+    });
+
+    const text_field = canvas.Widget{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(12, 16, 100, 36),
+        .text = "abcdefghijklmnopqrstuvwxyz",
+        .text_selection = canvas.TextSelection.collapsed(26),
+        .semantics = .{ .label = "Name" },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{text_field} }, geometry.RectF.init(0, 0, 180, 80), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    _ = try harness.runtime.editCanvasWidgetText(1, "canvas", 2, .{ .insert_text = "!" });
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.nodes[1].widget.value > 0);
+    const viewport = canvas.textInputViewportForWidget(retained.nodes[1].widget, .{}).?;
+    const caret = (try harness.runtime.canvasWidgetTextGeometry(1, "canvas", 2)).caret_bounds.?;
+    try std.testing.expect(caret.x >= viewport.x - 0.001);
+    try std.testing.expect(caret.maxX() <= viewport.maxX() + 0.001);
+
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("abcdefghijklmnopqrstuvwxyz!", retained.nodes[1].widget.text);
+    try std.testing.expect(retained.nodes[1].widget.value > 0);
+
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+    const display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    var saw_viewport_clip = false;
+    var saw_shifted_text = false;
+    for (display_list.commands) |command| {
+        switch (command) {
+            .push_clip => |clip| {
+                if (clip.id == testCanvasWidgetPartId(2, 16)) {
+                    try std.testing.expectEqualDeep(viewport, clip.rect);
+                    saw_viewport_clip = true;
+                }
+            },
+            .draw_text => |text| {
+                if (std.mem.eql(u8, text.text, "abcdefghijklmnopqrstuvwxyz!")) {
+                    try std.testing.expect(text.origin.x < viewport.x);
+                    saw_shifted_text = true;
+                }
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_viewport_clip);
+    try std.testing.expect(saw_shifted_text);
+
+    _ = try harness.runtime.editCanvasWidgetText(1, "canvas", 2, .{ .set_selection = canvas.TextSelection.collapsed(0) });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 0), retained.nodes[1].widget.value);
+    const leading_caret = (try harness.runtime.canvasWidgetTextGeometry(1, "canvas", 2)).caret_bounds.?;
+    try std.testing.expect(leading_caret.x >= viewport.x - 0.001);
+}
+
 test "runtime applies text input to focused canvas text fields" {
     const TestApp = struct {
         widget_keyboard_count: u32 = 0,

@@ -700,7 +700,7 @@ pub fn canvasWidgetLayoutNodeWithTextReconcileState(
         const source_matches_runtime_text = std.mem.eql(u8, entry.text, copy.widget.text);
         if (!source_unchanged and !source_matches_runtime_text) return copy;
         if (source_unchanged) copy.widget.text = entry.text;
-        if (copy.widget.kind == .textarea) copy.widget.value = entry.value;
+        copy.widget.value = entry.value;
         if (copy.widget.text_selection == null and copy.widget.text_composition == null) {
             copy.widget.text_selection = entry.text_selection;
             copy.widget.text_composition = entry.text_composition;
@@ -903,7 +903,7 @@ pub fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, st
 
 pub fn clampCanvasWidgetLayoutTextOffsets(nodes: []canvas.WidgetLayoutNode, tokens: canvas.DesignTokens) void {
     for (nodes) |*node| {
-        if (node.widget.kind != .textarea) continue;
+        if (!canvasWidgetEditableTextKind(node.widget.kind)) continue;
         node.widget.value = canvas.clampedTextInputScrollOffsetForWidget(node.widget, tokens, node.widget.value);
     }
 }

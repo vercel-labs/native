@@ -516,7 +516,7 @@ pub const RuntimeView = struct {
     pub const stepCanvasWidgetKineticScroll = CanvasWidgetScrollMethods.stepCanvasWidgetKineticScroll;
     pub const canvasWidgetScrollContentExtent = CanvasWidgetScrollMethods.canvasWidgetScrollContentExtent;
     pub const translateCanvasWidgetScrollDescendants = CanvasWidgetScrollMethods.translateCanvasWidgetScrollDescendants;
-    pub const scrollCanvasTextareaCaretIntoView = CanvasWidgetScrollMethods.scrollCanvasTextareaCaretIntoView;
+    pub const scrollCanvasTextInputCaretIntoView = CanvasWidgetScrollMethods.scrollCanvasTextInputCaretIntoView;
 
     const CanvasWidgetControlMethods = view_widget_control.RuntimeViewCanvasWidgetControl(RuntimeView);
     pub const canvasWidgetToggleAnimation = CanvasWidgetControlMethods.canvasWidgetToggleAnimation;

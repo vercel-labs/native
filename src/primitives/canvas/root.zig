@@ -631,6 +631,7 @@ pub const textInputClearButtonHitRect = widget_runtime.textInputClearButtonHitRe
 pub const textInputContentExtentForWidget = widget_runtime.textInputContentExtentForWidget;
 pub const textInputMaxScrollOffsetForWidget = widget_runtime.textInputMaxScrollOffsetForWidget;
 pub const clampedTextInputScrollOffsetForWidget = widget_runtime.clampedTextInputScrollOffsetForWidget;
+pub const textInputScrollOffsetToRevealCaret = widget_runtime.textInputScrollOffsetToRevealCaret;
 pub const intrinsicWidgetSize = widget_runtime.intrinsicWidgetSize;
 pub const cursorForWidgetHit = widget_runtime.cursorForWidgetHit;
 pub const cursorForWidgetTarget = widget_runtime.cursorForWidgetTarget;

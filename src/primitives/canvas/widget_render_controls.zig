@@ -459,7 +459,10 @@ pub fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignToke
     const selection_range = widgetTextSelectionRange(widget);
     const composition_range = widgetTextCompositionRange(widget);
     const has_text_affordances = selection_range != null or composition_range != null;
-    const clips_text = widget.kind == .textarea;
+    const visible_text = if (widget.text.len > 0) widget.text else widgetPlaceholder(widget);
+    const horizontal_overflow = layout_options.wrap == .none and
+        (widget.value > 0 or measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, visible_text, text_size) > clip_rect.width);
+    const clips_text = widget.kind == .textarea or horizontal_overflow;
 
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
@@ -483,8 +486,6 @@ pub fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignToke
             try emitWidgetTextSelectionRects(builder, widget, draw_text, layout_options, range, 3, 13, max_widget_text_range_rects, tokens);
         }
     }
-    const placeholder = widgetPlaceholder(widget);
-    const visible_text = if (widget.text.len > 0) widget.text else placeholder;
     if (visible_text.len > 0) {
         var command = draw_text;
         command.id = widgetPartId(widget.id, if (has_text_affordances) 4 else 3);

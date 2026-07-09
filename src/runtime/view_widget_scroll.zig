@@ -335,25 +335,11 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             }
         }
 
-        pub fn scrollCanvasTextareaCaretIntoView(self: *RuntimeView, index: usize) void {
+        pub fn scrollCanvasTextInputCaretIntoView(self: *RuntimeView, index: usize) void {
             if (index >= self.widget_layout_node_count) return;
-            var widget = self.widget_layout_nodes[index].widget;
-            if (widget.kind != .textarea) return;
-
-            const viewport = canvas.textInputViewportForWidget(widget, self.widget_tokens) orelse return;
-            const geometry_value = canvas.textGeometryForWidget(widget, self.widget_tokens);
-            const caret = geometry_value.caret_bounds orelse return;
-
-            var next_offset = canvas.clampedTextInputScrollOffsetForWidget(widget, self.widget_tokens, widget.value);
-            const padding: f32 = 2;
-            if (caret.y < viewport.y) {
-                next_offset -= viewport.y - caret.y + padding;
-            } else if (caret.maxY() > viewport.maxY()) {
-                next_offset += caret.maxY() - viewport.maxY() + padding;
-            }
-            next_offset = canvas.clampedTextInputScrollOffsetForWidget(widget, self.widget_tokens, next_offset);
+            const widget = self.widget_layout_nodes[index].widget;
+            const next_offset = canvas.textInputScrollOffsetToRevealCaret(widget, self.widget_tokens, 2);
             if (next_offset == widget.value) return;
-            widget.value = next_offset;
             self.widget_layout_nodes[index].widget.value = next_offset;
         }
     };
