@@ -251,6 +251,7 @@ typedef struct native_sdk_gtk_window {
      * UNDER the WebView (or the WebView over a canvas) set it through
      * the same layer channel the child views use. */
     int main_webview_layer;
+    int inspector_open;
     /* Last pointer press on a gpu_surface view, in window coordinates —
      * what an interactive window move begins from. The device/time pair
      * comes from the originating event; a zero time means no press has
@@ -2277,11 +2278,30 @@ static int native_sdk_shortcut_modifiers_match(uint32_t shortcut_modifiers, GdkM
         has_command == needs_command;
 }
 
+static void on_inspector_closed(WebKitWebInspector *inspector, gpointer data) {
+    (void)inspector;
+    native_sdk_gtk_window_t *win = data;
+    win->inspector_open = 0;
+}
+
 static gboolean on_shortcut_key_pressed(GtkEventControllerKey *controller, guint keyval, guint keycode, GdkModifierType state, gpointer data) {
     (void)controller;
     (void)keycode;
     native_sdk_gtk_window_t *win = data;
     native_sdk_gtk_host_t *host = win ? win->host : NULL;
+    if (win && win->web_view &&
+        (keyval == GDK_KEY_F12 ||
+         (keyval == GDK_KEY_I && (state & GDK_CONTROL_MASK) && (state & GDK_SHIFT_MASK)))) {
+        WebKitWebInspector *inspector = webkit_web_view_get_inspector(win->web_view);
+        if (win->inspector_open) {
+            webkit_web_inspector_close(inspector);
+            win->inspector_open = 0;
+        } else {
+            webkit_web_inspector_show(inspector);
+            win->inspector_open = 1;
+        }
+        return TRUE;
+    }
     if (!host || host->shortcut_count == 0) return FALSE;
     char key_buffer[32];
     int uses_implicit_shift = 0;
@@ -2597,6 +2617,9 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
             "user-content-manager", win->content_manager,
             NULL));
     win->web_view = wv;
+    WebKitSettings *wk_settings = webkit_web_view_get_settings(wv);
+    webkit_settings_set_enable_developer_extras(wk_settings, TRUE);
+    g_signal_connect(webkit_web_view_get_inspector(wv), "closed", G_CALLBACK(on_inspector_closed), win);
     if (!host->scheme_registered) {
         webkit_web_context_register_uri_scheme(webkit_web_view_get_context(wv), "zero", native_sdk_asset_scheme_request, host, NULL);
         host->scheme_registered = 1;
@@ -3607,6 +3630,9 @@ int native_sdk_gtk_create_webview(native_sdk_gtk_host_t *host, uint64_t window_i
         free(url_copy);
         return 0;
     }
+
+    WebKitSettings *child_wk_settings = webkit_web_view_get_settings(web_view);
+    webkit_settings_set_enable_developer_extras(child_wk_settings, TRUE);
 
     native_sdk_gtk_webview_t *webview = &win->webviews[win->webview_count++];
     memset(webview, 0, sizeof(*webview));

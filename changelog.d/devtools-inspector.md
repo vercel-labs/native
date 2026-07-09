@@ -1,0 +1,1 @@
+feature: **DevTools inspector on Windows & Linux**: press F12 or Ctrl+Shift+I to open the browser DevTools inspector. Right-click "Inspect Element" is also available. Matches the existing macOS Cmd+Option+I behavior.
