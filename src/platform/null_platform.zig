@@ -370,6 +370,8 @@ pub const NullPlatform = struct {
     tray_popover_window_len: usize = 0,
     tray_popover_visible: bool = false,
     tray_popover_toggle_count: usize = 0,
+    launch_at_login_enabled: bool = false,
+    launch_at_login_set_count: usize = 0,
     window_event_window_id: WindowId = 0,
     window_event_name: [max_window_event_name_bytes]u8 = undefined,
     window_event_name_len: usize = 0,
@@ -599,6 +601,8 @@ pub const NullPlatform = struct {
                 .update_tray_title_fn = updateTrayTitle,
                 .remove_tray_fn = removeTray,
                 .toggle_tray_popover_fn = toggleTrayPopover,
+                .set_launch_at_login_fn = setLaunchAtLogin,
+                .get_launch_at_login_fn = getLaunchAtLogin,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
                 .add_recent_document_fn = addRecentDocument,
@@ -1185,6 +1189,20 @@ pub const NullPlatform = struct {
         self.tray_remove_count += 1;
         self.tray_popover_window_len = 0;
         self.tray_popover_visible = false;
+    }
+
+    /// The headless login item: the null platform plays a bundled host
+    /// whose registrations always succeed, so tests assert the plumbing
+    /// and the state round-trip.
+    fn setLaunchAtLogin(context: ?*anyopaque, enabled: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.launch_at_login_enabled = enabled;
+        self.launch_at_login_set_count += 1;
+    }
+
+    fn getLaunchAtLogin(context: ?*anyopaque) anyerror!bool {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        return self.launch_at_login_enabled;
     }
 
     /// The headless popover: no glass, so the toggle records itself and
@@ -2119,6 +2137,14 @@ pub const NullPlatform = struct {
 
     pub fn trayPopoverToggleCount(self: *const NullPlatform) usize {
         return self.tray_popover_toggle_count;
+    }
+
+    pub fn launchAtLoginEnabled(self: *const NullPlatform) bool {
+        return self.launch_at_login_enabled;
+    }
+
+    pub fn launchAtLoginSetCount(self: *const NullPlatform) usize {
+        return self.launch_at_login_set_count;
     }
 
     pub fn lastWindowEventWindowId(self: *const NullPlatform) WindowId {

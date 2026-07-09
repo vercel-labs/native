@@ -161,6 +161,29 @@ test "null platform emits deterministic lifecycle events" {
     try std.testing.expectEqualStrings("app_shutdown", recorder.names[5]);
 }
 
+test "null platform round-trips launch-at-login and popover toggles" {
+    var null_platform = NullPlatform.init(.{});
+    const services = null_platform.platform().services;
+
+    try std.testing.expect(!(try services.getLaunchAtLogin()));
+    try services.setLaunchAtLogin(true);
+    try std.testing.expect(try services.getLaunchAtLogin());
+    try services.setLaunchAtLogin(false);
+    try std.testing.expect(!(try services.getLaunchAtLogin()));
+    try std.testing.expectEqual(@as(usize, 2), null_platform.launchAtLoginSetCount());
+
+    // No popover-hosting tray: the toggle reports unsupported.
+    try std.testing.expectError(error.UnsupportedService, services.toggleTrayPopover());
+    try services.createTray(.{ .title = "ZN", .popover_window = "main", .items = &.{.{ .id = 1, .label = "Quit" }} });
+    try std.testing.expectEqualStrings("main", null_platform.trayPopoverWindow());
+    try std.testing.expect(!null_platform.trayPopoverVisible());
+    try services.toggleTrayPopover();
+    try std.testing.expect(null_platform.trayPopoverVisible());
+    try services.toggleTrayPopover();
+    try std.testing.expect(!null_platform.trayPopoverVisible());
+    try std.testing.expectEqual(@as(usize, 2), null_platform.trayPopoverToggleCount());
+}
+
 test "null platform records loaded webview source" {
     var null_platform = NullPlatform.initWithOptions(.{}, .chromium, .{ .app_name = "Demo", .window_title = "Demo Window" });
     try null_platform.platform().services.loadWebView(WebViewSource.html("<h1>Hello</h1>"));

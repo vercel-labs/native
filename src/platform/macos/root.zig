@@ -345,6 +345,8 @@ extern fn native_sdk_appkit_set_tray_popover(host: *AppKitHost, window_label: [*
 extern fn native_sdk_appkit_toggle_tray_popover(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_set_tray_popover_callback(host: *AppKitHost, callback: AppKitTrayPopoverCallback, context: ?*anyopaque) void;
 extern fn native_sdk_appkit_set_activation_policy(host: *AppKitHost, policy: c_int) void;
+extern fn native_sdk_appkit_set_launch_at_login(host: *AppKitHost, enabled: c_int) c_int;
+extern fn native_sdk_appkit_get_launch_at_login(host: *AppKitHost) c_int;
 
 /// Whether a Dock icon path names a raw image source (.png/.svg) that
 /// `native package` would inset and mask onto the macOS icon grid.
@@ -628,6 +630,8 @@ pub const MacPlatform = struct {
                 .update_tray_title_fn = updateTrayTitle,
                 .remove_tray_fn = removeTray,
                 .toggle_tray_popover_fn = toggleTrayPopover,
+                .set_launch_at_login_fn = setLaunchAtLogin,
+                .get_launch_at_login_fn = getLaunchAtLogin,
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
@@ -2057,6 +2061,31 @@ fn removeTray(context: ?*anyopaque) anyerror!void {
 fn toggleTrayPopover(context: ?*anyopaque) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_appkit_toggle_tray_popover(self.host) == 0) return error.UnsupportedService;
+}
+
+/// SMAppService status codes from the host (see appkit_host.h):
+/// set: 0 ok, 1 service unavailable (macOS < 13), 2 not an .app bundle,
+/// 3 register/unregister failed. get: 0/1 enabled state, negative
+/// mirrors of the set codes.
+fn setLaunchAtLogin(context: ?*anyopaque, enabled: bool) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    switch (native_sdk_appkit_set_launch_at_login(self.host, if (enabled) 1 else 0)) {
+        0 => {},
+        1 => return error.UnsupportedService,
+        2 => return error.RequiresAppBundle,
+        else => return error.LaunchAtLoginFailed,
+    }
+}
+
+fn getLaunchAtLogin(context: ?*anyopaque) anyerror!bool {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    return switch (native_sdk_appkit_get_launch_at_login(self.host)) {
+        0 => false,
+        1 => true,
+        -1 => error.UnsupportedService,
+        -2 => error.RequiresAppBundle,
+        else => error.LaunchAtLoginFailed,
+    };
 }
 
 fn appkitTrayCallback(context: ?*anyopaque, item_id: u32) callconv(.c) void {

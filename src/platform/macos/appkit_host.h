@@ -618,6 +618,15 @@ void native_sdk_appkit_set_tray_popover_callback(native_sdk_appkit_host_t *host,
  * 1 = accessory (menu-bar-only; the runtime twin of a packaged bundle's
  * LSUIElement=true). Call before the run loop starts. */
 void native_sdk_appkit_set_activation_policy(native_sdk_appkit_host_t *host, int policy);
+/* Launch-at-login via SMAppService.mainAppService (macOS 13+).
+ * set returns: 0 ok (desired state holds), 1 service unavailable
+ * (macOS < 13), 2 the process does not run from an .app bundle (the
+ * service is bundle-identity-based; dev binaries cannot register),
+ * 3 register/unregister failed.
+ * get returns: 0 not registered/enabled, 1 enabled, or the negated set
+ * availability codes (-1 unavailable, -2 not a bundle). */
+int native_sdk_appkit_set_launch_at_login(native_sdk_appkit_host_t *host, int enabled);
+int native_sdk_appkit_get_launch_at_login(native_sdk_appkit_host_t *host);
 
 #ifdef __cplusplus
 }

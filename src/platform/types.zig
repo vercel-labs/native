@@ -2032,6 +2032,8 @@ pub const PlatformServices = struct {
     update_tray_title_fn: ?*const fn (context: ?*anyopaque, title: []const u8) anyerror!void = null,
     remove_tray_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     toggle_tray_popover_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    set_launch_at_login_fn: ?*const fn (context: ?*anyopaque, enabled: bool) anyerror!void = null,
+    get_launch_at_login_fn: ?*const fn (context: ?*anyopaque) anyerror!bool = null,
     configure_security_policy_fn: ?*const fn (context: ?*anyopaque, policy: security.Policy) anyerror!void = null,
     configure_menus_fn: ?*const fn (context: ?*anyopaque, menus: []const Menu) anyerror!void = null,
     configure_shortcuts_fn: ?*const fn (context: ?*anyopaque, shortcuts: []const Shortcut) anyerror!void = null,
@@ -2461,6 +2463,22 @@ pub const PlatformServices = struct {
     pub fn toggleTrayPopover(self: PlatformServices) anyerror!void {
         const toggle_fn = self.toggle_tray_popover_fn orelse return error.UnsupportedService;
         return toggle_fn(self.context);
+    }
+
+    /// Register/unregister the app as a login item (macOS 13+
+    /// `SMAppService.mainAppService`). Only meaningful for packaged
+    /// .app bundles: bare binaries report `error.RequiresAppBundle`,
+    /// hosts without the service `error.UnsupportedService`.
+    pub fn setLaunchAtLogin(self: PlatformServices, enabled: bool) anyerror!void {
+        const set_fn = self.set_launch_at_login_fn orelse return error.UnsupportedService;
+        return set_fn(self.context, enabled);
+    }
+
+    /// Whether the app is currently registered as a login item (same
+    /// availability contract as `setLaunchAtLogin`).
+    pub fn getLaunchAtLogin(self: PlatformServices) anyerror!bool {
+        const get_fn = self.get_launch_at_login_fn orelse return error.UnsupportedService;
+        return get_fn(self.context);
     }
 
     pub fn configureSecurityPolicy(self: PlatformServices, policy: security.Policy) anyerror!void {

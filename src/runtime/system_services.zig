@@ -156,6 +156,23 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             try self.options.platform.services.toggleTrayPopover();
         }
 
+        /// Launch-at-login through the platform's login-item service
+        /// (macOS 13+ `SMAppService.mainAppService` register/unregister).
+        /// Only meaningful for packaged .app bundles — a bare dev binary
+        /// reports `error.RequiresAppBundle`, platforms without the
+        /// service `error.UnsupportedService` — so apps can degrade the
+        /// preference honestly instead of half-registering.
+        pub fn setLaunchAtLogin(self: *Runtime, enabled: bool) anyerror!void {
+            try self.options.platform.services.setLaunchAtLogin(enabled);
+        }
+
+        /// Whether the app is registered as a login item right now (the
+        /// OS's answer, not a cached mirror). Same availability contract
+        /// as `setLaunchAtLogin`.
+        pub fn getLaunchAtLogin(self: *Runtime) anyerror!bool {
+            return self.options.platform.services.getLaunchAtLogin();
+        }
+
         pub fn trayItemExists(self: *const Runtime, item_id: platform.TrayItemId) bool {
             for (self.tray_items[0..self.tray_item_count]) |item| {
                 if (item.id == item_id) return true;

@@ -17,6 +17,7 @@
 #import <dispatch/dispatch.h>
 #import <Security/Security.h>
 #include <dlfcn.h>
+#include <objc/message.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <math.h>
 #include <stdatomic.h>
@@ -10598,5 +10599,69 @@ void native_sdk_appkit_set_activation_policy(native_sdk_appkit_host_t *host, int
     @autoreleasepool {
         [NSApp setActivationPolicy:(policy == 1 ? NSApplicationActivationPolicyAccessory
                                                 : NSApplicationActivationPolicyRegular)];
+    }
+}
+
+/* ----------------------------------------------------- launch at login
+ *
+ * SMAppService (macOS 13+) resolved at runtime: the toolkit links
+ * ServiceManagement nowhere (that would touch every app build graph for
+ * a niche service), so the framework loads lazily and older hosts
+ * report honestly unavailable instead of failing to link. */
+
+static Class NativeSdkSMAppServiceClass(void) {
+    static Class cls = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dlopen("/System/Library/Frameworks/ServiceManagement.framework/ServiceManagement", RTLD_LAZY);
+        cls = NSClassFromString(@"SMAppService");
+    });
+    return cls;
+}
+
+/* SMAppService registers by bundle identity; a bare dev binary (no
+ * Info.plist, no .app wrapper) has nothing launchd could launch. */
+static BOOL NativeSdkRunsFromAppBundle(void) {
+    NSBundle *bundle = [NSBundle mainBundle];
+    return bundle.bundleIdentifier != nil && [bundle.bundlePath.pathExtension isEqualToString:@"app"];
+}
+
+/* SMAppServiceStatus without the SDK header: 0 notRegistered, 1 enabled,
+ * 2 requiresApproval, 3 notFound. */
+static long NativeSdkSMAppServiceStatus(id service) {
+    return ((long (*)(id, SEL))objc_msgSend)(service, sel_registerName("status"));
+}
+
+int native_sdk_appkit_set_launch_at_login(native_sdk_appkit_host_t *host, int enabled) {
+    (void)host;
+    @autoreleasepool {
+        Class smClass = NativeSdkSMAppServiceClass();
+        if (!smClass) return 1;
+        if (!NativeSdkRunsFromAppBundle()) return 2;
+        id service = ((id (*)(Class, SEL))objc_msgSend)(smClass, sel_registerName("mainAppService"));
+        if (!service) return 3;
+        const long status = NativeSdkSMAppServiceStatus(service);
+        if (enabled && status == 1) return 0;
+        if (!enabled && status != 1 && status != 2) return 0;
+        NSError *error = nil;
+        const SEL verb = sel_registerName(enabled ? "registerAndReturnError:" : "unregisterAndReturnError:");
+        const BOOL ok = ((BOOL (*)(id, SEL, NSError **))objc_msgSend)(service, verb, &error);
+        if (!ok) {
+            NSLog(@"native-sdk: launch-at-login %s failed: %@", enabled ? "register" : "unregister", error);
+            return 3;
+        }
+        return 0;
+    }
+}
+
+int native_sdk_appkit_get_launch_at_login(native_sdk_appkit_host_t *host) {
+    (void)host;
+    @autoreleasepool {
+        Class smClass = NativeSdkSMAppServiceClass();
+        if (!smClass) return -1;
+        if (!NativeSdkRunsFromAppBundle()) return -2;
+        id service = ((id (*)(Class, SEL))objc_msgSend)(smClass, sel_registerName("mainAppService"));
+        if (!service) return -3;
+        return NativeSdkSMAppServiceStatus(service) == 1 ? 1 : 0;
     }
 }

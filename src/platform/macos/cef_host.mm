@@ -3005,6 +3005,20 @@ void native_sdk_appkit_set_activation_policy(native_sdk_appkit_host_t *host, int
     }
 }
 
+/* Launch-at-login is not wired for the Chromium host yet: report
+ * honestly unavailable (the system-engine host owns the SMAppService
+ * seam). */
+int native_sdk_appkit_set_launch_at_login(native_sdk_appkit_host_t *host, int enabled) {
+    (void)host;
+    (void)enabled;
+    return 1;
+}
+
+int native_sdk_appkit_get_launch_at_login(native_sdk_appkit_host_t *host) {
+    (void)host;
+    return -1;
+}
+
 /* Native context menu, CEF engine: same NSMenu presentation as the
  * system-engine host, anchored to the window content view (gpu-surface
  * views are system-engine-only, so `label` resolves to the window). */

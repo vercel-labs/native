@@ -1,0 +1,1 @@
+feature: **Launch at login (macOS)**: `Runtime.setLaunchAtLogin(enabled)` / `Runtime.getLaunchAtLogin()` register the app as a login item through `SMAppService.mainAppService` (macOS 13+, resolved at runtime — no new link dependency); bare dev binaries report `error.RequiresAppBundle` and pre-13 hosts `error.UnsupportedService`, so apps degrade the preference honestly.
