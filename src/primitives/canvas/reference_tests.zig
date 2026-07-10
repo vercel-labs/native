@@ -788,6 +788,168 @@ test "rounded-rect coverage matches supersampled ground truth with no silhouette
     }
 }
 
+// ---------------------------------------------------------------------------
+// Coverage blend-space split.
+//
+// Geometry (paths, rounded rects) blends its anti-aliased edge coverage
+// in linear light; glyph coverage blends in sRGB to preserve text
+// weight. These tests pin the split from both sides with independently
+// computed ground truth, so a refactor can never silently swap the two
+// (a swap fails BOTH assertions, loudly).
+
+/// The exact sRGB decode the renderer's 256-entry byte table holds.
+fn blendSplitSrgbToLinear(value: f32) f32 {
+    const channel = std.math.clamp(value, 0, 1);
+    if (channel <= 0.04045) return channel / 12.92;
+    return std.math.pow(f32, (channel + 0.055) / 1.055, 2.4);
+}
+
+fn blendSplitLinearToSrgb(value: f32) f32 {
+    const channel = std.math.clamp(value, 0, 1);
+    if (channel <= 0.0031308) return channel * 12.92;
+    return 1.055 * std.math.pow(f32, channel, 1.0 / 2.4) - 0.055;
+}
+
+/// The renderer's encode-table lookup, replicated: nearest of 4096
+/// evenly spaced entries, then the final byte rounding.
+fn blendSplitEncodeByte(value: f32) u8 {
+    const index = @round(std.math.clamp(value, 0, 1) * 4095.0);
+    return @intFromFloat(@round(blendSplitLinearToSrgb(index / 4095.0) * 255.0));
+}
+
+/// Linear-light coverage blend of an opaque source byte over an opaque
+/// destination byte, from the same LUT math the renderer tabulates.
+fn blendSplitLinearByte(src: u8, dst: u8, coverage: f32) u8 {
+    const src_linear = blendSplitSrgbToLinear(@as(f32, @floatFromInt(src)) / 255.0);
+    const dst_linear = blendSplitSrgbToLinear(@as(f32, @floatFromInt(dst)) / 255.0);
+    return blendSplitEncodeByte(src_linear * coverage + dst_linear * (1 - coverage));
+}
+
+/// sRGB-space coverage blend of the same pixel (the historical fold).
+fn blendSplitSrgbByte(src: u8, dst: u8, coverage: f32) u8 {
+    const src_f = @as(f32, @floatFromInt(src)) / 255.0;
+    const dst_f = @as(f32, @floatFromInt(dst)) / 255.0;
+    return @intFromFloat(@round((src_f * coverage + dst_f * (1 - coverage)) * 255.0));
+}
+
+fn blendSplitRenderPass(surface: ReferenceRenderSurface, command: RenderCommand, clear: Color, width: usize, height: usize) !void {
+    const pass = CanvasRenderPass{
+        .surface_size = geometry.SizeF.init(@floatFromInt(width), @floatFromInt(height)),
+        .scale = 1,
+        .full_repaint = true,
+        .commands = &.{command},
+    };
+    try surface.renderPass(pass, clear);
+}
+
+test "geometry edge coverage blends in linear light, computed from the LUT math" {
+    // A black path whose right edge splits pixel column 12 exactly in
+    // half: the vector core reports coverage 0.5 there, interiors 1.
+    const split_width: usize = 24;
+    const split_height: usize = 16;
+    const white = Color{ .r = 1, .g = 1, .b = 1, .a = 1 };
+    const black = Color{ .r = 0, .g = 0, .b = 0, .a = 1 };
+    const bounds = geometry.RectF.init(0, 0, split_width, split_height);
+    const elements = [_]PathElement{
+        .{ .verb = .move_to, .points = .{ geometry.PointF.init(4, 4), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(12.5, 4), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(12.5, 12), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(4, 12), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .close, .points = .{ geometry.PointF.zero(), geometry.PointF.zero(), geometry.PointF.zero() } },
+    };
+
+    const linear_edge = blendSplitLinearByte(0, 255, 0.5);
+    const srgb_edge = blendSplitSrgbByte(0, 255, 0.5);
+    // The split is only observable if the two spaces disagree here.
+    try std.testing.expect(linear_edge != srgb_edge);
+
+    // fill_path: the vector-core geometry route.
+    {
+        var pixels: [split_width * split_height * 4]u8 = undefined;
+        const surface = try ReferenceRenderSurface.init(split_width, split_height, &pixels);
+        try blendSplitRenderPass(surface, .{
+            .command = .{ .fill_path = .{ .elements = &elements, .fill = .{ .color = black } } },
+            .local_bounds = bounds,
+            .bounds = bounds,
+        }, white, split_width, split_height);
+        // Fully covered interior pixels stay bit-identical to the plain
+        // sRGB blend: an opaque source at coverage 1 is a copy in either
+        // space.
+        try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 8, 8);
+        // The half-covered edge pixel holds the linear-light value.
+        try expectPixelRgba8(.{ linear_edge, linear_edge, linear_edge, 255 }, surface, 12, 8);
+    }
+
+    // fill_rounded_rect: the signed-distance geometry route. Its right
+    // edge is a straight segment at the same half-pixel boundary (the
+    // radius-2 corners are far from row 8), so coverage is 0.5 again.
+    {
+        var pixels: [split_width * split_height * 4]u8 = undefined;
+        const surface = try ReferenceRenderSurface.init(split_width, split_height, &pixels);
+        try blendSplitRenderPass(surface, .{
+            .command = .{ .fill_rounded_rect = .{ .rect = geometry.RectF.init(4, 4, 8.5, 8), .radius = Radius.all(2), .fill = .{ .color = black } } },
+            .local_bounds = bounds,
+            .bounds = bounds,
+        }, white, split_width, split_height);
+        try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 8, 8);
+        try expectPixelRgba8(.{ linear_edge, linear_edge, linear_edge, 255 }, surface, 12, 8);
+    }
+}
+
+test "glyph edge coverage blends in sRGB, not linear light" {
+    // The same discrimination from the text side: render one glyph twice
+    // — once over transparent (whose alpha channel IS the coverage, in
+    // any blend space) and once over white — then check every fringe
+    // pixel of the white render against both models. Text must track the
+    // sRGB fold and stay far from the linear-light value at mid
+    // coverage, so inverting the sink's blend space can never pass.
+    const glyph_width: usize = 32;
+    const glyph_height: usize = 48;
+    const white = Color{ .r = 1, .g = 1, .b = 1, .a = 1 };
+    const black = Color{ .r = 0, .g = 0, .b = 0, .a = 1 };
+    const clear = Color{ .r = 0, .g = 0, .b = 0, .a = 0 };
+    const bounds = geometry.RectF.init(0, 0, glyph_width, glyph_height);
+    const command = RenderCommand{
+        .command = .{ .draw_text = .{ .size = 32, .origin = geometry.PointF.init(4, 40), .color = black, .text = "o" } },
+        .local_bounds = bounds,
+        .bounds = bounds,
+    };
+
+    var coverage_pixels: [glyph_width * glyph_height * 4]u8 = undefined;
+    const coverage_surface = try ReferenceRenderSurface.init(glyph_width, glyph_height, &coverage_pixels);
+    try blendSplitRenderPass(coverage_surface, command, clear, glyph_width, glyph_height);
+
+    var blended_pixels: [glyph_width * glyph_height * 4]u8 = undefined;
+    const blended_surface = try ReferenceRenderSurface.init(glyph_width, glyph_height, &blended_pixels);
+    try blendSplitRenderPass(blended_surface, command, white, glyph_width, glyph_height);
+
+    var mid_coverage_pixels: usize = 0;
+    var y: usize = 0;
+    while (y < glyph_height) : (y += 1) {
+        var x: usize = 0;
+        while (x < glyph_width) : (x += 1) {
+            const coverage_byte = coverage_surface.pixelRgba8(x, y)[3];
+            if (coverage_byte == 0 or coverage_byte == 255) continue;
+            const coverage = @as(f32, @floatFromInt(coverage_byte)) / 255.0;
+            const rendered: i32 = blended_surface.pixelRgba8(x, y)[0];
+            const srgb_expected: i32 = blendSplitSrgbByte(0, 255, coverage);
+            // One level of slack: the recovered coverage byte is itself
+            // rounded, so the re-derived sRGB fold can sit one step off
+            // the value blended from the unrounded coverage.
+            try std.testing.expect(@max(rendered - srgb_expected, srgb_expected - rendered) <= 1);
+            // Mid-coverage fringes are where the spaces disagree most;
+            // hold text a wide margin away from the linear value there.
+            if (coverage_byte >= 64 and coverage_byte <= 192) {
+                mid_coverage_pixels += 1;
+                const linear_expected: i32 = blendSplitLinearByte(0, 255, coverage);
+                try std.testing.expect(linear_expected - rendered >= 16);
+            }
+        }
+    }
+    // The glyph must actually have exercised the fringe band.
+    try std.testing.expect(mid_coverage_pixels >= 4);
+}
+
 test "reference renderer applies clip transform and opacity" {
     const commands = [_]CanvasCommand{
         .{ .push_clip = .{ .rect = geometry.RectF.init(1, 1, 2, 2) } },
@@ -965,13 +1127,16 @@ test "reference renderer strokes paths: butt caps end at the segment, round caps
     // One horizontal unit-width segment, rendered once per cap shape.
     // The end pixels (0,1) and (2,1) are where the caps live: the butt
     // cap stops at the endpoint (the segment covers exactly half of each
-    // end pixel — 128 after coverage rounding), while the round cap
-    // bulges a half-width semicircle past it (75% coverage per the
-    // anti-aliased vector core). Interior and off-stroke pixels are
-    // cap-independent.
+    // end pixel), while the round cap bulges a half-width semicircle
+    // past it (75% coverage per the anti-aliased vector core). Interior
+    // and off-stroke pixels are cap-independent. The expected end-pixel
+    // bytes are the LINEAR-LIGHT encodings of those coverages over black
+    // — geometry edge coverage blends in linear light (see the renderer's
+    // `CoverageBlend`), so 50% coverage of a 255 channel re-encodes to
+    // 188 and 75% to 225, not the 128/191 sRGB-space folds.
     const cases = [_]struct { cap: canvas.LineCap, end_coverage: u8 }{
-        .{ .cap = .butt, .end_coverage = 128 },
-        .{ .cap = .round, .end_coverage = 191 },
+        .{ .cap = .butt, .end_coverage = 188 },
+        .{ .cap = .round, .end_coverage = 225 },
     };
     for (cases) |case| {
         const elements = [_]PathElement{

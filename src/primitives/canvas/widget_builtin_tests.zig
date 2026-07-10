@@ -416,9 +416,10 @@ test "icon widgets render built-in vector icons as tinted path commands" {
         if (pixels[index] < 250) ink += 1;
     }
     try std.testing.expect(ink > 20);
-    // Regenerated for the house default palette: the tint (the text
-    // token) moved from #09090b to #0a0a0a; same check-mark coverage.
-    try std.testing.expectEqual(@as(u64, 1722938743772709742), support.referenceSurfaceSignature(&pixels));
+    // Regenerated when geometry edge coverage moved to linear-light
+    // blending (the icon is a vector path): same coverage, smoother
+    // fringe bytes.
+    try std.testing.expectEqual(@as(u64, 5692773564953859754), support.referenceSurfaceSignature(&pixels));
 
     // A non-registry text keeps the historical glyph rendering.
     const glyph = Widget{
@@ -490,7 +491,7 @@ test "checkbox check mark strokes one anti-aliased vector path" {
         }
     }
     try std.testing.expect(partial >= 4);
-    try std.testing.expectEqual(@as(u64, 12485073109273199295), support.referenceSurfaceSignature(&pixels));
+    try std.testing.expectEqual(@as(u64, 10271374105851145327), support.referenceSurfaceSignature(&pixels));
 }
 
 test "a builder accumulating two widget trees keeps each checkbox mark's own geometry" {
