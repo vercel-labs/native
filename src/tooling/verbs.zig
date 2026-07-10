@@ -193,6 +193,11 @@ fn runZig(io: std.Io, verb: Verb, argv: []const []const u8) !void {
         .exited => |code| std.debug.print("native {t}: `zig build` step failed (exit code {d})\n", .{ verb, code }),
         else => std.debug.print("native {t}: `zig build` step terminated abnormally ({t})\n", .{ verb, term }),
     }
+    // The child's compile errors streamed straight through above. The one
+    // failure class worth a pointer is code written for an older Zig — the
+    // SDK builds with Zig 0.16, where std APIs moved, and those failures
+    // read "no member named 'cwd'/'init'/'io'" on std types.
+    std.debug.print("if the errors above name missing std members, the code may use pre-0.16 Zig idioms - run `native skills get zig` or see https://native-sdk.dev/zig\n", .{});
     return error.ZigBuildFailed;
 }
 

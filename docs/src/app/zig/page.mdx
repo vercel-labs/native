@@ -1,0 +1,219 @@
+# Zig 0.16 Notes
+
+Native SDK apps are written in Zig, and the toolkit requires **Zig 0.16.0**. You rarely install it yourself: `native dev`, `native build`, and `native test` use the `zig` on your PATH when its version matches, and otherwise offer to download the pinned version into `~/.native/toolchains/` (checksum-verified; `--yes` skips the prompt in scripts). `native doctor` reports whether a `zig` command is available, and the SDK's `build.zig.zon` declares `minimum_zig_version = "0.16.0"`, so an incompatible compiler fails loudly rather than mysteriously.
+
+The catch: most Zig tutorials, blog posts, and AI training data teach Zig 0.15 or earlier, and 0.16 reshaped the standard library. Code written from that memory fails with `no member named` errors on APIs that moved. This page maps each error to the current idiom. Coding agents get the same content (plus references into the SDK source) from the CLI: `native skills get zig`.
+
+## The one big idea
+
+Zig 0.16 moved everything that touches the outside world — files, stdout, clocks, sleeping, child processes, sockets — behind an explicit `std.Io` value that you pass in. Your `main` receives one (along with allocators, the environment, and the args) through `std.process.Init`; tests use `std.testing.io`. The second change: containers like `ArrayList` no longer remember their allocator — you pass it to every call.
+
+Inside a Native SDK app, you mostly don't need `std.Io` at all: `update` does files, subprocesses, HTTP, and timers through the [typed effects channel](/state) (`fx.readFile`, `fx.spawn`, `fx.fetch`, `fx.startTimer`), and clock reads go through `fx.wallMs()` or `native_sdk.nowMs()`. Raw `std.Io` shows up in `main`, in tests, and in standalone tools.
+
+## Error-to-fix index
+
+<table>
+  <thead>
+    <tr>
+      <th>The compiler says</th>
+      <th>What changed</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>struct 'heap' has no member named 'GeneralPurposeAllocator'</code></td>
+      <td><a href="#main-receives-stdprocessinit">main receives std.process.Init</a></td>
+    </tr>
+    <tr>
+      <td><code>struct 'fs' has no member named 'cwd'</code></td>
+      <td><a href="#file-io-lives-on-stdiodir">File IO lives on std.Io.Dir</a></td>
+    </tr>
+    <tr>
+      <td><code>struct 'std' has no member named 'io'</code></td>
+      <td><a href="#printing-and-writers">Printing and writers</a></td>
+    </tr>
+    <tr>
+      <td><code>struct 'array_list.Aligned(u8,null)' has no member named 'init'</code></td>
+      <td><a href="#arraylist-is-unmanaged">ArrayList is unmanaged</a></td>
+    </tr>
+    <tr>
+      <td><code>invalid format string 's' for type '...'</code></td>
+      <td><a href="#format-specifiers-t-and-f">Format specifiers <code>{'{t}'}</code> and <code>{'{f}'}</code></a></td>
+    </tr>
+    <tr>
+      <td><code>struct 'time' has no member named 'sleep'</code> (or <code>'milliTimestamp'</code>)</td>
+      <td><a href="#time-and-sleeping">Time and sleeping</a></td>
+    </tr>
+    <tr>
+      <td><code>struct 'process.Child' has no member named 'init'</code></td>
+      <td><a href="#child-processes">Child processes</a></td>
+    </tr>
+    <tr>
+      <td><code>struct 'process' has no member named 'getEnvMap'</code> (or <code>'argsAlloc'</code>)</td>
+      <td><a href="#environment-and-arguments">Environment and arguments</a></td>
+    </tr>
+    <tr>
+      <td><code>struct 'std' has no member named 'net'</code></td>
+      <td>Sockets moved to <code>std.Io.net</code> (<code>IpAddress</code>, <code>Stream</code>) and take an <code>io</code></td>
+    </tr>
+    <tr>
+      <td><code>struct 'fs' has no member named 'selfExePath'</code></td>
+      <td><code>std.process.executablePath(io, &amp;buf)</code>, returning the length</td>
+    </tr>
+    <tr>
+      <td><code>no field named 'root_source_file' in struct 'Build.ExecutableOptions'</code></td>
+      <td><a href="#buildzig-artifacts-take-modules">build.zig artifacts take modules</a></td>
+    </tr>
+  </tbody>
+</table>
+
+## main receives std.process.Init
+
+There is no allocator boilerplate anymore. `main` takes `std.process.Init`, which carries a leak-checked general-purpose allocator, a process-lifetime arena, the `Io`, the environment, and the command-line arguments:
+
+```zig
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const arena = init.arena.allocator();
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(arena);
+    _ = args;
+    _ = gpa;
+    _ = io;
+}
+```
+
+The `main` that `native init` generates already has this shape — it passes `init` through to the runner and `init.io` to the hot-reload watcher. If you write a helper that needs to do IO, take an `io: std.Io` parameter and thread it down from `main`.
+
+## File IO lives on std.Io.Dir
+
+`std.fs.cwd()` and `std.fs.File` are gone. The handle is `std.Io.Dir`, and every operation takes `io` right after the receiver. Note the `readFileAlloc` argument order and the explicit size limit:
+
+```zig
+const cwd = std.Io.Dir.cwd();
+const content = try cwd.readFileAlloc(io, "notes.txt", allocator, .limited(1024 * 1024));
+defer allocator.free(content);
+
+try cwd.writeFile(io, .{ .sub_path = "notes.txt", .data = bytes });
+
+var file = try cwd.openFile(io, "notes.txt", .{});
+defer file.close(io);
+```
+
+Inside `update`, don't do this at all — `fx.readFile` and `fx.writeFile` persist app state through the effects channel and deliver the result as a message.
+
+## Printing and writers
+
+`std.io.getStdOut().writer()` is gone. Stdout takes `io` plus a buffer you own, printing goes through the `.interface` field, and nothing appears until you flush:
+
+```zig
+var stdout_buffer: [4096]u8 = undefined;
+var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+const stdout = &stdout_writer.interface;
+defer stdout.flush() catch {};
+try stdout.print("{s}\n", .{message});
+```
+
+For debug output, `std.debug.print` is unchanged and needs no `io`. `std.io.fixedBufferStream` became `std.Io.Writer.fixed(&buf)` (read the result back with `.buffered()`), and growable string building is `std.Io.Writer.Allocating.init(allocator)`. One-shot formatting keeps `std.fmt.bufPrint` and `std.fmt.allocPrint`, unchanged.
+
+## ArrayList is unmanaged
+
+The list no longer stores its allocator. Start from `.empty` and pass the allocator to every call that can allocate or free:
+
+```zig
+var list: std.ArrayList(Habit) = .empty;
+defer list.deinit(allocator);
+try list.append(allocator, habit);
+try list.appendSlice(allocator, more_habits);
+const owned = try list.toOwnedSlice(allocator);
+```
+
+The old `std.ArrayList(T).init(allocator)` fails with the `no member named 'init'` error above; a managed-style `list.append(item)` fails with `member function expected 2 argument(s), found 1`. (`std.StringHashMap` and `std.AutoHashMap` still have managed `.init(allocator)` forms — only `ArrayList` and explicitly `Unmanaged` types changed.)
+
+## Format specifiers `{t}` and `{f}`
+
+`{s}` formats strings only. Printing an enum or tagged union tag is `{t}`:
+
+```zig
+std.debug.print("filter is {t}\n", .{model.filter}); // prints the tag name
+```
+
+Custom format methods changed twice over: the old four-parameter signature (`comptime fmt`, `FormatOptions`, `anytype` writer) no longer compiles, and `{}` no longer calls a `format` method — it prints the raw field dump. Declare the new two-parameter signature and print with `{f}`:
+
+```zig
+pub fn format(self: Point, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    try writer.print("({d},{d})", .{ self.x, self.y });
+}
+
+std.debug.print("{f}\n", .{point});
+```
+
+## Time and sleeping
+
+`std.time` keeps only unit constants (`ns_per_ms` and friends); reading clocks and sleeping take `io`:
+
+```zig
+try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .awake);
+const now_ns: i128 = std.Io.Timestamp.now(io, .real).nanoseconds;
+```
+
+App code should not reach for either: `native_sdk.nowMs()` and `native_sdk.monotonicMs()` are the SDK's clock facade, `fx.wallMs()` is the journaled read inside `update`, and repeating work belongs to `fx.startTimer`. See [State & Data Flow](/state).
+
+## Child processes
+
+`Child.init` plus `child.spawn()` collapsed into one call, and lifecycle methods take `io`:
+
+```zig
+var child = try std.process.spawn(io, .{
+    .argv = &.{ "git", "status", "--porcelain" },
+    .stdin = .ignore,
+    .stdout = .inherit,
+    .stderr = .inherit,
+});
+const term = try child.wait(io);
+```
+
+Inside an app, use `fx.spawn` instead — bounded, replay-friendly, and the exit and output arrive as messages.
+
+## Environment and arguments
+
+`std.process.getEnvMap`, `argsAlloc`, and `argsWithAllocator` are gone; `main` already holds both ends: `init.environ_map.get("HOME")` and `init.minimal.args.toSlice(allocator)`. Building an environment for a child process is `std.process.Environ.Map.init(allocator)` plus `put`.
+
+## build.zig artifacts take modules
+
+Zero-config apps have no `build.zig` — this only matters after `native eject` or `native init --full`. Executables and tests take a `root_module`, and the module owns the root source file, target, and optimize mode:
+
+```zig
+const exe = b.addExecutable(.{
+    .name = "app",
+    .root_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    }),
+});
+```
+
+The ejected `build.zig` the CLI writes is the reference shape.
+
+## Tests get their Io from std.testing.io
+
+Tests never construct an `Io`; `std.testing.io` sits next to `std.testing.allocator`:
+
+```zig
+test "round-trips the store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "store.txt", .data = "v1" });
+}
+```
+
+Model/Msg/update tests — the ones the generated `src/tests.zig` shows — need no `Io` at all.
+
+## One more habit: build and test both
+
+Zig analyzes code lazily, so an outdated idiom in a function only tests reference (or only `main` references) can hide from the other command indefinitely. Run both `native build` and `native test` (or `zig build` and `zig build test`) before calling a change done.
+
+## What didn't change
+
+`std.fmt.bufPrint` / `allocPrint` / `parseInt` / `parseFloat`, `std.mem`, `std.debug.print`, `std.heap.page_allocator`, the `std.time` unit constants, `@embedFile`, and `std.testing.expect*` all work as before. If code using only these fails, the problem is elsewhere.

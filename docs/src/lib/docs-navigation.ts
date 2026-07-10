@@ -95,6 +95,7 @@ export const navSections: NavSection[] = [
       { name: "Platform Support", href: "/platform-support" },
       { name: "Debugging", href: "/debugging" },
       { name: "native doctor", href: "/debugging/doctor" },
+      { name: "Zig 0.16 Notes", href: "/zig" },
       { name: "Extensions", href: "/extensions" },
     ],
   },
