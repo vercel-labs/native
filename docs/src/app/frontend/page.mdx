@@ -88,6 +88,48 @@ native dev --binary zig-out/bin/MyApp --url http://127.0.0.1:3000/ --command "np
 
 The command starts the frontend process, waits for the port to accept connections, launches the native shell with `NATIVE_SDK_FRONTEND_URL`, and terminates the frontend when the shell exits. See [Dev Server](/cli/dev) for all flags.
 
+## Existing Vite app
+
+To wrap an existing Vite app, keep the web project where it is and add a Native SDK shell beside it. The shell needs two paths: the development server URL and the production build directory.
+
+```zig
+.frontend = .{
+    .dist = "dist",
+    .entry = "index.html",
+    .spa_fallback = true,
+    .dev = .{
+        .url = "http://127.0.0.1:5173/",
+        .command = .{ "npm", "run", "dev", "--", "--host", "127.0.0.1" },
+        .ready_path = "/",
+        .timeout_ms = 30000,
+    },
+}
+```
+
+In the Zig shell, use `sourceFromEnv` with the same production directory:
+
+```zig
+fn source(context: *anyopaque) anyerror!native_sdk.WebViewSource {
+    const self: *App = @ptrCast(@alignCast(context));
+    return native_sdk.frontend.sourceFromEnv(self.env_map, .{
+        .dist = "dist",
+        .entry = "index.html",
+    });
+}
+```
+
+Add the dev origin to the navigation policy while developing:
+
+```zig
+.security = .{
+    .navigation = .{
+        .allowed_origins = .{ "zero://app", "zero://inline", "http://127.0.0.1:5173" },
+    },
+}
+```
+
+`native dev` starts the Vite server and sets `NATIVE_SDK_FRONTEND_URL`; packaged builds ignore that environment variable and load `dist/index.html` as local assets. If your Vite app customizes `base`, make sure the production build still resolves assets under the `zero://app` origin.
+
 ## Framework recipes
 
 **Vite**: `.url = "http://127.0.0.1:5173/"`, command `npm run dev -- --host 127.0.0.1`.
