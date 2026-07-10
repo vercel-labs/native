@@ -11,6 +11,8 @@
 #   3. gpu_nonblank=true              (real pixels were presented)
 #   4. widget-click "Add task" -> '4 open'   (automation input mutates state)
 #   5. automate screenshot renders a non-empty PNG
+#   6. ZERO WebKit helper processes for the whole run (the main WebView is
+#      lazy; a canvas app must never boot the WebKit stack)
 #
 # Deliberately NOT `set -e` (same as windows-canvas-smoke.sh): grep exits 1
 # on zero matches, and under `set -e` an assignment like `x=$(grep ...)` or
@@ -19,13 +21,10 @@
 # goes through fail(), which dumps the snapshot and the app log.
 set -u
 
-# WebKitGTK's bubblewrap sandbox needs unprivileged user namespaces, which
-# ubuntu-24.04 runners restrict via AppArmor; without this the web process
-# dies launching xdg-dbus-proxy and the app never publishes an automation
-# snapshot (reproduced in a local container: ready=true never lands; with
-# the sandbox disabled the full smoke passes). The sandbox is not what
-# this smoke tests.
-export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS="${WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS:-1}"
+# No WebKit sandbox workaround: a canvas app's main WebView is created
+# lazily and never materializes, so no WebKit helper processes start and
+# the runner's user-namespace restrictions never come into play. The
+# zero-WebKit assertion below keeps it that way.
 
 # GTK_A11Y=none: under Xvfb there is no session bus providing org.a11y.Bus,
 # and GTK4's a11y init blocks ~25 s on the GDBus name lookup before warning
@@ -77,6 +76,21 @@ fail() {
   exit 1
 }
 
+# Canvas apps must never spawn WebKit: the window's main WebView is
+# created lazily and nothing in this app materializes it, so any
+# WebKitWebProcess/WebKitNetworkProcess during the run means an eager
+# creation regressed (and with it launch latency, resident helper
+# processes, and the sandbox trouble this smoke used to work around).
+assert_no_webkit() {
+  local helpers
+  helpers=$(pgrep -af 'WebKit(Web|Network)Process' 2>/dev/null)
+  if [ -n "$helpers" ]; then
+    echo "-- WebKit helper processes found ($1):"
+    echo "$helpers" | sed 's/^/  /'
+    fail "canvas app spawned WebKit processes ($1)"
+  fi
+}
+
 # ---- build ----------------------------------------------------------------
 (cd "$repo_root" && zig build) || fail "root zig build (CLI) failed"
 (cd "$app_dir" && zig build -Dplatform=linux -Dweb-engine=system -Dautomation=true) \
@@ -101,6 +115,8 @@ app_pid=$!
 grep -q 'gpu_backend=software' "$snap" || fail "gpu_backend is not software"
 echo "== canvas: $(grep -o 'gpu_backend=[a-z]*' "$snap" | head -1)" \
   "$(grep -o 'gpu_nonblank=[a-z]*' "$snap" | head -1)"
+assert_no_webkit "after first presented frame"
+echo "== zero WebKit processes after first presented frame"
 
 # ---- 4: automation widget-click mutates the model --------------------------
 echo "== open before click: $(grep -oE '[0-9]+ open' "$snap" | head -1)"
@@ -116,6 +132,10 @@ echo "== open after click: $(grep -oE '[0-9]+ open' "$snap" | head -1)"
 "$cli" automate screenshot inbox-canvas || fail "CLI screenshot failed"
 test -s .zig-cache/native-sdk-automation/screenshot-inbox-canvas.png \
   || fail "screenshot PNG missing or empty"
+
+# ---- 6: still zero WebKit processes at the end of the run -------------------
+assert_no_webkit "at end of run"
+echo "== zero WebKit processes at end of run"
 
 echo "PASS: linux canvas smoke"
 exit 0

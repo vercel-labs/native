@@ -141,11 +141,12 @@ jobs:
           version: 0.16.0
       - name: Install GTK and Xvfb
         run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev xvfb
-      # Drives the gpu_surface software path against system WebKitGTK under
-      # Xvfb: snapshot ready, gpu_backend=software, gpu_nonblank=true,
-      # automation widget-click, and a rendered screenshot. Sandbox/a11y
-      # env, the widened cold-start readiness budget (shared runners stall
-      # ~27 s before the first runtime event), and failure forensics (dump
+      # Drives the gpu_surface software path under Xvfb: snapshot ready,
+      # gpu_backend=software, gpu_nonblank=true, automation widget-click,
+      # a rendered screenshot, and ZERO WebKit helper processes (the main
+      # WebView is lazy; canvas apps never boot WebKit). A11y env, the
+      # widened cold-start readiness budget (shared runners stall ~27 s
+      # before the first runtime event), and failure forensics (dump
       # snapshot + app log) all live in the script.
       - name: Build and drive ui-inbox headless
         run: .github/scripts/linux-canvas-smoke.sh
