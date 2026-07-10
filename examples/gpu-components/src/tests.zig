@@ -616,7 +616,7 @@ test "gpu components display list renders stable reference snapshot" {
     // on checked/filled states. Update deliberately when component
     // rendering changes, reviewing the rendered pixels (reference render
     // dump or docs previews — same emitters) first.
-    try std.testing.expectEqual(@as(u64, 4863232662243686658), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 9599670827131584552), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -693,7 +693,7 @@ test "gpu components display list renders stable geist reference snapshot" {
     const scratch = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(scratch);
     const surface = try renderComponentsReferenceSurface(componentTokensForPack(.geist, .light), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 13313358543749413523), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 12445785486770386627), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -785,12 +785,12 @@ test "geist button group renders the detached secondary-tab register in both sch
     // one step short of the pack's pure-black light primary — probed at
     // the chip's lower body, clear of the knockout label.
     try std.testing.expectEqual([4]u8{ 23, 23, 23, 255 }, light.pixelRgba8(30, 48));
-    try std.testing.expectEqual(@as(u64, 8187074409027429810), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 13158221911267186466), referenceSurfaceSignature(pixels));
 
     const dark = try renderButtonGroupReferenceSurface(componentTokensForPack(.geist, .dark), pixels, scratch);
     // Dark inverts to porcelain #ededed.
     try std.testing.expectEqual([4]u8{ 237, 237, 237, 255 }, dark.pixelRgba8(30, 48));
-    try std.testing.expectEqual(@as(u64, 272499359279849024), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 9922762454948493824), referenceSurfaceSignature(pixels));
 }
 
 test "house button group keeps the attached segmented bar through the shared specimen" {
@@ -804,7 +804,7 @@ test "house button group keeps the attached segmented bar through the shared spe
     const scratch = try std.testing.allocator.alloc(u8, button_group_surface_pixels);
     defer std.testing.allocator.free(scratch);
     _ = try renderButtonGroupReferenceSurface(componentTokens(), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 12529290438367463158), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 16337717838073850632), referenceSurfaceSignature(pixels));
 }
 
 /// Render a two-trigger tab strip (one active) on a small reference
@@ -922,7 +922,7 @@ test "house tabs keep the flush pill strip through the shared specimen" {
     const scratch = try std.testing.allocator.alloc(u8, tabs_surface_pixels);
     defer std.testing.allocator.free(scratch);
     _ = try renderTabsReferenceSurface(componentTokens(), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 1813963338460688705), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 15995515449431694753), referenceSurfaceSignature(pixels));
 }
 
 test "gpu components house reference snapshot is reproducible through the shared per-theme path" {
@@ -935,7 +935,7 @@ test "gpu components house reference snapshot is reproducible through the shared
     const scratch = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(scratch);
     _ = try renderComponentsReferenceSurface(componentTokens(), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 4863232662243686658), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 9599670827131584552), referenceSurfaceSignature(pixels));
 }
 
 test "gpu components catalog previews use canonical built-in foundations" {
@@ -2189,4 +2189,37 @@ test "gpu components sidebar handle drag resizes retained layout" {
     try expectComponentWidgetFrame(layout, surface_overlay_id, drawer_frame);
     try std.testing.expectEqual(@as(f32, 0), drawer_frame.x);
     try std.testing.expectEqual(canvas_width, drawer_frame.width);
+}
+
+test "theme strip triggers never elide under geometry pixel snapping" {
+    // The toolbar's segmented theme strip hugs its measured labels, so
+    // its triggers sit exactly at the elision threshold. Under geometry
+    // snapping the renderer rounds every frame edge to the device grid,
+    // and a fractional label-exact width can lose most of a pixel to
+    // that rounding — swapping the third label's glyphs for a trailing
+    // ellipsis while the unsnapped layout fits it. The guard is
+    // layout/render token agreement: the scene lays out with the SAME
+    // tokens it renders with, so intrinsic label widths ceil to the
+    // snap grid and the snapped frame is never narrower than its label.
+    // Assert on the drawn text runs of all three triggers under every
+    // pack the catalog pins, snapping on, 1x — the exact configuration
+    // that elided "High" when the layout ran under mismatched tokens.
+    const packs = [_]canvas.ThemePack{ .house, .geist };
+    for (packs) |pack| {
+        const tokens = componentTokensForPack(pack, .light);
+        try std.testing.expect(tokens.pixel_snap.geometry);
+        var commands: [max_component_commands]canvas.CanvasCommand = undefined;
+        var builder = canvas.Builder.init(&commands);
+        try buildComponentsDisplayListFromWidgetsWithTokens(&builder, tokens);
+        const display_list = builder.displayList();
+        const modes = [_]ComponentThemeMode{ .light, .dark, .high };
+        for (modes) |mode| {
+            const ref = display_list.findCommandById(canvas.widgetPartId(themeModeTriggerId(mode), 3)) orelse return error.MissingTriggerText;
+            const text = ref.command.draw_text;
+            var lines: [4]canvas.TextLine = undefined;
+            const text_layout = try canvas.layoutTextRun(text, text.text_layout.?, &lines);
+            try std.testing.expect(text_layout.lines.len > 0);
+            for (text_layout.lines) |line| try std.testing.expect(!line.isElided());
+        }
+    }
 }

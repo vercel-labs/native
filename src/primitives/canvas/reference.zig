@@ -295,12 +295,21 @@ pub const ReferenceRenderSurface = struct {
         // so no apron rows join the key.
         const probe = self.memoProbe(pixel_rect, 0, referenceMemoParamsHash(2, command, value));
         if (self.memoReplay(probe, pixel_rect)) return;
+        // Square-cornered fills keep the legacy binary pixel-center
+        // test (bit-identical on integer bounds); rounded fills take
+        // the anti-aliased signed-distance coverage.
+        const binary = referenceRadiusIsZero(radius);
         var y = pixel_rect.y;
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
                 const point = referencePixelCenter(x, y);
-                if (referencePointInRoundedRect(point, rect, radius)) self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.fill, command.transform, point), command.opacity);
+                if (binary) {
+                    if (referencePointInRoundedRect(point, rect, radius)) self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.fill, command.transform, point), command.opacity);
+                    continue;
+                }
+                const coverage = referenceRoundedRectCoverage(point, rect, radius);
+                if (coverage > 0) self.blendPixel(@intCast(x), @intCast(y), referenceScaleColorAlpha(referenceSampleFill(value.fill, command.transform, point), coverage), command.opacity);
             }
         }
         self.memoStore(probe, pixel_rect);
@@ -323,13 +332,28 @@ pub const ReferenceRenderSurface = struct {
         // blends into, so no apron rows join the key.
         const probe = self.memoProbe(pixel_rect, 0, referenceMemoParamsHash(5, command, value));
         if (self.memoReplay(probe, pixel_rect)) return;
+        // Square-cornered borders keep the legacy binary ring test
+        // (bit-identical on integer bounds). Rounded borders derive
+        // BOTH ring edges from the same signed-distance field —
+        // coverage is outer-edge coverage minus inner-edge coverage —
+        // so the border weight stays uniform around the whole shape
+        // (the inner edge stays in the field even when the inset
+        // radius bottoms out at a square corner).
+        const binary = referenceRadiusIsZero(radius);
         var y = pixel_rect.y;
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
                 const point = referencePixelCenter(x, y);
-                if (referencePointInRoundedRect(point, outer, outer_radius) and !referencePointInRoundedRect(point, inner, inner_radius)) {
-                    self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.stroke.fill, command.transform, point), command.opacity);
+                if (binary) {
+                    if (referencePointInRoundedRect(point, outer, outer_radius) and !referencePointInRoundedRect(point, inner, inner_radius)) {
+                        self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.stroke.fill, command.transform, point), command.opacity);
+                    }
+                    continue;
+                }
+                const coverage = std.math.clamp(referenceRoundedRectCoverage(point, outer, outer_radius) - referenceRoundedRectCoverage(point, inner, inner_radius), 0, 1);
+                if (coverage > 0) {
+                    self.blendPixel(@intCast(x), @intCast(y), referenceScaleColorAlpha(referenceSampleFill(value.stroke.fill, command.transform, point), coverage), command.opacity);
                 }
             }
         }
@@ -1357,6 +1381,61 @@ fn referencePointInRoundedRect(point: geometry.PointF, rect: geometry.RectF, rad
         return referencePointInCorner(point, geometry.PointF.init(normalized.x + bottom_left, normalized.maxY() - bottom_left), bottom_left);
     }
     return true;
+}
+
+/// True when every corner is square — the gate for the legacy binary
+/// pixel-center rasterization, which keeps radius-0 rects on integer
+/// bounds bit-identical to their historical bytes.
+fn referenceRadiusIsZero(radius: Radius) bool {
+    return radius.top_left <= 0 and radius.top_right <= 0 and
+        radius.bottom_right <= 0 and radius.bottom_left <= 0;
+}
+
+/// Fractional coverage of the pixel centered at `point` against a
+/// rounded rect: `clamp(0.5 - d, 0, 1)` of the EXACT signed distance to
+/// the shape boundary. One closed form serves arcs and straight
+/// segments alike, so coverage is a continuous function around the
+/// whole perimeter — a per-region model (arc ramp here, binary edge
+/// there) disagrees with itself about where the boundary is at the
+/// hand-off points and grows nubs or notches into the silhouette.
+///
+/// The distance is the classic rounded-rect field: with `q = |p - c| -
+/// (half_extent - r)` for the corner radius `r` of the quadrant `p`
+/// lies in, `d = length(max(q, 0)) + min(max(q.x, q.y), 0) - r`. It is
+/// exact for any per-corner radii, including square (r = 0) corners,
+/// and along a straight segment it reduces to the plain axis distance
+/// (the selected radius cancels), so the field is continuous where
+/// quadrants with different radii meet. Cheap fully-inside/outside
+/// short circuits keep the square root off interior and far-apron
+/// pixels; the exact form runs only near the boundary band.
+fn referenceRoundedRectCoverage(point: geometry.PointF, rect: geometry.RectF, radius: Radius) f32 {
+    const normalized = rect.normalized();
+    if (normalized.isEmpty()) return 0;
+    const max_radius = @min(normalized.width, normalized.height) * 0.5;
+
+    const half_width = normalized.width * 0.5;
+    const half_height = normalized.height * 0.5;
+    const dx = point.x - (normalized.x + half_width);
+    const dy = point.y - (normalized.y + half_height);
+    const corner_radius = std.math.clamp(nonNegative(if (dx < 0)
+        (if (dy < 0) radius.top_left else radius.bottom_left)
+    else
+        (if (dy < 0) radius.top_right else radius.bottom_right)), 0, max_radius);
+
+    const qx = @abs(dx) - half_width + corner_radius;
+    const qy = @abs(dy) - half_height + corner_radius;
+    // Fully inside: with both components non-positive the distance is
+    // `max(qx, qy) - r`, so anything at least half a pixel inside the
+    // radius-inset cross is full coverage.
+    if (@max(qx, qy) <= -0.5) return 1;
+    // Fully outside: the distance is at least `qx - r` (and `qy - r`),
+    // so anything at least half a pixel beyond the bounding box is
+    // zero coverage.
+    if (qx - corner_radius >= 0.5 or qy - corner_radius >= 0.5) return 0;
+    const mx = @max(qx, 0);
+    const my = @max(qy, 0);
+    const distance = @sqrt(mx * mx + my * my) + @min(@max(qx, qy), 0) - corner_radius;
+    return std.math.clamp(0.5 - distance, 0, 1);
 }
 
 fn referencePointInCorner(point: geometry.PointF, center: geometry.PointF, radius: f32) bool {

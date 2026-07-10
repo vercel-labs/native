@@ -628,10 +628,164 @@ test "reference renderer captures Phase 2 primitive signature" {
     const surface = (try ReferenceRenderSurface.initWithScratch(32, 24, &pixels, &scratch)).withImages(&images);
     try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
 
-    try std.testing.expectEqual(@as(u64, 12197497484215834747), referenceSurfaceSignature(&pixels));
+    try std.testing.expectEqual(@as(u64, 8143217197410062006), referenceSurfaceSignature(&pixels));
     try expectVisiblePixel(surface.pixelRgba8(6, 6));
     try expectVisiblePixel(surface.pixelRgba8(20, 8));
     try expectVisiblePixel(surface.pixelRgba8(6, 16));
+}
+
+// ---------------------------------------------------------------------------
+// Rounded-rect coverage shape fidelity.
+//
+// The anti-aliased rounded-rect rasterization derives per-pixel coverage
+// from one continuous signed-distance field of the whole shape. These
+// tests hold that coverage against ground truth — 16x16 supersampling of
+// the exact point-in-shape predicate per pixel — with two assertions:
+//
+//   1. NO PROTRUSION: any pixel the supersampled shape leaves empty must
+//      stay empty. A coverage model that treats perimeter regions
+//      differently (an arc ramp handing off to a binary straight edge)
+//      disagrees with itself about where the boundary is and pushes
+//      nubs outside the silhouette; this catches that class of bug
+//      exactly.
+//   2. BOUNDED DEVIATION: the worst per-pixel difference stays within
+//      the intrinsic error of distance-ramp coverage. A half-pixel
+//      linear ramp reproduces box-filter coverage exactly on straight
+//      edges; on arcs it deviates more as curvature tightens, and at a
+//      sharp concave ring corner the distance-to-coverage mapping has a
+//      known worst case of ~1/4 at the single corner pixel. The
+//      per-case bounds encode those regimes with a small margin; the
+//      discontinuous-coverage bug class lands far outside them (2-4x).
+
+const roundedRectCoverageFidelityCase = struct {
+    kind: enum { fill, stroke },
+    rect: geometry.RectF,
+    radius: Radius,
+    stroke_width: f32 = 0,
+    /// Max per-pixel |rendered - supersampled| in 1/255 levels.
+    tolerance: i32,
+};
+
+fn fidelityClampRadius(value: f32, max_radius: f32) f32 {
+    return std.math.clamp(@max(0, value), 0, max_radius);
+}
+
+fn fidelityInCorner(x: f32, y: f32, cx: f32, cy: f32, r: f32) bool {
+    if (r <= 0) return false;
+    const dx = x - cx;
+    const dy = y - cy;
+    return dx * dx + dy * dy <= r * r;
+}
+
+/// The exact rounded-rect interior predicate the supersampled ground
+/// truth integrates: the rect with each corner replaced by a quarter
+/// disc of its (clamped) radius.
+fn fidelityInRoundedRect(x: f32, y: f32, rect: geometry.RectF, radius: Radius) bool {
+    if (rect.width <= 0 or rect.height <= 0) return false;
+    if (x < rect.x or x > rect.x + rect.width or y < rect.y or y > rect.y + rect.height) return false;
+    const max_radius = @min(rect.width, rect.height) * 0.5;
+    const top_left = fidelityClampRadius(radius.top_left, max_radius);
+    const top_right = fidelityClampRadius(radius.top_right, max_radius);
+    const bottom_right = fidelityClampRadius(radius.bottom_right, max_radius);
+    const bottom_left = fidelityClampRadius(radius.bottom_left, max_radius);
+    const max_x = rect.x + rect.width;
+    const max_y = rect.y + rect.height;
+    if (x < rect.x + top_left and y < rect.y + top_left) return fidelityInCorner(x, y, rect.x + top_left, rect.y + top_left, top_left);
+    if (x >= max_x - top_right and y < rect.y + top_right) return fidelityInCorner(x, y, max_x - top_right, rect.y + top_right, top_right);
+    if (x >= max_x - bottom_right and y >= max_y - bottom_right) return fidelityInCorner(x, y, max_x - bottom_right, max_y - bottom_right, bottom_right);
+    if (x < rect.x + bottom_left and y >= max_y - bottom_left) return fidelityInCorner(x, y, rect.x + bottom_left, max_y - bottom_left, bottom_left);
+    return true;
+}
+
+fn fidelityOutsetRadius(radius: Radius, outset: f32) Radius {
+    return .{
+        .top_left = @max(0, radius.top_left + outset),
+        .top_right = @max(0, radius.top_right + outset),
+        .bottom_right = @max(0, radius.bottom_right + outset),
+        .bottom_left = @max(0, radius.bottom_left + outset),
+    };
+}
+
+/// Ground-truth alpha of one pixel: the fraction of a 16x16 subsample
+/// grid inside the case's shape (the stroke ring is outer minus inner,
+/// derived exactly as the renderer derives them), quantized to a byte
+/// like the renderer's blend quantizes coverage.
+fn fidelityTruthAlpha(case: roundedRectCoverageFidelityCase, px: usize, py: usize) u8 {
+    const half = case.stroke_width * 0.5;
+    const outer = case.rect.inflate(geometry.InsetsF.all(half));
+    const inner = case.rect.deflate(geometry.InsetsF.all(@min(half, @min(case.rect.width, case.rect.height) * 0.5)));
+    const outer_radius = fidelityOutsetRadius(case.radius, half);
+    const inner_radius = fidelityOutsetRadius(case.radius, -half);
+    var covered: usize = 0;
+    var sub_y: usize = 0;
+    while (sub_y < 16) : (sub_y += 1) {
+        var sub_x: usize = 0;
+        while (sub_x < 16) : (sub_x += 1) {
+            const x = @as(f32, @floatFromInt(px)) + (@as(f32, @floatFromInt(sub_x)) + 0.5) / 16.0;
+            const y = @as(f32, @floatFromInt(py)) + (@as(f32, @floatFromInt(sub_y)) + 0.5) / 16.0;
+            const in = switch (case.kind) {
+                .fill => fidelityInRoundedRect(x, y, case.rect, case.radius),
+                .stroke => fidelityInRoundedRect(x, y, outer, outer_radius) and !fidelityInRoundedRect(x, y, inner, inner_radius),
+            };
+            if (in) covered += 1;
+        }
+    }
+    return @intFromFloat(@round(@as(f32, @floatFromInt(covered)) / 256.0 * 255.0));
+}
+
+test "rounded-rect coverage matches supersampled ground truth with no silhouette protrusion" {
+    const fidelity_width: usize = 48;
+    const fidelity_height: usize = 40;
+    const white = Color{ .r = 1, .g = 1, .b = 1, .a = 1 };
+    const cases = [_]roundedRectCoverageFidelityCase{
+        // Button-shaped fills: smooth arcs, integer and fractional bounds.
+        .{ .kind = .fill, .rect = geometry.RectF.init(6, 5, 30, 22), .radius = Radius.all(8), .tolerance = 16 },
+        .{ .kind = .fill, .rect = geometry.RectF.init(6.3, 5.7, 29.4, 21.6), .radius = Radius.all(8), .tolerance = 16 },
+        // Pill: the radius clamps to the half-height.
+        .{ .kind = .fill, .rect = geometry.RectF.init(4, 6, 40, 20), .radius = Radius.all(22), .tolerance = 16 },
+        // Tight curvature and mixed per-corner radii (one square corner).
+        .{ .kind = .fill, .rect = geometry.RectF.init(10.2, 8.6, 21.7, 14.3), .radius = Radius.all(0.75), .tolerance = 32 },
+        .{ .kind = .fill, .rect = geometry.RectF.init(7.6, 6.2, 30.8, 24.9), .radius = .{ .top_left = 0, .top_right = 6, .bottom_right = 12, .bottom_left = 2 }, .tolerance = 32 },
+        // Thin borders: both ring edges from the same field.
+        .{ .kind = .stroke, .rect = geometry.RectF.init(8, 7, 28, 20), .radius = Radius.all(6), .stroke_width = 1, .tolerance = 20 },
+        .{ .kind = .stroke, .rect = geometry.RectF.init(8.4, 7.8, 27.3, 19.5), .radius = Radius.all(6), .stroke_width = 2, .tolerance = 20 },
+        .{ .kind = .stroke, .rect = geometry.RectF.init(9.1, 8.3, 25.6, 17.2), .radius = Radius.all(0.75), .stroke_width = 1, .tolerance = 32 },
+        // Thick border whose inset radius bottoms out: the ring's inner
+        // corners go sharp and concave, the distance-ramp worst case.
+        .{ .kind = .stroke, .rect = geometry.RectF.init(8, 7, 28, 20), .radius = Radius.all(1), .stroke_width = 3, .tolerance = 72 },
+    };
+
+    for (cases) |case| {
+        var pixels: [fidelity_width * fidelity_height * 4]u8 = undefined;
+        const surface = try ReferenceRenderSurface.init(fidelity_width, fidelity_height, &pixels);
+        const bounds = geometry.RectF.init(0, 0, fidelity_width, fidelity_height);
+        const command = RenderCommand{
+            .command = switch (case.kind) {
+                .fill => .{ .fill_rounded_rect = .{ .rect = case.rect, .radius = case.radius, .fill = .{ .color = white } } },
+                .stroke => .{ .stroke_rect = .{ .rect = case.rect, .radius = case.radius, .stroke = .{ .fill = .{ .color = white }, .width = case.stroke_width } } },
+            },
+            .local_bounds = bounds,
+            .bounds = bounds,
+        };
+        const pass = CanvasRenderPass{
+            .surface_size = geometry.SizeF.init(fidelity_width, fidelity_height),
+            .scale = 1,
+            .full_repaint = true,
+            .commands = &.{command},
+        };
+        try surface.renderPass(pass, Color{ .r = 0, .g = 0, .b = 0, .a = 0 });
+
+        var y: usize = 0;
+        while (y < fidelity_height) : (y += 1) {
+            var x: usize = 0;
+            while (x < fidelity_width) : (x += 1) {
+                const rendered: i32 = surface.pixelRgba8(x, y)[3];
+                const truth: i32 = fidelityTruthAlpha(case, x, y);
+                if (truth == 0) try std.testing.expectEqual(@as(i32, 0), rendered);
+                try std.testing.expect(@max(rendered - truth, truth - rendered) <= case.tolerance);
+            }
+        }
+    }
 }
 
 test "reference renderer applies clip transform and opacity" {

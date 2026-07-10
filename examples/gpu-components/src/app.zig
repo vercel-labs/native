@@ -64,7 +64,7 @@ const componentSizesEqual = component_scene.componentSizesEqual;
 const componentTokensForScaleMotionAndContrast = component_scene.componentTokensForScaleMotionAndContrast;
 const componentThemeModeForAppearance = component_scene.componentThemeModeForAppearance;
 const normalizedPixelSnapScale = component_scene.normalizedPixelSnapScale;
-const buildComponentsWidgetLayoutWithStateAndSize = component_scene.buildComponentsWidgetLayoutWithStateAndSize;
+const buildComponentsWidgetLayoutWithStateSizeAndTokens = component_scene.buildComponentsWidgetLayoutWithStateSizeAndTokens;
 const surfaceOverlayKind = component_scene.surfaceOverlayKind;
 const surfaceOverlayFrameForSidebar = component_scene.surfaceOverlayFrameForSidebar;
 const gpuFrameEvent = component_scene.gpuFrameEvent;
@@ -656,7 +656,12 @@ pub const GpuComponentsApp = struct {
 
     pub fn updateComponentsCanvasModel(self: *@This(), runtime: *native_sdk.Runtime, window_id: native_sdk.WindowId) anyerror!void {
         var nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
-        const layout = try buildComponentsWidgetLayoutWithStateAndSize(&nodes, self.virtual_scroll, self.componentUiState(), self.canvas_size);
+        // Layout under the SAME tokens the display list is emitted
+        // with: under geometry pixel snapping, label-hugging intrinsic
+        // widths ceil to the snap grid, and only a token-matched layout
+        // keeps the renderer's edge snapping from shaving those widths
+        // below their labels (eliding text that fits unsnapped).
+        const layout = try buildComponentsWidgetLayoutWithStateSizeAndTokens(&nodes, self.virtual_scroll, self.componentUiState(), self.canvas_size, self.componentTokens());
         _ = try runtime.setCanvasWidgetLayout(window_id, canvas_label, layout);
         _ = try runtime.emitCanvasWidgetDisplayListWithStoredTokensAndChrome(window_id, canvas_label, .{
             .prefix_command_count = component_chrome_prefix_commands,

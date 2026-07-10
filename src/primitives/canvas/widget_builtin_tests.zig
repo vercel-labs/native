@@ -3158,3 +3158,87 @@ test "theme packs resolve by name and compose with every theme axis" {
     // Fields the override left null keep the pack's values.
     try std.testing.expectEqual(geist_light.metrics.control_height_lg, overridden.metrics.control_height_lg);
 }
+
+test "hairline borders snap to whole device columns with smooth arcs" {
+    const snapHairlineStrokeRect = @import("widget_render_style.zig").snapHairlineStrokeRect;
+    const white = Color{ .r = 1, .g = 1, .b = 1, .a = 1 };
+
+    // Inactive without the geometry token or a usable scale.
+    const unsnapped: StrokeRect = .{ .rect = geometry.RectF.init(4, 3, 24, 14), .radius = Radius.all(6), .stroke = .{ .fill = .{ .color = white }, .width = 1 } };
+    const off = DesignTokens{ .pixel_snap = .{ .geometry = false, .scale = 1 } };
+    try std.testing.expectEqual(unsnapped.rect.x, snapHairlineStrokeRect(off, unsnapped).rect.x);
+
+    // 1x: a 1px border pulls its centerline half a pixel inward so the
+    // band covers exactly one column with its outer edge on the frame.
+    const at_1x = DesignTokens{ .pixel_snap = .{ .geometry = true, .scale = 1 } };
+    const snapped = snapHairlineStrokeRect(at_1x, unsnapped);
+    try std.testing.expectEqual(@as(f32, 4.5), snapped.rect.x);
+    try std.testing.expectEqual(@as(f32, 3.5), snapped.rect.y);
+    try std.testing.expectEqual(@as(f32, 23), snapped.rect.width);
+    try std.testing.expectEqual(@as(f32, 1), snapped.stroke.width);
+    // The outer arc keeps the frame's radius: centerline radius shrinks
+    // by the half-width inset.
+    try std.testing.expectEqual(@as(f32, 5.5), snapped.radius.top_left);
+
+    // Wider borders keep true geometry (device width above the
+    // hairline range).
+    const wide: StrokeRect = .{ .rect = geometry.RectF.init(4, 3, 24, 14), .radius = Radius.all(6), .stroke = .{ .fill = .{ .color = white }, .width = 3 } };
+    try std.testing.expectEqual(@as(f32, 4), snapHairlineStrokeRect(at_1x, wide).rect.x);
+
+    // Fractional scale: snapping happens on the DEVICE grid. At 1.25x a
+    // 1px logical border snaps to one device pixel (0.8 logical) — the
+    // floor of its exact 1.25-device width — and a frame edge at
+    // logical 4 (device 5) pulls the centerline to device 5.5 =
+    // logical 4.4.
+    const at_fractional = DesignTokens{ .pixel_snap = .{ .geometry = true, .scale = 1.25 } };
+    const fractional = snapHairlineStrokeRect(at_fractional, unsnapped);
+    try std.testing.expectEqual(@as(f32, 4.4), fractional.rect.x);
+    try std.testing.expectEqual(@as(f32, 0.8), fractional.stroke.width);
+
+    // At 1.5x the exact device width of a 1px logical border is 1.5 —
+    // between grid widths — and the snap takes the FLOOR: one device
+    // column (2/3 logical), the crisp-and-light choice, never two. The
+    // frame edge at logical 4 (device 6) pulls the centerline to
+    // device 6.5.
+    const at_halfstep = DesignTokens{ .pixel_snap = .{ .geometry = true, .scale = 1.5 } };
+    const halfstep = snapHairlineStrokeRect(at_halfstep, unsnapped);
+    try std.testing.expectEqual(@as(f32, 6.5 / 1.5), halfstep.rect.x);
+    try std.testing.expectEqual(@as(f32, 1.0 / 1.5), halfstep.stroke.width);
+
+    // A stroke whose device width rounds to zero stays unsnapped — the
+    // floor's one-pixel minimum never darkens a sub-half-pixel stroke.
+    var whisper = unsnapped;
+    whisper.stroke.width = 0.25;
+    try std.testing.expectEqual(@as(f32, 0.25), snapHairlineStrokeRect(at_halfstep, whisper).stroke.width);
+    try std.testing.expectEqual(unsnapped.rect.x, snapHairlineStrokeRect(at_halfstep, whisper).rect.x);
+
+    // Rendered at 1x, the straight runs land as exactly one full-alpha
+    // column inside the frame — no half-covered neighbors — while the
+    // corners keep fractional arc coverage from the continuous field.
+    var pixels: [40 * 24 * 4]u8 = undefined;
+    const surface = try ReferenceRenderSurface.init(40, 24, &pixels);
+    const bounds = geometry.RectF.init(0, 0, 40, 24);
+    const command = RenderCommand{
+        .command = .{ .stroke_rect = snapped },
+        .local_bounds = bounds,
+        .bounds = bounds,
+    };
+    try surface.renderPass(.{
+        .surface_size = geometry.SizeF.init(40, 24),
+        .scale = 1,
+        .full_repaint = true,
+        .commands = &.{command},
+    }, Color{ .r = 0, .g = 0, .b = 0, .a = 0 });
+    // Mid-height row: outside column empty, frame column fully inked,
+    // next column inside empty again.
+    try std.testing.expectEqual(@as(u8, 0), surface.pixelRgba8(3, 10)[3]);
+    try std.testing.expectEqual(@as(u8, 255), surface.pixelRgba8(4, 10)[3]);
+    try std.testing.expectEqual(@as(u8, 0), surface.pixelRgba8(5, 10)[3]);
+    // Mid-width column: same on the top run.
+    try std.testing.expectEqual(@as(u8, 0), surface.pixelRgba8(16, 2)[3]);
+    try std.testing.expectEqual(@as(u8, 255), surface.pixelRgba8(16, 3)[3]);
+    try std.testing.expectEqual(@as(u8, 0), surface.pixelRgba8(16, 4)[3]);
+    // Corner pixels carry fractional arc coverage — smooth, not binary.
+    const corner = surface.pixelRgba8(5, 4)[3];
+    try std.testing.expect(corner > 0 and corner < 255);
+}

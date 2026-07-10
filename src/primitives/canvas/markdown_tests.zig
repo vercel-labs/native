@@ -405,7 +405,7 @@ test "the README-shaped fixture renders through the mapper and the reference ren
 // separators, fenced-code panels, and near-black underlined links.
 // Update deliberately when markdown rendering changes, reviewing the
 // rendered pixels first (see reference_tests.zig conventions).
-const markdown_document_reference_signature: u64 = 1138378532370101207;
+const markdown_document_reference_signature: u64 = 6015448079037287912;
 
 
 test "bare URLs autolink at word boundaries with trailing punctuation trimmed" {

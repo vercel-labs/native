@@ -722,8 +722,8 @@ test "chart golden: line + bar + band render byte-identically in light and dark"
 // category labels (q1, q3) under the bars. Both themes clear with their
 // background token. Update deliberately when chart rendering changes,
 // reviewing the dumped pixels first.
-const golden_light_signature: u64 = 11760269401975515075;
-const golden_dark_signature: u64 = 1706071444071293822;
+const golden_light_signature: u64 = 11237334215963301158;
+const golden_dark_signature: u64 = 4053146140543071333;
 
 fn goldenDumpRequested() bool {
     if (comptime !@import("builtin").link_libc) return false;

@@ -87,6 +87,7 @@ const widgetAccentForegroundColor = widget_render_style.widgetAccentForegroundCo
 const widgetRadius = widget_render_style.widgetRadius;
 pub const controlRadius = widget_render_style.controlRadius;
 pub const controlStrokeWidth = widget_render_style.controlStrokeWidth;
+const snapHairlineStrokeRect = widget_render_style.snapHairlineStrokeRect;
 pub const selectControlVisualTokens = widget_render_style.selectControlVisualTokens;
 pub const textInputControlVisualTokens = widget_render_style.textInputControlVisualTokens;
 const alertControlVisualTokens = widget_render_style.alertControlVisualTokens;
@@ -1201,7 +1202,7 @@ fn emitAvatarWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
         });
     }
 
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 4),
         .rect = widget.frame,
         .radius = radius,
@@ -1209,7 +1210,7 @@ fn emitAvatarWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
             .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
         },
-    });
+    }));
 }
 
 fn emitBadgeWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
@@ -1223,7 +1224,7 @@ fn emitBadgeWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Erro
         .radius = radius,
         .fill = colorFill(badgeBackgroundColor(widget, tokens, visual)),
     });
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
@@ -1231,7 +1232,7 @@ fn emitBadgeWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Erro
             .fill = widgetBorderFill(widget, badgeBorderColor(widget, tokens, visual)),
             .width = badgeStrokeWidth(widget, tokens, visual),
         },
-    });
+    }));
     const content_color = badgeTextColor(widget, tokens, visual);
     // Inline vector icon: icon-only badges center it (the stepper's
     // completed check, status chips); icon + text draws it before the
@@ -1329,7 +1330,7 @@ fn emitSplitDividerWidget(builder: *Builder, widget: Widget, tokens: DesignToken
         .fill = colorFill(line_color),
     });
     if (widget.state.focused) {
-        try builder.strokeRect(.{
+        try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
             .id = widgetPartId(widget.id, 2),
             .rect = pixelSnapGeometryRect(tokens, normalized),
             .radius = Radius.all(tokens.radius.sm),
@@ -1337,7 +1338,7 @@ fn emitSplitDividerWidget(builder: *Builder, widget: Widget, tokens: DesignToken
                 .fill = widget_render_style.widgetFocusRingFill(widget, tokens),
                 .width = tokens.stroke.focus,
             },
-        });
+        }));
     }
 }
 
@@ -2322,12 +2323,12 @@ fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens,
         .radius = radius,
         .fill = colorFill(tokens.colors.surface),
     });
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = chartCommandId(widget.id, chart_hover_seed, 0, 3),
         .rect = card,
         .radius = radius,
         .stroke = .{ .fill = colorFill(tokens.colors.border), .width = hairline },
-    });
+    }));
 
     // Title line, then one swatch/name/value row per series holding
     // this sample. Values right-align on the card's inner edge so a

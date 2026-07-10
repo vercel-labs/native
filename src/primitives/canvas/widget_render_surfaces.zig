@@ -40,6 +40,7 @@ const widgetForegroundColor = widget_render_style.widgetForegroundColor;
 const widgetRadius = widget_render_style.widgetRadius;
 const controlRadius = widget_render_style.controlRadius;
 const controlStrokeWidth = widget_render_style.controlStrokeWidth;
+const snapHairlineStrokeRect = widget_render_style.snapHairlineStrokeRect;
 const buttonStateBackground = widget_render_style.buttonStateBackground;
 const washHovered = widget_render_style.washHovered;
 const alertControlVisualTokens = widget_render_style.alertControlVisualTokens;
@@ -58,7 +59,7 @@ pub fn emitAlertWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
         .radius = radius,
         .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface))),
     });
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
@@ -66,7 +67,7 @@ pub fn emitAlertWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
             .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
         },
-    });
+    }));
     if (widget.text.len == 0) return;
 
     // The house style alert geometry: a FIXED 16px icon centered on the first
@@ -144,7 +145,7 @@ pub fn emitCardWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTok
         .radius = radius,
         .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface))),
     });
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
@@ -152,7 +153,7 @@ pub fn emitCardWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTok
             .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
         },
-    });
+    }));
     if (widget.text.len == 0) return;
 
     const title_size = widgetTypographySize(widget, tokens.typography.body_size + 1);
@@ -207,7 +208,7 @@ pub fn emitModalSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: D
         .radius = radius,
         .fill = widgetBackgroundFill(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface)),
     });
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 3),
         .rect = widget.frame,
         .radius = radius,
@@ -215,7 +216,7 @@ pub fn emitModalSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: D
             .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
         },
-    });
+    }));
     if (widget.text.len == 0) return;
 
     const title_size = widgetTypographySize(widget, tokens.typography.title_size);
@@ -264,7 +265,7 @@ pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
         .radius = radius,
         .fill = colorFill(background),
     });
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 3),
         .rect = widget.frame,
         .radius = radius,
@@ -272,7 +273,7 @@ pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
             .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
         },
-    });
+    }));
     if (widget.kind == .resizable) try emitResizableWidgetHandle(builder, widget, tokens, visual);
 }
 
@@ -320,7 +321,7 @@ pub fn emitBubbleWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignT
         });
     }
     if (bubbleBorderColor(widget, tokens)) |border| {
-        try builder.strokeRect(.{
+        try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
             .id = widgetPartId(widget.id, 3),
             .rect = widget.frame,
             .radius = radius,
@@ -328,7 +329,7 @@ pub fn emitBubbleWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignT
                 .fill = colorFill(border),
                 .width = controlStrokeWidth(widget, tokens.controls.bubble, tokens.stroke.hairline),
             },
-        });
+        }));
     }
 }
 
@@ -599,7 +600,7 @@ pub fn emitTabsListWidgetChrome(builder: *Builder, widget: Widget, tokens: Desig
                 .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle)),
             });
             if (widget.style.border orelse visual.border) |border| {
-                try builder.strokeRect(.{
+                try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
                     .id = widgetPartId(widget.id, 2),
                     .rect = frame,
                     .radius = radius,
@@ -607,7 +608,7 @@ pub fn emitTabsListWidgetChrome(builder: *Builder, widget: Widget, tokens: Desig
                         .fill = colorFill(border),
                         .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
                     },
-                });
+                }));
             }
         },
         .underline => {
@@ -691,7 +692,7 @@ pub fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: Design
         .radius = radius,
         .fill = widgetBackgroundFill(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface)),
     });
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 3),
         .rect = widget.frame,
         .radius = radius,
@@ -699,7 +700,7 @@ pub fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: Design
             .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
         },
-    });
+    }));
 }
 
 pub fn emitMenuSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
@@ -724,7 +725,7 @@ pub fn emitMenuSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: De
         .radius = radius,
         .fill = widgetBackgroundFill(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface)),
     });
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 3),
         .rect = widget.frame,
         .radius = radius,
@@ -732,7 +733,7 @@ pub fn emitMenuSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: De
             .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
         },
-    });
+    }));
 }
 
 fn pixelSnapScale(tokens: DesignTokens) ?f32 {
@@ -782,7 +783,7 @@ fn emitWidgetFocusRing(builder: *Builder, widget: Widget, tokens: DesignTokens, 
     // The shared ring-offset treatment: a concentric ring the
     // token-stated gap outside the widget's own border (see
     // widget_render_style).
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, slot),
         .rect = widget_render_style.focusRingRect(widget.frame, tokens),
         .radius = widget_render_style.focusRingRadius(widgetRadius(widget, tokens.radius.md), tokens),
@@ -790,5 +791,5 @@ fn emitWidgetFocusRing(builder: *Builder, widget: Widget, tokens: DesignTokens, 
             .fill = widgetFocusRingFill(widget, tokens),
             .width = tokens.stroke.focus,
         },
-    });
+    }));
 }

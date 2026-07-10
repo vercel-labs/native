@@ -335,7 +335,7 @@ pub fn installComponentsCanvasModel(runtime: *native_sdk.Runtime, window_id: nat
     var commands: [max_component_commands]canvas.CanvasCommand = undefined;
     var nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
     var builder = canvas.Builder.init(&commands);
-    const layout = try buildComponentsWidgetLayoutWithStateAndSize(&nodes, virtual_scroll, ui_state, surface_size);
+    const layout = try buildComponentsWidgetLayoutWithStateSizeAndTokens(&nodes, virtual_scroll, ui_state, surface_size, tokens);
     try buildComponentsDisplayListForSize(&builder, layout, tokens, surface_size);
     _ = try runtime.setCanvasDisplayList(window_id, canvas_label, builder.displayList());
     _ = try runtime.setCanvasWidgetLayout(window_id, canvas_label, layout);
@@ -355,7 +355,7 @@ pub fn buildComponentsDisplayListFromWidgets(builder: *canvas.Builder) canvas.Er
 /// is machine-verified pixel-for-pixel, not just the default one.
 pub fn buildComponentsDisplayListFromWidgetsWithTokens(builder: *canvas.Builder, tokens: canvas.DesignTokens) canvas.Error!void {
     var nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
-    const layout = try buildComponentsWidgetLayout(&nodes);
+    const layout = try buildComponentsWidgetLayoutWithStateSizeAndTokens(&nodes, .{}, .{}, default_canvas_size, tokens);
     try buildComponentsDisplayList(builder, layout, tokens);
 }
 
@@ -709,6 +709,21 @@ pub fn appendComponentWidget(output: []canvas.Widget, count: *usize, widget: can
 }
 
 pub fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutNode, virtual_scroll: ComponentVirtualScroll, ui_state: ComponentUiState, surface_size: geometry.SizeF) canvas.Error!canvas.WidgetLayoutTree {
+    return buildComponentsWidgetLayoutWithStateSizeAndTokens(nodes, virtual_scroll, ui_state, surface_size, componentTokens());
+}
+
+/// Layout under an explicit token set — REQUIRED to be the same tokens
+/// the display list is emitted with. Layout and render must agree on
+/// `pixel_snap`: under geometry snapping, intrinsic label-hugging
+/// widths ceil to the snap grid (a grid-aligned width survives the
+/// renderer's per-edge rounding at any position), while a layout
+/// computed under non-snapping tokens keeps exact fractional widths
+/// that render-time edge snapping can shave below the label — eliding
+/// text that fits unsnapped. The wrappers above default to the
+/// catalog's stock tokens; any caller rendering under other tokens
+/// (theme packs, dark scheme, surface scale) must lay out here with
+/// those same tokens.
+pub fn buildComponentsWidgetLayoutWithStateSizeAndTokens(nodes: []canvas.WidgetLayoutNode, virtual_scroll: ComponentVirtualScroll, ui_state: ComponentUiState, surface_size: geometry.SizeF, tokens: canvas.DesignTokens) canvas.Error!canvas.WidgetLayoutTree {
     const nav_items = [_]canvas.Widget{
         .{ .id = 121, .kind = .list_item, .text = "Controls", .state = .{ .selected = true } },
         .{ .id = 122, .kind = .list_item, .text = "Inputs" },
@@ -993,7 +1008,7 @@ pub fn buildComponentsWidgetLayoutWithStateAndSize(nodes: []canvas.WidgetLayoutN
         }));
     }
 
-    return canvas.layoutWidgetTree(.{ .kind = .stack, .children = root_widgets[0..root_widget_count] }, rect(0, 0, size.width, size.height), nodes);
+    return canvas.layoutWidgetTreeWithTokens(.{ .kind = .stack, .children = root_widgets[0..root_widget_count] }, rect(0, 0, size.width, size.height), tokens, nodes);
 }
 
 pub fn componentFrame(display_list: canvas.DisplayList, previous: ?canvas.DisplayList, options: canvas.CanvasFrameOptions, storage: canvas.CanvasFrameStorage) canvas.Error!canvas.CanvasFrame {

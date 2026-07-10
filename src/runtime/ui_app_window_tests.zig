@@ -309,6 +309,99 @@ test "input from the secondary window dispatches through its own tree with its w
     try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.bumps);
 }
 
+test "each window's tokens carry its own surface density, not the main canvas's" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    // Static tokens make this the strict case: ordinary slot rebuilds
+    // skip the redundant emission, so every re-stamped stored copy below
+    // proves the stale-scale re-emit fired for THAT window.
+    var static_tokens = canvas.DesignTokens.theme(.{ .color_scheme = .light });
+    static_tokens.pixel_snap = .{ .geometry = true, .text = true };
+    const app_state = try PanelApp.create(std.heap.page_allocator, .{
+        .name = "ui-app-panel-density",
+        .scene = panel_scene,
+        .canvas_label = canvas_label,
+        .tokens = static_tokens,
+        .update = panelUpdate,
+        .view = panelView,
+        .windows_fn = panelWindows,
+        .window_view = panelWindowView,
+    });
+    defer app_state.destroy();
+    const app = app_state.app();
+    try harness.start(app);
+
+    // Main canvas installs on a 1x monitor; the model already declares
+    // the settings window, so the installing rebuild creates it.
+    app_state.model.settings_open = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    var settings_id: support.platform.WindowId = 0;
+    for (harness.runtime.listWindows(&buffer)) |info| {
+        if (std.mem.eql(u8, info.label, settings_window_label)) settings_id = info.id;
+    }
+    try std.testing.expect(settings_id != 0);
+
+    // The settings window installs on a 2x monitor: ITS stored tokens
+    // carry 2 while the main canvas keeps 1 — the scale is per-window
+    // state, the appearance is still the app's single set.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = settings_id,
+        .label = settings_canvas_label,
+        .size = geometry.SizeF.init(320, 240),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 2_000_000,
+        .nonblank = true,
+    } });
+    const main_stored = try harness.runtime.canvasWidgetDesignTokens(1, canvas_label);
+    try std.testing.expectEqual(@as(f32, 1), main_stored.pixel_snap.scale);
+    var slot_stored = try harness.runtime.canvasWidgetDesignTokens(settings_id, settings_canvas_label);
+    try std.testing.expectEqual(@as(f32, 2), slot_stored.pixel_snap.scale);
+    try std.testing.expectEqualDeep(static_tokens.colors.background, slot_stored.colors.background);
+
+    // Dragging the SECONDARY window to a 1x monitor re-stamps only its
+    // own tokens. The model is poked directly (no dispatch) so the
+    // refreshed slot text proves the frame triggered the slot rebuild.
+    app_state.model.bumps = 3;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = settings_id,
+        .label = settings_canvas_label,
+        .size = geometry.SizeF.init(320, 240),
+        .scale_factor = 1,
+        .frame_index = 2,
+        .timestamp_ns = 3_000_000,
+        .nonblank = true,
+    } });
+    const rebuilt = try harness.runtime.canvasWidgetLayout(settings_id, settings_canvas_label);
+    try std.testing.expect(widgetIdByText(rebuilt, .text, "bumped 3") != null);
+    slot_stored = try harness.runtime.canvasWidgetDesignTokens(settings_id, settings_canvas_label);
+    try std.testing.expectEqual(@as(f32, 1), slot_stored.pixel_snap.scale);
+
+    // A density-carrying RESIZE (the DPI-change channel on hosts that
+    // rescale the frame in place) re-stamps the slot's tokens too, even
+    // at an unchanged logical size.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_resized = .{
+        .window_id = settings_id,
+        .label = settings_canvas_label,
+        .frame = geometry.RectF.init(0, 0, 320, 240),
+        .scale_factor = 2,
+    } });
+    slot_stored = try harness.runtime.canvasWidgetDesignTokens(settings_id, settings_canvas_label);
+    try std.testing.expectEqual(@as(f32, 2), slot_stored.pixel_snap.scale);
+    const main_after = try harness.runtime.canvasWidgetDesignTokens(1, canvas_label);
+    try std.testing.expectEqual(@as(f32, 1), main_after.pixel_snap.scale);
+}
+
 // ------------------------------------------------- window-action effects
 
 const VerbModel = struct {

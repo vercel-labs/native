@@ -1478,6 +1478,13 @@ pub const DesignTokens = struct {
             .house => .{
                 .colors = ColorTokens.theme(options.color_scheme, options.contrast),
                 .controls = ControlTokens.theme(options.color_scheme, options.contrast),
+                // Geometry pixel snapping is part of the house register:
+                // hairline borders land on whole device columns (crisp
+                // 1px lines) and intrinsic boxes round to the device
+                // grid. The runtime stamps the live surface scale on
+                // top; apps opt out through the token override
+                // (`.pixel_snap = .{ .geometry = false }`).
+                .pixel_snap = .{ .geometry = true },
             },
             .geist => geist_theme.designTokens(options.color_scheme, options.contrast),
         };

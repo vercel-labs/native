@@ -2,11 +2,27 @@
 <!-- Application manifest embedded into Windows app executables. Declaring
      the common-controls v6 side-by-side dependency activates the modern
      control styling and the v6-only exports (TaskDialogIndirect); without
-     it the loader binds the system-default v5 assembly. -->
+     it the loader binds the system-default v5 assembly. Declaring
+     per-monitor-v2 DPI awareness makes GetDpiForWindow report the real
+     monitor DPI (instead of a virtualized 96) so the canvas rasterizes
+     at device scale and Windows never bitmap-stretches the window.
+     dpiAwareness carries an ordered fallback list: readers take the first
+     value they recognize, so PerMonitorV2 degrades to PerMonitor where v2
+     is unknown. The dpiAwareness element itself is ignored before Windows
+     10 1607; there the legacy dpiAware element beside it picks up, and its
+     true/pm value requests per-monitor awareness where supported with
+     system-DPI awareness as the floor. Readers that understand dpiAwareness
+     prefer it over dpiAware, so the two elements coexist safely. -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <dependency>
     <dependentAssembly>
       <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
     </dependentAssembly>
   </dependency>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
+    </windowsSettings>
+  </application>
 </assembly>

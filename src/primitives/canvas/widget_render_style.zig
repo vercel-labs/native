@@ -7,10 +7,63 @@ const widget_model = @import("widgets.zig");
 const Color = drawing_model.Color;
 const Fill = drawing_model.Fill;
 const Radius = drawing_model.Radius;
+const StrokeRect = drawing_model.StrokeRect;
 const DesignTokens = token_model.DesignTokens;
 const ControlVisualTokens = token_model.ControlVisualTokens;
 const Widget = widget_model.Widget;
 const WidgetState = widget_model.WidgetState;
+
+/// Snap a hairline border to the device-pixel grid at emit time. A
+/// stroke centered on its rect straddles the boundary by half its
+/// width, so a 1-device-pixel border rasterizes as two half-covered
+/// columns — geometrically faithful but visually soft. Eligibility is
+/// judged on the ROUNDED device width: strokes rounding to one or two
+/// device pixels snap, wider borders keep true geometry, and a width
+/// that rounds to zero stays unsnapped rather than darkening a
+/// sub-half-pixel stroke to a full column. An eligible stroke takes the
+/// FLOOR of its exact device width, never below one pixel, so a
+/// fractional width lands on the lighter whole-pixel neighbor — a 1px
+/// logical border at a 1.5x scale covers one device column, not two.
+/// A hairline is a boundary, not content: when the grid forces a
+/// choice, crisp-and-light reads better than crisp-and-heavy. The snap
+/// moves each frame edge to the grid and pulls the centerline INWARD
+/// by half the snapped width, so the band covers exactly that many
+/// whole device columns and rows with its outer silhouette on the
+/// widget frame (never bleeding past layout bounds). Corner radii
+/// shrink by the same inset so the outer arc keeps the frame's radius,
+/// and the arcs stay smooth: the snapped geometry is still one rounded
+/// rect, rasterized by one continuous coverage field. Inactive without
+/// the pixel-snap geometry token or a usable scale, so fractional
+/// device scales snap in DEVICE space and unsnapped surfaces render
+/// untouched.
+pub fn snapHairlineStrokeRect(tokens: DesignTokens, value: StrokeRect) StrokeRect {
+    if (!tokens.pixel_snap.geometry) return value;
+    const scale = tokens.pixel_snap.scale;
+    if (!std.math.isFinite(scale) or scale <= 0) return value;
+    const exact_device_width = nonNegative(value.stroke.width) * scale;
+    const rounded_device_width = @round(exact_device_width);
+    if (rounded_device_width < 1 or rounded_device_width > 2) return value;
+    const device_width = @max(1, @floor(exact_device_width));
+    const rect = value.rect.normalized();
+    if (rect.isEmpty()) return value;
+    const half_device = device_width * 0.5;
+    const x0 = (@round(rect.x * scale) + half_device) / scale;
+    const y0 = (@round(rect.y * scale) + half_device) / scale;
+    const x1 = (@round(rect.maxX() * scale) - half_device) / scale;
+    const y1 = (@round(rect.maxY() * scale) - half_device) / scale;
+    if (x1 <= x0 or y1 <= y0) return value;
+    const inset = half_device / scale;
+    var snapped = value;
+    snapped.rect = geometry.RectF.init(x0, y0, x1 - x0, y1 - y0);
+    snapped.radius = .{
+        .top_left = @max(0, value.radius.top_left - inset),
+        .top_right = @max(0, value.radius.top_right - inset),
+        .bottom_right = @max(0, value.radius.bottom_right - inset),
+        .bottom_left = @max(0, value.radius.bottom_left - inset),
+    };
+    snapped.stroke.width = device_width / scale;
+    return snapped;
+}
 
 /// The frame the focus ring strokes: the control rect pushed out by the
 /// ring-offset token (`stroke.focus_offset`) — the control keeps its

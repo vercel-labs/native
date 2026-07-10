@@ -74,6 +74,7 @@ const controlRadius = widget_render_style.controlRadius;
 const buttonControlRadius = widget_render_style.buttonControlRadius;
 const widgetSizedRadiusValue = widget_render_style.widgetSizedRadiusValue;
 const controlStrokeWidth = widget_render_style.controlStrokeWidth;
+const snapHairlineStrokeRect = widget_render_style.snapHairlineStrokeRect;
 const buttonFill = widget_render_style.buttonFill;
 const buttonTextColorForWidget = widget_render_style.buttonTextColorForWidget;
 const buttonBorderFill = widget_render_style.buttonBorderFill;
@@ -294,22 +295,7 @@ fn buttonGroupSegmentRadius(widget: Widget, visual: ControlVisualTokens, tokens:
 /// freed by the retired button shadow.
 fn emitButtonBorder(builder: *Builder, widget: Widget, tokens: DesignTokens, radius: Radius) Error!void {
     const stroke_width = buttonStrokeWidth(widget, tokens);
-    // Seams exist only in the segmented register — a detached chip has
-    // no shared boundary to collapse.
-    const drop_left_border = !widget_render_style.buttonInDetachedGroup(widget, tokens) and
-        (widget.group_segment == .middle or widget.group_segment == .last);
-    if (drop_left_border) {
-        try builder.pushClip(.{
-            .id = widgetPartId(widget.id, 0),
-            .rect = geometry.RectF.init(
-                widget.frame.x + stroke_width * 0.5,
-                widget.frame.y - stroke_width,
-                @max(0, widget.frame.width + stroke_width * 0.5),
-                widget.frame.height + stroke_width * 2,
-            ),
-        });
-    }
-    try builder.strokeRect(.{
+    const border = snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
@@ -318,6 +304,26 @@ fn emitButtonBorder(builder: *Builder, widget: Widget, tokens: DesignTokens, rad
             .width = stroke_width,
         },
     });
+    // Seams exist only in the segmented register — a detached chip has
+    // no shared boundary to collapse.
+    const drop_left_border = !widget_render_style.buttonInDetachedGroup(widget, tokens) and
+        (widget.group_segment == .middle or widget.group_segment == .last);
+    if (drop_left_border) {
+        // The clip's left edge sits on the border band's INNER edge —
+        // computed from the (possibly snapped) emitted stroke, so the
+        // whole left band drops whether or not snapping moved it.
+        const band_inner_x = border.rect.x + border.stroke.width * 0.5;
+        try builder.pushClip(.{
+            .id = widgetPartId(widget.id, 0),
+            .rect = geometry.RectF.init(
+                band_inner_x,
+                widget.frame.y - stroke_width,
+                @max(0, widget.frame.maxX() + stroke_width - band_inner_x),
+                widget.frame.height + stroke_width * 2,
+            ),
+        });
+    }
+    try builder.strokeRect(border);
     if (drop_left_border) try builder.popClip();
 }
 
@@ -404,7 +410,7 @@ pub fn emitSelectWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
         .radius = radius,
         .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, widget.state.pressed, washHovered(widget), tokens.colors.surface))),
     });
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
@@ -412,7 +418,7 @@ pub fn emitSelectWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
             .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
-    });
+    }));
     if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 6, widget.frame, radius);
     if (visible_text.len > 0) {
         const text_color = if (is_placeholder)
@@ -467,7 +473,7 @@ pub fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignToke
         .radius = radius,
         .fill = textInputFill(widget, tokens, visual),
     });
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
@@ -475,7 +481,7 @@ pub fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignToke
             .fill = textInputBorderFill(widget, visual, tokens.colors.border),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
-    });
+    }));
     if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 7, widget.frame, radius);
     if (clips_text) try builder.pushClip(.{ .id = widgetPartId(widget.id, 16), .rect = clip_rect, .radius = radius });
     if (selection_range) |range| {
@@ -529,7 +535,7 @@ pub fn emitInputGroupWidget(builder: *Builder, widget: Widget, tokens: DesignTok
         .radius = radius,
         .fill = textInputFill(widget, tokens, visual),
     });
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
@@ -537,7 +543,7 @@ pub fn emitInputGroupWidget(builder: *Builder, widget: Widget, tokens: DesignTok
             .fill = textInputBorderFill(widget, visual, tokens.colors.border),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
-    });
+    }));
     if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 3, widget.frame, radius);
 }
 
@@ -560,7 +566,7 @@ pub fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTo
         .radius = radius,
         .fill = textInputFill(widget, tokens, visual),
     });
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
@@ -568,7 +574,7 @@ pub fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTo
             .fill = textInputBorderFill(widget, visual, tokens.colors.border),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
-    });
+    }));
     if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 14, widget.frame, radius);
     try emitSearchFieldIcon(builder, widget, tokens, icon_size);
     if (selection_range) |range| {
@@ -871,14 +877,14 @@ pub fn emitDataCellWidgetChrome(builder: *Builder, widget: Widget, tokens: Desig
     // border/stroke opts a cell back into an edge.
     const wants_stroke = widget.style.border != null or visual.border != null or widget.style.stroke_width != null or visual.stroke_width != null;
     if (wants_stroke) {
-        try builder.strokeRect(.{
+        try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
             .id = widgetPartId(widget.id, 2),
             .rect = widget.frame,
             .stroke = .{
                 .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
                 .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
             },
-        });
+        }));
     }
     if (widget.state.focused) try emitWidgetFocusRing(builder, widget, tokens, 3);
     return visual;
@@ -954,7 +960,7 @@ pub fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: Des
                 });
             }
             if (selected) {
-                try builder.strokeRect(.{
+                try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
                     .id = widgetPartId(widget.id, 2),
                     .rect = widget.frame,
                     .radius = radius,
@@ -962,7 +968,7 @@ pub fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: Des
                         .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
                         .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
                     },
-                });
+                }));
             }
         },
         // The underline treatment: triggers are bare text — no pill, no
@@ -1023,7 +1029,7 @@ pub fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignToken
         else
             colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, false, washHovered(widget), tokens.colors.surface))),
     });
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
         .rect = box,
         .radius = radius,
@@ -1031,7 +1037,7 @@ pub fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignToken
             .fill = colorFill(disabledWash(if (selected) widgetAccentColor(widget, visual.border orelse visual.active_background orelse tokens.colors.accent) else widgetBorderColor(widget, visual.border orelse tokens.colors.border), widget.state.disabled, tokens.states.disabled_alpha)),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
-    });
+    }));
     if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 3, box, radius);
     if (selected) {
         // The check keeps the accent-foreground tint even when disabled
@@ -1068,7 +1074,7 @@ pub fn emitRadioWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
         .radius = radius,
         .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, false, washHovered(widget), tokens.colors.surface))),
     });
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
         .rect = circle,
         .radius = radius,
@@ -1078,7 +1084,7 @@ pub fn emitRadioWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
             .fill = colorFill(disabledWash(widgetBorderColor(widget, visual.border orelse tokens.colors.border), widget.state.disabled, tokens.states.disabled_alpha)),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
-    });
+    }));
     if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 3, circle, radius);
     if (selected) {
         const dot_size = @max(0, circle.height * 0.5);
@@ -1128,7 +1134,7 @@ pub fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
     const wants_track_stroke = widget.style.border != null or visual.border != null;
     const track_stroke_width = controlStrokeWidth(widget, visual, if (wants_track_stroke) tokens.stroke.regular else 0);
     if (track_stroke_width > 0) {
-        try builder.strokeRect(.{
+        try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
             .id = widgetPartId(widget.id, 2),
             .rect = track,
             .radius = track_radius,
@@ -1136,7 +1142,7 @@ pub fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
                 .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
                 .width = track_stroke_width,
             },
-        });
+        }));
     }
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 3),
@@ -1215,7 +1221,7 @@ pub fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
     // The thumb's resting hairline wears the focus-ring neutral (a mid
     // gray in both schemes), so the ring on focus reads as a brighter
     // echo of an edge the control already owns — not a recolor.
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 4),
         .rect = knob,
         .radius = knob_radius,
@@ -1223,7 +1229,7 @@ pub fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
             .fill = widgetBorderFill(widget, disabledWash(visual.border orelse tokens.colors.focus_ring, washed, tokens.states.disabled_alpha)),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
         },
-    });
+    }));
     if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 5, knob, knob_radius);
 }
 
@@ -1332,7 +1338,7 @@ fn emitWidgetFocusRing(builder: *Builder, widget: Widget, tokens: DesignTokens, 
 /// (`stroke.focus_offset`) outside it, so focus adds an outline instead
 /// of recoloring the control's edge.
 fn emitWidgetFocusRingForRect(builder: *Builder, widget: Widget, tokens: DesignTokens, slot: ObjectId, rect: geometry.RectF, radius: Radius) Error!void {
-    try builder.strokeRect(.{
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, slot),
         .rect = widget_render_style.focusRingRect(rect, tokens),
         .radius = widget_render_style.focusRingRadius(radius, tokens),
@@ -1340,7 +1346,7 @@ fn emitWidgetFocusRingForRect(builder: *Builder, widget: Widget, tokens: DesignT
             .fill = widgetFocusRingFill(widget, tokens),
             .width = tokens.stroke.focus,
         },
-    });
+    }));
 }
 
 fn emitControlLabelWithColor(builder: *Builder, widget: Widget, tokens: DesignTokens, x: f32, slot: ObjectId, color: Color) Error!void {

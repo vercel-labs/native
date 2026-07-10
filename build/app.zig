@@ -544,6 +544,9 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         // Common-controls v6 side-by-side dependency: without this
         // manifest the loader binds the system-default v5 assembly, which
         // renders classic-styled controls and lacks the v6-only exports.
+        // The manifest also declares per-monitor-v2 DPI awareness so the
+        // canvas rasterizes at real device scale instead of Windows
+        // bitmap-stretching a 96-DPI surface on scaled displays.
         exe.win32_manifest = dep.path("assets/native-sdk.manifest");
         switch (web_engine) {
             .system => app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/webview2_host.cpp"), .flags = &.{"-std=c++17"} }),

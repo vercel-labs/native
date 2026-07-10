@@ -54,6 +54,12 @@ pub fn designTokens(color_scheme: ColorScheme, contrast: ColorContrast) DesignTo
         // then a 2px blue ring — the stroke defaults already carry that
         // geometry, restated here so the pack is explicit about it.
         .stroke = .{ .hairline = 1, .regular = 1, .focus = 2, .focus_offset = 2 },
+        // Crisp 1px lines are core to this register: geometry pixel
+        // snapping lands hairline borders on whole device columns. The
+        // runtime stamps the live surface scale on top; apps opt out
+        // through the token override (`.pixel_snap = .{ .geometry =
+        // false }`).
+        .pixel_snap = .{ .geometry = true },
         // Shadows are quiet: a 2px settle under raised cards, one
         // dominant 16/24 layer under overlays. Buttons stay flat.
         .shadow = .{
