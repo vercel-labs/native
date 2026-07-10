@@ -118,6 +118,7 @@ For builtin windows/WebViews helpers, enable `js_window_api` and policy in the r
 
 - `examples/next`: Next.js app with production assets under `frontend/out`.
 - `examples/react`: React with Vite.
+- `examples/solid`: Solid with Vite.
 - `examples/svelte`: Svelte with Vite.
 - `examples/vue`: Vue with Vite.
 

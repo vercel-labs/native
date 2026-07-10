@@ -312,7 +312,7 @@ When changing app behavior, keep tests in the app's existing authoring tier. Typ
 - `examples/webview`: bridge and WebView runtime example.
 - `examples/browser`: layered WebView/browser-style example.
 - `examples/next`: Next.js with production assets.
-- `examples/react`, `examples/svelte`, `examples/vue`: Vite frontend apps.
+- `examples/react`, `examples/solid`, `examples/svelte`, `examples/vue`: Vite frontend apps.
 - `examples/ios`, `examples/android`: mobile host embedding examples.
 
 ## When answering users
