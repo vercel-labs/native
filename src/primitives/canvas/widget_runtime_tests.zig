@@ -1907,7 +1907,7 @@ test "widget emitter applies selection and range control tokens" {
     try emitWidgetTree(&builder, .{ .id = 64, .kind = .progress, .frame = geometry.RectF.init(0, 172, 160, 8), .value = 0.5 }, tokens);
 
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 18), display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, 17), display_list.commandCount());
     switch (display_list.commands[0]) {
         .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(30, 50, 70), fill.fill),
         else => return error.TestUnexpectedResult,
@@ -1925,34 +1925,34 @@ test "widget emitter applies selection and range control tokens" {
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[5]) {
-        .draw_line => |line| try expectFillColor(Color.rgb8(250, 252, 255), line.stroke.fill),
+        .stroke_path => |stroke| try expectFillColor(Color.rgb8(250, 252, 255), stroke.stroke.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[8]) {
+    switch (display_list.commands[7]) {
         .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(34, 70, 108), fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[10]) {
+    switch (display_list.commands[9]) {
         .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(248, 250, 252), fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[12]) {
+    switch (display_list.commands[11]) {
         .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(50, 56, 64), fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[13]) {
+    switch (display_list.commands[12]) {
         .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(38, 76, 114), fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[14]) {
+    switch (display_list.commands[13]) {
         .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(246, 248, 250), fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[16]) {
+    switch (display_list.commands[15]) {
         .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(52, 58, 66), fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[17]) {
+    switch (display_list.commands[16]) {
         .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(40, 80, 120), fill.fill),
         else => return error.TestUnexpectedResult,
     }
@@ -2642,57 +2642,56 @@ test "widget emitter renders checkbox radio switch and slider controls" {
     }, tokens);
 
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 19), display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, 18), display_list.commandCount());
     switch (display_list.commands[0]) {
         .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.accent, fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expect(display_list.commands[3] == .draw_line);
-    try std.testing.expect(display_list.commands[4] == .draw_line);
-    switch (display_list.commands[5]) {
+    try std.testing.expect(display_list.commands[3] == .stroke_path);
+    switch (display_list.commands[4]) {
         .draw_text => |text| try std.testing.expectEqualStrings("Live", text.text),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[6]) {
+    switch (display_list.commands[5]) {
         .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface, fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[9]) {
+    switch (display_list.commands[8]) {
         .fill_rounded_rect => |fill| {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(11, 4)), fill.id);
             try expectFillColor(tokens.colors.accent, fill.fill);
         },
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[10]) {
+    switch (display_list.commands[9]) {
         .draw_text => |text| try std.testing.expectEqualStrings("Monthly", text.text),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[11]) {
+    switch (display_list.commands[10]) {
         .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.accent, fill.fill),
         else => return error.TestUnexpectedResult,
     }
     // The switch track is borderless now, so the toggle's label follows
     // its fill and knob directly.
-    switch (display_list.commands[13]) {
+    switch (display_list.commands[12]) {
         .draw_text => |text| try std.testing.expectEqualStrings("Mode", text.text),
         else => return error.TestUnexpectedResult,
     }
     // 4px slider rail centered in the 32px row: y = 124 + 14.
-    switch (display_list.commands[15]) {
+    switch (display_list.commands[14]) {
         .fill_rounded_rect => |fill| try expectRect(geometry.RectF.init(0, 138, 40, 4), fill.rect),
         else => return error.TestUnexpectedResult,
     }
     // The knob's resting hairline wears the focus-ring neutral; focus
     // adds the offset ring in the same color outside it.
-    switch (display_list.commands[17]) {
+    switch (display_list.commands[16]) {
         .stroke_rect => |stroke| {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(13, 4)), stroke.id);
             try expectFillColor(tokens.colors.focus_ring, stroke.stroke.fill);
         },
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[18]) {
+    switch (display_list.commands[17]) {
         .stroke_rect => |stroke| {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(13, 5)), stroke.id);
             try std.testing.expectEqual(@as(f32, 3), stroke.stroke.width);

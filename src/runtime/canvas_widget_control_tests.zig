@@ -191,8 +191,8 @@ test "runtime applies pointer values to canvas controls" {
     var saw_empty_slider_active = false;
     for (display_list.commands) |command| {
         switch (command) {
-            .draw_line => |line| {
-                if (line.id == testCanvasWidgetPartId(2, 4)) saw_checkbox_check = true;
+            .stroke_path => |stroke| {
+                if (stroke.id == testCanvasWidgetPartId(2, 4)) saw_checkbox_check = true;
             },
             .fill_rounded_rect => |fill| {
                 if (fill.id == testCanvasWidgetPartId(4, 2)) {
@@ -1328,8 +1328,8 @@ test "runtime refreshes widget owned display list from canvas input" {
     var saw_checkbox_check = false;
     for (display_list.commands) |command| {
         switch (command) {
-            .draw_line => |line| {
-                if (line.id == testCanvasWidgetPartId(2, 4)) saw_checkbox_check = true;
+            .stroke_path => |stroke| {
+                if (stroke.id == testCanvasWidgetPartId(2, 4)) saw_checkbox_check = true;
             },
             else => {},
         }

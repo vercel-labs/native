@@ -436,6 +436,63 @@ test "icon widgets render built-in vector icons as tinted path commands" {
     }
 }
 
+test "checkbox check mark strokes one anti-aliased vector path" {
+    const checkbox = Widget{
+        .id = 63,
+        .kind = WidgetKind.checkbox,
+        .frame = geometry.RectF.init(0, 0, 24, 24),
+        .value = 1,
+    };
+    const tokens = DesignTokens{};
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, checkbox, tokens);
+    const display_list = builder.displayList();
+    // The mark is ONE stroked polyline through the vector core — move
+    // plus two lines, round caps (and the vector core's round joins at
+    // the vee vertex), the same rasterization the built-in stroke icons
+    // get — not a pair of hard-edged line commands.
+    switch (display_list.findCommandById(widgetPartId(63, 4)).?.command) {
+        .stroke_path => |stroke| {
+            try std.testing.expectEqual(@as(usize, 3), stroke.elements.len);
+            try std.testing.expectEqual(PathVerb.move_to, stroke.elements[0].verb);
+            try std.testing.expectEqual(PathVerb.line_to, stroke.elements[1].verb);
+            try std.testing.expectEqual(PathVerb.line_to, stroke.elements[2].verb);
+            try std.testing.expectEqual(@as(f32, 2), stroke.stroke.width);
+            try std.testing.expectEqual(canvas.LineCap.round, stroke.cap);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // Rasterized, the diagonal carries partial-coverage edge pixels —
+    // anti-aliasing a binary point-in-capsule test can never produce —
+    // and the whole render pins byte-identical.
+    var render_commands: [8]RenderCommand = undefined;
+    const plan = try (DisplayList{ .commands = display_list.commands }).renderPlan(&render_commands);
+    var pixels: [24 * 24 * 4]u8 = undefined;
+    @memset(&pixels, 0);
+    const surface = try ReferenceRenderSurface.init(24, 24, &pixels);
+    try surface.renderPass(.{
+        .commands = plan.commands,
+        .surface_size = geometry.SizeF.init(24, 24),
+        .full_repaint = true,
+    }, Color.rgb8(255, 255, 255));
+    // Sample strictly inside the accent fill (the 16px box spans y 4-20;
+    // stay clear of its border ring and corners) and count pixels that
+    // blend between the dark fill and the light mark.
+    var partial: usize = 0;
+    var y: usize = 6;
+    while (y < 18) : (y += 1) {
+        var x: usize = 2;
+        while (x < 14) : (x += 1) {
+            const value = pixels[(y * 24 + x) * 4];
+            if (value > 60 and value < 200) partial += 1;
+        }
+    }
+    try std.testing.expect(partial >= 4);
+    try std.testing.expectEqual(@as(u64, 6001578290815647983), support.referenceSurfaceSignature(&pixels));
+}
+
 test "app-registered icons draw through the widget paths like built-ins" {
     var buffer = canvas.svg_icon.IconBuffer{};
     const parsed = try canvas.svg_icon.parse(

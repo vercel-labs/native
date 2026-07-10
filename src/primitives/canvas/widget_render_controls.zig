@@ -9,6 +9,7 @@ const widget_access = @import("widget_access.zig");
 const widget_metrics = @import("widget_metrics.zig");
 const widget_text_input = @import("widget_text_input.zig");
 const widget_render_style = @import("widget_render_style.zig");
+const widget_render = @import("widget_render.zig");
 const icon_model = @import("icons.zig");
 const svg_icon_model = @import("svg_icon.zig");
 
@@ -1041,17 +1042,23 @@ pub fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignToken
         const left = pixelSnapGeometryPoint(tokens, geometry.PointF.init(box.x + box.width * 0.26, box.y + box.height * 0.54));
         const mid = pixelSnapGeometryPoint(tokens, geometry.PointF.init(box.x + box.width * 0.43, box.y + box.height * 0.70));
         const right = pixelSnapGeometryPoint(tokens, geometry.PointF.init(box.x + box.width * 0.76, box.y + box.height * 0.32));
-        try builder.drawLine(.{
+        // ONE stroked polyline through the vector core, not a pair of
+        // line commands: `draw_line` rasterizes as a hard-edged capsule
+        // (exact for the axis-aligned hairlines it serves), which turns
+        // this diagonal into staircase chunks at control sizes. The
+        // stroke path gets the same anti-aliased coverage and round
+        // caps/joins the built-in stroke icons get, so the mark reads
+        // crisp and even at 1x — same three snapped vertices, so the
+        // drawn shape is unchanged.
+        const elements = try widget_render.allocFramePathElements(3);
+        elements[0] = .{ .verb = .move_to, .points = .{ left, geometry.PointF.zero(), geometry.PointF.zero() } };
+        elements[1] = .{ .verb = .line_to, .points = .{ mid, geometry.PointF.zero(), geometry.PointF.zero() } };
+        elements[2] = .{ .verb = .line_to, .points = .{ right, geometry.PointF.zero(), geometry.PointF.zero() } };
+        try builder.strokePath(.{
             .id = widgetPartId(widget.id, 4),
-            .from = left,
-            .to = mid,
+            .elements = elements,
             .stroke = .{ .fill = colorFill(check_color), .width = 2 },
-        });
-        try builder.drawLine(.{
-            .id = widgetPartId(widget.id, 5),
-            .from = mid,
-            .to = right,
-            .stroke = .{ .fill = colorFill(check_color), .width = 2 },
+            .cap = .round,
         });
     }
     try emitControlLabelWithColor(builder, widget, tokens, box.x + box.width + widgetControlInset(widget, tokens, tokens.spacing.sm), 6, visual.foreground orelse tokens.colors.text);

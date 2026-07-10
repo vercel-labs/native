@@ -113,8 +113,9 @@ pub const sliderWidgetKnobRect = widget_render_controls.sliderWidgetKnobRect;
 const max_widget_depth: usize = 32;
 
 /// Frame-lifetime scratch for widget-built path elements: `.chart`
-/// widgets build their line/band `PathElement`s here at emit time, and
-/// `.spinner` widgets their arc segment (unlike icons, whose elements
+/// widgets build their line/band `PathElement`s here at emit time,
+/// `.spinner` widgets their arc segment, and `.checkbox` its check-mark
+/// polyline (unlike icons, whose elements
 /// are comptime-static); emitted commands slice into it. The event loop
 /// is single-threaded and the runtime copies the display list into
 /// per-view storage within the same emit call stack, so one threadlocal
@@ -155,7 +156,7 @@ fn allocFrameLabelBytes(text: []const u8) Error![]const u8 {
 /// the entry points record it here.
 threadlocal var scrim_viewport: ?geometry.RectF = null;
 
-fn allocFramePathElements(count: usize) Error![]drawing_model.PathElement {
+pub fn allocFramePathElements(count: usize) Error![]drawing_model.PathElement {
     if (frame_path_len + count > frame_path_elements.len) return error.ChartPathElementListFull;
     const start = frame_path_len;
     frame_path_len += count;
