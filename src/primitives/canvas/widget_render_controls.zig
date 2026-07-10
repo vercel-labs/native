@@ -1050,7 +1050,7 @@ pub fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignToken
         // caps/joins the built-in stroke icons get, so the mark reads
         // crisp and even at 1x — same three snapped vertices, so the
         // drawn shape is unchanged.
-        const elements = try widget_render.allocFramePathElements(3);
+        const elements = try builder.allocPathElements(3);
         elements[0] = .{ .verb = .move_to, .points = .{ left, geometry.PointF.zero(), geometry.PointF.zero() } };
         elements[1] = .{ .verb = .line_to, .points = .{ mid, geometry.PointF.zero(), geometry.PointF.zero() } };
         elements[2] = .{ .verb = .line_to, .points = .{ right, geometry.PointF.zero(), geometry.PointF.zero() } };

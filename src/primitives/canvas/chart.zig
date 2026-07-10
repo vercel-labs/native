@@ -14,7 +14,7 @@
 //! Budgets: series points are bounded at `max_chart_points_per_series`
 //! per series (the `Ui.chart` builder downsamples anything longer, so a
 //! 10k-point star-history series renders instead of erroring), and the
-//! per-frame path-element scratch in the widget renderer is bounded at
+//! display-list builder's path-element store is bounded at
 //! `max_chart_path_elements_per_frame`, mirroring the runtime's per-view
 //! `max_canvas_path_elements_per_view` budget (a lockstep test keeps the
 //! two from drifting).
@@ -32,9 +32,10 @@ pub const ChartSeriesColor = text_spans_model.TextSpanColor;
 /// pass through verbatim.
 pub const max_chart_points_per_series: usize = 256;
 
-/// Per-frame path-element scratch budget for chart rendering (the widget
-/// renderer builds line/band path elements into threadlocal scratch that
-/// must survive until the runtime copies the display list). Mirrors the
+/// Path-element budget for the display-list builder's own element store
+/// (the widget renderer builds chart line/band elements — and the
+/// spinner's and checkbox's — directly into the builder, so the emitted
+/// commands own their geometry for the builder's lifetime). Mirrors the
 /// runtime's `canvas_limits.max_canvas_path_elements_per_view`: a frame
 /// that would exceed this fails loudly with `ChartPathElementListFull`,
 /// exactly when the per-view path budget would have refused the copy
@@ -44,9 +45,9 @@ pub const max_chart_points_per_series: usize = 256;
 pub const max_chart_path_elements_per_frame: usize = 2048;
 
 /// Per-frame byte budget for the formatted tick/tooltip label scratch
-/// (same threadlocal frame-lifetime contract as the path elements: the
-/// emitted `drawText` commands slice into it until the runtime copies
-/// the display list). A y axis labels at most a handful of ticks and a
+/// (threadlocal frame-lifetime storage: the emitted `drawText` commands
+/// slice into it until the runtime copies the display list). A y axis
+/// labels at most a handful of ticks and a
 /// hover tooltip a row per series, each `max_chart_value_label_bytes`
 /// long, so 2 KiB holds dozens of charts per frame; overflow fails
 /// loudly with `ChartLabelBytesFull`.

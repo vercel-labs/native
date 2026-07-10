@@ -348,6 +348,8 @@ fn writeCanvasGpuCommandJson(command: CanvasGpuCommand, writer: anytype) !void {
     try writer.writeAll(",\"paint\":");
     try writeCanvasGpuPaintJson(command.paint, writer);
     try writer.print(",\"strokeWidth\":{d}", .{command.stroke_width});
+    try writer.writeAll(",\"cap\":");
+    try json.writeString(writer, @tagName(command.cap));
     try writer.writeAll(",\"image\":");
     try writeCanvasGpuImageJson(command.image, writer);
     try writer.writeAll(",\"text\":");
@@ -974,7 +976,7 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 }
 
 // ---------------------------------------------------------------------------
-// Compact binary gpu-surface packet encoding (wire format v3).
+// Compact binary gpu-surface packet encoding (wire format v4).
 //
 // The version this comment names, the `binary_packet_version` constant
 // below, and the host decoder's spec comment (appkit_host.m) must agree;
@@ -1006,6 +1008,11 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 // scissor stays the union of the list (hosts may honor either; pixels
 // outside every rect are unchanged by construction).
 //
+// v4 (from v3): every command carries a stroke end-cap code (u8, 0 butt
+// / 1 round) after stroke_width, so packet hosts stroke open subpaths
+// (the checkbox mark, the spinner arc) with the same cap the reference
+// renderer rasterizes instead of their engine default.
+//
 // Layout:
 //   "NSGP" u8[4] | version u8 | load_action u8 (1 load / 2 clear /
 //     3 patch) | flags u8 (bit0 scissor, bit1 dirty rect list) | reserved u8
@@ -1023,7 +1030,7 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 //     | order_count u32 | order keys u64[]
 
 pub const binary_packet_magic = "NSGP";
-pub const binary_packet_version: u8 = 3;
+pub const binary_packet_version: u8 = 4;
 
 /// Most dirty rects a patch header carries: enough to keep far-apart
 /// small changes (a switch plus a status line) from fusing into a
@@ -1054,6 +1061,7 @@ pub fn canvasGpuCommandFingerprint(command: CanvasGpuCommand) u64 {
     h = hash.resourceHashRect(h, command.bounds);
     h = hash.resourceHashF32(h, command.opacity);
     h = hash.resourceHashF32(h, command.stroke_width);
+    h = hash.resourceHashEnum(h, @intFromEnum(command.cap));
     h = hash.resourceHashOptionalObjectId(h, command.id);
     h = hash.resourceHashOptionalRect(h, command.clip);
     h = hash.resourceHashAffine(h, command.transform);
@@ -1254,7 +1262,8 @@ const binary_command_flag_text: u8 = 0x40;
 const binary_command_flag_effect: u8 = 0x80;
 
 /// Command layout: kind u8 | flags u8 | bounds f32[4] | opacity f32
-/// | stroke_width f32 | [id u64] | [clip f32[4]] | [transform f32[6]]
+/// | stroke_width f32 | cap u8 (0 butt / 1 round) | [id u64]
+/// | [clip f32[4]] | [transform f32[6]]
 /// | [shape] | [paint] | [image] | [text] | [effect] — each optional
 /// section present exactly when its flag bit is set. The identity
 /// transform is elided (the flag doubles as "non-identity").
@@ -1276,6 +1285,10 @@ fn writeCanvasGpuCommandBinary(command: CanvasGpuCommand, writer: anytype) !void
     try writeBinaryRect(command.bounds, writer);
     try writeBinaryF32(command.opacity, writer);
     try writeBinaryF32(command.stroke_width, writer);
+    try writer.writeByte(switch (command.cap) {
+        .butt => 0,
+        .round => 1,
+    });
     if (command.id) |id| try writer.writeInt(u64, id, .little);
     if (command.clip) |clip| try writeBinaryRect(clip, writer);
     if (!identity_transform) try writeBinaryAffine(command.transform, writer);

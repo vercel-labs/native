@@ -1317,7 +1317,7 @@ test "every display-list command kind is representable on the packet path" {
         .{ .stroke_rect = .{ .id = 13, .rect = geometry.RectF.init(32, 32, 32, 32), .radius = canvas.Radius.all(4), .stroke = .{ .width = 2, .fill = .{ .color = canvas.Color.rgb8(0, 0, 255) } } } },
         .{ .draw_line = .{ .id = 14, .from = geometry.PointF.init(0, 70), .to = geometry.PointF.init(64, 70), .stroke = .{ .width = 1, .fill = .{ .color = canvas.Color.rgb8(128, 128, 128) } } } },
         .{ .fill_path = .{ .id = 15, .elements = &path_elements, .fill = .{ .color = canvas.Color.rgb8(200, 100, 50) } } },
-        .{ .stroke_path = .{ .id = 16, .elements = &path_elements, .stroke = .{ .width = 1.5, .fill = .{ .color = canvas.Color.rgb8(50, 100, 200) } } } },
+        .{ .stroke_path = .{ .id = 16, .elements = &path_elements, .stroke = .{ .width = 1.5, .fill = .{ .color = canvas.Color.rgb8(50, 100, 200) } }, .cap = .round } },
         .{ .draw_image = .{ .id = 17, .image_id = 3, .dst = geometry.RectF.init(80, 80, 24, 24), .radius = canvas.Radius.all(12) } },
         .{ .draw_text = .{ .id = 18, .font_id = 1, .size = 13, .origin = geometry.PointF.init(8, 120), .color = canvas.Color.rgb8(30, 30, 30), .text = "audit", .text_layout = .{ .max_width = 200, .line_height = 16, .wrap = .word } } },
         .{ .shadow = .{ .id = 19, .rect = geometry.RectF.init(10, 140, 40, 20), .radius = canvas.Radius.all(4), .offset = .{ .dx = 0, .dy = 2 }, .blur = 6, .spread = 1, .color = canvas.Color.rgba8(0, 0, 0, 90) } },
@@ -1341,10 +1341,18 @@ test "every display-list command kind is representable on the packet path" {
     // Structural commands never reach the packet: 11 draw commands.
     try std.testing.expectEqual(@as(usize, 11), packet.commandCount());
 
+    // The stroke path's cap channel survives into the packet command —
+    // the field the host reads to shape open subpath ends.
+    for (packet.commands) |packet_command| {
+        const expected_cap: canvas.LineCap = if (packet_command.kind == .stroke_path) .round else .butt;
+        try std.testing.expectEqual(expected_cap, packet_command.cap);
+    }
+
     // Both encodings accept the full kind coverage.
     var json_buffer: [64 * 1024]u8 = undefined;
     var json_writer = std.Io.Writer.fixed(&json_buffer);
     try packet.writeJson(&json_writer);
+    try std.testing.expect(std.mem.indexOf(u8, json_writer.buffered(), "\"cap\":\"round\"") != null);
     var binary_buffer: [64 * 1024]u8 = undefined;
     var binary_writer = std.Io.Writer.fixed(&binary_buffer);
     try packet.writeBinary(&binary_writer);

@@ -2399,6 +2399,14 @@ static BOOL NativeSdkPacketDrawCommandBody(NSDictionary *command, NSString *kind
     } else if ([kind isEqualToString:@"stroke_path"]) {
         NSBezierPath *path = NativeSdkPacketShapePath(NativeSdkPacketDictionary(command[@"shape"]));
         path.lineWidth = MAX(1, NativeSdkPacketNumber(command[@"strokeWidth"], path.lineWidth));
+        /* End caps come from the command's cap channel (the engine's
+         * reference renderer honors the same field); joins are always
+         * round for path strokes — the engine rounds every stroke-path
+         * join, so a default miter here would put a spur on the
+         * checkbox mark's vee that no other engine draws. */
+        NSString *cap = [command[@"cap"] isKindOfClass:[NSString class]] ? command[@"cap"] : @"butt";
+        path.lineCapStyle = [cap isEqualToString:@"round"] ? NSLineCapStyleRound : NSLineCapStyleButt;
+        path.lineJoinStyle = NSLineJoinStyleRound;
         ok = NativeSdkPacketDrawPaintedPath(path, NativeSdkPacketDictionary(command[@"paint"]), opacity, YES);
     } else if ([kind isEqualToString:@"draw_text"]) {
         ok = NativeSdkPacketDrawText(NativeSdkPacketDictionary(command[@"text"]), opacity);
@@ -2478,7 +2486,7 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
 }
 
 /* ---------------------------------------------------------------------------
- * Compact binary gpu-surface packet decoding (wire format v3).
+ * Compact binary gpu-surface packet decoding (wire format v4).
  *
  * Little-endian, length-prefixed, mirror of the engine's binary packet
  * encoder (serialization.zig, `writeCanvasGpuPacketBinary` and the patch
@@ -2492,9 +2500,10 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
  * command, and the `patch` load action carrying an edit script (evicts +
  * keyed upserts + the full draw-order vector) against the view's retained
  * command dictionary; v3 added the flag-gated dirty rect list after the
- * scissor. The version this comment names and the encoder's spec comment
- * must agree with `binary_packet_version` (serialization.zig); the
- * `test-wire-format-version-prose` build check pins all three.
+ * scissor; v4 added the per-command stroke end-cap code after
+ * stroke_width. The version this comment names and the encoder's spec
+ * comment must agree with `binary_packet_version` (serialization.zig);
+ * the `test-wire-format-version-prose` build check pins all three.
  */
 
 /* Retained commands per view; pins the engine's
@@ -2808,7 +2817,12 @@ static NSDictionary *NativeSdkBinaryReadCommand(NativeSdkBinaryPacketReader *rea
     NSArray *bounds = NativeSdkBinaryReadF32Array(reader, 4);
     NSNumber *opacity = NativeSdkBinaryReadF32Number(reader);
     NSNumber *strokeWidth = NativeSdkBinaryReadF32Number(reader);
-    if (reader->failed || !kind || !bounds) {
+    uint8_t capCode = NativeSdkBinaryReadU8(reader);
+    /* Same string values the JSON parse yields, so the draw functions
+     * serve both encodings unchanged. Unknown codes are a framing
+     * violation like any unknown tag. */
+    NSString *cap = capCode == 0 ? @"butt" : (capCode == 1 ? @"round" : nil);
+    if (reader->failed || !kind || !bounds || !cap) {
         reader->failed = YES;
         return nil;
     }
@@ -2817,6 +2831,7 @@ static NSDictionary *NativeSdkBinaryReadCommand(NativeSdkBinaryPacketReader *rea
         @"bounds" : bounds,
         @"opacity" : opacity,
         @"strokeWidth" : strokeWidth,
+        @"cap" : cap,
     }];
     if (flags & NativeSdkBinaryCommandFlagId) command[@"id"] = @(NativeSdkBinaryReadU64(reader));
     if (flags & NativeSdkBinaryCommandFlagClip) {
@@ -2871,7 +2886,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (memcmp(bytes, "NSGP", 4) != 0) return nil;
     reader.offset = 4;
     uint8_t version = NativeSdkBinaryReadU8(&reader);
-    if (version != 3) return nil;
+    if (version != 4) return nil;
     uint8_t loadActionCode = NativeSdkBinaryReadU8(&reader);
     uint8_t packetFlags = NativeSdkBinaryReadU8(&reader);
     (void)NativeSdkBinaryReadU8(&reader); /* reserved */

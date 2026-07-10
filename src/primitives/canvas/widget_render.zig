@@ -112,30 +112,23 @@ pub const sliderWidgetKnobRect = widget_render_controls.sliderWidgetKnobRect;
 
 const max_widget_depth: usize = 32;
 
-/// Frame-lifetime scratch for widget-built path elements: `.chart`
-/// widgets build their line/band `PathElement`s here at emit time,
-/// `.spinner` widgets their arc segment, and `.checkbox` its check-mark
-/// polyline (unlike icons, whose elements
-/// are comptime-static); emitted commands slice into it. The event loop
-/// is single-threaded and the runtime copies the display list into
-/// per-view storage within the same emit call stack, so one threadlocal
-/// buffer per frame is sound — reset at each emit entry point. Sized to
-/// mirror the runtime's per-view path-element budget
-/// (`canvas_limits.max_canvas_path_elements_per_view`; a lockstep test
-/// keeps them equal), so overflow here fails exactly where the per-view
-/// copy would have refused anyway — loudly, by budget name.
-threadlocal var frame_path_elements: [chart_model.max_chart_path_elements_per_frame]drawing_model.PathElement = undefined;
-threadlocal var frame_path_len: usize = 0;
+// Widget-built path elements (`.chart` lines/bands, the `.spinner` arc
+// and segments, the `.checkbox` check mark — unlike icons, whose
+// elements are comptime-static) allocate from the display-list builder's
+// own store (`Builder.allocPathElements`), so the emitted commands'
+// element slices share the builder's lifetime instead of pointing into
+// shared scratch that a later emission could overwrite.
 
 /// Frame-lifetime scratch for formatted chart label text (y tick values
-/// and hover-detail rows): `drawText` commands slice into it under the
-/// same single-threaded copy-before-return contract as the path
-/// elements above. Overflow fails loudly by budget name.
+/// and hover-detail rows): `drawText` commands slice into it. The event
+/// loop is single-threaded and the runtime copies the display list into
+/// per-view storage within the same emit call stack, so one threadlocal
+/// buffer per frame is sound — reset at each emit entry point. Overflow
+/// fails loudly by budget name.
 threadlocal var frame_label_bytes: [chart_model.max_chart_label_bytes_per_frame]u8 = undefined;
 threadlocal var frame_label_len: usize = 0;
 
-fn resetFramePathScratch() void {
-    frame_path_len = 0;
+fn resetFrameLabelScratch() void {
     frame_label_len = 0;
 }
 
@@ -150,21 +143,14 @@ fn allocFrameLabelBytes(text: []const u8) Error![]const u8 {
 }
 
 /// Frame-lifetime scratch (same single-threaded emit contract as the
-/// path-element scratch above) holding the root bounds of the tree being
+/// label scratch above) holding the root bounds of the tree being
 /// emitted: the rect a modal surface's scrim covers. Chrome emission
 /// happens deep in the recursion where no ancestor frame is in scope, so
 /// the entry points record it here.
 threadlocal var scrim_viewport: ?geometry.RectF = null;
 
-pub fn allocFramePathElements(count: usize) Error![]drawing_model.PathElement {
-    if (frame_path_len + count > frame_path_elements.len) return error.ChartPathElementListFull;
-    const start = frame_path_len;
-    frame_path_len += count;
-    return frame_path_elements[start .. start + count];
-}
-
 pub fn emitWidgetTree(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    resetFramePathScratch();
+    resetFrameLabelScratch();
     scrim_viewport = widget.frame.normalized();
     try emitWidgetDepth(builder, widget, tokens, 0);
 }
@@ -174,7 +160,7 @@ pub fn emitWidgetLayout(builder: *Builder, layout: anytype, tokens: DesignTokens
 }
 
 pub fn emitWidgetLayoutWithState(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
-    resetFramePathScratch();
+    resetFrameLabelScratch();
     scrim_viewport = widgetLayoutRootBounds(layout);
     try emitWidgetLayoutChildren(builder, layout, null, tokens, state);
     try emitWidgetLayoutAnchored(builder, layout, tokens, state);
@@ -1537,7 +1523,7 @@ fn emitSpinnerArc(builder: *Builder, widget: Widget, visual: ControlVisualTokens
     const delta_degrees = spinner_arc_sweep_degrees / @as(f32, @floatFromInt(segment_total));
     const kappa = (4.0 / 3.0) * @tan(std.math.degreesToRadians(delta_degrees) * 0.25) * radius;
 
-    const elements = try allocFramePathElements(1 + segment_total);
+    const elements = try builder.allocPathElements(1 + segment_total);
     const start_radians = std.math.degreesToRadians(start_degrees);
     elements[0] = .{ .verb = .move_to, .points = .{
         geometry.PointF.init(center.x + radius * @cos(start_radians), center.y + radius * @sin(start_radians)),
@@ -1623,7 +1609,7 @@ fn emitSpinnerSegments(builder: *Builder, widget: Widget, tokens: DesignTokens, 
         const f = geometry.PointF.init(inner.x - cap * v.x, inner.y - cap * v.y);
         const inner_mid = geometry.PointF.init(inner.x - cap * u.x, inner.y - cap * u.y);
 
-        const elements = try allocFramePathElements(8);
+        const elements = try builder.allocPathElements(8);
         elements[0] = .{ .verb = .move_to, .points = .{ a, geometry.PointF.zero(), geometry.PointF.zero() } };
         elements[1] = .{ .verb = .line_to, .points = .{ b, geometry.PointF.zero(), geometry.PointF.zero() } };
         elements[2] = .{ .verb = .cubic_to, .points = .{
@@ -1988,7 +1974,7 @@ fn emitChartLine(
 
     if (series.fill) {
         const base_y = chartMapY(chartBaselineValue(domain), domain, plot, 0);
-        const elements = try allocFramePathElements(points.len + 3);
+        const elements = try builder.allocPathElements(points.len + 3);
         for (points, 0..) |point, index| {
             elements[index] = .{
                 .verb = if (index == 0) .move_to else .line_to,
@@ -2005,7 +1991,7 @@ fn emitChartLine(
         });
     }
 
-    const elements = try allocFramePathElements(points.len);
+    const elements = try builder.allocPathElements(points.len);
     for (points, 0..) |point, index| {
         elements[index] = .{
             .verb = if (index == 0) .move_to else .line_to,
@@ -2036,7 +2022,7 @@ fn emitChartBand(
     const base_y = chartMapY(chartBaselineValue(domain), domain, plot, 0);
     const pair_count = @min(series.values.len, series.low.len);
     const lower_count = if (pair_count >= 2) pair_count else 2;
-    const elements = try allocFramePathElements(upper.len + lower_count + 1);
+    const elements = try builder.allocPathElements(upper.len + lower_count + 1);
     for (upper, 0..) |point, index| {
         elements[index] = .{
             .verb = if (index == 0) .move_to else .line_to,

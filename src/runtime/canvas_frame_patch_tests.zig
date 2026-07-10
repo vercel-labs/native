@@ -180,7 +180,7 @@ const BinaryCursor = struct {
         const start = self.offset;
         _ = try self.readU8(); // kind
         const flags = try self.readU8();
-        try self.skip(16 + 4 + 4); // bounds + opacity + stroke_width
+        try self.skip(16 + 4 + 4 + 1); // bounds + opacity + stroke_width + cap
         if (flags & 0x01 != 0) try self.skip(8); // id
         if (flags & 0x02 != 0) try self.skip(16); // clip
         if (flags & 0x04 != 0) try self.skip(24); // transform
@@ -929,6 +929,9 @@ test "command fingerprints cover every encoded field" {
     changed.stroke_width = 3;
     try std.testing.expect(canvas.canvasGpuCommandFingerprint(changed) != base_fingerprint);
     changed = base;
+    changed.cap = .round;
+    try std.testing.expect(canvas.canvasGpuCommandFingerprint(changed) != base_fingerprint);
+    changed = base;
     changed.id = 42;
     try std.testing.expect(canvas.canvasGpuCommandFingerprint(changed) != base_fingerprint);
     changed = base;
@@ -973,6 +976,41 @@ test "command fingerprints cover every encoded field" {
     var moved = unkeyed;
     moved.command_index = 4;
     try std.testing.expect(canvas.canvasGpuPacketCommandKey(moved, unkeyed_fingerprint) != synthetic);
+}
+
+test "the stroke end-cap rides the binary command encoding" {
+    // The command model's cap channel must survive the wire: the host
+    // strokes the checkbox mark's open polyline with the caps the
+    // reference renderer rasterizes, so a dropped byte here is silent
+    // cross-engine divergence. The cap sits at a fixed offset — key u64,
+    // kind u8, flags u8, bounds f32[4], opacity f32, stroke_width f32 —
+    // pinned against the host decoder's layout.
+    const elements = [_]canvas.PathElement{
+        .{ .verb = .move_to, .points = .{ geometry.PointF.init(4, 8), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(7, 11), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(12, 5), geometry.PointF.zero(), geometry.PointF.zero() } },
+    };
+    var command = canvas.CanvasGpuCommand{
+        .command_index = 0,
+        .id = 7,
+        .kind = .stroke_path,
+        .bounds = geometry.RectF.init(4, 5, 8, 6),
+        .shape = .{ .path = &elements },
+        .paint = .{ .color = canvas.Color.rgb8(255, 255, 255) },
+        .stroke_width = 2,
+        .cap = .round,
+    };
+    const cap_offset = 8 + 1 + 1 + 16 + 4 + 4;
+
+    var buffer: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try canvas.writeCanvasGpuCommandBinaryKeyed(7, command, &writer);
+    try std.testing.expectEqual(@as(u8, 1), writer.buffered()[cap_offset]);
+
+    command.cap = .butt;
+    var butt_writer = std.Io.Writer.fixed(&buffer);
+    try canvas.writeCanvasGpuCommandBinaryKeyed(7, command, &butt_writer);
+    try std.testing.expectEqual(@as(u8, 0), butt_writer.buffered()[cap_offset]);
 }
 
 test "pixel presents adopt a dirty-refinement baseline only for opted-in hosts and never feed patches" {

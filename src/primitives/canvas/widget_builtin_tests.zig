@@ -493,6 +493,56 @@ test "checkbox check mark strokes one anti-aliased vector path" {
     try std.testing.expectEqual(@as(u64, 6001578290815647983), support.referenceSurfaceSignature(&pixels));
 }
 
+test "a builder accumulating two widget trees keeps each checkbox mark's own geometry" {
+    const tokens = DesignTokens{};
+    const first = Widget{
+        .id = 63,
+        .kind = WidgetKind.checkbox,
+        .frame = geometry.RectF.init(0, 0, 24, 24),
+        .value = 1,
+    };
+    const second = Widget{
+        .id = 64,
+        .kind = WidgetKind.checkbox,
+        .frame = geometry.RectF.init(40, 8, 48, 48),
+        .value = 1,
+    };
+
+    // Snapshot the first mark's vertices from a solo emit, deep-copied
+    // before any other emission runs.
+    var solo_commands: [8]CanvasCommand = undefined;
+    var solo_builder = Builder.init(&solo_commands);
+    try emitWidgetTree(&solo_builder, first, tokens);
+    var expected: [3]canvas.PathElement = undefined;
+    switch (solo_builder.displayList().findCommandById(widgetPartId(63, 4)).?.command) {
+        .stroke_path => |stroke| {
+            try std.testing.expectEqual(@as(usize, 3), stroke.elements.len);
+            @memcpy(&expected, stroke.elements[0..3]);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // One builder accumulating two separately emitted trees: the first
+    // tree's mark command must still describe the FIRST checkbox after
+    // the second emit — its elements live in builder-owned storage, so
+    // no later emission can overwrite them out from under the retained
+    // display list.
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, first, tokens);
+    try emitWidgetTree(&builder, second, tokens);
+    switch (builder.displayList().findCommandById(widgetPartId(63, 4)).?.command) {
+        .stroke_path => |stroke| {
+            try std.testing.expectEqual(@as(usize, 3), stroke.elements.len);
+            for (expected, stroke.elements) |expected_element, element| {
+                try std.testing.expectEqual(expected_element.verb, element.verb);
+                try std.testing.expectEqual(expected_element.points[0], element.points[0]);
+            }
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "app-registered icons draw through the widget paths like built-ins" {
     var buffer = canvas.svg_icon.IconBuffer{};
     const parsed = try canvas.svg_icon.parse(

@@ -1,6 +1,7 @@
 const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
+const chart_model = @import("chart.zig");
 const drawing_model = @import("drawing.zig");
 const text_model = @import("text.zig");
 const render_model = @import("render.zig");
@@ -365,6 +366,20 @@ fn nonNegative(value: f32) f32 {
 pub const Builder = struct {
     commands: []CanvasCommand,
     len: usize = 0,
+    /// Builder-owned storage for path elements built at emit time (the
+    /// checkbox mark, chart polylines and bands, the spinner arc and
+    /// segments). Emitters allocate from here via `allocPathElements`,
+    /// so their commands' element slices share the builder's lifetime:
+    /// a display list accumulated across several emit calls — or held
+    /// while another builder emits — keeps every path's geometry
+    /// intact. Comptime-static elements (the icon registry) bypass the
+    /// store and stay zero-copy. Sized to the chart frame budget, which
+    /// a lockstep test keeps equal to the runtime's per-view
+    /// path-element budget, so overflow fails loudly by budget name
+    /// exactly where the runtime's per-view copy would have refused
+    /// anyway.
+    path_elements: [chart_model.max_chart_path_elements_per_frame]drawing_model.PathElement = undefined,
+    path_element_len: usize = 0,
 
     pub fn init(commands: []CanvasCommand) Builder {
         return .{ .commands = commands };
@@ -372,6 +387,18 @@ pub const Builder = struct {
 
     pub fn reset(self: *Builder) void {
         self.len = 0;
+        self.path_element_len = 0;
+    }
+
+    /// Reserve `count` path elements in the builder-owned store. The
+    /// returned slice is caller-filled and stays valid for the life of
+    /// the builder (until `reset`), so commands built over it survive
+    /// later emissions into this or any other builder.
+    pub fn allocPathElements(self: *Builder, count: usize) error{ChartPathElementListFull}![]drawing_model.PathElement {
+        if (self.path_element_len + count > self.path_elements.len) return error.ChartPathElementListFull;
+        const start = self.path_element_len;
+        self.path_element_len += count;
+        return self.path_elements[start..self.path_element_len];
     }
 
     pub fn displayList(self: *const Builder) DisplayList {

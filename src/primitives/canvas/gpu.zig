@@ -13,6 +13,7 @@ const Color = drawing_model.Color;
 const Radius = drawing_model.Radius;
 const LinearGradient = drawing_model.LinearGradient;
 const Fill = drawing_model.Fill;
+const LineCap = drawing_model.LineCap;
 const PathElement = drawing_model.PathElement;
 const ImageFit = drawing_model.ImageFit;
 const ImageSampling = drawing_model.ImageSampling;
@@ -201,6 +202,12 @@ pub const CanvasGpuCommand = struct {
     shape: CanvasGpuShape = .none,
     paint: CanvasGpuPaint = .none,
     stroke_width: f32 = 0,
+    /// Stroke end-cap shape for `stroke_path` commands (butt for every
+    /// other kind, matching the display-list model where only path
+    /// strokes carry a cap channel). Rides the wire so packet hosts
+    /// stroke open subpaths with the same ends the reference renderer
+    /// rasterizes.
+    cap: LineCap = .butt,
     image: ?CanvasGpuImage = null,
     text: ?CanvasGpuText = null,
     effect: CanvasGpuEffect = .none,
@@ -525,6 +532,7 @@ pub fn canvasGpuCommandFromRenderCommand(command: RenderCommand, command_index: 
             packet_command.shape = .{ .path = value.elements };
             packet_command.paint = canvasGpuPaint(value.stroke.fill);
             packet_command.stroke_width = value.stroke.width;
+            packet_command.cap = value.cap;
             packet_command.uses_path_geometry = true;
             packet_command.uses_resource = canvasGpuFillUsesResource(value.stroke.fill);
         },
