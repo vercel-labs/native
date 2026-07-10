@@ -320,8 +320,9 @@ fn shortcutModifiers(comptime shortcut: anytype) native_sdk.ShortcutModifiers {
 }
 
 pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
+    comptime validateNativeHostManifest();
     if (build_options.debug_overlay) {
-        std.debug.print("debug-overlay=true backend={s} web-engine={s} trace={s}\n", .{ build_options.platform, build_options.web_engine, build_options.trace });
+        std.debug.print("debug-overlay=true backend={s} host={s} web-engine={s} trace={s}\n", .{ build_options.platform, build_options.host, build_options.web_engine, build_options.trace });
     }
     // Session replay never opens a real platform: the journal is the
     // world, and it drives a headless runtime over the null platform.
@@ -345,6 +346,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
     const session_recorder = setupSessionRecorder(init, app_info);
     var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
+    const platform = if (comptime nativeHost()) null_platform.nativePlatform() else null_platform.platform();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -368,7 +370,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
     native_sdk.Runtime.initAt(runtime, .{
-        .platform = null_platform.platform(),
+        .platform = platform,
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
@@ -384,7 +386,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
         .session_recorder = session_recorder,
     });
 
-    try runtime.run(app);
+    try runRuntime(runtime, app);
     finishSessionRecorder(session_recorder);
 }
 
@@ -422,7 +424,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
     native_sdk.Runtime.initAt(runtime, .{
-        .platform = mac_platform.platform(),
+        .platform = if (comptime nativeHost()) mac_platform.nativePlatform() else mac_platform.platform(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
@@ -439,7 +441,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     });
     native_sdk.runtime.launch_timing.lap("runtime_ready");
 
-    try runtime.run(app);
+    try runRuntime(runtime, app);
     finishSessionRecorder(session_recorder);
 }
 
@@ -473,7 +475,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
     native_sdk.Runtime.initAt(runtime, .{
-        .platform = linux_platform.platform(),
+        .platform = if (comptime nativeHost()) linux_platform.nativePlatform() else linux_platform.platform(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
@@ -489,7 +491,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .session_recorder = session_recorder,
     });
 
-    try runtime.run(app);
+    try runRuntime(runtime, app);
     finishSessionRecorder(session_recorder);
 }
 
@@ -523,7 +525,7 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
     native_sdk.Runtime.initAt(runtime, .{
-        .platform = windows_platform.platform(),
+        .platform = if (comptime nativeHost()) windows_platform.nativePlatform() else windows_platform.platform(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
@@ -539,8 +541,16 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
         .session_recorder = session_recorder,
     });
 
-    try runtime.run(app);
+    try runRuntime(runtime, app);
     finishSessionRecorder(session_recorder);
+}
+
+fn runRuntime(runtime: *native_sdk.Runtime, app: native_sdk.App) !void {
+    if (comptime nativeHost()) {
+        try runtime.runNative(app);
+    } else {
+        try runtime.run(app);
+    }
 }
 
 // ------------------------------------------------- session record/replay
@@ -620,7 +630,7 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
     const app_info = options.appInfo(&buffers);
     var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
     null_platform.gpu_surfaces = true;
-    var replay_platform = null_platform.platform();
+    var replay_platform = if (comptime nativeHost()) null_platform.nativePlatform() else null_platform.platform();
     // Same-platform replay must mirror the RECORDING host's rendering
     // capabilities, or pixel checkpoints catch the honest difference:
     // - text measures through the SAME host seam (macOS: CoreText + the
@@ -651,7 +661,7 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
         !std.mem.eql(u8, value, "0")
     else
         true;
-    const report = native_sdk.runtime.replaySession(runtime, app, journal_bytes, .{ .verify = verify }) catch |err| {
+    const report = (if (comptime nativeHost()) native_sdk.runtime.replayNativeSession else native_sdk.runtime.replaySession)(runtime, app, journal_bytes, .{ .verify = verify }) catch |err| {
         switch (err) {
             error.JournalBadMagic,
             error.JournalUnsupportedVersion,
@@ -710,6 +720,41 @@ fn shouldTrace(record: native_sdk.trace.Record) bool {
 fn webEngine() native_sdk.WebEngine {
     if (comptime std.mem.eql(u8, build_options.web_engine, "chromium")) return .chromium;
     return .system;
+}
+
+fn nativeHost() bool {
+    return std.mem.eql(u8, build_options.host, "native");
+}
+
+fn validateNativeHostManifest() void {
+    if (!nativeHost()) return;
+    if (@hasField(@TypeOf(app_manifest), "frontend")) {
+        @compileError("app.zon host = \"native\" cannot declare frontend content");
+    }
+    if (@hasField(@TypeOf(app_manifest), "capabilities")) {
+        for (app_manifest.capabilities) |capability| {
+            if (std.mem.eql(u8, capability, "webview")) {
+                @compileError("app.zon host = \"native\" cannot declare the webview capability");
+            }
+            if (std.mem.eql(u8, capability, "js_bridge")) {
+                @compileError("app.zon host = \"native\" cannot declare the JavaScript bridge capability");
+            }
+        }
+    }
+    if (@hasField(@TypeOf(app_manifest), "bridge") and @hasField(@TypeOf(app_manifest.bridge), "commands") and app_manifest.bridge.commands.len > 0) {
+        @compileError("app.zon host = \"native\" cannot declare JavaScript bridge commands");
+    }
+    if (!@hasField(@TypeOf(app_manifest), "shell")) return;
+    const shell = app_manifest.shell;
+    if (!@hasField(@TypeOf(shell), "windows")) return;
+    for (shell.windows) |window| {
+        if (!@hasField(@TypeOf(window), "views")) continue;
+        for (window.views) |view| {
+            if (@hasField(@TypeOf(view), "kind") and std.mem.eql(u8, view.kind, "webview")) {
+                @compileError("app.zon host = \"native\" cannot declare webview shell views");
+            }
+        }
+    }
 }
 
 const StateBuffers = struct {

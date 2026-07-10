@@ -546,23 +546,31 @@ pub const NullPlatform = struct {
     }
 
     pub fn platform(self: *NullPlatform) Platform {
+        return self.platformWithWebViews(true);
+    }
+
+    pub fn nativePlatform(self: *NullPlatform) Platform {
+        return self.platformWithWebViews(false);
+    }
+
+    fn platformWithWebViews(self: *NullPlatform, comptime webviews_enabled: bool) Platform {
         return .{
             .context = self,
             .name = "null",
             .surface_value = self.surface_value,
             .run_fn = run,
-            .supports_fn = supportsFeature,
+            .supports_fn = if (webviews_enabled) supportsFeature else supportsNativeFeature,
             .services = .{
                 .context = self,
                 .read_clipboard_fn = readClipboard,
                 .write_clipboard_fn = writeClipboard,
                 .read_clipboard_data_fn = readClipboardData,
                 .write_clipboard_data_fn = writeClipboardData,
-                .load_webview_fn = loadWebView,
-                .load_window_webview_fn = loadWindowWebView,
-                .complete_bridge_fn = completeBridge,
-                .complete_window_bridge_fn = completeWindowBridge,
-                .complete_webview_bridge_fn = completeWebViewBridge,
+                .load_webview_fn = if (webviews_enabled) loadWebView else null,
+                .load_window_webview_fn = if (webviews_enabled) loadWindowWebView else null,
+                .complete_bridge_fn = if (webviews_enabled) completeBridge else null,
+                .complete_window_bridge_fn = if (webviews_enabled) completeWindowBridge else null,
+                .complete_webview_bridge_fn = if (webviews_enabled) completeWebViewBridge else null,
                 .create_window_fn = createWindow,
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
@@ -570,19 +578,19 @@ pub const NullPlatform = struct {
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
                 .set_window_drag_regions_fn = setWindowDragRegions,
-                .create_view_fn = createView,
+                .create_view_fn = if (webviews_enabled) createView else createNativeView,
                 .update_view_fn = updateView,
                 .set_view_frame_fn = setViewFrame,
                 .set_view_visible_fn = setViewVisible,
                 .set_view_cursor_fn = setViewCursor,
                 .focus_view_fn = focusView,
                 .close_view_fn = closeView,
-                .create_webview_fn = createWebView,
-                .set_webview_frame_fn = setWebViewFrame,
-                .navigate_webview_fn = navigateWebView,
-                .set_webview_zoom_fn = setWebViewZoom,
-                .set_webview_layer_fn = setWebViewLayer,
-                .close_webview_fn = closeWebView,
+                .create_webview_fn = if (webviews_enabled) createWebView else null,
+                .set_webview_frame_fn = if (webviews_enabled) setWebViewFrame else null,
+                .navigate_webview_fn = if (webviews_enabled) navigateWebView else null,
+                .set_webview_zoom_fn = if (webviews_enabled) setWebViewZoom else null,
+                .set_webview_layer_fn = if (webviews_enabled) setWebViewLayer else null,
+                .close_webview_fn = if (webviews_enabled) closeWebView else null,
                 .show_open_dialog_fn = showOpenDialog,
                 .show_save_dialog_fn = showSaveDialog,
                 .show_message_dialog_fn = showMessageDialog,
@@ -598,10 +606,10 @@ pub const NullPlatform = struct {
                 .reveal_path_fn = revealPath,
                 .add_recent_document_fn = addRecentDocument,
                 .clear_recent_documents_fn = clearRecentDocuments,
-                .configure_security_policy_fn = configureSecurityPolicy,
+                .configure_security_policy_fn = if (webviews_enabled) configureSecurityPolicy else null,
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
-                .emit_window_event_fn = emitWindowEvent,
+                .emit_window_event_fn = if (webviews_enabled) emitWindowEvent else null,
                 .start_timer_fn = startTimer,
                 .cancel_timer_fn = cancelTimer,
                 .audio_load_fn = if (self.audio_playback) audioLoad else null,
@@ -632,6 +640,7 @@ pub const NullPlatform = struct {
         return switch (feature) {
             .main_webview,
             .child_webviews,
+            => true,
             .native_views,
             .native_control_commands,
             .menus,
@@ -658,6 +667,13 @@ pub const NullPlatform = struct {
             .audio_playback => self.audio_playback,
             .audio_streaming => self.audio_playback and self.audio_streaming,
             .audio_spectrum => self.audio_playback and self.audio_spectrum,
+        };
+    }
+
+    fn supportsNativeFeature(context: *anyopaque, feature: PlatformFeature) bool {
+        return switch (feature) {
+            .main_webview, .child_webviews => false,
+            else => supportsFeature(context, feature),
         };
     }
 
@@ -898,8 +914,13 @@ pub const NullPlatform = struct {
     }
 
     fn createView(context: ?*anyopaque, options: ViewOptions) anyerror!void {
-        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         if (options.kind == .webview) return createWebView(context, options.webViewOptions());
+        return createNativeView(context, options);
+    }
+
+    fn createNativeView(context: ?*anyopaque, options: ViewOptions) anyerror!void {
+        if (options.kind == .webview) return error.UnsupportedViewKind;
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         if (options.kind == .gpu_surface and !self.gpu_surfaces) return error.UnsupportedViewKind;
         try self.validateViewOptions(options);
         if (self.findViewIndex(options.window_id, options.label) != null) return error.DuplicateViewLabel;

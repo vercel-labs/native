@@ -10,7 +10,9 @@
 #import <Accelerate/Accelerate.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 #import <WebKit/WebKit.h>
+#endif
 #import <CoreFoundation/CoreFoundation.h>
 #import <CoreText/CoreText.h>
 #import <ImageIO/ImageIO.h>
@@ -26,9 +28,11 @@
 
 @class NativeSdkAppKitHost;
 
-static const NSUInteger NativeSdkMaxChildWebViews = 16;
 static const NSUInteger NativeSdkMaxNativeViews = 32;
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
+static const NSUInteger NativeSdkMaxChildWebViews = 16;
 static const NSInteger NativeSdkBridgeFrameKeepaliveFrames = 600;
+#endif
 static const uint64_t NativeSdkNanosecondsPerSecond = 1000000000ull;
 static const uint32_t NativeSdkShortcutModifierPrimary = 1u << 0;
 static const uint32_t NativeSdkShortcutModifierCommand = 1u << 1;
@@ -47,15 +51,17 @@ static void *NativeSdkAppKitAudioTimeControlContext = &NativeSdkAppKitAudioTimeC
  * of the spectrum machinery in the audio section below. */
 typedef struct native_sdk_spectrum_tap_state native_sdk_spectrum_tap_state_t;
 static NSRect constrainFrame(NSRect frame);
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 static NSString *NativeSdkAppKitBridgeScript(void);
 static NSString *NativeSdkMimeTypeForPath(NSString *path);
 static NSString *NativeSdkResolvedAssetRoot(NSString *rootPath);
-static void NativeSdkRegisterBundledFonts(void);
 static NSString *NativeSdkSafeAssetPath(NSURL *url, NSString *entryPath);
 static NSURL *NativeSdkAssetEntryURL(NSString *origin, NSString *entryPath);
 static NSArray<NSString *> *NativeSdkPolicyListFromBytes(const char *bytes, size_t len, NSArray<NSString *> *fallback);
 static NSString *NativeSdkOriginForURL(NSURL *url);
 static BOOL NativeSdkPolicyListMatches(NSArray<NSString *> *values, NSURL *url);
+#endif
+static void NativeSdkRegisterBundledFonts(void);
 static NSString *NativeSdkShortcutKeyForEvent(NSEvent *event);
 static BOOL NativeSdkShortcutUsesImplicitShift(NSString *key, NSEvent *event);
 static BOOL NativeSdkShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventModifierFlags eventModifiers, BOOL allowImplicitShift);
@@ -301,6 +307,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) BOOL observesContentLayout;
 @end
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 @interface NativeSdkWebView : WKWebView <NSDraggingDestination>
 @property(nonatomic, strong) NSArray<NSValue *> *coveredMouseRects;
 @property(nonatomic, assign) NativeSdkAppKitHost *host;
@@ -312,6 +319,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) uint64_t windowId;
 @property(nonatomic, strong) NSString *webViewLabel;
 @end
+#endif
 
 @class NativeSdkMetalSurfaceView;
 
@@ -625,12 +633,14 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)setScrollDrivers:(const native_sdk_appkit_scroll_driver_t *)drivers count:(NSUInteger)count;
 @end
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 @interface NativeSdkAssetSchemeHandler : NSObject <WKURLSchemeHandler>
 @property(nonatomic, strong) NSString *rootPath;
 @property(nonatomic, strong) NSString *entryPath;
 @property(nonatomic, assign) BOOL spaFallback;
 - (void)configureWithRootPath:(NSString *)rootPath entryPath:(NSString *)entryPath spaFallback:(BOOL)spaFallback;
 @end
+#endif
 
 @interface NativeSdkShortcut : NSObject
 @property(nonatomic, strong) NSString *identifier;
@@ -638,17 +648,29 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) uint32_t modifiers;
 @end
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 @interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate>
+#else
+@interface NativeSdkAppKitHost : NSObject
+#endif
 @property(nonatomic, strong) NSWindow *window;
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 @property(nonatomic, strong) WKWebView *webView;
+#endif
 @property(nonatomic, strong) NativeSdkWindowDelegate *delegate;
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 @property(nonatomic, strong) NativeSdkBridgeScriptHandler *bridgeScriptHandler;
 @property(nonatomic, strong) NativeSdkAssetSchemeHandler *assetSchemeHandler;
+#endif
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSWindow *> *windows;
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, WKWebView *> *webViews;
+#endif
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkWindowDelegate *> *delegates;
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkBridgeScriptHandler *> *bridgeScriptHandlers;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkAssetSchemeHandler *> *assetSchemeHandlers;
+#endif
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *windowLabels;
 /// Present-before-show bookkeeping: windows created with the deferred
 /// show policy stay ordered OUT until their first gpu-surface present
@@ -659,7 +681,9 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 /// color, packed RGBA8 per window — so residual gaps (resize slack,
 /// titlebar bands) show the app's background, never a blank default.
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *windowClearColors;
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 @property(nonatomic, strong) NSMutableDictionary<NSString *, WKWebView *> *childWebViews;
+#endif
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSView *> *nativeViews;
 /// App-owned NSViews adopted into native view containers (native-surface
 /// adoption): container key → adopted view. Kept alongside `nativeViews`
@@ -674,7 +698,9 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSImage *> *canvasImageStore;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *nativeViewCommands;
 @property(nonatomic, strong) NSMutableSet<NSString *> *nativeViewExplicitTextKeys;
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 @property(nonatomic, strong) NSMutableSet<NSString *> *bridgeEnabledChildWebViewKeys;
+#endif
 @property(nonatomic, strong) NSTimer *timer;
 /* Coalescing flag for cross-thread frame requests: set (atomically) by
  * requestFrameFromAnyThread before it posts to the main queue, cleared
@@ -757,13 +783,17 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) NSString *iconPath;
 @property(nonatomic, strong) NSString *windowLabel;
 @property(nonatomic, assign) native_sdk_appkit_event_callback_t callback;
-@property(nonatomic, assign) native_sdk_appkit_bridge_callback_t bridgeCallback;
 @property(nonatomic, assign) void *context;
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
+@property(nonatomic, assign) native_sdk_appkit_bridge_callback_t bridgeCallback;
 @property(nonatomic, assign) void *bridgeContext;
+#endif
 @property(nonatomic, assign) BOOL didShutdown;
 @property(nonatomic, assign) BOOL observesApplicationActivation;
 @property(nonatomic, assign) BOOL observesAppearanceChanges;
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 @property(nonatomic, assign) NSInteger bridgeFrameKeepalive;
+#endif
 @property(nonatomic, strong) id shortcutEventMonitor;
 @property(nonatomic, strong) id willTerminateObserver;
 @property(nonatomic, strong) dispatch_source_t sigtermSource;
@@ -771,9 +801,11 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, assign) native_sdk_appkit_tray_callback_t trayCallback;
 @property(nonatomic, assign) void *trayContext;
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
+#endif
 - (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy;
 - (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy makeMain:(BOOL)makeMain;
 - (void)showDeferredWindowIfPending:(uint64_t)windowId reason:(const char *)reason;
@@ -782,10 +814,12 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)closeWindowWithId:(uint64_t)windowId;
 - (BOOL)startWindowDragWithId:(uint64_t)windowId;
 - (BOOL)chromeInsetsForWindowId:(uint64_t)windowId top:(double *)top left:(double *)left bottom:(double *)bottom right:(double *)right buttonsX:(double *)buttonsX buttonsY:(double *)buttonsY buttonsWidth:(double *)buttonsWidth buttonsHeight:(double *)buttonsHeight;
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 - (WKWebView *)ensureMainWebViewForWindowId:(uint64_t)windowId;
 - (WKWebView *)webViewForWindowId:(uint64_t)windowId;
 - (WKWebView *)mainWebViewForWindow:(NSWindow *)window;
 - (NativeSdkAssetSchemeHandler *)assetHandlerForWindowId:(uint64_t)windowId;
+#endif
 - (NSString *)nativeViewKeyForWindow:(uint64_t)windowId label:(NSString *)label;
 - (NSRect)viewFrameForContainer:(NSView *)container x:(double)x y:(double)y width:(double)width height:(double)height;
 - (NSView *)nativeParentViewForWindow:(uint64_t)windowId parent:(NSString *)parent;
@@ -817,19 +851,21 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (BOOL)viewIsAdoptedSurfaceDescendant:(NSView *)view;
 - (void)installAdoptedSurfaceClickMonitor;
 - (BOOL)releaseViewSurfaceInWindow:(uint64_t)windowId label:(NSString *)label;
-- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled;
 - (BOOL)setNativeViewCursorInWindow:(uint64_t)windowId label:(NSString *)label cursor:(NSInteger)cursor;
+- (void)reorderViewsInWindow:(uint64_t)windowId;
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
+- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled;
 - (BOOL)setWebViewFrameInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height;
 - (BOOL)navigateWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url;
 - (BOOL)setWebViewZoomInWindow:(uint64_t)windowId label:(NSString *)label zoom:(double)zoom;
 - (BOOL)setWebViewLayerInWindow:(uint64_t)windowId label:(NSString *)label layer:(NSInteger)layer;
 - (BOOL)closeWebViewInWindow:(uint64_t)windowId label:(NSString *)label;
 - (void)closeWebViewsInWindow:(uint64_t)windowId;
-- (void)reorderWebViewsInWindow:(uint64_t)windowId;
 - (void)updateCoveredMouseRectsInWindow:(uint64_t)windowId;
 - (void)applyCoveredMouseRects:(NSArray<NSValue *> *)rects toWebView:(WKWebView *)webView;
 - (void)removeBridgeHandlerForChildWebView:(WKWebView *)webView key:(NSString *)key;
 - (void)removeAllChildBridgeHandlers;
+#endif
 - (void)configureApplication;
 - (void)buildMenuBar;
 - (void)addApplicationMenuToMenu:(NSMenu *)mainMenu;
@@ -882,9 +918,12 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (BOOL)anyHostWindowVisibleOnGlass;
 - (void)audioSpectrumTimerFired:(NSTimer *)timer;
 - (void)wakeFromAnyThread;
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 - (void)scheduleBridgeFrames;
+#endif
 - (void)emitFrame;
 - (void)emitShutdown;
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 - (void)loadSource:(NSString *)source kind:(NSInteger)kind assetRoot:(NSString *)assetRoot entry:(NSString *)entry origin:(NSString *)origin spaFallback:(BOOL)spaFallback;
 - (void)loadSource:(NSString *)source kind:(NSInteger)kind assetRoot:(NSString *)assetRoot entry:(NSString *)entry origin:(NSString *)origin spaFallback:(BOOL)spaFallback windowId:(uint64_t)windowId;
 - (void)setAllowedNavigationOrigins:(NSArray<NSString *> *)origins externalURLs:(NSArray<NSString *> *)externalURLs externalAction:(NSInteger)externalAction;
@@ -896,6 +935,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)completeBridgeWithResponse:(NSString *)response windowId:(uint64_t)windowId;
 - (void)completeBridgeWithResponse:(NSString *)response windowId:(uint64_t)windowId webViewLabel:(NSString *)webViewLabel;
 - (void)emitEventNamed:(NSString *)name detailJSON:(NSString *)detailJSON windowId:(uint64_t)windowId;
+#endif
 - (void)setShortcutsWithIds:(const char *const *)ids idLengths:(const size_t *)idLengths keys:(const char *const *)keys keyLengths:(const size_t *)keyLengths modifiers:(const uint32_t *)modifiers count:(size_t)count;
 - (BOOL)handleShortcutEvent:(NSEvent *)event;
 - (void)emitShortcutWithId:(NSString *)identifier key:(NSString *)key modifiers:(uint32_t)modifiers event:(NSEvent *)event;
@@ -1027,14 +1067,20 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
         self.observesContentLayout = NO;
     }
     [self.host emitWindowFrameForWindowId:self.windowId open:NO];
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     [self.host closeWebViewsInWindow:self.windowId];
+#endif
     [self.host closeNativeViewsInWindow:self.windowId];
     NSNumber *key = @(self.windowId);
     [self.host.windows removeObjectForKey:key];
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     [self.host.webViews removeObjectForKey:key];
+#endif
     [self.host.delegates removeObjectForKey:key];
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     [self.host.bridgeScriptHandlers removeObjectForKey:key];
     [self.host.assetSchemeHandlers removeObjectForKey:key];
+#endif
     [self.host.windowLabels removeObjectForKey:key];
     [self.host.deferredShowWindows removeObjectForKey:key];
     [self.host.windowClearColors removeObjectForKey:key];
@@ -1046,6 +1092,7 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
 
 @end
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 @implementation NativeSdkWebView
 
 - (BOOL)pointIsCovered:(NSPoint)point {
@@ -1088,7 +1135,9 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
 }
 
 @end
+#endif
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 @implementation NativeSdkBridgeScriptHandler
 
 - (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
@@ -1097,6 +1146,7 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
 }
 
 @end
+#endif
 
 @implementation NativeSdkWidgetAccessibilityElement
 
@@ -6172,6 +6222,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
 @end
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 @implementation NativeSdkAssetSchemeHandler
 
 - (instancetype)init {
@@ -6228,6 +6279,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 }
 
 @end
+#endif
 
 @implementation NativeSdkShortcut
 @end
@@ -6255,24 +6307,34 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     self.iconPath = iconPath ?: @"";
     self.windowLabel = windowLabel.length > 0 ? windowLabel : @"main";
     self.windows = [[NSMutableDictionary alloc] init];
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     self.webViews = [[NSMutableDictionary alloc] init];
+#endif
     self.delegates = [[NSMutableDictionary alloc] init];
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     self.bridgeScriptHandlers = [[NSMutableDictionary alloc] init];
     self.assetSchemeHandlers = [[NSMutableDictionary alloc] init];
+#endif
     self.windowLabels = [[NSMutableDictionary alloc] init];
     self.deferredShowWindows = [[NSMutableDictionary alloc] init];
     self.windowClearColors = [[NSMutableDictionary alloc] init];
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     self.childWebViews = [[NSMutableDictionary alloc] init];
+#endif
     self.nativeViews = [[NSMutableDictionary alloc] init];
     self.adoptedViewSurfaces = [[NSMutableDictionary alloc] init];
     self.canvasImageStore = [[NSMutableDictionary alloc] init];
     self.nativeViewCommands = [[NSMutableDictionary alloc] init];
     self.nativeViewExplicitTextKeys = [[NSMutableSet alloc] init];
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     self.bridgeEnabledChildWebViewKeys = [[NSMutableSet alloc] init];
+#endif
     self.appTimers = [[NSMutableDictionary alloc] init];
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     self.allowedNavigationOrigins = @[ @"zero://app", @"zero://inline" ];
     self.allowedExternalURLs = @[];
     self.externalLinkAction = 0;
+#endif
     self.shortcuts = @[];
     [self configureApplication];
     NativeSdkLaunchLap("app_configured");
@@ -6467,10 +6529,12 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
     }
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     [self removeAllChildBridgeHandlers];
     for (WKWebView *webView in self.webViews.allValues) {
         [webView.configuration.userContentController removeScriptMessageHandlerForName:@"nativeSdkBridge"];
     }
+#endif
 }
 
 - (void)focusWindowWithId:(uint64_t)windowId {
@@ -6598,6 +6662,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     return YES;
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 // Create-on-first-use for a window's main WebView. Pure peek reads
 // (event emission, bridge completion echoes, reorder passes) keep going
 // through `webViewForWindowId:` and skip absent WebViews — a page that
@@ -6656,7 +6721,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         self.bridgeScriptHandler = bridgeScriptHandler;
         self.assetSchemeHandler = assetSchemeHandler;
     }
-    [self reorderWebViewsInWindow:windowId];
+    [self reorderViewsInWindow:windowId];
     NativeSdkLaunchLap("main_webview_ready");
     return webView;
 }
@@ -6686,6 +6751,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     CGFloat nativeY = contentView.isFlipped ? y : contentView.bounds.size.height - y - height;
     return NSMakeRect(x, nativeY, width, height);
 }
+#endif
 
 - (NSString *)nativeViewKeyForWindow:(uint64_t)windowId label:(NSString *)label {
     return [NSString stringWithFormat:@"%llu:%@", windowId, label ?: @""];
@@ -6931,7 +6997,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     } else {
         [self.nativeViewExplicitTextKeys removeObject:key];
     }
-    [self reorderWebViewsInWindow:windowId];
+    [self reorderViewsInWindow:windowId];
     [self scheduleFrame];
     return YES;
 }
@@ -6972,7 +7038,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         [self applyNativeViewState:view enabled:currentEnabled role:(hasRole ? role : nil) accessibilityLabel:(hasAccessibilityLabel ? accessibilityLabel : nil) text:displayText];
     }
     if (hasCommand) [self configureNativeView:view command:command key:key];
-    [self reorderWebViewsInWindow:windowId];
+    [self reorderViewsInWindow:windowId];
     [self scheduleFrame];
     return YES;
 }
@@ -6988,6 +7054,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 - (BOOL)focusNativeViewInWindow:(uint64_t)windowId label:(NSString *)label {
     NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
     if (!window) return NO;
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     if ([label isEqualToString:@"main"]) {
         WKWebView *webView = [self webViewForWindowId:windowId];
         if (!webView || webView.hidden) return NO;
@@ -6999,6 +7066,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         [window makeKeyAndOrderFront:nil];
         return [window makeFirstResponder:webView];
     }
+#endif
     NSView *view = self.nativeViews[[self nativeViewKeyForWindow:windowId label:label]];
     if (!view || view.hidden) return NO;
     window = view.window ?: window;
@@ -7200,7 +7268,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         [self.nativeViewCommands removeObjectForKey:viewKey];
         [self.nativeViewExplicitTextKeys removeObject:viewKey];
     }
-    [self reorderWebViewsInWindow:windowId];
+    [self reorderViewsInWindow:windowId];
     [self scheduleFrame];
     return YES;
 }
@@ -7217,7 +7285,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         [self.nativeViewCommands removeObjectForKey:key];
         [self.nativeViewExplicitTextKeys removeObject:key];
     }
-    [self reorderWebViewsInWindow:windowId];
+    [self reorderViewsInWindow:windowId];
 }
 
 - (void)dropAdoptedViewSurfaceForKey:(NSString *)key {
@@ -7280,6 +7348,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     return YES;
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 - (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled {
     if (label.length == 0 || url.length == 0 || width <= 0 || height <= 0 || x < 0 || y < 0) return NO;
     NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
@@ -7331,7 +7400,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     [webview loadRequest:[NSURLRequest requestWithURL:targetURL]];
     self.childWebViews[key] = webview;
     if (bridgeEnabled) [self.bridgeEnabledChildWebViewKeys addObject:key];
-    [self reorderWebViewsInWindow:windowId];
+    [self reorderViewsInWindow:windowId];
     [self scheduleBridgeFrames];
     return YES;
 }
@@ -7344,14 +7413,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         if (!window || !webView) return NO;
         webView.autoresizingMask = NSViewNotSizable;
         webView.frame = [self webViewFrameForWindow:window x:x y:y width:width height:height];
-        [self reorderWebViewsInWindow:windowId];
+        [self reorderViewsInWindow:windowId];
         [self scheduleBridgeFrames];
         return YES;
     }
     WKWebView *webview = self.childWebViews[[self webViewKeyForWindow:windowId label:label]];
     if (!window || !webview) return NO;
     webview.frame = [self webViewFrameForWindow:window x:x y:y width:width height:height];
-    [self reorderWebViewsInWindow:windowId];
+    [self reorderViewsInWindow:windowId];
     [self scheduleBridgeFrames];
     return YES;
 }
@@ -7396,14 +7465,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         if (!webView) return NO;
         webView.wantsLayer = YES;
         webView.layer.zPosition = layer;
-        [self reorderWebViewsInWindow:windowId];
+        [self reorderViewsInWindow:windowId];
         return YES;
     }
     WKWebView *webview = self.childWebViews[[self webViewKeyForWindow:windowId label:label]];
     if (!webview) return NO;
     webview.wantsLayer = YES;
     webview.layer.zPosition = layer;
-    [self reorderWebViewsInWindow:windowId];
+    [self reorderViewsInWindow:windowId];
     return YES;
 }
 
@@ -7414,7 +7483,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     [self removeBridgeHandlerForChildWebView:webview key:key];
     [webview removeFromSuperview];
     [self.childWebViews removeObjectForKey:key];
-    [self reorderWebViewsInWindow:windowId];
+    [self reorderViewsInWindow:windowId];
     [self scheduleBridgeFrames];
     return YES;
 }
@@ -7429,21 +7498,23 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         [webview removeFromSuperview];
         [self.childWebViews removeObjectForKey:key];
     }
-    [self reorderWebViewsInWindow:windowId];
+    [self reorderViewsInWindow:windowId];
 }
+#endif
 
-- (void)reorderWebViewsInWindow:(uint64_t)windowId {
+- (void)reorderViewsInWindow:(uint64_t)windowId {
     NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
     NSView *contentView = window.contentView;
     if (!contentView) return;
 
     NSMutableArray<NSView *> *views = [[NSMutableArray alloc] init];
+    NSString *prefix = [NSString stringWithFormat:@"%llu:", windowId];
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     WKWebView *mainWebView = self.webViews[@(windowId)];
     if (mainWebView && mainWebView.superview == contentView) {
         [views addObject:mainWebView];
     }
 
-    NSString *prefix = [NSString stringWithFormat:@"%llu:", windowId];
     for (NSString *key in self.childWebViews) {
         if (![key hasPrefix:prefix]) continue;
         WKWebView *view = self.childWebViews[key];
@@ -7451,6 +7522,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             [views addObject:view];
         }
     }
+#endif
     for (NSString *key in self.nativeViews) {
         if (![key hasPrefix:prefix]) continue;
         NSView *view = self.nativeViews[key];
@@ -7476,9 +7548,12 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         [contentView addSubview:view positioned:NSWindowAbove relativeTo:previous];
         previous = view;
     }
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     [self updateCoveredMouseRectsInWindow:windowId];
+#endif
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 - (void)updateCoveredMouseRectsInWindow:(uint64_t)windowId {
     NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
     NSView *contentView = window.contentView;
@@ -7586,6 +7661,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         [self removeBridgeHandlerForChildWebView:self.childWebViews[key] key:key];
     }
 }
+#endif
 
 static NSRect constrainFrame(NSRect frame) {
     NSScreen *screen = [NSScreen mainScreen];
@@ -7600,6 +7676,7 @@ static NSRect constrainFrame(NSRect frame) {
     return frame;
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 static NSString *NativeSdkAppKitBridgeScript(void) {
     return @"(function(){"
         "if(window.zero&&window.zero.invoke){return;}"
@@ -7738,6 +7815,7 @@ static NSString *NativeSdkMimeTypeForPath(NSString *path) {
     if ([ext isEqualToString:@"wasm"]) return @"application/wasm";
     return @"application/octet-stream";
 }
+#endif
 
 static BOOL NativeSdkDirectoryExists(NSString *path) {
     BOOL isDirectory = NO;
@@ -7765,6 +7843,7 @@ static NSString *NativeSdkResolvedAssetFilePath(NSString *path) {
     return path;
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 static NSString *NativeSdkResolvedAssetRoot(NSString *rootPath) {
     NSString *resourcePath = [NSBundle mainBundle].resourcePath;
     BOOL isAppBundle = [[NSBundle mainBundle].bundlePath.pathExtension.lowercaseString isEqualToString:@"app"];
@@ -7780,6 +7859,7 @@ static NSString *NativeSdkResolvedAssetRoot(NSString *rootPath) {
     }
     return cwdPath;
 }
+#endif
 
 static BOOL NativeSdkFontAssetExtension(NSString *path) {
     NSString *extension = path.pathExtension.lowercaseString;
@@ -7832,6 +7912,7 @@ static void NativeSdkRegisterBundledFonts(void) {
     });
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 static BOOL NativeSdkPathHasUnsafeSegment(NSString *path) {
     for (NSString *segment in [path componentsSeparatedByString:@"/"]) {
         if (segment.length == 0) continue;
@@ -7864,6 +7945,7 @@ static NSURL *NativeSdkAssetEntryURL(NSString *origin, NSString *entryPath) {
     }
     return [NSURL URLWithString:[NSString stringWithFormat:@"%@/%@", base, entry]];
 }
+#endif
 
 /* Ask the process services layer to show the display name for this
  * process in the Dock tile and the app switcher. Unbundled dev binaries
@@ -7945,6 +8027,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     [mainMenu addItem:editMenuItem];
     NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
     [editMenuItem setSubmenu:editMenu];
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     if (self.hasWebContent) {
         // Undo/Redo answer only inside web content (the webview's own
         // editing stack); the canvas text editor has no undo stack, so
@@ -7953,6 +8036,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
         [editMenu addItem:[self menuItem:@"Redo" action:@selector(redo:) key:@"Z" modifiers:NSEventModifierFlagCommand]];
         [editMenu addItem:[NSMenuItem separatorItem]];
     }
+#endif
     [editMenu addItem:[self menuItem:@"Cut" action:@selector(cut:) key:@"x" modifiers:NSEventModifierFlagCommand]];
     [editMenu addItem:[self menuItem:@"Copy" action:@selector(copy:) key:@"c" modifiers:NSEventModifierFlagCommand]];
     [editMenu addItem:[self menuItem:@"Paste" action:@selector(paste:) key:@"v" modifiers:NSEventModifierFlagCommand]];
@@ -7966,11 +8050,13 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     [mainMenu addItem:viewMenuItem];
     NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
     [viewMenuItem setSubmenu:viewMenu];
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     if (self.hasWebContent) {
         [viewMenu addItem:[self menuItem:@"Reload" action:@selector(reload:) key:@"r" modifiers:NSEventModifierFlagCommand]];
         [viewMenu addItem:[self menuItem:@"Toggle Web Inspector" action:@selector(toggleWebInspector:) key:@"i" modifiers:(NSEventModifierFlagCommand | NSEventModifierFlagOption)]];
         [viewMenu addItem:[NSMenuItem separatorItem]];
     }
+#endif
     [viewMenu addItem:[self menuItem:@"Enter Full Screen" action:@selector(toggleFullScreen:) key:@"f" modifiers:(NSEventModifierFlagCommand | NSEventModifierFlagControl)]];
 
     // A real Window menu: Minimize/Zoom act through the responder
@@ -9154,18 +9240,22 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
     return 1;
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 - (void)scheduleBridgeFrames {
     self.bridgeFrameKeepalive = NativeSdkBridgeFrameKeepaliveFrames;
     [self scheduleFrame];
 }
+#endif
 
 - (void)emitFrame {
     self.timer = nil;
     [self emitEvent:(native_sdk_appkit_event_t){ .kind = NATIVE_SDK_APPKIT_EVENT_FRAME }];
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     if (self.bridgeFrameKeepalive > 0) {
         self.bridgeFrameKeepalive -= 1;
         [self scheduleFrame];
     }
+#endif
 }
 
 - (void)emitShutdown {
@@ -9176,6 +9266,7 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
     [self emitEvent:(native_sdk_appkit_event_t){ .kind = NATIVE_SDK_APPKIT_EVENT_SHUTDOWN }];
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 - (void)loadSource:(NSString *)source kind:(NSInteger)kind assetRoot:(NSString *)assetRoot entry:(NSString *)entry origin:(NSString *)origin spaFallback:(BOOL)spaFallback {
     [self loadSource:source kind:kind assetRoot:assetRoot entry:entry origin:origin spaFallback:spaFallback windowId:1];
 }
@@ -9355,6 +9446,7 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
     [webView evaluateJavaScript:script completionHandler:nil];
     [self scheduleBridgeFrames];
 }
+#endif
 
 - (BOOL)handleShortcutEvent:(NSEvent *)event {
     if (event.type != NSEventTypeKeyDown) return NO;
@@ -9466,6 +9558,7 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
     [NSApp orderFrontStandardAboutPanelWithOptions:options];
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 - (void)reload:(id)sender {
     (void)sender;
     WKWebView *webView = [self mainWebViewForWindow:NSApp.keyWindow];
@@ -9483,6 +9576,7 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
         ((void (*)(id, SEL))[webView methodForSelector:selector])(webView, selector);
     }
 }
+#endif
 
 - (void)trayMenuItemClicked:(NSMenuItem *)menuItem {
     if (self.trayCallback) {
@@ -9492,6 +9586,7 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
 
 @end
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 static NSArray<NSString *> *NativeSdkPolicyListFromBytes(const char *bytes, size_t len, NSArray<NSString *> *fallback) {
     if (!bytes || len == 0) return fallback ?: @[];
     NSString *joined = [[NSString alloc] initWithBytes:bytes length:len encoding:NSUTF8StringEncoding];
@@ -9515,6 +9610,7 @@ static NSString *NativeSdkOriginForURL(NSURL *url) {
     if (port) return [NSString stringWithFormat:@"%@://%@:%@", scheme, host, port];
     return [NSString stringWithFormat:@"%@://%@", scheme, host];
 }
+#endif
 
 static NSString *NativeSdkShortcutKeyForEvent(NSEvent *event) {
     NSString *characters = event.charactersIgnoringModifiers ?: @"";
@@ -9592,6 +9688,7 @@ static NSEventModifierFlags NativeSdkMenuModifierFlags(uint32_t modifiers) {
     return flags;
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 static BOOL NativeSdkWildcardPrefixHasPath(NSString *prefix) {
     NSURLComponents *components = [NSURLComponents componentsWithString:prefix ?: @""];
     return components.scheme.length > 0 && components.host.length > 0 && components.percentEncodedPath.length > 0;
@@ -9610,6 +9707,7 @@ static BOOL NativeSdkPolicyListMatches(NSArray<NSString *> *values, NSURL *url) 
     }
     return NO;
 }
+#endif
 
 native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy) {
     @autoreleasepool {
@@ -9754,6 +9852,7 @@ void native_sdk_appkit_stop(native_sdk_appkit_host_t *host) {
     [object stop];
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 void native_sdk_appkit_load_webview(native_sdk_appkit_host_t *host, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback) {
     native_sdk_appkit_load_window_webview(host, 1, source, source_len, source_kind, asset_root, asset_root_len, asset_entry, asset_entry_len, asset_origin, asset_origin_len, spa_fallback);
 }
@@ -9809,6 +9908,7 @@ void native_sdk_appkit_set_security_policy(native_sdk_appkit_host_t *host, const
     NSArray<NSString *> *externalURLs = NativeSdkPolicyListFromBytes(external_urls, external_urls_len, @[]);
     [object setAllowedNavigationOrigins:origins externalURLs:externalURLs externalAction:external_action];
 }
+#endif
 
 void native_sdk_appkit_set_menus(native_sdk_appkit_host_t *host, const char *const *menu_titles, const size_t *menu_title_lens, size_t menu_count, const uint32_t *item_menu_indices, const char *const *item_labels, const size_t *item_label_lens, const char *const *item_commands, const size_t *item_command_lens, const char *const *item_keys, const size_t *item_key_lens, const uint32_t *item_modifiers, const int *item_separators, const int *item_enabled, const int *item_checked, size_t item_count) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
@@ -9994,6 +10094,7 @@ int native_sdk_appkit_update_widget_accessibility(native_sdk_appkit_host_t *host
     return [object updateWidgetAccessibilityInWindow:window_id label:labelString ?: @"" nodes:nodes count:node_count] ? 1 : 0;
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 int native_sdk_appkit_create_webview(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
@@ -10031,6 +10132,7 @@ int native_sdk_appkit_close_webview(native_sdk_appkit_host_t *host, uint64_t win
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     return [object closeWebViewInWindow:window_id label:labelString ?: @""] ? 1 : 0;
 }
+#endif
 
 size_t native_sdk_appkit_clipboard_read(native_sdk_appkit_host_t *host, char *buffer, size_t buffer_len) {
     return native_sdk_appkit_clipboard_read_data(host, "text/plain", strlen("text/plain"), buffer, buffer_len);

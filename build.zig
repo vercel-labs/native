@@ -140,6 +140,7 @@ pub fn build(b: *std.Build) void {
     desktop_mod.addImport("canvas", canvas_mod);
     const desktop_tests = testArtifact(b, desktop_mod);
     const desktop_test_shards = desktopTestShardArtifacts(b, desktop_mod);
+    const app_build_tests = testArtifact(b, module(b, host_target, optimize, "build_app_tests.zig"));
 
     // The embeddable static library's root module carries only the C ABI
     // exports (fixed WebView shell host); user-app canvas libraries are
@@ -402,6 +403,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(eject_components_tests).step);
     test_step.dependOn(&b.addRunArtifact(markup_lsp_tests).step);
     test_step.dependOn(&b.addRunArtifact(automation_cli_tests).step);
+    test_step.dependOn(&b.addRunArtifact(app_build_tests).step);
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-package-types", "Verify package TypeScript platform feature names", &.{
         .{ .path = "packages/native-sdk/native-sdk.d.ts", .pattern = "NativeSdkCommandInfo" },
         .{ .path = "packages/native-sdk/native-sdk.d.ts", .pattern = "list(): Promise<NativeSdkCommandInfo[]>" },
@@ -723,6 +725,7 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-automation-protocol", "Run automation protocol tests", automation_protocol_tests);
     addTestStep(b, "test-automation-cli", "Run native automate CLI tests", automation_cli_tests);
     addTestStep(b, "test-tooling", "Run Native SDK tooling tests", tooling_tests);
+    addTestStep(b, "test-app-build-config", "Run app build manifest parsing tests", app_build_tests);
     addTestStep(b, "test-eject-components", "Run ejected-component widget-identity tests", eject_components_tests);
 
     const run_hello = b.addSystemCommand(&.{ "zig", "build", "run", b.fmt("-Dplatform={s}", .{platform_arg}), b.fmt("-Dtrace={s}", .{@tagName(trace_option)}) });
@@ -765,6 +768,7 @@ pub fn build(b: *std.Build) void {
 
     const native_examples_step = b.step("test-examples-native", "Run native-first example tests");
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-command-app", "Run command app example tests", "examples/command-app", .owned);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-native-only", "Run native-only host example tests", "examples/native-only", .managed);
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-native-shell", "Run native shell example tests", "examples/native-shell", .owned);
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-native-panels", "Run native panels example tests", "examples/native-panels", .owned);
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-surface", "Run GPU surface example tests", "examples/gpu-surface", .managed);
@@ -787,6 +791,88 @@ pub fn build(b: *std.Build) void {
     addFileContainsCheckStep(b, file_contains_checker, native_examples_step, "test-example-capabilities-events", "Verify capabilities example event bridge names", &.{
         .{ .path = "examples/capabilities/src/main.zig", .pattern = "native-sdk:drop:files" },
     });
+
+    addFileContainsCheckStep(b, file_contains_checker, native_examples_step, "test-native-only-host-source-guards", "Verify native-only browser source guards", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "#if !defined(NATIVE_SDK_NATIVE_ONLY)\n#import <WebKit/WebKit.h>" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "#if !defined(NATIVE_SDK_NATIVE_ONLY) && __has_include(<WebView2.h>)" },
+        .{ .path = "build/app.zig", .pattern = "-DNATIVE_SDK_NATIVE_ONLY=1" },
+    });
+    const native_only_source_step = b.step("test-native-only-host-sources", "Verify native-only macOS and Windows browser source exclusion");
+    if (host_target.result.os.tag == .linux or host_target.result.os.tag == .macos) {
+        const check_native_only_macos_source = b.addSystemCommand(&.{ "sh", "-c", "set -eu; active=$(mktemp); trap 'rm -f \"$active\"' EXIT; awk '!/^#(import|include)/' src/platform/macos/appkit_host.m | zig cc -E -P -x objective-c -DNATIVE_SDK_NATIVE_ONLY=1 - > \"$active\"; if grep -E -n 'WebKit|WK[A-Z]|WebView2|ICoreWebView2|libcef|CEF' \"$active\"; then echo 'native-only AppKit source retains browser code' >&2; exit 1; fi" });
+        const check_native_only_windows_source = b.addSystemCommand(&.{ "zig", "c++", "-target", "x86_64-windows-gnu", "-std=c++17", "-DNATIVE_SDK_NATIVE_ONLY=1", "-Itests/fixtures/native-only-browser-headers", "-c" });
+        check_native_only_windows_source.addFileArg(b.path("src/platform/windows/webview2_host.cpp"));
+        check_native_only_windows_source.addArg("-o");
+        _ = check_native_only_windows_source.addOutputFileArg("native-only-webview2-host.obj");
+        check_native_only_windows_source.step.dependOn(&check_native_only_macos_source.step);
+        native_only_source_step.dependOn(&check_native_only_windows_source.step);
+    } else if (host_target.result.os.tag == .windows) {
+        const check_native_only_windows_source = b.addSystemCommand(&.{ "zig", "c++", "-target", "x86_64-windows-gnu", "-std=c++17", "-DNATIVE_SDK_NATIVE_ONLY=1", "-Itests/fixtures/native-only-browser-headers", "-c" });
+        check_native_only_windows_source.addFileArg(b.path("src/platform/windows/webview2_host.cpp"));
+        check_native_only_windows_source.addArg("-o");
+        _ = check_native_only_windows_source.addOutputFileArg("native-only-webview2-host.obj");
+        native_only_source_step.dependOn(&check_native_only_windows_source.step);
+    }
+
+    const native_only_link_step = b.step("test-native-only-host-link", "Build the native-only host and verify it has no browser dependencies or bridge dispatcher");
+    const native_only_package_step = b.step("test-native-only-host-package", "Package the native-only host and audit the staged artifact");
+    const native_only_windows_step = b.step("test-native-only-host-windows", "Cross-compile the native-only Windows host and verify it has no browser imports");
+
+    if (host_target.result.os.tag == .linux) {
+        const build_native_only = managedExampleRun(b, host_cli_exe, &.{ "build", "-Dplatform=linux" });
+        build_native_only.setCwd(b.path("examples/native-only"));
+        build_native_only.has_side_effects = true;
+        build_native_only.step.dependOn(native_only_source_step);
+        const check_native_only_link = b.addSystemCommand(&.{ "sh", "-c", "set -eu; binary=zig-out/bin/native-only; if readelf -d \"$binary\" | grep -E -i 'NEEDED.*(webkit|webview|libcef|cef\\.so)'; then echo 'native-only Linux binary imports a browser library' >&2; exit 1; fi; if strings \"$binary\" | grep -E -i 'WebKitWebProcess|WebView2Loader|libcef|cef\\.so|native-sdk\\.(command|window|view|webview|platform|dialog|os|clipboard|credentials)\\.'; then echo 'native-only Linux binary contains a browser or JavaScript bridge dispatcher reference' >&2; exit 1; fi; if nm -a \"$binary\" 2>/dev/null | grep -E 'dispatchWebViewBridgeCommand|handleBuiltinBridgeMessage'; then echo 'native-only Linux binary retains bridge dispatcher symbols' >&2; exit 1; fi" });
+        check_native_only_link.setCwd(b.path("examples/native-only"));
+        check_native_only_link.step.dependOn(&build_native_only.step);
+        native_only_link_step.dependOn(&check_native_only_link.step);
+
+        const clean_native_only_package = b.addSystemCommand(&.{ "sh", "-c", "rm -rf zig-out/package/native-only-linux" });
+        clean_native_only_package.setCwd(b.path("examples/native-only"));
+        const package_native_only = managedExampleRun(b, host_cli_exe, &.{ "package", "--target", "linux", "--output", "zig-out/package/native-only-linux", "--binary", "zig-out/bin/native-only", "--assets", "assets" });
+        package_native_only.setCwd(b.path("examples/native-only"));
+        package_native_only.has_side_effects = true;
+        package_native_only.step.dependOn(&clean_native_only_package.step);
+        package_native_only.step.dependOn(&check_native_only_link.step);
+        const check_native_only_package = b.addSystemCommand(&.{ "sh", "-c", "set -eu; package=zig-out/package/native-only-linux; binary=$package/bin/native-only; test -f \"$binary\"; test -f \"$package/resources/native-only.txt\"; test ! -e \"$package/Frameworks\"; if grep -E -i 'frontend|chromium|cef' \"$package/package-manifest.zon\"; then echo 'native-only package report retains frontend or CEF staging' >&2; exit 1; fi; if readelf -d \"$binary\" | grep -E -i 'NEEDED.*(webkit|webview|libcef|cef\\.so)'; then echo 'packaged native-only Linux binary imports a browser library' >&2; exit 1; fi; if strings \"$binary\" | grep -E -i 'WebKitWebProcess|WebView2Loader|libcef|cef\\.so|native-sdk\\.(command|window|view|webview|platform|dialog|os|clipboard|credentials)\\.'; then echo 'packaged native-only Linux binary retains browser or bridge dispatcher references' >&2; exit 1; fi" });
+        check_native_only_package.setCwd(b.path("examples/native-only"));
+        check_native_only_package.step.dependOn(&package_native_only.step);
+        native_only_package_step.dependOn(&check_native_only_package.step);
+        native_examples_step.dependOn(&check_native_only_package.step);
+
+        const build_native_only_windows = managedExampleRun(b, host_cli_exe, &.{ "build", "-Dplatform=windows", "-Dtarget=x86_64-windows-gnu" });
+        build_native_only_windows.setCwd(b.path("examples/native-only"));
+        build_native_only_windows.has_side_effects = true;
+        build_native_only_windows.step.dependOn(&check_native_only_package.step);
+        const check_native_only_windows_imports = b.addSystemCommand(&.{ "sh", "-c", "set -eu; binary=zig-out/bin/native-only.exe; if objdump -p \"$binary\" | grep -E -i 'DLL Name:.*(WebView2|libcef|cef\\.dll|WebKit)'; then echo 'native-only Windows binary imports a browser library' >&2; exit 1; fi; if strings \"$binary\" | grep -E -i 'WebView2Loader|libcef|cef\\.dll|WebKitWebProcess|native-sdk\\.(command|window|view|webview|platform|dialog|os|clipboard|credentials)\\.'; then echo 'native-only Windows binary contains a browser or JavaScript bridge dispatcher reference' >&2; exit 1; fi; if objdump -t \"$binary\" | grep -E 'dispatchWebViewBridgeCommand|handleBuiltinBridgeMessage'; then echo 'native-only Windows binary retains bridge dispatcher symbols' >&2; exit 1; fi" });
+        check_native_only_windows_imports.setCwd(b.path("examples/native-only"));
+        check_native_only_windows_imports.step.dependOn(&build_native_only_windows.step);
+        native_only_windows_step.dependOn(&check_native_only_windows_imports.step);
+        native_examples_step.dependOn(&check_native_only_windows_imports.step);
+    } else if (host_target.result.os.tag == .macos) {
+        const build_native_only = managedExampleRun(b, host_cli_exe, &.{ "build", "-Dplatform=macos" });
+        build_native_only.setCwd(b.path("examples/native-only"));
+        build_native_only.has_side_effects = true;
+        build_native_only.step.dependOn(native_only_source_step);
+        const check_native_only_link = b.addSystemCommand(&.{ "sh", "-c", "set -eu; binary=zig-out/bin/native-only; if otool -L \"$binary\" | grep -E -i 'WebKit|WebView2|libcef|Chromium Embedded Framework'; then echo 'native-only macOS binary imports a browser framework' >&2; exit 1; fi; if strings \"$binary\" | grep -E -i 'WebKitWebProcess|WebView2Loader|libcef|native-sdk\\.(command|window|view|webview|platform|dialog|os|clipboard|credentials)\\.'; then echo 'native-only macOS binary contains a browser or JavaScript bridge dispatcher reference' >&2; exit 1; fi; if nm -a \"$binary\" 2>/dev/null | grep -E 'dispatchWebViewBridgeCommand|handleBuiltinBridgeMessage'; then echo 'native-only macOS binary retains bridge dispatcher symbols' >&2; exit 1; fi" });
+        check_native_only_link.setCwd(b.path("examples/native-only"));
+        check_native_only_link.step.dependOn(&build_native_only.step);
+        native_only_link_step.dependOn(&check_native_only_link.step);
+
+        const clean_native_only_package = b.addSystemCommand(&.{ "sh", "-c", "rm -rf zig-out/package/native-only.app" });
+        clean_native_only_package.setCwd(b.path("examples/native-only"));
+        const package_native_only = managedExampleRun(b, host_cli_exe, &.{ "package", "--target", "macos", "--output", "zig-out/package/native-only.app", "--binary", "zig-out/bin/native-only", "--assets", "assets" });
+        package_native_only.setCwd(b.path("examples/native-only"));
+        package_native_only.has_side_effects = true;
+        package_native_only.step.dependOn(&clean_native_only_package.step);
+        package_native_only.step.dependOn(&check_native_only_link.step);
+        const check_native_only_package = b.addSystemCommand(&.{ "sh", "-c", "set -eu; package=zig-out/package/native-only.app; binary=$package/Contents/MacOS/native-only; test -f \"$binary\"; test -f \"$package/Contents/Resources/assets/native-only.txt\"; test ! -e \"$package/Contents/Frameworks\"; if grep -E -i 'frontend|chromium|cef' \"$package/Contents/Resources/package-manifest.zon\"; then echo 'native-only package report retains frontend or CEF staging' >&2; exit 1; fi; if otool -L \"$binary\" | grep -E -i 'WebKit|WebView2|libcef|Chromium Embedded Framework'; then echo 'packaged native-only macOS binary imports a browser framework' >&2; exit 1; fi; if strings \"$binary\" | grep -E -i 'WebKitWebProcess|WebView2Loader|libcef|native-sdk\\.(command|window|view|webview|platform|dialog|os|clipboard|credentials)\\.'; then echo 'packaged native-only macOS binary retains browser or bridge dispatcher references' >&2; exit 1; fi" });
+        check_native_only_package.setCwd(b.path("examples/native-only"));
+        check_native_only_package.step.dependOn(&package_native_only.step);
+        native_only_package_step.dependOn(&check_native_only_package.step);
+        native_examples_step.dependOn(&check_native_only_package.step);
+    }
 
     const mobile_examples_step = b.step("test-examples-mobile", "Verify mobile example project layouts");
     addLayoutCheckStep(b, mobile_examples_step, "test-example-ios-layout", "Verify iOS example layout", &.{

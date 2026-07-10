@@ -81,6 +81,14 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         }
 
         pub fn run(self: *Runtime, app: App) anyerror!void {
+            return runWithBridges(self, app, true);
+        }
+
+        pub fn runNative(self: *Runtime, app: App) anyerror!void {
+            return runWithBridges(self, app, false);
+        }
+
+        fn runWithBridges(self: *Runtime, app: App, comptime web_bridges_enabled: bool) anyerror!void {
             var init_fields: [3]trace.Field = undefined;
             init_fields[0] = trace.string("app", app.name);
             init_fields[1] = trace.string("platform", self.options.platform.name);
@@ -91,7 +99,11 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             }
             log(self, "runtime.init", "runtime initialized", init_fields[0..init_field_count]);
             try app_manifest.validateCommands(self.options.commands);
-            try self.options.platform.services.configureSecurityPolicy(self.options.security);
+            if (self.options.platform.services.configure_security_policy_fn) |configure_fn| {
+                try configure_fn(self.options.platform.services.context, self.options.security);
+            } else if (self.options.platform.supports(.main_webview) or self.options.platform.supports(.child_webviews)) {
+                return error.UnsupportedService;
+            }
             try self.options.platform.services.configureMenus(self.options.menus);
             try self.options.platform.services.configureShortcuts(self.options.shortcuts);
             // Automation liveness: the drain (`consumeAutomationCommand`,
@@ -152,7 +164,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             };
 
             var context: RunContext = .{ .runtime = self, .app = app };
-            try self.options.platform.run(handlePlatformEvent, &context);
+            try self.options.platform.run(if (web_bridges_enabled) handlePlatformEvent else handleNativePlatformEvent, &context);
 
             log(self, "runtime.done", "runtime finished", &.{});
         }
@@ -179,6 +191,14 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         }
 
         pub fn dispatchPlatformEvent(self: *Runtime, app: App, event_value: platform.Event) anyerror!void {
+            return dispatchPlatformEventWithBridges(self, app, event_value, true);
+        }
+
+        pub fn dispatchNonBridgePlatformEvent(self: *Runtime, app: App, event_value: platform.Event) anyerror!void {
+            return dispatchPlatformEventWithBridges(self, app, event_value, false);
+        }
+
+        fn dispatchPlatformEventWithBridges(self: *Runtime, app: App, event_value: platform.Event, comptime web_bridges_enabled: bool) anyerror!void {
             // Session recording: stage the event on entry, commit it on
             // exit — so effect results drained DURING dispatch precede
             // the event record in the journal (replay feeds them before
@@ -308,8 +328,14 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     if (WindowViewMethods().findWindowIndexById(self, window_id)) |index| WindowViewMethods().setFocusedIndex(self, index);
                     self.invalidated = true;
                 },
-                .frame_requested => try frame(self, app),
-                .bridge_message => |message| try handleBridgeMessage(self, app, message),
+                .frame_requested => try frameWithBridges(self, app, web_bridges_enabled),
+                .bridge_message => |message| {
+                    if (comptime web_bridges_enabled) {
+                        try handleBridgeMessage(self, app, message);
+                    } else {
+                        return error.UnsupportedService;
+                    }
+                },
                 .tray_action => |item_id| {
                     log(self, "tray.action", "tray item selected", &.{trace.uint("item_id", item_id)});
                     try dispatchCommand(self, app, .{
@@ -499,8 +525,12 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         }
 
         pub fn frame(self: *Runtime, app: App) anyerror!void {
+            return frameWithBridges(self, app, true);
+        }
+
+        fn frameWithBridges(self: *Runtime, app: App, comptime web_bridges_enabled: bool) anyerror!void {
             const start_ns = nowNanoseconds();
-            try consumeAutomationCommand(self, app);
+            try consumeAutomationCommand(self, app, web_bridges_enabled);
             if (!self.invalidated) return;
 
             try publishAutomation(self);
@@ -534,7 +564,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         }
 
         pub fn dispatchAutomationCommand(self: *Runtime, app: App, line: []const u8) anyerror!void {
-            try dispatchAutomationProtocolCommand(self, app, try automation.protocol.Command.parse(line));
+            try dispatchAutomationProtocolCommand(self, app, try automation.protocol.Command.parse(line), true);
         }
 
         pub fn frameDiagnostics(self: *Runtime) FrameDiagnostics {
@@ -547,7 +577,12 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
 
         fn handlePlatformEvent(context: *anyopaque, event_value: platform.Event) anyerror!void {
             const run_context: *RunContext = @ptrCast(@alignCast(context));
-            try run_context.runtime.dispatchPlatformEvent(run_context.app, event_value);
+            try dispatchPlatformEventWithBridges(run_context.runtime, run_context.app, event_value, true);
+        }
+
+        fn handleNativePlatformEvent(context: *anyopaque, event_value: platform.Event) anyerror!void {
+            const run_context: *RunContext = @ptrCast(@alignCast(context));
+            try dispatchPlatformEventWithBridges(run_context.runtime, run_context.app, event_value, false);
         }
 
         fn loadStartupWindows(self: *Runtime, app: App) anyerror!void {
@@ -752,7 +787,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             try server.publish(automationSnapshot(self, server.title));
         }
 
-        fn consumeAutomationCommand(self: *Runtime, app: App) anyerror!void {
+        fn consumeAutomationCommand(self: *Runtime, app: App, comptime web_bridges_enabled: bool) anyerror!void {
             const server = self.options.automation orelse return;
             var buffer: [automation.protocol.max_command_bytes]u8 = undefined;
             // Automation command errors ALWAYS degrade, regardless of
@@ -767,7 +802,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 recordDispatchError(self, "automation.command", err);
                 return;
             }) orelse return;
-            dispatchAutomationProtocolCommand(self, app, command) catch |err| {
+            dispatchAutomationProtocolCommand(self, app, command, web_bridges_enabled) catch |err| {
                 recordDispatchErrorDetail(self, automationCommandEventName(command.action), err, command.value);
             };
         }
@@ -791,7 +826,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             };
         }
 
-        fn dispatchAutomationProtocolCommand(self: *Runtime, app: App, command: automation.protocol.Command) anyerror!void {
+        fn dispatchAutomationProtocolCommand(self: *Runtime, app: App, command: automation.protocol.Command, comptime web_bridges_enabled: bool) anyerror!void {
             switch (command.action) {
                 .reload => {
                     self.command_count += 1;
@@ -799,15 +834,19 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     self.invalidateFor(.command, null);
                 },
                 .bridge => {
-                    try handleBridgeMessage(self, app, .{ .bytes = command.value, .origin = "zero://inline", .window_id = 1, .webview_label = "main" });
+                    if (comptime web_bridges_enabled) {
+                        try handleBridgeMessage(self, app, .{ .bytes = command.value, .origin = "zero://inline", .window_id = 1, .webview_label = "main" });
+                    } else {
+                        return error.UnsupportedService;
+                    }
                 },
                 .resize => {
                     const parsed = try parseAutomationResizeCommand(command.value);
-                    try dispatchPlatformEvent(self, app, .{ .surface_resized = .{
+                    try dispatchPlatformEventWithBridges(self, app, .{ .surface_resized = .{
                         .id = 1,
                         .size = geometry.SizeF.init(parsed.width, parsed.height),
                         .scale_factor = parsed.scale_factor,
-                    } });
+                    } }, web_bridges_enabled);
                 },
                 .screenshot => {
                     publishAutomationScreenshot(self, command.value) catch |err| {
@@ -816,11 +855,11 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 },
                 .native_command => {
                     const parsed = try parseAutomationNativeCommand(command.value);
-                    try dispatchPlatformEvent(self, app, .{ .native_command = .{
+                    try dispatchPlatformEventWithBridges(self, app, .{ .native_command = .{
                         .name = parsed.name,
                         .window_id = 1,
                         .view_label = parsed.view_label,
-                    } });
+                    } }, web_bridges_enabled);
                 },
                 .widget_action => {
                     try AutomationWidgetMethods().dispatchAutomationWidgetAction(self, app, try parseAutomationWidgetAction(command.value));
@@ -847,17 +886,17 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     try AutomationWidgetMethods().dispatchAutomationWidgetKeyInput(self, app, try parseAutomationWidgetKey(command.value));
                 },
                 .menu_command => {
-                    try dispatchPlatformEvent(self, app, .{ .menu_command = .{
+                    try dispatchPlatformEventWithBridges(self, app, .{ .menu_command = .{
                         .name = try parseAutomationCommandName(command.value),
                         .window_id = 1,
-                    } });
+                    } }, web_bridges_enabled);
                 },
                 .shortcut => {
-                    try dispatchPlatformEvent(self, app, .{ .shortcut = .{
+                    try dispatchPlatformEventWithBridges(self, app, .{ .shortcut = .{
                         .id = try parseAutomationCommandName(command.value),
                         .key = "",
                         .window_id = 1,
-                    } });
+                    } }, web_bridges_enabled);
                 },
                 .tray_action => {
                     // Drive a status-item dropdown row through the
@@ -868,7 +907,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     // like widget-click on an unmounted widget.
                     const item_id = try parseAutomationTrayItemId(command.value);
                     if (!self.tray_created or !SystemServiceMethods().trayItemExists(self, item_id)) return error.InvalidCommand;
-                    try dispatchPlatformEvent(self, app, .{ .tray_action = item_id });
+                    try dispatchPlatformEventWithBridges(self, app, .{ .tray_action = item_id }, web_bridges_enabled);
                 },
                 .focus_view => {
                     try WindowViewMethods().focusView(self, 1, try parseAutomationViewLabel(command.value));

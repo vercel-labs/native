@@ -10,6 +10,7 @@ pub const RawManifest = struct {
     platforms: []const []const u8 = &.{},
     permissions: []const []const u8 = &.{},
     capabilities: []const []const u8 = &.{},
+    host: []const u8 = "webview",
     bridge: RawBridge = .{},
     web_engine: []const u8 = @tagName(web_engine.default_engine),
     theme: ?[]const u8 = null,

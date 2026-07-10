@@ -66,6 +66,7 @@ pub const PackageOptions = struct {
     frontend: ?manifest_tool.FrontendMetadata = null,
     web_engine: WebEngine = .system,
     cef_dir: []const u8 = web_engine_tool.default_cef_dir,
+    cef_override: bool = false,
     signing: SigningConfig = .{},
     archive: bool = false,
     /// The process environment, when the caller has one (the CLI). The
@@ -97,6 +98,10 @@ pub fn artifactName(buffer: []u8, metadata: manifest_tool.Metadata, target: Pack
 }
 
 pub fn createPackage(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions) !PackageStats {
+    if (manifest_tool.hostValidationError(options.metadata) != null) return error.InvalidManifest;
+    if (std.mem.eql(u8, options.metadata.host, "native") and (options.frontend != null or options.web_engine != .system or options.cef_override)) {
+        return error.InvalidNativeHostPackage;
+    }
     try validateWebEngineTarget(options.target, options.web_engine);
     var stats = switch (options.target) {
         .macos => try createMacosApp(allocator, io, options),
@@ -147,6 +152,47 @@ pub fn createLocalPackage(io: std.Io, output_path: []const u8) !PackageStats {
         .output_path = output_path,
         .binary_path = null,
     });
+}
+
+test "native host package options reject browser staging" {
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.native_sdk.native_package",
+        .name = "native-package",
+        .version = "1.0.0",
+        .host = "native",
+    };
+    const frontend: manifest_tool.FrontendMetadata = .{};
+
+    try std.testing.expectError(error.InvalidNativeHostPackage, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = ".zig-cache/native-package-frontend",
+        .frontend = frontend,
+    }));
+    try std.testing.expectError(error.InvalidNativeHostPackage, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = ".zig-cache/native-package-chromium",
+        .web_engine = .chromium,
+    }));
+    try std.testing.expectError(error.InvalidNativeHostPackage, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = ".zig-cache/native-package-cef",
+        .cef_override = true,
+    }));
+}
+
+test "native host package rejects invalid manifest metadata" {
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.native_sdk.invalid_native_package",
+        .name = "invalid-native-package",
+        .version = "1.0.0",
+        .host = "native",
+        .capabilities = &.{"js_bridge"},
+    };
+
+    try std.testing.expectError(error.InvalidManifest, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = ".zig-cache/native-package-invalid-manifest",
+    }));
 }
 
 pub fn createMacosApp(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions) !PackageStats {
@@ -1669,7 +1715,6 @@ test "mobile package templates ship the toolkit hosts" {
     try std.testing.expect(std.mem.indexOf(u8, android_bridge, "ANativeWindow_fromSurface") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_bridge, "WINDOW_FORMAT_RGBA_8888") != null);
 }
-
 
 test "mobile package artifacts use manifest identity metadata" {
     var cwd = std.Io.Dir.cwd();

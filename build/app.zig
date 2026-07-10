@@ -4,6 +4,7 @@
 //! come from the native-sdk dependency.
 
 const std = @import("std");
+const RawManifest = @import("../src/tooling/raw_manifest.zig").RawManifest;
 
 const PlatformOption = enum {
     auto,
@@ -23,6 +24,11 @@ const TraceOption = enum {
 const WebEngineOption = enum {
     system,
     chromium,
+};
+
+const HostOption = enum {
+    webview,
+    native,
 };
 
 pub const AppOptions = struct {
@@ -218,7 +224,11 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         @panic("-Dplatform=windows requires a Windows target");
     }
     const app_web_engine = appWebEngineConfig(b, app_options.app_root);
-    const web_engine = web_engine_override orelse app_web_engine.web_engine;
+    const host = app_web_engine.host;
+    if (host == .native and (web_engine_override == .chromium or app_web_engine.web_engine == .chromium or cef_dir_override != null or cef_auto_install_override != null or app_web_engine.cef_auto_install or !std.mem.eql(u8, app_web_engine.cef_dir, "third_party/cef/macos"))) {
+        @panic("app.zon host = \"native\" cannot select Chromium or configure CEF");
+    }
+    const web_engine = if (host == .native) .system else web_engine_override orelse app_web_engine.web_engine;
     const cef_dir = cef_dir_override orelse defaultCefDir(selected_platform, app_web_engine.cef_dir);
     const cef_auto_install = cef_auto_install_override orelse app_web_engine.cef_auto_install;
     if (web_engine == .chromium and selected_platform != .macos) {
@@ -235,6 +245,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     });
     options.addOption([]const u8, "trace", @tagName(trace_option));
     options.addOption([]const u8, "web_engine", @tagName(web_engine));
+    options.addOption([]const u8, "host", @tagName(host));
     options.addOption(bool, "debug_overlay", debug_overlay);
     options.addOption(bool, "automation", automation_enabled);
     options.addOption(bool, "js_bridge", js_bridge_enabled);
@@ -245,7 +256,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         .name = app_options.name,
         .root_module = app_mod,
     });
-    linkPlatform(b, dep, target, app_mod, exe, selected_platform, web_engine, cef_dir, cef_auto_install);
+    linkPlatform(b, dep, target, app_mod, exe, selected_platform, host, web_engine, cef_dir, cef_auto_install);
     const install = b.addInstallArtifact(exe, .{});
     b.getInstallStep().dependOn(&install.step);
 
@@ -465,9 +476,13 @@ fn externalModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.R
 // Reproduced with a 10-line `zig cc` program against both the 14.5 and
 // 26.0 SDKs. Release builds never hit it (no UBSan), which is why only
 // Debug-built examples (standardOptimizeOption default) crashed.
-fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, cef_dir: []const u8, cef_auto_install: bool) void {
+fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, host: HostOption, web_engine: WebEngineOption, cef_dir: []const u8, cef_auto_install: bool) void {
     if (platform == .macos) {
-        switch (web_engine) {
+        if (host == .native) {
+            const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
+            const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-DNATIVE_SDK_NATIVE_ONLY=1", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-DNATIVE_SDK_NATIVE_ONLY=1", "-mmacosx-version-min=11.0" };
+            app_mod.addCSourceFile(.{ .file = dep.path("src/platform/macos/appkit_host.m"), .flags = flags });
+        } else switch (web_engine) {
             .system => {
                 const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
                 const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
@@ -515,7 +530,11 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         app_mod.linkSystemLibrary("c", .{});
         if (web_engine == .chromium) app_mod.linkSystemLibrary("c++", .{});
     } else if (platform == .linux) {
-        switch (web_engine) {
+        if (host == .native) {
+            app_mod.addCSourceFile(.{ .file = dep.path("src/platform/linux/gtk_host.c"), .flags = &.{"-DNATIVE_SDK_NATIVE_ONLY=1"} });
+            app_mod.linkSystemLibrary("gtk4", .{});
+            app_mod.linkSystemLibrary("dl", .{});
+        } else switch (web_engine) {
             .system => {
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/linux/gtk_host.c"), .flags = &.{} });
                 app_mod.linkSystemLibrary("gtk4", .{});
@@ -545,7 +564,9 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         // manifest the loader binds the system-default v5 assembly, which
         // renders classic-styled controls and lacks the v6-only exports.
         exe.win32_manifest = dep.path("assets/native-sdk.manifest");
-        switch (web_engine) {
+        if (host == .native) {
+            app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17", "-DNATIVE_SDK_NATIVE_ONLY=1" } });
+        } else switch (web_engine) {
             .system => app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/webview2_host.cpp"), .flags = &.{"-std=c++17"} }),
             .chromium => {
                 const cef_check = addCefCheck(b, target, cef_dir);
@@ -638,6 +659,7 @@ fn addCefCheck(b: *std.Build, target: std.Build.ResolvedTarget, cef_dir: []const
 }
 
 const AppWebEngineConfig = struct {
+    host: HostOption = .webview,
     web_engine: WebEngineOption = .system,
     cef_dir: []const u8 = "third_party/cef/macos",
     cef_auto_install: bool = false,
@@ -661,16 +683,34 @@ fn appPath(b: *std.Build, app_root: []const u8, sub_path: []const u8) []const u8
 }
 
 fn appWebEngineConfig(b: *std.Build, app_root: []const u8) AppWebEngineConfig {
-    const source = b.build_root.handle.readFileAlloc(b.graph.io, appPath(b, app_root, "app.zon"), b.allocator, .limited(1024 * 1024)) catch return .{};
-    var config: AppWebEngineConfig = .{};
-    if (stringField(source, ".web_engine")) |value| {
-        config.web_engine = parseWebEngine(value) orelse .system;
-    }
-    if (objectSection(source, ".cef")) |cef| {
-        if (stringField(cef, ".dir")) |value| config.cef_dir = value;
-        if (boolField(cef, ".auto_install")) |value| config.cef_auto_install = value;
-    }
-    return config;
+    const manifest_path = appPath(b, app_root, "app.zon");
+    const source = b.build_root.handle.readFileAlloc(b.graph.io, manifest_path, b.allocator, .limited(1024 * 1024)) catch |err| {
+        std.debug.panic("failed to read {s}: {s}", .{ manifest_path, @errorName(err) });
+    };
+    return parseAppWebEngineConfig(b.allocator, source) catch |err| {
+        std.debug.panic("invalid {s}: {s}", .{ manifest_path, @errorName(err) });
+    };
+}
+
+fn parseAppWebEngineConfig(allocator: std.mem.Allocator, source: []const u8) !AppWebEngineConfig {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const source_z = try scratch.dupeZ(u8, source);
+    @setEvalBranchQuota(5000);
+    const raw = try std.zon.parse.fromSliceAlloc(RawManifest, scratch, source_z, null, .{});
+    return .{
+        .host = parseHost(raw.host) orelse return error.InvalidHost,
+        .web_engine = parseWebEngine(raw.web_engine) orelse return error.InvalidWebEngine,
+        .cef_dir = try allocator.dupe(u8, raw.cef.dir),
+        .cef_auto_install = raw.cef.auto_install,
+    };
+}
+
+fn parseHost(value: []const u8) ?HostOption {
+    if (std.mem.eql(u8, value, "webview")) return .webview;
+    if (std.mem.eql(u8, value, "native")) return .native;
+    return null;
 }
 
 fn parseWebEngine(value: []const u8) ?WebEngineOption {
@@ -679,38 +719,27 @@ fn parseWebEngine(value: []const u8) ?WebEngineOption {
     return null;
 }
 
-fn stringField(source: []const u8, field: []const u8) ?[]const u8 {
-    const field_index = std.mem.indexOf(u8, source, field) orelse return null;
-    const equals = std.mem.indexOfScalarPos(u8, source, field_index, '=') orelse return null;
-    const start_quote = std.mem.indexOfScalarPos(u8, source, equals, '"') orelse return null;
-    const end_quote = std.mem.indexOfScalarPos(u8, source, start_quote + 1, '"') orelse return null;
-    return source[start_quote + 1 .. end_quote];
+test "app build host parser ignores comment-shadowed fields" {
+    const config = try parseAppWebEngineConfig(std.testing.allocator,
+        \\.{
+        \\    .id = "dev.native_sdk.comment_host",
+        \\    .name = "comment-host",
+        \\    .version = "1.0.0",
+        \\    // .host = "webview",
+        \\    .host = "native",
+        \\}
+    );
+    defer std.testing.allocator.free(config.cef_dir);
+    try std.testing.expectEqual(HostOption.native, config.host);
 }
 
-fn objectSection(source: []const u8, field: []const u8) ?[]const u8 {
-    const field_index = std.mem.indexOf(u8, source, field) orelse return null;
-    const open = std.mem.indexOfScalarPos(u8, source, field_index, '{') orelse return null;
-    var depth: usize = 0;
-    var index = open;
-    while (index < source.len) : (index += 1) {
-        switch (source[index]) {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if (depth == 0) return source[open + 1 .. index];
-            },
-            else => {},
-        }
-    }
-    return null;
-}
-
-fn boolField(source: []const u8, field: []const u8) ?bool {
-    const field_index = std.mem.indexOf(u8, source, field) orelse return null;
-    const equals = std.mem.indexOfScalarPos(u8, source, field_index, '=') orelse return null;
-    var index = equals + 1;
-    while (index < source.len and std.ascii.isWhitespace(source[index])) : (index += 1) {}
-    if (std.mem.startsWith(u8, source[index..], "true")) return true;
-    if (std.mem.startsWith(u8, source[index..], "false")) return false;
-    return null;
+test "app build host parser rejects invalid values" {
+    try std.testing.expectError(error.InvalidHost, parseAppWebEngineConfig(std.testing.allocator,
+        \\.{
+        \\    .id = "dev.native_sdk.invalid_host",
+        \\    .name = "invalid-host",
+        \\    .version = "1.0.0",
+        \\    .host = "browser",
+        \\}
+    ));
 }

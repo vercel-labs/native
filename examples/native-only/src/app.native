@@ -1,0 +1,5 @@
+<column gap="12" padding="24" main="center" cross="center">
+  <text>Native-only host</text>
+  <text>No browser engine is compiled or linked.</text>
+  <button variant="primary" on-press="toggle">{status}</button>
+</column>

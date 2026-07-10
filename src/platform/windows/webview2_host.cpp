@@ -27,7 +27,7 @@
 #include <thread>
 #include <vector>
 
-#if __has_include(<WebView2.h>) && __has_include(<wrl.h>)
+#if !defined(NATIVE_SDK_NATIVE_ONLY) && __has_include(<WebView2.h>) && __has_include(<wrl.h>)
 #include <WebView2.h>
 #include <wrl.h>
 #define NATIVE_SDK_HAS_WEBVIEW2 1
@@ -39,7 +39,9 @@ using Microsoft::WRL::ComPtr;
  * the host builds with the embedded WebView layer stubbed out — canvas
  * apps are unaffected, but apps that load a WebView report
  * WebViewNotFound at start. */
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 #pragma message("WebView2.h not found: building the Windows host without the embedded WebView layer (canvas apps unaffected; WebView loads will report WebViewNotFound)")
+#endif
 #endif
 
 /* Media Foundation (the audio backend below) + WinHTTP (the audio cache

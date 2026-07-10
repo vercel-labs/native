@@ -446,9 +446,11 @@ pub const Runtime = struct {
 
     const FlowMethods = runtime_flow.RuntimeFlow(Runtime);
     pub const run = FlowMethods.run;
+    pub const runNative = FlowMethods.runNative;
     pub const emitWindowEvent = FlowMethods.emitWindowEvent;
     pub const respondToBridge = FlowMethods.respondToBridge;
     pub const dispatchPlatformEvent = FlowMethods.dispatchPlatformEvent;
+    pub const dispatchNonBridgePlatformEvent = FlowMethods.dispatchNonBridgePlatformEvent;
     pub const dispatchEvent = FlowMethods.dispatchEvent;
     pub const dispatchCommand = FlowMethods.dispatchCommand;
     pub const frame = FlowMethods.frame;

@@ -329,6 +329,29 @@ test "webview bridge fallback only routes main responses" {
     try std.testing.expectError(error.UnsupportedService, services.completeWebViewBridge(3, "preview", "{\"ok\":true}"));
 }
 
+test "native-only null platform omits WebView services" {
+    var null_platform = NullPlatform.init(.{});
+    const web_platform = null_platform.platform();
+    const platform = null_platform.nativePlatform();
+
+    try std.testing.expect(web_platform.supports(.main_webview));
+    try std.testing.expect(!platform.supports(.main_webview));
+    try std.testing.expect(!platform.supports(.child_webviews));
+    try std.testing.expect(platform.supports(.native_views));
+    try std.testing.expect(platform.services.load_webview_fn == null);
+    try std.testing.expect(platform.services.load_window_webview_fn == null);
+    try std.testing.expect(platform.services.complete_bridge_fn == null);
+    try std.testing.expect(platform.services.complete_window_bridge_fn == null);
+    try std.testing.expect(platform.services.complete_webview_bridge_fn == null);
+    try std.testing.expect(platform.services.create_webview_fn == null);
+    try std.testing.expect(platform.services.configure_security_policy_fn == null);
+    try std.testing.expect(platform.services.emit_window_event_fn == null);
+    try std.testing.expectError(error.UnsupportedService, platform.services.loadWebView(.html("")));
+    try std.testing.expectError(error.UnsupportedViewKind, platform.services.createView(.{ .label = "browser", .kind = .webview, .url = "https://example.com" }));
+    try std.testing.expectError(error.UnsupportedService, platform.services.configureSecurityPolicy(.{}));
+    try std.testing.expect(web_platform.supports(.main_webview));
+}
+
 test "shortcut configuration requires backend support for non-empty lists" {
     const services = PlatformServices{};
     try services.configureShortcuts(&.{});

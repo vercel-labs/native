@@ -1,7 +1,12 @@
 #include "gtk_host.h"
 
 #include <gtk/gtk.h>
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 #include <webkit/webkit.h>
+#else
+typedef struct _WebKitWebView WebKitWebView;
+typedef struct _WebKitUserContentManager WebKitUserContentManager;
+#endif
 #include <glib/gstdio.h>
 #include <dlfcn.h>
 #include <limits.h>
@@ -430,6 +435,7 @@ static int native_sdk_window_allows_asset_origin(native_sdk_gtk_window_t *win, c
     return native_sdk_strings_equal(win->asset_origin, origin) || native_sdk_strings_equal(win->bridge_origin, origin);
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 typedef WebKitWebView *(*native_sdk_request_get_web_view_fn)(WebKitURISchemeRequest *request);
 
 static native_sdk_request_get_web_view_fn native_sdk_request_get_web_view(void) {
@@ -484,6 +490,7 @@ static void native_sdk_apply_webview_frame(native_sdk_gtk_webview_t *webview) {
     gtk_widget_set_margin_top(widget, native_sdk_webview_coord(webview->y));
     gtk_widget_set_size_request(widget, native_sdk_webview_extent(webview->width), native_sdk_webview_extent(webview->height));
 }
+#endif
 
 static int native_sdk_valid_native_view_frame(double x, double y, double width, double height) {
     return x >= 0 && y >= 0 && width >= 0 && height >= 0;
@@ -1778,6 +1785,7 @@ static const char *native_sdk_mime_for_ext(const char *path) {
     return "application/octet-stream";
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 static native_sdk_gtk_window_t *native_sdk_window_for_asset_uri(native_sdk_gtk_host_t *host, const char *uri, WebKitWebView *request_web_view, int request_web_view_supported) {
     char *origin = native_sdk_origin_for_uri(uri);
     if (!origin) return NULL;
@@ -1882,6 +1890,7 @@ static void native_sdk_asset_scheme_request(WebKitURISchemeRequest *request, gpo
     g_free(path);
     g_free(relative);
 }
+#endif
 
 static native_sdk_gtk_window_t *native_sdk_find_window(native_sdk_gtk_host_t *host, uint64_t id) {
     for (int i = 0; i < host->window_count; i++) {
@@ -2385,6 +2394,7 @@ static gboolean on_close_request(GtkWindow *window, gpointer data) {
     return FALSE;
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 static const char *native_sdk_decision_uri(WebKitPolicyDecision *decision, WebKitPolicyDecisionType type) {
     if (type != WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION) return NULL;
     WebKitNavigationPolicyDecision *navigation = WEBKIT_NAVIGATION_POLICY_DECISION(decision);
@@ -2392,6 +2402,7 @@ static const char *native_sdk_decision_uri(WebKitPolicyDecision *decision, WebKi
     WebKitURIRequest *request = action ? webkit_navigation_action_get_request(action) : NULL;
     return request ? webkit_uri_request_get_uri(request) : NULL;
 }
+#endif
 
 #if GTK_CHECK_VERSION(4, 10, 0)
 static void native_sdk_uri_launch_done(GObject *source_object, GAsyncResult *result, gpointer data) {
@@ -2417,6 +2428,7 @@ static void native_sdk_open_external_uri(GtkWindow *parent, const char *uri) {
 #endif
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 static gboolean on_decide_policy(WebKitWebView *web_view, WebKitPolicyDecision *decision, WebKitPolicyDecisionType type, gpointer data) {
     (void)web_view;
     native_sdk_gtk_window_t *win = data;
@@ -2507,6 +2519,7 @@ static void native_sdk_setup_bridge(native_sdk_gtk_window_t *win) {
     webkit_user_content_manager_add_script(manager, script);
     webkit_user_script_unref(script);
 }
+#endif
 
 static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk_host_t *host, uint64_t window_id, const char *title, const char *label, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height) {
     if (native_sdk_find_window(host, window_id)) return NULL;
@@ -2591,6 +2604,7 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
         g_signal_connect(bar, "map", G_CALLBACK(native_sdk_on_header_bar_mapped), win->host);
     }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     win->content_manager = webkit_user_content_manager_new();
     WebKitWebView *wv = WEBKIT_WEB_VIEW(
         g_object_new(WEBKIT_TYPE_WEB_VIEW,
@@ -2602,6 +2616,7 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
         host->scheme_registered = 1;
     }
     native_sdk_setup_bridge(win);
+#endif
 
     win->root_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     /* Declared content min-size floor: the size request on the content
@@ -2620,7 +2635,9 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
     win->stack_root = gtk_overlay_new();
     gtk_widget_set_hexpand(win->stack_root, TRUE);
     gtk_widget_set_vexpand(win->stack_root, TRUE);
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     gtk_overlay_set_child(GTK_OVERLAY(win->stack_root), GTK_WIDGET(wv));
+#endif
     gtk_box_append(GTK_BOX(win->root_box), win->stack_root);
     gtk_window_set_child(win->gtk_window, win->root_box);
     native_sdk_install_file_drop_target(win);
@@ -2629,7 +2646,9 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
     g_signal_connect(win->gtk_window, "notify::default-height", G_CALLBACK(on_resize), win);
     g_signal_connect(win->gtk_window, "notify::is-active", G_CALLBACK(on_focus), win);
     g_signal_connect(win->gtk_window, "close-request", G_CALLBACK(on_close_request), win);
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
     g_signal_connect(win->web_view, "decide-policy", G_CALLBACK(on_decide_policy), win);
+#endif
     GtkEventController *shortcut_controller = gtk_event_controller_key_new();
     gtk_event_controller_set_propagation_phase(shortcut_controller, GTK_PHASE_CAPTURE);
     g_signal_connect(shortcut_controller, "key-pressed", G_CALLBACK(on_shortcut_key_pressed), win);
@@ -2842,6 +2861,7 @@ int native_sdk_gtk_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t 
     return 1;
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 void native_sdk_gtk_load_webview(native_sdk_gtk_host_t *host, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback) {
     native_sdk_gtk_load_window_webview(host, 1, source, source_len, source_kind, asset_root, asset_root_len, asset_entry, asset_entry_len, asset_origin, asset_origin_len, spa_fallback);
 }
@@ -2971,6 +2991,7 @@ void native_sdk_gtk_emit_window_event(native_sdk_gtk_host_t *host, uint64_t wind
     free(event_name);
     free(detail);
 }
+#endif
 
 void native_sdk_gtk_set_security_policy(native_sdk_gtk_host_t *host, const char *allowed_origins, size_t allowed_origins_len, const char *external_urls, size_t external_urls_len, int external_action) {
     native_sdk_free_string_list(host->allowed_origins, host->allowed_origins_count);
@@ -3567,6 +3588,7 @@ int native_sdk_gtk_close_view(native_sdk_gtk_host_t *host, uint64_t window_id, c
     return 1;
 }
 
+#if !defined(NATIVE_SDK_NATIVE_ONLY)
 int native_sdk_gtk_create_webview(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled) {
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     if (!win || !win->stack_root || label_len == 0 || url_len == 0 || !native_sdk_valid_webview_frame(x, y, width, height)) return 0;
@@ -3722,6 +3744,7 @@ int native_sdk_gtk_close_webview(native_sdk_gtk_host_t *host, uint64_t window_id
     free(label_copy);
     return 0;
 }
+#endif
 
 int native_sdk_gtk_open_external_url(native_sdk_gtk_host_t *host, const char *url, size_t url_len) {
     if (!host || !url || url_len == 0) return 0;

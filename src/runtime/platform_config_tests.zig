@@ -65,6 +65,44 @@ const builtinBridgeErrorMessage = support.builtinBridgeErrorMessage;
 const testViewByLabel = support.testViewByLabel;
 const testCanvasWidgetPartId = support.testCanvasWidgetPartId;
 
+test "native-only null runtime completes startup without a browser security hook" {
+    const TestApp = struct {
+        const views = [_]app_manifest.ShellView{.{
+            .label = "main-canvas",
+            .kind = .gpu_surface,
+            .fill = true,
+        }};
+        const windows = [_]app_manifest.ShellWindow{.{
+            .label = "main",
+            .views = &views,
+        }};
+
+        fn scene(context: *anyopaque) anyerror!app_manifest.ShellConfig {
+            _ = context;
+            return .{ .windows = &windows };
+        }
+    };
+
+    var app_context: u8 = 0;
+    var null_platform = platform.NullPlatform.init(.{});
+    null_platform.gpu_surfaces = true;
+    const runtime = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    Runtime.initAt(runtime, .{
+        .platform = null_platform.nativePlatform(),
+        .security = .{ .permissions = &.{security.permission_view} },
+    });
+
+    try runtime.run(.{
+        .context = &app_context,
+        .name = "native-runtime-smoke",
+        .scene_fn = TestApp.scene,
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), runtime.view_count);
+    try std.testing.expectEqual(@as(u64, 1), runtime.frame_index);
+}
+
 test "runtime dispatches shortcut command events" {
     const TestApp = struct {
         command_count: u32 = 0,

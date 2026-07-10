@@ -22,6 +22,7 @@ pub const Metadata = struct {
     platforms: []const []const u8 = &.{},
     permissions: []const []const u8 = &.{},
     capabilities: []const []const u8 = &.{},
+    host: []const u8 = "webview",
     bridge_commands: []const BridgeCommandMetadata = &.{},
     web_engine: []const u8 = "system",
     /// The built-in theme pack the app selects (`theme = "geist"`).
@@ -51,6 +52,7 @@ pub const Metadata = struct {
         if (self.description) |value| allocator.free(value);
         if (self.theme) |value| allocator.free(value);
         allocator.free(self.version);
+        allocator.free(self.host);
         allocator.free(self.web_engine);
         allocator.free(self.cef.dir);
         for (self.icons) |value| allocator.free(value);
@@ -388,6 +390,7 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     defer allocator.free(windows);
     const shell = parseShell(allocator, metadata.shell) catch return .{ .ok = false, .message = "app.zon shell is invalid" };
     defer deinitParsedShell(allocator, shell);
+    if (hostValidationError(metadata)) |message| return .{ .ok = false, .message = message };
     const commands = parseCommands(allocator, metadata.commands) catch return .{ .ok = false, .message = "app.zon commands are invalid" };
     defer allocator.free(commands);
     const menus = parseMenus(allocator, metadata.menus) catch return .{ .ok = false, .message = "app.zon menus are invalid" };
@@ -472,6 +475,7 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .platforms = try duplicateStringList(allocator, raw.platforms),
         .permissions = try duplicateStringList(allocator, raw.permissions),
         .capabilities = try duplicateStringList(allocator, raw.capabilities),
+        .host = try allocator.dupe(u8, raw.host),
         .bridge_commands = try convertRawBridgeCommands(allocator, raw.bridge.commands),
         .web_engine = try allocator.dupe(u8, raw.web_engine),
         .cef = .{
@@ -488,6 +492,37 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .file_associations = try convertRawFileAssociations(allocator, raw.file_associations),
         .url_schemes = try convertRawUrlSchemes(allocator, raw.url_schemes),
     };
+}
+
+const Host = enum { webview, native };
+
+fn parseHost(value: []const u8) ?Host {
+    if (std.mem.eql(u8, value, "webview")) return .webview;
+    if (std.mem.eql(u8, value, "native")) return .native;
+    return null;
+}
+
+pub fn hostValidationError(metadata: Metadata) ?[]const u8 {
+    const host = parseHost(metadata.host) orelse return "app.zon host is invalid - expected one of: webview, native";
+    if (host != .native) return null;
+    if (metadata.frontend != null) return "app.zon native host cannot declare frontend content";
+    if (hasString(metadata.capabilities, "webview")) return "app.zon native host cannot declare the webview capability";
+    for (metadata.shell.windows) |window| {
+        for (window.views) |view| {
+            if (std.mem.eql(u8, view.kind, "webview")) return "app.zon native host cannot declare webview shell views";
+        }
+    }
+    if (hasString(metadata.capabilities, "js_bridge") or metadata.bridge_commands.len > 0) return "app.zon native host cannot declare JavaScript bridge content";
+    if (!std.mem.eql(u8, metadata.web_engine, "system")) return "app.zon native host cannot select a web engine";
+    if (metadata.cef.auto_install or !std.mem.eql(u8, metadata.cef.dir, web_engine_tool.default_cef_dir)) return "app.zon native host cannot configure CEF";
+    return null;
+}
+
+fn hasString(values: []const []const u8, expected: []const u8) bool {
+    for (values) |value| {
+        if (std.mem.eql(u8, value, expected)) return true;
+    }
+    return false;
 }
 
 fn duplicateOptionalString(allocator: std.mem.Allocator, value: ?[]const u8) !?[]const u8 {
@@ -1811,6 +1846,107 @@ test "manifest metadata parser reads frontend config" {
     try std.testing.expectEqualStrings("http://127.0.0.1:5173/", metadata.frontend.?.dev.?.url);
     try std.testing.expectEqualStrings("npm", metadata.frontend.?.dev.?.command[0]);
     try std.testing.expectEqual(@as(u32, 12000), metadata.frontend.?.dev.?.timeout_ms);
+}
+
+test "manifest metadata parser keeps webview hosting by default and reads native hosting" {
+    const default_metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.default",
+        \\  .name = "default",
+        \\  .version = "1.0.0",
+        \\}
+    );
+    defer default_metadata.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("webview", default_metadata.host);
+
+    const native_metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.native",
+        \\  .name = "native",
+        \\  .version = "1.0.0",
+        \\  .host = "native",
+        \\}
+    );
+    defer native_metadata.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("native", native_metadata.host);
+}
+
+test "native host validation rejects web content declarations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-native-host-manifest";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+
+    const cases = [_]struct {
+        source: []const u8,
+        message: []const u8,
+    }{
+        .{
+            .source =
+            \\.{ .id = "dev.example.app", .name = "demo", .version = "1.0.0", .host = "browser" }
+            ,
+            .message = "app.zon host is invalid - expected one of: webview, native",
+        },
+        .{
+            .source =
+            \\.{ .id = "dev.example.app", .name = "demo", .version = "1.0.0", .host = "native", .frontend = .{} }
+            ,
+            .message = "app.zon native host cannot declare frontend content",
+        },
+        .{
+            .source =
+            \\.{ .id = "dev.example.app", .name = "demo", .version = "1.0.0", .host = "native", .capabilities = .{ "webview" } }
+            ,
+            .message = "app.zon native host cannot declare the webview capability",
+        },
+        .{
+            .source =
+            \\.{ .id = "dev.example.app", .name = "demo", .version = "1.0.0", .host = "native", .shell = .{ .windows = .{ .{ .views = .{ .{ .label = "main", .kind = "webview" } } } } } }
+            ,
+            .message = "app.zon native host cannot declare webview shell views",
+        },
+        .{
+            .source =
+            \\.{ .id = "dev.example.app", .name = "demo", .version = "1.0.0", .host = "native", .capabilities = .{ "js_bridge" } }
+            ,
+            .message = "app.zon native host cannot declare JavaScript bridge content",
+        },
+        .{
+            .source =
+            \\.{ .id = "dev.example.app", .name = "demo", .version = "1.0.0", .host = "native", .bridge = .{ .commands = .{ .{ .name = "native.ping" } } } }
+            ,
+            .message = "app.zon native host cannot declare JavaScript bridge content",
+        },
+        .{
+            .source =
+            \\.{ .id = "dev.example.app", .name = "demo", .version = "1.0.0", .host = "native", .web_engine = "chromium" }
+            ,
+            .message = "app.zon native host cannot select a web engine",
+        },
+        .{
+            .source =
+            \\.{ .id = "dev.example.app", .name = "demo", .version = "1.0.0", .host = "native", .cef = .{ .auto_install = true } }
+            ,
+            .message = "app.zon native host cannot configure CEF",
+        },
+        .{
+            .source =
+            \\.{ .id = "dev.example.app", .name = "demo", .version = "1.0.0", .host = "native", .cef = .{ .dir = "vendor/cef" } }
+            ,
+            .message = "app.zon native host cannot configure CEF",
+        },
+    };
+
+    for (cases) |case| {
+        try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data = case.source });
+        const result = try validateFile(allocator, std.testing.io, root ++ "/app.zon");
+        try std.testing.expect(!result.ok);
+        try std.testing.expectEqualStrings(case.message, result.message);
+    }
 }
 
 test "validate surfaces the non-square icon teaching error with dimensions" {

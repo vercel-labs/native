@@ -17,6 +17,7 @@ The manifest `native init` generates — identity, one shell window with a GPU s
     .platforms = .{"macos"},
     .permissions = .{ "view", "command" },
     .capabilities = .{ "native_views", "gpu_surfaces" },
+    .host = "native",
     .shell = .{
         .windows = .{
             .{
@@ -32,14 +33,6 @@ The manifest `native init` generates — identity, one shell window with a GPU s
             },
         },
     },
-    .security = .{
-        .navigation = .{
-            .allowed_origins = .{ "zero://app", "zero://inline" },
-            .external_links = .{ .action = "deny" },
-        },
-    },
-    .web_engine = "system",
-    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
 }
 ```
 
@@ -157,6 +150,10 @@ A fuller manifest for an app that also [embeds web content](/frontend) and decla
       <td>Feature declarations (see <a href="/security">Security</a>)</td>
     </tr>
     <tr>
+      <td><code>host</code></td>
+      <td><code>webview</code> (default) or <code>native</code>; native hosts exclude browser SDKs and services</td>
+    </tr>
+    <tr>
       <td><code>bridge</code></td>
       <td>Bridge command policies (see <a href="/bridge">Bridge</a>)</td>
     </tr>
@@ -210,6 +207,12 @@ A fuller manifest for an app that also [embeds web content](/frontend) and decla
     </tr>
   </tbody>
 </table>
+
+## `host`
+
+`host = "webview"` is the default and preserves the browser-capable desktop host. Set `host = "native"` for a canvas/native-view app that must not compile or link WebKit, WebKitGTK, WebView2, or CEF, stage frontend content, or include the JavaScript command dispatcher. Native manifests reject webview, bridge, frontend, Chromium, and CEF declarations. Native hosts retain non-browser platform services and package ordinary app assets such as images, fonts, audio, and icons.
+
+A native host cannot declare `frontend`, the `webview` or `js_bridge` capabilities, bridge commands, WebView shell views, or Chromium. `native validate app.zon` reports the conflicting declaration instead of silently adding a browser layer.
 
 ## `shell`
 

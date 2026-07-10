@@ -70,7 +70,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 };
             };
 
-            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = window_id,
                 .label = label,
                 .kind = .pointer_down,
@@ -79,7 +79,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 .y = point.y,
                 .button = 0,
             } });
-            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = window_id,
                 .label = label,
                 .kind = .pointer_up,
@@ -109,7 +109,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             const label = self.views[view_index].label;
             const timestamp_ns = automationInputTimestampNs();
 
-            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = window_id,
                 .label = label,
                 .kind = .pointer_down,
@@ -118,11 +118,11 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 .y = point.y,
                 .button = 0,
             } });
-            try self.dispatchPlatformEvent(app, .{ .timer = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .timer = .{
                 .id = platform.press_hold_timer_id,
                 .timestamp_ns = timestamp_ns,
             } });
-            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = window_id,
                 .label = label,
                 .kind = .pointer_up,
@@ -152,7 +152,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             const label = self.views[view_index].label;
             const timestamp_ns = automationInputTimestampNs();
 
-            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = window_id,
                 .label = label,
                 .kind = .pointer_down,
@@ -161,7 +161,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 .y = point.y,
                 .button = 1,
             } });
-            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = window_id,
                 .label = label,
                 .kind = .pointer_up,
@@ -199,7 +199,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 .token = widget.id,
                 .kind = .app,
             };
-            try self.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .context_menu_action = .{
                 .window_id = self.views[view_index].window_id,
                 .view_label = self.views[view_index].label,
                 .token = widget.id,
@@ -238,7 +238,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             if (bounds.isEmpty()) return error.WheelTargetHasEmptyBounds;
             const point = bounds.center();
             const timestamp_ns = automationInputTimestampNs();
-            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = self.views[view_index].window_id,
                 .label = self.views[view_index].label,
                 .kind = .scroll,
@@ -252,7 +252,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         pub fn dispatchAutomationWidgetKeyInput(self: *Runtime, app: runtime_api.App(Runtime), key: AutomationWidgetKey) anyerror!void {
             const view_index = try automationGpuSurfaceViewIndexByLabel(self, key.view_label);
             try self.focusView(self.views[view_index].window_id, self.views[view_index].label);
-            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = self.views[view_index].window_id,
                 .label = self.views[view_index].label,
                 .kind = .key_down,
@@ -286,7 +286,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             );
             const timestamp_ns = automationInputTimestampNs();
 
-            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = self.views[view_index].window_id,
                 .label = self.views[view_index].label,
                 .kind = .pointer_down,
@@ -295,7 +295,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 .y = start.y,
                 .button = 0,
             } });
-            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = self.views[view_index].window_id,
                 .label = self.views[view_index].label,
                 .kind = .pointer_drag,
@@ -306,7 +306,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 .delta_y = end.y - start.y,
                 .button = 0,
             } });
-            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = self.views[view_index].window_id,
                 .label = self.views[view_index].label,
                 .kind = .pointer_up,
@@ -376,7 +376,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                     try CanvasWidgetEventMethods().invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
                 }
             }
-            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = self.views[view_index].window_id,
                 .label = self.views[view_index].label,
                 .kind = .key_down,
@@ -422,7 +422,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
 
             // Select all (the platform primary shortcut), exactly like a
             // user pressing cmd/ctrl+a in the focused field.
-            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = window_id,
                 .label = label,
                 .kind = .key_down,
@@ -432,7 +432,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             } });
             if (text.len == 0) {
                 // Empty replacement: delete the selection.
-                try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                     .window_id = window_id,
                     .label = label,
                     .kind = .key_down,
@@ -441,7 +441,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 } });
                 return;
             }
-            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = window_id,
                 .label = label,
                 .kind = .text_input,
@@ -483,7 +483,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 }
             }
 
-            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = window_id,
                 .label = label,
                 .kind = .pointer_drag,
@@ -512,7 +512,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             const bounds = node.frame.normalized();
             if (bounds.isEmpty()) return error.InvalidCommand;
 
-            try self.dispatchPlatformEvent(app, .{ .files_dropped = .{
+            try self.dispatchNonBridgePlatformEvent(app, .{ .files_dropped = .{
                 .window_id = self.views[view_index].window_id,
                 .view_label = self.views[view_index].label,
                 .point = bounds.center(),

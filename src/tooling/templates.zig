@@ -390,7 +390,6 @@ fn nativeMainZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8
         \\        .js_window_api = false,
         \\        .security = .{
         \\            .permissions = &app_permissions,
-        \\            .navigation = .{ .allowed_origins = &.{ "zero://inline", "zero://app" } },
         \\        },
         \\    }, init);
         \\}
@@ -561,6 +560,7 @@ fn nativeAppZon(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 
         \\,
         \\    .description = "A counter that lives in one native window.",
         \\    .version = "0.1.0",
+        \\    .host = "native",
         \\    .icons = .{"assets/icon.png"},
         \\    .platforms = .{"macos"},
         \\    .permissions = .{ "view", "command" },
@@ -585,14 +585,6 @@ fn nativeAppZon(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 
         \\            },
         \\        },
         \\    },
-        \\    .security = .{
-        \\        .navigation = .{
-        \\            .allowed_origins = .{ "zero://app", "zero://inline" },
-        \\            .external_links = .{ .action = "deny" },
-        \\        },
-        \\    },
-        \\    .web_engine = "system",
-        \\    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
         \\}
         \\
     );
@@ -716,7 +708,7 @@ fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_pa
         \\        with:
         \\          version: 0.16.0
         \\      - name: Install GTK and Xvfb
-        \\        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev xvfb
+        \\        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev xvfb
         \\      - name: Fetch native-sdk
         \\        run: |
         \\          if [ ! -f "$NATIVE_SDK_PATH/build.zig" ]; then
@@ -728,7 +720,7 @@ fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_pa
         \\        run: |
         \\          set -euo pipefail
         \\          cli="$NATIVE_SDK_PATH/zig-out/bin/native"
-        \\          zig build -Dplatform=linux -Dweb-engine=system -Dautomation=true
+        \\          zig build -Dplatform=linux -Dautomation=true
         \\          rm -rf .zig-cache/native-sdk-automation
         \\          xvfb-run -a ./zig-out/bin/
     );
@@ -2916,6 +2908,9 @@ test "writeDefaultApp emits a slim native scaffold by default" {
     try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, ".github/workflows/ci.yml"));
 
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "gpu_surface") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, ".host = \"native\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, ".navigation") == null);
+    try std.testing.expect(std.mem.indexOf(u8, main_zig_text, ".navigation") == null);
     try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "native_sdk.UiApp(Model, Msg)") != null);
     // The generated + derived state is ignored wholesale.
     try std.testing.expect(std.mem.indexOf(u8, gitignore_text, ".native/") != null);
@@ -2957,9 +2952,12 @@ test "writeDefaultApp emits native project files" {
     try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "src/runner.zig"));
 
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "gpu_surface") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, ".host = \"native\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "\"native_views\", \"gpu_surfaces\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "dev.native_sdk.my-app") != null);
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, ".frontend") == null);
+    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, ".navigation") == null);
+    try std.testing.expect(std.mem.indexOf(u8, main_zig_text, ".navigation") == null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "native_sdk.addApp(b, b.dependency(\"native_sdk\", .{}), .{ .name = \"my-app\" })") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zon_text, ".native_sdk = .{ .path = ") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zon_text, ".name = .my_app") != null);
@@ -2992,8 +2990,9 @@ test "writeDefaultApp emits a CI workflow for native apps" {
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "zig build test -Dplatform=null") != null);
     // The smoke job builds with automation, launches under Xvfb, and drives
     // the snapshot: the binary name comes from the template context.
-    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "libgtk-4-dev libwebkitgtk-6.0-dev xvfb") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "zig build -Dplatform=linux -Dweb-engine=system -Dautomation=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "libgtk-4-dev xvfb") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "libwebkitgtk") == null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "zig build -Dplatform=linux -Dautomation=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "xvfb-run -a ./zig-out/bin/my-app &") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "automate wait") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "automate assert 'gpu_nonblank=true' 'role=button name=\"Reset\"' 'count: 0'") != null);

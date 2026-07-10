@@ -1,0 +1,24 @@
+.{
+    .id = "dev.native_sdk.native_only",
+    .name = "native-only",
+    .display_name = "Native Only",
+    .description = "A canvas-only desktop host fixture.",
+    .version = "0.1.0",
+    .host = "native",
+    .platforms = .{ "macos", "linux", "windows" },
+    .capabilities = .{ "native_views", "gpu_surfaces" },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Native Only",
+                .width = 420,
+                .height = 260,
+                .restore_state = false,
+                .views = .{
+                    .{ .label = "main-canvas", .kind = "gpu_surface", .fill = true, .role = "Native-only canvas", .accessibility_label = "Native-only canvas", .gpu_backend = "software", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                },
+            },
+        },
+    },
+}

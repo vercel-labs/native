@@ -562,30 +562,38 @@ pub const MacPlatform = struct {
     }
 
     pub fn platform(self: *MacPlatform) platform_mod.Platform {
+        return self.platformWithWebViews(true);
+    }
+
+    pub fn nativePlatform(self: *MacPlatform) platform_mod.Platform {
+        return self.platformWithWebViews(false);
+    }
+
+    fn platformWithWebViews(self: *MacPlatform, comptime webviews_enabled: bool) platform_mod.Platform {
         return .{
             .context = self,
             .name = "macos",
             .surface_value = self.surface_value,
-            .run_fn = run,
-            .supports_fn = supportsFeature,
+            .run_fn = if (webviews_enabled) run else runNative,
+            .supports_fn = if (webviews_enabled) supportsFeature else supportsNativeFeature,
             .services = .{
                 .context = self,
                 .read_clipboard_fn = readClipboard,
                 .write_clipboard_fn = writeClipboard,
                 .read_clipboard_data_fn = readClipboardData,
                 .write_clipboard_data_fn = writeClipboardData,
-                .load_webview_fn = loadWebView,
-                .load_window_webview_fn = loadWindowWebView,
-                .complete_bridge_fn = completeBridge,
-                .complete_window_bridge_fn = completeWindowBridge,
-                .complete_webview_bridge_fn = completeWebViewBridge,
+                .load_webview_fn = if (webviews_enabled) loadWebView else null,
+                .load_window_webview_fn = if (webviews_enabled) loadWindowWebView else null,
+                .complete_bridge_fn = if (webviews_enabled) completeBridge else null,
+                .complete_window_bridge_fn = if (webviews_enabled) completeWindowBridge else null,
+                .complete_webview_bridge_fn = if (webviews_enabled) completeWebViewBridge else null,
                 .create_window_fn = createWindow,
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
-                .create_view_fn = createView,
+                .create_view_fn = if (webviews_enabled) createView else createNativeView,
                 .update_view_fn = updateView,
                 .set_view_frame_fn = setViewFrame,
                 .set_view_visible_fn = setViewVisible,
@@ -594,12 +602,12 @@ pub const MacPlatform = struct {
                 .close_view_fn = closeView,
                 .adopt_view_surface_fn = adoptViewSurface,
                 .release_view_surface_fn = releaseViewSurface,
-                .create_webview_fn = createWebView,
-                .set_webview_frame_fn = setWebViewFrame,
-                .navigate_webview_fn = navigateWebView,
-                .set_webview_zoom_fn = setWebViewZoom,
-                .set_webview_layer_fn = setWebViewLayer,
-                .close_webview_fn = closeWebView,
+                .create_webview_fn = if (webviews_enabled) createWebView else null,
+                .set_webview_frame_fn = if (webviews_enabled) setWebViewFrame else null,
+                .navigate_webview_fn = if (webviews_enabled) navigateWebView else null,
+                .set_webview_zoom_fn = if (webviews_enabled) setWebViewZoom else null,
+                .set_webview_layer_fn = if (webviews_enabled) setWebViewLayer else null,
+                .close_webview_fn = if (webviews_enabled) closeWebView else null,
                 .show_open_dialog_fn = showOpenDialog,
                 .show_save_dialog_fn = showSaveDialog,
                 .show_message_dialog_fn = showMessageDialog,
@@ -615,10 +623,10 @@ pub const MacPlatform = struct {
                 .update_tray_menu_fn = updateTrayMenu,
                 .update_tray_title_fn = updateTrayTitle,
                 .remove_tray_fn = removeTray,
-                .configure_security_policy_fn = configureSecurityPolicy,
+                .configure_security_policy_fn = if (webviews_enabled) configureSecurityPolicy else null,
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
-                .emit_window_event_fn = emitWindowEvent,
+                .emit_window_event_fn = if (webviews_enabled) emitWindowEvent else null,
                 .start_timer_fn = startTimer,
                 .cancel_timer_fn = cancelTimer,
                 .audio_load_fn = audioLoad,
@@ -654,6 +662,7 @@ pub const MacPlatform = struct {
         return switch (feature) {
             .main_webview,
             .child_webviews,
+            => true,
             .tray,
             .shortcuts,
             .dialogs,
@@ -688,6 +697,13 @@ pub const MacPlatform = struct {
         };
     }
 
+    fn supportsNativeFeature(context: *anyopaque, feature: platform_mod.PlatformFeature) bool {
+        return switch (feature) {
+            .main_webview, .child_webviews => false,
+            else => supportsFeature(context, feature),
+        };
+    }
+
     fn run(context: *anyopaque, handler: platform_mod.EventHandler, handler_context: *anyopaque) anyerror!void {
         const self: *MacPlatform = @ptrCast(@alignCast(context));
         self.state = .{
@@ -696,6 +712,18 @@ pub const MacPlatform = struct {
             .handler_context = handler_context,
         };
         native_sdk_appkit_set_bridge_callback(self.host, appkitBridgeCallback, &self.state);
+        native_sdk_appkit_set_tray_callback(self.host, appkitTrayCallback, &self.state);
+        native_sdk_appkit_run(self.host, appkitCallback, &self.state);
+        if (self.state.failed) return error.CallbackFailed;
+    }
+
+    fn runNative(context: *anyopaque, handler: platform_mod.EventHandler, handler_context: *anyopaque) anyerror!void {
+        const self: *MacPlatform = @ptrCast(@alignCast(context));
+        self.state = .{
+            .self = self,
+            .handler = handler,
+            .handler_context = handler_context,
+        };
         native_sdk_appkit_set_tray_callback(self.host, appkitTrayCallback, &self.state);
         native_sdk_appkit_run(self.host, appkitCallback, &self.state);
         if (self.state.failed) return error.CallbackFailed;
@@ -1117,6 +1145,11 @@ fn windowChrome(context: ?*anyopaque, window_id: platform_mod.WindowId) platform
 
 fn createView(context: ?*anyopaque, options: platform_mod.ViewOptions) anyerror!void {
     if (options.kind == .webview) return createWebView(context, options.webViewOptions());
+    return createNativeView(context, options);
+}
+
+fn createNativeView(context: ?*anyopaque, options: platform_mod.ViewOptions) anyerror!void {
+    if (options.kind == .webview) return error.UnsupportedViewKind;
     if (!isSupportedNativeViewKind(options.kind)) return error.UnsupportedViewKind;
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedViewKind;

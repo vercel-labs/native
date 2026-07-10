@@ -109,6 +109,7 @@ pub const SessionHeader = runtime_session_journal.Header;
 pub const sessionHeaderNow = runtime_session_record.headerNow;
 pub const sessionPlatformName = runtime_session_replay.currentPlatformName;
 pub const replaySession = runtime_session_replay.replaySession;
+pub const replayNativeSession = runtime_session_replay.replayNativeSession;
 pub const ReplayOptions = runtime_session_replay.ReplayOptions;
 pub const ReplayReport = runtime_session_replay.ReplayReport;
 pub const ReplayMismatch = runtime_session_replay.ReplayMismatch;

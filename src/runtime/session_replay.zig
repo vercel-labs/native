@@ -117,6 +117,25 @@ pub fn replaySession(
     journal_bytes: []const u8,
     options: ReplayOptions,
 ) anyerror!ReplayReport {
+    return replaySessionWithBridges(runtime, app, journal_bytes, options, true);
+}
+
+pub fn replayNativeSession(
+    runtime: *core.Runtime,
+    app: core.App,
+    journal_bytes: []const u8,
+    options: ReplayOptions,
+) anyerror!ReplayReport {
+    return replaySessionWithBridges(runtime, app, journal_bytes, options, false);
+}
+
+fn replaySessionWithBridges(
+    runtime: *core.Runtime,
+    app: core.App,
+    journal_bytes: []const u8,
+    options: ReplayOptions,
+    comptime web_bridges_enabled: bool,
+) anyerror!ReplayReport {
     var reader = try journal.Reader.init(journal_bytes);
     var report: ReplayReport = .{};
     var armed = false;
@@ -149,7 +168,11 @@ pub fn replaySession(
                         // below fails loudly instead.
                     };
                 }
-                try runtime.dispatchPlatformEvent(app, event);
+                if (comptime web_bridges_enabled) {
+                    try runtime.dispatchPlatformEvent(app, event);
+                } else {
+                    try runtime.dispatchNonBridgePlatformEvent(app, event);
+                }
                 report.events_replayed += 1;
             },
             .effect => |effect| {

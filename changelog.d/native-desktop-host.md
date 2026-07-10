@@ -1,0 +1,1 @@
+feature: **Native-only desktop hosts**: canvas apps can set `host = "native"` to exclude browser backends, the JavaScript bridge dispatcher, frontend staging, and Chromium packaging while retaining native platform services.

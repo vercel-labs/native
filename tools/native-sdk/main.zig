@@ -152,6 +152,17 @@ pub fn main(init: std.process.Init) !void {
             .bool_flags = &.{ "--cef-auto-install", "--archive" },
         });
         const manifest_path = try flagValue(args, "--manifest") orelse "app.zon";
+        const validation = tooling.manifest.validateFile(allocator, init.io, manifest_path) catch |err| switch (err) {
+            error.FileNotFound => {
+                std.debug.print("error: {s} not found - run this from your app's root (the folder containing app.zon), or pass --manifest <path/to/app.zon>\n", .{manifest_path});
+                std.process.exit(1);
+            },
+            else => return err,
+        };
+        if (!validation.ok) {
+            tooling.manifest.printDiagnostic(validation);
+            std.process.exit(1);
+        }
         const metadata = tooling.manifest.readMetadata(allocator, init.io, manifest_path) catch |err| switch (err) {
             error.FileNotFound => {
                 std.debug.print("error: {s} not found - run this from your app's root (the folder containing app.zon), or pass --manifest <path/to/app.zon>\n", .{manifest_path});
@@ -165,10 +176,16 @@ pub fn main(init: std.process.Init) !void {
             tooling.web_engine.Engine.parse(value) orelse fail("invalid web engine")
         else
             null;
+        const cef_dir_override = try flagValue(args, "--cef-dir");
+        const cef_auto_install_override = flagBool(args, "--cef-auto-install");
+        const native_host = std.mem.eql(u8, metadata.host, "native");
+        if (native_host and (web_engine_override == .chromium or cef_dir_override != null or cef_auto_install_override)) {
+            fail("host=native cannot use Chromium or CEF package overrides");
+        }
         const web_engine = try tooling.web_engine.resolve(.{ .web_engine = metadata.web_engine, .cef = metadata.cef }, .{
             .web_engine = web_engine_override,
-            .cef_dir = try flagValue(args, "--cef-dir"),
-            .cef_auto_install = if (flagBool(args, "--cef-auto-install")) true else null,
+            .cef_dir = cef_dir_override,
+            .cef_auto_install = if (cef_auto_install_override) true else null,
         });
         const signing_name = try flagValue(args, "--signing") orelse "none";
         const signing = tooling.package.SigningMode.parse(signing_name) orelse fail("invalid signing mode");
@@ -205,10 +222,11 @@ pub fn main(init: std.process.Init) !void {
             .optimize = optimize_value,
             .output_path = output_dir,
             .binary_path = binary_path,
-            .assets_dir = try flagValue(args, "--assets") orelse if (metadata.frontend) |frontend| frontend.dist else "assets",
-            .frontend = metadata.frontend,
+            .assets_dir = try flagValue(args, "--assets") orelse if (!native_host and metadata.frontend != null) metadata.frontend.?.dist else "assets",
+            .frontend = if (native_host) null else metadata.frontend,
             .web_engine = web_engine.engine,
             .cef_dir = web_engine.cef_dir,
+            .cef_override = cef_dir_override != null or cef_auto_install_override,
             .signing = .{ .mode = signing, .identity = try flagValue(args, "--identity"), .entitlements = try flagValue(args, "--entitlements"), .team_id = try flagValue(args, "--team-id") },
             .archive = archive,
             .env_map = init.environ_map,
