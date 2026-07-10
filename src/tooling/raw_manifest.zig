@@ -12,6 +12,7 @@ pub const RawManifest = struct {
     capabilities: []const []const u8 = &.{},
     bridge: RawBridge = .{},
     web_engine: []const u8 = @tagName(web_engine.default_engine),
+    webview_layer: []const u8 = "auto",
     theme: ?[]const u8 = null,
     cef: RawCef = .{},
     frontend: ?RawFrontend = null,

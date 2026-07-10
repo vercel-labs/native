@@ -25,6 +25,12 @@ const WebEngineOption = enum {
     chromium,
 };
 
+const WebLayerOption = enum {
+    auto,
+    include,
+    exclude,
+};
+
 pub const AppOptions = struct {
     name: []const u8,
     /// App entry point; defaults to src/main.zig (relative to `app_root`).
@@ -202,6 +208,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const automation_enabled = b.option(bool, "automation", "Enable Native SDK automation artifacts") orelse false;
     const js_bridge_enabled = b.option(bool, "js-bridge", "Enable optional JavaScript bridge stubs") orelse false;
     const web_engine_override = b.option(WebEngineOption, "web-engine", "Override app.zon web engine: system, chromium");
+    const web_layer_override = b.option(WebLayerOption, "web-layer", "Override app.zon webview_layer: auto, include, exclude");
     const cef_dir_override = b.option([]const u8, "cef-dir", "Override CEF root directory for Chromium builds");
     const cef_auto_install_override = b.option(bool, "cef-auto-install", "Override app.zon CEF auto-install setting");
     const selected_platform: PlatformOption = switch (platform_option) {
@@ -217,13 +224,14 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     if (selected_platform == .windows and target.result.os.tag != .windows) {
         @panic("-Dplatform=windows requires a Windows target");
     }
-    const app_web_engine = appWebEngineConfig(b, app_options.app_root);
-    const web_engine = web_engine_override orelse app_web_engine.web_engine;
-    const cef_dir = cef_dir_override orelse defaultCefDir(selected_platform, app_web_engine.cef_dir);
-    const cef_auto_install = cef_auto_install_override orelse app_web_engine.cef_auto_install;
+    const app_config = appManifestBuildConfig(b, app_options.app_root);
+    const web_engine = web_engine_override orelse app_config.web_engine;
+    const cef_dir = cef_dir_override orelse defaultCefDir(selected_platform, app_config.cef_dir);
+    const cef_auto_install = cef_auto_install_override orelse app_config.cef_auto_install;
     if (web_engine == .chromium and selected_platform != .macos) {
         @panic("-Dweb-engine=chromium currently requires -Dplatform=macos");
     }
+    const web_layer = resolveWebLayer(app_config, web_engine, web_layer_override);
 
     const options = b.addOptions();
     options.addOption([]const u8, "platform", switch (selected_platform) {
@@ -238,6 +246,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     options.addOption(bool, "debug_overlay", debug_overlay);
     options.addOption(bool, "automation", automation_enabled);
     options.addOption(bool, "js_bridge", js_bridge_enabled);
+    options.addOption(bool, "web_layer", web_layer);
     const options_mod = options.createModule();
 
     const app_mod = appModule(b, dep, target, app_optimize, app_options, options_mod);
@@ -245,13 +254,13 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         .name = app_options.name,
         .root_module = app_mod,
     });
-    linkPlatform(b, dep, target, app_mod, exe, selected_platform, web_engine, cef_dir, cef_auto_install);
+    linkPlatform(b, dep, target, app_mod, exe, selected_platform, web_engine, web_layer, cef_dir, cef_auto_install);
     const install = b.addInstallArtifact(exe, .{});
     b.getInstallStep().dependOn(&install.step);
 
     const run = b.addRunArtifact(exe);
     addCefRuntimeRunFiles(b, target, run, exe, web_engine, cef_dir);
-    addWebView2RuntimeRunFiles(dep, target, run, web_engine);
+    addWebView2RuntimeRunFiles(dep, target, run, web_engine, web_layer);
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run.step);
 
@@ -470,7 +479,7 @@ fn externalModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.R
 // Reproduced with a 10-line `zig cc` program against both the 14.5 and
 // 26.0 SDKs. Release builds never hit it (no UBSan), which is why only
 // Debug-built examples (standardOptimizeOption default) crashed.
-fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, cef_dir: []const u8, cef_auto_install: bool) void {
+fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, web_layer: bool, cef_dir: []const u8, cef_auto_install: bool) void {
     if (platform == .macos) {
         switch (web_engine) {
             .system => {
@@ -554,7 +563,7 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         // bitmap-stretching a 96-DPI surface on scaled displays.
         exe.win32_manifest = dep.path("assets/native-sdk.manifest");
         switch (web_engine) {
-            .system => {
+            .system => if (web_layer) {
                 // The vendored WebView2 SDK header (third_party/webview2)
                 // turns on the host's embedded-WebView layer; the host
                 // fails the compile by design if it cannot be found.
@@ -566,6 +575,14 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 // touch it.
                 const loader = b.addInstallBinFile(dep.path(webView2LoaderSubPath(target)), "WebView2Loader.dll");
                 b.getInstallStep().dependOn(&loader.step);
+            } else {
+                // Native-only app (nothing in app.zon declares web use):
+                // compile the host without the embedded-WebView layer.
+                // The stub define opts into the header-less compile, the
+                // WebView2 include path stays off, and no
+                // WebView2Loader.dll is installed or path-wired — the
+                // executable carries no reference to it at all.
+                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17", "-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB" } });
             },
             .chromium => {
                 const cef_check = addCefCheck(b, target, cef_dir);
@@ -611,8 +628,9 @@ fn webView2LoaderSubPath(target: std.Build.ResolvedTarget) []const u8 {
 /// `zig build run` executes the cached artifact, which has no installed
 /// WebView2Loader.dll beside it; the vendored loader's directory goes on
 /// the run step's PATH so the host's LoadLibrary resolves it in dev runs.
-fn addWebView2RuntimeRunFiles(dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, run: *std.Build.Step.Run, web_engine: WebEngineOption) void {
+fn addWebView2RuntimeRunFiles(dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, run: *std.Build.Step.Run, web_engine: WebEngineOption, web_layer: bool) void {
     if (web_engine != .system) return;
+    if (!web_layer) return;
     if (target.result.os.tag != .windows) return;
     const loader_dir = std.fs.path.dirname(webView2LoaderSubPath(target)).?;
     run.addPathDir(dep.builder.pathFromRoot(loader_dir));
@@ -676,10 +694,41 @@ fn addCefCheck(b: *std.Build, target: std.Build.ResolvedTarget, cef_dir: []const
     return b.addSystemCommand(&.{ "sh", "-c", script });
 }
 
-const AppWebEngineConfig = struct {
+/// What the build graph reads out of app.zon: the web-engine/CEF knobs
+/// and the web-layer inference inputs. An unreadable or unparsable
+/// manifest falls back to the system engine WITH the web layer kept —
+/// over-inclusion is a size cost, wrong exclusion is a broken app.
+const AppManifestBuildConfig = struct {
     web_engine: WebEngineOption = .system,
     cef_dir: []const u8 = "third_party/cef/macos",
     cef_auto_install: bool = false,
+    webview_layer: WebLayerOption = .auto,
+    /// The first web declaration found (for teaching messages), or null
+    /// when app.zon declares no web use. `web_engine = "system"` alone is
+    /// NOT web intent — it is the default in many canvas manifests.
+    web_declaration: ?[]const u8 = null,
+};
+
+/// The lenient app.zon shape the build graph parses for inference: only
+/// the fields that decide the web layer and the web engine; everything
+/// else is ignored. Full schema validation stays with `native validate`
+/// and the runner's comptime import.
+const InferenceManifest = struct {
+    capabilities: []const []const u8 = &.{},
+    web_engine: []const u8 = "system",
+    webview_layer: []const u8 = "auto",
+    cef: struct {
+        dir: []const u8 = "third_party/cef/macos",
+        auto_install: bool = false,
+    } = .{},
+    frontend: ?struct {} = null,
+    shell: struct {
+        windows: []const struct {
+            views: []const struct {
+                kind: []const u8 = "",
+            } = &.{},
+        } = &.{},
+    } = .{},
 };
 
 fn defaultCefDir(platform: PlatformOption, configured: []const u8) []const u8 {
@@ -699,17 +748,60 @@ fn appPath(b: *std.Build, app_root: []const u8, sub_path: []const u8) []const u8
     return b.pathJoin(&.{ app_root, sub_path });
 }
 
-fn appWebEngineConfig(b: *std.Build, app_root: []const u8) AppWebEngineConfig {
-    const source = b.build_root.handle.readFileAlloc(b.graph.io, appPath(b, app_root, "app.zon"), b.allocator, .limited(1024 * 1024)) catch return .{};
-    var config: AppWebEngineConfig = .{};
-    if (stringField(source, ".web_engine")) |value| {
-        config.web_engine = parseWebEngine(value) orelse .system;
-    }
-    if (objectSection(source, ".cef")) |cef| {
-        if (stringField(cef, ".dir")) |value| config.cef_dir = value;
-        if (boolField(cef, ".auto_install")) |value| config.cef_auto_install = value;
-    }
+fn appManifestBuildConfig(b: *std.Build, app_root: []const u8) AppManifestBuildConfig {
+    // The fallback for a manifest this lenient parse cannot read keeps
+    // the web layer (see AppManifestBuildConfig): a shape mismatch here
+    // is not proof the app declares no web use.
+    const fallback: AppManifestBuildConfig = .{ .web_declaration = "an app.zon the build graph could not parse" };
+    const source = b.build_root.handle.readFileAlloc(b.graph.io, appPath(b, app_root, "app.zon"), b.allocator, .limited(1024 * 1024)) catch return fallback;
+    const source_z = b.allocator.dupeZ(u8, source) catch return fallback;
+    @setEvalBranchQuota(2000);
+    const raw = std.zon.parse.fromSliceAlloc(InferenceManifest, b.allocator, source_z, null, .{ .ignore_unknown_fields = true }) catch return fallback;
+    var config: AppManifestBuildConfig = .{
+        .web_engine = parseWebEngine(raw.web_engine) orelse .system,
+        .cef_dir = raw.cef.dir,
+        .cef_auto_install = raw.cef.auto_install,
+        .webview_layer = parseWebLayer(raw.webview_layer) orelse @panic("app.zon .webview_layer must be \"auto\", \"include\", or \"exclude\""),
+    };
+    config.web_declaration = blk: {
+        if (raw.frontend != null) break :blk "a .frontend block";
+        for (raw.capabilities) |capability| {
+            if (std.mem.eql(u8, capability, "webview")) break :blk "the \"webview\" capability";
+        }
+        for (raw.shell.windows) |window| {
+            for (window.views) |view| {
+                if (std.mem.eql(u8, view.kind, "webview")) break :blk "a .shell webview view";
+            }
+        }
+        break :blk null;
+    };
     return config;
+}
+
+/// The web-layer decision for this build: an app is WEB when app.zon
+/// declares web use (a .frontend block, the "webview" capability, a
+/// .shell webview view) or the build resolves to the Chromium engine;
+/// otherwise it is NATIVE-ONLY and the platform host compiles without
+/// the embedded-WebView layer. `.webview_layer` (and `-Dweb-layer`)
+/// override the inference — but an exclude that contradicts a web
+/// declaration is a hard configure error, never a silently broken app.
+fn resolveWebLayer(config: AppManifestBuildConfig, web_engine: WebEngineOption, override: ?WebLayerOption) bool {
+    const setting = override orelse config.webview_layer;
+    const declaration: ?[]const u8 = config.web_declaration orelse
+        (if (web_engine == .chromium) "the Chromium web engine" else null);
+    return switch (setting) {
+        .include => true,
+        .auto => declaration != null,
+        .exclude => {
+            if (declaration) |reason| {
+                std.debug.panic(
+                    "the web layer is excluded ({s}) but the app declares web use ({s}); remove the exclude or drop the web declaration",
+                    .{ if (override != null) "-Dweb-layer=exclude" else "app.zon .webview_layer = \"exclude\"", reason },
+                );
+            }
+            return false;
+        },
+    };
 }
 
 fn parseWebEngine(value: []const u8) ?WebEngineOption {
@@ -718,38 +810,9 @@ fn parseWebEngine(value: []const u8) ?WebEngineOption {
     return null;
 }
 
-fn stringField(source: []const u8, field: []const u8) ?[]const u8 {
-    const field_index = std.mem.indexOf(u8, source, field) orelse return null;
-    const equals = std.mem.indexOfScalarPos(u8, source, field_index, '=') orelse return null;
-    const start_quote = std.mem.indexOfScalarPos(u8, source, equals, '"') orelse return null;
-    const end_quote = std.mem.indexOfScalarPos(u8, source, start_quote + 1, '"') orelse return null;
-    return source[start_quote + 1 .. end_quote];
-}
-
-fn objectSection(source: []const u8, field: []const u8) ?[]const u8 {
-    const field_index = std.mem.indexOf(u8, source, field) orelse return null;
-    const open = std.mem.indexOfScalarPos(u8, source, field_index, '{') orelse return null;
-    var depth: usize = 0;
-    var index = open;
-    while (index < source.len) : (index += 1) {
-        switch (source[index]) {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if (depth == 0) return source[open + 1 .. index];
-            },
-            else => {},
-        }
-    }
-    return null;
-}
-
-fn boolField(source: []const u8, field: []const u8) ?bool {
-    const field_index = std.mem.indexOf(u8, source, field) orelse return null;
-    const equals = std.mem.indexOfScalarPos(u8, source, field_index, '=') orelse return null;
-    var index = equals + 1;
-    while (index < source.len and std.ascii.isWhitespace(source[index])) : (index += 1) {}
-    if (std.mem.startsWith(u8, source[index..], "true")) return true;
-    if (std.mem.startsWith(u8, source[index..], "false")) return false;
+fn parseWebLayer(value: []const u8) ?WebLayerOption {
+    if (std.mem.eql(u8, value, "auto")) return .auto;
+    if (std.mem.eql(u8, value, "include")) return .include;
+    if (std.mem.eql(u8, value, "exclude")) return .exclude;
     return null;
 }

@@ -70,6 +70,11 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             errdefer Self.removeWindowAt(self, index);
             errdefer if (native_created) self.options.platform.services.closeWindow(id) catch {};
 
+            // Materializing a window source means creating its main
+            // webview — refused before the native window exists when the
+            // build has no web layer, so the error names the real cause.
+            if (self.windows[index].source != null and !self.options.web_layer) return error.WebViewLayerNotBuilt;
+
             const window_options = options.windowOptions(id, self.windows[index].info.label);
             const native_info = try self.options.platform.services.createWindow(window_options);
             native_created = true;

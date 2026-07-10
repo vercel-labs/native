@@ -321,6 +321,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn createWebViewView(self: *Runtime, options: platform.ViewOptions) !platform.ViewInfo {
+            if (!self.options.web_layer) return error.WebViewLayerNotBuilt;
             try validateChildWebViewLabel(options.label);
             try Self.validateWebViewUrl(self, options.url);
             if (!isValidWebViewFrame(options.frame)) return error.InvalidWebViewOptions;

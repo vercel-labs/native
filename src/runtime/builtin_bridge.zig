@@ -148,6 +148,12 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
         }
 
         pub fn dispatchWebViewBridgeCommand(self: *Runtime, request: bridge.Request, source_window_id: platform.WindowId, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            // A native-only build has no webviews to command (and no page
+            // to command them from); every webview verb answers with the
+            // teaching error instead of a misleading not-found.
+            if (!self.options.web_layer) {
+                return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(error.WebViewLayerNotBuilt), builtinBridgeErrorMessage(error.WebViewLayerNotBuilt));
+            }
             const result = if (std.mem.eql(u8, request.command, "native-sdk.webview.create"))
                 Self.createWebViewFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
             else if (std.mem.eql(u8, request.command, "native-sdk.webview.list"))

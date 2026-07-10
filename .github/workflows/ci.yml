@@ -130,6 +130,11 @@ jobs:
       - name: Install GTK dependencies
         run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
       - run: zig build test-examples-native
+      # Declare-to-use, proven on real Windows executables: the
+      # canvas-only ui-inbox cross-compiles without the embedded WebView
+      # layer (no WebView2Loader.dll reference, no loader installed) and
+      # the webview example keeps it.
+      - run: zig build test-windows-web-layer-audit
 
   linux-canvas-smoke:
     name: Linux Canvas Smoke

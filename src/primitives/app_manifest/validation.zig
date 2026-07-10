@@ -85,8 +85,35 @@ pub fn validateManifest(manifest: Manifest) ValidationError!void {
     try validateFileAssociations(manifest.file_associations);
     try validateUrlSchemes(manifest.url_schemes);
     try validateCefConfig(manifest.package.web_engine, manifest.cef);
+    try validateWebViewLayer(manifest);
     try validatePackageMetadata(manifest.package);
     try validateUpdates(manifest.updates);
+}
+
+/// Whether the manifest declares web content: a `.frontend` block, the
+/// `webview` capability, a `.shell` webview view, or the Chromium
+/// engine. The same declare-to-use test the build graph runs to decide
+/// whether the app ships the embedded web layer at all.
+pub fn manifestDeclaresWebContent(manifest: Manifest) bool {
+    if (manifest.frontend != null) return true;
+    for (manifest.capabilities) |capability| {
+        if (capability.kind() == .webview) return true;
+    }
+    for (manifest.shell.windows) |window| {
+        for (window.views) |view| {
+            if (view.kind == .webview) return true;
+        }
+    }
+    return manifest.package.web_engine == .chromium;
+}
+
+/// `.webview_layer = "exclude"` promises a native-only app; a manifest
+/// that simultaneously declares web content contradicts itself, and the
+/// contradiction is refused here — never resolved silently in either
+/// direction.
+pub fn validateWebViewLayer(manifest: Manifest) ValidationError!void {
+    if (manifest.webview_layer != .exclude) return;
+    if (manifestDeclaresWebContent(manifest)) return error.WebViewLayerConflict;
 }
 
 pub fn validateIdentity(identity: AppIdentity) ValidationError!void {

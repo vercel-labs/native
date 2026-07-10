@@ -267,6 +267,26 @@ fn manifestHasWebContent() bool {
     return false;
 }
 
+/// Whether this build ships the embedded web layer. The standard build
+/// graph (build/app.zig) infers it from app.zon and passes it through
+/// build options; an options module from an older hand-rolled build.zig
+/// that predates the option keeps the layer — over-inclusion is safe.
+fn webLayerEnabled() bool {
+    if (comptime !@hasDecl(build_options, "web_layer")) return true;
+    return build_options.web_layer;
+}
+
+// The runner-side half of the reject-conflicts contract: a build that
+// excludes the web layer while app.zon declares web use must fail at
+// compile time here too, so a hand-rolled build graph that bypasses the
+// standard configure-time error still cannot ship an app whose declared
+// webviews would fail at runtime.
+comptime {
+    if (!webLayerEnabled() and manifestHasWebContent()) {
+        @compileError("this build excludes the web layer (-Dweb-layer=exclude or a custom build graph) but app.zon declares web use (a .frontend block or the \"webview\" capability); remove the exclude or drop the web declaration");
+    }
+}
+
 fn windowLabel(comptime window: anytype, comptime index: usize) []const u8 {
     if (comptime @hasField(@TypeOf(window), "label")) return window.label;
     return if (index == 0) "main" else "window";
@@ -374,6 +394,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
         .bridge = options.bridge,
         .builtin_bridge = options.builtin_bridge,
         .js_window_api = options.js_window_api,
+        .web_layer = webLayerEnabled(),
         .gpu_surface_frame_diagnostics = false,
         .security = options.security,
         .menus = options.menus,
@@ -428,6 +449,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .bridge = options.bridge,
         .builtin_bridge = options.builtin_bridge,
         .js_window_api = options.js_window_api,
+        .web_layer = webLayerEnabled(),
         .gpu_surface_frame_diagnostics = false,
         .security = options.security,
         .menus = options.menus,
@@ -479,6 +501,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .bridge = options.bridge,
         .builtin_bridge = options.builtin_bridge,
         .js_window_api = options.js_window_api,
+        .web_layer = webLayerEnabled(),
         .gpu_surface_frame_diagnostics = false,
         .security = options.security,
         .menus = options.menus,
@@ -529,6 +552,7 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
         .bridge = options.bridge,
         .builtin_bridge = options.builtin_bridge,
         .js_window_api = options.js_window_api,
+        .web_layer = webLayerEnabled(),
         .gpu_surface_frame_diagnostics = false,
         .security = options.security,
         .menus = options.menus,
@@ -643,6 +667,7 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
         .bridge = options.bridge,
         .builtin_bridge = options.builtin_bridge,
         .js_window_api = options.js_window_api,
+        .web_layer = webLayerEnabled(),
         .security = options.security,
         .menus = options.menus,
     });

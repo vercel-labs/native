@@ -482,19 +482,23 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/linux/gtk_host.c", .pattern = "change != NATIVE_SDK_GST_STATE_CHANGE_ASYNC" },
         .{ .path = "src/platform/linux/gtk_host.c", .pattern = "#define NATIVE_SDK_GST_STATE_CHANGE_ASYNC 2" },
     });
-    // The embedded-WebView layer must stay real: the vendored WebView2
-    // SDK header turns the guard on, every first-party build graph puts
-    // it on the include path, and a build that cannot see it fails at
-    // compile time instead of quietly shipping the stubbed host (whose
-    // WebView loads report WebViewNotFound at runtime).
-    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-windows-webview2-vendor", "Verify the vendored WebView2 SDK stays wired into every Windows build graph", &.{
+    // The embedded-WebView layer must stay real AND declare-to-use: the
+    // vendored WebView2 SDK header turns the guard on, the standard build
+    // graph puts it on the include path exactly when app.zon declares web
+    // use (`if (web_layer)`), and only that native-only branch may opt
+    // into the stub define — a web build that cannot see the header still
+    // fails at compile time instead of quietly shipping the stubbed host
+    // (whose WebView loads report WebViewNotFound at runtime).
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-windows-webview2-vendor", "Verify the vendored WebView2 SDK stays wired into every web-declaring Windows build graph", &.{
         .{ .path = "third_party/webview2/include/WebView2.h", .pattern = "CreateCoreWebView2EnvironmentWithOptions" },
         .{ .path = "third_party/webview2/include/EventToken.h", .pattern = "EventRegistrationToken" },
         .{ .path = "third_party/webview2/LICENSE.txt", .pattern = "Redistribution and use in source and binary forms" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "#error \"WebView2.h not found" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "LoadLibraryW(L\"WebView2Loader.dll\")" },
+        .{ .path = "build/app.zig", .pattern = ".system => if (web_layer) {" },
         .{ .path = "build/app.zig", .pattern = "app_mod.addIncludePath(dep.path(\"third_party/webview2/include\"));" },
         .{ .path = "build/app.zig", .pattern = "third_party/webview2/x64/WebView2Loader.dll" },
+        .{ .path = "build/app.zig", .pattern = "\"-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB\"" },
         .{ .path = "src/tooling/templates.zig", .pattern = "third_party/webview2/include" },
         .{ .path = "src/tooling/templates.zig", .pattern = "third_party/webview2/x64/WebView2Loader.dll" },
     });
@@ -796,6 +800,47 @@ pub fn build(b: *std.Build) void {
     build_browser_system.setCwd(b.path("examples/browser"));
     const browser_system_link_step = b.step("test-browser-system-link", "Build the browser example with the system engine");
     browser_system_link_step.dependOn(&build_browser_system.step);
+
+    // Windows web-layer PE cross-audit: the declare-to-use inference,
+    // proven on real executables from any host via cross-compile.
+    // ui-inbox's manifest declares no web use, so its exe must carry no
+    // WebView2Loader.dll reference (the whole embedded layer compiles
+    // out) and no loader may land beside it; the webview example declares
+    // the "webview" capability, so its exe must keep the reference. The
+    // loader string lives as UTF-16 in the host, so the audit is a
+    // dedicated scanner (tools/audit_web_layer.zig), not a text grep.
+    const web_layer_auditor = b.addExecutable(.{
+        .name = "audit-web-layer",
+        .root_module = module(b, host_target, optimize, "tools/audit_web_layer.zig"),
+    });
+    // A loader installed by a build predating the inference would fail
+    // the absence check below without being this build's fault; clear it
+    // so the assertion tests what THIS build installs.
+    const clean_native_only_loader = b.addSystemCommand(&.{ "sh", "-c", "rm -f examples/ui-inbox/zig-out/bin/WebView2Loader.dll" });
+    const build_native_only_windows = b.addSystemCommand(&.{ "zig", "build", "-Dtarget=x86_64-windows-gnu", "-Dplatform=windows" });
+    build_native_only_windows.setCwd(b.path("examples/ui-inbox"));
+    build_native_only_windows.step.dependOn(&clean_native_only_loader.step);
+    const build_webview_windows = b.addSystemCommand(&.{ "zig", "build", "-Dtarget=x86_64-windows-gnu", "-Dplatform=windows", "-Dweb-engine=system" });
+    build_webview_windows.setCwd(b.path("examples/webview"));
+    const audit_native_only_exe = b.addRunArtifact(web_layer_auditor);
+    audit_native_only_exe.addArgs(&.{ "examples/ui-inbox/zig-out/bin/ui-inbox.exe", "absent" });
+    audit_native_only_exe.has_side_effects = true;
+    audit_native_only_exe.step.dependOn(&build_native_only_windows.step);
+    const audit_webview_exe = b.addRunArtifact(web_layer_auditor);
+    audit_webview_exe.addArgs(&.{ "examples/webview/zig-out/bin/webview.exe", "present" });
+    audit_webview_exe.has_side_effects = true;
+    audit_webview_exe.step.dependOn(&build_webview_windows.step);
+    const audit_native_only_loader = b.addSystemCommand(&.{ "sh", "-c",
+        \\test ! -f examples/ui-inbox/zig-out/bin/WebView2Loader.dll || {
+        \\  echo "web-layer audit FAILED: the native-only build installed WebView2Loader.dll" >&2
+        \\  exit 1
+        \\}
+    });
+    audit_native_only_loader.step.dependOn(&build_native_only_windows.step);
+    const web_layer_audit_step = b.step("test-windows-web-layer-audit", "Cross-compile a native-only and a web example for Windows and audit the web layer in each exe");
+    web_layer_audit_step.dependOn(&audit_native_only_exe.step);
+    web_layer_audit_step.dependOn(&audit_webview_exe.step);
+    web_layer_audit_step.dependOn(&audit_native_only_loader.step);
 
     const frontend_examples_step = b.step("test-examples-frontends", "Run frontend example tests");
     addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-next", "Run Next example tests", "examples/next", .owned);

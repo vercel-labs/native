@@ -396,6 +396,13 @@ pub const Options = struct {
     automation: ?automation.Server = null,
     window_state_store: ?window_state.Store = null,
     js_window_api: bool = false,
+    /// Whether this build ships the embedded web layer. The app runner
+    /// sets it from the build graph's app.zon inference (declare-to-use:
+    /// a .frontend block, the "webview" capability, or a .shell webview
+    /// view). When false, every webview-creating path fails fast with
+    /// `error.WebViewLayerNotBuilt` and its teaching message instead of
+    /// reaching a platform host whose web layer was compiled out.
+    web_layer: bool = true,
     gpu_surface_frame_diagnostics: bool = true,
     /// Pixels-only presentation hosts (the mobile embed host) opt in to
     /// keeping the view's keyed command mirror alive across PIXEL

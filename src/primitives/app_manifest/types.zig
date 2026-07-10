@@ -26,6 +26,7 @@ pub const ValidationError = error{
     InvalidTimeout,
     InvalidKeyword,
     MissingRequiredField,
+    WebViewLayerConflict,
     NoSpaceLeft,
 };
 
@@ -82,6 +83,18 @@ pub const PackageKind = enum {
 pub const WebEngine = enum {
     system,
     chromium,
+};
+
+/// Whether the app ships the embedded web layer. `auto` (the default)
+/// infers it from the manifest's declarations — a `.frontend` block, the
+/// `webview` capability, a `.shell` webview view, or the Chromium engine
+/// all mean web; none of them means native-only. `include`/`exclude`
+/// override the inference, and an `exclude` that contradicts a web
+/// declaration is a validation error, never a silently broken build.
+pub const WebViewLayer = enum {
+    auto,
+    include,
+    exclude,
 };
 
 pub const CefConfig = struct {
@@ -582,6 +595,7 @@ pub const Manifest = struct {
     file_associations: []const FileAssociation = &.{},
     url_schemes: []const UrlScheme = &.{},
     cef: CefConfig = .{},
+    webview_layer: WebViewLayer = .auto,
     package: PackageMetadata = .{},
     updates: UpdateConfig = .{},
 };

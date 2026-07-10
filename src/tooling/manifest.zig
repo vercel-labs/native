@@ -24,6 +24,10 @@ pub const Metadata = struct {
     capabilities: []const []const u8 = &.{},
     bridge_commands: []const BridgeCommandMetadata = &.{},
     web_engine: []const u8 = "system",
+    /// Whether the app ships the embedded web layer: "auto" (default,
+    /// inferred from the manifest's web declarations), "include", or
+    /// "exclude". See `webLayer` for the inference.
+    webview_layer: []const u8 = "auto",
     /// The built-in theme pack the app selects (`theme = "geist"`).
     /// Optional — absent keeps the house register. Validated against
     /// the known pack names so a typo is a check error, never a silent
@@ -52,6 +56,7 @@ pub const Metadata = struct {
         if (self.theme) |value| allocator.free(value);
         allocator.free(self.version);
         allocator.free(self.web_engine);
+        allocator.free(self.webview_layer);
         allocator.free(self.cef.dir);
         for (self.icons) |value| allocator.free(value);
         if (self.icons.len > 0) allocator.free(self.icons);
@@ -399,6 +404,7 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     const url_schemes = parseUrlSchemes(allocator, metadata.url_schemes) catch return .{ .ok = false, .message = "app.zon URL schemes are invalid" };
     defer allocator.free(url_schemes);
     const manifest_web_engine = parseWebEngine(metadata.web_engine) catch return .{ .ok = false, .message = "app.zon web engine is invalid" };
+    const manifest_webview_layer = parseWebViewLayer(metadata.webview_layer) catch return .{ .ok = false, .message = "app.zon webview_layer is invalid - expected \"auto\", \"include\", or \"exclude\"" };
     const platform_settings = parsePlatformSettings(allocator, metadata.platforms) catch return .{ .ok = false, .message = "app.zon platforms are invalid" };
     defer allocator.free(platform_settings);
 
@@ -419,9 +425,16 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
         .file_associations = file_associations,
         .url_schemes = url_schemes,
         .cef = .{ .dir = metadata.cef.dir, .auto_install = metadata.cef.auto_install },
+        .webview_layer = manifest_webview_layer,
         .package = .{ .web_engine = manifest_web_engine },
     };
-    app_manifest.validateManifest(manifest) catch return .{ .ok = false, .message = "manifest fields failed semantic validation" };
+    app_manifest.validateManifest(manifest) catch |err| return .{
+        .ok = false,
+        .message = switch (err) {
+            error.WebViewLayerConflict => web_layer_conflict_message,
+            else => "manifest fields failed semantic validation",
+        },
+    };
     return .{ .ok = true, .message = "app.zon is valid" };
 }
 
@@ -474,6 +487,7 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .capabilities = try duplicateStringList(allocator, raw.capabilities),
         .bridge_commands = try convertRawBridgeCommands(allocator, raw.bridge.commands),
         .web_engine = try allocator.dupe(u8, raw.web_engine),
+        .webview_layer = try allocator.dupe(u8, raw.webview_layer),
         .cef = .{
             .dir = try allocator.dupe(u8, raw.cef.dir),
             .auto_install = raw.cef.auto_install,
@@ -1318,6 +1332,78 @@ fn parseWebEngine(value: []const u8) !app_manifest.WebEngine {
     return error.InvalidWebEngine;
 }
 
+fn parseWebViewLayer(value: []const u8) !app_manifest.WebViewLayer {
+    if (std.mem.eql(u8, value, "auto")) return .auto;
+    if (std.mem.eql(u8, value, "include")) return .include;
+    if (std.mem.eql(u8, value, "exclude")) return .exclude;
+    return error.InvalidWebViewLayer;
+}
+
+/// The teaching message every boundary prints for the same
+/// contradiction: a manifest that excludes the web layer while declaring
+/// web content.
+pub const web_layer_conflict_message = "app.zon sets .webview_layer = \"exclude\" but declares web content (a .frontend block, the \"webview\" capability, a .shell webview view, or .web_engine = \"chromium\") - remove the web declarations or drop the exclude";
+
+/// Why the web layer is (or is not) in the build, for verdict lines.
+pub const WebLayerReason = enum {
+    inferred_native_only,
+    declared_exclude,
+    capability,
+    frontend,
+    shell_webview,
+    chromium_engine,
+    declared_include,
+};
+
+pub const WebLayer = struct {
+    enabled: bool,
+    reason: WebLayerReason,
+
+    /// The parenthesized half of a verdict line: `web layer: none
+    /// (inferred)` / `web layer: webview2 (declared: capabilities)`.
+    pub fn sourceText(self: WebLayer) []const u8 {
+        return switch (self.reason) {
+            .inferred_native_only => "inferred: nothing in app.zon declares web use",
+            .declared_exclude => "declared: .webview_layer = \"exclude\"",
+            .capability => "declared: capabilities",
+            .frontend => "declared: .frontend",
+            .shell_webview => "declared: .shell webview view",
+            .chromium_engine => "declared: .web_engine = \"chromium\"",
+            .declared_include => "declared: .webview_layer = \"include\"",
+        };
+    }
+};
+
+pub const WebLayerError = error{ InvalidWebViewLayer, WebViewLayerConflict };
+
+/// The CLI-side web-layer inference over parsed metadata — the same
+/// declare-to-use rule the build graph applies to app.zon: `.frontend`,
+/// the `webview` capability, a `.shell` webview view, or the Chromium
+/// engine means the app ships the web layer; none of them means
+/// native-only. `.webview_layer = "include"|"exclude"` overrides, and an
+/// exclude that contradicts a web declaration is refused.
+pub fn webLayer(metadata: Metadata) WebLayerError!WebLayer {
+    const setting = parseWebViewLayer(metadata.webview_layer) catch return error.InvalidWebViewLayer;
+    const declared: ?WebLayerReason = blk: {
+        if (metadata.frontend != null) break :blk .frontend;
+        for (metadata.capabilities) |capability| {
+            if (std.mem.eql(u8, capability, "webview")) break :blk .capability;
+        }
+        for (metadata.shell.windows) |window| {
+            for (window.views) |view| {
+                if (std.mem.eql(u8, view.kind, "webview")) break :blk .shell_webview;
+            }
+        }
+        if (std.mem.eql(u8, metadata.web_engine, "chromium")) break :blk .chromium_engine;
+        break :blk null;
+    };
+    return switch (setting) {
+        .include => .{ .enabled = true, .reason = .declared_include },
+        .exclude => if (declared != null) error.WebViewLayerConflict else .{ .enabled = false, .reason = .declared_exclude },
+        .auto => if (declared) |reason| .{ .enabled = true, .reason = reason } else .{ .enabled = false, .reason = .inferred_native_only },
+    };
+}
+
 fn validateRelativePath(path: []const u8) !void {
     if (path.len == 0) return error.InvalidPath;
     if (path[0] == '/' or path[0] == '\\') return error.InvalidPath;
@@ -1918,6 +2004,98 @@ test "validate accepts a square icon source and prebuilt containers" {
 
     const result = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
     try std.testing.expect(result.ok);
+}
+
+test "web layer inference is declare-to-use over parsed metadata" {
+    // Nothing declared: native-only.
+    const canvas_capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const canvas: Metadata = .{ .id = "dev.example.canvas", .name = "canvas", .version = "1.0.0", .capabilities = &canvas_capabilities };
+    const canvas_layer = try webLayer(canvas);
+    try std.testing.expect(!canvas_layer.enabled);
+    try std.testing.expectEqual(WebLayerReason.inferred_native_only, canvas_layer.reason);
+
+    // Each web declaration flips the inference.
+    const webview_capabilities = [_][]const u8{"webview"};
+    const by_capability = try webLayer(.{ .id = "dev.example.a", .name = "a", .version = "1.0.0", .capabilities = &webview_capabilities });
+    try std.testing.expect(by_capability.enabled);
+    try std.testing.expectEqual(WebLayerReason.capability, by_capability.reason);
+
+    const by_frontend = try webLayer(.{ .id = "dev.example.b", .name = "b", .version = "1.0.0", .frontend = .{} });
+    try std.testing.expect(by_frontend.enabled);
+    try std.testing.expectEqual(WebLayerReason.frontend, by_frontend.reason);
+
+    const shell_views = [_]ShellViewMetadata{.{ .label = "content", .kind = "webview", .url = "zero://app/index.html" }};
+    const shell_windows = [_]ShellWindowMetadata{.{ .label = "main", .views = &shell_views }};
+    const by_shell = try webLayer(.{ .id = "dev.example.c", .name = "c", .version = "1.0.0", .shell = .{ .windows = &shell_windows } });
+    try std.testing.expect(by_shell.enabled);
+    try std.testing.expectEqual(WebLayerReason.shell_webview, by_shell.reason);
+
+    // The Chromium engine is web intent; the system default alone is not.
+    const by_chromium = try webLayer(.{ .id = "dev.example.d", .name = "d", .version = "1.0.0", .web_engine = "chromium" });
+    try std.testing.expect(by_chromium.enabled);
+    try std.testing.expectEqual(WebLayerReason.chromium_engine, by_chromium.reason);
+
+    // Explicit overrides.
+    const included = try webLayer(.{ .id = "dev.example.e", .name = "e", .version = "1.0.0", .webview_layer = "include" });
+    try std.testing.expect(included.enabled);
+    const excluded = try webLayer(.{ .id = "dev.example.f", .name = "f", .version = "1.0.0", .webview_layer = "exclude" });
+    try std.testing.expect(!excluded.enabled);
+    try std.testing.expectEqual(WebLayerReason.declared_exclude, excluded.reason);
+
+    // Contradictions and typos are refused, never resolved silently.
+    try std.testing.expectError(error.WebViewLayerConflict, webLayer(.{ .id = "dev.example.g", .name = "g", .version = "1.0.0", .capabilities = &webview_capabilities, .webview_layer = "exclude" }));
+    try std.testing.expectError(error.InvalidWebViewLayer, webLayer(.{ .id = "dev.example.h", .name = "h", .version = "1.0.0", .webview_layer = "never" }));
+}
+
+test "validate rejects a web-declaring manifest that excludes the web layer" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-validate-web-layer-conflict";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.app",
+        \\  .name = "demo",
+        \\  .version = "1.0.0",
+        \\  .capabilities = .{"webview"},
+        \\  .webview_layer = "exclude",
+        \\}
+    });
+
+    const result = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!result.ok);
+    try std.testing.expect(std.mem.indexOf(u8, result.message, ".webview_layer = \"exclude\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.message, "declares web content") != null);
+
+    // A native-only manifest with the same exclude is valid.
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.app",
+        \\  .name = "demo",
+        \\  .version = "1.0.0",
+        \\  .capabilities = .{"gpu_surfaces"},
+        \\  .webview_layer = "exclude",
+        \\}
+    });
+    const native_only = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(native_only.ok);
+
+    // A typo in the setting is its own teaching error.
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.app",
+        \\  .name = "demo",
+        \\  .version = "1.0.0",
+        \\  .webview_layer = "never",
+        \\}
+    });
+    const invalid = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!invalid.ok);
+    try std.testing.expect(std.mem.indexOf(u8, invalid.message, "webview_layer is invalid") != null);
 }
 
 test "manifest validates the theme pack name" {

@@ -551,6 +551,9 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         }
 
         fn loadStartupWindows(self: *Runtime, app: App) anyerror!void {
+            // Scene-less startup always materializes the app's webview
+            // source into the main window; a native-only build cannot.
+            if (!self.options.web_layer) return error.WebViewLayerNotBuilt;
             const source = try WindowViewMethods().copyLoadedSource(self, try app.webViewSource());
             self.loaded_source = source;
             const app_info = self.options.platform.app_info;
@@ -592,6 +595,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 try WindowViewMethods().copyLoadedSource(self, try app.webViewSource())
             else
                 null;
+            if (source != null and !self.options.web_layer) return error.WebViewLayerNotBuilt;
             self.loaded_source = source;
 
             try loadStartupSceneWindow(self, scene.windows[0], source);
@@ -661,12 +665,16 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         }
 
         fn loadWebView(self: *Runtime, app: App) anyerror!void {
+            if (!self.options.web_layer) return error.WebViewLayerNotBuilt;
             const source = try WindowViewMethods().copyLoadedSource(self, try app.webViewSource());
             self.loaded_source = source;
             try self.options.platform.services.loadWindowWebView(1, source);
         }
 
         pub fn reloadWindows(self: *Runtime, app: App) anyerror!void {
+            // Reload re-materializes webview sources; native-only builds
+            // have none to reload.
+            if (!self.options.web_layer) return error.WebViewLayerNotBuilt;
             const source = try WindowViewMethods().copyLoadedSource(self, try app.webViewSource());
             self.loaded_source = source;
             if (self.window_count == 0) {

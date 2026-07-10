@@ -524,6 +524,15 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, strict: bool) !void {
     const result = try tooling.manifest.validateFile(allocator, io, "app.zon");
     tooling.manifest.printDiagnostic(result);
     if (!result.ok) return error.InvalidManifest;
+    // The build-graph web-layer inference, surfaced where authors look:
+    // whether this app ships the embedded web layer, and why.
+    const metadata = try tooling.manifest.readMetadata(allocator, io, "app.zon");
+    if (tooling.manifest.webLayer(metadata)) |layer| {
+        std.debug.print("web layer: {s} ({s})\n", .{ if (layer.enabled) "included" else "none", layer.sourceText() });
+    } else |_| {
+        // Contradictions and invalid values were already rejected by the
+        // validation pass above; nothing more to add here.
+    }
     const checked_markup = markup_files.items.len;
     const contract_note: []const u8 = if (outcome.contract_checked) " against the model contract" else "";
     std.debug.print("checked {d} markup file{s}{s} and app.zon\n", .{ checked_markup, if (checked_markup == 1) "" else "s", contract_note });
