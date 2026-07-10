@@ -4326,6 +4326,11 @@ static bool createChildWebView(Host *host, const std::string &key) {
                     controller->put_ZoomFactor(found->second.zoom);
                     controller->put_IsVisible(TRUE);
                     if (found->second.webview) {
+                        ICoreWebView2Settings *settings = nullptr;
+                        if (SUCCEEDED(found->second.webview->get_Settings(&settings)) && settings) {
+                            settings->put_AreDevToolsEnabled(TRUE);
+                            settings->Release();
+                        }
                         if (found->second.bridge_enabled) {
                             found->second.webview->AddScriptToExecuteOnDocumentCreated(nativeSdkBridgeScript(), nullptr);
                             EventRegistrationToken bridge_token = {};
@@ -4371,7 +4376,7 @@ static bool createChildWebView(Host *host, const std::string &key) {
                         EventRegistrationToken accelerator_token = {};
                         uint64_t accelerator_window_id = found->second.window_id;
                         found->second.controller->add_AcceleratorKeyPressed(Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
-                            [host, accelerator_window_id, lifetime](ICoreWebView2Controller *, ICoreWebView2AcceleratorKeyPressedEventArgs *args) -> HRESULT {
+                            [host, key, accelerator_window_id, lifetime](ICoreWebView2Controller *, ICoreWebView2AcceleratorKeyPressedEventArgs *args) -> HRESULT {
                                 auto token = lifetime.lock();
                                 if (!token) return S_OK;
                                 std::lock_guard<std::recursive_mutex> guard(token->mutex);
@@ -4381,6 +4386,14 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                 if (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN) return S_OK;
                                 UINT virtual_key = 0;
                                 if (FAILED(args->get_VirtualKey(&virtual_key))) return S_OK;
+                                if (virtual_key == VK_F12 || (virtual_key == 'I' && keyDown(VK_CONTROL) && keyDown(VK_SHIFT))) {
+                                    auto it = host->webviews.find(key);
+                                    if (it != host->webviews.end() && it->second.webview) {
+                                        it->second.webview->OpenDevToolsWindow();
+                                    }
+                                    args->put_Handled(TRUE);
+                                    return S_OK;
+                                }
                                 if (emitShortcutForWindowId(host, accelerator_window_id, virtual_key)) {
                                     args->put_Handled(TRUE);
                                 }

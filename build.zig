@@ -510,6 +510,12 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "bridgeOriginForWebViewUrl(source_webview->second, source_url)" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "webview.spa_fallback = spa_fallback != 0;" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-devtools-inspector", "Verify DevTools inspector is enabled on Windows and Linux", &.{
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "put_AreDevToolsEnabled(TRUE)" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "OpenDevToolsWindow()" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "webkit_settings_set_enable_developer_extras" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "webkit_web_view_get_inspector" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-cef-packaged-assets-webviews", "Verify macOS CEF child WebViews resolve packaged asset URLs before loading", &.{
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "self.assetRoots = [[NSMutableDictionary alloc] init];" },
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "resolvedWebViewURLString:(NSString *)url windowId:(uint64_t)windowId" },
