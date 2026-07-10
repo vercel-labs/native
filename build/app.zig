@@ -244,6 +244,8 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const exe = b.addExecutable(.{
         .name = app_options.name,
         .root_module = app_mod,
+        .use_llvm = useLlvmWorkaround(target),
+        .use_lld = useLlvmWorkaround(target),
     });
     linkPlatform(b, dep, target, app_mod, exe, selected_platform, web_engine, cef_dir, cef_auto_install);
     const install = b.addInstallArtifact(exe, .{});
@@ -350,6 +352,11 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
 ///   fn take(a: ?*anyopaque, w: f32, h: f32, s: f32, p: ?*anyopaque,
 ///           t: f32, r: f32, bo: f32, l: f32, kt: f32, kr: f32, kb: f32,
 ///           kl: f32) callconv(.c) void { ... }
+///
+/// GCC 15 also emits `.sframe` sections in Linux startup objects whose
+/// R_X86_64_PC64 relocations crash Zig's self-hosted x86_64 linker (Native
+/// issue #37). App executables use this result for both `use_llvm` and
+/// `use_lld` so Debug links go through LLD as well as LLVM code generation.
 ///
 /// Force the LLVM backend on x86_64 until the upstream backend is fixed;
 /// Release modes already default to LLVM, so this only changes Debug.
