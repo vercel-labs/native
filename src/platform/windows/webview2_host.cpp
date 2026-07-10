@@ -1442,13 +1442,23 @@ static bool validChildWebViewFrame(double x, double y, double width, double heig
     return x >= 0 && y >= 0 && width > 0 && height > 0;
 }
 
-static int nativeViewCoord(double value) {
+static constexpr int nativeViewCoord(double value) {
     return value > 0 ? (int)(value + 0.5) : 0;
 }
 
-static int nativeViewExtent(double value) {
-    return value > 0 ? (int)(value + 0.5) : 0;
-}
+/* Compile-time proof of the accumulate-then-round frame policy (see
+ * nativeViewPhysicalFrame): rounding each nesting level separately drifts
+ * from the round of the logical sum — parent x=10.4 plus child x=10.4 at
+ * scale 1.5 is round(15.6) + round(15.6) = 32, one pixel right of the
+ * true origin round(20.8 * 1.5) = 31 — and an independently rounded
+ * extent opens the same one-pixel seam against an edge derived from the
+ * accumulated logical coordinates: origin 10.2 with width 10.2 at scale
+ * 1.5 ends at round(15.3) + round(15.3) = 30, but the true right edge is
+ * round(20.4 * 1.5) = 31. */
+static_assert(nativeViewCoord(10.4 * 1.5) + nativeViewCoord(10.4 * 1.5) == 32 && nativeViewCoord((10.4 + 10.4) * 1.5) == 31,
+    "per-level rounding must drift so the accumulate-then-round policy is load-bearing");
+static_assert(nativeViewCoord(10.2 * 1.5) + nativeViewCoord(10.2 * 1.5) == 30 && nativeViewCoord((10.2 + 10.2) * 1.5) == 31,
+    "independently rounded extents must open seams that edge-derived extents close");
 
 static bool validNativeViewFrame(double x, double y, double width, double height) {
     return x >= 0 && y >= 0 && width >= 0 && height >= 0;
@@ -1535,17 +1545,42 @@ static double nativeViewFrameScale(Host *host, const NativeView &view) {
     return (double)dpiForWindow(window->second.hwnd) / 96.0;
 }
 
-static POINT nativeViewAbsoluteOrigin(Host *host, const NativeView &view, double scale) {
-    POINT point = { nativeViewCoord(view.x * scale), nativeViewCoord(view.y * scale) };
-    if (!host || view.parent.empty()) return point;
+/* Absolute LOGICAL origin of a view: its own frame origin plus every
+ * ancestor's, summed before any scaling or rounding. */
+static void nativeViewLogicalOrigin(Host *host, const NativeView &view, double *logical_x, double *logical_y) {
+    *logical_x = view.x;
+    *logical_y = view.y;
+    if (!host || view.parent.empty()) return;
     auto parent = host->native_views.find(nativeViewKey(view.window_id, view.parent));
     while (parent != host->native_views.end()) {
-        point.x += nativeViewCoord(parent->second.x * scale);
-        point.y += nativeViewCoord(parent->second.y * scale);
+        *logical_x += parent->second.x;
+        *logical_y += parent->second.y;
         if (parent->second.parent.empty()) break;
         parent = host->native_views.find(nativeViewKey(parent->second.window_id, parent->second.parent));
     }
-    return point;
+}
+
+/* Physical frame policy: every physical EDGE is the once-rounded product
+ * of an ACCUMULATED logical coordinate and the window scale. Accumulating
+ * before rounding matters because the sum of per-level rounds drifts from
+ * the round of the sum at fractional scales (and at fractional logical
+ * coordinates even at scale 1.0) — see the static_asserts beside
+ * nativeViewCoord for the numeric proof. Width and height fall out as
+ * edge differences (right = round((logical_x + width) * scale)) rather
+ * than independently rounded extents, so frames that abut logically —
+ * a sibling starting where the previous one ends, a child flush against
+ * its parent's edge — land on the same physical pixel column with no
+ * one-pixel gap or overlap at any scale. */
+static RECT nativeViewPhysicalFrame(Host *host, const NativeView &view, double scale) {
+    double logical_x = 0;
+    double logical_y = 0;
+    nativeViewLogicalOrigin(host, view, &logical_x, &logical_y);
+    RECT frame = {};
+    frame.left = nativeViewCoord(logical_x * scale);
+    frame.top = nativeViewCoord(logical_y * scale);
+    frame.right = nativeViewCoord((logical_x + view.width) * scale);
+    frame.bottom = nativeViewCoord((logical_y + view.height) * scale);
+    return frame;
 }
 
 static void applyNativeViewText(NativeView &view, const std::string &text) {
@@ -1590,8 +1625,8 @@ static void applyNativeViewAccessibility(NativeView &view) {
 static void applyNativeViewFrame(Host *host, NativeView &view) {
     if (!view.hwnd) return;
     const double scale = nativeViewFrameScale(host, view);
-    POINT origin = nativeViewAbsoluteOrigin(host, view, scale);
-    MoveWindow(view.hwnd, origin.x, origin.y, nativeViewExtent(view.width * scale), nativeViewExtent(view.height * scale), TRUE);
+    RECT frame = nativeViewPhysicalFrame(host, view, scale);
+    MoveWindow(view.hwnd, frame.left, frame.top, frame.right - frame.left, frame.bottom - frame.top, TRUE);
 }
 
 static void applyNativeViewState(NativeView &view, bool update_text, const std::string &text) {
@@ -5498,16 +5533,16 @@ int native_sdk_windows_create_view(Host *host, uint64_t window_id, const char *l
     if (view.visible) style |= WS_VISIBLE;
 
     const double scale = nativeViewFrameScale(host, view);
-    POINT origin = nativeViewAbsoluteOrigin(host, view, scale);
+    RECT frame = nativeViewPhysicalFrame(host, view, scale);
     HWND hwnd = CreateWindowExW(
         ex_style,
         class_name.c_str(),
         wide_text.c_str(),
         style,
-        origin.x,
-        origin.y,
-        nativeViewExtent(width * scale),
-        nativeViewExtent(height * scale),
+        frame.left,
+        frame.top,
+        frame.right - frame.left,
+        frame.bottom - frame.top,
         window->second.hwnd,
         nullptr,
         host->instance,

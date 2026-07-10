@@ -688,6 +688,24 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "gpuImeCommitAction(pending, result)" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "ISC_SHOWUICOMPOSITIONWINDOW" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-windows-view-frame-rounding", "Verify Windows native view frames accumulate logical coordinates before rounding and declare the full DPI awareness fallback chain", &.{
+        // The frame policy: every physical edge is the once-rounded
+        // product of an ACCUMULATED logical coordinate and the window
+        // scale, with width/height as edge differences. Per-level
+        // rounding drifts from the round of the sum (the static_asserts
+        // beside nativeViewCoord carry the numeric proof, compiled on
+        // every Windows host build).
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "static void nativeViewLogicalOrigin(Host *host, const NativeView &view, double *logical_x, double *logical_y)" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "frame.right = nativeViewCoord((logical_x + view.width) * scale);" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "static_assert(nativeViewCoord(10.4 * 1.5) + nativeViewCoord(10.4 * 1.5) == 32 && nativeViewCoord((10.4 + 10.4) * 1.5) == 31," },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "MoveWindow(view.hwnd, frame.left, frame.top, frame.right - frame.left, frame.bottom - frame.top, TRUE);" },
+        // The embedded manifest's DPI declarations: the ordered
+        // dpiAwareness list degrades PerMonitorV2 to PerMonitor, and the
+        // legacy dpiAware element covers systems that ignore dpiAwareness
+        // entirely.
+        .{ .path = "assets/native-sdk.manifest", .pattern = "<dpiAware xmlns=\"http://schemas.microsoft.com/SMI/2005/WindowsSettings\">true/pm</dpiAware>" },
+        .{ .path = "assets/native-sdk.manifest", .pattern = "<dpiAwareness xmlns=\"http://schemas.microsoft.com/SMI/2016/WindowsSettings\">PerMonitorV2, PerMonitor</dpiAwareness>" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-widget-text-command-bridge", "Verify AppKit GPU text widgets route native text commands", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)selectAll:(id)sender" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "@selector(selectAll:)" },
