@@ -14,6 +14,8 @@ scripts/gate.sh full          # everything CI-shaped that runs locally
 
 Run `scripts/gate.sh fast` before finishing any change; it maps your diff to the suites that cover it. The docs site checks with `pnpm --dir docs check` (the gate runs it only when `docs/` changed).
 
+This repository builds with Zig 0.16.0. If a build fails with "no member named" errors on std APIs (`std.fs.cwd`, `ArrayList.init`, `std.io`), you are writing pre-0.16 idioms — `skill-data/zig/SKILL.md` maps each such compile error to the current idiom as this codebase writes it.
+
 Pinned goldens (pixel signatures, schema fingerprints, command counts) are updated deliberately: review the rendered output or the counted commands first, and keep the pin's comment a self-contained description of what the value represents.
 
 ## Changelog

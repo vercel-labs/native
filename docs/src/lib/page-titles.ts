@@ -45,6 +45,7 @@ export const PAGE_TITLES: Record<string, string> = {
   embed: "Embedded App",
   "web-engines": "Web Engines",
   packages: "Package Distribution",
+  zig: "Zig 0.16 Notes",
 };
 
 export function getPageTitle(slug: string): string | null {

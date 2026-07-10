@@ -16,7 +16,7 @@ native version
 Two things the CLI handles for you, so you never configure them:
 
 - **The SDK location.** Apps build against the SDK the CLI ships with — `native init` records the path automatically (override with `--framework <sdk path>`).
-- **The Zig toolchain.** `native dev|build|test` use the Zig on your PATH when its version is compatible, and otherwise offer to download the pinned version into `~/.native/toolchains/` (checksum-verified; pass `--yes` to skip the prompt in scripts).
+- **The Zig toolchain.** `native dev|build|test` use the Zig on your PATH when its version is compatible, and otherwise offer to download the pinned version into `~/.native/toolchains/` (checksum-verified; pass `--yes` to skip the prompt in scripts). The toolkit requires Zig 0.16.0 — if you learned Zig on an older version, [Zig 0.16 Notes](/zig) maps the standard-library changes.
 
 ## Create an app
 
@@ -161,6 +161,7 @@ If the app outgrows the managed graph — extra build steps, custom sources — 
 - [Native UI](/native-ui) — every element, attribute, and pattern in the markup
 - [Components](/components) — the component catalog
 - [State & Data Flow](/state) — derive-don't-store, bindings, and text editing state
+- [Zig 0.16 Notes](/zig) — the standard-library idioms this SDK uses, mapped from the compile errors older Zig habits produce
 - [Examples](https://github.com/vercel-labs/native/tree/main/examples) — complete apps in the repository, from a calculator to a native shell
 - [Web Content](/frontend) — the secondary path for apps that embed an existing web frontend
 - [Platform Support](/platform-support) — what each host supports today

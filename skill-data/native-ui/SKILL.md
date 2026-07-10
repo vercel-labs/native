@@ -1033,6 +1033,22 @@ Md.view(ui, model.body_markdown, .{
 - Not in v1 (degrades to plain text, never fails): reference links, raw HTML, footnotes, backslash escapes (except `\|` in table rows).
 - `<details>` state is elm-style: the CALLER owns the expanded flags. Keep a bounded `details_expanded: [8]bool` in the model, toggle it in `update` on the details message, and pass the slice back in.
 
+## Zig 0.16, not 0.15: the std idioms that changed
+
+The toolkit requires Zig 0.16.0, and code written from memory of older Zig fails with "no member named" errors on std APIs. The recurring ones, old → current:
+
+| Compile error says | Old idiom | Write instead |
+| --- | --- | --- |
+| `struct 'array_list.Aligned(u8,null)' has no member named 'init'` | `std.ArrayList(T).init(allocator)`, `list.append(x)` | `var list: std.ArrayList(T) = .empty;` then `list.append(allocator, x)`, `list.deinit(allocator)` — the allocator rides every call |
+| `struct 'heap' has no member named 'GeneralPurposeAllocator'` | hand-built GPA in `main` | `pub fn main(init: std.process.Init) !void` — use `init.gpa`, `init.arena.allocator()`, `init.io` (the generated `main` already does) |
+| `struct 'fs' has no member named 'cwd'` | `std.fs.cwd().openFile(path, .{})` | `std.Io.Dir.cwd().openFile(io, path, .{})` — file IO lives on `std.Io.Dir` and takes an `io`; in `update` use `fx.readFile`/`fx.writeFile` instead |
+| `struct 'std' has no member named 'io'` | `std.io.getStdOut().writer()` | `std.Io.File.stdout().writer(io, &buffer)` then print through `&writer.interface` and `flush()`; `std.debug.print` is unchanged |
+| `struct 'time' has no member named 'sleep'`/`'milliTimestamp'` | `std.time.sleep(ns)`, `std.time.milliTimestamp()` | clocks live on `Io` — in app code use `fx.wallMs()` / `native_sdk.nowMs()` / `fx.startTimer` (see Time above), in tests `std.Io.sleep(std.testing.io, ...)` |
+| `invalid format string 's' for type '...'` | `{s}` on an enum | `{t}` prints the tag name; custom `format` methods take `(self, writer: *std.Io.Writer)` and print with `{f}` |
+| `struct 'process.Child' has no member named 'init'` | `Child.init` + `child.spawn()` | `fx.spawn` in apps; `std.process.spawn(io, .{ .argv = ... })` + `child.wait(io)` in tools |
+
+Tests that touch files or clocks get their `Io` from `std.testing.io`. The full catalog — env/args, sockets, readers, `build.zig` shapes, each with the SDK's live reference file — is its own skill: `native skills get zig`.
+
 ## Validate without building
 
 `native markup check src/view.native` — instant grammar/structure validation with `file:line:column` errors, including the font-coverage tofu guard: literal text with a codepoint outside the bundled face (⌘, ✓, ⑂, dingbats, CJK) is a teaching error naming the character, because it renders as a tofu box on the reference/screenshot and mobile paths — use a vector icon (`icon=` / `<icon name>`) or plain words. Dynamic strings get the same lesson as a Debug-build `zero_canvas_ui` diagnostic when the view builds. The accessibility lint rides the same pass: unnamed interactive controls and role misuse are errors, unnamed images and redundant labels are warnings (`--strict` promotes).

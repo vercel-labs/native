@@ -29,6 +29,7 @@ These references are included by `native skills get core --full`. Use them when 
 - App-defined bridge commands, builtin commands, permissions, windows, WebViews, dialogs: `references/bridge-security-native-capabilities.md`
 - Web engine choice, CEF, packaging, signing, doctor, logs, debugging: `references/web-engines-packaging-debugging.md`
 - Running-app inspection and smoke tests: `native skills get automation`
+- `zig build` fails on std APIs ("no member named 'cwd'", ArrayList `init`): `native skills get zig` — the Zig 0.16 idioms, indexed by compile error
 
 ## Quick start
 
@@ -225,6 +226,8 @@ zig build package
 ```
 
 Run BOTH `zig build` and `zig build test` before calling a change done: Zig's lazy analysis means code only tests reference (or only `main()` reference) can sit broken for weeks under the other command alone — tests never analyze `main`, so an API removed from std can keep "passing" until the app build finally touches it.
+
+The toolkit requires Zig 0.16.0. When a build fails with "no member named" errors on std APIs (`std.fs.cwd`, `ArrayList.init`, `std.io`, `GeneralPurposeAllocator`), the code was written against older Zig idioms — `native skills get zig` maps each such compile error to the 0.16 idiom as this SDK writes it.
 
 For GUI smoke tests, build with automation enabled and use the `automation` skill:
 
