@@ -9,6 +9,7 @@ export const PAGE_TITLES: Record<string, string> = {
   "quick-start": "Quick Start",
   "app-model": "App Model",
   "native-ui": "Native UI",
+  "design-guide": "Design Guide",
   state: "State & Data Flow",
   theming: "Theming",
   "building-components": "Building Components",

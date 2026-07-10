@@ -16,6 +16,10 @@ Run `scripts/gate.sh fast` before finishing any change; it maps your diff to the
 
 Pinned goldens (pixel signatures, schema fingerprints, command counts) are updated deliberately: review the rendered output or the counted commands first, and keep the pin's comment a self-contained description of what the value represents.
 
+## Design guide
+
+Read and follow [DESIGN.md](./DESIGN.md) before changing built-in UI, examples, templates, component previews, or Native UI docs. New UI should use the framework's native widgets first, keep visual identity token-driven, and verify accessibility, keyboard behavior, and layout stability. Call out any deliberate divergence in the change summary.
+
 ## Changelog
 
 Do not edit `CHANGELOG.md` directly. Each user-visible change ships a fragment in `changelog.d/` — see `changelog.d/README.md` for the format and voice. Internal-only polish needs no fragment.

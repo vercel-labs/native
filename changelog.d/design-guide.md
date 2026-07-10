@@ -1,0 +1,1 @@
+improvement: **Design guide**: Native SDK now documents a framework-level design contract for built-in components, examples, docs, and agent-generated native UI, and exposes it in the docs navigation.

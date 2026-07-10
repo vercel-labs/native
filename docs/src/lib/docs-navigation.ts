@@ -26,6 +26,7 @@ export const navSections: NavSection[] = [
     items: [
       { name: "App Model", href: "/app-model" },
       { name: "Native UI", href: "/native-ui" },
+      { name: "Design Guide", href: "/design-guide" },
       { name: "State & Data Flow", href: "/state" },
       { name: "Theming", href: "/theming" },
       { name: "Building Components", href: "/building-components" },
