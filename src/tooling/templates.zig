@@ -932,11 +932,13 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, native_sdk_path, cef_dir, cef_auto_install);
         \\    b.installArtifact(exe);
         \\
-        \\    const frontend_install = b.addSystemCommand(&.{ "npm", "install", "--prefix", "frontend" });
+        \\    const frontend_install = b.addSystemCommand(&.{ "npm", "install" });
+        \\    frontend_install.setCwd(b.path("frontend"));
         \\    const frontend_install_step = b.step("frontend-install", "Install frontend dependencies");
         \\    frontend_install_step.dependOn(&frontend_install.step);
         \\
-        \\    const frontend_build = b.addSystemCommand(&.{ "npm", "--prefix", "frontend", "run", "build" });
+        \\    const frontend_build = b.addSystemCommand(&.{ "npm", "run", "build" });
+        \\    frontend_build.setCwd(b.path("frontend"));
         \\    frontend_build.step.dependOn(&frontend_install.step);
         \\    const frontend_step = b.step("frontend-build", "Build the frontend");
         \\    frontend_step.dependOn(&frontend_build.step);
@@ -2004,6 +2006,8 @@ fn appZon(allocator: std.mem.Allocator, names: TemplateNames, frontend: Frontend
     try appendZigString(&out, allocator, frontend.devUrl());
     try out.appendSlice(allocator,
         \\,
+        // `native dev` runs manifest commands from the app root and does not
+        // expose a command cwd, so this invocation still needs `--prefix`.
         \\            .command = .{ "npm", "--prefix", "frontend", "run", "dev"
     );
     if (frontend != .next) {
@@ -2743,7 +2747,8 @@ fn readme(allocator: std.mem.Allocator, names: TemplateNames, framework_path: []
         \\`zig build dev`, `zig build run`, and `zig build package` install frontend dependencies automatically. To install them explicitly, run:
         \\
         \\```sh
-        \\npm install --prefix frontend
+        \\cd frontend
+        \\npm install
         \\```
         \\
         \\The generated build defaults to this Native SDK framework path:
@@ -2859,6 +2864,8 @@ test "writeDefaultApp emits Vite project files" {
     defer std.testing.allocator.free(main_zig_text);
     const runner_zig_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "src/runner.zig");
     defer std.testing.allocator.free(runner_zig_text);
+    const readme_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "README.md");
+    defer std.testing.allocator.free(readme_text);
     const package_json_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "frontend/package.json");
     defer std.testing.allocator.free(package_json_text);
     const main_js_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "frontend/src/main.js");
@@ -2866,11 +2873,17 @@ test "writeDefaultApp emits Vite project files" {
 
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, ".frontend") != null);
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "frontend/dist") != null);
-    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "npm") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "\"npm\", \"--prefix\", \"frontend\", \"run\", \"dev\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, ".windows") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "frontend-install") != null);
-    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"npm\", \"install\", \"--prefix\", \"frontend\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"npm\", \"install\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "frontend_install.setCwd(b.path(\"frontend\"))") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "frontend-build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"npm\", \"run\", \"build\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "frontend_build.setCwd(b.path(\"frontend\"))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "--prefix") == null);
+    try std.testing.expect(std.mem.indexOf(u8, readme_text, "cd frontend\nnpm install") != null);
+    try std.testing.expect(std.mem.indexOf(u8, readme_text, "--prefix") == null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "frontend_build.step.dependOn(&frontend_install.step)") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"native\", \"dev\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "dev.step.dependOn(&frontend_install.step)") != null);
