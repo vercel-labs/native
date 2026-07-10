@@ -1460,6 +1460,20 @@ static_assert(nativeViewCoord(10.4 * 1.5) + nativeViewCoord(10.4 * 1.5) == 32 &&
 static_assert(nativeViewCoord(10.2 * 1.5) + nativeViewCoord(10.2 * 1.5) == 30 && nativeViewCoord((10.2 + 10.2) * 1.5) == 31,
     "independently rounded extents must open seams that edge-derived extents close");
 
+/* A scaled window CONTENT extent rounded to whole physical pixels — the
+ * same round-once policy as native view frames (see
+ * nativeViewPhysicalFrame). Truncating instead would land fractional-DPI
+ * windows one physical pixel short of the request: logical 726 at 125%
+ * is 907.5 physical, which must become 908, not 907. Every conversion of
+ * a scaled content size to a physical extent goes through here so the
+ * standard-chrome and hidden-titlebar paths cannot drift apart. */
+static constexpr LONG physicalContentExtent(double value) {
+    return (LONG)(value + 0.5);
+}
+
+static_assert(physicalContentExtent(726 * 1.25) == 908 && (LONG)(726 * 1.25) == 907,
+    "truncation must land a pixel short of the round so the rounding is load-bearing");
+
 static bool validNativeViewFrame(double x, double y, double width, double height) {
     return x >= 0 && y >= 0 && width >= 0 && height >= 0;
 }
@@ -2047,8 +2061,8 @@ static SIZE hiddenOuterSizeForContent(DWORD style, DWORD ex_style, bool has_menu
     RECT borders = { 0, 0, 0, 0 };
     adjustWindowRectForDpi(&borders, style & ~WS_CAPTION, FALSE, ex_style, dpi);
     SIZE outer = {};
-    outer.cx = (LONG)content_width + (borders.right - borders.left);
-    outer.cy = (LONG)content_height + borders.bottom + (has_menu ? systemMetricForDpi(SM_CYMENU, dpi) : 0);
+    outer.cx = physicalContentExtent(content_width) + (borders.right - borders.left);
+    outer.cy = physicalContentExtent(content_height) + borders.bottom + (has_menu ? systemMetricForDpi(SM_CYMENU, dpi) : 0);
     return outer;
 }
 
@@ -4721,7 +4735,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                     const double scale = (double)dpi / 96.0;
                     const double min_content_width = window.min_width > 0 ? window.min_width * scale : 0;
                     const double min_content_height = window.min_height > 0 ? window.min_height * scale : 0;
-                    RECT frame = { 0, 0, (LONG)(min_content_width + 0.5), (LONG)(min_content_height + 0.5) };
+                    RECT frame = { 0, 0, physicalContentExtent(min_content_width), physicalContentExtent(min_content_height) };
                     const DWORD style = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE);
                     const DWORD ex_style = (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
                     const bool has_menu = GetMenu(hwnd) != nullptr;
@@ -4812,7 +4826,7 @@ static bool createNativeWindow(Host *host, Window &window) {
     const double scale = (double)dpi / 96.0;
     const double content_width = window.width * scale;
     const double content_height = window.height * scale;
-    RECT frame = { 0, 0, (LONG)(content_width + 0.5), (LONG)(content_height + 0.5) };
+    RECT frame = { 0, 0, physicalContentExtent(content_width), physicalContentExtent(content_height) };
     adjustWindowRectForDpi(&frame, style, has_menu ? TRUE : FALSE, 0, dpi);
     LONG outer_width = frame.right - frame.left;
     LONG outer_height = frame.bottom - frame.top;
