@@ -5530,6 +5530,18 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     [self queueScrollInputEvent:event deltaX:-event.scrollingDeltaX deltaY:-event.scrollingDeltaY];
 }
 
+- (void)magnifyWithEvent:(NSEvent *)event {
+    // Pinch-to-zoom: forward cursor-local coordinates and the incremental
+    // magnification factor in delta_y (NSEvent.magnification; positive =
+    // zoom in). delta_x stays 0 — see GpuSurfaceInputEvent.delta_y.
+    if (event.magnification == 0) return;
+    [self emitInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_MAGNIFY
+                           event:event
+                          button:0
+                          deltaX:0
+                          deltaY:event.magnification];
+}
+
 - (void)keyDown:(NSEvent *)event {
     if ([self focusedTextAccessibilityElement]) {
         self.interpretedKeyEventEmittedInput = NO;

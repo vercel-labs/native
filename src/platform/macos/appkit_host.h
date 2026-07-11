@@ -76,6 +76,9 @@ typedef enum {
     NATIVE_SDK_APPKIT_GPU_INPUT_IME_COMMIT_COMPOSITION = 9,
     NATIVE_SDK_APPKIT_GPU_INPUT_IME_CANCEL_COMPOSITION = 10,
     NATIVE_SDK_APPKIT_GPU_INPUT_POINTER_CANCEL = 11,
+    /* Trackpad pinch: cursor-local x/y, incremental NSEvent.magnification
+     * in delta_y (positive = zoom in). Appended so existing ordinals stay. */
+    NATIVE_SDK_APPKIT_GPU_INPUT_MAGNIFY = 12,
 } native_sdk_appkit_gpu_input_kind_t;
 
 typedef enum {

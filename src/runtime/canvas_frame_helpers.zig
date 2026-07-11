@@ -140,6 +140,7 @@ pub fn canvasWidgetPointerEventFromGpuInput(input_event: GpuSurfaceInputEvent) ?
         .ime_set_composition,
         .ime_commit_composition,
         .ime_cancel_composition,
+        .magnify,
         => return null,
     };
     return .{
@@ -163,6 +164,7 @@ pub fn canvasWidgetInputBatchesDisplayListRefresh(kind: platform.GpuSurfaceInput
         .ime_set_composition,
         .ime_commit_composition,
         .ime_cancel_composition,
+        .magnify,
         => true,
     };
 }
@@ -181,6 +183,7 @@ pub fn canvasWidgetKeyboardEventFromGpuInput(input_event: GpuSurfaceInputEvent, 
         .ime_set_composition,
         .ime_commit_composition,
         .ime_cancel_composition,
+        .magnify,
         => return null,
     };
     return .{
@@ -221,6 +224,7 @@ fn canvasWidgetTextEditEventFromGpuInput(input_event: GpuSurfaceInputEvent) ?can
         .pointer_move,
         .pointer_drag,
         .scroll,
+        .magnify,
         => null,
     };
 }
@@ -411,4 +415,17 @@ pub fn gpuSurfaceFrameEventFromGpuFrame(frame: platform.GpuFrame) platform.GpuSu
         .widget_node_count = frame.widget_node_count,
         .widget_semantics_count = frame.widget_semantics_count,
     };
+}
+
+test "magnify gpu input is not a widget pointer or keyboard event" {
+    const input = GpuSurfaceInputEvent{
+        .label = "canvas",
+        .kind = .magnify,
+        .x = 10,
+        .y = 20,
+        .delta_y = 0.05,
+    };
+    try std.testing.expect(canvasWidgetPointerEventFromGpuInput(input) == null);
+    try std.testing.expect(canvasWidgetKeyboardEventFromGpuInput(input, 1) == null);
+    try std.testing.expect(canvasWidgetInputBatchesDisplayListRefresh(.magnify));
 }

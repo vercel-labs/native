@@ -692,6 +692,13 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "_surfaceCursor = cursor ?: [NSCursor arrowCursor]" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSCursor pointingHandCursor" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-magnify-input", "Verify AppKit GPU surfaces forward trackpad magnify gestures", &.{
+        .{ .path = "src/platform/macos/appkit_host.h", .pattern = "NATIVE_SDK_APPKIT_GPU_INPUT_MAGNIFY = 12" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)magnifyWithEvent:(NSEvent *)event" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NATIVE_SDK_APPKIT_GPU_INPUT_MAGNIFY" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "deltaY:event.magnification" },
+        .{ .path = "src/platform/macos/root.zig", .pattern = "12 => .magnify" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-widget-accessibility-actions", "Verify AppKit GPU widget accessibility actions route to the runtime", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilityPerformPress" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "emitWidgetAccessibilityActionWithId" },

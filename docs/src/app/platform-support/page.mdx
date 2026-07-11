@@ -40,7 +40,7 @@ macOS, Linux, and Windows run full desktop apps through their own platform hosts
     </tr>
     <tr>
       <td>Pointer, keyboard &amp; IME input</td>
-      <td><Tier tier="full" /></td>
+      <td><Tier tier="full" note="includes trackpad magnify (pinch) on gpu_surface" /></td>
       <td><Tier tier="caveats" note="IME composition is mapped; real-hardware IME verification is pending" fn={3} /></td>
       <td><Tier tier="full" note="pointer, keyboard, scroll, IME composition, HiDPI" /></td>
       <td><Tier tier="caveats" note="touch, system keyboard, and IME through the toolkit host" fn={3} /></td>
@@ -391,7 +391,7 @@ Mobile hosts own safe areas, orientation, keyboard avoidance, back gestures, and
 
 Canvas-scene apps also run through a hand-written embed host: `addMobileLib` compiles a `Model`/`Msg`/`update`/`view` app into the embed static library with a single `gpu_surface` scene, frames render through the deterministic CPU reference renderer, and the host shim blits the presented pixels (`native_sdk_app_render_pixels`) into its own surface. The `examples/mobile-canvas` iOS shim — the same architecture the toolkit's own UIKit host uses — is exercised on the simulator: rendering, safe-area layout, real touch/keyboard/IME input, and accessibility snapshots. The Android `NativeActivity` shim cross-compiles for both Android arches from the same library build.
 
-`gpu_surface` is implemented for the macOS system-WebView host as a Metal-backed child surface and for the Linux and Windows system-WebView hosts as a software-rendered (CPU reference renderer + GTK pixel blit on Linux, GDI DIB blit on Windows) child surface; Linux and Windows frame events report `backend=software`, and a manifest that declares another backend (for example `gpu_backend = "metal"`) falls back to software on those hosts instead of erroring. Windows maps native IME composition (`WM_IME_COMPOSITION`) onto the same shared IME events the macOS and Linux hosts emit — inline preedit, cursor position, and the commit contract — with real-hardware IME verification still pending. Other current hosts report unsupported operations for that view kind and `runtime.supports(.gpu_surfaces)` / `window.zero.platform.supports("gpuSurfaces")` return `false`.
+`gpu_surface` is implemented for the macOS system-WebView host as a Metal-backed child surface and for the Linux and Windows system-WebView hosts as a software-rendered (CPU reference renderer + GTK pixel blit on Linux, GDI DIB blit on Windows) child surface; Linux and Windows frame events report `backend=software`, and a manifest that declares another backend (for example `gpu_backend = "metal"`) falls back to software on those hosts instead of erroring. Windows maps native IME composition (`WM_IME_COMPOSITION`) onto the same shared IME events the macOS and Linux hosts emit — inline preedit, cursor position, and the commit contract — with real-hardware IME verification still pending. On macOS, trackpad pinch gestures arrive as `GpuSurfaceInputKind.magnify` with cursor-local coordinates and incremental `NSEvent.magnification` in `delta_y` (positive zooms in); other hosts do not synthesize magnify. Other current hosts report unsupported operations for that view kind and `runtime.supports(.gpu_surfaces)` / `window.zero.platform.supports("gpuSurfaces")` return `false`.
 
 ## Related Docs
 

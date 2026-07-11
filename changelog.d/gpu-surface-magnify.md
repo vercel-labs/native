@@ -1,0 +1,1 @@
+feature: **macOS trackpad magnify on GPU surfaces**: pinch gestures arrive as `GpuSurfaceInputKind.magnify` with cursor-local coordinates and incremental `NSEvent.magnification` in `delta_y` (positive zooms in).

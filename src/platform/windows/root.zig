@@ -564,6 +564,7 @@ fn gpuSurfaceInputKindFromInt(value: c_int) platform_mod.GpuSurfaceInputKind {
         9 => .ime_commit_composition,
         10 => .ime_cancel_composition,
         11 => .pointer_cancel,
+        12 => .magnify, // macOS-synthesized; Windows does not emit magnify
         else => .pointer_move,
     };
 }
@@ -1383,6 +1384,16 @@ test "windows gpu surface input maps pointer cancel" {
     var event = std.mem.zeroes(WindowsEvent);
     event.input_kind = 11;
     try std.testing.expectEqual(platform_mod.GpuSurfaceInputKind.pointer_cancel, gpuSurfaceInputEventFromWindowsEvent(&event).kind);
+}
+
+test "windows gpu surface input maps magnify abi ordinal without synthesizing" {
+    // Shared ABI ordinal 12 (macOS magnify); Windows does not emit it.
+    var event = std.mem.zeroes(WindowsEvent);
+    event.input_kind = 12;
+    event.delta_y = 0.1;
+    const input = gpuSurfaceInputEventFromWindowsEvent(&event);
+    try std.testing.expectEqual(platform_mod.GpuSurfaceInputKind.magnify, input.kind);
+    try std.testing.expectEqual(@as(f32, 0.1), input.delta_y);
 }
 
 test "windows gpu surface input maps ime text and composition events" {

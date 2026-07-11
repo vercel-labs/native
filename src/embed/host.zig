@@ -843,7 +843,7 @@ pub const MobileHostApp = struct {
                 self.last_input_composition_cursor = input.composition_cursor;
                 self.last_input_modifiers = input.modifiers;
                 switch (input.kind) {
-                    .pointer_down, .pointer_up, .pointer_cancel, .pointer_move, .pointer_drag, .scroll => {
+                    .pointer_down, .pointer_up, .pointer_cancel, .pointer_move, .pointer_drag, .scroll, .magnify => {
                         self.touch_count += 1;
                         self.last_touch_id = input.pointer_id;
                         self.last_touch_kind = input.kind;

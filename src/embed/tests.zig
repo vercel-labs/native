@@ -220,8 +220,31 @@ test "mobile C ABI forwards surface resize and touch input" {
     try std.testing.expectEqual(@as(f32, 0), self.last_touch_pressure);
     try std.testing.expectEqualStrings("", std.mem.span(native_sdk_app_last_error_name(app)));
 
+    // Magnify is a desktop (macOS) kind; the embed host still records it
+    // when the runtime delivers one so shared GpuSurfaceInputKind handling
+    // stays exhaustive across hosts.
+    try self.embedded.runtime.dispatchPlatformEvent(self.embedded.app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = mobile_gpu_surface_label,
+        .kind = .magnify,
+        .timestamp_ns = 9_000_000,
+        .pointer_id = 7,
+        .x = 40,
+        .y = 50,
+        .delta_y = 0.08,
+    } });
+    try std.testing.expectEqual(@as(usize, 5), self.touch_count);
+    try std.testing.expectEqual(@as(usize, 5), self.input_count);
+    try std.testing.expectEqual(platform.GpuSurfaceInputKind.magnify, self.last_touch_kind);
+    try std.testing.expectEqual(platform.GpuSurfaceInputKind.magnify, self.last_input_kind);
+    try std.testing.expectEqual(@as(u64, 7), self.last_touch_id);
+    try std.testing.expectEqual(@as(f32, 40), self.last_touch_x);
+    try std.testing.expectEqual(@as(f32, 50), self.last_touch_y);
+    try std.testing.expectEqual(@as(f32, 0), self.last_touch_delta_x);
+    try std.testing.expectEqual(@as(f32, 0.08), self.last_touch_delta_y);
+
     native_sdk_app_touch(app, 42, 99, 13, 25, 0);
-    try std.testing.expectEqual(@as(usize, 4), self.touch_count);
+    try std.testing.expectEqual(@as(usize, 5), self.touch_count);
     try std.testing.expectEqualStrings("InvalidTouchPhase", std.mem.span(native_sdk_app_last_error_name(app)));
 }
 

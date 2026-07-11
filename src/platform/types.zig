@@ -1550,6 +1550,9 @@ pub const GpuSurfaceInputKind = enum {
     ime_set_composition,
     ime_commit_composition,
     ime_cancel_composition,
+    /// Trackpad pinch / magnify gesture (macOS AppKit `-magnifyWithEvent:`).
+    /// Host ABI ordinal is 12; see `GpuSurfaceInputEvent.delta_y`.
+    magnify,
 };
 
 pub const GpuSurfaceInputEvent = struct {
@@ -1563,6 +1566,10 @@ pub const GpuSurfaceInputEvent = struct {
     button: i32 = 0,
     pressure: f32 = 0,
     delta_x: f32 = 0,
+    /// For `.scroll`, the wheel/trackpad scroll delta in canvas points.
+    /// For `.magnify`, the incremental magnification factor from the host
+    /// (`NSEvent.magnification` on macOS): positive zooms in, negative
+    /// zooms out. `delta_x` is 0 for magnify.
     delta_y: f32 = 0,
     key: []const u8 = "",
     text: []const u8 = "",

@@ -1813,6 +1813,7 @@ fn gpuSurfaceInputKindFromInt(value: c_int) platform_mod.GpuSurfaceInputKind {
         9 => .ime_commit_composition,
         10 => .ime_cancel_composition,
         11 => .pointer_cancel,
+        12 => .magnify,
         else => .pointer_move,
     };
 }
@@ -2240,6 +2241,32 @@ test "mac gpu surface input maps pointer cancel" {
 
     const input = gpuSurfaceInputEventFromAppKitEvent(&event);
     try std.testing.expectEqual(platform_mod.GpuSurfaceInputKind.pointer_cancel, input.kind);
+}
+
+test "mac gpu surface input maps magnify with incremental magnification in delta_y" {
+    const label = "canvas";
+    var event = std.mem.zeroes(AppKitEvent);
+    event.window_id = 3;
+    event.view_label = label.ptr;
+    event.view_label_len = label.len;
+    event.input_kind = 12;
+    event.timestamp_ns = 456_000_000;
+    event.x = 120;
+    event.y = 80;
+    event.delta_x = 0;
+    event.delta_y = 0.05;
+    event.shortcut_modifiers = shortcut_modifier_option;
+
+    const input = gpuSurfaceInputEventFromAppKitEvent(&event);
+    try std.testing.expectEqual(@as(platform_mod.WindowId, 3), input.window_id);
+    try std.testing.expectEqualStrings("canvas", input.label);
+    try std.testing.expectEqual(platform_mod.GpuSurfaceInputKind.magnify, input.kind);
+    try std.testing.expectEqual(@as(u64, 456_000_000), input.timestamp_ns);
+    try std.testing.expectEqual(@as(f32, 120), input.x);
+    try std.testing.expectEqual(@as(f32, 80), input.y);
+    try std.testing.expectEqual(@as(f32, 0), input.delta_x);
+    try std.testing.expectEqual(@as(f32, 0.05), input.delta_y);
+    try std.testing.expect(input.modifiers.option);
 }
 
 test "mac appearance event maps color scheme" {
