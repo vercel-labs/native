@@ -272,6 +272,20 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
             }
         }
     }
+    // The Linux twin of that guard (the build-time half is the ELF scan
+    // in tools/audit_web_layer.zig): an executable that links WebKitGTK
+    // was compiled WITH the embedded web layer, so packaging it under a
+    // native-only decision ships an app that still demands libwebkitgtk
+    // on every user machine while its webviews would fail to spawn.
+    if (options.target == .linux and options.web_engine == .system and !webLayerFor(options).enabled) {
+        if (options.binary_path) |binary_path| {
+            if (try elfReferencesWebKitGtk(allocator, io, binary_path)) {
+                std.debug.print("error: {s} references WebKitGTK but this package ships no web layer, so its webviews would fail to spawn - the binary was built with the embedded web layer (for example `zig build -Dweb-layer=include`)\n" ++
+                    "  package with `--web-layer include`, or rebuild the binary to match the packaging decision\n", .{binary_path});
+                return error.WebViewLayerMismatch;
+            }
+        }
+    }
     if (options.binary_path) |binary_path| {
         const binary_subpath = try std.fmt.allocPrint(allocator, "bin/{s}", .{executable_name});
         defer allocator.free(binary_subpath);
@@ -1046,6 +1060,80 @@ fn peReferencesWebView2Loader(allocator: std.mem.Allocator, io: std.Io, path: []
     }
     return std.mem.indexOf(u8, bytes, &needle_wide) != null or
         std.mem.indexOf(u8, bytes, needle_ascii) != null;
+}
+
+/// Whether a Linux executable carries the embedded web layer: the GTK
+/// host links webkitgtk-6.0 directly, so the honest evidence is a
+/// libwebkitgtk/libjavascriptcoregtk DT_NEEDED entry or a webkit_*/jsc_*
+/// dynamic-symbol name — all removed by the WebKitGTK compile seam in a
+/// native-only build. The same probe as the build-time auditor
+/// (tools/audit_web_layer.zig), hand-rolled over the section headers;
+/// a non-ELF file (or one this minimal parse cannot walk) proves
+/// nothing about the layer, so it scans as false rather than refusing
+/// the package.
+fn elfReferencesWebKitGtk(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !bool {
+    const bytes = try readPath(allocator, io, path);
+    defer allocator.free(bytes);
+    return elfBytesReferenceWebKitGtk(bytes);
+}
+
+fn elfBytesReferenceWebKitGtk(bytes: []const u8) bool {
+    // ELF64 little endian only — every Linux target this toolkit builds.
+    if (bytes.len < 0x40 or !std.mem.eql(u8, bytes[0..4], "\x7fELF")) return false;
+    if (bytes[4] != 2 or bytes[5] != 1) return false;
+    const sh_offset: u64 = std.mem.readInt(u64, bytes[0x28..0x30], .little);
+    const sh_entsize: u16 = std.mem.readInt(u16, bytes[0x3a..0x3c], .little);
+    const sh_count: u16 = std.mem.readInt(u16, bytes[0x3c..0x3e], .little);
+    if (sh_offset == 0 or sh_count == 0 or sh_entsize < 0x40) return false;
+
+    var index: u16 = 0;
+    while (index < sh_count) : (index += 1) {
+        const header = elfSectionSlice(bytes, sh_offset + @as(u64, index) * sh_entsize, 0x40) orelse return false;
+        const sh_type = std.mem.readInt(u32, header[0x04..0x08], .little);
+        const link = std.mem.readInt(u32, header[0x28..0x2c], .little);
+        const offset = std.mem.readInt(u64, header[0x18..0x20], .little);
+        const size = std.mem.readInt(u64, header[0x20..0x28], .little);
+        const entsize = std.mem.readInt(u64, header[0x38..0x40], .little);
+        // SHT_DYNAMIC = 6, SHT_DYNSYM = 11.
+        if (sh_type != 6 and sh_type != 11) continue;
+        if (link >= sh_count) continue;
+        const link_header = elfSectionSlice(bytes, sh_offset + @as(u64, link) * sh_entsize, 0x40) orelse return false;
+        const strtab = elfSectionSlice(bytes, std.mem.readInt(u64, link_header[0x18..0x20], .little), std.mem.readInt(u64, link_header[0x20..0x28], .little)) orelse return false;
+        const table = elfSectionSlice(bytes, offset, size) orelse return false;
+        if (sh_type == 6) {
+            var cursor: usize = 0;
+            while (cursor + 16 <= table.len) : (cursor += 16) {
+                const tag: i64 = @bitCast(std.mem.readInt(u64, table[cursor..][0..8], .little));
+                if (tag != 1) continue; // DT_NEEDED
+                const name = elfStringAt(strtab, std.mem.readInt(u64, table[cursor + 8 ..][0..8], .little)) orelse continue;
+                if (std.mem.indexOf(u8, name, "webkitgtk") != null or std.mem.indexOf(u8, name, "javascriptcoregtk") != null) return true;
+            }
+        } else {
+            const stride: usize = if (entsize >= 24) @intCast(entsize) else 24;
+            var cursor: usize = 0;
+            while (cursor + 24 <= table.len) : (cursor += stride) {
+                const name_offset: u32 = std.mem.readInt(u32, table[cursor..][0..4], .little);
+                if (name_offset == 0) continue;
+                const name = elfStringAt(strtab, name_offset) orelse continue;
+                if (std.mem.startsWith(u8, name, "webkit_") or std.mem.startsWith(u8, name, "jsc_")) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn elfSectionSlice(bytes: []const u8, offset: u64, size: u64) ?[]const u8 {
+    if (offset > bytes.len) return null;
+    const start: usize = @intCast(offset);
+    if (size > bytes.len - start) return null;
+    return bytes[start .. start + @as(usize, @intCast(size))];
+}
+
+fn elfStringAt(strtab: []const u8, offset: u64) ?[]const u8 {
+    if (offset >= strtab.len) return null;
+    const start: usize = @intCast(offset);
+    const end = std.mem.indexOfScalarPos(u8, strtab, start, 0) orelse return null;
+    return strtab[start..end];
 }
 
 /// Whether a PE executable targets arm64, read from the COFF machine
@@ -2519,6 +2607,141 @@ test "package refuses to strip the loader from an exe that references it" {
         .binary_path = root ++ "/app.exe",
         .assets_dir = root ++ "/assets",
     }));
+}
+
+/// A minimal but structurally valid ELF64 executable for the WebKitGTK
+/// scan: one .dynstr, one .dynamic with a single DT_NEEDED naming
+/// `needed_lib`, and one .dynsym whose single real symbol is named
+/// `symbol_name` — the two evidence channels the Linux web-layer guard
+/// reads. Caller frees.
+fn testWebLayerElfBytes(gpa: std.mem.Allocator, needed_lib: []const u8, symbol_name: []const u8) ![]u8 {
+    const dynstr_offset: u64 = 0x100;
+    const dynamic_offset: u64 = 0x180;
+    const dynsym_offset: u64 = 0x1c0;
+    const shdr_offset: u64 = 0x200;
+    const bytes = try gpa.alloc(u8, 0x2c0);
+    @memset(bytes, 0);
+
+    // ELF header: magic, ELFCLASS64, little endian, section table.
+    @memcpy(bytes[0..4], "\x7fELF");
+    bytes[4] = 2;
+    bytes[5] = 1;
+    std.mem.writeInt(u64, bytes[0x28..0x30], shdr_offset, .little);
+    std.mem.writeInt(u16, bytes[0x3a..0x3c], 0x40, .little);
+    std.mem.writeInt(u16, bytes[0x3c..0x3e], 3, .little);
+
+    // .dynstr: "\0<needed_lib>\0<symbol_name>\0".
+    const lib_name_offset: u64 = 1;
+    const symbol_name_offset: u64 = 1 + needed_lib.len + 1;
+    const dynstr_len: u64 = symbol_name_offset + symbol_name.len + 1;
+    @memcpy(bytes[@intCast(dynstr_offset + lib_name_offset)..][0..needed_lib.len], needed_lib);
+    @memcpy(bytes[@intCast(dynstr_offset + symbol_name_offset)..][0..symbol_name.len], symbol_name);
+
+    // .dynamic: DT_NEEDED -> needed_lib, then DT_NULL.
+    std.mem.writeInt(u64, bytes[@intCast(dynamic_offset)..][0..8], 1, .little); // DT_NEEDED
+    std.mem.writeInt(u64, bytes[@intCast(dynamic_offset + 8)..][0..8], lib_name_offset, .little);
+
+    // .dynsym: the null symbol, then one named symbol.
+    std.mem.writeInt(u32, bytes[@intCast(dynsym_offset + 24)..][0..4], @intCast(symbol_name_offset), .little);
+
+    // Section headers: [0] .dynstr (SHT_STRTAB), [1] .dynamic, [2] .dynsym.
+    const shdr = struct {
+        fn write(buffer: []u8, base: u64, index: u64, sh_type: u32, link: u32, offset: u64, size: u64, entsize: u64) void {
+            const header = buffer[@intCast(base + index * 0x40)..][0..0x40];
+            std.mem.writeInt(u32, header[0x04..0x08], sh_type, .little);
+            std.mem.writeInt(u64, header[0x18..0x20], offset, .little);
+            std.mem.writeInt(u64, header[0x20..0x28], size, .little);
+            std.mem.writeInt(u32, header[0x28..0x2c], link, .little);
+            std.mem.writeInt(u64, header[0x38..0x40], entsize, .little);
+        }
+    };
+    shdr.write(bytes, shdr_offset, 0, 3, 0, dynstr_offset, dynstr_len, 0);
+    shdr.write(bytes, shdr_offset, 1, 6, 0, dynamic_offset, 32, 16);
+    shdr.write(bytes, shdr_offset, 2, 11, 0, dynsym_offset, 48, 24);
+    return bytes;
+}
+
+test "the linux web-layer scan reads DT_NEEDED and dynamic symbols" {
+    const gpa = std.testing.allocator;
+    // The library link is evidence on its own.
+    const linked = try testWebLayerElfBytes(gpa, "libwebkitgtk-6.0.so.4", "gtk_init");
+    defer gpa.free(linked);
+    try std.testing.expect(elfBytesReferenceWebKitGtk(linked));
+    // So is a lone webkit_/jsc_ dynamic symbol (a hand-linked binary
+    // that dodged the DT_NEEDED entry still calls into WebKit).
+    const symboled = try testWebLayerElfBytes(gpa, "libgtk-4.so.1", "webkit_web_view_new");
+    defer gpa.free(symboled);
+    try std.testing.expect(elfBytesReferenceWebKitGtk(symboled));
+    const jsc = try testWebLayerElfBytes(gpa, "libgtk-4.so.1", "jsc_value_to_string");
+    defer gpa.free(jsc);
+    try std.testing.expect(elfBytesReferenceWebKitGtk(jsc));
+    // A WebKit-free GTK binary scans clean, and a non-ELF payload
+    // proves nothing (stays packageable), mirroring the PE probe.
+    const clean = try testWebLayerElfBytes(gpa, "libgtk-4.so.1", "gtk_init");
+    defer gpa.free(clean);
+    try std.testing.expect(!elfBytesReferenceWebKitGtk(clean));
+    try std.testing.expect(!elfBytesReferenceWebKitGtk("not an executable"));
+}
+
+test "package refuses to strip WebKitGTK from a Linux binary that links it" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-linux-mismatch";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    const elf_bytes = try testWebLayerElfBytes(std.testing.allocator, "libwebkitgtk-6.0.so.4", "webkit_web_view_new");
+    defer std.testing.allocator.free(elf_bytes);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app", .data = elf_bytes });
+
+    // A WebKitGTK-linking binary (built with the web layer) packaged
+    // under a native-only decision would ship broken webviews AND a
+    // libwebkitgtk runtime requirement the package claims not to have:
+    // refused, with `--web-layer include` as the way out.
+    const capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.linux-mismatch",
+        .name = "linux-mismatch-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+    try std.testing.expectError(error.WebViewLayerMismatch, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .linux,
+        .output_path = root ++ "/demo-linux",
+        .binary_path = root ++ "/app",
+        .assets_dir = root ++ "/assets",
+    }));
+}
+
+test "native-only linux package accepts a WebKit-free ELF and reports web layer none" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-linux-clean";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    const elf_bytes = try testWebLayerElfBytes(std.testing.allocator, "libgtk-4.so.1", "gtk_init");
+    defer std.testing.allocator.free(elf_bytes);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app", .data = elf_bytes });
+
+    const capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.linux-clean",
+        .name = "linux-clean-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+    const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .linux,
+        .output_path = root ++ "/demo-linux",
+        .binary_path = root ++ "/app",
+        .assets_dir = root ++ "/assets",
+    });
+    try std.testing.expect(!stats.web_layer.?.enabled);
+
+    const report = try readPath(std.testing.allocator, std.testing.io, root ++ "/demo-linux/package-manifest.zon");
+    defer std.testing.allocator.free(report);
+    try std.testing.expect(std.mem.indexOf(u8, report, ".web_layer = \"none (inferred: nothing in app.zon declares web use)\"") != null);
 }
 
 // ---------------------------------------------------------------------------
