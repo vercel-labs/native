@@ -147,8 +147,8 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("bundled {d} assets into {s}\n", .{ stats.asset_count, output_dir });
     } else if (std.mem.eql(u8, command, "package")) {
         checkVerbFlags("package", args[2..], .{
-            .usage = "package [--target macos] [--output path] [--binary path] [--assets path] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]",
-            .value_flags = &.{ "--manifest", "--target", "--output", "--binary", "--assets", "--web-engine", "--cef-dir", "--signing", "--identity", "--entitlements", "--team-id", "--optimize" },
+            .usage = "package [--target macos] [--output path] [--binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]",
+            .value_flags = &.{ "--manifest", "--target", "--output", "--binary", "--assets", "--web-engine", "--web-layer", "--cef-dir", "--signing", "--identity", "--entitlements", "--team-id", "--optimize" },
             .bool_flags = &.{ "--cef-auto-install", "--archive" },
         });
         const manifest_path = try flagValue(args, "--manifest") orelse "app.zon";
@@ -170,6 +170,14 @@ pub fn main(init: std.process.Init) !void {
             .cef_dir = try flagValue(args, "--cef-dir"),
             .cef_auto_install = if (flagBool(args, "--cef-auto-install")) true else null,
         });
+        // `--web-layer` beats app.zon's `.webview_layer` the same way
+        // `-Dweb-layer` beats it in the build graph; the standard build
+        // graphs pass their resolved layer decision through this flag so
+        // the package always agrees with the exe it wraps.
+        const web_layer_setting = if (try flagValue(args, "--web-layer")) |value|
+            tooling.manifest.parseWebViewLayerSetting(value) orelse fail("invalid --web-layer value: use auto, include, or exclude")
+        else
+            null;
         const signing_name = try flagValue(args, "--signing") orelse "none";
         const signing = tooling.package.SigningMode.parse(signing_name) orelse fail("invalid signing mode");
         const default_output = switch (target) {
@@ -208,6 +216,7 @@ pub fn main(init: std.process.Init) !void {
             .assets_dir = try flagValue(args, "--assets") orelse if (metadata.frontend) |frontend| frontend.dist else "assets",
             .frontend = metadata.frontend,
             .web_engine = web_engine.engine,
+            .web_layer_setting = web_layer_setting,
             .cef_dir = web_engine.cef_dir,
             .signing = .{ .mode = signing, .identity = try flagValue(args, "--identity"), .entitlements = try flagValue(args, "--entitlements"), .team_id = try flagValue(args, "--team-id") },
             .archive = archive,
@@ -349,7 +358,7 @@ fn usage() void {
         \\  doctor [--strict] [--manifest app.zon] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install]
         \\  validate [app.zon]
         \\  bundle-assets [app.zon] [assets] [output]
-        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--assets path] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]
+        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]
         \\  dev [--manifest app.zon] --binary path [--url http://127.0.0.1:5173/] [--command "npm run dev"] [--timeout-ms 30000]
         \\  package-windows [--output path] [--binary path]
         \\  package-linux [--output path] [--binary path]
@@ -753,6 +762,7 @@ fn positionalArg(args: []const []const u8) ?[]const u8 {
                 std.mem.eql(u8, arg, "--binary") or
                 std.mem.eql(u8, arg, "--assets") or
                 std.mem.eql(u8, arg, "--web-engine") or
+                std.mem.eql(u8, arg, "--web-layer") or
                 std.mem.eql(u8, arg, "--cef-dir") or
                 std.mem.eql(u8, arg, "--signing") or
                 std.mem.eql(u8, arg, "--identity") or

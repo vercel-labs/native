@@ -11,11 +11,18 @@
 //! boundary owns:
 //!
 //! - The standard build graph (build/app.zig) sees `-Dweb-engine` and
-//!   `-Dweb-layer`: its resolved engine is the flag orelse app.zon, and
-//!   a conflict is a configure-time error.
-//! - The CLI (src/tooling/manifest.zig `webLayer`, consumed by
-//!   src/tooling/package.zig) sees `--web-engine`: its resolved engine
-//!   is the flag orelse app.zon, and a conflict refuses the package.
+//!   `-Dweb-layer`: its resolved engine is the flag orelse app.zon, its
+//!   effective layer setting is the flag orelse app.zon, and a conflict
+//!   is a configure-time error.
+//! - The CLI (src/tooling/manifest.zig `webLayer`/`webLayerResolved`,
+//!   consumed by src/tooling/package.zig) sees `--web-engine` and the
+//!   package verb's `--web-layer`: each flag beats its app.zon field the
+//!   same way the `-D` options do in the build graph, and a conflict
+//!   refuses the package. Both standard graph shapes (build/app.zig and
+//!   the generated template's build.zig) forward their RESOLVED layer
+//!   decision to `native package` as `--web-layer include|exclude`, so a
+//!   graph-driven package never re-infers what the graph already decided
+//!   and the packaged artifact structurally agrees with the exe.
 //! - The app runner (src/app_runner/root.zig) evaluates the contract at
 //!   comptime over the app.zon import. It NEVER sees the `-Dweb-engine`
 //!   flag, so its engine input is the manifest's own engine: the
@@ -323,6 +330,24 @@ test "web-layer contract matrix agrees across boundary shapes" {
     try std.testing.expectError(error.WebViewLayerConflict, infer(.{ .capabilities = .{"webview"} }, .system, .exclude));
     try std.testing.expectError(error.WebViewLayerConflict, infer(.{}, .chromium, .exclude));
     try std.testing.expectError(error.WebViewLayerConflict, decide(.exclude, .unreadable_manifest));
+
+    // The package boundary's forwarded resolution: the build graphs hand
+    // `native package` their computed decision as `--web-layer
+    // include|exclude`, and replaying that setting through `decide` must
+    // reproduce the same enabled-ness for every row the graph can reach
+    // — forwarding the resolution is lossless, so the exe and the
+    // package it lands in can never disagree about the web layer.
+    const forward_settings = [_]WebViewLayer{ .auto, .include, .exclude };
+    const forward_declarations = [_]?Declaration{ null, .capability, .chromium_engine };
+    for (forward_settings) |setting| {
+        for (forward_declarations) |declaration| {
+            // A refused conflict never configures, so the graph has
+            // nothing to forward for that row.
+            const original = decide(setting, declaration) catch continue;
+            const replayed = try decide(if (original.enabled) .include else .exclude, declaration);
+            try std.testing.expectEqual(original.enabled, replayed.enabled);
+        }
+    }
 
     // The runner's comptime evaluation: the same scan over a ZON-import
     // shape, forced through comptime.

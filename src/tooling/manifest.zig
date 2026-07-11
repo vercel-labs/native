@@ -1344,25 +1344,44 @@ fn parseWebViewLayer(value: []const u8) !app_manifest.WebViewLayer {
 /// web content.
 pub const web_layer_conflict_message = "app.zon sets .webview_layer = \"exclude\" but the app declares web content (a .frontend block, the \"webview\" capability, a .shell webview view, or the Chromium web engine - from .web_engine or --web-engine) - remove the web declarations or drop the exclude";
 
+/// The same contradiction arriving through the CLI flag instead of the
+/// manifest field: `--web-layer exclude` against an app that declares
+/// web content.
+pub const web_layer_flag_conflict_message = "--web-layer exclude contradicts the app's web declarations (a .frontend block, the \"webview\" capability, a .shell webview view, or the Chromium web engine - from .web_engine or --web-engine) - remove the web declarations or drop the flag";
+
 /// Why the web layer is (or is not) in the build, for verdict lines —
 /// the shared contract's reason set.
 pub const WebLayerReason = app_manifest.web_layer.Reason;
 
+/// The layer setting a boundary resolves before deciding: "auto",
+/// "include", or "exclude" — the shared contract's input enum, exported
+/// for the CLI's `--web-layer` flag.
+pub const WebViewLayerSetting = app_manifest.WebViewLayer;
+
+/// Parse a `--web-layer` flag value (auto|include|exclude), via the
+/// shared contract so the flag and the app.zon field accept exactly the
+/// same vocabulary.
+pub const parseWebViewLayerSetting = app_manifest.web_layer.parseWebViewLayer;
+
 pub const WebLayer = struct {
     enabled: bool,
     reason: WebLayerReason,
+    /// Whether the deciding include/exclude came from the CLI's
+    /// `--web-layer` flag rather than app.zon's `.webview_layer`; only
+    /// meaningful for the declared_include/declared_exclude reasons.
+    from_flag: bool = false,
 
     /// The parenthesized half of a verdict line: `web layer: none
     /// (inferred)` / `web layer: webview2 (declared: capabilities)`.
     pub fn sourceText(self: WebLayer) []const u8 {
         return switch (self.reason) {
             .inferred_native_only => "inferred: nothing in app.zon declares web use",
-            .declared_exclude => "declared: .webview_layer = \"exclude\"",
+            .declared_exclude => if (self.from_flag) "declared: --web-layer exclude" else "declared: .webview_layer = \"exclude\"",
             .capability => "declared: capabilities",
             .frontend => "declared: .frontend",
             .shell_webview => "declared: .shell webview view",
             .chromium_engine => "declared: the Chromium web engine (.web_engine or --web-engine)",
-            .declared_include => "declared: .webview_layer = \"include\"",
+            .declared_include => if (self.from_flag) "declared: --web-layer include" else "declared: .webview_layer = \"include\"",
             // Only the build graph's lenient parse can produce this
             // reason; parsed metadata always reaches this fn readable.
             .unreadable_manifest => "kept: app.zon could not be parsed",
@@ -1380,12 +1399,37 @@ pub const WebLayerError = error{ InvalidWebViewLayer, WebViewLayerConflict };
 /// exclude that contradicts a web declaration (including a resolved
 /// Chromium engine) is refused.
 pub fn webLayer(metadata: Metadata, resolved_engine: web_engine_tool.Engine) WebLayerError!WebLayer {
-    const setting = parseWebViewLayer(metadata.webview_layer) catch return error.InvalidWebViewLayer;
+    return webLayerResolved(metadata, resolved_engine, null);
+}
+
+/// `webLayer` with the CLI's `--web-layer` flag in play: the flag beats
+/// app.zon's `.webview_layer` exactly as `-Dweb-layer` beats it in the
+/// build graph (effective setting = flag orelse manifest), so the build
+/// graphs can forward their resolved decision and hand-run packages can
+/// override the field without editing app.zon. An exclude flag against
+/// a web declaration is the same refused conflict as a manifest exclude.
+pub fn webLayerResolved(metadata: Metadata, resolved_engine: web_engine_tool.Engine, layer_flag: ?WebViewLayerSetting) WebLayerError!WebLayer {
+    const manifest_setting = parseWebViewLayer(metadata.webview_layer) catch return error.InvalidWebViewLayer;
     const engine: app_manifest.WebEngine = switch (resolved_engine) {
         .system => .system,
         .chromium => .chromium,
     };
-    const decision = app_manifest.web_layer.infer(metadata, engine, setting) catch return error.WebViewLayerConflict;
+    const decision = app_manifest.web_layer.infer(metadata, engine, layer_flag orelse manifest_setting) catch return error.WebViewLayerConflict;
+    if (layer_flag != null) {
+        // The flag decides, but the verdict line keeps app.zon's own
+        // richer reason whenever the flag merely confirms what the
+        // manifest already decides: the build graphs forward their
+        // resolved decision on every `zig build package`, and the common
+        // case must keep reporting "declared: capabilities", not the
+        // forwarded flag. Only a flag that CHANGES the outcome names
+        // itself as the cause.
+        if (app_manifest.web_layer.infer(metadata, engine, manifest_setting)) |manifest_decision| {
+            if (manifest_decision.enabled == decision.enabled) {
+                return .{ .enabled = manifest_decision.enabled, .reason = manifest_decision.reason };
+            }
+        } else |_| {}
+        return .{ .enabled = decision.enabled, .reason = decision.reason, .from_flag = true };
+    }
     return .{ .enabled = decision.enabled, .reason = decision.reason };
 }
 
@@ -2044,6 +2088,51 @@ test "web layer inference is declare-to-use over parsed metadata" {
     try std.testing.expectError(error.WebViewLayerConflict, webLayerFromManifest(.{ .id = "dev.example.g", .name = "g", .version = "1.0.0", .capabilities = &webview_capabilities, .webview_layer = "exclude" }));
     try std.testing.expectError(error.WebViewLayerConflict, webLayer(.{ .id = "dev.example.j", .name = "j", .version = "1.0.0", .webview_layer = "exclude" }, .chromium));
     try std.testing.expectError(error.InvalidWebViewLayer, webLayerFromManifest(.{ .id = "dev.example.h", .name = "h", .version = "1.0.0", .webview_layer = "never" }));
+}
+
+test "web layer --web-layer flag beats the manifest field like -Dweb-layer does" {
+    const canvas_capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const canvas: Metadata = .{ .id = "dev.example.canvas", .name = "canvas", .version = "1.0.0", .capabilities = &canvas_capabilities };
+    const webview_capabilities = [_][]const u8{"webview"};
+    const web: Metadata = .{ .id = "dev.example.web", .name = "web", .version = "1.0.0", .capabilities = &webview_capabilities };
+
+    // An include flag that changes the outcome names itself as the cause.
+    const forced_in = try webLayerResolved(canvas, .system, .include);
+    try std.testing.expect(forced_in.enabled);
+    try std.testing.expectEqual(WebLayerReason.declared_include, forced_in.reason);
+    try std.testing.expectEqualStrings("declared: --web-layer include", forced_in.sourceText());
+
+    // A flag that merely confirms the inference keeps the manifest's own
+    // richer reason, so graph-forwarded packages report like hand-run ones.
+    const confirmed = try webLayerResolved(web, .system, .include);
+    try std.testing.expect(confirmed.enabled);
+    try std.testing.expectEqual(WebLayerReason.capability, confirmed.reason);
+    try std.testing.expectEqualStrings("declared: capabilities", confirmed.sourceText());
+    const confirmed_off = try webLayerResolved(canvas, .system, .exclude);
+    try std.testing.expect(!confirmed_off.enabled);
+    try std.testing.expectEqual(WebLayerReason.inferred_native_only, confirmed_off.reason);
+
+    // An exclude flag against a web declaration is the same refused
+    // conflict as a manifest exclude — including a resolved Chromium engine.
+    try std.testing.expectError(error.WebViewLayerConflict, webLayerResolved(web, .system, .exclude));
+    try std.testing.expectError(error.WebViewLayerConflict, webLayerResolved(canvas, .chromium, .exclude));
+
+    // `--web-layer auto` overrides a manifest exclude back to inference,
+    // exactly as `-Dweb-layer=auto` does in the build graph.
+    const reopened = try webLayerResolved(.{ .id = "dev.example.k", .name = "k", .version = "1.0.0", .capabilities = &webview_capabilities, .webview_layer = "exclude" }, .system, .auto);
+    try std.testing.expect(reopened.enabled);
+    try std.testing.expectEqual(WebLayerReason.capability, reopened.reason);
+
+    // No flag: identical to `webLayer` (the manifest field decides).
+    const plain = try webLayerResolved(canvas, .system, null);
+    try std.testing.expect(!plain.enabled);
+    try std.testing.expectEqual(WebLayerReason.inferred_native_only, plain.reason);
+
+    // The flag parser shares the contract's vocabulary.
+    try std.testing.expectEqual(WebViewLayerSetting.include, parseWebViewLayerSetting("include").?);
+    try std.testing.expectEqual(WebViewLayerSetting.exclude, parseWebViewLayerSetting("exclude").?);
+    try std.testing.expectEqual(WebViewLayerSetting.auto, parseWebViewLayerSetting("auto").?);
+    try std.testing.expectEqual(null, parseWebViewLayerSetting("never"));
 }
 
 test "validate rejects a web-declaring manifest that excludes the web layer" {

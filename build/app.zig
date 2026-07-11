@@ -339,6 +339,14 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         // build graph knows the packaged binary's REAL mode, so forward
         // it instead of letting the CLI assume one.
         package_run.addArgs(&.{ "--optimize", @tagName(app_optimize) });
+        // Forward the RESOLVED web-layer decision, never the raw inputs:
+        // this graph already decided web vs native-only for the exe it is
+        // packaging (app.zon declarations plus -Dweb-layer/-Dweb-engine),
+        // and the CLI re-inferring from app.zon alone would miss a
+        // flag-driven override — a WebView2-referencing exe packaged
+        // without its loader. Handing over the decision itself makes
+        // exe/package agreement structural.
+        package_run.addArgs(&.{ "--web-layer", if (web_layer) "include" else "exclude" });
         package_run.has_side_effects = true;
         const package_step = b.step("package", "Create a distributable package via the native CLI");
         package_step.dependOn(&package_run.step);

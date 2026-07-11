@@ -127,6 +127,8 @@ Package the app for distribution. The manifest is picked up at `app.zon` and the
   <dd>Optimization level.</dd>
   <dt><code>--web-engine</code></dt>
   <dd>Temporarily override <code>app.zon</code> with <code>system</code> or macOS-only <code>chromium</code>.</dd>
+  <dt><code>--web-layer</code></dt>
+  <dd>Override <code>app.zon</code>'s <code>.webview_layer</code> with <code>auto</code>, <code>include</code>, or <code>exclude</code> — the same precedence as <code>-Dweb-layer</code> in the build graph. <code>zig build package</code> passes the graph's resolved decision here automatically so the package always matches the built executable.</dd>
   <dt><code>--cef-dir</code></dt>
   <dd>Temporarily override the CEF distribution path from <code>app.zon</code>.</dd>
   <dt><code>--cef-auto-install</code></dt>

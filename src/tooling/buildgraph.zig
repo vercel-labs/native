@@ -67,7 +67,13 @@ pub fn resolveFrameworkRoot(allocator: std.mem.Allocator, io: std.Io, env_map: *
     if (env_map.get("NATIVE_SDK_PATH")) |path| {
         if (path.len > 0 and hasFrameworkRoot(allocator, io, path)) {
             if (std.fs.path.isAbsolute(path)) return try allocator.dupe(u8, path);
-            return try std.Io.Dir.cwd().realPathFileAlloc(io, path, allocator);
+            // realPathFileAlloc returns a sentinel-terminated allocation
+            // (length + 1 bytes); this function's contract is a plain
+            // slice the caller frees, so re-dupe without the sentinel or
+            // that free is off by one byte.
+            const real_path = try std.Io.Dir.cwd().realPathFileAlloc(io, path, allocator);
+            defer allocator.free(real_path);
+            return try allocator.dupe(u8, real_path);
         }
     }
 

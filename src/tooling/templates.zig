@@ -991,6 +991,13 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    package.setEnvironmentVariable("NATIVE_SDK_PATH", b.pathFromRoot(native_sdk_path));
         \\    package.addFileArg(exe.getEmittedBin());
         \\    package.addArgs(&.{ "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir });
+        \\    // Forward the RESOLVED web-layer decision, never the raw inputs:
+        \\    // this graph already decided web vs native-only for the exe it is
+        \\    // packaging (app.zon declarations plus -Dweb-layer/-Dweb-engine),
+        \\    // and the CLI re-inferring from app.zon alone would miss a
+        \\    // flag-driven override. Handing over the decision itself makes
+        \\    // exe/package agreement structural.
+        \\    package.addArgs(&.{ "--web-layer", if (web_layer) "include" else "exclude" });
         \\    if (cef_auto_install) package.addArg("--cef-auto-install");
         \\    package.step.dependOn(&exe.step);
         \\    package.step.dependOn(&frontend_build.step);
@@ -3003,6 +3010,9 @@ test "writeDefaultApp emits Vite project files" {
     // loader when native-only).
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "b.option(WebLayerOption, \"web-layer\", \"Override app.zon webview_layer: auto, include, exclude\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "const web_layer = resolveWebLayer(app_config, web_engine, web_layer_override)") != null);
+    // The emitted package step forwards the graph's resolved decision so
+    // the packaged artifact structurally agrees with the compiled exe.
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.addArgs(&.{ \"--web-layer\", if (web_layer) \"include\" else \"exclude\" })") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "options.addOption(bool, \"web_layer\", web_layer)") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "std.zon.parse.fromSliceAlloc(InferenceManifest") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "the web layer is excluded ({s}) but the app declares web use ({s})") != null);
