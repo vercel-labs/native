@@ -169,6 +169,10 @@ A fuller manifest for an app that also [embeds web content](/frontend) and decla
       <td><code>system</code> or <code>chromium</code>; Chromium is currently supported for macOS builds (see <a href="/web-engines">Web Engines</a>)</td>
     </tr>
     <tr>
+      <td><code>webview_layer</code></td>
+      <td><code>auto</code> (default), <code>include</code>, or <code>exclude</code> — whether the build ships the embedded web layer (see below)</td>
+    </tr>
+    <tr>
       <td><code>theme</code></td>
       <td>Built-in theme pack: <code>house</code> (default) or <code>geist</code>; an unknown name is a build/check error (see <a href="/theming">Theming</a>)</td>
     </tr>
@@ -210,6 +214,17 @@ A fuller manifest for an app that also [embeds web content](/frontend) and decla
     </tr>
   </tbody>
 </table>
+
+## `webview_layer`
+
+Under the default `auto`, the build infers whether to ship the embedded web layer from what the app declares: `"webview"` in `.capabilities`, a `.frontend` block, a `.shell` webview view, or a web engine resolved to Chromium (from `.web_engine` or the `-Dweb-engine`/`--web-engine` flags) each count as web intent, and an app with none of them builds native-only. `include` forces the layer into a build that declares nothing yet; `exclude` promises a native-only app. The `-Dweb-layer` build option overrides the manifest setting for one build.
+
+`exclude` alongside any web declaration is a contradiction, refused with a teaching error at validate, build, and package time instead of shipping an app whose declared webviews cannot work:
+
+```zig
+.capabilities = .{"webview"},
+.webview_layer = "exclude", // rejected: remove the web declarations or drop the exclude
+```
 
 ## `shell`
 
