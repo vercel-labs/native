@@ -283,6 +283,9 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 // Series inside a chart are consumed by buildChart.
                 comptime fail(node, markup.series_parent_message);
             }
+            if (comptime std.mem.eql(u8, node.name, "calendar")) {
+                return buildCalendar(node, entries, ui, model, scope);
+            }
             if (comptime std.mem.eql(u8, node.name, "context-menu")) {
                 // Direct context-menu children are consumed by their host
                 // element below; one reaching here is misplaced.
@@ -852,6 +855,128 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 steps[index] = .{ .label = interpolatedText(comptime node.children[index], entries, ui, model, scope) };
             }
             return ui.stepper(options, steps);
+        }
+
+        /// Comptime mirror of the interpreter's `buildCalendar`: the closed
+        /// attribute set and the message tags check at comptime; the dates,
+        /// mode, and selection resolve at runtime. Misuse fails compilation
+        /// with the interpreter's message.
+        fn buildCalendar(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype) Ui.Node {
+            const D = canvas.CalendarDate;
+            comptime {
+                for (node.attrs) |attribute| {
+                    if (std.mem.eql(u8, attribute.name, "kind")) continue;
+                    if (std.mem.eql(u8, attribute.name, "on-select")) {
+                        const expression = markup.parseMessageExpression(attribute.value) orelse fail(node, markup.calendar_select_message);
+                        if (expression.payload.len != 0) fail(node, markup.calendar_select_message);
+                        continue;
+                    }
+                    if (std.mem.eql(u8, attribute.name, "on-prev") or std.mem.eql(u8, attribute.name, "on-next")) {
+                        const expression = markup.parseMessageExpression(attribute.value) orelse fail(node, markup.calendar_nav_message);
+                        if (expression.payload.len != 0) fail(node, markup.calendar_nav_message);
+                        continue;
+                    }
+                    if (std.mem.startsWith(u8, attribute.name, "on-")) fail(node, markup.calendar_nav_message);
+                    const known = std.mem.eql(u8, attribute.name, "month") or
+                        std.mem.eql(u8, attribute.name, "selected-dates") or
+                        std.mem.eql(u8, attribute.name, "mode") or
+                        std.mem.eql(u8, attribute.name, "today") or
+                        std.mem.eql(u8, attribute.name, "week-start") or
+                        std.mem.eql(u8, attribute.name, "min-date") or
+                        std.mem.eql(u8, attribute.name, "max-date") or
+                        std.mem.eql(u8, attribute.name, "show-outside-days") or
+                        std.mem.eql(u8, attribute.name, "width") or
+                        std.mem.eql(u8, attribute.name, "key") or
+                        std.mem.eql(u8, attribute.name, "global-key") or
+                        std.mem.eql(u8, attribute.name, "label");
+                    if (!known) fail(node, markup.calendar_attr_message);
+                }
+                if (node.attr("month") == null) fail(node, markup.calendar_month_message);
+                for (node.children) |child| fail(child, markup.calendar_children_message);
+            }
+
+            var options: Ui.CalendarOptions = .{ .month = undefined };
+            options.month = D.parseIso(stringAttr(node, entries, comptime node.attr("month").?, ui, model, scope, markup.calendar_month_message)) orelse {
+                ui.failed = true;
+                return ui.el(.column, .{}, .{});
+            };
+
+            var mode: Ui.CalendarMode = .single;
+            if (comptime (node.attr("mode") != null)) {
+                const text = stringAttr(node, entries, comptime node.attr("mode").?, ui, model, scope, markup.calendar_mode_message);
+                mode = std.meta.stringToEnum(Ui.CalendarMode, text) orelse runtimeFail(Ui.CalendarMode, ui);
+            }
+            var selected_text: []const u8 = "";
+            if (comptime (node.attr("selected-dates") != null)) {
+                selected_text = stringAttr(node, entries, comptime node.attr("selected-dates").?, ui, model, scope, markup.calendar_date_attr_message);
+            }
+            if (comptime (node.attr("today") != null)) {
+                options.today = D.parseIso(stringAttr(node, entries, comptime node.attr("today").?, ui, model, scope, markup.calendar_date_attr_message));
+            }
+            if (comptime (node.attr("min-date") != null)) {
+                options.min = D.parseIso(stringAttr(node, entries, comptime node.attr("min-date").?, ui, model, scope, markup.calendar_date_attr_message));
+            }
+            if (comptime (node.attr("max-date") != null)) {
+                options.max = D.parseIso(stringAttr(node, entries, comptime node.attr("max-date").?, ui, model, scope, markup.calendar_date_attr_message));
+            }
+            if (comptime (node.attr("week-start") != null)) {
+                const text = stringAttr(node, entries, comptime node.attr("week-start").?, ui, model, scope, markup.calendar_week_start_message);
+                options.week_start = std.meta.stringToEnum(Ui.CalendarWeekStart, text) orelse runtimeFail(Ui.CalendarWeekStart, ui);
+            }
+            if (comptime (node.attr("show-outside-days") != null)) {
+                options.show_outside_days = evalExpr(node, entries, comptime node.attr("show-outside-days").?, ui, model, scope).truthy();
+            }
+            if (comptime (node.attr("width") != null)) {
+                options.width = floatAttr(node, entries, comptime node.attr("width").?, ui, model, scope);
+            }
+            if (comptime (node.attr("key") != null)) {
+                options.key = attrKey(node, entries, comptime node.attr("key").?, ui, model, scope, "keys must be integers or strings");
+            }
+            if (comptime (node.attr("global-key") != null)) {
+                options.global_key = attrKey(node, entries, comptime node.attr("global-key").?, ui, model, scope, "keys must be integers or strings");
+            }
+            if (comptime (node.attr("label") != null)) {
+                options.semantics.label = stringAttr(node, entries, comptime node.attr("label").?, ui, model, scope, "label expects text");
+            }
+            if (comptime (node.attr("on-select") != null)) {
+                const expression = comptime (markup.parseMessageExpression(node.attr("on-select").?) orelse fail(node, markup.calendar_select_message));
+                options.on_select = comptime (calendarSelectConstructor(expression.tag) orelse fail(node, markup.calendar_select_message));
+            }
+            if (comptime (node.attr("on-prev") != null)) {
+                const expression = comptime (markup.parseMessageExpression(node.attr("on-prev").?) orelse fail(node, markup.calendar_nav_message));
+                options.on_prev = constructMessage(node, expression, entries, ui, model, scope);
+            }
+            if (comptime (node.attr("on-next") != null)) {
+                const expression = comptime (markup.parseMessageExpression(node.attr("on-next").?) orelse fail(node, markup.calendar_nav_message));
+                options.on_next = constructMessage(node, expression, entries, ui, model, scope);
+            }
+
+            options.selection = buildCalendarSelection(mode, selected_text, ui);
+            return ui.calendar(options);
+        }
+
+        /// Parse a `selected-dates` string into the selection the mode wants
+        /// (mirrors the interpreter's `buildCalendarSelection`).
+        fn buildCalendarSelection(mode: Ui.CalendarMode, text: []const u8, ui: *Ui) Ui.CalendarSelection {
+            const D = canvas.CalendarDate;
+            if (text.len == 0) return switch (mode) {
+                .single => .{ .single = null },
+                .range => .{ .range = .{} },
+                .multiple => .{ .multiple = &.{} },
+            };
+            const buffer = ui.arena.alloc(D, D.countIsoList(text)) catch {
+                ui.failed = true;
+                return .{ .single = null };
+            };
+            const count = D.parseIsoList(text, buffer);
+            return switch (mode) {
+                .single => .{ .single = if (count > 0) buffer[0] else null },
+                .range => .{ .range = .{
+                    .start = if (count > 0) buffer[0] else null,
+                    .end = if (count > 1) buffer[1] else null,
+                } },
+                .multiple => .{ .multiple = buffer[0..count] },
+            };
         }
 
         /// Comptime mirror of the interpreter's `buildInputGroup`: the
@@ -1838,6 +1963,20 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 for (@typeInfo(MsgT).@"union".fields) |field| {
                     if (field.type == canvas.ScrollState and std.mem.eql(u8, field.name, tag)) {
                         return Ui.scrollMsg(@field(std.meta.Tag(MsgT), field.name));
+                    }
+                }
+                return null;
+            }
+        }
+
+        /// Msg constructor for a calendar day press: the tag must name a
+        /// `canvas.CalendarDate` variant (mirrors `Ui.calendarSelectMsg`).
+        fn calendarSelectConstructor(comptime tag: []const u8) ?Ui.CalendarSelectFn {
+            comptime {
+                @setEvalBranchQuota(10_000);
+                for (@typeInfo(MsgT).@"union".fields) |field| {
+                    if (field.type == canvas.CalendarDate and std.mem.eql(u8, field.name, tag)) {
+                        return Ui.calendarSelectMsg(@field(std.meta.Tag(MsgT), field.name));
                     }
                 }
                 return null;

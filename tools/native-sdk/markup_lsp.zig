@@ -338,6 +338,8 @@ pub const Server = struct {
                     for (span_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "span attribute", doc.doc);
                 } else if (std.mem.eql(u8, element_name, "reactions")) {
                     for (reactions_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "reactions attribute", doc.doc);
+                } else if (std.mem.eql(u8, element_name, "calendar")) {
+                    for (calendar_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "calendar attribute", doc.doc);
                 } else if (std.mem.eql(u8, element_name, "avatar")) {
                     for (avatar_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "avatar attribute", doc.doc);
                     for (attribute_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "markup attribute", doc.doc);
@@ -657,6 +659,7 @@ pub const input_group_attr_docs = markup_docs.input_group_attr_docs;
 pub const input_group_actions_attr_docs = markup_docs.input_group_actions_attr_docs;
 pub const span_attr_docs = markup_docs.span_attr_docs;
 pub const reactions_attr_docs = markup_docs.reactions_attr_docs;
+pub const calendar_attr_docs = markup_docs.calendar_attr_docs;
 pub const event_docs = markup_docs.event_docs;
 pub const elementDoc = markup_docs.elementDoc;
 pub const attributeDoc = markup_docs.attributeDoc;
@@ -916,7 +919,7 @@ test "doc tables cover every known element, attribute, and event" {
     for (ui_markup.known_element_names) |name| {
         try testing.expect(elementDoc(name) != null);
     }
-    for ([_][]const u8{ "for", "if", "else", "template", "use", "import", "slot", "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions", "span", "reactions" }) |name| {
+    for ([_][]const u8{ "for", "if", "else", "template", "use", "import", "slot", "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "calendar", "context-menu", "input-group", "input-group-actions", "span", "reactions" }) |name| {
         try testing.expect(elementDoc(name) != null);
     }
     for (ui_markup.schema.attrs) |entry| {

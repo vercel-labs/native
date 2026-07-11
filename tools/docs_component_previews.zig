@@ -212,6 +212,8 @@ fn writeVocabJson(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     try writeDocList(&js, &markup_docs.span_attr_docs);
     try js.objectField("reactions");
     try writeDocList(&js, &markup_docs.reactions_attr_docs);
+    try js.objectField("calendar");
+    try writeDocList(&js, &markup_docs.calendar_attr_docs);
     try js.objectField("dropdown-menu");
     try writeDocList(&js, &markup_docs.anchor_attr_docs);
     try js.objectField("template");

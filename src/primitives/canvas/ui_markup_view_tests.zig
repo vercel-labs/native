@@ -3707,3 +3707,57 @@ test "reactions misuse fails the build with the pinned teaching messages" {
     const info = canvas.ui_markup.validate(document) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings(canvas.ui_markup.font_coverage_message, info.message);
 }
+
+// ------------------------------------------------------------ calendar
+
+pub const CalMsg = union(enum) {
+    pick: canvas.CalendarDate,
+    prev,
+    next,
+};
+
+pub const CalModel = struct {
+    month: []const u8 = "2026-07-01",
+    picked: []const u8 = "2026-07-08",
+};
+
+pub const cal_markup_source =
+    \\<calendar month="{month}" selected-dates="{picked}" today="2026-07-15" on-select="pick" on-prev="prev" on-next="next" />
+;
+
+pub const CalUi = canvas.Ui(CalMsg);
+
+fn findCalPress(tree: CalUi.Tree, widget: canvas.Widget, want: CalMsg) ?canvas.Widget {
+    if (tree.msgForPointer(widget.id, .up)) |msg| {
+        if (std.meta.eql(msg, want)) return widget;
+    }
+    for (widget.children) |child| {
+        if (findCalPress(tree, child, want)) |found| return found;
+    }
+    return null;
+}
+
+test "markup calendar builds a month grid and resolves day and nav presses" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const CalMarkup = markup_view.MarkupView(CalModel, CalMsg);
+    var view = try CalMarkup.init(arena, cal_markup_source);
+    const model = CalModel{};
+    var ui = CalUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+
+    // The bound month drives the caption label and grid semantics.
+    try testing.expectEqualStrings("July 2026", tree.root.semantics.label);
+
+    // The selected day (the 8th) is marked and its press injects its date.
+    const day8 = findByText(tree.root, .button, "8").?;
+    try testing.expect(day8.state.selected);
+    const picked = tree.msgForPointer(day8.id, .up).?.pick;
+    try testing.expect(picked.eql(.{ .year = 2026, .month = 7, .day = 8 }));
+
+    // The caption chevrons dispatch the bare month-step tags.
+    try testing.expect(findCalPress(tree, tree.root, .prev) != null);
+    try testing.expect(findCalPress(tree, tree.root, .next) != null);
+}

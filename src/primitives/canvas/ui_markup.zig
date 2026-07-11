@@ -1836,6 +1836,16 @@ pub const series_values_message = "series requires a values attribute with one {
 pub const series_color_message = "series color takes a literal color token name (a canvas ColorTokens field, e.g. accent, info, success, text_muted)";
 pub const series_label_message = "series label expects text (a literal or one {binding}) - it names the series in the chart's semantics summary";
 pub const series_children_message = "series is a leaf - it takes no children; the values binding carries its data";
+pub const calendar_attr_message = "unknown attribute for calendar - it takes month, mode, selected-dates, today, week-start, min-date, max-date, show-outside-days, on-select, on-prev, on-next, width, key, global-key, and label";
+pub const calendar_month_message = "calendar requires a month attribute naming the shown month as a YYYY-MM-DD date (a literal or one {binding}; the day is ignored)";
+pub const calendar_date_attr_message = "calendar date attributes (selected-dates, today, min-date, max-date) take a YYYY-MM-DD date - or, for selected-dates in range/multiple mode, a comma- or space-separated list of them - as a literal or one {binding}";
+pub const calendar_mode_message = "calendar mode takes a literal or {binding}: single (default), range, or multiple";
+pub const calendar_week_start_message = "calendar week-start takes a literal or {binding}: sunday (default) or monday";
+pub const calendar_children_message = "calendar takes no children - month, selected, today, and the bounds come from attributes";
+pub const calendar_select_message = "calendar on-select takes a BARE Msg tag whose payload is the pressed day (a CalendarDate variant, like pick: canvas.CalendarDate) - the calendar injects the date, so on-select carries no {binding} payload";
+pub const calendar_nav_message = "calendar on-prev/on-next take a bare Msg tag (the month step) and carry no payload; no other on-* event has a surface on calendar";
+pub const calendar_mode_value_names = [_][]const u8{ "single", "range", "multiple" };
+pub const calendar_week_start_value_names = [_][]const u8{ "sunday", "monday" };
 pub const context_menu_parent_message = "context-menu must be a DIRECT child of the element whose right-click it answers - a conditional menu goes inside: wrap the menu-items in if/else, not the context-menu itself";
 pub const context_menu_host_message = "context-menu attaches to the element that takes the right-click, and this element is never a hit target - put the menu on the pressable element (list-item, button, panel, ...) or bind on-press on this one";
 pub const context_menu_single_message = "an element takes at most one context-menu - one right-click, one menu; swap its items with if/else INSIDE the menu";
@@ -2498,6 +2508,91 @@ fn validateSeries(node: MarkupNode) ?MarkupErrorInfo {
     return null;
 }
 
+/// A calendar enum attribute (`mode`, `week-start`): a closed literal
+/// vocabulary, or a `{binding}` the engine resolves to one of the names at
+/// build time.
+fn calendarEnumAttrOk(value: []const u8, names: []const []const u8) bool {
+    const expression = parseAttrExpression(value) orelse return false;
+    return switch (expression) {
+        .literal => |literal| nameInList(literal, names),
+        .binding => true,
+        else => false,
+    };
+}
+
+/// `<calendar month="{iso}">` — the day-grid calendar. A leaf: the shown
+/// month, selection, today mark, and bounds all ride attributes (dates are
+/// `YYYY-MM-DD`), day presses dispatch a bare `on-select` whose payload the
+/// engine fills with the pressed day, and month steps ride
+/// `on-prev`/`on-next`.
+fn validateCalendar(node: MarkupNode) ?MarkupErrorInfo {
+    for (node.children) |child| {
+        return errorAt(child, calendar_children_message);
+    }
+    var has_month = false;
+    for (node.attrs) |attribute| {
+        if (std.mem.eql(u8, attribute.name, "month")) {
+            has_month = true;
+            if (attrExpressionError(attribute.value, calendar_month_message)) |message| {
+                return attrError(node, attribute, message);
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, attribute.name, "selected-dates") or
+            std.mem.eql(u8, attribute.name, "today") or
+            std.mem.eql(u8, attribute.name, "min-date") or
+            std.mem.eql(u8, attribute.name, "max-date"))
+        {
+            if (attrExpressionError(attribute.value, calendar_date_attr_message)) |message| {
+                return attrError(node, attribute, message);
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, attribute.name, "mode")) {
+            if (!calendarEnumAttrOk(attribute.value, &calendar_mode_value_names)) {
+                return attrError(node, attribute, calendar_mode_message);
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, attribute.name, "week-start")) {
+            if (!calendarEnumAttrOk(attribute.value, &calendar_week_start_value_names)) {
+                return attrError(node, attribute, calendar_week_start_message);
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, attribute.name, "on-select")) {
+            const expression = parseMessageExpression(attribute.value);
+            if (expression == null or expression.?.payload.len != 0) {
+                return attrError(node, attribute, calendar_select_message);
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, attribute.name, "on-prev") or std.mem.eql(u8, attribute.name, "on-next")) {
+            const expression = parseMessageExpression(attribute.value);
+            if (expression == null or expression.?.payload.len != 0) {
+                return attrError(node, attribute, calendar_nav_message);
+            }
+            continue;
+        }
+        if (std.mem.startsWith(u8, attribute.name, "on-")) {
+            return attrError(node, attribute, calendar_nav_message);
+        }
+        const known = std.mem.eql(u8, attribute.name, "show-outside-days") or
+            std.mem.eql(u8, attribute.name, "width") or
+            std.mem.eql(u8, attribute.name, "key") or
+            std.mem.eql(u8, attribute.name, "global-key") or
+            std.mem.eql(u8, attribute.name, "label");
+        if (!known) {
+            return attrError(node, attribute, calendar_attr_message);
+        }
+        if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+            return attrError(node, attribute, message);
+        }
+    }
+    if (!has_month) return errorAt(node, calendar_month_message);
+    return null;
+}
+
 /// `<input-group>` — the composer-grade grouped input: ONE bordered
 /// field wrapping exactly one `<textarea>` (first, so document order is
 /// focus order) plus an optional `<input-group-actions>` accessory row.
@@ -2700,7 +2795,7 @@ fn validateReactions(node: MarkupNode) ?MarkupErrorInfo {
 /// The rule hooks the composite registry entries name. A registry entry
 /// whose hook this table does not implement is a compile error (below),
 /// so attachment and implementation can never drift.
-const rule_hook_names = [_][]const u8{ "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions", "span", "reactions" };
+const rule_hook_names = [_][]const u8{ "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "calendar", "context-menu", "input-group", "input-group-actions", "span", "reactions" };
 
 comptime {
     for (schema.elements) |entry| {
@@ -2741,6 +2836,7 @@ fn validateRuleHook(hook: []const u8, document: MarkupDocument, node: MarkupNode
         // reaching the generic pass sits outside a chart.
         return errorAt(node, series_parent_message);
     }
+    if (std.mem.eql(u8, hook, "calendar")) return validateCalendar(node);
     if (std.mem.eql(u8, hook, "context-menu")) {
         // Direct context-menu element children are consumed by their
         // host element's validation; one reaching the generic pass sits

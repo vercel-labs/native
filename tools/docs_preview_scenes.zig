@@ -179,6 +179,7 @@ pub const scenes = [_]Scene{
     .{ .name = "status-bar", .height = 170, .build = stateless(buildStatusBar) },
     .{ .name = "stepper", .height = 160, .build = stateless(buildStepper) },
     .{ .name = "timeline", .height = 320, .build = stateless(buildTimeline) },
+    .{ .name = "calendar", .height = 400, .build = stateless(buildCalendar) },
 
     // Catalog hero tiles: ONE representative variation per component,
     // framed 16:9 so the Components index card fills edge to edge and
@@ -219,6 +220,7 @@ pub const scenes = [_]Scene{
     heroScene("spinner-hero", buildSpinner),
     heroScene("split-hero", buildSplitHero),
     heroScene("status-bar-hero", buildStatusBarHero),
+    heroScene("calendar-hero", buildCalendarHero),
     heroScene("stepper-hero", buildStepperHero),
     heroScene("switch-hero", buildSwitchHero),
     heroScene("table-hero", buildTableHero),
@@ -1105,6 +1107,33 @@ fn buildTimeline(ui: *Ui) Node {
     });
 }
 
+/// Preview day-press handler: the scene model carries no date, so a press
+/// is a no-op — the tile is a display sample, and the live preview only
+/// needs the cells to read as pressable (hover wash).
+fn calendarPreviewSelect(date: canvas.CalendarDate) Msg {
+    _ = date;
+    return .noop;
+}
+
+/// A fixed July 2026 calendar with the 8th selected and the 15th marked
+/// today — deterministic, so the reference render is stable.
+fn calendarPreview(ui: *Ui, width: f32, cell_size: f32) Node {
+    return ui.calendar(.{
+        .month = .{ .year = 2026, .month = 7, .day = 1 },
+        .selection = .{ .single = .{ .year = 2026, .month = 7, .day = 8 } },
+        .today = .{ .year = 2026, .month = 7, .day = 15 },
+        .width = width,
+        .cell_size = cell_size,
+        .on_select = calendarPreviewSelect,
+        .on_prev = .noop,
+        .on_next = .noop,
+    });
+}
+
+fn buildCalendar(ui: *Ui) Node {
+    return tileStart(ui, .{calendarPreview(ui, 300, 36)});
+}
+
 fn buildSpacer(ui: *Ui) Node {
     return tile(ui, .{
         ui.panel(.{ .width = 340, .padding = 12 }, .{
@@ -1517,6 +1546,16 @@ fn buildStepperHero(ui: *Ui) Node {
             .{ .label = "Review" },
             .{ .label = "Publish" },
         }),
+    });
+}
+
+fn buildCalendarHero(ui: *Ui) Node {
+    // A full-size month reads best legible rather than shrunk to fit: the
+    // wide 16:9 hero card holds the caption, weekday header, and the
+    // selected/today weeks, and the trailing weeks clip cleanly at the
+    // card's bottom edge (top-aligned).
+    return ui.column(.{ .padding = 16, .main = .start, .cross = .center, .grow = 1 }, .{
+        calendarPreview(ui, 300, 30),
     });
 }
 

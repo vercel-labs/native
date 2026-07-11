@@ -1109,6 +1109,7 @@ const Checker = struct {
         if (std.mem.eql(u8, node.name, "stepper")) return self.checkStepper(node);
         if (std.mem.eql(u8, node.name, "timeline-item")) return self.checkTimelineItem(node);
         if (std.mem.eql(u8, node.name, "chart")) return self.checkChart(node);
+        if (std.mem.eql(u8, node.name, "calendar")) return self.checkCalendar(node);
         if (std.mem.eql(u8, node.name, "timeline")) {
             for (node.attrs) |attribute| {
                 if (std.mem.eql(u8, attribute.name, "gap") or std.mem.eql(u8, attribute.name, "grow")) {
@@ -1252,6 +1253,48 @@ const Checker = struct {
         for (node.children) |child| {
             for (child.children) |run| {
                 if (run.kind == .text) try self.checkTextRun(run);
+            }
+        }
+    }
+
+    /// `<calendar>`: the date attributes resolve like strings (ISO dates or
+    /// bindings to string model fields), `on-select` must name a Msg
+    /// variant carrying a `CalendarDate` — the engine injects the pressed
+    /// day — and `on-prev`/`on-next` must be payload-free tags.
+    fn checkCalendar(self: *Checker, node: markup.MarkupNode) CheckErr!void {
+        for (node.attrs) |attribute| {
+            if (std.mem.eql(u8, attribute.name, "on-select")) {
+                const expression = markup.parseMessageExpression(attribute.value) orelse continue;
+                const tag = self.findMsg(expression.tag) orelse return self.failAttr(node, attribute, markup.calendar_select_message);
+                if (tag.payload != .unsupported or !std.mem.endsWith(u8, tag.payload_type, "CalendarDate")) {
+                    return self.failAttr(node, attribute, markup.calendar_select_message);
+                }
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "on-prev") or std.mem.eql(u8, attribute.name, "on-next")) {
+                const expression = markup.parseMessageExpression(attribute.value) orelse continue;
+                const tag = self.findMsg(expression.tag) orelse return self.failAttr(node, attribute, markup.calendar_nav_message);
+                if (tag.payload != .none) return self.failAttr(node, attribute, markup.calendar_nav_message);
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "month") or
+                std.mem.eql(u8, attribute.name, "selected-dates") or
+                std.mem.eql(u8, attribute.name, "today") or
+                std.mem.eql(u8, attribute.name, "min-date") or
+                std.mem.eql(u8, attribute.name, "max-date"))
+            {
+                try self.checkClassAttr(node, attribute, .text);
+            } else if (std.mem.eql(u8, attribute.name, "mode") or std.mem.eql(u8, attribute.name, "week-start")) {
+                try self.checkClassAttr(node, attribute, .option);
+            } else if (std.mem.eql(u8, attribute.name, "width")) {
+                try self.checkClassAttr(node, attribute, .number);
+            } else if (std.mem.eql(u8, attribute.name, "show-outside-days")) {
+                try self.checkClassAttr(node, attribute, .truthy);
+            } else if (std.mem.eql(u8, attribute.name, "key") or std.mem.eql(u8, attribute.name, "global-key")) {
+                try self.checkKeyAttr(node, attribute);
+            } else if (std.mem.eql(u8, attribute.name, "label")) {
+                const kind = try self.attrKind(node, attribute, attribute.value);
+                try self.requireAttrKind(node, attribute, kind, &.{.string}, label_attr_message);
             }
         }
     }

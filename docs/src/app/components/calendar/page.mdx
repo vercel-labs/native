@@ -1,0 +1,62 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Calendar
+
+A day-grid month picker (lowered through `Ui.calendar`): a caption row with the month/year and prev/next chevrons, a weekday header, and a 6×7 day grid. The selected day wears the accent fill, today a soft fill, and adjacent-month days read muted. Display-only, like the rest of the library — the app model owns the shown month and the selection; day presses dispatch `on-select` with the pressed day, and the chevrons dispatch `on-prev`/`on-next` so `update` steps the month (`CalendarDate.addMonths`).
+
+Dates ride attributes as `YYYY-MM-DD` strings (a literal or a `{binding}` to a string model field). `mode` picks how `selected-dates` reads: one date for `single` (the default), a start/end pair for `range`, or a comma/space-separated list for `multiple`.
+
+<ComponentPreview name="calendar" alt="A calendar rendered by the engine" caption="July 2026 with the 8th selected and the 15th marked today; the adjacent-month days read muted" />
+
+## Markup
+
+`month` is required — the shown month as `YYYY-MM-DD` (the day is ignored). The bare `on-select` tag names a `Msg` variant whose payload is a `CalendarDate`; the calendar injects the pressed day, so it carries no `{}` payload.
+
+```html
+<calendar
+  month="{visible_month}"
+  selected-dates="{picked_day}"
+  today="{today}"
+  on-select="pick"
+  on-prev="prev_month"
+  on-next="next_month" />
+```
+
+### Range and multiple
+
+`mode="range"` reads the first two dates in `selected-dates` as the band's start and end (inclusive); `mode="multiple"` highlights every date in the list.
+
+```html
+<calendar month="{visible_month}" mode="range" selected-dates="{stay_range}" on-select="set_range" />
+<calendar month="{visible_month}" mode="multiple" selected-dates="{busy_days}" on-select="toggle_day" />
+```
+
+## Zig builder
+
+The builder takes a typed `CalendarSelection` union directly and an `on_select` message constructor (`calendarSelectMsg`). `min`/`max` bound the selectable range (out-of-bounds days render disabled), and `cell_size` shrinks the grid for a dense sidebar month.
+
+```zig
+ui.calendar(.{
+    .month = model.visible_month,
+    .selection = .{ .single = model.picked_day },
+    .today = model.today,
+    .on_select = Ui.calendarSelectMsg(.pick),
+    .on_prev = .prev_month,
+    .on_next = .next_month,
+})
+```
+
+A day press builds `Msg{ .pick = date }`; step the month in `update` from `on_prev`/`on_next`:
+
+```zig
+.prev_month => model.visible_month = model.visible_month.addMonths(-1),
+.next_month => model.visible_month = model.visible_month.addMonths(1),
+.pick => |date| model.picked_day = date,
+```
+
+## Attributes
+
+`month` is required. Dates are `YYYY-MM-DD` literals or `{binding}`s.
+
+<AttrTable element="calendar" attrs={["month", "mode", "selected-dates", "today", "week-start", "min-date", "max-date", "show-outside-days", "width", "on-select", "on-prev", "on-next", "key", "global-key", "label"]} />

@@ -725,6 +725,9 @@ pub fn Ui(comptime Msg: type) type {
         pub const ValueMsgFn = *const fn (value: f32) Msg;
         pub const LinkMsgFn = *const fn (link: []const u8) Msg;
         pub const ScrollMsgFn = *const fn (scroll: canvas.ScrollState) Msg;
+        /// Message constructor for a `calendar` day press: called at build
+        /// time with the pressed day, so each cell binds a concrete Msg.
+        pub const CalendarSelectFn = *const fn (date: canvas.CalendarDate) Msg;
 
         pub const Node = struct {
             widget: Widget = .{ .kind = .stack },
@@ -816,6 +819,17 @@ pub fn Ui(comptime Msg: type) type {
             return struct {
                 fn make(link: []const u8) Msg {
                     return @unionInit(Msg, @tagName(tag), link);
+                }
+            }.make;
+        }
+
+        /// Comptime message constructor for `on_select`:
+        /// `calendarSelectMsg(.pick)` yields a function building
+        /// `Msg{ .pick = date }` from the pressed calendar day.
+        pub fn calendarSelectMsg(comptime tag: std.meta.Tag(Msg)) CalendarSelectFn {
+            return struct {
+                fn make(date: canvas.CalendarDate) Msg {
+                    return @unionInit(Msg, @tagName(tag), date);
                 }
             }.make;
         }
@@ -2062,6 +2076,238 @@ pub fn Ui(comptime Msg: type) type {
                 .semantics = item_semantics,
                 .on_press = options.on_press,
             }, .{row_node});
+        }
+
+        // ---------------------------------------------------------- calendar
+
+        pub const CalendarWeekStart = enum { sunday, monday };
+
+        pub const CalendarMode = enum { single, range, multiple };
+
+        /// What the calendar paints as selected. `single` highlights one
+        /// day; `range` fills a start..end band (inclusive,
+        /// order-independent) with strong ends and a muted middle;
+        /// `multiple` highlights each day in the set. Display-only: the app
+        /// model owns the value and updates it from `on_select`.
+        pub const CalendarSelection = union(CalendarMode) {
+            single: ?canvas.CalendarDate,
+            range: struct { start: ?canvas.CalendarDate = null, end: ?canvas.CalendarDate = null },
+            multiple: []const canvas.CalendarDate,
+        };
+
+        pub const CalendarOptions = struct {
+            /// The month the grid shows: `year` and `month` are read, `day`
+            /// is ignored. The app model owns it; `on_prev`/`on_next` step
+            /// it (`CalendarDate.addMonths`).
+            month: canvas.CalendarDate,
+            /// Which days paint selected (defaults to single, nothing
+            /// selected).
+            selection: CalendarSelection = .{ .single = null },
+            /// The day marked "today" (a subtle ring), or null to mark none.
+            /// No clock is read — a controlled component takes the date it
+            /// should treat as today from the app.
+            today: ?canvas.CalendarDate = null,
+            /// First weekday column.
+            week_start: CalendarWeekStart = .sunday,
+            /// Days before `min` or after `max` render disabled
+            /// (unpressable, dimmed). null leaves that side unbounded.
+            min: ?canvas.CalendarDate = null,
+            max: ?canvas.CalendarDate = null,
+            /// Draw the adjacent-month days that fill the first and last
+            /// weeks (muted). Off leaves those cells blank.
+            show_outside_days: bool = true,
+            /// Message constructor called with the pressed day. Pair with
+            /// `calendarSelectMsg`.
+            on_select: ?CalendarSelectFn = null,
+            /// Previous / next month navigation (the caption chevrons). A
+            /// chevron with no handler renders disabled.
+            on_prev: ?Msg = null,
+            on_next: ?Msg = null,
+            /// Definite width for the whole calendar; 0 sizes to content.
+            width: f32 = 0,
+            /// Edge length of a day cell. Shrink it for a dense calendar
+            /// (a compact sidebar month); the grid gap and cell padding
+            /// scale with it.
+            cell_size: f32 = calendar_default_cell_size,
+            key: ?UiKey = null,
+            global_key: ?UiKey = null,
+            grow: f32 = 0,
+            /// Root semantics; role defaults to `group`, labeled with the
+            /// shown month ("July 2026").
+            semantics: canvas.WidgetSemantics = .{},
+        };
+
+        const calendar_default_cell_size: f32 = 36;
+
+        /// Grid gap for a calendar of the given cell size (tight for dense
+        /// calendars, roomier for the default).
+        fn calendarGap(cell_size: f32) f32 {
+            return if (cell_size < 26) 2 else 4;
+        }
+
+        /// House calendar (the shadcn base-calendar shape): a caption row
+        /// with month/year and prev/next chevrons, a weekday header, and a
+        /// 6×7 day grid whose cells derive their selected/today/outside/
+        /// disabled state from the options. Display-only — day presses
+        /// dispatch `on_select(date)` and month steps dispatch
+        /// `on_prev`/`on_next`; the app model owns the shown month and the
+        /// selection.
+        pub fn calendar(self: *Self, options: CalendarOptions) Node {
+            const Date = canvas.CalendarDate;
+            const shown = options.month.firstOfMonth();
+            const month_label = self.fmt("{s} {d}", .{ Date.month_names[shown.month - 1], shown.year });
+            const gap = calendarGap(options.cell_size);
+
+            var semantics = options.semantics;
+            if (semantics.role == .none) semantics.role = .group;
+            if (semantics.label.len == 0) semantics.label = month_label;
+
+            const caption = self.el(.row, .{ .cross = .center, .gap = gap }, .{
+                self.calendarNav(options, options.on_prev, "chevron-left", "Previous month"),
+                self.el(.row, .{ .grow = 1, .main = .center }, .{
+                    self.text(.{ .style_tokens = .{ .foreground = .text } }, month_label),
+                }),
+                self.calendarNav(options, options.on_next, "chevron-right", "Next month"),
+            });
+
+            const head_cells = self.arena.alloc(Node, 7) catch {
+                self.failed = true;
+                return self.el(.column, .{ .semantics = semantics }, .{});
+            };
+            for (0..7) |i| {
+                const wd: usize = (@intFromEnum(options.week_start) + i) % 7;
+                head_cells[i] = self.el(.row, .{ .grow = 1, .min_width = options.cell_size, .main = .center }, .{
+                    self.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, Date.weekday_abbr[wd]),
+                });
+            }
+            const header = self.el(.row, .{ .gap = gap }, .{head_cells});
+
+            const week_start_wd: Date.Weekday = @enumFromInt(@intFromEnum(options.week_start));
+            const grid_start = shown.gridStart(week_start_wd);
+            const weeks = self.arena.alloc(Node, 6) catch {
+                self.failed = true;
+                return self.el(.column, .{ .semantics = semantics }, .{});
+            };
+            for (0..6) |w| {
+                const day_cells = self.arena.alloc(Node, 7) catch {
+                    self.failed = true;
+                    return self.el(.column, .{ .semantics = semantics }, .{});
+                };
+                for (0..7) |d| {
+                    const date = grid_start.addDays(@intCast(w * 7 + d));
+                    day_cells[d] = self.calendarDay(options, shown, date);
+                }
+                weeks[w] = self.el(.row, .{ .gap = gap, .key = .{ .int = @intCast(w) } }, .{day_cells});
+            }
+            const grid = self.el(.column, .{
+                .gap = gap,
+                .semantics = .{ .role = .grid, .label = month_label },
+            }, .{weeks});
+
+            return self.el(.column, .{
+                .key = options.key,
+                .global_key = options.global_key,
+                .gap = gap * 2,
+                .grow = options.grow,
+                .width = options.width,
+                .semantics = semantics,
+            }, .{ caption, header, grid });
+        }
+
+        /// One caption chevron: an icon-only ghost button, disabled (no
+        /// press target) when the app wired no handler.
+        fn calendarNav(self: *Self, options: CalendarOptions, handler: ?Msg, icon_name: []const u8, label: []const u8) Node {
+            return self.el(.button, .{
+                .variant = .ghost,
+                .size = .icon,
+                .icon = icon_name,
+                .width = options.cell_size,
+                .height = options.cell_size,
+                .on_press = handler,
+                .disabled = handler == null,
+                .semantics = .{ .role = .button, .label = label },
+            }, .{});
+        }
+
+        const CalendarDaySelection = enum { none, selected, range_middle };
+
+        fn calendarDaySelectionFor(options: CalendarOptions, date: canvas.CalendarDate) CalendarDaySelection {
+            switch (options.selection) {
+                .single => |maybe| {
+                    if (maybe) |s| if (s.eql(date)) return .selected;
+                    return .none;
+                },
+                .multiple => |dates| {
+                    for (dates) |s| if (s.eql(date)) return .selected;
+                    return .none;
+                },
+                .range => |r| {
+                    const start = r.start orelse return .none;
+                    const end = r.end orelse return if (start.eql(date)) .selected else .none;
+                    if (date.eql(start) or date.eql(end)) return .selected;
+                    if (date.between(start, end)) return .range_middle;
+                    return .none;
+                },
+            }
+        }
+
+        fn calendarDayDisabled(options: CalendarOptions, date: canvas.CalendarDate) bool {
+            if (options.min) |m| if (date.order(m) == .lt) return true;
+            if (options.max) |m| if (date.order(m) == .gt) return true;
+            return false;
+        }
+
+        /// One day cell, built as a button so the design system owns its
+        /// fills, hover/press washes, focus ring, disabled tint, and label
+        /// inversion: the selected day is a `default` button in its active
+        /// state (accent fill, inverted label — the shadcn look), the
+        /// range middle and today wear the soft `secondary` fill, and a
+        /// plain day is a flat `ghost`. Outside-month and out-of-bounds
+        /// days read muted; out-of-bounds days are disabled (unpressable).
+        fn calendarDay(self: *Self, options: CalendarOptions, shown: canvas.CalendarDate, date: canvas.CalendarDate) Node {
+            const Date = canvas.CalendarDate;
+            const outside = date.month != shown.month or date.year != shown.year;
+            if (outside and !options.show_outside_days) {
+                // Keep the column so the grid stays aligned.
+                return self.el(.stack, .{ .grow = 1, .min_width = options.cell_size, .height = options.cell_size }, .{});
+            }
+            const disabled = calendarDayDisabled(options, date);
+            const sel = calendarDaySelectionFor(options, date);
+            const is_today = if (options.today) |t| t.eql(date) else false;
+
+            const variant: canvas.WidgetVariant = switch (sel) {
+                .selected => .default,
+                .range_middle => .secondary,
+                .none => if (is_today) .secondary else .ghost,
+            };
+            // Muted label for adjacent-month days (unless they are the
+            // selected day, which inverts on the accent fill).
+            const style_tokens: StyleTokenRefs = if (outside and sel != .selected)
+                .{ .foreground = .text_muted }
+            else
+                .{};
+
+            const press: ?Msg = if (disabled) null else if (options.on_select) |ctor| ctor(date) else null;
+            var cell = self.button(.{
+                .variant = variant,
+                .size = .sm,
+                .grow = 1,
+                .min_width = options.cell_size,
+                .height = options.cell_size,
+                .selected = sel == .selected,
+                .disabled = disabled,
+                .on_press = press,
+                .style_tokens = style_tokens,
+                .semantics = .{
+                    .role = .button,
+                    .label = self.fmt("{s} {d}, {d}", .{ Date.month_names[date.month - 1], date.day, date.year }),
+                },
+            }, self.fmt("{d}", .{date.day}));
+            // Square day cells: a small symmetric inset so two-digit days
+            // never clip, in place of the button's wider default padding.
+            const inset = @round(options.cell_size * 0.12);
+            cell.widget.layout.padding = .{ .top = inset, .bottom = inset, .left = inset, .right = inset };
+            return cell;
         }
 
         pub const NavOptions = struct {
