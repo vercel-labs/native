@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
-# Linux canvas smoke under Xvfb.
+# Linux canvas smoke under Xvfb — run on a machine with NO WebKitGTK dev
+# package, which makes the build itself the native-only link test.
 #
-# Exercises the Linux gpu_surface software path against system WebKitGTK
-# without a display server: builds examples/ui-inbox with -Dplatform=linux
-# -Dweb-engine=system -Dautomation=true, runs it under Xvfb, and asserts
-# against the automation snapshot:
+# Exercises the Linux gpu_surface software path without a display server:
+# builds examples/ui-inbox (a native-only app, so its GTK host compiles
+# with the WebKitGTK stub seam and never links webkitgtk-6.0) with
+# -Dplatform=linux -Dweb-engine=system -Dautomation=true, runs it under
+# Xvfb, and asserts against the automation snapshot:
 #
-#   1. snapshot ready=true            (app booted, automation server live)
-#   2. gpu_backend=software           (the software present path is active)
-#   3. gpu_nonblank=true              (real pixels were presented)
-#   4. widget-click "Add task" -> '4 open'   (automation input mutates state)
-#   5. automate screenshot renders a non-empty PNG
-#   6. ZERO WebKit helper processes for the whole run (the main WebView is
-#      lazy; a canvas app must never boot the WebKit stack)
+#   1. the built ELF carries no WebKitGTK reference (no libwebkitgtk
+#      DT_NEEDED entry, no webkit_/jsc_ dynamic symbol), audited on the
+#      real binary by tools/audit_web_layer.zig
+#   2. snapshot ready=true            (app booted, automation server live)
+#   3. gpu_backend=software           (the software present path is active)
+#   4. gpu_nonblank=true              (real pixels were presented)
+#   5. widget-click "Add task" -> '4 open'   (automation input mutates state)
+#   6. automate screenshot renders a non-empty PNG
+#   7. ZERO WebKit helper processes for the whole run (a native-only app
+#      has no web layer to boot WebKit with)
 #
 # Deliberately NOT `set -e` (same as windows-canvas-smoke.sh): grep exits 1
 # on zero matches, and under `set -e` an assignment like `x=$(grep ...)` or
@@ -21,10 +26,11 @@
 # goes through fail(), which dumps the snapshot and the app log.
 set -u
 
-# No WebKit sandbox workaround: a canvas app's main WebView is created
-# lazily and never materializes, so no WebKit helper processes start and
-# the runner's user-namespace restrictions never come into play. The
-# zero-WebKit assertion below keeps it that way.
+# No WebKit sandbox workaround: a native-only app's host is compiled
+# without the web layer entirely (and even in web builds the main
+# WebView is lazy), so no WebKit helper processes start and the runner's
+# user-namespace restrictions never come into play. The zero-WebKit
+# assertion below keeps it that way.
 
 # GTK_A11Y=none: under Xvfb there is no session bus providing org.a11y.Bus,
 # and GTK4's a11y init blocks ~25 s on the GDBus name lookup before warning
@@ -94,7 +100,12 @@ assert_no_webkit() {
 # ---- build ----------------------------------------------------------------
 (cd "$repo_root" && zig build) || fail "root zig build (CLI) failed"
 (cd "$app_dir" && zig build -Dplatform=linux -Dweb-engine=system -Dautomation=true) \
-  || fail "ui-inbox Linux build failed"
+  || fail "ui-inbox Linux build failed (a native-only app must build without the WebKitGTK dev package)"
+
+# ---- 1: the native-only ELF carries no WebKitGTK reference -----------------
+(cd "$repo_root" && zig run tools/audit_web_layer.zig -- "$app_dir/zig-out/bin/ui-inbox" absent) \
+  || fail "native-only ELF audit failed (the binary references WebKitGTK)"
+echo "== native-only ELF audit ok"
 
 # ---- launch ---------------------------------------------------------------
 cd "$app_dir" || fail "missing $app_dir"
@@ -102,14 +113,14 @@ rm -rf .zig-cache/native-sdk-automation
 xvfb-run -a "$app_dir/zig-out/bin/ui-inbox" > "$app_log" 2>&1 &
 app_pid=$!
 
-# ---- 1: automation snapshot becomes ready ---------------------------------
+# ---- 2: automation snapshot becomes ready ---------------------------------
 # `automate assert` self-reports on timeout (missing patterns + snapshot
 # tail) and prints the measured latency on success, so green logs carry
 # the readiness margin.
 "$cli" automate assert --timeout-ms "$ready_timeout_ms" 'ready=true' \
   || fail "snapshot never became ready"
 
-# ---- 2 + 3: software backend presented non-blank pixels --------------------
+# ---- 3 + 4: software backend presented non-blank pixels --------------------
 "$cli" automate assert --timeout-ms 30000 'gpu_nonblank=true' \
   || fail "gpu_nonblank never became true"
 grep -q 'gpu_backend=software' "$snap" || fail "gpu_backend is not software"
@@ -118,7 +129,7 @@ echo "== canvas: $(grep -o 'gpu_backend=[a-z]*' "$snap" | head -1)" \
 assert_no_webkit "after first presented frame"
 echo "== zero WebKit processes after first presented frame"
 
-# ---- 4: automation widget-click mutates the model --------------------------
+# ---- 5: automation widget-click mutates the model --------------------------
 echo "== open before click: $(grep -oE '[0-9]+ open' "$snap" | head -1)"
 add_id=$(grep -o 'widget @w1/inbox-canvas#[0-9]* role=button name="Add task"' "$snap" \
   | grep -o '#[0-9]*' | tr -d '#')
@@ -128,12 +139,12 @@ add_id=$(grep -o 'widget @w1/inbox-canvas#[0-9]* role=button name="Add task"' "$
   || fail "widget-click did not reach '4 open'"
 echo "== open after click: $(grep -oE '[0-9]+ open' "$snap" | head -1)"
 
-# ---- 5: screenshot renders a non-empty PNG ---------------------------------
+# ---- 6: screenshot renders a non-empty PNG ---------------------------------
 "$cli" automate screenshot inbox-canvas || fail "CLI screenshot failed"
 test -s .zig-cache/native-sdk-automation/screenshot-inbox-canvas.png \
   || fail "screenshot PNG missing or empty"
 
-# ---- 6: still zero WebKit processes at the end of the run -------------------
+# ---- 7: still zero WebKit processes at the end of the run -------------------
 assert_no_webkit "at end of run"
 echo "== zero WebKit processes at end of run"
 

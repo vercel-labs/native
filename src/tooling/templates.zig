@@ -717,7 +717,11 @@ fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_pa
         \\        with:
         \\          version: 0.16.0
         \\      - name: Install GTK and Xvfb
-        \\        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev xvfb
+        \\        # No WebKitGTK dev package: this app declares no web use, so its
+        \\        # Linux host compiles without the embedded web layer and never
+        \\        # links WebKitGTK (install it alongside a .frontend block or
+        \\        # the "webview" capability if the app grows web content).
+        \\        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev xvfb
         \\      - name: Fetch native-sdk
         \\        run: |
         \\          if [ ! -f "$NATIVE_SDK_PATH/build.zig" ]; then
@@ -1137,10 +1141,22 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        if (web_engine == .chromium) app_mod.linkSystemLibrary("c++", .{});
         \\    } else if (platform == .linux) {
         \\        switch (web_engine) {
-        \\            .system => {
+        \\            .system => if (web_layer) {
         \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/linux/gtk_host.c"), .flags = &.{} });
         \\                app_mod.linkSystemLibrary("gtk4", .{});
         \\                app_mod.linkSystemLibrary("webkitgtk-6.0", .{});
+        \\                app_mod.linkSystemLibrary("dl", .{});
+        \\            } else {
+        \\                // Native-only app (nothing in app.zon declares web use):
+        \\                // compile the GTK host without the embedded web layer.
+        \\                // The stub define excludes the layer outright — the host
+        \\                // honors it before probing for the WebKitGTK header, so
+        \\                // the layer stays out even on machines where the
+        \\                // development package is installed — libwebkitgtk is
+        \\                // neither linked nor required at runtime, and the
+        \\                // executable carries no WebKit reference at all.
+        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/linux/gtk_host.c"), .flags = &.{"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB"} });
+        \\                app_mod.linkSystemLibrary("gtk4", .{});
         \\                app_mod.linkSystemLibrary("dl", .{});
         \\            },
         \\            .chromium => {
@@ -3020,6 +3036,9 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "the web layer is excluded ({s}) but the app declares web use ({s})") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, ".system => if (web_layer) {") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB\"") != null);
+    // The Linux seam mirrors it: gtk_host.c compiles with the WebKitGTK
+    // stub define and webkitgtk-6.0 is not linked when native-only.
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "if (!web_layer) return;") != null);
     try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "frontend/dist") != null);
     try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "127.0.0.1:5173") != null);
@@ -3179,8 +3198,11 @@ test "writeDefaultApp emits a CI workflow for native apps" {
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "version: 0.16.0") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "zig build test -Dplatform=null") != null);
     // The smoke job builds with automation, launches under Xvfb, and drives
-    // the snapshot: the binary name comes from the template context.
-    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "libgtk-4-dev libwebkitgtk-6.0-dev xvfb") != null);
+    // the snapshot: the binary name comes from the template context. A
+    // native app's smoke never needs WebKitGTK — its host compiles
+    // without the embedded web layer.
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "libgtk-4-dev xvfb") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "libwebkitgtk-6.0-dev") == null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "zig build -Dplatform=linux -Dweb-engine=system -Dautomation=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "xvfb-run -a ./zig-out/bin/my-app &") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "automate wait") != null);

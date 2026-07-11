@@ -510,6 +510,19 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/tooling/templates.zig", .pattern = "third_party/webview2/include" },
         .{ .path = "src/tooling/templates.zig", .pattern = "third_party/webview2/x64/WebView2Loader.dll" },
     });
+    // The Linux mirror of the Windows seam: the stub define wins over
+    // header visibility (a native-only build never reintroduces the
+    // libwebkitgtk link even where the dev package is installed), the
+    // header is required for web builds, and both build graphs compile
+    // gtk_host.c with the stub and drop the webkitgtk-6.0 link when the
+    // web layer is excluded.
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-linux-webkitgtk-seam", "Verify the WebKitGTK compile seam stays wired through the GTK host and both Linux build graphs", &.{
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "#if defined(NATIVE_SDK_ALLOW_WEBKITGTK_STUB)" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "#elif __has_include(<webkit/webkit.h>)" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "#error \"webkit/webkit.h not found" },
+        .{ .path = "build/app.zig", .pattern = "\"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB\"" },
+        .{ .path = "src/tooling/templates.zig", .pattern = "\"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB\"" },
+    });
     addLayoutCheckStep(b, test_step, "test-windows-webview2-loader-layout", "Verify the vendored WebView2 loader binaries are present", &.{
         "third_party/webview2/x64/WebView2Loader.dll",
         "third_party/webview2/arm64/WebView2Loader.dll",
@@ -838,7 +851,8 @@ pub fn build(b: *std.Build) void {
     audit_webview_exe.addArgs(&.{ "examples/webview/zig-out/bin/webview.exe", "present" });
     audit_webview_exe.has_side_effects = true;
     audit_webview_exe.step.dependOn(&build_webview_windows.step);
-    const audit_native_only_loader = b.addSystemCommand(&.{ "sh", "-c",
+    const audit_native_only_loader = b.addSystemCommand(&.{
+        "sh", "-c",
         \\test ! -f examples/ui-inbox/zig-out/bin/WebView2Loader.dll || {
         \\  echo "web-layer audit FAILED: the native-only build installed WebView2Loader.dll" >&2
         \\  exit 1
@@ -849,6 +863,33 @@ pub fn build(b: *std.Build) void {
     web_layer_audit_step.dependOn(&audit_native_only_exe.step);
     web_layer_audit_step.dependOn(&audit_webview_exe.step);
     web_layer_audit_step.dependOn(&audit_native_only_loader.step);
+
+    // Linux web-layer ELF cross-audit: the same declare-to-use proof on
+    // real Linux executables. Unlike the Windows step this cannot
+    // cross-compile from any host — the GTK host needs the system GTK4
+    // (and, for the web example, WebKitGTK) development headers — so the
+    // step runs on Linux with both packages installed and proves the
+    // SEAM, not the environment: the native-only exe must carry no
+    // libwebkitgtk DT_NEEDED entry and no webkit_/jsc_ dynamic symbol
+    // even though the dev package was right there, while the web example
+    // must keep them. The environment half (a native-only app building
+    // on a runner with no WebKitGTK dev package at all) is proven by the
+    // linux-canvas-smoke CI job.
+    const build_native_only_linux = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=linux" });
+    build_native_only_linux.setCwd(b.path("examples/ui-inbox"));
+    const build_webview_linux = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=linux", "-Dweb-engine=system" });
+    build_webview_linux.setCwd(b.path("examples/webview"));
+    const audit_native_only_elf = b.addRunArtifact(web_layer_auditor);
+    audit_native_only_elf.addArgs(&.{ "examples/ui-inbox/zig-out/bin/ui-inbox", "absent" });
+    audit_native_only_elf.has_side_effects = true;
+    audit_native_only_elf.step.dependOn(&build_native_only_linux.step);
+    const audit_webview_elf = b.addRunArtifact(web_layer_auditor);
+    audit_webview_elf.addArgs(&.{ "examples/webview/zig-out/bin/webview", "present" });
+    audit_webview_elf.has_side_effects = true;
+    audit_webview_elf.step.dependOn(&build_webview_linux.step);
+    const linux_web_layer_audit_step = b.step("test-linux-web-layer-audit", "Build a native-only and a web example for Linux (Linux host with GTK4 + WebKitGTK dev packages) and audit the web layer in each ELF");
+    linux_web_layer_audit_step.dependOn(&audit_native_only_elf.step);
+    linux_web_layer_audit_step.dependOn(&audit_webview_elf.step);
 
     const frontend_examples_step = b.step("test-examples-frontends", "Run frontend example tests");
     addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-next", "Run Next example tests", "examples/next", .owned);
@@ -1459,6 +1500,16 @@ pub fn build(b: *std.Build) void {
         \\ready_budget_ms="$smoke_budget_ms"
         \\if [ "$ready_budget_ms" -lt 500 ]; then ready_budget_ms=500; fi
         \\ready_budget_ns=$((ready_budget_ms * 1000000))
+        \\# gpu-dashboard is a native-only app (nothing in app.zon declares web
+        \\# use), so its macOS host must never boot the WebKit stack: WKWebView
+        \\# instantiation spawns com.apple.WebKit.* XPC helpers. They are
+        \\# launchd-parented (not app children), so the honest cheap probe is
+        \\# the machine-wide helper set before launch vs at the end of the
+        \\# session — a NEW helper during this headless smoke window means the
+        \\# lazy main-WebView path regressed (the failure lists the processes
+        \\# so a coincidental web app launched mid-smoke is tellable apart).
+        \\webkit_helpers() { pgrep -f 'com\.apple\.WebKit\.(WebContent|Networking|GPU)' 2>/dev/null | tr '\n' ' '; }
+        \\webkit_before="$(webkit_helpers)"
         \\pid=""
         \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-gpu-dashboard-smoke.log) ----" >&2; cat .zig-cache/native-sdk-gpu-dashboard-smoke.log >&2 2>/dev/null || true; fi' EXIT
         \\stop_app() {
@@ -1625,6 +1676,19 @@ pub fn build(b: *std.Build) void {
         \\if ! grep -q "gpu incremental verify view=dashboard-canvas checks=" "$verify_log" 2>/dev/null; then echo "dashboard verify mode recorded no incremental checks" >&2; exit 1; fi
         \\if grep -q "verify MISMATCH" "$verify_log" 2>/dev/null; then echo "dashboard incremental present diverged from a full redraw:" >&2; grep "verify MISMATCH" "$verify_log" >&2; exit 1; fi
         \\if grep "gpu incremental verify view=dashboard-canvas checks=" "$verify_log" | grep -qv "mismatches=0"; then echo "dashboard incremental verify reported mismatches" >&2; exit 1; fi
+        \\# The whole session ran (two launches, clicks, resizes): a native-only
+        \\# macOS app must have spawned ZERO new WebKit helper processes.
+        \\webkit_after="$(webkit_helpers)"
+        \\new_webkit=""
+        \\for helper_pid in $webkit_after; do
+        \\  case " $webkit_before " in *" $helper_pid "*) ;; *) new_webkit="$new_webkit $helper_pid" ;; esac
+        \\done
+        \\if [ -n "$new_webkit" ]; then
+        \\  echo "native-only gpu-dashboard session spawned WebKit helper processes:$new_webkit" >&2
+        \\  for helper_pid in $new_webkit; do ps -p "$helper_pid" -o pid,ppid,command >&2 || true; done
+        \\  exit 1
+        \\fi
+        \\echo "zero new WebKit helper processes during the native-only session"
         \\echo "gpu-dashboard smoke ok"
         ,
         "sh",

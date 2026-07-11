@@ -9,8 +9,11 @@ const support = @import("test_support.zig");
 const std = support.std;
 const geometry = support.geometry;
 const app_manifest = support.app_manifest;
+const automation = support.automation;
 const platform = support.platform;
 const App = support.App;
+const Event = support.Event;
+const Runtime = support.Runtime;
 const TestHarness = support.TestHarness;
 
 const teaching_needle = "built without the web layer";
@@ -100,6 +103,119 @@ test "native-only runtime fails fast when a source app reaches webview startup" 
     harness.runtime.options.web_layer = false;
     var app_state: SourceApp = .{};
     try std.testing.expectError(error.WebViewLayerNotBuilt, harness.start(app_state.app()));
+}
+
+/// The scripted platform loop for the automation-driven session below:
+/// startup, one frame, then two dropbox commands written from the loop's
+/// own thread (like a driver writing while the app runs) and drained by
+/// the following frames — deterministic, no watcher timing involved.
+const NativeOnlyAutomationLoop = struct {
+    null_platform: *platform.NullPlatform,
+    automation_dir: []const u8,
+
+    fn run(context: *anyopaque, handler: platform.EventHandler, handler_context: *anyopaque) anyerror!void {
+        const self: *NativeOnlyAutomationLoop = @ptrCast(@alignCast(context));
+        try handler(handler_context, .app_start);
+        try handler(handler_context, .{ .surface_resized = self.null_platform.surface_value });
+        try handler(handler_context, .frame_requested);
+
+        var path_buffer: [160]u8 = undefined;
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+            .sub_path = try std.fmt.bufPrint(&path_buffer, "{s}/command-1.txt", .{self.automation_dir}),
+            .data = "menu-command probe.normal\n",
+        });
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+            .sub_path = try std.fmt.bufPrint(&path_buffer, "{s}/command-2.txt", .{self.automation_dir}),
+            .data = "menu-command probe.webview\n",
+        });
+        try handler(handler_context, .frame_requested);
+        try handler(handler_context, .frame_requested);
+        try handler(handler_context, .app_shutdown);
+    }
+};
+
+/// A native-only canvas app driven entirely through automation: a
+/// normal command mutates state, and a command that tries to create a
+/// webview records the gate's answer.
+const NativeOnlyAutomationApp = struct {
+    normal_commands: usize = 0,
+    webview_error: ?anyerror = null,
+
+    fn scene(context: *anyopaque) anyerror!app_manifest.ShellConfig {
+        _ = context;
+        return .{ .windows = &canvas_scene_windows };
+    }
+
+    fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+        const self: *NativeOnlyAutomationApp = @ptrCast(@alignCast(context));
+        if (event_value != .command) return;
+        if (std.mem.eql(u8, event_value.command.name, "probe.normal")) {
+            self.normal_commands += 1;
+            return;
+        }
+        if (std.mem.eql(u8, event_value.command.name, "probe.webview")) {
+            _ = runtime.createView(.{
+                .window_id = 1,
+                .label = "preview",
+                .kind = .webview,
+                .frame = geometry.RectF.init(0, 0, 320, 240),
+                .url = "https://example.com",
+            }) catch |err| {
+                self.webview_error = err;
+                return;
+            };
+            self.webview_error = null;
+        }
+    }
+
+    fn app(self: *NativeOnlyAutomationApp) App {
+        return .{
+            .context = self,
+            .name = "native-only-automation",
+            .scene_fn = scene,
+            .event_fn = event,
+        };
+    }
+};
+
+test "automation drives a native-only session: commands work, webview creation teaches" {
+    // Pid-suffixed dropbox (this test compiles into more than one test
+    // binary; parallel copies must not share a directory).
+    var dir_buffer: [64]u8 = undefined;
+    const automation_dir = try automation.watcher.testDirectory(&dir_buffer, ".zig-cache/test-automation-web-layer");
+    var cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(std.testing.io, automation_dir) catch {};
+    try cwd.createDirPath(std.testing.io, automation_dir);
+    defer cwd.deleteTree(std.testing.io, automation_dir) catch {};
+
+    // Heap-hosted: NullPlatform and Runtime are both multi-megabyte.
+    const null_platform = try std.heap.page_allocator.create(platform.NullPlatform);
+    defer std.heap.page_allocator.destroy(null_platform);
+    null_platform.* = platform.NullPlatform.init(.{});
+    null_platform.gpu_surfaces = true;
+    var loop: NativeOnlyAutomationLoop = .{ .null_platform = null_platform, .automation_dir = automation_dir };
+
+    var platform_value = null_platform.platform();
+    platform_value.run_fn = NativeOnlyAutomationLoop.run;
+    platform_value.context = &loop;
+
+    const runtime = try std.heap.page_allocator.create(Runtime);
+    defer std.heap.page_allocator.destroy(runtime);
+    Runtime.initAt(runtime, .{
+        .platform = platform_value,
+        .automation = automation.Server.init(std.testing.io, automation_dir, "WebLayerGate"),
+        .web_layer = false,
+    });
+
+    var app_state: NativeOnlyAutomationApp = .{};
+    try runtime.run(app_state.app());
+
+    // Normal operation: the automation-driven command reached the app.
+    try std.testing.expectEqual(@as(usize, 1), app_state.normal_commands);
+    // The automation-driven webview attempt got the teaching error, and
+    // no webview ever reached the platform host.
+    try std.testing.expectEqual(@as(?anyerror, error.WebViewLayerNotBuilt), app_state.webview_error);
+    try std.testing.expectEqual(@as(usize, 0), null_platform.webview_count);
 }
 
 test "web-layer builds keep every webview path working (control)" {

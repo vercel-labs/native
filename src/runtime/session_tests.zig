@@ -168,8 +168,10 @@ const RecordedSession = struct {
 /// a fetch and a spawn with results fed through the fake executor, an
 /// fx-timer fire via its platform timer event, and per-frame
 /// checkpoints. Returns the final model and fingerprint for the replay
-/// side to match.
-fn recordReferenceSession(gpa: std.mem.Allocator, buffer: *JournalBuffer) !RecordedSession {
+/// side to match. `web_layer` mirrors the build's inference: the
+/// reference session is a pure canvas app, so it must record (and
+/// replay, below) identically in a native-only build.
+fn recordReferenceSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, web_layer: bool) !RecordedSession {
     const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
     defer std.heap.page_allocator.destroy(recorder);
     recorder.* = session_record.SessionRecorder.init(buffer.sink());
@@ -178,6 +180,7 @@ fn recordReferenceSession(gpa: std.mem.Allocator, buffer: *JournalBuffer) !Recor
     const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(gpa);
     harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.web_layer = web_layer;
     harness.runtime.options.session_recorder = recorder;
 
     const app_state = try gpa.create(SessionApp);
@@ -248,7 +251,7 @@ fn recordReferenceSession(gpa: std.mem.Allocator, buffer: *JournalBuffer) !Recor
     };
 }
 
-fn replayIntoFreshApp(gpa: std.mem.Allocator, journal_bytes: []const u8) !struct {
+fn replayIntoFreshApp(gpa: std.mem.Allocator, journal_bytes: []const u8, web_layer: bool) !struct {
     report: session_replay.ReplayReport,
     model: SessionModel,
     fingerprint: u64,
@@ -256,6 +259,7 @@ fn replayIntoFreshApp(gpa: std.mem.Allocator, journal_bytes: []const u8) !struct
     const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(gpa);
     harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.web_layer = web_layer;
 
     const app_state = try gpa.create(SessionApp);
     defer gpa.destroy(app_state);
@@ -278,7 +282,7 @@ test "a recorded session replays to identical model state and fingerprints" {
     const buffer = try std.heap.page_allocator.create(JournalBuffer);
     defer std.heap.page_allocator.destroy(buffer);
     buffer.len = 0;
-    const recorded = try recordReferenceSession(gpa, buffer);
+    const recorded = try recordReferenceSession(gpa, buffer, true);
 
     // The recording captured real state.
     try std.testing.expectEqual(@as(u32, 2), recorded.model.count);
@@ -291,10 +295,33 @@ test "a recorded session replays to identical model state and fingerprints" {
     try std.testing.expectEqual(@as(u32, 1), recorded.model.spectrum_count);
     try std.testing.expect(recorded.model.band_checksum != 0);
 
-    const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes());
+    const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes(), true);
     try std.testing.expect(replayed.report.ok());
     try std.testing.expect(replayed.report.events_replayed > 0);
     try std.testing.expectEqual(@as(u64, 5), replayed.report.effects_fed);
+    try std.testing.expect(replayed.report.checkpoints_verified > 0);
+    try std.testing.expectEqualDeep(recorded.model, replayed.model);
+    try std.testing.expectEqual(recorded.fingerprint, replayed.fingerprint);
+}
+
+test "a native-only session records and replays like a web-layer one" {
+    // The whole reference session is canvas-only, so a native-only
+    // runtime (web_layer = false, the app-runner inference for an
+    // app.zon with no web declaration) must journal and replay it
+    // byte-for-byte equivalently: same final model, same fingerprint,
+    // same checkpoint verification. Record/replay is part of the
+    // native-only contract, not a web-layer feature.
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    const recorded = try recordReferenceSession(gpa, buffer, false);
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.count);
+    try std.testing.expectEqualStrings("hello-from-the-network", recorded.model.bodyText());
+
+    const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes(), false);
+    try std.testing.expect(replayed.report.ok());
+    try std.testing.expect(replayed.report.events_replayed > 0);
     try std.testing.expect(replayed.report.checkpoints_verified > 0);
     try std.testing.expectEqualDeep(recorded.model, replayed.model);
     try std.testing.expectEqual(recorded.fingerprint, replayed.fingerprint);
@@ -305,7 +332,7 @@ test "a truncated journal is refused loudly" {
     const buffer = try std.heap.page_allocator.create(JournalBuffer);
     defer std.heap.page_allocator.destroy(buffer);
     buffer.len = 0;
-    _ = try recordReferenceSession(gpa, buffer);
+    _ = try recordReferenceSession(gpa, buffer, true);
     const whole = buffer.journalBytes();
 
     const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
@@ -328,7 +355,7 @@ test "a tampered effect payload fails verification loudly" {
     const buffer = try std.heap.page_allocator.create(JournalBuffer);
     defer std.heap.page_allocator.destroy(buffer);
     buffer.len = 0;
-    _ = try recordReferenceSession(gpa, buffer);
+    _ = try recordReferenceSession(gpa, buffer, true);
 
     // Flip one byte inside the journaled fetch body: framing stays
     // valid, so the tamper is only detectable semantically — the
@@ -337,7 +364,7 @@ test "a tampered effect payload fails verification loudly" {
     const at = std.mem.indexOf(u8, bytes, "hello-from-the-network") orelse unreachable;
     bytes[at] ^= 0x20;
 
-    const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes());
+    const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes(), true);
     try std.testing.expect(!replayed.report.ok());
     try std.testing.expect(replayed.report.mismatch_count >= 1);
     try std.testing.expectEqual(session_replay.ReplayMismatchKind.fingerprint, replayed.report.mismatches[0].kind);

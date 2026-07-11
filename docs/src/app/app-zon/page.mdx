@@ -219,6 +219,8 @@ A fuller manifest for an app that also [embeds web content](/frontend) and decla
 
 Under the default `auto`, the build infers whether to ship the embedded web layer from what the app declares: `"webview"` in `.capabilities`, a `.frontend` block, a `.shell` webview view, or a web engine resolved to Chromium (from `.web_engine` or the `-Dweb-engine`/`--web-engine` flags) each count as web intent, and an app with none of them builds native-only. `include` forces the layer into a build that declares nothing yet; `exclude` promises a native-only app. The `-Dweb-layer` build option overrides the manifest setting for one build.
 
+A native-only build carries the platform consequences with it: on Windows the executable never references `WebView2Loader.dll` and no loader ships in the package; on Linux the host compiles and links without WebKitGTK entirely, so building needs no WebKitGTK development package and users need no `libwebkitgtk` installed at runtime.
+
 `exclude` alongside any web declaration is a contradiction, refused with a teaching error at validate, build, and package time instead of shipping an app whose declared webviews cannot work:
 
 ```zig

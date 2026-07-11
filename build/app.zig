@@ -347,6 +347,11 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         // without its loader. Handing over the decision itself makes
         // exe/package agreement structural.
         package_run.addArgs(&.{ "--web-layer", if (web_layer) "include" else "exclude" });
+        // Same reasoning for the web engine: the CLI defaults to system, so
+        // a Chromium exe packaged without these flags would ship no CEF
+        // runtime (the generated build graph already forwards them).
+        package_run.addArgs(&.{ "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir });
+        if (cef_auto_install) package_run.addArg("--cef-auto-install");
         package_run.has_side_effects = true;
         const package_step = b.step("package", "Create a distributable package via the native CLI");
         package_step.dependOn(&package_run.step);
@@ -537,10 +542,22 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         if (web_engine == .chromium) app_mod.linkSystemLibrary("c++", .{});
     } else if (platform == .linux) {
         switch (web_engine) {
-            .system => {
+            .system => if (web_layer) {
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/linux/gtk_host.c"), .flags = &.{} });
                 app_mod.linkSystemLibrary("gtk4", .{});
                 app_mod.linkSystemLibrary("webkitgtk-6.0", .{});
+                app_mod.linkSystemLibrary("dl", .{});
+            } else {
+                // Native-only app (nothing in app.zon declares web use):
+                // compile the GTK host without the embedded web layer.
+                // The stub define excludes the layer outright — the host
+                // honors it before probing for the WebKitGTK header, so
+                // the layer stays out even on machines where the
+                // development package is installed — libwebkitgtk is
+                // neither linked nor required at runtime, and the
+                // executable carries no WebKit reference at all.
+                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/linux/gtk_host.c"), .flags = &.{"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB"} });
+                app_mod.linkSystemLibrary("gtk4", .{});
                 app_mod.linkSystemLibrary("dl", .{});
             },
             .chromium => {
