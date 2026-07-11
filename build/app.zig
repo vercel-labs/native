@@ -245,7 +245,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         .name = app_options.name,
         .root_module = app_mod,
         .use_llvm = useLlvmWorkaround(target),
-        .use_lld = useLlvmWorkaround(target),
+        .use_lld = useLldWorkaround(target),
     });
     linkPlatform(b, dep, target, app_mod, exe, selected_platform, web_engine, cef_dir, cef_auto_install);
     const install = b.addInstallArtifact(exe, .{});
@@ -355,13 +355,17 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
 ///
 /// GCC 15 also emits `.sframe` sections in Linux startup objects whose
 /// R_X86_64_PC64 relocations crash Zig's self-hosted x86_64 linker (Native
-/// issue #37). App executables use this result for both `use_llvm` and
-/// `use_lld` so Debug links go through LLD as well as LLVM code generation.
+/// issue #37). App executables use LLD on x86_64 Linux so Debug links avoid
+/// the self-hosted linker crash.
 ///
 /// Force the LLVM backend on x86_64 until the upstream backend is fixed;
 /// Release modes already default to LLVM, so this only changes Debug.
 pub fn useLlvmWorkaround(target: std.Build.ResolvedTarget) ?bool {
     return if (target.result.cpu.arch == .x86_64) true else null;
+}
+
+pub fn useLldWorkaround(target: std.Build.ResolvedTarget) ?bool {
+    return if (target.result.cpu.arch == .x86_64 and target.result.os.tag == .linux) true else null;
 }
 
 fn exampleOptimizeMode(b: *std.Build, requested: ?std.builtin.OptimizeMode, default_mode: std.builtin.OptimizeMode) std.builtin.OptimizeMode {
