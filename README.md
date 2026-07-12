@@ -122,10 +122,7 @@ The full documentation is at [native-sdk.dev](https://native-sdk.dev).
 - [Capabilities](https://native-sdk.dev/capabilities) — guarded OS services: notifications, clipboard, dialogs, credentials
 - [Packaging](https://native-sdk.dev/packaging) — from binary to distributable app
 - [Platform Support](https://native-sdk.dev/platform-support) — what each host supports today
-
-## Community
-
-- [Awesome Native SDK](https://github.com/henryoman/awesome-vercel-native#readme) — Curated list of Native SDK apps, examples, framework integrations, and tooling.
+- [Awesome Vercel Native](https://github.com/henryoman/awesome-vercel-native#readme) — Curated apps, examples, integrations, and tooling.
 
 ## Contributing
 
