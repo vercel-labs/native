@@ -89,6 +89,11 @@ pub const PackageStats = struct {
     artifact_name: []const u8 = "",
     target: PackageTarget = .macos,
     signing_mode: SigningMode = .none,
+    /// True when a signing mode that claims to sign (adhoc or identity)
+    /// ran AND the result passed `codesign --verify --deep --strict`:
+    /// the proof behind the report's "signed, verified" line. A package
+    /// whose signing or verification fails never produces stats at all.
+    signing_verified: bool = false,
     asset_count: usize = 0,
     web_engine: WebEngine = .system,
     web_layer: ?manifest_tool.WebLayer = null,
@@ -174,6 +179,9 @@ pub fn printDiagnostic(stats: PackageStats) void {
     if (stats.web_layer) |layer| {
         std.debug.print("  web layer: {s} ({s})\n", .{ webLayerEngineName(layer, stats.target, stats.web_engine), layer.sourceText() });
     }
+    if (stats.signing_verified) {
+        std.debug.print("  signing: {s} (signed, verified)\n", .{@tagName(stats.signing_mode)});
+    }
     if (stats.archive_path) |archive| {
         std.debug.print("  archive: {s}\n", .{archive});
     }
@@ -225,13 +233,14 @@ pub fn createMacosApp(allocator: std.mem.Allocator, io: std.Io, options: Package
         try cef.ensureLayout(io, options.cef_dir);
         try copyMacosCefRuntime(allocator, io, package_dir, options.cef_dir);
     }
-    try runSigning(allocator, io, package_dir, options);
+    const signing_verified = try runSigning(allocator, io, package_dir, options);
 
     return .{
         .path = options.output_path,
         .artifact_name = std.fs.path.basename(options.output_path),
         .target = .macos,
         .signing_mode = options.signing.mode,
+        .signing_verified = signing_verified,
         .asset_count = bundle_stats.asset_count,
         .web_engine = options.web_engine,
         .web_layer = webLayerFor(options),
@@ -1359,33 +1368,65 @@ fn copyTree(allocator: std.mem.Allocator, io: std.Io, source_path: []const u8, d
 /// the signature on the bundle is the proof it happened — and only a
 /// FAILED signing rewrites it, which is safe because a failed codesign
 /// leaves the bundle without a seal to break.
-fn runSigning(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: PackageOptions) !void {
+/// Returns true when the bundle was signed AND the signature verified —
+/// the value the report's "signed, verified" line states. A signing mode
+/// that claims to sign (adhoc or identity) either delivers a verified
+/// signature or fails the whole package with codesign's own reason:
+/// exiting 0 while shipping an unsigned bundle is the release-breaking
+/// failure this pipeline exists to prevent.
+fn runSigning(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: PackageOptions) !bool {
     const plan_path = "Contents/Resources/signing-plan.txt";
     switch (options.signing.mode) {
-        .none => try writeFile(dir, io, plan_path, "signing=none\nunsigned local package\n"),
+        .none => {
+            try writeFile(dir, io, plan_path, "signing=none\nunsigned local package\n");
+            return false;
+        },
         .adhoc => {
             try writeFile(dir, io, plan_path, "signing=adhoc\nad-hoc signed\n");
-            const result = codesign.signAdHoc(io, options.output_path) catch {
+            const result = try codesign.signAdHoc(allocator, io, options.output_path);
+            defer allocator.free(result.message);
+            if (!result.ok) {
                 try writeFile(dir, io, plan_path, "signing=adhoc\ncodesign --sign - failed; bundle is unsigned\n");
-                return;
-            };
-            if (!result.ok) try writeFile(dir, io, plan_path, "signing=adhoc\ncodesign --sign - failed; bundle is unsigned\n");
+                std.debug.print("error: ad-hoc code signing failed for {s}, so this package would ship unsigned - codesign said:\n{s}\n  fix what codesign reports above, or package with `--signing none` if an unsigned bundle is what you want\n", .{ options.output_path, trimmedToolOutput(result.message) });
+                return error.SigningFailed;
+            }
         },
         .identity => {
             const identity = options.signing.identity orelse {
                 try writeFile(dir, io, plan_path, "signing=identity\nno identity provided; bundle is unsigned\n");
-                return;
+                std.debug.print("error: --signing identity needs the identity to sign with, so this package would ship unsigned - pass --identity \"Developer ID Application: Your Name (TEAMID)\"\n  `security find-identity -v -p codesigning` lists the identities this machine can sign with\n", .{});
+                return error.SigningFailed;
             };
             const plan_text = try std.fmt.allocPrint(allocator, "signing=identity\nsigned with {s}\n", .{identity});
             defer allocator.free(plan_text);
             try writeFile(dir, io, plan_path, plan_text);
-            const result = codesign.signIdentity(io, options.output_path, identity, options.signing.entitlements) catch {
+            const result = try codesign.signIdentity(allocator, io, options.output_path, identity, options.signing.entitlements);
+            defer allocator.free(result.message);
+            if (!result.ok) {
                 try writeFile(dir, io, plan_path, "signing=identity\ncodesign failed; bundle is unsigned\n");
-                return;
-            };
-            if (!result.ok) try writeFile(dir, io, plan_path, "signing=identity\ncodesign failed; bundle is unsigned\n");
+                std.debug.print("error: code signing with \"{s}\" failed for {s}, so this package would ship unsigned - codesign said:\n{s}\n  `security find-identity -v -p codesigning` lists the identities this machine can sign with\n", .{ identity, options.output_path, trimmedToolOutput(result.message) });
+                return error.SigningFailed;
+            }
         },
     }
+    // The signature just applied must actually hold — the same strict
+    // deep check an Apple silicon launch effectively runs. A bundle that
+    // signs but does not verify (a stale seal, unsigned nested code) is
+    // a packaging failure, not a report footnote.
+    const verified = try codesign.verify(allocator, io, options.output_path);
+    defer allocator.free(verified.message);
+    if (!verified.ok) {
+        std.debug.print("error: {s} was signed but failed `codesign --verify --deep --strict`, so it would be rejected at launch - codesign said:\n{s}\n  fix what codesign reports above and rerun `native package`\n", .{ options.output_path, trimmedToolOutput(verified.message) });
+        return error.SignatureVerificationFailed;
+    }
+    return true;
+}
+
+/// codesign's output, trimmed of trailing newlines so the teaching
+/// message's fix line lands directly under it (the output itself stays
+/// verbatim).
+fn trimmedToolOutput(output: []const u8) []const u8 {
+    return std.mem.trimEnd(u8, output, "\r\n");
 }
 
 fn hasRegistrationMetadata(metadata: manifest_tool.Metadata) bool {
@@ -2335,6 +2376,77 @@ test "package report records target signing and assets" {
     const len = try file.readPositionalAll(std.testing.io, &buffer, 0);
     try std.testing.expect(std.mem.indexOf(u8, buffer[0..len], ".target = \"linux\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer[0..len], ".asset_count = 2") != null);
+}
+
+test "adhoc packaging into a spaced output path signs and verifies" {
+    // The reported release-breaker: `--output "<path with spaces>.app"`
+    // packaged, exited 0, and shipped an UNSIGNED bundle because the
+    // codesign command was a shell string the spaces split apart. The
+    // pipeline now execs argv arrays, so the spaced path must sign — and
+    // the strict deep verify (real codesign, darwin hosts only) is the
+    // proof.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package signed spaced";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.spaced-sign", .name = "spaced-demo", .version = "1.0.0" };
+    const app_path = root ++ "/My Spaced Demo.app";
+    const stats = try createMacosApp(gpa, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = app_path,
+        // A real Mach-O executable, so codesign has honest code to sign.
+        .binary_path = "/bin/ls",
+        .assets_dir = root ++ "/assets",
+        .signing = .{ .mode = .adhoc },
+    });
+    try std.testing.expectEqual(SigningMode.adhoc, stats.signing_mode);
+    try std.testing.expect(stats.signing_verified);
+
+    // Pin the claim with an independent codesign run, not just the flag.
+    const verified = try codesign.verify(gpa, std.testing.io, app_path);
+    defer gpa.free(verified.message);
+    try std.testing.expect(verified.ok);
+}
+
+test "a codesign failure fails packaging instead of shipping unsigned" {
+    // An identity codesign cannot resolve exits nonzero; packaging must
+    // surface that as an error (with codesign's reason printed), never
+    // as a created artifact. Real codesign run: darwin hosts only.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-signing-failure";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.sign-fail", .name = "sign-fail-demo", .version = "1.0.0" };
+    try std.testing.expectError(error.SigningFailed, createMacosApp(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/Sign Fail Demo.app",
+        .binary_path = "/bin/ls",
+        .assets_dir = root ++ "/assets",
+        .signing = .{ .mode = .identity, .identity = "native-sdk-no-such-identity" },
+    }));
+}
+
+test "identity signing without an identity is a loud failure, not a silent unsigned bundle" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-signing-no-identity";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.no-identity", .name = "no-identity-demo", .version = "1.0.0" };
+    try std.testing.expectError(error.SigningFailed, createMacosApp(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/NoIdentity.app",
+        .assets_dir = root ++ "/assets",
+        .signing = .{ .mode = .identity },
+    }));
 }
 
 test "native-only windows package ships no WebView2 loader and reports web layer none" {

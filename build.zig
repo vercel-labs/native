@@ -2279,10 +2279,15 @@ pub fn build(b: *std.Build) void {
     // carries the CLI as its executable (packaging only needs a real
     // Mach-O to sign); the check skips loudly on hosts without codesign
     // (any non-macOS machine) instead of pretending to have verified.
+    // Signing that claims to sign now fails the package on hosts that
+    // cannot run codesign (that IS the fix this step gates), so only a
+    // macOS host requests adhoc here; elsewhere the package stays
+    // unsigned and the check script below skips loudly as before.
+    const package_signing_mode: []const u8 = if (b.graph.host.result.os.tag == .macos) "adhoc" else "none";
     const package_signing_run = b.addRunArtifact(host_cli_exe);
     package_signing_run.addArgs(&.{ "package", "--target", "macos", "--output", "zig-out/package/native-sdk-signing-verify.app", "--binary" });
     package_signing_run.addFileArg(host_cli_exe.getEmittedBin());
-    package_signing_run.addArgs(&.{ "--manifest", "app.zon", "--assets", "assets", "--optimize", optimize_name, "--signing", "adhoc" });
+    package_signing_run.addArgs(&.{ "--manifest", "app.zon", "--assets", "assets", "--optimize", optimize_name, "--signing", package_signing_mode });
     package_signing_run.has_side_effects = true;
     const package_signing_check = b.addSystemCommand(&.{
         "sh", "-c",
