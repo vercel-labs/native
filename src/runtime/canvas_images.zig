@@ -52,8 +52,14 @@ pub const RegisteredCanvasImage = struct {
 /// bound because decoders may need in-buffer scratch beyond the tight
 /// pixel bytes (the null platform's strict PNG parser keeps one filter
 /// byte per row: raw stream <= pixels + pixels/4 since a row is at least
-/// 4 pixel bytes). Loop-thread only, like the frame scratch.
-threadlocal var canvas_image_decode_scratch: [max_registered_canvas_image_pixel_bytes + max_registered_canvas_image_pixel_bytes / 4]u8 = undefined;
+/// 4 pixel bytes). Loop-thread only, like the frame scratch — and
+/// lazily heap-allocated per thread (1.25 MiB) on the first decode, so
+/// threads that never register image bytes never carry it in their
+/// static TLS block.
+const CanvasImageDecodeScratch = struct {
+    bytes: [max_registered_canvas_image_pixel_bytes + max_registered_canvas_image_pixel_bytes / 4]u8,
+};
+const canvas_image_decode_scratch = canvas.lazy_tls.LazyTls(CanvasImageDecodeScratch);
 
 pub fn RuntimeCanvasImages(comptime Runtime: type) type {
     return struct {
@@ -112,7 +118,7 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
         /// `error.ImageTooLarge` (decoded pixels over the slot bound).
         pub fn registerCanvasImageBytes(self: *Runtime, id: canvas.ImageId, bytes: []const u8) anyerror!RegisteredCanvasImage {
             if (id == 0) return error.InvalidImageId;
-            const decoded = try self.options.platform.services.decodeImage(bytes, &canvas_image_decode_scratch);
+            const decoded = try self.options.platform.services.decodeImage(bytes, &canvas_image_decode_scratch.get().bytes);
             if (decoded.rgba8.len > max_registered_canvas_image_pixel_bytes) return error.ImageTooLarge;
             try registerCanvasImage(self, id, decoded.width, decoded.height, decoded.rgba8);
             return .{ .width = decoded.width, .height = decoded.height };

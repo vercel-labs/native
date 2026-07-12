@@ -226,10 +226,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             );
 
             // Per-pass probe-table indices over the collected entry lists
-            // (shared threadlocal scratch; see the reconcile-id-index note
+            // (shared per-thread scratch; see the reconcile-id-index note
             // in canvas_widget_runtime.zig). Lookups return exactly what
             // the linear scans returned; only the search cost changes.
-            const index_scratch = &canvas_widget_runtime.canvas_widget_reconcile_index_scratch;
+            const index_scratch = canvas_widget_runtime.canvas_widget_reconcile_index_scratch.get();
             index_scratch.controls.build(previous_control_states);
             index_scratch.source_controls.build(self.widgetSourceControlEntries());
             index_scratch.texts.build(previous_text_states);

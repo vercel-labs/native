@@ -114,9 +114,12 @@ pub const CanvasWidgetSemanticsIndex = CanvasWidgetIdIndex(canvas.WidgetSemantic
 /// Shared per-pass index scratch (~8 KiB of slots per table). The two
 /// reconcile passes per rebuild (the staged reconcile, then the retained
 /// copy) run back-to-back on the single-threaded event loop and each
-/// rebuilds every table it uses, so one threadlocal set serves both —
-/// the same pattern as the planners' probe-table scratch.
-pub threadlocal var canvas_widget_reconcile_index_scratch: CanvasWidgetReconcileIndexScratch = .{};
+/// rebuilds every table it uses, so one per-thread set serves both —
+/// the same pattern as the planners' probe-table scratch. Lazily
+/// heap-allocated (~32 KiB) on a thread's first reconcile, so threads
+/// that never reconcile widgets never carry it in their static TLS
+/// block.
+pub const canvas_widget_reconcile_index_scratch = canvas.lazy_tls.LazyTls(CanvasWidgetReconcileIndexScratch);
 
 pub const CanvasWidgetReconcileIndexScratch = struct {
     controls: CanvasWidgetControlEntryIndex = .{},
@@ -825,7 +828,7 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
     // mid-rubber-band must not clamp an offset the OS scroller owns.
     restoreCanvasWidgetLayoutScrollOffsets(staged_nodes, previous_runtime_offsets, previous_source_scroll_entries);
 
-    const index_scratch = &canvas_widget_reconcile_index_scratch;
+    const index_scratch = canvas_widget_reconcile_index_scratch.get();
     index_scratch.controls.build(previous_control_states);
     index_scratch.source_controls.build(previous_source_control_entries);
     index_scratch.texts.build(previous_text_states);

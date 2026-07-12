@@ -469,6 +469,11 @@ pub const markdown = @import("markdown.zig");
 // the runtime's keyed diffs (see plan_key_index.zig).
 pub const plan_key_index = @import("plan_key_index.zig");
 
+// Lazily heap-allocated per-thread scratch: keeps the large planner
+// buffers out of the static TLS template every OS thread must clone
+// (see lazy_tls.zig for the working-set numbers).
+pub const lazy_tls = @import("lazy_tls.zig");
+
 // Experimental markup front-end lives in `ui_markup.zig` / `ui_markup_view.zig`
 // (runtime parse + interpret: the dev/hot-reload engine) and
 // `ui_markup_compiled.zig` (comptime parse: the release engine, no parser in

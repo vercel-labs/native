@@ -94,9 +94,10 @@ pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTok
         next.nodes.len >= plan_key_index.min_entries_for_index) and
         plan_key_index.fitsHashSlots(diff_widget_id_index_slots, previous.nodes.len) and
         plan_key_index.fitsHashSlots(diff_widget_id_index_slots, next.nodes.len);
-    if (use_index) {
-        try buildDiffWidgetIdIndex(previous, &diff_previous_widget_id_index);
-        try buildDiffWidgetIdIndex(next, &diff_next_widget_id_index);
+    const id_scratch: ?*DiffWidgetIdScratch = if (use_index) diff_widget_id_scratch.get() else null;
+    if (id_scratch) |scratch| {
+        try buildDiffWidgetIdIndex(previous, &scratch.previous);
+        try buildDiffWidgetIdIndex(next, &scratch.next);
     } else {
         try validateUniqueWidgetIds(previous);
         try validateUniqueWidgetIds(next);
@@ -106,7 +107,7 @@ pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTok
     for (previous.nodes, 0..) |previous_node, previous_index| {
         const id = previous_node.widget.id;
         if (id == 0) continue;
-        const next_lookup = if (use_index) findWidgetNodeByIdIndexed(next, &diff_next_widget_id_index, id) else findWidgetNodeById(next, id);
+        const next_lookup = if (id_scratch) |scratch| findWidgetNodeByIdIndexed(next, &scratch.next, id) else findWidgetNodeById(next, id);
         const next_ref = next_lookup orelse {
             try appendWidgetInvalidation(output, &len, .{
                 .kind = .removed,
@@ -157,7 +158,7 @@ pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTok
     for (next.nodes, 0..) |next_node, next_index| {
         const id = next_node.widget.id;
         if (id == 0) continue;
-        const previous_lookup = if (use_index) findWidgetNodeByIdIndexed(previous, &diff_previous_widget_id_index, id) else findWidgetNodeById(previous, id);
+        const previous_lookup = if (id_scratch) |scratch| findWidgetNodeByIdIndexed(previous, &scratch.previous, id) else findWidgetNodeById(previous, id);
         if (previous_lookup == null) {
             try appendWidgetInvalidation(output, &len, .{
                 .kind = .added,
@@ -201,8 +202,14 @@ fn findWidgetNodeById(layout: anytype, id: ObjectId) ?WidgetNodeRef {
 /// bound; small or oversized trees keep the linear scans.
 const diff_widget_id_index_slots = 2048;
 const DiffWidgetIdIndex = plan_key_index.HashSlots(diff_widget_id_index_slots);
-threadlocal var diff_previous_widget_id_index: DiffWidgetIdIndex = .{};
-threadlocal var diff_next_widget_id_index: DiffWidgetIdIndex = .{};
+// Lazily heap-allocated per thread (16 KiB of probe tables): reset per
+// diff, so first-use init on the diffing thread is the only contract —
+// threads that never diff widget trees never allocate it.
+const DiffWidgetIdScratch = struct {
+    previous: DiffWidgetIdIndex = .{},
+    next: DiffWidgetIdIndex = .{},
+};
+const diff_widget_id_scratch = @import("lazy_tls.zig").LazyTls(DiffWidgetIdScratch);
 
 /// Fill `table` with the keyed nodes' id->index mapping, erroring on the
 /// duplicate ids `validateUniqueWidgetIds` rejects — one pass does both

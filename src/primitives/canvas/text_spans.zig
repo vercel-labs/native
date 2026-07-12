@@ -354,12 +354,13 @@ const LayoutState = struct {
 /// to the pre-cache behavior (goldens, signatures, reference renders).
 pub fn layoutTextSpans(spans: []const TextSpan, options: TextSpanLayoutOptions, runs_storage: []TextSpanRun) TextSpanLayout {
     if (options.measure != null and runs_storage.len >= max_text_span_runs_per_paragraph) {
+        const cache = span_wrap_cache.get();
         const key = spanWrapKey(spans, options);
-        if (findSpanWrapEntry(key)) |entry_index| {
-            if (rebaseSpanWrapEntry(entry_index, spans, options, runs_storage)) |layout| return layout;
+        if (findSpanWrapEntry(cache, key)) |entry_index| {
+            if (rebaseSpanWrapEntry(cache, entry_index, spans, options, runs_storage)) |layout| return layout;
         }
         const layout = layoutTextSpansUncached(spans, options, runs_storage);
-        storeSpanWrapEntry(key, spans, layout);
+        storeSpanWrapEntry(cache, key, spans, layout);
         return layout;
     }
     return layoutTextSpansUncached(spans, options, runs_storage);
@@ -502,19 +503,31 @@ const SpanWrapEntry = struct {
     last_used: u64 = 0,
 };
 
-threadlocal var span_wrap_entries: [span_wrap_cache_capacity]SpanWrapEntry = @splat(.{});
-threadlocal var span_wrap_runs: [span_wrap_cache_capacity][max_text_span_runs_per_paragraph]SpanWrapRun = undefined;
-threadlocal var span_wrap_use_tick: u64 = 0;
-threadlocal var span_wrap_hit_count: u64 = 0;
-threadlocal var span_wrap_miss_count: u64 = 0;
+/// The whole per-thread wrap cache behind one lazily heap-allocated
+/// pointer (~1 MiB that would otherwise sit in the static TLS template
+/// every OS thread's loader clones). Init happens on the first cached
+/// `layoutTextSpans` call of a thread — the layout thread by
+/// construction — so threads that never wrap spans never allocate it.
+/// `runs` carries no default and stays uninitialized, exactly like the
+/// `= undefined` static it replaces.
+const SpanWrapCache = struct {
+    entries: [span_wrap_cache_capacity]SpanWrapEntry = @splat(.{}),
+    runs: [span_wrap_cache_capacity][max_text_span_runs_per_paragraph]SpanWrapRun,
+    use_tick: u64 = 0,
+    hit_count: u64 = 0,
+    miss_count: u64 = 0,
+};
+const span_wrap_cache = @import("lazy_tls.zig").LazyTls(SpanWrapCache);
 
 /// Cache observability for tests and benchmarks.
 pub fn textSpanWrapCacheHitCount() u64 {
-    return span_wrap_hit_count;
+    const cache = span_wrap_cache.peek() orelse return 0;
+    return cache.hit_count;
 }
 
 pub fn textSpanWrapCacheMissCount() u64 {
-    return span_wrap_miss_count;
+    const cache = span_wrap_cache.peek() orelse return 0;
+    return cache.miss_count;
 }
 
 fn spanWrapKey(spans: []const TextSpan, options: TextSpanLayoutOptions) SpanWrapKey {
@@ -567,20 +580,20 @@ fn spanWrapKeysEqual(a: SpanWrapKey, b: SpanWrapKey) bool {
         a.generation == b.generation;
 }
 
-fn findSpanWrapEntry(key: SpanWrapKey) ?usize {
-    for (&span_wrap_entries, 0..) |*entry, index| {
+fn findSpanWrapEntry(cache: *SpanWrapCache, key: SpanWrapKey) ?usize {
+    for (&cache.entries, 0..) |*entry, index| {
         if (spanWrapKeysEqual(entry.key, key)) {
-            span_wrap_use_tick += 1;
-            entry.last_used = span_wrap_use_tick;
-            span_wrap_hit_count += 1;
+            cache.use_tick += 1;
+            entry.last_used = cache.use_tick;
+            cache.hit_count += 1;
             return index;
         }
     }
-    span_wrap_miss_count += 1;
+    cache.miss_count += 1;
     return null;
 }
 
-fn storeSpanWrapEntry(key: SpanWrapKey, spans: []const TextSpan, layout: TextSpanLayout) void {
+fn storeSpanWrapEntry(cache: *SpanWrapCache, key: SpanWrapKey, spans: []const TextSpan, layout: TextSpanLayout) void {
     if (layout.runs.len > max_text_span_runs_per_paragraph) return;
     // Offsets require every run to alias its span's bytes; the breaker
     // only ever emits subslices of span.text, so a failure here would be
@@ -591,17 +604,17 @@ fn storeSpanWrapEntry(key: SpanWrapKey, spans: []const TextSpan, layout: TextSpa
 
     var victim: usize = 0;
     var victim_tick: u64 = std.math.maxInt(u64);
-    for (&span_wrap_entries, 0..) |*entry, index| {
+    for (&cache.entries, 0..) |*entry, index| {
         const tick = if (entry.key.used) entry.last_used else 0;
         if (tick < victim_tick) {
             victim_tick = tick;
             victim = index;
         }
     }
-    span_wrap_use_tick += 1;
+    cache.use_tick += 1;
     for (layout.runs, 0..) |run, run_index| {
         const offset = spanRunOffset(spans, run).?;
-        span_wrap_runs[victim][run_index] = .{
+        cache.runs[victim][run_index] = .{
             .span_index = @intCast(run.span_index),
             .text_start = @intCast(offset),
             .text_len = @intCast(run.text.len),
@@ -611,14 +624,14 @@ fn storeSpanWrapEntry(key: SpanWrapKey, spans: []const TextSpan, layout: TextSpa
             .baseline = run.baseline,
         };
     }
-    span_wrap_entries[victim] = .{
+    cache.entries[victim] = .{
         .key = key,
         .run_len = layout.runs.len,
         .line_count = layout.line_count,
         .line_height = layout.line_height,
         .size = layout.size,
         .truncated = layout.truncated,
-        .last_used = span_wrap_use_tick,
+        .last_used = cache.use_tick,
     };
 }
 
@@ -639,13 +652,13 @@ fn spanRunOffset(spans: []const TextSpan, run: TextSpanRun) ?usize {
 /// offset does not fit the current spans — only reachable through a
 /// content-hash collision, and answered by re-laying-out instead of
 /// serving mismatched geometry.
-fn rebaseSpanWrapEntry(entry_index: usize, spans: []const TextSpan, options: TextSpanLayoutOptions, runs_storage: []TextSpanRun) ?TextSpanLayout {
-    const entry = &span_wrap_entries[entry_index];
-    for (span_wrap_runs[entry_index][0..entry.run_len]) |cached| {
+fn rebaseSpanWrapEntry(cache: *SpanWrapCache, entry_index: usize, spans: []const TextSpan, options: TextSpanLayoutOptions, runs_storage: []TextSpanRun) ?TextSpanLayout {
+    const entry = &cache.entries[entry_index];
+    for (cache.runs[entry_index][0..entry.run_len]) |cached| {
         if (cached.span_index >= spans.len) return null;
         if (cached.text_start + cached.text_len > spans[cached.span_index].text.len) return null;
     }
-    for (span_wrap_runs[entry_index][0..entry.run_len], 0..) |cached, run_index| {
+    for (cache.runs[entry_index][0..entry.run_len], 0..) |cached, run_index| {
         const span = spans[cached.span_index];
         runs_storage[run_index] = .{
             .span_index = cached.span_index,

@@ -123,24 +123,36 @@ const AdvanceEntry = struct {
     last_used: u64 = 0,
 };
 
-threadlocal var advance_entries: [advance_cache_capacity]AdvanceEntry = @splat(.{});
-threadlocal var advance_storage: [advance_cache_capacity][max_cached_advance_run_bytes]f32 = undefined;
-threadlocal var oversize_key: AdvanceKey = .{};
-threadlocal var oversize_storage: [max_batched_advance_run_bytes]f32 = undefined;
-/// Monotonic use tick driving least-recently-used eviction.
-threadlocal var advance_use_tick: u64 = 0;
-/// Fetch statistics for tests and the render benchmark: how many
-/// batched provider calls actually happened vs how many lookups were
-/// answered from retained entries.
-threadlocal var advance_fetch_count: u64 = 0;
-threadlocal var advance_hit_count: u64 = 0;
+/// The whole per-thread cache behind one lazily heap-allocated pointer:
+/// at ~2.25 MiB this was the single largest block in the static TLS
+/// template every OS thread's loader had to clone. Init happens on the
+/// first `textRunAdvances`/`cachedTextRunAdvances` call of a thread —
+/// the measuring thread by construction — so threads that never measure
+/// text never allocate it. The storage arrays carry no default and stay
+/// uninitialized, exactly like the `= undefined` statics they replace.
+const AdvanceCache = struct {
+    entries: [advance_cache_capacity]AdvanceEntry = @splat(.{}),
+    storage: [advance_cache_capacity][max_cached_advance_run_bytes]f32,
+    oversize_key: AdvanceKey = .{},
+    oversize_storage: [max_batched_advance_run_bytes]f32,
+    /// Monotonic use tick driving least-recently-used eviction.
+    use_tick: u64 = 0,
+    /// Fetch statistics for tests and the render benchmark: how many
+    /// batched provider calls actually happened vs how many lookups were
+    /// answered from retained entries.
+    fetch_count: u64 = 0,
+    hit_count: u64 = 0,
+};
+const advance_cache = @import("lazy_tls.zig").LazyTls(AdvanceCache);
 
 pub fn textAdvanceFetchCount() u64 {
-    return advance_fetch_count;
+    const cache = advance_cache.peek() orelse return 0;
+    return cache.fetch_count;
 }
 
 pub fn textAdvanceHitCount() u64 {
-    return advance_hit_count;
+    const cache = advance_cache.peek() orelse return 0;
+    return cache.hit_count;
 }
 
 fn advanceKeyFor(provider: *const TextMeasureProvider, font_id: FontId, size: f32, text: []const u8) AdvanceKey {
@@ -192,32 +204,33 @@ pub fn textRunAdvances(provider: *const TextMeasureProvider, font_id: FontId, si
     if (text.len == 0) return &.{};
     if (text.len > max_batched_advance_run_bytes) return null;
 
+    const cache = advance_cache.get();
     const key = advanceKeyFor(provider, font_id, size, text);
-    advance_use_tick += 1;
+    cache.use_tick += 1;
 
     if (text.len > max_cached_advance_run_bytes) {
         // Oversize runs: one uncached scratch slot, memoized against
         // itself so repeated fetches of the same long run (the line
         // breaker, then elision, then bounds) still pay one call.
-        if (advanceKeysEqual(oversize_key, key)) {
-            advance_hit_count += 1;
-            return oversize_storage[0..text.len];
+        if (advanceKeysEqual(cache.oversize_key, key)) {
+            cache.hit_count += 1;
+            return cache.oversize_storage[0..text.len];
         }
-        oversize_key = .{};
-        advance_fetch_count += 1;
-        if (!provider.measureAdvances(font_id, size, text, oversize_storage[0..text.len])) return null;
-        if (!advancesValid(oversize_storage[0..text.len])) return null;
-        oversize_key = key;
-        return oversize_storage[0..text.len];
+        cache.oversize_key = .{};
+        cache.fetch_count += 1;
+        if (!provider.measureAdvances(font_id, size, text, cache.oversize_storage[0..text.len])) return null;
+        if (!advancesValid(cache.oversize_storage[0..text.len])) return null;
+        cache.oversize_key = key;
+        return cache.oversize_storage[0..text.len];
     }
 
     var victim: usize = 0;
     var victim_tick: u64 = std.math.maxInt(u64);
-    for (&advance_entries, 0..) |*entry, index| {
+    for (&cache.entries, 0..) |*entry, index| {
         if (advanceKeysEqual(entry.key, key)) {
-            entry.last_used = advance_use_tick;
-            advance_hit_count += 1;
-            return advance_storage[index][0..text.len];
+            entry.last_used = cache.use_tick;
+            cache.hit_count += 1;
+            return cache.storage[index][0..text.len];
         }
         // Unused slots evict first (tick 0), then the least recently
         // used entry — honest bounded retention, no clock heuristics.
@@ -228,12 +241,12 @@ pub fn textRunAdvances(provider: *const TextMeasureProvider, font_id: FontId, si
         }
     }
 
-    advance_entries[victim].key = .{};
-    advance_fetch_count += 1;
-    if (!provider.measureAdvances(font_id, size, text, advance_storage[victim][0..text.len])) return null;
-    if (!advancesValid(advance_storage[victim][0..text.len])) return null;
-    advance_entries[victim] = .{ .key = key, .last_used = advance_use_tick };
-    return advance_storage[victim][0..text.len];
+    cache.entries[victim].key = .{};
+    cache.fetch_count += 1;
+    if (!provider.measureAdvances(font_id, size, text, cache.storage[victim][0..text.len])) return null;
+    if (!advancesValid(cache.storage[victim][0..text.len])) return null;
+    cache.entries[victim] = .{ .key = key, .last_used = cache.use_tick };
+    return cache.storage[victim][0..text.len];
 }
 
 /// Peek: the run's advances IF already retained (or sitting in the
@@ -248,20 +261,22 @@ pub fn cachedTextRunAdvances(provider: *const TextMeasureProvider, font_id: Font
     if (provider.measure_advances_fn == null) return null;
     if (text.len == 0) return &.{};
     if (text.len > max_batched_advance_run_bytes) return null;
+    // Peek must not allocate a cache that nothing has fetched into yet.
+    const cache = advance_cache.peek() orelse return null;
     const key = advanceKeyFor(provider, font_id, size, text);
     if (text.len > max_cached_advance_run_bytes) {
-        if (advanceKeysEqual(oversize_key, key)) {
-            advance_hit_count += 1;
-            return oversize_storage[0..text.len];
+        if (advanceKeysEqual(cache.oversize_key, key)) {
+            cache.hit_count += 1;
+            return cache.oversize_storage[0..text.len];
         }
         return null;
     }
-    for (&advance_entries, 0..) |*entry, index| {
+    for (&cache.entries, 0..) |*entry, index| {
         if (advanceKeysEqual(entry.key, key)) {
-            advance_use_tick += 1;
-            entry.last_used = advance_use_tick;
-            advance_hit_count += 1;
-            return advance_storage[index][0..text.len];
+            cache.use_tick += 1;
+            entry.last_used = cache.use_tick;
+            cache.hit_count += 1;
+            return cache.storage[index][0..text.len];
         }
     }
     return null;

@@ -126,21 +126,31 @@ const max_widget_depth: usize = 32;
 /// per-view storage within the same emit call stack, so one threadlocal
 /// buffer per frame is sound — reset at each emit entry point. Overflow
 /// fails loudly by budget name.
-threadlocal var frame_label_bytes: [chart_model.max_chart_label_bytes_per_frame]u8 = undefined;
-threadlocal var frame_label_len: usize = 0;
+// Lazily heap-allocated per thread (the label pool plus the chart
+// polyline scratch below): init on first emit/chart use of a thread —
+// the emitting thread by construction — so threads that never emit
+// widgets never allocate it. The arrays carry no default and stay
+// uninitialized, exactly like the `= undefined` statics they replace.
+const WidgetRenderScratch = struct {
+    frame_label_bytes: [chart_model.max_chart_label_bytes_per_frame]u8,
+    frame_label_len: usize = 0,
+    chart_polyline_points: [chart_model.max_chart_points_per_series]geometry.PointF,
+};
+const widget_render_scratch = @import("lazy_tls.zig").LazyTls(WidgetRenderScratch);
 
 fn resetFrameLabelScratch() void {
-    frame_label_len = 0;
+    widget_render_scratch.get().frame_label_len = 0;
 }
 
 /// Persist a formatted label into the frame scratch so the emitted
 /// command outlives the local formatting buffer.
 fn allocFrameLabelBytes(text: []const u8) Error![]const u8 {
-    if (frame_label_len + text.len > frame_label_bytes.len) return error.ChartLabelBytesFull;
-    const start = frame_label_len;
-    frame_label_len += text.len;
-    @memcpy(frame_label_bytes[start..frame_label_len], text);
-    return frame_label_bytes[start..frame_label_len];
+    const scratch = widget_render_scratch.get();
+    if (scratch.frame_label_len + text.len > scratch.frame_label_bytes.len) return error.ChartLabelBytesFull;
+    const start = scratch.frame_label_len;
+    scratch.frame_label_len += text.len;
+    @memcpy(scratch.frame_label_bytes[start..scratch.frame_label_len], text);
+    return scratch.frame_label_bytes[start..scratch.frame_label_len];
 }
 
 /// Frame-lifetime scratch (same single-threaded emit contract as the
@@ -2062,27 +2072,27 @@ fn emitChartBand(
 }
 
 /// Map a series into plot-space points, skipping non-finite values.
-/// Returned points live in a threadlocal scratch valid until the next
-/// series maps (each emitter consumes them before returning).
-threadlocal var chart_polyline_points: [chart_model.max_chart_points_per_series]geometry.PointF = undefined;
-
+/// Returned points live in per-thread scratch (`WidgetRenderScratch`)
+/// valid until the next series maps (each emitter consumes them before
+/// returning).
 fn chartPolylinePoints(
     values: []const f32,
     domain: chart_model.ChartDomain,
     plot: geometry.RectF,
     inset: f32,
 ) Error![]const geometry.PointF {
-    const count = @min(values.len, chart_polyline_points.len);
+    const points = &widget_render_scratch.get().chart_polyline_points;
+    const count = @min(values.len, points.len);
     var len: usize = 0;
     for (values[0..count], 0..) |value, index| {
         if (!std.math.isFinite(value)) continue;
-        chart_polyline_points[len] = geometry.PointF.init(
+        points[len] = geometry.PointF.init(
             chartMapX(index, count, plot, inset),
             chartMapY(value, domain, plot, inset),
         );
         len += 1;
     }
-    return chart_polyline_points[0..len];
+    return points[0..len];
 }
 
 const chart_grid_seed: u64 = 0x5eed_c4a8_0000_0001;

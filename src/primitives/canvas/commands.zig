@@ -191,8 +191,14 @@ pub const DisplayList = struct {
 /// half-full bound; small or oversized lists keep the linear scans.
 const diff_id_index_slots = 4096;
 const DiffIdIndex = plan_key_index.HashSlots(diff_id_index_slots);
-threadlocal var diff_previous_id_index: DiffIdIndex = .{};
-threadlocal var diff_next_id_index: DiffIdIndex = .{};
+// Lazily heap-allocated per thread (32 KiB of probe tables): reset per
+// diff, so first-use init on the diffing thread is the only contract —
+// threads that never diff never allocate it.
+const DiffIdScratch = struct {
+    previous: DiffIdIndex = .{},
+    next: DiffIdIndex = .{},
+};
+const diff_id_scratch = @import("lazy_tls.zig").LazyTls(DiffIdScratch);
 
 /// Fill `table` with the keyed commands' id->index mapping, erroring on
 /// the duplicate ids `validateUniqueObjectIds` rejects — one pass does
@@ -229,9 +235,10 @@ fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChan
         next.commands.len >= plan_key_index.min_entries_for_index) and
         plan_key_index.fitsHashSlots(diff_id_index_slots, previous.commands.len) and
         plan_key_index.fitsHashSlots(diff_id_index_slots, next.commands.len);
-    if (use_index) {
-        try buildDiffIdIndex(previous, &diff_previous_id_index);
-        try buildDiffIdIndex(next, &diff_next_id_index);
+    const id_scratch: ?*DiffIdScratch = if (use_index) diff_id_scratch.get() else null;
+    if (id_scratch) |scratch| {
+        try buildDiffIdIndex(previous, &scratch.previous);
+        try buildDiffIdIndex(next, &scratch.next);
     } else {
         try validateUniqueObjectIds(previous);
         try validateUniqueObjectIds(next);
@@ -260,7 +267,7 @@ fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChan
 
     for (previous.commands, 0..) |previous_command, previous_index| {
         const id = previous_command.objectId() orelse continue;
-        const next_lookup = if (use_index) findCommandByIdIndexed(next, &diff_next_id_index, id) else next.findCommandById(id);
+        const next_lookup = if (id_scratch) |scratch| findCommandByIdIndexed(next, &scratch.next, id) else next.findCommandById(id);
         const next_ref = next_lookup orelse {
             try appendDiffChange(output, &len, .{
                 .kind = .removed,
@@ -284,7 +291,7 @@ fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChan
 
     for (next.commands, 0..) |next_command, next_index| {
         const id = next_command.objectId() orelse continue;
-        const previous_lookup = if (use_index) findCommandByIdIndexed(previous, &diff_previous_id_index, id) else previous.findCommandById(id);
+        const previous_lookup = if (id_scratch) |scratch| findCommandByIdIndexed(previous, &scratch.previous, id) else previous.findCommandById(id);
         if (previous_lookup == null) {
             try appendDiffChange(output, &len, .{
                 .kind = .added,
