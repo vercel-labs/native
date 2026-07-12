@@ -125,7 +125,7 @@ The full documentation is at [native-sdk.dev](https://native-sdk.dev).
 
 ## Community
 
-- [Awesome Native SDK](https://github.com/henryoman/awesome-native-sdk#readme) — Curated list of Native SDK apps, examples, framework integrations, and tooling.
+- [Awesome Native SDK](https://github.com/henryoman/awesome-vercel-native#readme) — Curated list of Native SDK apps, examples, framework integrations, and tooling.
 
 ## Contributing
 
