@@ -1,7 +1,21 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+pub const SignOutcome = enum {
+    /// codesign sealed the bundle.
+    signed,
+    /// codesign is not available on this host (e.g. cross-packaging a macOS
+    /// bundle from Linux). Signing is impossible here, so callers may leave
+    /// the bundle unsigned without failing the build.
+    unavailable,
+    /// codesign ran and exited non-zero. On a host that can sign, this is a
+    /// hard failure: the bundle is unsigned and must not ship as if it were
+    /// signed.
+    failed,
+};
 
 pub const SignResult = struct {
-    ok: bool,
+    outcome: SignOutcome,
     message: []const u8,
 };
 
@@ -20,61 +34,110 @@ pub const NotarizeArgs = struct {
     password_keychain_item: ?[]const u8 = null,
 };
 
-pub fn buildSignCommand(buffer: []u8, args: CodesignArgs) ![]const u8 {
-    var writer = std.Io.Writer.fixed(buffer);
-    try writer.writeAll("codesign --sign ");
-    try writer.writeAll(args.identity);
-    try writer.writeAll(" --force");
-    if (args.deep) try writer.writeAll(" --deep");
-    if (args.hardened_runtime) try writer.writeAll(" --options runtime");
+/// codesign's argv never exceeds this many entries: program, `--sign`,
+/// identity, `--force`, `--deep`, `--options runtime`, `--entitlements`,
+/// its path, and the bundle path.
+const max_sign_argv = 10;
+/// notarytool submit's argv never exceeds this many entries.
+const max_notarize_argv = 11;
+
+/// Build the codesign invocation as an argv array (filled into `buffer`)
+/// rather than a shell string. This is the whole fix for spaced bundle
+/// paths: passing `{ "codesign", …, "/tmp/My App.app" }` straight to the OS
+/// keeps the path a single argument, where a `sh -c` string word-splits it
+/// into "/tmp/My" and "App.app" and codesign silently signs nothing. It also
+/// removes any command-injection surface from paths or identities.
+pub fn buildSignArgv(buffer: [][]const u8, args: CodesignArgs) [][]const u8 {
+    var n: usize = 0;
+    buffer[n] = "codesign";
+    n += 1;
+    buffer[n] = "--sign";
+    n += 1;
+    buffer[n] = args.identity;
+    n += 1;
+    buffer[n] = "--force";
+    n += 1;
+    if (args.deep) {
+        buffer[n] = "--deep";
+        n += 1;
+    }
+    if (args.hardened_runtime) {
+        buffer[n] = "--options";
+        n += 1;
+        buffer[n] = "runtime";
+        n += 1;
+    }
     if (args.entitlements) |ent| {
-        try writer.writeAll(" --entitlements ");
-        try writer.writeAll(ent);
+        buffer[n] = "--entitlements";
+        n += 1;
+        buffer[n] = ent;
+        n += 1;
     }
-    try writer.writeAll(" ");
-    try writer.writeAll(args.app_path);
-    return writer.buffered();
+    buffer[n] = args.app_path;
+    n += 1;
+    return buffer[0..n];
 }
 
-pub fn buildNotarizeSubmitCommand(buffer: []u8, zip_path: []const u8, args: NotarizeArgs) ![]const u8 {
-    var writer = std.Io.Writer.fixed(buffer);
-    try writer.writeAll("xcrun notarytool submit ");
-    try writer.writeAll(zip_path);
-    try writer.writeAll(" --team-id ");
-    try writer.writeAll(args.team_id);
-    if (args.apple_id) |apple_id| {
-        try writer.writeAll(" --apple-id ");
-        try writer.writeAll(apple_id);
+pub fn buildNotarizeSubmitArgv(
+    buffer: [][]const u8,
+    zip_path: []const u8,
+    team_id: []const u8,
+    apple_id: ?[]const u8,
+    keychain_password: ?[]const u8,
+) [][]const u8 {
+    var n: usize = 0;
+    buffer[n] = "xcrun";
+    n += 1;
+    buffer[n] = "notarytool";
+    n += 1;
+    buffer[n] = "submit";
+    n += 1;
+    buffer[n] = zip_path;
+    n += 1;
+    buffer[n] = "--team-id";
+    n += 1;
+    buffer[n] = team_id;
+    n += 1;
+    if (apple_id) |id| {
+        buffer[n] = "--apple-id";
+        n += 1;
+        buffer[n] = id;
+        n += 1;
     }
-    if (args.password_keychain_item) |item| {
-        try writer.writeAll(" --password @keychain:");
-        try writer.writeAll(item);
+    if (keychain_password) |password| {
+        buffer[n] = "--password";
+        n += 1;
+        buffer[n] = password;
+        n += 1;
     }
-    try writer.writeAll(" --wait");
-    return writer.buffered();
+    buffer[n] = "--wait";
+    n += 1;
+    return buffer[0..n];
 }
 
-pub fn buildStapleCommand(buffer: []u8, app_path: []const u8) ![]const u8 {
-    var writer = std.Io.Writer.fixed(buffer);
-    try writer.writeAll("xcrun stapler staple ");
-    try writer.writeAll(app_path);
-    return writer.buffered();
+pub fn buildStapleArgv(buffer: [][]const u8, app_path: []const u8) [][]const u8 {
+    buffer[0] = "xcrun";
+    buffer[1] = "stapler";
+    buffer[2] = "staple";
+    buffer[3] = app_path;
+    return buffer[0..4];
 }
 
-pub fn buildZipCommand(buffer: []u8, app_path: []const u8, zip_path: []const u8) ![]const u8 {
-    var writer = std.Io.Writer.fixed(buffer);
-    try writer.writeAll("ditto -c -k --keepParent ");
-    try writer.writeAll(app_path);
-    try writer.writeAll(" ");
-    try writer.writeAll(zip_path);
-    return writer.buffered();
+pub fn buildZipArgv(buffer: [][]const u8, app_path: []const u8, zip_path: []const u8) [][]const u8 {
+    buffer[0] = "ditto";
+    buffer[1] = "-c";
+    buffer[2] = "-k";
+    buffer[3] = "--keepParent";
+    buffer[4] = app_path;
+    buffer[5] = zip_path;
+    return buffer[0..6];
 }
 
-pub fn signAdHoc(io: std.Io, app_path: []const u8) !SignResult {
+pub fn signAdHoc(io: std.Io, app_path: []const u8) SignResult {
     return runSign(io, .{ .app_path = app_path, .identity = "-", .deep = true });
 }
 
-pub fn signIdentity(io: std.Io, app_path: []const u8, identity: []const u8, entitlements: ?[]const u8) !SignResult {
+pub fn signIdentity(io: std.Io, app_path: []const u8, identity: []const u8, entitlements: ?[]const u8) SignResult {
     return runSign(io, .{
         .app_path = app_path,
         .identity = identity,
@@ -88,85 +151,128 @@ pub fn notarize(allocator: std.mem.Allocator, io: std.Io, args: NotarizeArgs) !S
     const zip_path = try std.fmt.allocPrint(allocator, "{s}.zip", .{args.app_path});
     defer allocator.free(zip_path);
 
-    var zip_buf: [1024]u8 = undefined;
-    const zip_cmd = try buildZipCommand(&zip_buf, args.app_path, zip_path);
-    var zip_result = runShell(io, zip_cmd) catch return .{ .ok = false, .message = "failed to zip app for notarization" };
-    _ = &zip_result;
+    var zip_argv: [6][]const u8 = undefined;
+    const zip = buildZipArgv(&zip_argv, args.app_path, zip_path);
+    runArgv(io, zip) catch return .{ .outcome = .failed, .message = "failed to zip app for notarization" };
 
-    var submit_buf: [1024]u8 = undefined;
-    const submit_cmd = try buildNotarizeSubmitCommand(&submit_buf, zip_path, args);
-    runShell(io, submit_cmd) catch return .{ .ok = false, .message = "notarytool submit failed" };
+    const keychain_password: ?[]const u8 = if (args.password_keychain_item) |item|
+        try std.fmt.allocPrint(allocator, "@keychain:{s}", .{item})
+    else
+        null;
+    defer if (keychain_password) |password| allocator.free(password);
 
-    var staple_buf: [512]u8 = undefined;
-    const staple_cmd = try buildStapleCommand(&staple_buf, args.app_path);
-    runShell(io, staple_cmd) catch return .{ .ok = false, .message = "stapler staple failed" };
+    var submit_argv: [max_notarize_argv][]const u8 = undefined;
+    const submit = buildNotarizeSubmitArgv(&submit_argv, zip_path, args.team_id, args.apple_id, keychain_password);
+    runArgv(io, submit) catch return .{ .outcome = .failed, .message = "notarytool submit failed" };
 
-    return .{ .ok = true, .message = "notarization complete" };
+    var staple_argv: [4][]const u8 = undefined;
+    const staple = buildStapleArgv(&staple_argv, args.app_path);
+    runArgv(io, staple) catch return .{ .outcome = .failed, .message = "stapler staple failed" };
+
+    return .{ .outcome = .signed, .message = "notarization complete" };
 }
 
-fn runSign(io: std.Io, args: CodesignArgs) !SignResult {
-    var buffer: [1024]u8 = undefined;
-    const cmd = try buildSignCommand(&buffer, args);
-    runShell(io, cmd) catch return .{ .ok = false, .message = "codesign failed" };
-    return .{ .ok = true, .message = "signed" };
+fn runSign(io: std.Io, args: CodesignArgs) SignResult {
+    // Only macOS ships codesign. Cross-packaging a macOS bundle from another
+    // host leaves it unsigned, but that is not a failure of THIS host — it is
+    // simply the wrong place to seal a bundle, so report it as unavailable
+    // rather than as a codesign that ran and failed.
+    if (builtin.os.tag != .macos)
+        return .{ .outcome = .unavailable, .message = "codesign is only available on macOS hosts" };
+
+    var argv_buf: [max_sign_argv][]const u8 = undefined;
+    const argv = buildSignArgv(&argv_buf, args);
+    runArgv(io, argv) catch return .{ .outcome = .failed, .message = "codesign failed" };
+    return .{ .outcome = .signed, .message = "signed" };
 }
 
-/// Run one shell command and FAIL on a non-zero exit: a codesign that
-/// exits 1 (or a host without codesign at all, exit 127) must surface as
-/// an error so callers record the bundle as unsigned instead of
-/// reporting a signature that does not exist.
-fn runShell(io: std.Io, cmd: []const u8) !void {
-    const argv = [_][]const u8{ "sh", "-c", cmd };
-    var child = try std.process.spawn(io, .{
-        .argv = &argv,
+/// Spawn one tool directly (no `sh -c`) and FAIL on a non-zero exit. Passing
+/// argv straight to the OS keeps a path with spaces a single argument — the
+/// shell never gets a chance to word-split it — and leaves no command-
+/// injection surface from paths or identities. A codesign that exits
+/// non-zero, or a spawn that never launches, surfaces as error.CommandFailed
+/// so callers record the bundle as unsigned instead of reporting a signature
+/// that does not exist.
+fn runArgv(io: std.Io, argv: []const []const u8) !void {
+    var child = std.process.spawn(io, .{
+        .argv = argv,
         .stdin = .ignore,
         .stdout = .inherit,
         .stderr = .inherit,
-    });
-    const term = try child.wait(io);
+    }) catch return error.CommandFailed;
+    const term = child.wait(io) catch return error.CommandFailed;
     switch (term) {
         .exited => |code| if (code != 0) return error.CommandFailed,
         else => return error.CommandFailed,
     }
 }
 
-test "ad-hoc sign command is well-formed" {
-    var buffer: [512]u8 = undefined;
-    const cmd = try buildSignCommand(&buffer, .{ .app_path = "/tmp/Test.app" });
-    try std.testing.expectEqualStrings("codesign --sign - --force --deep /tmp/Test.app", cmd);
+fn expectArgv(expected: []const []const u8, actual: []const []const u8) !void {
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |want, got| try std.testing.expectEqualStrings(want, got);
 }
 
-test "identity sign command includes runtime and entitlements" {
-    var buffer: [512]u8 = undefined;
-    const cmd = try buildSignCommand(&buffer, .{
+test "ad-hoc sign argv keeps a spaced bundle path as one argument" {
+    var buffer: [max_sign_argv][]const u8 = undefined;
+    const argv = buildSignArgv(&buffer, .{ .app_path = "/tmp/My App.app" });
+    try expectArgv(
+        &.{ "codesign", "--sign", "-", "--force", "--deep", "/tmp/My App.app" },
+        argv,
+    );
+}
+
+test "identity sign argv includes runtime and entitlements" {
+    var buffer: [max_sign_argv][]const u8 = undefined;
+    const argv = buildSignArgv(&buffer, .{
         .app_path = "/tmp/Test.app",
         .identity = "Developer ID Application: Test",
         .entitlements = "assets/native-sdk.entitlements",
         .hardened_runtime = true,
     });
-    try std.testing.expectEqualStrings(
-        "codesign --sign Developer ID Application: Test --force --deep --options runtime --entitlements assets/native-sdk.entitlements /tmp/Test.app",
-        cmd,
+    try expectArgv(&.{
+        "codesign",
+        "--sign",
+        "Developer ID Application: Test",
+        "--force",
+        "--deep",
+        "--options",
+        "runtime",
+        "--entitlements",
+        "assets/native-sdk.entitlements",
+        "/tmp/Test.app",
+    }, argv);
+}
+
+test "notarize submit argv includes team id and wait" {
+    var buffer: [max_notarize_argv][]const u8 = undefined;
+    const argv = buildNotarizeSubmitArgv(&buffer, "/tmp/Test.app.zip", "ABCD1234", null, null);
+    try expectArgv(
+        &.{ "xcrun", "notarytool", "submit", "/tmp/Test.app.zip", "--team-id", "ABCD1234", "--wait" },
+        argv,
     );
 }
 
-test "notarize submit command includes team id and wait" {
-    var buffer: [512]u8 = undefined;
-    const cmd = try buildNotarizeSubmitCommand(&buffer, "/tmp/Test.app.zip", .{
-        .app_path = "/tmp/Test.app",
-        .team_id = "ABCD1234",
-    });
-    try std.testing.expectEqualStrings("xcrun notarytool submit /tmp/Test.app.zip --team-id ABCD1234 --wait", cmd);
+test "notarize submit argv carries apple id and keychain password" {
+    var buffer: [max_notarize_argv][]const u8 = undefined;
+    const argv = buildNotarizeSubmitArgv(&buffer, "/tmp/Test.app.zip", "ABCD1234", "dev@example.com", "@keychain:AC_PASSWORD");
+    try expectArgv(&.{
+        "xcrun",      "notarytool",            "submit",     "/tmp/Test.app.zip",
+        "--team-id",  "ABCD1234",              "--apple-id", "dev@example.com",
+        "--password", "@keychain:AC_PASSWORD", "--wait",
+    }, argv);
 }
 
-test "staple command targets app path" {
-    var buffer: [256]u8 = undefined;
-    const cmd = try buildStapleCommand(&buffer, "/tmp/Test.app");
-    try std.testing.expectEqualStrings("xcrun stapler staple /tmp/Test.app", cmd);
+test "staple argv targets app path" {
+    var buffer: [4][]const u8 = undefined;
+    const argv = buildStapleArgv(&buffer, "/tmp/My App.app");
+    try expectArgv(&.{ "xcrun", "stapler", "staple", "/tmp/My App.app" }, argv);
 }
 
-test "zip command uses ditto" {
-    var buffer: [256]u8 = undefined;
-    const cmd = try buildZipCommand(&buffer, "/tmp/Test.app", "/tmp/Test.app.zip");
-    try std.testing.expectEqualStrings("ditto -c -k --keepParent /tmp/Test.app /tmp/Test.app.zip", cmd);
+test "zip argv uses ditto and keeps spaced paths intact" {
+    var buffer: [6][]const u8 = undefined;
+    const argv = buildZipArgv(&buffer, "/tmp/My App.app", "/tmp/My App.app.zip");
+    try expectArgv(
+        &.{ "ditto", "-c", "-k", "--keepParent", "/tmp/My App.app", "/tmp/My App.app.zip" },
+        argv,
+    );
 }

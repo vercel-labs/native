@@ -2275,19 +2275,23 @@ pub fn build(b: *std.Build) void {
     // verifier. This is the regression gate for the ordering bug where a
     // file written into Contents/Resources AFTER signing invalidated the
     // resource seal ("file added"), turning every quarantined install
-    // into Gatekeeper's "damaged — move to Trash" dialog. The bundle
-    // carries the CLI as its executable (packaging only needs a real
-    // Mach-O to sign); the check skips loudly on hosts without codesign
-    // (any non-macOS machine) instead of pretending to have verified.
+    // into Gatekeeper's "damaged — move to Trash" dialog. The output path
+    // deliberately contains a space ("signing verify.app"): #115 shipped an
+    // UNSIGNED bundle when codesign was composed as a `sh -c` string that
+    // word-split the spaced path, so this gate now also proves the argv is
+    // passed to codesign intact. The bundle carries the CLI as its
+    // executable (packaging only needs a real Mach-O to sign); the check
+    // skips loudly on hosts without codesign (any non-macOS machine)
+    // instead of pretending to have verified.
     const package_signing_run = b.addRunArtifact(host_cli_exe);
-    package_signing_run.addArgs(&.{ "package", "--target", "macos", "--output", "zig-out/package/native-sdk-signing-verify.app", "--binary" });
+    package_signing_run.addArgs(&.{ "package", "--target", "macos", "--output", "zig-out/package/native-sdk signing verify.app", "--binary" });
     package_signing_run.addFileArg(host_cli_exe.getEmittedBin());
     package_signing_run.addArgs(&.{ "--manifest", "app.zon", "--assets", "assets", "--optimize", optimize_name, "--signing", "adhoc" });
     package_signing_run.has_side_effects = true;
     const package_signing_check = b.addSystemCommand(&.{
         "sh", "-c",
         \\set -e
-        \\app="zig-out/package/native-sdk-signing-verify.app"
+        \\app="zig-out/package/native-sdk signing verify.app"
         \\if ! command -v codesign >/dev/null 2>&1; then
         \\  echo "codesign unavailable on this host; skipping signed-package verification"
         \\  exit 0

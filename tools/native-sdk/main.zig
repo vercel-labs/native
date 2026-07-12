@@ -207,7 +207,7 @@ pub fn main(init: std.process.Init) !void {
         if (web_engine.engine == .chromium and web_engine.cef_auto_install) {
             try tooling.cef.run(allocator, init.io, init.environ_map, &.{ "install", "--dir", web_engine.cef_dir });
         }
-        const stats = try tooling.package.createPackage(allocator, init.io, .{
+        const stats = tooling.package.createPackage(allocator, init.io, .{
             .metadata = metadata,
             .target = target,
             .optimize = optimize_value,
@@ -221,7 +221,7 @@ pub fn main(init: std.process.Init) !void {
             .signing = .{ .mode = signing, .identity = try flagValue(args, "--identity"), .entitlements = try flagValue(args, "--entitlements"), .team_id = try flagValue(args, "--team-id") },
             .archive = archive,
             .env_map = init.environ_map,
-        });
+        }) catch |err| return failVerb(err);
         tooling.package.printDiagnostic(stats);
     } else if (std.mem.eql(u8, command, "dev")) {
         checkVerbFlags("dev", args[2..], .{
@@ -441,6 +441,7 @@ fn failVerb(err: anyerror) anyerror!void {
         error.HostCompileFailed,
         error.SimulatorUnavailable,
         error.SimulatorCommandFailed,
+        error.SigningFailed,
         => std.process.exit(1),
         else => return err,
     }

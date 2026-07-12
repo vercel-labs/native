@@ -1359,31 +1359,48 @@ fn copyTree(allocator: std.mem.Allocator, io: std.Io, source_path: []const u8, d
 /// the signature on the bundle is the proof it happened — and only a
 /// FAILED signing rewrites it, which is safe because a failed codesign
 /// leaves the bundle without a seal to break.
+///
+/// When ad-hoc or identity signing was requested and codesign actually ran
+/// and failed, this returns error.SigningFailed so `native package` exits
+/// non-zero: a bundle that asked to be signed and came out unsigned must
+/// never ship as if it were signed. A host that simply cannot sign (e.g.
+/// cross-packaging a macOS bundle from Linux, where codesign does not exist)
+/// is not a failure — the plan records the bundle as unsigned and packaging
+/// still succeeds.
 fn runSigning(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: PackageOptions) !void {
     const plan_path = "Contents/Resources/signing-plan.txt";
     switch (options.signing.mode) {
         .none => try writeFile(dir, io, plan_path, "signing=none\nunsigned local package\n"),
         .adhoc => {
             try writeFile(dir, io, plan_path, "signing=adhoc\nad-hoc signed\n");
-            const result = codesign.signAdHoc(io, options.output_path) catch {
-                try writeFile(dir, io, plan_path, "signing=adhoc\ncodesign --sign - failed; bundle is unsigned\n");
-                return;
-            };
-            if (!result.ok) try writeFile(dir, io, plan_path, "signing=adhoc\ncodesign --sign - failed; bundle is unsigned\n");
+            switch (codesign.signAdHoc(io, options.output_path).outcome) {
+                .signed => {},
+                .unavailable => try writeFile(dir, io, plan_path, "signing=adhoc\ncodesign unavailable on this host; bundle is unsigned\n"),
+                .failed => {
+                    try writeFile(dir, io, plan_path, "signing=adhoc\ncodesign --sign - failed; bundle is unsigned\n");
+                    std.debug.print("error: ad-hoc code signing failed; {s} was left unsigned\n", .{options.output_path});
+                    return error.SigningFailed;
+                },
+            }
         },
         .identity => {
             const identity = options.signing.identity orelse {
                 try writeFile(dir, io, plan_path, "signing=identity\nno identity provided; bundle is unsigned\n");
-                return;
+                std.debug.print("error: --signing identity requires --identity <name>; {s} was left unsigned\n", .{options.output_path});
+                return error.SigningFailed;
             };
             const plan_text = try std.fmt.allocPrint(allocator, "signing=identity\nsigned with {s}\n", .{identity});
             defer allocator.free(plan_text);
             try writeFile(dir, io, plan_path, plan_text);
-            const result = codesign.signIdentity(io, options.output_path, identity, options.signing.entitlements) catch {
-                try writeFile(dir, io, plan_path, "signing=identity\ncodesign failed; bundle is unsigned\n");
-                return;
-            };
-            if (!result.ok) try writeFile(dir, io, plan_path, "signing=identity\ncodesign failed; bundle is unsigned\n");
+            switch (codesign.signIdentity(io, options.output_path, identity, options.signing.entitlements).outcome) {
+                .signed => {},
+                .unavailable => try writeFile(dir, io, plan_path, "signing=identity\ncodesign unavailable on this host; bundle is unsigned\n"),
+                .failed => {
+                    try writeFile(dir, io, plan_path, "signing=identity\ncodesign failed; bundle is unsigned\n");
+                    std.debug.print("error: identity code signing failed; {s} was left unsigned\n", .{options.output_path});
+                    return error.SigningFailed;
+                },
+            }
         },
     }
 }
