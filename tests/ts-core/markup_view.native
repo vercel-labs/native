@@ -9,7 +9,10 @@
     <text>draft [{draft}]</text>
   </row>
   <row gap="4">
-    <button on-press="add">Add</button>
+    <stack>
+      <button on-press="add">Add</button>
+      <tooltip anchor="above" tooltip-delay="200">Add a task</tooltip>
+    </stack>
     <button on-press="cycle">Cycle</button>
     <button on-press="clear">Clear</button>
   </row>

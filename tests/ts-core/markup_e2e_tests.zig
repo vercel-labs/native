@@ -174,6 +174,29 @@ const Harness = struct {
         return node.frame.normalized().center();
     }
 
+    fn pointerMove(self: *Harness, point: geometry.PointF, timestamp_ns: u64) !void {
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = .pointer_move,
+            .timestamp_ns = timestamp_ns,
+            .x = point.x,
+            .y = point.y,
+        } });
+    }
+
+    /// Present one frame on an explicit RECORDED timestamp — the clock
+    /// the tooltip hover-intent delay (and every tween) steps on.
+    fn frameAt(self: *Harness, frame_index: u64, timestamp_ns: u64) !void {
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = geometry.SizeF.init(480, 360),
+            .scale_factor = 1,
+            .frame_index = frame_index,
+            .timestamp_ns = timestamp_ns,
+        } });
+    }
+
     fn pointerClick(self: *Harness, point: geometry.PointF, timestamp_ns: u64) !void {
         try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
             .window_id = 1,
@@ -691,6 +714,87 @@ test "a recorded markup session replays byte-identically with verified fingerpri
     try std.testing.expectEqual(@as(u64, 1), report.effects_fed);
     try std.testing.expectEqualDeep(recorded.snapshot, BoardSnapshot.take());
     try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
+/// Record the tooltip hover-dwell session: raw pointer hovers with
+/// test-fixed timestamps arm the Add button's anchored tooltip
+/// (tooltip-delay="200" in the fixture markup), explicit frame events
+/// on the recorded clock carry the dwell past the deadline (show),
+/// and a final hover off the trigger hides it — every transition on
+/// journaled time, so two recordings are byte-identical.
+fn recordTooltipDwellSession(buffer: *JournalBuffer) !u64 {
+    const recorder = try std.heap.page_allocator.create(runtime_ns.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = runtime_ns.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "ts-markup-e2e", .window_width = 480, .window_height = 360 });
+
+    const h = try Harness.createRecorded(recorder);
+    defer h.destroy();
+
+    const add_button = h.findId(.button, "Add").?;
+    const tooltip_id = h.findId(.tooltip, "Add a task").?;
+    const view = &h.harness.runtime.views[try h.viewIndex()];
+
+    // The anchored tooltip adopts hidden; hovering the trigger arms the
+    // 200ms declared delay without painting anything.
+    try h.pointerMove(try h.aim(add_button), 10_000_000);
+    try std.testing.expectEqual(tooltip_id, view.canvas_tooltip_armed_id);
+    try h.frameAt(2, 60_000_000);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), view.canvas_tooltip_shown_id);
+
+    // The first frame at/past the deadline (10ms + 200ms) shows the
+    // tooltip — a deterministic frame on the recorded clock.
+    try h.frameAt(3, 215_000_000);
+    try std.testing.expectEqual(tooltip_id, view.canvas_tooltip_shown_id);
+
+    // Leaving the trigger hides it; the hide frame is recorded too.
+    try h.pointerMove(.{ .x = 4, .y = 350 }, 260_000_000);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), view.canvas_tooltip_shown_id);
+    try h.frameAt(4, 280_000_000);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return h.harness.runtime.sessionStateFingerprint();
+}
+
+test "a recorded tooltip hover dwell replays its show and hide frames byte-identically" {
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    const fingerprint = try recordTooltipDwellSession(buffer);
+
+    // Determinism pin: the same driven dwell records byte-identical
+    // journal bytes — hover timestamps, the show frame, the hide frame,
+    // and every per-frame fingerprint checkpoint included.
+    const second = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(second);
+    second.len = 0;
+    const fingerprint_again = try recordTooltipDwellSession(second);
+    try std.testing.expectEqual(fingerprint, fingerprint_again);
+    try std.testing.expectEqualSlices(u8, buffer.journalBytes(), second.journalBytes());
+
+    // Replay into a fresh app: the journaled hovers re-arm the intent
+    // machine, the journaled frame timestamps re-fire the delay, and the
+    // per-frame fingerprint checkpoints verify the tooltip's show and
+    // hide frames — on the recorded clock, never a wall clock.
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{
+        .size = geometry.SizeF.init(480, 360),
+    });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try std.testing.allocator.create(App);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = Adapter.init(std.heap.page_allocator, .{}, boardOptions());
+    defer app_state.deinit();
+
+    const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.events_replayed > 0);
+    try std.testing.expect(report.checkpoints_verified > 0);
+    try std.testing.expectEqual(fingerprint, harness.runtime.sessionStateFingerprint());
 }
 
 // ------------------------------------------------- two live cores
