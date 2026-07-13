@@ -27,6 +27,10 @@
     "README.md",
     "LICENSE"
   ],
+  "dependencies": {
+    "@typescript/old": "npm:typescript@6.0.3",
+    "@typescript/typescript6": "6.0.2"
+  },
   "optionalDependencies": {
     "@native-sdk/cli-darwin-arm64": "0.5.0",
     "@native-sdk/cli-darwin-x64": "0.5.0",
